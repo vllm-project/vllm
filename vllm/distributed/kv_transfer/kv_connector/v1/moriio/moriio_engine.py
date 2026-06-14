@@ -344,8 +344,36 @@ class MoRIIOWriter:
             # Wait for transfer to complete
             self.worker.moriio_wrapper.waiting_for_transfer_complete()
 
+            # Wide-EP multi-pod support: when the remote DP fan-out is
+            # split across multiple pods, ``task.remote_ip`` (set at
+            # schedule time from ``meta.remote_host``) only addresses the
+            # first pod. Resolve the per-rank host from the worker's
+            # ``remote_hosts`` list (stamped by ``_write_blocks_for_req``
+            # before the schedule). Falls back to ``task.remote_ip`` for
+            # single-pod deployments and on any indexing miss.
+            _remote_ip = task.remote_ip
+            _hosts = list(getattr(self.worker, "remote_hosts", []) or [])
+            _dp_local = int(getattr(self.worker, "remote_dp_size_local", 0) or 0)
+            if _hosts and _dp_local > 0:
+                _pod_idx = int(request_info.decode_dp_rank) // _dp_local
+                if 0 <= _pod_idx < len(_hosts):
+                    _remote_ip = _hosts[_pod_idx]
+
+            # Wide-EP multi-pod port offset: each remote pod only binds
+            # notify sockets on ``notify_port .. notify_port + dp_local -
+            # 1`` (one per LOCAL DP rank in that pod), so the offset
+            # added to ``task.remote_notify_port`` must use the per-pod
+            # LOCAL rank, not the GLOBAL rank ``decode_dp_rank``.  Same
+            # rationale as ``_moriio_handshake`` port-offset in
+            # ``moriio_connector.py::_background_moriio_handshake``.
+            # Single-pod (``_dp_local == 0`` or ``_dp_local ==
+            # remote_dp_size``) is bit-identical because modulus equals
+            # the global rank in that case.
+            _decode_dp_rank_for_port = int(request_info.decode_dp_rank)
+            if _dp_local > 0:
+                _decode_dp_rank_for_port = _decode_dp_rank_for_port % _dp_local
             remote_port = task.remote_notify_port + get_port_offset(
-                request_info.decode_dp_rank, self.worker.tp_rank
+                _decode_dp_rank_for_port, self.worker.tp_rank
             )
             # Consider using RDMA immediate data in decode side
             # to eliminate the need for this notification.
@@ -353,7 +381,7 @@ class MoRIIOWriter:
 
             # Send completion notification
             self.worker.moriio_wrapper.send_notify(
-                task.transfer_id, task.remote_ip, remote_port
+                task.transfer_id, _remote_ip, remote_port
             )
             # mark request as done, then we can free the blocks
             with self.worker.moriio_wrapper.lock:

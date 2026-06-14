@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import hashlib
 import os
 import socket
 import time
@@ -26,6 +27,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
@@ -277,6 +279,69 @@ class AsyncLLM(EngineClient):
 
         return self._supported_tasks
 
+    def _pick_dp_rank_for_request(
+        self,
+        request_id: str,
+        params: SamplingParams | PoolingParams,
+    ) -> int | None:
+        """Pick a stable ``data_parallel_rank`` for a request.
+
+        When the OpenAI server is run with ``--api-server-count N`` (N > 1),
+        Linux SO_REUSEPORT shuffles incoming connections across ApiServer
+        processes. Two legs of a disaggregated prefill/decode pair (which
+        share a ``request_id``) can land on different ApiServers and be
+        load-balanced to different DP ranks. KV-transfer protocols that
+        pin source/target by DP rank (MoRI-IO, NIXL WRITE-mode, ...) then
+        end up exchanging handshakes with the wrong peer and the request
+        deadlocks at the connector level.
+
+        To work around this we synthesize a per-request DP rank that both
+        legs will independently agree on, in this order:
+
+          1. ``params.extra_args["kv_transfer_params"]["dp_rank_hint"]``
+             if the caller (or an upstream routing sidecar) has already
+             picked the rank.
+          2. Otherwise a stable ``blake2s(request_id) % effective_dp_size``
+             hash.
+
+        When ``data_parallel_size_local`` is set and smaller than
+        ``data_parallel_size`` (multi-pod DP, "Wide-EP"), the modulus is
+        capped to the local pod size so that both legs route to a rank in
+        the same pod -- cross-pod handshake requires a coordinator that
+        may not exist in the disagg orchestrator.
+
+        Returns ``None`` when there is no DP fan-out to disambiguate
+        (``effective_dp_size <= 1``); callers should leave
+        ``data_parallel_rank`` unset in that case.
+        """
+        pc = self.vllm_config.parallel_config
+        try:
+            dp_size = int(pc.data_parallel_size)
+        except Exception:
+            dp_size = 1
+        if dp_size <= 1:
+            return None
+        try:
+            dp_local_raw = getattr(pc, "data_parallel_size_local", None)
+            dp_local = int(dp_local_raw) if dp_local_raw else dp_size
+            if dp_local > 0:
+                dp_size = min(dp_size, dp_local)
+        except Exception:
+            pass
+        if dp_size <= 1:
+            return None
+        extra = getattr(params, "extra_args", None) or {}
+        if isinstance(extra, dict):
+            ktp = extra.get("kv_transfer_params") or {}
+            if isinstance(ktp, dict):
+                hint = ktp.get("dp_rank_hint")
+                if isinstance(hint, int) and 0 <= hint < dp_size:
+                    return hint
+        digest = hashlib.blake2s(
+            str(request_id).encode("utf-8"), digest_size=8
+        ).digest()
+        return int.from_bytes(digest, "big") % dp_size
+
     async def add_request(
         self,
         request_id: str,
@@ -296,6 +361,20 @@ class AsyncLLM(EngineClient):
         reasoning_parser_kwargs: dict[str, Any] | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
+
+        # ROCm-only: stable per-request DP-rank fallback to neutralise the
+        # SO_REUSEPORT shuffle on disagg P/D pairs (MoRI-IO, NIXL WRITE).
+        # Gated to ROCm because (a) MoRI-IO is the in-tree consumer that
+        # exercises this path and (b) we don't want to silently change the
+        # default DP load-balancing behaviour for CUDA users.
+        if current_platform.is_rocm() and data_parallel_rank is None:
+            data_parallel_rank = self._pick_dp_rank_for_request(request_id, params)
+            if data_parallel_rank is not None:
+                logger.debug(
+                    "Auto-routed request %s to data_parallel_rank=%d",
+                    request_id,
+                    data_parallel_rank,
+                )
 
         if self.errored:
             raise EngineDeadError()

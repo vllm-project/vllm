@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -88,7 +89,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-HANDSHAKE_TIMEOUT_MINS = 5
+HANDSHAKE_TIMEOUT_MINS = int(os.environ.get("VLLM_HANDSHAKE_TIMEOUT_MINS", "5"))
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -1146,10 +1147,21 @@ class EngineCoreProc(EngineCore):
                 numa_utils.log_current_affinity_state(process_title)
 
             if data_parallel and vllm_config.kv_transfer_config is not None:
-                # modify the engine_id and append the local_dp_rank to it to ensure
-                # that the kv_transfer_config is unique for each DP rank.
+                # On ROCm multi-node DP deployments, ``local_dp_rank``
+                # collides across nodes (each node spawns engines
+                # 0..N-1 locally), so suffix the engine_id with the
+                # *global* ``dp_rank`` to keep engine_ids unique world-
+                # wide. On other platforms we preserve the legacy
+                # ``local_dp_rank`` suffix to keep this branch
+                # bit-identical to upstream HEAD until the equivalent
+                # fix (vllm-project/vllm#39276) merges upstream and the
+                # platform gate can be dropped.
+                _engine_id_dp_suffix = (
+                    dp_rank if current_platform.is_rocm() else local_dp_rank
+                )
                 vllm_config.kv_transfer_config.engine_id = (
-                    f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
+                    f"{vllm_config.kv_transfer_config.engine_id}"
+                    f"_dp{_engine_id_dp_suffix}"
                 )
                 logger.debug(
                     "Setting kv_transfer_config.engine_id to %s",
@@ -1801,15 +1813,22 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
-        if self.has_coordinator and request_wave != self.current_wave:
+        # First-wave wake: do NOT gate on ``request_wave != self.current_wave``.
+        # Both default to 0, so that gate skips the ``start_wave`` broadcast on
+        # the very first request after engine init -- the DP rank that received
+        # it then blocks forever on the first collective (EP/MoE all2all,
+        # ``has_unfinished_dp`` all-reduce) because the other ranks see
+        # ``engines_running == False`` and never call ``execute_dummy_batch``,
+        # until the multiproc_executor 1800s timeout fires. Reproduces 100% on
+        # DeepSeek-V3 DP=8/16 cold start. Steady state stays correct: once
+        # ``engines_running`` is True the wake branch short-circuits.
+        if self.has_coordinator:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
-            elif (
+            if (
                 not self.engines_running
                 and self.scheduler.pause_state == PauseState.UNPAUSED
             ):
-                # Request received for an already-completed wave, notify
-                # front-end that we need to start the next one.
                 self.engines_running = True
                 self.output_queue.put_nowait(
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))
