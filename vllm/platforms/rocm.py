@@ -711,8 +711,9 @@ class RocmPlatform(Platform):
     @classmethod
     @with_amdsmi_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
         try:
-            device = amdsmi_get_processor_handles()[device_id]
+            device = amdsmi_get_processor_handles()[physical_device_id]
         except AmdSmiException as error:
             logger.error("amdsmi device query failed ", exc_info=error)
             return ""
