@@ -50,10 +50,10 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
-from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import FullAttentionSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, SlidingWindowSpec
 from vllm.v1.request import RequestStatus
 from vllm.v1.worker.utils import select_common_block_size
 
@@ -338,6 +338,37 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
 
 
 class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        # Cross-layer blocks require a known KV cache config to inspect
+        # the per-group specs (e.g. to rule out hybrid SSM models).
+        if self._kv_cache_config is None:
+            return False
+        if any(
+            isinstance(group.kv_cache_spec, MambaSpec)
+            for group in self._kv_cache_config.kv_cache_groups
+        ):
+            # Hybrid SSM models do not yet support cross-layer layout.
+            return False
+
+        backend = get_current_attn_backend(self._vllm_config)
+        if backend.get_name() not in (
+            "FLASH_ATTN",
+            "FLASHINFER",
+            "TRITON_ATTN",
+        ):
+            return False
+
+        # Match Nixl: only HND benefits from cross-layer registration today.
+        if get_kv_cache_layout() != "HND":
+            return False
+
+        extra_config = self._vllm_config.kv_transfer_config.kv_connector_extra_config
+        return (
+            str(extra_config.get("enable_cross_layers_blocks", "False")).lower()
+            == "true"
+        )
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -431,6 +462,12 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
+    ):
+        assert self.connector_worker is not None
+        self.connector_worker.register_cross_layers_kv_caches(kv_cache)
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -1385,10 +1422,39 @@ class MooncakeConnectorWorker:
             )
         return ret_value
 
+    def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
+        """Register a single cross-layer KV cache tensor with Mooncake.
+
+        The tensor is one contiguous buffer holding KV data for every layer
+        (allocated by ``allocate_uniform_kv_caches``). We forward it through
+        ``register_kv_caches`` under a synthetic key — the downstream loop
+        treats it as a single "layer" with a per-block stride that already
+        spans all layers. ``register_kv_caches`` rebuilds ``transfer_topo``
+        from the tensor shape, so ``split_k_and_v`` will correctly be False.
+        """
+        self.register_kv_caches({"cross_layers_kv_cache": kv_cache})
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in mooncake."""
 
         logger.info("Registering KV_Caches. use_mla: %s", self.use_mla)
+
+        # Rebuild transfer_topo with the actual tensor shape so that
+        # cross-layer layout (one extra leading dim vs. the per-layer cache
+        # shape) is detected. Without this, `split_k_and_v` stays True and
+        # the cross-layer tensor would be incorrectly iterated along dim 0.
+        first_cache = next(iter(kv_caches.values()))
+        self.transfer_topo = TransferTopology(
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            block_size=self.block_size,
+            engine_id=self.engine_id,
+            is_mla=self.use_mla,
+            is_mamba=self.transfer_topo.is_mamba,
+            total_num_kv_heads=self.transfer_topo.total_num_kv_heads,
+            attn_backends=self.transfer_topo.attn_backends,
+            tensor_shape=first_cache.shape,
+        )
 
         kv_data_ptrs = []
         kv_data_lens = []

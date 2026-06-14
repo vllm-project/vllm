@@ -694,6 +694,59 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
         ]
 
 
+def test_register_cross_layers_kv_cache():
+    """A single cross-layer KV tensor registers as one Mooncake region."""
+
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Event"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Thread"
+        ) as mock_thread,
+    ):
+        connector = MooncakeConnector(vllm_config, KVConnectorRole.WORKER)
+        worker = connector.connector_worker
+        mock_thread.return_value.is_alive.return_value = False
+
+        # Per-layer FA shape is 5D; cross-layer HND prepends a num_layers
+        # dim and permutes via stride order (2, 4, 0, 1, 3, 5), giving the
+        # physical shape (num_blocks, block_size, num_layers, 2, num_kv_heads,
+        # head_size). The connector only inspects shape[0] and total bytes,
+        # so we construct that 6D physical layout directly.
+        num_blocks, block_size, num_layers = 2, 16, 3
+        num_kv_heads, head_size = 4, 64
+        cross_layer_cache = torch.zeros(
+            (num_blocks, block_size, num_layers, 2, num_kv_heads, head_size),
+            dtype=torch.float16,
+        )
+
+        with patch.object(
+            worker.engine, "batch_register_memory", return_value=0
+        ) as mock_batch_register:
+            connector.register_cross_layers_kv_cache(
+                cross_layer_cache, FlashAttentionBackend
+            )
+
+        mock_batch_register.assert_called_once()
+        registered_ptrs, registered_lens = mock_batch_register.call_args[0]
+        # One contiguous tensor → one registered region whose length spans
+        # all layers (i.e. the full tensor, not a single layer's slice).
+        assert registered_ptrs == [cross_layer_cache.data_ptr()]
+        assert registered_lens == [cross_layer_cache.nbytes]
+        assert worker.num_blocks == num_blocks
+        assert worker.block_len_per_layer == [cross_layer_cache.nbytes // num_blocks]
+        # Cross-layer mode must disable K/V splitting on dim 0.
+        assert worker.transfer_topo.split_k_and_v is False
+        assert worker.transfer_topo.cross_layers_blocks is True
+
+
 @pytest.mark.asyncio
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
