@@ -1025,12 +1025,23 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     BUILD_PKGS="libcusparse-dev-${CUDA_VERSION_DASH} \
                 libcublas-dev-${CUDA_VERSION_DASH} \
                 libcusolver-dev-${CUDA_VERSION_DASH}"; \
+    KV_REQ=/tmp/kv_connectors.txt; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
+        if [ "$CUDA_MAJOR" -ge 13 ]; then \
+            # mooncake-transfer-engine ship CUDA-13-specific
+            # distributions (mooncake-transfer-engine-cuda13).
+            # The bind mount is read-only, so write the rewritten file
+            # elsewhere and install from that copy.
+            sed -E \
+                -e 's/^mooncake-transfer-engine\b/mooncake-transfer-engine-cuda13/' \
+                /tmp/kv_connectors.txt > /tmp/kv_connectors.cu13.txt; \
+            KV_REQ=/tmp/kv_connectors.cu13.txt; \
+        fi; \
+        uv pip install --system -r ${KV_REQ} --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
             apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
-            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
+            uv pip install --system -r ${KV_REQ} --no-build-isolation && \
             apt-get purge -y ${BUILD_PKGS} && \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
