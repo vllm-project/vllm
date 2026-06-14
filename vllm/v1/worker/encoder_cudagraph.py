@@ -387,6 +387,16 @@ class EncoderCudaGraphManager:
                 )
             )
 
+        # extract actual frames per item
+        actual_frames_per_item = None
+        if num_items > 0 and self.max_frames_per_batch > 0:
+            grid_thw_key = f"{self.model.get_input_modality(mm_kwargs)}_grid_thw"
+            grid_thw = mm_kwargs.get(grid_thw_key)
+            if grid_thw is not None:
+                if not isinstance(grid_thw, list):
+                    grid_thw = grid_thw.tolist()
+                actual_frames_per_item = [t for t, h, w in grid_thw]
+
         # outputs_by_orig_idx maps each original image index to its output
         # tensor. Needed because greedy packing reorders images; we restore
         # the original order before returning.
@@ -397,6 +407,25 @@ class EncoderCudaGraphManager:
                 mm_kwargs, batch_orig_indices
             )
             batch_out_tokens = sum(per_item_out_tokens[i] for i in batch_orig_indices)
+
+            if actual_frames_per_item is not None:
+                batch_max_frames = max(
+                    actual_frames_per_item[i] for i in batch_orig_indices
+                )
+                frames_per_item = self.max_frames_per_batch // self.max_batch_size
+                if batch_max_frames > frames_per_item:
+                    # Check if actual frames per item exceeds capture capacity.
+                    # If so, fallback to eager to avoid shape mismatch.
+                    token_budget = None
+                    logger.warning(
+                        "Input video frames %s exceeds capture capacity %s, "
+                        "fallback to eager, please manually set "
+                        "'encoder_cudagraph_max_vision_items_per_batch "
+                        "and 'encoder_cudagraph_max_frames_per_batch' "
+                        "in 'compilation-config'",
+                        batch_max_frames,
+                        frames_per_item,
+                    )
 
             if token_budget is None:
                 # Single oversized image: item_tokens > max_budget.
