@@ -645,13 +645,12 @@ class ModelConfig:
             config_format=self.config_format,
         )
 
-        # Some checkpoints set sliding_window to 0 to indicate that sliding window is
-        # disabled, but vLLM uses None for that. Convert 0 to None to avoid errors.
-        # Set before get_and_verify_max_len to ensure that max_model_len does not get
-        # capped to 0.
-        if self.get_sliding_window() == 0:
+        # Some checkpoints set sliding_window to 0 to indicate that sliding window
+        # is disabled. _get_raw_sliding_window normalizes 0 to None so that
+        # max_model_len does not get capped to 0 in get_and_verify_max_len;
+        # here we only record the disabled state.
+        if getattr(self.hf_text_config, "sliding_window", None) == 0:
             self.disable_sliding_window = True
-            self.hf_text_config.sliding_window = None
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
@@ -713,10 +712,20 @@ class ModelConfig:
                     "disable the cache with --mm-processor-cache-gb 0."
                 )
 
-        if self.disable_sliding_window:
-            # Set after get_and_verify_max_len to ensure that max_model_len
-            # can be correctly capped to sliding window size
-            self.hf_text_config.sliding_window = None
+        # Multimodal GGUF models must use original repo for mm processing
+        if is_gguf(self.tokenizer) and self.is_multimodal_model:
+            raise ValueError(
+                "Loading a multimodal GGUF model needs to use original "
+                "tokenizer. Please specify the unquantized hf model's "
+                "repo name or path using the --tokenizer argument."
+            )
+
+        # NOTE: The disabled sliding window state is tracked by
+        # `self.disable_sliding_window` and exposed via `get_sliding_window()`.
+        # We deliberately do NOT write it back into the HF config
+        # (`self.hf_text_config.sliding_window = None`): strict HF configs
+        # (transformers v5 `@strict` dataclasses, e.g. Gemma4) declare the
+        # field as `int` and reject `None` with a validation error.
 
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False
@@ -1220,9 +1229,20 @@ class ModelConfig:
                 "or pipeline_parallel_size > 1."
             )
 
+    def _get_raw_sliding_window(self) -> int | None:
+        """Get the sliding window size from the HF text config if present,
+        regardless of whether sliding window is disabled.
+
+        Some checkpoints set sliding_window to 0 to indicate that sliding
+        window is disabled; normalize that to None."""
+        sliding_window = getattr(self.hf_text_config, "sliding_window", None)
+        return None if sliding_window == 0 else sliding_window
+
     def get_sliding_window(self) -> int | None:
-        """Get the sliding window size from the HF text config if present."""
-        return getattr(self.hf_text_config, "sliding_window", None)
+        """Get the effective sliding window size, or None if disabled."""
+        if self.disable_sliding_window:
+            return None
+        return self._get_raw_sliding_window()
 
     def get_vocab_size(self) -> int:
         return self.model_arch_config.vocab_size
@@ -1716,7 +1736,10 @@ class ModelConfig:
             tokenizer_config=tokenizer_config,
             max_model_len=max_model_len,
             disable_sliding_window=self.disable_sliding_window,
-            sliding_window=self.get_sliding_window(),
+            # Pass the raw value: when sliding window is disabled,
+            # _get_and_verify_max_len needs the original window size to cap
+            # max_model_len, while get_sliding_window() would return None.
+            sliding_window=self._get_raw_sliding_window(),
             spec_target_max_model_len=self.spec_target_max_model_len,
             encoder_config=self.encoder_config,
         )

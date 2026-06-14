@@ -408,6 +408,10 @@ MODEL_IDS_EXPECTED = [
     ("Qwen/Qwen1.5-7B", 32768),
     ("mistralai/Mistral-7B-v0.1", 4096),
     ("mistralai/Mistral-7B-Instruct-v0.2", 32768),
+    # Strict HF config (transformers v5 `@strict` dataclass) declaring
+    # `sliding_window: int`; must not crash when sliding window is disabled.
+    # See https://github.com/vllm-project/vllm/issues/45259
+    ("google/gemma-4-E2B-it", 512),
 ]
 
 
@@ -416,6 +420,11 @@ def test_disable_sliding_window(model_id_expected):
     model_id, expected = model_id_expected
     model_config = ModelConfig(model_id, disable_sliding_window=True)
     assert model_config.max_model_len == expected
+    assert model_config.get_sliding_window() is None
+    # The HF config must not be mutated to express the disabled state:
+    # strict HF configs reject `sliding_window = None` for int-typed fields.
+    hf_sliding_window = getattr(model_config.hf_text_config, "sliding_window", None)
+    assert hf_sliding_window is None or isinstance(hf_sliding_window, int)
 
 
 @pytest.mark.skipif(
