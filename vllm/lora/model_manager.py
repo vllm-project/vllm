@@ -791,7 +791,8 @@ class LoRAModelManager:
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
         if isinstance(first_lora.lora_a, list):
-            lora_device = next(iter(first_lora.lora_a))
+            first_tensor = next((t for t in first_lora.lora_a if t is not None), None)
+            lora_device = first_tensor.device if first_tensor is not None else torch.device("cpu")
         else:
             lora_device = first_lora.lora_a.device
         # Execute pin_memory after LoRA weight merging, mainly because:
