@@ -1020,13 +1020,17 @@ class SpeculativeConfig:
 
     def verify_equal_vocab_size_if_draft_model(self):
         if (
-            self.method == "draft_model"
+            (self.method == "draft_model" or self.use_eagle())
             and self.target_model_config is not None
             and self.draft_model_config is not None
         ):
             target_vocab_size = self.target_model_config.get_vocab_size()
             draft_vocab_size = self.draft_model_config.get_vocab_size()
-            if target_vocab_size != draft_vocab_size:
+            if (
+                target_vocab_size != draft_vocab_size
+                and getattr(self.draft_model_config.hf_config, "draft_vocab_size", None)
+                is None
+            ):
                 raise ValueError(
                     f"Target and draft model should have the same vocabulary size. "
                     f"Target model vocab_size={target_vocab_size}. "

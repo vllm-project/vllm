@@ -5,7 +5,7 @@ import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pydantic
 import pytest
@@ -1557,3 +1557,43 @@ def test_ir_op_priority_ctx():
         # context restored even after exception
         assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
         assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+
+
+@pytest.mark.parametrize("method", ["eagle", "eagle3", "dflash", "mtp"])
+def test_verify_vocab_size_raises_for_eagle_mismatch(method):
+    """eagle and eagle3 must enforce vocab-size parity like draft_model does."""
+    spec_cfg = SpeculativeConfig.__new__(SpeculativeConfig)
+    spec_cfg.method = method
+
+    target_mock = Mock()
+    target_mock.get_vocab_size.return_value = 128000
+
+    draft_mock = Mock()
+    draft_mock.get_vocab_size.return_value = 99999
+    draft_mock.hf_config = Mock(spec=[])  # no auto-attrs → draft_vocab_size absent
+
+    spec_cfg.target_model_config = target_mock
+    spec_cfg.draft_model_config = draft_mock
+
+    with pytest.raises(ValueError, match="same vocabulary size"):
+        spec_cfg.verify_equal_vocab_size_if_draft_model()
+
+
+def test_verify_vocab_size_allows_eagle3_pruned_vocab():
+    """eagle3 with draft_vocab_size on hf_config signals intentional pruning."""
+    spec_cfg = SpeculativeConfig.__new__(SpeculativeConfig)
+    spec_cfg.method = "eagle3"
+
+    target_mock = Mock()
+    target_mock.get_vocab_size.return_value = 128000
+
+    draft_mock = Mock()
+    draft_mock.get_vocab_size.return_value = 8000
+    draft_mock.hf_config = Mock(spec=["draft_vocab_size"])
+    draft_mock.hf_config.draft_vocab_size = 8000
+
+    spec_cfg.target_model_config = target_mock
+    spec_cfg.draft_model_config = draft_mock
+
+    # must not raise
+    spec_cfg.verify_equal_vocab_size_if_draft_model()
