@@ -205,6 +205,13 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.pp_spec_broadcast import (
+    broadcast_sampled_token_ids,
+    gather_valid_sampled_tokens_per_req,
+    num_computed_tokens_drift_correction,
+    receive_sampled_token_ids,
+    select_latest_sampled_token_per_req,
+)
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
@@ -618,6 +625,12 @@ class GPUModelRunner(
             self.rejection_sampler = RejectionSampler(
                 self.sampler, self.speculative_config, self.device
             )
+        else:
+            # Under PP>1 the draft lives only on the last rank; on every other
+            # rank `drafter` must still exist (as None) so the many
+            # `isinstance(self.drafter, ...)` checks in the hot path don't trip
+            # over a missing attribute.
+            self.drafter = None
 
         self.num_spec_tokens = 0
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
@@ -832,6 +845,10 @@ class GPUModelRunner(
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
         self._draft_probs: torch.Tensor | None = None
+        # Per-request broadcast valid-sampled-token count from the last receiver
+        # call (non-last PP rank), consumed by _update_states to correct the
+        # optimistic num_computed_tokens drift. Keyed by req_id.
+        self._pp_prev_valid_sampled_count: dict[str, int] = {}
         self._draft_prob_req_ids: list[str] | None = None
         # N-gram GPU path: async D2H buffer/event for per-request valid draft counts.
         self._num_valid_draft_tokens: torch.Tensor | None = None
@@ -1309,6 +1326,23 @@ class GPUModelRunner(
                     # scheduling. Corrected on GPU in _prepare_inputs.
                     optimistic_num_accepted = req_state.prev_num_draft_len
                     req_state.output_token_ids.extend([-1] * optimistic_num_accepted)
+
+                    # Non-last PP rank: the GPU kernel that corrects the optimistic
+                    # num_computed_tokens (update_num_computed_tokens_for_batch_change,
+                    # in _prepare_inputs) only runs on the sampler/last rank (gated on
+                    # valid_sampled_token_count_gpu). Reconstruct the same correction
+                    # here from the broadcast valid count the receiver stashed, BEFORE
+                    # num_computed_tokens is written to req_state / the cpu buffer
+                    # below — the scheduler advanced it optimistically (all drafts
+                    # accepted); subtract the rejected drafts so rope/KV positions
+                    # (built from num_computed_tokens) are not off-by-one after a
+                    # rejection. (The last rank keeps the kernel + deferred path.)
+                    if not is_last_rank:
+                        prev_valid = self._pp_prev_valid_sampled_count.get(req_id)
+                        if prev_valid is not None:
+                            num_computed_tokens -= num_computed_tokens_drift_correction(
+                                optimistic_num_accepted, prev_valid
+                            )
 
                     deferred_spec_decode_corrections.append(
                         (req_id, optimistic_num_accepted, req_state)
@@ -1793,8 +1827,15 @@ class GPUModelRunner(
             # and no reordering happened.
             # The indices are both the same permutation of 0..N-1 so
             # we can copy directly using a single slice.
+            # Use the per-request LATEST valid sampled token, not column 0: with
+            # spec decode prev_sampled_token_ids is [accepted drafts..., bonus],
+            # so after a multi-token accept column 0 is the FIRST accepted draft,
+            # not the latest committed token the next step must continue from.
+            # (Mirrors C4's select_latest on the cpu/non-common path.)
             self.input_ids.gpu[:num_common_tokens].copy_(
-                self.input_batch.prev_sampled_token_ids[:num_common_tokens, 0],
+                select_latest_sampled_token_per_req(
+                    self.input_batch.prev_sampled_token_ids[:num_common_tokens]
+                ),
                 non_blocking=True,
             )
             return
@@ -1805,12 +1846,16 @@ class GPUModelRunner(
         prev_common_req_indices_tensor = torch.tensor(
             prev_indices, dtype=torch.int64, pin_memory=self.pin_memory
         ).to(self.device, non_blocking=True)
+        # Per-request LATEST valid sampled token (not column 0) — see the
+        # common-case branch above; column 0 is the first accepted draft after a
+        # multi-token accept, not the latest committed token.
+        latest_sampled_per_req = select_latest_sampled_token_per_req(
+            self.input_batch.prev_sampled_token_ids
+        )
         self.input_ids.gpu.scatter_(
             dim=0,
             index=sampled_tokens_index_tensor,
-            src=self.input_batch.prev_sampled_token_ids[
-                prev_common_req_indices_tensor, 0
-            ],
+            src=latest_sampled_per_req[prev_common_req_indices_tensor],
         )
 
         # Scatter the draft tokens after the sampled tokens are scattered.
@@ -4560,6 +4605,20 @@ class GPUModelRunner(
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
 
+        # PP + async spec: broadcast the freshly-proposed drafts to the non-last
+        # ranks (paired 1:1 with the sampled-token broadcast above) so they can
+        # scatter the real draft tokens into the spec positions next step instead
+        # of the -1 placeholder. Without this the non-last verification-forward
+        # embeds garbage at the spec positions -> non-greedy output.
+        if (
+            self.use_async_scheduling
+            and self.num_spec_tokens
+            and not self.broadcast_pp_output
+        ):
+            pp = get_pp_group()
+            if pp.world_size > 1 and pp.is_last_rank:
+                self._pp_broadcast_draft_token_ids()
+
         # Finalize KV connector (wait_for_save + clear metadata) after
         # draft model runs. Deferred from target model forward to allow
         # draft model to also save its KV cache.
@@ -4651,30 +4710,128 @@ class GPUModelRunner(
     def _pp_broadcast_prev_sampled_token_ids(
         self, sampled_token_ids: torch.Tensor
     ) -> None:
-        """Broadcast sampled token ids (GPU) from last PP stage"""
+        """Broadcast sampled token ids (GPU) from last PP stage.
+
+        Without spec the grid is ``[num_reqs, 1]``; with MTP/EAGLE spec it is
+        ``[num_reqs, num_spec + 1]`` (accepted drafts + bonus, ``-1``-padded). The
+        transport is width-agnostic; the receiver allocates the matching width.
+        """
         pp = get_pp_group()
         assert pp.is_last_rank
-        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
-        assert sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] == 1, (
-            "PP+async expects sampled_token_ids to have shape [num_reqs, 1]"
-        )
         # Skip for chunked prefill: sampled tokens are dummy
         # and will be discarded, no need to broadcast.
         if not self._is_all_reqs_chunked_prefill():
-            torch.distributed.broadcast(
-                sampled_token_ids, src=pp.rank, group=pp.device_group
+            # The sampler emits a width-1 grid on steps with no scheduled spec
+            # tokens (e.g. the first decode after prefill), but the receiver always
+            # reads num_spec+1 columns. Pad the missing columns with -1 so the
+            # broadcast shapes match on both ranks; otherwise the receiver reads
+            # uninitialized buffer garbage in the extra column and commits it as a
+            # real token, corrupting the sequence (breaks greedy-equivalence).
+            width = self.num_spec_tokens + 1
+            if sampled_token_ids.shape[-1] < width:
+                pad = sampled_token_ids.new_full(
+                    (sampled_token_ids.shape[0], width - sampled_token_ids.shape[-1]),
+                    -1,
+                )
+                sampled_token_ids = torch.cat([sampled_token_ids, pad], dim=-1)
+            broadcast_sampled_token_ids(sampled_token_ids, pp.device_group, pp.rank)
+
+    def _pp_broadcast_draft_token_ids(self) -> None:
+        """Broadcast the proposed draft token ids from the last PP stage.
+
+        The drafter runs only on the last rank (`is_last_rank` gate), so
+        ``_draft_token_ids`` is ``None`` on the non-last ranks. Without this, the
+        non-last ranks embed the ``-1`` scheduler placeholder at the spec
+        positions in ``_prepare_input_ids`` (the GPU draft scatter is skipped when
+        ``_draft_token_ids is None``) -> wrong verification-forward hidden states
+        -> non-greedy output. Broadcasting the drafts (paired 1:1 with the sampled
+        broadcast each step) lets every rank scatter the REAL draft tokens, so the
+        verification matches the single-GPU path. Width is fixed at ``num_spec``
+        and ``-1``-padded; a None/absent draft broadcasts an all-``-1`` grid so the
+        non-last receive never blocks.
+        """
+        pp = get_pp_group()
+        assert pp.is_last_rank
+        if self._is_all_reqs_chunked_prefill():
+            return
+        num_reqs = self.input_batch.num_reqs
+        width = self.num_spec_tokens
+        dt = self._draft_token_ids
+        if torch.is_tensor(dt):
+            dt = dt.to(dtype=torch.int32)
+            if dt.shape[-1] < width:
+                pad = dt.new_full((dt.shape[0], width - dt.shape[-1]), -1)
+                dt = torch.cat([dt, pad], dim=-1)
+            dt = dt[:num_reqs, :width].contiguous()
+        else:
+            dt = torch.full(
+                (num_reqs, width), -1, dtype=torch.int32, device=self.device
             )
+        broadcast_sampled_token_ids(dt, pp.device_group, pp.rank)
 
     def _pp_receive_prev_sampled_token_ids_to_input_batch(self) -> None:
         """Receive sampled token ids broadcast from last PP stage"""
         pp = get_pp_group()
         assert not pp.is_last_rank
         num_reqs = self.input_batch.num_reqs
-        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
-        recv = torch.empty((num_reqs, 1), dtype=torch.int32, device=self.device)
-        # skip for chunked prefill.
+        # Without spec the grid is [num_reqs, 1]; with spec it is
+        # [num_reqs, num_spec + 1] (accepted drafts + bonus, -1 padded). Allocate
+        # the matching width so the broadcast from the last rank lines up.
+        width = self.num_spec_tokens + 1
         if not self._is_all_reqs_chunked_prefill():
-            torch.distributed.broadcast(recv, src=pp.last_rank, group=pp.device_group)
+            recv = receive_sampled_token_ids(
+                num_reqs, width, pp.device_group, pp.last_rank, self.device
+            )
+            # C4 (holistic): the non-last rank never runs the sampler, so it must
+            # persist the REAL sampled tokens per request (never -1) into its local
+            # buffers. A single-position write is insufficient: when a draft is
+            # accepted, num_computed_tokens advances by v = (accepted drafts + bonus)
+            # while only one slot was written, leaving the in-between (accepted-draft)
+            # positions as -1. The next step reads token_ids_cpu[num_computed_tokens]
+            # (which includes the spec tokens) and embeds a -1 -> indexSelectSmallIndex
+            # (break #2). Empirically num_computed_tokens grows by exactly the previous
+            # step's v, so writing all v values recv[i, 0:v] and advancing the cursor by
+            # v keeps token_ids_cpu (and num_tokens_no_spec) in lockstep with the read.
+            gathered = gather_valid_sampled_tokens_per_req(recv)
+            # Receive the broadcast draft tokens (paired 1:1 with the sampled
+            # broadcast on the last rank) so this rank's _prepare_input_ids draft
+            # scatter places the REAL drafts at the spec positions instead of the
+            # -1 placeholder (its local drafter never ran -> _draft_token_ids would
+            # be None and the scatter would be skipped -> non-greedy verification).
+            if self.num_spec_tokens:
+                self._draft_token_ids = receive_sampled_token_ids(
+                    num_reqs,
+                    self.num_spec_tokens,
+                    pp.device_group,
+                    pp.last_rank,
+                    self.device,
+                )
+            # Hybrid (mamba/GDN linear-attention) models: the GDN forward rolls
+            # back its conv1d/SSM recurrent state using attn_metadata.num_accepted
+            # _tokens, which _update_states_after_model_execute sets ONLY on the
+            # sampler/last rank (this rank returns early in sample_tokens, so it
+            # never runs). Source the same per-request accepted count from the
+            # broadcast (recv: accepted drafts + bonus, -1 padded) so the non-last
+            # rank's GDN layers roll back state identically. Without this its
+            # num_accepted_tokens is stale -> accept-steps corrupt the recurrent
+            # state -> wrong verification -> non-greedy (pure-attention models are
+            # unaffected; this is the hybrid analogue of the s9 num_computed_tokens
+            # drift fix). Mirrors the last rank's gpu->cpu copy at :1567.
+            if (
+                self.model_config.is_hybrid
+                and self.num_accepted_tokens_event is not None
+            ):
+                num_accepted = (recv != -1).sum(dim=1)
+                self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+                    num_accepted, non_blocking=True
+                )
+                self.num_accepted_tokens_event.record()
+        else:
+            # All-chunked-prefill: nothing was broadcast (recv is uninitialized) and
+            # these requests take their next input from the prompt, not a sampled
+            # token. Keep the original placeholder behaviour for them.
+            recv = torch.empty((num_reqs, width), dtype=torch.int32, device=self.device)
+            gathered = None
         self.input_batch.prev_sampled_token_ids = recv
 
         # construct `prev_req_id_to_index` here so `_prepare_input_ids`
@@ -4682,17 +4839,57 @@ class GPUModelRunner(
         discard_req_indices = np.nonzero(self.discard_request_mask.np[:num_reqs])[0]
         discard_req_indices_set = set(discard_req_indices)
         prev_req_id_to_index: dict[str, int] = {}
+        self._pp_prev_valid_sampled_count = {}
         for i, req_id in enumerate(self.input_batch.req_ids):
             if i in discard_req_indices_set:
                 continue
             prev_req_id_to_index[req_id] = i
-            # PP+async scheduling: advance per-request local cached output length by
-            # appending a placeholder (-1) token id.
-            if (req_state := self.requests.get(req_id)) is not None:
-                req_state.output_token_ids.append(-1)
             pos = self.input_batch.num_tokens_no_spec[i]
-            self.input_batch.is_token_ids[i, pos] = True
-            self.input_batch.num_tokens_no_spec[i] = pos + 1
+            req_state = self.requests.get(req_id)
+            if gathered is None:
+                # All-chunked-prefill: keep the -1 placeholder, advance by one.
+                if req_state is not None:
+                    req_state.output_token_ids.append(-1)
+                self.input_batch.is_token_ids[i, pos] = True
+                self.input_batch.num_tokens_no_spec[i] = pos + 1
+                continue
+            # Holistic C4: persist ALL v real tokens recv[i, 0:v] (accepted drafts +
+            # bonus, in sequence order) into the v positions [pos : pos + v] and
+            # advance the token_ids_cpu cursor by v, so the next step's read at
+            # num_computed_tokens (which includes the spec tokens) never lands on an
+            # un-backfilled -1. Empirically num_computed_tokens grows by exactly the
+            # previous step's v, so this keeps the write cursor in lockstep with the
+            # read. output_token_ids is deliberately NOT grown by v here: it drives
+            # num_tokens, which the discard mask compares against the (one-step-lagging)
+            # num_computed_tokens + num_scheduled; advancing it ahead of nct mis-marks
+            # the request as chunked-prefill and suppresses the broadcast. Keep the
+            # original single-token append (the latest/bonus) so num_tokens tracks nct.
+            values = gathered[i]
+            v = len(values)
+            end = pos + v
+            self.input_batch.token_ids_cpu[i, pos:end] = values
+            self.input_batch.is_token_ids[i, pos:end] = True
+            self.input_batch.num_tokens_no_spec[i] = end
+            if req_state is not None:
+                # (B) count reconciliation — the non-last-rank analogue of
+                # correct_spec_decode_token_counts (which runs only on the sampler
+                # rank). The optimistic-extend (:1319) appended prev_num_draft_len -1
+                # placeholders for THIS step's drafts; replace them with the v real
+                # committed tokens. Without this the rejected-draft placeholders
+                # (prev_num_draft_len - (v-1) of them) are never corrected on the
+                # non-last rank, so num_tokens inflates and discard_request_mask
+                # (:2045) eventually mis-fires -> request mis-marked all-chunked ->
+                # broadcast suppressed -> a -1 is written -> break #2.
+                optimistic = req_state.prev_num_draft_len
+                if optimistic:
+                    del req_state.output_token_ids[-optimistic:]
+                req_state.output_token_ids.extend(values)
+            # Stash this request's broadcast valid count so _update_states can apply
+            # the num_computed_tokens drift correction AFTER the scheduler's
+            # optimistic value is set (here in the receiver it would be overwritten
+            # by _update_states :1408). v = accepted drafts + bonus; the next step's
+            # optimistic advance assumed all drafts accepted.
+            self._pp_prev_valid_sampled_count[req_id] = v
         self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -5907,10 +6104,16 @@ class GPUModelRunner(
             else:
                 hidden_states = outputs
 
-            if self.speculative_config and (
-                self.speculative_config.use_eagle()
-                or self.speculative_config.uses_draft_model()
-                or self.speculative_config.uses_extract_hidden_states()
+            if (
+                self.speculative_config
+                # The drafter only exists on the last PP rank (see __init__);
+                # under PP>1 the non-last ranks have no draft to dummy-run.
+                and get_pp_group().is_last_rank
+                and (
+                    self.speculative_config.use_eagle()
+                    or self.speculative_config.uses_draft_model()
+                    or self.speculative_config.uses_extract_hidden_states()
+                )
             ):
                 assert isinstance(
                     self.drafter,
@@ -6814,9 +7017,14 @@ class GPUModelRunner(
         self.calculate_reorder_batch_threshold()
 
         # Initialize drafter attention backend
-        if self.speculative_config and (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_draft_model()
+        # The drafter only exists on the last PP rank (see __init__).
+        if (
+            self.speculative_config
+            and get_pp_group().is_last_rank
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_draft_model()
+            )
         ):
             assert isinstance(
                 self.drafter,
@@ -6867,9 +7075,14 @@ class GPUModelRunner(
         )
 
         # Initialize drafter's cudagraph dispatcher if using spec decode.
-        if self.speculative_config and (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_extract_hidden_states()
+        # The drafter only exists on the last PP rank (see __init__).
+        if (
+            self.speculative_config
+            and get_pp_group().is_last_rank
+            and (
+                self.speculative_config.use_eagle()
+                or self.speculative_config.uses_extract_hidden_states()
+            )
         ):
             assert isinstance(
                 self.drafter,
@@ -7291,6 +7504,7 @@ class GPUModelRunner(
 
         if (
             self.speculative_config
+            and get_pp_group().is_last_rank
             and self.speculative_config.uses_extract_hidden_states()
         ):
             assert isinstance(self.drafter, ExtractHiddenStatesProposer)

@@ -17,6 +17,9 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantized_draft_embedding import (
+    QuantizedVocabEmbedding,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -32,6 +35,7 @@ from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
+    SupportsPP,
     _require_is_multimodal,
 )
 from .utils import (
@@ -68,15 +72,46 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
 
         self.config = config
 
+        # Design C (standalone draft): when the draft runs with its own
+        # pipeline_parallel_size == 1 (decoupled from a target PP>1), it executes
+        # only on the last global PP rank. There `get_pp_group().is_first_rank`
+        # is False, so the forward would wrongly take the inter-stage path and
+        # demand intermediate_tensors the proposer never supplies. This flag makes
+        # the forward behave as first==last (embed -> fc -> layer -> norm). The
+        # draft's embed_tokens is already weight-loaded on the last rank and the
+        # target hidden state is resident there, so no cross-stage traffic is
+        # needed.
+        spec_config = vllm_config.speculative_config
+        self.standalone_draft = (
+            spec_config is not None and spec_config.draft_pipeline_parallel_size == 1
+        )
+
         self.vocab_size = config.vocab_size
 
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "mtp_num_hidden_layers", 1)
 
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
+        quant_bits = (
+            spec_config.draft_embed_quant_bits if spec_config is not None else None
         )
+        if quant_bits is not None:
+            # A1c: under PP the draft holds its own copy of the (huge) vocab
+            # embedding on the last rank. Quantize it at LOAD time (int storage
+            # allocated here; the checkpoint fp16 weight is quantized as it loads)
+            # so the full fp16 [vocab, hidden] table never materializes on the GPU
+            # — a post-load swap OOMs at the load peak. Correctness is unaffected
+            # (rejection sampling); only the acceptance rate may drop.
+            self.embed_tokens = QuantizedVocabEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+                bits=quant_bits,
+                params_dtype=torch.get_default_dtype(),
+            )
+        else:
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+            )
 
         # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
         # missing from hf_quant_config.json exclude_modules. Force unquantized.
@@ -130,7 +165,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        if get_pp_group().is_first_rank:
+        if self.standalone_draft or get_pp_group().is_first_rank:
             if inputs_embeds is None:
                 inputs_embeds = self.embed_input_ids(input_ids)
             assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
@@ -151,7 +186,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             residual=residual,
         )
 
-        if not get_pp_group().is_last_rank:
+        if not (self.standalone_draft or get_pp_group().is_last_rank):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
@@ -354,7 +389,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         "hidden_states": 0,
     }
 )
-class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
+class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -381,10 +416,27 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
         self.model = Qwen3_5MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "mtp")
         )
+        # Expose the inner predictor's PP intermediate-tensor factory so this
+        # wrapper satisfies the SupportsPP interface (Design B: the draft is
+        # sharded across the same PP stages as the target).
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
 
+        spec_config = vllm_config.speculative_config
+        skip_lm_head_alloc = (
+            spec_config is not None and spec_config.draft_embed_quant_bits is not None
+        )
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
+            elif skip_lm_head_alloc:
+                # A1c memory mode: the MTP draft's lm_head is always shared with
+                # the target's (same last rank) by the proposer's
+                # _maybe_share_lm_head. Materializing a full fp16 ParallelLMHead
+                # (e.g. 2.37 GiB for Qwen3.5) here only to discard it OOMs at the
+                # load peak — use a placeholder; sharing fills it.
+                self.lm_head = PPMissingLayer()
             else:
                 self.lm_head = ParallelLMHead(
                     config.vocab_size,
