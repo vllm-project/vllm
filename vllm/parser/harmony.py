@@ -7,7 +7,15 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
+
+from xgrammar.structural_tag import (
+    AnyTextFormat,
+    JSONSchemaFormat,
+    SequenceFormat,
+    StarFormat,
+    TagFormat,
+)
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -16,6 +24,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     DeltaToolCall,
     FunctionCall,
+    StructuralTagResponseFormat,
 )
 from vllm.entrypoints.openai.parser.harmony_utils import (
     extract_function_from_recipient,
@@ -25,6 +34,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 
 if TYPE_CHECKING:
@@ -290,3 +300,82 @@ class HarmonyParser(DelegatingParser):
             segments=segments,
             reasoning_token_count=reasoning_token_count,
         )
+
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        request = _normalize_output_format(request)
+        super().adjust_request(request)
+        return request
+
+
+def _normalize_output_format(
+    request: ChatCompletionRequest | ResponsesRequest,
+) -> ChatCompletionRequest | ResponsesRequest:
+    response_format = _get_request_response_format(request)
+    if response_format is None or response_format.type in (
+        "text",
+        "structural_tag",
+    ):
+        return request
+
+    normalized = _rewrite_response_format_for_harmony(response_format)
+    if normalized is not None:
+        s_tag_obj = normalized.model_dump(by_alias=True)
+        request.structured_outputs = StructuredOutputsParams(
+            structural_tag=json.dumps(s_tag_obj),
+        )
+        if isinstance(request, ResponsesRequest):
+            if request.text is not None:
+                request.text = request.text.model_copy(update={"format": None})
+        else:
+            request.response_format = None
+    return request
+
+
+def _get_request_response_format(
+    request: ChatCompletionRequest | ResponsesRequest,
+) -> Any | None:
+    if isinstance(request, ResponsesRequest):
+        return None if request.text is None else request.text.format
+    return request.response_format
+
+
+def _get_response_format_schema(response_format: Any) -> dict[str, Any] | None:
+    json_schema = getattr(response_format, "json_schema", None)
+    if json_schema is not None:
+        return getattr(json_schema, "json_schema", None)
+    return getattr(response_format, "schema_", None)
+
+
+def _rewrite_response_format_for_harmony(
+    response_format,
+) -> StructuralTagResponseFormat | None:
+    if response_format.type == "json_object":
+        final_content = JSONSchemaFormat(json_schema={"type": "object"})
+    elif response_format.type == "json_schema":
+        schema = _get_response_format_schema(response_format)
+        if schema is None:
+            return None
+        final_content = JSONSchemaFormat(json_schema=schema)
+    else:
+        return None
+    return StructuralTagResponseFormat(
+        type="structural_tag",
+        format=SequenceFormat(
+            elements=[
+                StarFormat(
+                    content=TagFormat(
+                        begin="<|start|>assistant<|channel|>analysis<|message|>",
+                        content=AnyTextFormat(),
+                        end="<|end|>",
+                    )
+                ),
+                TagFormat(
+                    begin="<|start|>assistant<|channel|>final<|message|>",
+                    content=final_content,
+                    end=["<|end|>", ""],  # HACK: <|return|> doesn't work
+                ),
+            ]
+        ),
+    )

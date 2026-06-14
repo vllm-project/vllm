@@ -735,6 +735,15 @@ class OpenAIServingResponses(OpenAIServing):
                 "in response API with Harmony"
             )
 
+        if self.parser is not None:
+            # HarmonyParser doesn't need chat_template_kwargs
+            # TODO: Unify adjust_request() call with non-harmony branch
+            self.parser(
+                self.renderer.get_tokenizer(),
+                request.tools,
+                model_config=self.model_config,
+            ).adjust_request(request=request)
+
         arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)

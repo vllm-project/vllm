@@ -457,7 +457,7 @@ class DelegatingParser(Parser):
 
         structure_tag = self._tool_parser.get_structural_tag(
             request,
-            reasoning=False,
+            reasoning=self._tool_parser.structural_tag_model_can_reason,
         )
         if structure_tag is None:
             return request

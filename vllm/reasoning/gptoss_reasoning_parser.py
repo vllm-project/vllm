@@ -71,64 +71,14 @@ class GptOssReasoningParser(ReasoningParser):
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
-        # The model can output some special tokens between "final" and "<|message|>"
-        # So we need to look for both sequences to determine the end of reasoning.
-        self.reasoning_end_token_ids_prefix = self.model_tokenizer.encode(
-            "<|channel|>final"
-        )
-        self.reasoning_end_token_ids_suffix = self.model_tokenizer.encode("<|message|>")
-        # We also need to check for the <|end|> token to avoid false positives from
-        # previous messages in multi-turn conversations.
-        self.eom_token_id = self.vocab["<|end|>"]
-        self.reasoning_max_num_between_tokens = 20
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
-        end_token_ids_prefix = self.reasoning_end_token_ids_prefix
-        end_token_ids_suffix = self.reasoning_end_token_ids_suffix
-        assert len(end_token_ids_prefix) > 0, "reasoning_end_token_ids_prefix is empty"
-        assert len(end_token_ids_suffix) > 0, "reasoning_end_token_ids_suffix is empty"
-        # Check if the end sequence is present in the input_ids.
-        # We search from the end of input_ids to find the last match.
-        for i in range(len(input_ids) - len(end_token_ids_prefix), -1, -1):
-            if input_ids[i] == self.eom_token_id:
-                # We looped backwards far enough to find the end of a previous message,
-                # which means we have searched the entirety of the current message
-                # and can exit early without searching further back into prior
-                # messages of the conversation.
-                return False
-            if input_ids[i : i + len(end_token_ids_prefix)] == end_token_ids_prefix:
-                # We have found the prefix, now we look for the suffix after the prefix.
-                suffix_start = i + len(end_token_ids_prefix)
-                for j in range(
-                    suffix_start, len(input_ids) - len(end_token_ids_suffix) + 1
-                ):
-                    if j - suffix_start >= self.reasoning_max_num_between_tokens:
-                        break
-                    if (
-                        input_ids[j : j + len(end_token_ids_suffix)]
-                        == end_token_ids_suffix
-                    ):
-                        return True
-        return False
+        return True
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
-        # The pattern window covers the end-of-reasoning marker itself.
-        # We add len(delta_ids) so that under speculative decoding (where
-        # a single step can accept many tokens) the entire accepted chunk
-        # is always inside the scan region.
-        delta_ids = tuple(delta_ids)
-        pattern_len = (
-            len(self.reasoning_end_token_ids_prefix)
-            + self.reasoning_max_num_between_tokens
-            + len(self.reasoning_end_token_ids_suffix)
-        )
-        window = pattern_len + len(delta_ids)
-        n = len(input_ids)
-        if n <= window:
-            return self.is_reasoning_end(input_ids)
-        return self.is_reasoning_end(input_ids[n - window :])
+        return True
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         raise NotImplementedError(

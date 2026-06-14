@@ -205,6 +205,7 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         structured_outputs_config = vllm_config.structured_outputs_config
+        structured_outputs_config.enable_in_reasoning = True
         if structured_outputs_config.reasoning_parser == "":
             structured_outputs_config.reasoning_parser = "openai_gptoss"
 
