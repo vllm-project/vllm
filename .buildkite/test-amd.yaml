@@ -1566,6 +1566,61 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
 
+- label: LM Eval Kimi K2 Thinking (8xMI300) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_8
+  optional: true
+  soft_fail: true
+  num_gpus: 8
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/layers/quantization/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/tool_parsers/kimi_k2_tool_parser.py
+  - vllm/reasoning/kimi_k2_reasoning_parser.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - tests/evals/gsm8k/
+  - tests/evals/gsm8k/configs/models-kimi-k2-thinking.txt
+  - tests/evals/gsm8k/configs/Kimi-K2-Thinking-MXFP4-Baseline-TP8.yaml
+  - tests/evals/gsm8k/configs/Kimi-K2-Thinking-MXFP4-AITER-TP8.yaml
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-kimi-k2-thinking.txt
+
+- label: LM Eval MiniMax M2.7 (4xMI300) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  optional: true
+  soft_fail: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/models/minimax_m2.py
+  - vllm/model_executor/layers/minimax_rms_norm/
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/layers/quantization/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/tool_parsers/minimax_m2_tool_parser.py
+  - vllm/reasoning/minimax_m2_reasoning_parser.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - tests/evals/gsm8k/
+  - tests/evals/gsm8k/configs/models-minimax-m27.txt
+  - tests/evals/gsm8k/configs/MiniMax-M2.7-Baseline-TP4.yaml
+  - tests/evals/gsm8k/configs/MiniMax-M2.7-AITER-TP4.yaml
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-minimax-m27.txt
+
 #---------------------------------------------------------  mi300 · examples  ----------------------------------------------------------#
 
 - label: Examples # TBD
