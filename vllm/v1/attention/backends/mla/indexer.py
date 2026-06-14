@@ -231,8 +231,6 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     reorder_batch_threshold: int = 1
-    natively_supported_next_n_fp4: list[int] = [1, 2]
-    # TODO (matt): integrate kernel with next_n = 4 support
 
     @classmethod
     def get_cudagraph_support(
@@ -267,15 +265,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         next_n = self.num_speculative_tokens + 1
         self.reorder_batch_threshold += self.num_speculative_tokens
-        # NOTE(zyongye) fp4 indexer cache only natively supports next_n in
-        # natively_supported_next_n_fp4; for other next_n values we fall back
-        # to the flattening path. Outside the SM100 datacenter family the FP8
-        # paged MQA logits kernel has the same [1, 2] constraint (deepgemm
-        # smxx_fp8_fp4_paged_mqa_logits.hpp:233), so flatten there too.
-        self.use_flattening = (
-            self.use_fp4_indexer_cache
-            or not current_platform.is_device_capability_family(100)
-        ) and next_n not in self.natively_supported_next_n_fp4
+        # NOTE: SM100 datacenter GPUs support any next_n natively via the
+        # multi-atom paged MQA logits kernels (FP8 and FP4 indexer
+        # caches). Outside the SM100 family the FP8
+        # paged MQA logits kernel only supports next_n in (1, 2)
+        # (deepgemm smxx_fp8_fp4_paged_mqa_logits.hpp:233), so flatten there.
+        self.use_flattening = not current_platform.is_device_capability_family(
+            100
+        ) and next_n not in (1, 2)
+        logger.info_once(
+            "DSA indexer decode path: use_flattening=%s "
+            "(next_n=%d, use_fp4_indexer_cache=%s)",
+            self.use_flattening,
+            next_n,
+            self.use_fp4_indexer_cache,
+        )
 
         sm_count = num_compute_units(self.device.index)
         self.num_sms = sm_count
@@ -288,20 +292,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
-        if not self.use_flattening and next_n > 1:
-            # Native MTP: 2D buffer for per-token seq_lens.
-            self.decode_seq_lens_buffer = torch.zeros(
-                (scheduler_config.max_num_seqs, next_n),
-                dtype=torch.int32,
-                device=self.device,
-            )
-        else:
-            # Flattening or no MTP: 1D buffer for expanded per-token seq_lens.
-            self.decode_seq_lens_buffer = torch.zeros(
-                (scheduler_config.max_num_batched_tokens,),
-                dtype=torch.int32,
-                device=self.device,
-            )
+        # Shared workspace for decode seq_lens. Native MTP views this as
+        # (B, max_decode_len) at runtime, keeping context_lens contiguous even
+        # when max_decode_len is smaller than next_n.
+        self.decode_seq_lens_buffer = torch.zeros(
+            (scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int32,
+            device=self.device,
+        )
         self.arange_buffer = torch.arange(
             max(
                 scheduler_config.max_num_seqs * next_n,
@@ -373,7 +371,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
           Plain decode or spec-decode with 2D per-token context lengths.
 
         Returns (seq_lens, block_table, decode_lens, batch_size, requires_padding).
-        seq_lens is 1D (batch_size,) for flatten/plain, 2D (B, next_n) for native MTP.
+        seq_lens is 1D (batch_size,) for flatten/plain, 2D (B, max_decode_len)
+        for native MTP.
         """
         min_decode_len = int(decode_lens_cpu.min().item())
         if not use_native and max_decode_len > 1:
@@ -454,16 +453,19 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # (requires_padding) instead.
             requires_padding = min_decode_len != max_decode_len
             if use_native and next_n > 1:
-                assert self.decode_seq_lens_buffer.dim() == 2
+                assert self.decode_seq_lens_buffer.dim() == 1
                 # (B, max_decode_len): token j attends to
                 # L - max_decode_len + j + 1 KV tokens.
-                self.decode_seq_lens_buffer[:num_decodes, :max_decode_len] = (
+                seq_lens_buffer = self.decode_seq_lens_buffer[
+                    : num_decodes * max_decode_len
+                ].view(num_decodes, max_decode_len)
+                seq_lens_buffer[:] = (
                     seq_lens.unsqueeze(1)
                     - max_decode_len
                     + 1
                     + self.offsets_buffer[:max_decode_len]
                 )
-                seq_lens = self.decode_seq_lens_buffer[:num_decodes, :max_decode_len]
+                seq_lens = seq_lens_buffer
             return seq_lens, block_table, decode_lens, num_decodes, requires_padding
 
     def build(

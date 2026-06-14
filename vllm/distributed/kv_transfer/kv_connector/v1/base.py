@@ -62,6 +62,7 @@ if TYPE_CHECKING:
         PromMetricT,
     )
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -439,6 +440,16 @@ class KVConnectorBase_V1(ABC):
     # Scheduler-side methods
     # ==============================
 
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        """
+        Bind the GPU block pool to the connector for per-GPU block status tracking.
+        For example, inc/dec ref counts, or iterate over the prefix cache blocks.
+
+        Args:
+            gpu_block_pool: the GPU block pool.
+        """
+        return
+
     @abstractmethod
     def get_num_new_matched_tokens(
         self,
@@ -510,6 +521,14 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def on_new_request(self, request: "Request") -> None:
+        """Called by the scheduler when a new request is added.
+
+        Connectors can override this to inspect the request and perform
+        bookkeeping. The default implementation is a no-op.
+        """
+        return
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
         Update KVConnector state from worker-side connectors output.
@@ -549,6 +568,18 @@ class KVConnectorBase_V1(ABC):
             New KV cache events since the last call.
         """
         return ()
+
+    def has_pending_push_work(self) -> bool:
+        """Return True if the connector has push-mode work that requires
+        the engine main loop to keep stepping (e.g. a P-side request whose
+        KV blocks are waiting to be WRITTEN to a D node).
+
+        Connectors that don't implement push-based KV transfer should
+        leave this as False.
+        """
+        # TODO: replace with a more general connector hook for keeping the
+        # scheduler alive (e.g. extend has_unfinished_requests).
+        return False
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
@@ -624,6 +655,23 @@ class KVConnectorBase_V1(ABC):
             metadata (KVConnectorHandshakeMetadata): the handshake metadata to set.
         """
         return None
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        """
+        Set handshake metadata keyed by (pp_rank, tp_rank).
+        - Default implementation assumes pp_rank is always 0
+        - PP-aware connectors override this to consume all PP producer shards.
+        """
+        if any(pp_rank != 0 for pp_rank, _ in metadata):
+            raise ValueError(
+                f"{type(self).__name__} received pp_rank > 0 handshake metadata "
+                "but does not support PP-disaggregated KV transfer."
+            )
+        self.set_xfer_handshake_metadata(
+            {tp_rank: meta for (_, tp_rank), meta in metadata.items()}
+        )
 
     @classmethod
     def build_prom_metrics(

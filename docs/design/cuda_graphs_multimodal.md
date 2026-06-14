@@ -17,6 +17,7 @@ The encoder CUDA Graph system uses a **budget-based capture/replay** strategy, m
 
 * [EncoderCudaGraphManager][vllm.v1.worker.encoder_cudagraph.EncoderCudaGraphManager]: orchestrates capture, replay, greedy packing, and data-parallel execution for encoder CUDA Graphs.
 * [SupportsEncoderCudaGraph][vllm.model_executor.models.interfaces.SupportsEncoderCudaGraph]: a runtime-checkable protocol that models implement to opt-in to encoder CUDA Graphs.
+* [EncoderItemSpec][vllm.v1.worker.encoder_cudagraph_defs.EncoderItemSpec]: describes a single encoder input item (image or video) with its input size and output token count.
 * [BudgetGraphMetadata][vllm.v1.worker.encoder_cudagraph.BudgetGraphMetadata]: holds the captured CUDA Graph and its associated I/O buffers for a single token budget level.
 
 ### Budget-based graph capture
@@ -30,8 +31,7 @@ class BudgetGraphMetadata:
     max_batch_size: int
     max_frames_per_batch: int
     graph: torch.cuda.CUDAGraph
-    input_buffer: torch.Tensor       # e.g. pixel_values
-    metadata_buffers: dict[str, torch.Tensor]  # e.g. embeddings, seq metadata
+    input_buffers: dict[str, torch.Tensor]  # e.g. pixel_values, embeddings, seq metadata
     output_buffer: torch.Tensor      # encoder hidden states
 ```
 
@@ -43,8 +43,8 @@ When a batch of images arrives, the manager sorts images by output token count (
 
 For each graph replay:
 
-1. Zero the pre-allocated `input_buffer`, then copy input tensors (e.g., `pixel_values`) into it.
-2. Zero `metadata_buffers`, then slice-copy precomputed values (e.g., rotary embeddings, sequence metadata).
+1. Call `prepare_encoder_cudagraph_replay_buffers()` to compute buffer values (including `pixel_values` and precomputed metadata) from actual batch inputs.
+2. Zero the pre-allocated `input_buffers`, then slice-copy the replay values into them.
 3. Replay the CUDA Graph.
 4. Clone outputs from `output_buffer` (cloning is necessary since the buffer is reused across replays).
 
@@ -65,18 +65,15 @@ Following <https://github.com/vllm-project/vllm/pull/35963> (ViT full CUDA graph
 
 Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGraph][vllm.model_executor.models.interfaces.SupportsEncoderCudaGraph] protocol. This protocol encapsulates all model-specific logic so that the manager remains model-agnostic. The protocol defines the following methods:
 
-* `get_encoder_cudagraph_config()` — returns static configuration (supported modalities, input key, buffer keys, output hidden size).
+* `get_encoder_cudagraph_config()` — returns static configuration (supported modalities, buffer keys, output hidden size, padding logics, max frames per video).
 * `get_encoder_cudagraph_budget_range(vllm_config)` — returns `(min_budget, max_budget)` for auto-inference of token budgets.
-* `get_encoder_cudagraph_num_items(mm_kwargs)` — returns the number of items (e.g. images) in the batch.
-* `get_encoder_cudagraph_per_item_output_tokens(mm_kwargs)` — returns per-item output token counts, used for greedy packing.
-* `get_encoder_cudagraph_per_item_input_sizes(mm_kwargs)` — returns per-item input sizes (e.g. patch counts), used for DP load balancing.
+* `get_encoder_cudagraph_item_specs(mm_kwargs)` — returns `list[EncoderItemSpec]` describing each item with its input size and output token count. Replaces the former three separate methods (`get_num_items`, `get_per_item_output_tokens`, `get_per_item_input_sizes`).
 * `select_encoder_cudagraph_items(mm_kwargs, indices)` — extracts a sub-batch of items by index, used during greedy packing and DP sharding.
-* `prepare_encoder_cudagraph_capture_inputs(...)` — creates dummy inputs for graph capture.
-* `prepare_encoder_cudagraph_replay_buffers(...)` — computes new buffer values from actual batch inputs before replay.
-* `encoder_cudagraph_forward(...)` — forward pass using precomputed buffers (called during capture and replay).
-* `encoder_eager_forward(...)` — fallback eager forward when no graph fits.
-* `get_input_modality(...)` - return the modality of the inputs.
-* `get_max_frames_per_video()` - return model-specific max frames per video.
+* `prepare_encoder_cudagraph_capture_inputs(...)` — creates dummy inputs for graph capture. Returns `EncoderCudaGraphCaptureInputs` with a single `values: dict[str, torch.Tensor]` that contains all buffers to be recorded into the graph.
+* `prepare_encoder_cudagraph_replay_buffers(mm_kwargs, max_batch_size, max_frames_per_batch)` — computes buffer values from actual batch inputs. Returns `EncoderCudaGraphReplayBuffers` with a `values` dict whose keys match `buffer_keys` in the config.
+* `encoder_cudagraph_forward(inputs: dict[str, torch.Tensor])` — forward pass accepting only fixed-shaped input tensors (the captured `values` dict). Called during both capture and replay. The `pixel_values` tensor is included in `inputs` alongside metadata buffers.
+* `encoder_eager_forward(mm_kwargs)` — fallback eager forward when no graph fits.
+* `postprocess_encoder_output(...)` — post-process encoder output, delegates to `scatter_output_slices` by default.
 
 !!! note
     The `SupportsEncoderCudaGraph` protocol is designed to be model-agnostic. New vision encoder models can opt-in by implementing the protocol methods without modifying the manager.
@@ -85,12 +82,18 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 
 | Architecture | Models | CG for Image | CG for Video |
 | ------------ | ------ | ------------ | ------------ |
-| `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ |
+| `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | - |
+| `InternVLChatModel` | `InternVL3.5`, `InternVL3`, `InternVL2.5`, `InternVL2` | ✅︎ | ✅︎ |
+| `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ |
 | `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ |
+| `Qwen3VLForConditionalGeneration` | `Qwen3-VL` | ✅︎ | ✅︎ |
+| `Qwen3_5ForConditionalGeneration` | `Qwen3.5` | ✅︎ | ✅︎ |
+| `Step3VLForConditionalGeneration` | `Step3-VL` | ✅︎ | ❌︎ |
+| `Glm4vForConditionalGeneration` | `GLM-4.1V, GLM-4.6V-Flash` | ✅︎ | ✅︎ |
 
 !!! note
     Encoder CUDA Graphs have currently been tested with `--mm-encoder-attn-backend=FLASH_ATTN` and `--mm-encoder-attn-backend=FLASHINFER` on Blackwell GPUs.
-    For Qwen2.5-VL only FA2 and FA3 has been tested.
+    For Qwen2-VL and Qwen2.5-VL only FA2 and FA3 has been tested.
 
 ## Configuration
 
@@ -99,7 +102,7 @@ Three fields in `CompilationConfig` control encoder CUDA Graphs:
 * `cudagraph_mm_encoder` (`bool`, default `False`) — enable CUDA Graph capture for multimodal encoder. When enabled, captures the full encoder forward as a CUDA Graph for each token budget level.
 * `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture as power-of-2 levels. User-provided values override auto-inference.
 * `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`.
-* `encoder_cudagraph_max_frames_per_batch` (`int`, default `None`) — maximum number of video frames per batch during capture. If `None` (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * max_frames_per_video` (`max_frames_per_video` is a model-specific value according to its `processing_info`). If we limit the video count per prompt to `0`, it will also be set to `0` (i.e., fall back to image-only mode).
+* `encoder_cudagraph_max_frames_per_batch` (`int`, default `None`) — maximum number of video frames per batch during capture. If `None` (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * max_frames_per_video` (`max_frames_per_video` is a model-specific value from `EncoderCudaGraphConfig`, computed by `get_max_frames_per_video()` on the model). If we limit the video count per prompt to `0`, it will also be set to `0` (i.e., fall back to image-only mode).
 
 ## Usage guide
 
@@ -109,6 +112,14 @@ Enable encoder CUDA Graphs via `compilation_config`:
 
 ```bash
 vllm serve Qwen/Qwen3-VL-32B \
+  --compilation-config '{"cudagraph_mm_encoder": true}'
+```
+
+For `Llama 4` (image only):
+
+```bash
+vllm serve meta-llama/Llama-4-Scout-17B-16E-Instruct \
+  --limit-mm-per-prompt '{"image": 1}' \
   --compilation-config '{"cudagraph_mm_encoder": true}'
 ```
 

@@ -74,6 +74,8 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # DFlash embeds mask tokens directly.
         self.parallel_drafting_hidden_state_tensor = None
 
+        self.dflash_causal = self.dflash_config.get("causal", False)
+
     @override
     def allow_multiple_draft_kv_cache_groups(self) -> bool:
         return True
@@ -109,11 +111,16 @@ class DFlashProposer(SpecDecodeBaseProposer):
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
         base = super()._create_draft_vllm_config()
+        # The draft model is text-only — clear the target's multimodal
+        # flag so flash_attn is not rejected for mm_prefix support.
+        arch = base.model_config.model_arch_config
+        if arch.is_mm_prefix_lm:
+            base.model_config.model_arch_config = replace(arch, is_mm_prefix_lm=False)
         return replace(
             base,
             attention_config=replace(
                 base.attention_config,
-                use_non_causal=True,
+                use_non_causal=not self.dflash_causal,
             ),
         )
 
@@ -301,7 +308,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             max_seq_len=cad.max_seq_len + num_query_per_req,
             block_table_tensor=self._get_dflash_block_table(primary_kv_cache_gid, cad),
             slot_mapping=query_slot_mapping,
-            causal=False,  # Non-causal attention is required for DFlash
+            causal=self.dflash_causal,
         )
 
         return num_query_total, token_indices_to_sample, new_cad
@@ -448,10 +455,8 @@ class DFlashProposer(SpecDecodeBaseProposer):
 
     @override
     def _get_eagle3_use_aux_hidden_state_from_config(self):
-        use_aux_hidden_state = True
-        dflash_config = getattr(
-            self.draft_model_config.hf_config, "dflash_config", None
-        )
-        if dflash_config is not None:
-            use_aux_hidden_state = dflash_config.get("use_aux_hidden_state", True)
-        return use_aux_hidden_state
+        return self.dflash_config.get("use_aux_hidden_state", True)
+
+    @property
+    def dflash_config(self):
+        return getattr(self.draft_model_config.hf_config, "dflash_config", None) or {}

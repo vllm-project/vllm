@@ -70,9 +70,15 @@ class MockParallelConfig:
 
 
 @dataclass
+class MockSchedulerConfig:
+    max_num_seqs: int = 128
+
+
+@dataclass
 class MockVllmConfig:
     model_config: MockModelConfig
     parallel_config: MockParallelConfig
+    scheduler_config: MockSchedulerConfig = field(default_factory=MockSchedulerConfig)
 
 
 def _build_renderer(model_config: MockModelConfig):
@@ -149,6 +155,9 @@ def _mock_engine() -> MagicMock:
     engine = MagicMock(spec=AsyncLLM)
     engine.errored = False
     engine.model_config = MockModelConfig()
+    engine.vllm_config = MockVllmConfig(
+        engine.model_config, parallel_config=MockParallelConfig()
+    )
     engine.input_processor = MagicMock()
     engine.renderer = _build_renderer(engine.model_config)
     return engine
@@ -503,3 +512,46 @@ async def test_stream_prompt_tokens_details():
     usage_chunk = parsed[-2]
     assert usage_chunk["choices"] == []
     assert usage_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_prompt_tokens_details_zero_cached():
+    """enable_prompt_tokens_details includes cached_tokens=0 in final usage.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/44377:
+    zero cached tokens must not be treated as falsy and omitted.
+    """
+    engine = _mock_engine()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_request_output(
+            "req-1",
+            token_ids=[10],
+            finish_reason="stop",
+            finished=True,
+            num_cached_tokens=0,
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine, enable_prompt_tokens_details=True)
+
+    request = GenerateRequest(
+        token_ids=[1, 2, 3],
+        sampling_params=SamplingParams(max_tokens=10),
+        model=MODEL_NAME,
+        stream=True,
+        stream_options=StreamOptions(include_usage=True),
+    )
+
+    response = await serving.serve_tokens(request)
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    parsed = _parse_sse_chunks(chunks)
+    # Usage-only chunk (before [DONE])
+    usage_chunk = parsed[-2]
+    assert usage_chunk["choices"] == []
+    # Zero cached tokens must be present, not omitted
+    assert usage_chunk["usage"]["prompt_tokens_details"] is not None
+    assert usage_chunk["usage"]["prompt_tokens_details"]["cached_tokens"] == 0
