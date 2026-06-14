@@ -859,6 +859,31 @@ def compute_causal_conv1d_metadata(
     return nums_dict, batch_ptr, token_chunk_offset_ptr
 
 
+def dcp_localize_seq_lens(
+    seq_lens: torch.Tensor,
+    dcp_rank: int,
+    dcp_world_size: int,
+    cp_kv_cache_interleave_size: int = 1,
+) -> torch.Tensor:
+    """Map global causal bounds to this DCP rank's local KV counts.
+
+    Interleaved ownership: global position j belongs to rank
+    (j // interleave_size) % dcp_world_size, so the result counts the
+    positions < bound owned by this rank. Equivalent to
+    get_dcp_local_seq_lens for a single rank, but purely elementwise: it
+    accepts a tensor of any shape (e.g. per-token expanded bounds, where
+    consecutive entries may land on different ranks), allocates no
+    intermediate (num_requests, world_size) tiling, and is CUDA-graph
+    safe (no device sync). Identity when dcp_world_size == 1.
+    """
+    ilv = cp_kv_cache_interleave_size
+    grp = dcp_world_size * ilv
+    full = seq_lens // grp
+    rem = seq_lens - full * grp
+    extra = (rem - dcp_rank * ilv).clamp_(0, ilv)
+    return full * ilv + extra
+
+
 def get_dcp_local_seq_lens(
     seq_lens: torch.Tensor,
     dcp_size: int = 1,
