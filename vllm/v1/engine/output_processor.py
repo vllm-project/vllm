@@ -388,6 +388,7 @@ class RequestState:
         text = self.detokenizer.get_next_output_text(finished, delta)
         if not delta:
             token_ids = self.detokenizer.output_token_ids
+        spec_accept_rate = self.detokenizer.spec_accept_rate()
 
         # Prepare logprobs, based on delta mode
         logprobs = self.logprobs_processor.logprobs
@@ -408,6 +409,7 @@ class RequestState:
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
             stop_reason=stop_reason if finished else None,
+            spec_accept_rate=spec_accept_rate,
         )
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
@@ -606,6 +608,7 @@ class OutputProcessor:
         for engine_core_output in engine_core_outputs:
             req_id = engine_core_output.request_id
             req_state = self.request_states.get(req_id)
+
             if req_state is None:
                 # Ignore output for already-aborted request.
                 continue
@@ -620,6 +623,9 @@ class OutputProcessor:
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
+            num_valid_draft_token = engine_core_output.num_valid_draft_token
+            num_generated_token = engine_core_output.num_generated_token
+            
             if engine_core_output.routed_experts is not None:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts
@@ -636,9 +642,14 @@ class OutputProcessor:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
                 # 2) Detokenize the token ids into text and perform stop checks.
+
+                # append new_token_ids
                 stop_string = req_state.detokenizer.update(
                     new_token_ids, finish_reason == FinishReason.STOP
                 )
+
+                spec_string = req_state.detokenizer.update_spec(num_valid_draft_token, num_generated_token)
+
                 if stop_string:
                     finish_reason = FinishReason.STOP
                     stop_reason = stop_string
@@ -686,7 +697,7 @@ class OutputProcessor:
                     )
                     if self.tracing_enabled:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
-
+        #print("end of output processor: ", request_outputs)
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,

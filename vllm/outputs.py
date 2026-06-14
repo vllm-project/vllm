@@ -46,6 +46,7 @@ class CompletionOutput:
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
+    spec_accept_rate: float | None = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -59,7 +60,9 @@ class CompletionOutput:
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
+            f"spec_accept_rate={self.spec_accept_rate}, "
             f"stop_reason={self.stop_reason})"
+        
         )
 
 
@@ -141,6 +144,9 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
         self.kv_transfer_params = kv_transfer_params
+        self.num_valid_draft_token = 0
+        self.num_generated_token = 0
+        self.speculative_decoding_accept_rate = 0.0
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
         """Merge subsequent RequestOutput into this one"""

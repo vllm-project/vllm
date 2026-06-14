@@ -1405,7 +1405,10 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
-
+        num_accepted_spec_tokens = model_runner_output.num_accepted_spec_tokens
+        num_generated_tokens = model_runner_output.num_generated_tokens
+        
+    
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
@@ -1449,6 +1452,7 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+        
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
@@ -1510,7 +1514,9 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
-
+            req_num_accepted_spec_tokens = num_accepted_spec_tokens.get(req_id, 0)
+            req_num_generated_tokens = num_generated_tokens.get(req_id, 0)
+            
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
@@ -1611,6 +1617,9 @@ class Scheduler(SchedulerInterface):
                 or kv_transfer_params
                 or stopped
             ):
+                 # For speculative decoding
+                    # num_valid_draft_token: int = 0
+                    # num_generated_token: int = 0
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -1627,6 +1636,8 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        num_valid_draft_token=req_num_accepted_spec_tokens,
+                        num_generated_token=req_num_generated_tokens,
                     )
                 )
             else:
