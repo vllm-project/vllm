@@ -27,10 +27,11 @@ external tokens > 0.
 
 import copy
 import time
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pytest
 
+from vllm.config import SpeculativeConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlConnector,
@@ -38,6 +39,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.v1.outputs import (
+    DraftTokenIds,
     EMPTY_MODEL_RUNNER_OUTPUT,
     KVConnectorOutput,
 )
@@ -777,6 +779,155 @@ def test_p_node_finished_holds_blocks_for_d():
     assert req_id in scheduler.requests
 
     # Clean up: simulate D reading and notifying
+    so = scheduler.schedule()
+    scheduler.update_from_output(so, EMPTY_MODEL_RUNNER_OUTPUT)
+    so = scheduler.schedule()
+    mro = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    mro.kv_connector_output = KVConnectorOutput(finished_sending={req_id})
+    scheduler.update_from_output(so, mro)
+    assert_scheduler_empty(scheduler)
+
+
+def test_p_node_finished_returns_spec_decode_handoff_tokens():
+    """P-node returns first generated token and draft tokens for D-node."""
+    num_spec_tokens = 3
+    vllm_config = create_vllm_config(
+        kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
+    )
+    vllm_config.speculative_config = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=num_spec_tokens,
+    )
+    scheduler = create_scheduler(vllm_config)
+    BS = vllm_config.cache_config.block_size
+    req = create_request(
+        request_id=504,
+        block_size=BS,
+        num_tokens=int(BS * 2.5),
+        do_remote_decode=True,
+    )
+    scheduler.add_request(req)
+    req_id = req.request_id
+
+    so = scheduler.schedule()
+    assert req_id in so.kv_transfer_spec_decode_handoff_req_ids
+
+    first_token_id = 123
+    draft_token_ids = [124, 125, 126]
+    mro = create_model_runner_output(reqs=[req], token_id=first_token_id)
+    mro.draft_token_ids = DraftTokenIds([req_id], [draft_token_ids])
+    eco = scheduler.update_from_output(so, mro)
+
+    kv = eco[0].outputs[0].kv_transfer_params
+    assert kv is not None
+    assert kv["do_remote_prefill"] is True
+    assert kv["do_remote_decode"] is False
+    assert kv["first_gen_token_ids"] == [first_token_id]
+    assert kv["draft_token_ids"] == draft_token_ids
+    assert kv["remote_num_tokens"] == req.num_prompt_tokens
+
+    so = scheduler.schedule()
+    scheduler.update_from_output(so, EMPTY_MODEL_RUNNER_OUTPUT)
+    so = scheduler.schedule()
+    mro = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    mro.kv_connector_output = KVConnectorOutput(finished_sending={req_id})
+    scheduler.update_from_output(so, mro)
+    assert_scheduler_empty(scheduler)
+
+
+def test_d_node_spec_decode_handoff_schedules_decode_shape():
+    """D-node seeds first generated token and schedules first step as 1+N."""
+    num_spec_tokens = 3
+    vllm_config = create_vllm_config(
+        kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
+        max_num_batched_tokens=64,
+    )
+    vllm_config.speculative_config = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=num_spec_tokens,
+    )
+    scheduler = create_scheduler(vllm_config)
+    BS = vllm_config.cache_config.block_size
+    req = create_request(
+        request_id=505,
+        block_size=BS,
+        num_tokens=int(BS * 2.5),
+        do_remote_prefill=True,
+    )
+    req_id = req.request_id
+    first_token_id = 201
+    draft_token_ids = [202, 203, 204]
+    req.kv_transfer_params["remote_num_tokens"] = req.num_prompt_tokens
+    req.kv_transfer_params["first_gen_token_ids"] = [first_token_id]
+    req.kv_transfer_params["draft_token_ids"] = draft_token_ids
+
+    scheduler.add_request(req)
+    so = scheduler.schedule()
+    assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.update_from_output(
+        so, create_model_runner_output(reqs=[], finished_recving={req_id})
+    )
+
+    so = scheduler.schedule()
+    assert so.num_scheduled_tokens[req_id] == 1 + num_spec_tokens
+    assert so.scheduled_spec_decode_tokens[req_id] == draft_token_ids
+    assert so.scheduled_new_reqs[0].output_token_ids == [first_token_id]
+    assert req.output_token_ids == [first_token_id]
+    assert req.spec_token_ids == []
+
+    model_token_id = 205
+    eco = scheduler.update_from_output(
+        so, create_model_runner_output(reqs=[req], token_id=model_token_id)
+    )
+    assert eco[0].outputs[0].new_token_ids == [first_token_id, model_token_id]
+    assert req.output_token_ids == [first_token_id, model_token_id]
+
+
+def test_p_node_structured_output_validates_handoff_draft_tokens():
+    """P-node validates handoff draft tokens after accepting output tokens."""
+    num_spec_tokens = 3
+    vllm_config = create_vllm_config(
+        kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
+    )
+    vllm_config.speculative_config = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=num_spec_tokens,
+    )
+    scheduler = create_scheduler(vllm_config)
+    BS = vllm_config.cache_config.block_size
+    req = create_request(
+        request_id=506,
+        block_size=BS,
+        num_tokens=int(BS * 2.5),
+        do_remote_decode=True,
+    )
+    req.structured_output_request = Mock()
+    req.structured_output_request.grammar = Mock()
+    req.structured_output_request.grammar.accept_tokens.return_value = True
+    req.structured_output_request.grammar.validate_tokens.return_value = [124]
+    scheduler.add_request(req)
+    req_id = req.request_id
+
+    so = scheduler.schedule()
+    assert req_id in so.kv_transfer_spec_decode_handoff_req_ids
+
+    first_token_id = 123
+    draft_token_ids = [124, 125, 126]
+    mro = create_model_runner_output(reqs=[req], token_id=first_token_id)
+    mro.draft_token_ids = DraftTokenIds([req_id], [draft_token_ids])
+    eco = scheduler.update_from_output(so, mro)
+
+    req.structured_output_request.grammar.accept_tokens.assert_called_once_with(
+        req_id, [first_token_id]
+    )
+    req.structured_output_request.grammar.validate_tokens.assert_called_once_with(
+        draft_token_ids
+    )
+    kv = eco[0].outputs[0].kv_transfer_params
+    assert kv is not None
+    assert kv["first_gen_token_ids"] == [first_token_id]
+    assert kv["draft_token_ids"] == [124]
+
     so = scheduler.schedule()
     scheduler.update_from_output(so, EMPTY_MODEL_RUNNER_OUTPUT)
     so = scheduler.schedule()

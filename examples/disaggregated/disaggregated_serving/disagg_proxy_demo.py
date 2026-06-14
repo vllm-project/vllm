@@ -21,9 +21,9 @@ import itertools
 import json
 import logging
 import os
-import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from typing import Any
 
 import aiohttp
 import requests
@@ -247,82 +247,197 @@ class Proxy:
         }
         return status
 
+    def _remove_instance_on_upstream_error(
+        self,
+        instance_type: str,
+        instance: str,
+        http_exc: HTTPException,
+    ) -> None:
+        if http_exc.status_code < 500:
+            return
+        if instance_type == "prefill":
+            instances = self.prefill_instances
+        else:
+            instances = self.decode_instances
+        if len(instances) <= 1:
+            return
+        self.remove_instance_endpoint(instance_type, instance)
+
+    @staticmethod
+    def _prefill_kv_transfer_params() -> dict[str, Any]:
+        return {
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+            "remote_engine_id": None,
+            "remote_block_ids": None,
+            "remote_host": None,
+            "remote_port": None,
+        }
+
+    @staticmethod
+    def _instance_host(instance: str) -> str:
+        return instance.rsplit(":", 1)[0]
+
+    @staticmethod
+    def _extract_kv_transfer_params(content: bytes) -> dict[str, Any] | None:
+        if not content:
+            return None
+
+        text = content.decode("utf-8", errors="replace").strip()
+        if not text:
+            return None
+
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = None
+
+        if isinstance(data, dict):
+            kv_transfer_params = data.get("kv_transfer_params")
+            if isinstance(kv_transfer_params, dict):
+                return kv_transfer_params
+
+        # Streaming responses are SSE frames: "data: {...}".
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            payload = line.removeprefix("data:").strip()
+            if payload == "[DONE]":
+                continue
+            try:
+                data = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict):
+                kv_transfer_params = data.get("kv_transfer_params")
+                if isinstance(kv_transfer_params, dict):
+                    return kv_transfer_params
+        return None
+
+    async def _prefill_and_get_kv_params(
+        self,
+        prefill_instance: str,
+        path: str,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        kv_prepare_request = request.copy()
+        kv_prepare_request["max_tokens"] = 1
+        if "max_completion_tokens" in kv_prepare_request:
+            kv_prepare_request["max_completion_tokens"] = 1
+        kv_prepare_request["stream"] = False
+        kv_prepare_request.pop("stream_options", None)
+        kv_prepare_request["kv_transfer_params"] = self._prefill_kv_transfer_params()
+
+        chunks = []
+        async for chunk in self.forward_request(
+            f"http://{prefill_instance}{path}",
+            kv_prepare_request,
+            use_chunked=False,
+        ):
+            chunks.append(chunk)
+
+        content = b"".join(chunks)
+        kv_transfer_params = self._extract_kv_transfer_params(content)
+        if not kv_transfer_params:
+            preview = content[:1024].decode("utf-8", errors="replace")
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    f"Prefill instance {prefill_instance} did not return "
+                    f"kv_transfer_params. Response preview: {preview}"
+                ),
+            )
+
+        # Use the HTTP host selected by this proxy; the P node may report a
+        # bind address that is not reachable from the D node.
+        kv_transfer_params["remote_host"] = self._instance_host(prefill_instance)
+        if not (
+            kv_transfer_params.get("first_gen_token_ids")
+            and kv_transfer_params.get("draft_token_ids")
+        ):
+            logger.warning(
+                "Prefill instance %s returned kv_transfer_params without "
+                "speculative handoff tokens: keys=%s",
+                prefill_instance,
+                sorted(kv_transfer_params.keys()),
+            )
+        return kv_transfer_params
+
     async def create_completion(self, raw_request: Request):
         try:
             request = await raw_request.json()
 
-            kv_prepare_request = request.copy()
-            kv_prepare_request["max_tokens"] = 1
-
             prefill_instance = self.schedule(self.prefill_cycler)
             try:
-                async for _ in self.forward_request(
-                    f"http://{prefill_instance}/v1/completions", kv_prepare_request
-                ):
-                    continue
+                kv_transfer_params = await self._prefill_and_get_kv_params(
+                    prefill_instance, "/v1/completions", request
+                )
             except HTTPException as http_exc:
-                self.remove_instance_endpoint("prefill", prefill_instance)
+                self._remove_instance_on_upstream_error(
+                    "prefill", prefill_instance, http_exc
+                )
                 raise http_exc
 
             # Perform kv recv and decoding stage
             decode_instance = self.schedule(self.decode_cycler)
+            decode_request = request.copy()
+            decode_request["kv_transfer_params"] = kv_transfer_params
 
             try:
                 generator = self.forward_request(
-                    f"http://{decode_instance}/v1/completions", request
+                    f"http://{decode_instance}/v1/completions", decode_request
                 )
             except HTTPException as http_exc:
-                self.remove_instance_endpoint("decode", decode_instance)
+                self._remove_instance_on_upstream_error(
+                    "decode", decode_instance, http_exc
+                )
                 raise http_exc
             response = StreamingResponse(generator)
             return response
-        except Exception:
-            import sys
-
-            exc_info = sys.exc_info()
-            print("Error occurred in disagg proxy server")
-            print(exc_info)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Error occurred in disagg proxy server")
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
     async def create_chat_completion(self, raw_request: Request):
         try:
             request = await raw_request.json()
 
-            # add params to request
-            kv_prepare_request = request.copy()
-            kv_prepare_request["max_tokens"] = 1
-            if "max_completion_tokens" in kv_prepare_request:
-                kv_prepare_request["max_completion_tokens"] = 1
-
             # prefill stage
             prefill_instance = self.schedule(self.prefill_cycler)
             try:
-                async for _ in self.forward_request(
-                    f"http://{prefill_instance}/v1/chat/completions", kv_prepare_request
-                ):
-                    continue
+                kv_transfer_params = await self._prefill_and_get_kv_params(
+                    prefill_instance, "/v1/chat/completions", request
+                )
             except HTTPException as http_exc:
-                self.remove_instance_endpoint("prefill", prefill_instance)
+                self._remove_instance_on_upstream_error(
+                    "prefill", prefill_instance, http_exc
+                )
                 raise http_exc
             # Perform kv recv and decoding stage
             decode_instance = self.schedule(self.decode_cycler)
+            decode_request = request.copy()
+            decode_request["kv_transfer_params"] = kv_transfer_params
 
             try:
                 generator = self.forward_request(
-                    "http://" + decode_instance + "/v1/chat/completions", request
+                    "http://" + decode_instance + "/v1/chat/completions",
+                    decode_request,
                 )
             except HTTPException as http_exc:
-                self.remove_instance_endpoint("decode", decode_instance)
+                self._remove_instance_on_upstream_error(
+                    "decode", decode_instance, http_exc
+                )
                 raise http_exc
             response = StreamingResponse(content=generator)
             return response
-        except Exception:
-            exc_info = sys.exc_info()
-            error_messages = [str(e) for e in exc_info if e]
-            print("Error occurred in disagg proxy server")
-            print(error_messages)
-            return StreamingResponse(
-                content=iter(error_messages), media_type="text/event-stream"
-            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception("Error occurred in disagg proxy server")
+            raise HTTPException(status_code=500, detail=str(e)) from e
 
     def remove_instance_endpoint(self, instance_type, instance):
         if instance_type == "decode" and instance in self.decode_instances:

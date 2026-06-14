@@ -238,6 +238,8 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         # remove the conditional below
         delay_free_blocks = any(len(group) > 0 for group in block_ids)
         remote_num_tokens = 0
+        first_gen_token_ids: list[int] = []
+        draft_token_ids: list[int] = []
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
             request_kv_blocks_ttl = self._kv_lease_duration
@@ -261,8 +263,18 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             block_ids = self.get_sw_clipped_blocks(block_ids)
 
             remote_num_tokens = request.num_computed_tokens
+            if (
+                self.enable_speculative_handoff
+                and is_p_node
+                and request.output_token_ids
+            ):
+                first_gen_token_ids = [int(request.output_token_ids[0])]
+                if request.spec_token_ids:
+                    draft_token_ids = [
+                        int(token_id) for token_id in request.spec_token_ids
+                    ]
 
-        return delay_free_blocks, dict(
+        kv_transfer_params = dict(
             do_remote_prefill=is_p_node,
             do_remote_decode=is_d_node,
             remote_block_ids=block_ids,
@@ -273,3 +285,9 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             remote_num_tokens=remote_num_tokens,
         )
+        if first_gen_token_ids:
+            kv_transfer_params["first_gen_token_ids"] = first_gen_token_ids
+        if draft_token_ids:
+            kv_transfer_params["draft_token_ids"] = draft_token_ids
+
+        return delay_free_blocks, kv_transfer_params

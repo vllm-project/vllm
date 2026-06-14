@@ -768,6 +768,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
             )
             req_index = self.req_states.req_id_to_index[req_id]
+            if (
+                new_req_data.output_token_ids
+                and new_req_data.num_computed_tokens == prompt_len
+            ):
+                # P/D handoff: prompt KV is present, and the transferred first
+                # generated token should be consumed as the decode input.
+                self.req_states.prefill_len.np[req_index] = prompt_len
+                self.req_states.last_sampled_tokens[req_index : req_index + 1] = (
+                    new_req_data.output_token_ids[-1]
+                )
 
             if self.encoder_cache is not None:
                 self.encoder_cache.add_request(req_id, new_req_data.mm_features)
@@ -1306,6 +1316,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states=hidden_states,
             aux_hidden_states=aux_hidden_states,
             finished_req_ids=finished_req_ids,
+            kv_transfer_spec_decode_handoff_req_ids=(
+                scheduler_output.kv_transfer_spec_decode_handoff_req_ids
+            ),
         )
 
         if not self.is_last_pp_rank:
@@ -1328,6 +1341,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states = self.execute_model_state.hidden_states
         aux_hidden_states = self.execute_model_state.aux_hidden_states
         finished_req_ids = self.execute_model_state.finished_req_ids
+        kv_transfer_spec_decode_handoff_req_ids = (
+            self.execute_model_state.kv_transfer_spec_decode_handoff_req_ids
+        )
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
@@ -1443,14 +1459,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=mm_inputs,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-
         if self.num_speculative_steps > 0:
-            # Spec-decode and diffusion LLMs both use draft tokens but the latter does
-            # not have a speculator (i.e. self.speculator is None)
+            # Spec-decode and diffusion LLMs both use draft tokens but the latter
+            # does not have a speculator (i.e. self.speculator is None).
+            draft_tokens = self.req_states.draft_tokens[input_batch.idx_mapping]
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
-                self.req_states.draft_tokens[input_batch.idx_mapping],
+                draft_tokens,
+                kv_transfer_spec_decode_handoff_req_ids,
             )
+            if kv_transfer_spec_decode_handoff_req_ids:
+                draft_token_ids = self.draft_tokens_handler.get_draft_tokens()
+                if draft_token_ids is not None:
+                    req_ids = []
+                    token_ids = []
+                    for req_id, draft_tokens_for_req in zip(
+                        draft_token_ids.req_ids,
+                        draft_token_ids.draft_token_ids,
+                    ):
+                        if req_id in kv_transfer_spec_decode_handoff_req_ids:
+                            req_ids.append(req_id)
+                            token_ids.append(draft_tokens_for_req)
+                    model_runner_output.draft_token_ids = DraftTokenIds(
+                        req_ids, token_ids
+                    )
 
         # Post-step KV connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
@@ -1567,3 +1599,4 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
+    kv_transfer_spec_decode_handoff_req_ids: set[str]

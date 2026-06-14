@@ -11,6 +11,7 @@ import pytest
 import torch
 
 from vllm import SamplingParams
+from vllm.config import SpeculativeConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 
 # ruff: noqa: E501
@@ -35,7 +36,13 @@ from .utils import (
 class DecodeBenchTestRunner:
     """Test runner for DecodeBenchConnector."""
 
-    def __init__(self, block_size: int, num_gpu_blocks: int):
+    def __init__(
+        self,
+        block_size: int,
+        num_gpu_blocks: int,
+        kv_connector_extra_config: dict | None = None,
+        num_speculative_tokens: int | None = None,
+    ):
         self.block_size = block_size
         self.num_gpu_blocks = num_gpu_blocks
 
@@ -46,7 +53,13 @@ class DecodeBenchTestRunner:
             block_size=block_size,
             max_num_batched_tokens=1000,
             kv_connector="DecodeBenchConnector",
+            kv_connector_extra_config=kv_connector_extra_config,
         )
+        if num_speculative_tokens is not None:
+            vllm_config.speculative_config = SpeculativeConfig(
+                model="ngram",
+                num_speculative_tokens=num_speculative_tokens,
+            )
 
         self.vllm_config = vllm_config
         self.scheduler: Scheduler = create_scheduler(
@@ -243,6 +256,52 @@ def test_decode_bench_connector_two_tokens():
     # For standard attention, there's only one group
     assert len(block_ids_per_group) == 1
     assert len(block_ids_per_group[0]) == 1  # 1 token needs 1 block
+
+
+def test_decode_bench_connector_speculative_handoff_schedule():
+    """DecodeBench can make the first D-side step look like spec decode."""
+    block_size = 16
+    num_gpu_blocks = 100
+    num_spec_tokens = 3
+
+    runner = DecodeBenchTestRunner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        num_speculative_tokens=num_spec_tokens,
+        kv_connector_extra_config={
+            "enable_speculative_handoff": True,
+        },
+    )
+
+    num_tokens = block_size * 2
+    req = runner.new_request(list(range(num_tokens)))
+
+    scheduler_output = runner.scheduler.schedule()
+    metadata = scheduler_output.kv_connector_metadata
+
+    assert isinstance(metadata, DecodeBenchConnectorMetadata)
+    assert req.request_id in metadata.reqs_to_fill
+    _, num_tokens_to_fill = metadata.reqs_to_fill[req.request_id]
+    assert num_tokens_to_fill == num_tokens
+
+    assert scheduler_output.num_scheduled_tokens[req.request_id] == (
+        1 + num_spec_tokens
+    )
+    assert scheduler_output.scheduled_spec_decode_tokens[req.request_id] == [
+        num_tokens - 2,
+        num_tokens - 3,
+        num_tokens - 4,
+    ]
+    assert req.kv_transfer_params is not None
+    assert req.kv_transfer_params["first_gen_token_ids"] == [num_tokens - 1]
+    assert req.kv_transfer_params["draft_token_ids"] == [
+        num_tokens - 2,
+        num_tokens - 3,
+        num_tokens - 4,
+    ]
+    assert list(req.output_token_ids) == [num_tokens - 1]
+    assert scheduler_output.scheduled_new_reqs[0].output_token_ids == [num_tokens - 1]
+    assert req.spec_token_ids == []
 
 
 def test_decode_bench_connector_large_context():

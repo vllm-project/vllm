@@ -72,6 +72,12 @@ class NixlBaseConnectorScheduler:
                 "kv_lease_duration", 30
             )
         )
+        self.num_speculative_tokens = vllm_config.num_speculative_tokens
+        self.enable_speculative_handoff = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "enable_speculative_handoff", self.num_speculative_tokens > 0
+            )
+        )
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
         self._heartbeat_interval = self._kv_lease_duration // 6
         if current_platform.device_type == "cpu":

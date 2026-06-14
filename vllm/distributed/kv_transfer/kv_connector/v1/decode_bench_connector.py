@@ -29,6 +29,10 @@ Usage:
         - fill_mean (float): Mean value for random normal fill (default: 0.015)
         - fill_std (float): Standard deviation for random fill (default: 0.0)
           Set to 0 for constant values, >0 for random sampling
+        - enable_speculative_handoff (bool): When enabled with speculative
+          decoding, synthesize a first generated token and draft tokens so the
+          decode-side first step can use the same 1 + draft token shape as
+          steady-state decode. Defaults to true with spec decoding enabled.
 """
 
 from dataclasses import dataclass
@@ -185,9 +189,18 @@ class DecodeBenchConnectorScheduler:
     def __init__(self, vllm_config: "VllmConfig"):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
+        kv_transfer_config = vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None
+
+        self.num_speculative_tokens = vllm_config.num_speculative_tokens
+        default_enable_speculative_handoff = vllm_config.num_speculative_tokens > 0
+        self.enable_speculative_handoff = kv_transfer_config.get_from_extra_config(
+            "enable_speculative_handoff", default_enable_speculative_handoff
+        )
 
         # Track which requests have already been filled
         self._filled_requests: set[str] = set()
+        self._speculative_handoff_requests: set[str] = set()
 
         # Track pending fills for the current scheduler step
         # request_id -> (block_ids_per_group, num_tokens_to_fill)
@@ -216,6 +229,11 @@ class DecodeBenchConnectorScheduler:
         if req_id in self._filled_requests:
             return 0, False
 
+        if self._maybe_seed_speculative_handoff(request):
+            # The prompt KV is externally available. The locally executed decode
+            # step validates the synthetic first token plus draft tokens.
+            return max(0, request.num_prompt_tokens - num_computed_tokens), False
+
         # Calculate how many tokens we need to fill
         # Fill all uncomputed tokens except the last one (which will be decoded)
         # This simulates having processed a long prefill
@@ -228,6 +246,50 @@ class DecodeBenchConnectorScheduler:
         # Return False for synchronous operation - the fill is fast enough
         # that async overhead isn't worth it
         return num_tokens_to_fill, False
+
+    def _maybe_seed_speculative_handoff(self, request: "Request") -> bool:
+        """Seed benchmark-only speculative handoff tokens on the D side."""
+        req_id = request.request_id
+        if req_id in self._speculative_handoff_requests:
+            return bool(request.spec_token_ids)
+        if (
+            not self.enable_speculative_handoff
+            or self.num_speculative_tokens <= 0
+            or request.num_output_tokens > 0
+            or request.spec_token_ids
+        ):
+            return False
+
+        first_token_id = self._make_synthetic_token_id(request, offset=0)
+        draft_token_ids = self._make_synthetic_draft_token_ids(request)
+        if not draft_token_ids:
+            return False
+
+        request.append_output_token_ids(first_token_id)
+        request.spec_token_ids = draft_token_ids
+
+        kv_transfer_params = dict(request.kv_transfer_params or {})
+        kv_transfer_params.update(
+            {
+                "first_gen_token_ids": [first_token_id],
+                "draft_token_ids": draft_token_ids,
+            }
+        )
+        request.kv_transfer_params = kv_transfer_params
+        self._speculative_handoff_requests.add(req_id)
+        return True
+
+    def _make_synthetic_draft_token_ids(self, request: "Request") -> list[int]:
+        return [
+            self._make_synthetic_token_id(request, offset=i + 1)
+            for i in range(self.num_speculative_tokens)
+        ]
+
+    def _make_synthetic_token_id(self, request: "Request", offset: int) -> int:
+        prompt_token_ids = request.prompt_token_ids
+        if prompt_token_ids:
+            return int(prompt_token_ids[-1 - offset % len(prompt_token_ids)])
+        return 0
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -295,6 +357,7 @@ class DecodeBenchConnectorScheduler:
         Called when a request has finished. Clean up any state.
         """
         self._filled_requests.discard(request.request_id)
+        self._speculative_handoff_requests.discard(request.request_id)
 
 
 class DecodeBenchConnectorWorker:

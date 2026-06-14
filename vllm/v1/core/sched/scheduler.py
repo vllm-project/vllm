@@ -217,6 +217,13 @@ class Scheduler(SchedulerInterface):
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
+        self.enable_kv_transfer_spec_decode_handoff = (
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "enable_speculative_handoff", self.num_spec_tokens > 0
+            )
+            if vllm_config.kv_transfer_config is not None
+            else False
+        )
         self.num_lookahead_tokens = 0
         if speculative_config is not None:
             if speculative_config.use_eagle():
@@ -295,6 +302,82 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
+        # KV-transfer speculative handoff seeds the first generated token into
+        # the request before scheduling. Keep those already-appended tokens here
+        # until update_from_output can emit them to EngineCoreOutput exactly once.
+        self._kv_transfer_spec_decode_handoff_output_token_ids: dict[
+            str, list[int]
+        ] = {}
+
+    def _is_kv_transfer_spec_decode_handoff(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+    ) -> bool:
+        params = request.kv_transfer_params
+        if (
+            not self.enable_kv_transfer_spec_decode_handoff
+            or not params
+            or not request.spec_token_ids
+            or request.num_output_tokens == 0
+            or num_computed_tokens < request.num_prompt_tokens
+        ):
+            return False
+
+        return bool(params.get("first_gen_token_ids") and params.get("draft_token_ids"))
+
+    def _should_collect_kv_transfer_spec_decode_handoff(
+        self,
+        request: Request,
+        num_computed_tokens: int,
+        num_new_tokens: int,
+    ) -> bool:
+        params = request.kv_transfer_params
+        return bool(
+            self.enable_kv_transfer_spec_decode_handoff
+            and self.num_spec_tokens > 0
+            and params
+            and params.get("do_remote_decode")
+            and request.num_output_tokens == 0
+            and num_computed_tokens + num_new_tokens >= request.num_prompt_tokens
+        )
+
+    def _maybe_seed_kv_transfer_spec_decode_handoff(
+        self,
+        request: Request,
+    ) -> None:
+        params = request.kv_transfer_params
+        if (
+            not self.enable_kv_transfer_spec_decode_handoff
+            or self.num_spec_tokens <= 0
+            or not params
+            or request.num_output_tokens > 0
+            or request.spec_token_ids
+        ):
+            return
+
+        first_gen_token_ids = params.get("first_gen_token_ids")
+        draft_token_ids = params.get("draft_token_ids")
+        if not first_gen_token_ids:
+            return
+        if not isinstance(first_gen_token_ids, list):
+            return
+
+        first_token_id = int(first_gen_token_ids[0])
+        request.append_output_token_ids(first_token_id)
+        self._kv_transfer_spec_decode_handoff_output_token_ids[
+            request.request_id
+        ] = [first_token_id]
+        if isinstance(draft_token_ids, list):
+            request.spec_token_ids = [
+                int(token_id) for token_id in draft_token_ids[: self.num_spec_tokens]
+            ]
+        # Async KV load decrements num_computed_tokens from num_tokens
+        # to num_tokens-1 so the last prompt position is re-computed for
+        # sampling.  The handoff already provides the first generated
+        # token, so restore the full prompt length so the first D-side
+        # step schedules exactly 1 + num_spec_tokens tokens.
+        request.num_computed_tokens = request.num_prompt_tokens
 
     def _mamba_block_aligned_split(
         self,
@@ -384,6 +467,7 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        kv_transfer_spec_decode_handoff_req_ids: set[str] = set()
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -535,6 +619,10 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
+            if self._should_collect_kv_transfer_spec_decode_handoff(
+                request, request.num_computed_tokens, num_new_tokens
+            ):
+                kv_transfer_spec_decode_handoff_req_ids.add(request_id)
 
             # Speculative decode related.
             if request.spec_token_ids:
@@ -735,6 +823,15 @@ class Scheduler(SchedulerInterface):
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
                 new_encoder_compute_budget = encoder_compute_budget
+                if not load_kv_async:
+                    self._maybe_seed_kv_transfer_spec_decode_handoff(request)
+                    num_computed_tokens = request.num_computed_tokens
+                is_kv_transfer_spec_decode_handoff = (
+                    not load_kv_async
+                    and self._is_kv_transfer_spec_decode_handoff(
+                        request, num_computed_tokens
+                    )
+                )
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
@@ -745,9 +842,17 @@ class Scheduler(SchedulerInterface):
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
-                    num_new_tokens = request.num_tokens - num_computed_tokens
+                    num_tokens_to_schedule = (
+                        request.num_tokens_with_spec
+                        if is_kv_transfer_spec_decode_handoff
+                        else request.num_tokens
+                    )
+                    num_new_tokens = num_tokens_to_schedule - num_computed_tokens
                     threshold = self.scheduler_config.long_prefill_token_threshold
-                    if 0 < threshold < num_new_tokens:
+                    if (
+                        not is_kv_transfer_spec_decode_handoff
+                        and 0 < threshold < num_new_tokens
+                    ):
                         num_new_tokens = threshold
 
                     # chunked prefill has to be enabled explicitly to allow
@@ -760,6 +865,11 @@ class Scheduler(SchedulerInterface):
                         # we can stop the scheduling here.
                         break
 
+                    if (
+                        is_kv_transfer_spec_decode_handoff
+                        and num_new_tokens > token_budget
+                    ):
+                        break
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
@@ -910,6 +1020,25 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                if self._should_collect_kv_transfer_spec_decode_handoff(
+                    request, num_computed_tokens, num_new_tokens
+                ):
+                    kv_transfer_spec_decode_handoff_req_ids.add(request_id)
+                if is_kv_transfer_spec_decode_handoff and request.spec_token_ids:
+                    num_scheduled_spec_tokens = (
+                        num_new_tokens
+                        + num_computed_tokens
+                        - request.num_tokens
+                        - request.num_output_placeholders
+                    )
+                    if num_scheduled_spec_tokens > 0:
+                        spec_token_ids = request.spec_token_ids
+                        if len(spec_token_ids) > num_scheduled_spec_tokens:
+                            spec_token_ids = spec_token_ids[
+                                :num_scheduled_spec_tokens
+                            ]
+                        scheduled_spec_decode_tokens[request_id] = spec_token_ids
+                    request.spec_token_ids = []
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
@@ -1011,6 +1140,9 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            kv_transfer_spec_decode_handoff_req_ids=(
+                kv_transfer_spec_decode_handoff_req_ids
+            ),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1405,6 +1537,14 @@ class Scheduler(SchedulerInterface):
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
+        handoff_draft_token_ids: dict[str, list[int]] = {}
+        if model_runner_output.draft_token_ids is not None:
+            handoff_draft_token_ids = dict(
+                zip(
+                    model_runner_output.draft_token_ids.req_ids,
+                    model_runner_output.draft_token_ids.draft_token_ids,
+                )
+            )
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -1505,18 +1645,50 @@ class Scheduler(SchedulerInterface):
 
             stopped = False
             new_logprobs = None
-            new_token_ids = generated_token_ids
+            generated_new_token_ids = generated_token_ids
+            num_generated_output_token_ids = 0
+            new_token_ids = []
+            handoff_next_spec_token_ids: list[int] | None = None
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
 
-            # Check for stop and update request status.
-            if new_token_ids:
-                new_token_ids, stopped = self._update_request_with_output(
-                    request, new_token_ids
+            handoff_new_token_ids = (
+                self._kv_transfer_spec_decode_handoff_output_token_ids.pop(
+                    req_id, []
                 )
-            elif request.pooling_params and pooler_output is not None:
+            )
+            if handoff_new_token_ids:
+                # The handoff token was appended in schedule() to form the
+                # right decode shape. Apply stop handling now before accepting
+                # any model-produced tokens from the same step.
+                new_token_ids.extend(handoff_new_token_ids)
+                stopped = check_stop(request, self.max_model_len)
+
+            # Check for stop and update request status.
+            if generated_new_token_ids and not stopped:
+                generated_new_token_ids, stopped = self._update_request_with_output(
+                    request, generated_new_token_ids
+                )
+                num_generated_output_token_ids = len(generated_new_token_ids)
+                new_token_ids.extend(generated_new_token_ids)
+                if (
+                    req_id in scheduler_output.kv_transfer_spec_decode_handoff_req_ids
+                    and (draft_token_ids := handoff_draft_token_ids.get(req_id))
+                    and len(draft_token_ids) >= self.num_spec_tokens
+                ):
+                    draft_token_ids = [
+                        int(token_id)
+                        for token_id in draft_token_ids[: self.num_spec_tokens]
+                    ]
+                    if all(token_id >= 0 for token_id in draft_token_ids):
+                        handoff_next_spec_token_ids = draft_token_ids
+            elif (
+                not handoff_new_token_ids
+                and request.pooling_params
+                and pooler_output is not None
+            ):
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
@@ -1537,6 +1709,18 @@ class Scheduler(SchedulerInterface):
                     request.status = RequestStatus.FINISHED_ERROR
                     request.resumable = False
                     stopped = True
+                elif handoff_next_spec_token_ids is not None:
+                    handoff_next_spec_token_ids = (
+                        struct_output_request.grammar.validate_tokens(
+                            handoff_next_spec_token_ids
+                        )
+                    )
+
+            if (
+                handoff_next_spec_token_ids is not None
+                and request.status != RequestStatus.FINISHED_ERROR
+            ):
+                request.spec_token_ids = handoff_next_spec_token_ids
 
             routed_experts = None
             if (
@@ -1597,8 +1781,11 @@ class Scheduler(SchedulerInterface):
                 request.sampling_params is not None
                 and request.sampling_params.num_logprobs is not None
                 and logprobs
+                and num_generated_output_token_ids > 0
             ):
-                new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
+                new_logprobs = logprobs.slice_request(
+                    req_index, num_generated_output_token_ids
+                )
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
@@ -1978,6 +2165,7 @@ class Scheduler(SchedulerInterface):
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
+        self._kv_transfer_spec_decode_handoff_output_token_ids.pop(request_id, None)
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
