@@ -16,9 +16,6 @@ import vllm.envs as envs
 from vllm.compilation.caching import aot_compile_hash_factors
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
-from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
-    minimax_m3_msa_warmup,
-)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -56,6 +53,10 @@ def _resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
 
 
 def kernel_warmup(worker: "Worker"):
+    from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
+        minimax_m3_msa_warmup,
+    )
+
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
         envs.VLLM_USE_DEEP_GEMM
