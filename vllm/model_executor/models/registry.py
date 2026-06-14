@@ -481,6 +481,10 @@ _MULTIMODAL_MODELS = {
         "llava_onevision",
         "LlavaOnevisionForConditionalGeneration",
     ),
+    "LlavaOnevision2ForConditionalGeneration": (
+        "llava_onevision2",
+        "LlavaOnevision2ForConditionalGeneration",
+    ),
     "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),
     "MiDashengLMModel": ("midashenglm", "MiDashengLMModel"),
     "MiMoV2OmniForCausalLM": ("mimo_v2_omni", "MiMoV2OmniForCausalLM"),

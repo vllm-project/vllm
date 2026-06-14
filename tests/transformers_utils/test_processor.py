@@ -3,10 +3,13 @@
 
 import importlib
 
+import pytest
 from transformers.processing_utils import ProcessingKwargs
 from typing_extensions import Unpack
 
+from vllm.transformers_utils import processor as processor_mod
 from vllm.transformers_utils.processor import (
+    get_processor,
     get_processor_kwargs_keys,
     get_processor_kwargs_type,
 )
@@ -65,3 +68,42 @@ def test_get_processor_kwargs_from_processor_module_scan_returns_full_union():
     proc = _ProcWithoutUnpack()
     keys = get_processor_kwargs_keys(get_processor_kwargs_type(proc))
     _assert_has_all_expected(keys)
+
+
+# ---- disable_type_check: allow non-ProcessorMixin trust_remote_code procs ----
+
+
+class _BareProcessor:
+    """Mimics a trust_remote_code processor not subclassing ProcessorMixin."""
+
+    def __call__(self, *args, **kwargs):
+        return None
+
+
+def test_get_processor_disable_type_check(monkeypatch):
+    bare = _BareProcessor()
+
+    class _FakeAutoProcessor:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            return bare
+
+    monkeypatch.setattr(
+        processor_mod, "convert_model_repo_to_path", lambda name: name
+    )
+    monkeypatch.setattr(
+        processor_mod,
+        "get_processor_cls_name_from_config",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(processor_mod, "AutoProcessor", _FakeAutoProcessor)
+
+    # Without the flag, a bare (non-ProcessorMixin) processor is rejected.
+    with pytest.raises(TypeError):
+        get_processor("dummy-model", trust_remote_code=True)
+
+    # With disable_type_check=True the same bare processor loads fine.
+    out = get_processor(
+        "dummy-model", trust_remote_code=True, disable_type_check=True
+    )
+    assert out is bare
