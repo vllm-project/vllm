@@ -11,12 +11,29 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.shmem_budget import make_shmem_pruner
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
 from .op import exp, exp2
 from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
+
+
+def _est_smem_delta_h(config, named_args):
+    """Shared-memory estimate for
+    ``chunk_gated_delta_rule_fwd_kernel_h_blockdim64`` in its K>192 branch
+    where all four ``b_h`` buffers live simultaneously. Returns a slight
+    over-estimate in bytes; an off-by-one Triton-internal allocation is
+    covered by the pruner's safety margin.
+    """
+    BV = config.kwargs.get("BV", 64)
+    BT = named_args.get("BT", 64)
+    num_stages = config.num_stages
+    persistent = 4 * BV * 64 * 4  # 4 x fp32 [BV,64] b_h buffers
+    per_stage = 2 * BT * 64 * 2 + BT * BV * 2  # b_w + b_k + b_v in bf16
+    overhead = 4096  # Triton bookkeeping safety
+    return persistent + num_stages * per_stage + overhead
 
 
 @triton.heuristics(
@@ -37,6 +54,7 @@ NUM_WARPS = [2, 4, 8, 16]
         for BV in [32, 64]
     ],
     key=["H", "K", "V", "BT"],
+    prune_configs_by={"early_config_prune": make_shmem_pruner(_est_smem_delta_h)},
     use_cuda_graph=use_cuda_graph,
 )
 @triton.jit(do_not_specialize=["T"])
