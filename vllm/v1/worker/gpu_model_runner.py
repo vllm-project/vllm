@@ -5177,6 +5177,19 @@ class GPUModelRunner(
                     )
                     eplb_models += 1
 
+                if (
+                    self.parallel_config.enable_eplb
+                    and not load_dummy_weights
+                    and eplb_models == 0
+                ):
+                    raise ValueError(
+                        "--enable-eplb was requested, but no loaded model "
+                        "implements the MixtureOfExperts interface required "
+                        f"by EPLB (main model: {type(self.model).__name__}). "
+                        "Either remove --enable-eplb, or use a MoE model "
+                        "whose vLLM implementation supports EPLB."
+                    )
+
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory
         except torch.cuda.OutOfMemoryError as e:
