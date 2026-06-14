@@ -82,4 +82,26 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
 }
 
+#ifdef VLLM_ROCM_GFX950
+TORCH_LIBRARY_FRAGMENT(vllm_sparse_mla_hip, m) {
+  m.def(
+      "decode_single(Tensor q, Tensor main_cache, Tensor main_indices, "
+      "Tensor main_indptr, Tensor extra_cache, Tensor extra_indices, "
+      "Tensor extra_indptr, Tensor? attn_sink, Tensor output, "
+      "int main_block_size, int extra_block_size, int main_num_rows, "
+      "int extra_num_rows, float scale, bool has_extra) -> ()");
+  m.def(
+      "decode_split(Tensor q, Tensor main_cache, Tensor main_indices, "
+      "Tensor main_indptr, Tensor extra_cache, Tensor extra_indices, "
+      "Tensor extra_indptr, Tensor? attn_sink, Tensor output, "
+      "Tensor scratch_m, Tensor scratch_l, Tensor scratch_acc, "
+      "int main_block_size, int extra_block_size, int main_num_rows, "
+      "int extra_num_rows, float scale, bool has_extra, int split_k) -> ()");
+}
+TORCH_LIBRARY_IMPL(vllm_sparse_mla_hip, CUDA, m) {
+  m.impl("decode_single", &sparse_mla_decode_single);
+  m.impl("decode_split", &sparse_mla_decode_split);
+}
+#endif
+
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

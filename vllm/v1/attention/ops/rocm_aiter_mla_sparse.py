@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import importlib
+import logging
 import math
+import os
 from importlib.util import find_spec
 
 import torch
@@ -2307,6 +2309,138 @@ def rocm_sparse_attn_prefill(
     output.copy_(output_chunk.to(output.dtype))
 
 
+# ============================================================================
+# HIP MFMA kernel implementation for sparse-MLA decode.
+# Compiled at build time via CMakeLists.txt into the _rocm_C extension when
+# gfx950 is in VLLM_GPU_ARCHES (see csrc/rocm/sparse_mla_decode.cu).
+# Ops are registered under the torch.ops.vllm_sparse_mla_hip namespace.
+# ============================================================================
+
+logger = logging.getLogger(__name__)
+
+
+def _sparse_mla_hip_as_int32_1d(x):
+    if x.dtype != torch.int32:
+        x = x.to(torch.int32)
+    if not x.is_contiguous():
+        x = x.contiguous()
+    return x.view(-1)
+
+
+_NUM_CUS = 256
+_MIN_K_PER_SPLIT = int(os.environ.get("SPARSE_MLA_HIP_MIN_K_PER_SPLIT", "32"))
+_SPLIT_K_OVERRIDE = os.environ.get("SPARSE_MLA_HIP_SPLIT_K")
+
+
+def _pick_split_k(num_queries, num_head_blocks, max_total_k):
+    if _SPLIT_K_OVERRIDE is not None:
+        return int(_SPLIT_K_OVERRIDE)
+    base_tiles = max(1, num_queries * num_head_blocks)
+    cu_target = max(1, _NUM_CUS // base_tiles)
+    k_limit = max(1, max_total_k // _MIN_K_PER_SPLIT)
+    target = max(1, min(cu_target, k_limit))
+    best = 1
+    for b in (1, 2, 4, 8):
+        if b <= target:
+            best = b
+    return best
+
+
+def _decode_sparse_mla_hip(
+    q,
+    main_cache,
+    main_indices,
+    main_indptr,
+    scale,
+    attn_sink,
+    nope_head_dim,
+    rope_head_dim,
+    extra_cache,
+    extra_indices,
+    extra_indptr,
+    max_main_len,
+    max_extra_len,
+):
+    main_indices = _sparse_mla_hip_as_int32_1d(main_indices)
+    main_indptr = _sparse_mla_hip_as_int32_1d(main_indptr)
+    num_queries, num_heads, _ = q.shape
+
+    has_extra = (
+        extra_cache is not None
+        and extra_indices is not None
+        and extra_indptr is not None
+    )
+    if has_extra:
+        extra_indices = _sparse_mla_hip_as_int32_1d(extra_indices)
+        extra_indptr = _sparse_mla_hip_as_int32_1d(extra_indptr)
+    else:
+        extra_cache = main_cache
+        extra_indices = torch.empty(0, device=q.device, dtype=torch.int32)
+        extra_indptr = torch.zeros(num_queries + 1, device=q.device, dtype=torch.int32)
+
+    out = torch.empty_like(q, dtype=torch.bfloat16)
+    sink = attn_sink.contiguous() if attn_sink is not None else None
+    q_in = q.contiguous() if not q.is_contiguous() else q
+
+    BLOCK_H = 16
+    num_head_blocks = (num_heads + BLOCK_H - 1) // BLOCK_H
+    total_max_k = max_main_len + (max_extra_len if has_extra else 0)
+    split_k = _pick_split_k(num_queries, num_head_blocks, total_max_k)
+
+    if split_k == 1:
+        torch.ops.vllm_sparse_mla_hip.decode_single(
+            q_in,
+            main_cache,
+            main_indices,
+            main_indptr,
+            extra_cache,
+            extra_indices,
+            extra_indptr,
+            sink,
+            out,
+            int(main_cache.shape[1]),
+            int(extra_cache.shape[1]),
+            int(main_cache.shape[0] * main_cache.shape[1]),
+            int(extra_cache.shape[0] * extra_cache.shape[1]),
+            float(scale),
+            bool(has_extra),
+        )
+    else:
+        scratch_m = torch.empty(
+            num_queries * num_head_blocks * split_k * BLOCK_H,
+            device=q.device,
+            dtype=torch.float32,
+        )
+        scratch_l = torch.empty_like(scratch_m)
+        scratch_acc = torch.empty(
+            num_queries * num_head_blocks * split_k * BLOCK_H * 512,
+            device=q.device,
+            dtype=torch.bfloat16,
+        )
+        torch.ops.vllm_sparse_mla_hip.decode_split(
+            q_in,
+            main_cache,
+            main_indices,
+            main_indptr,
+            extra_cache,
+            extra_indices,
+            extra_indptr,
+            sink,
+            out,
+            scratch_m,
+            scratch_l,
+            scratch_acc,
+            int(main_cache.shape[1]),
+            int(extra_cache.shape[1]),
+            int(main_cache.shape[0] * main_cache.shape[1]),
+            int(extra_cache.shape[0] * extra_cache.shape[1]),
+            float(scale),
+            bool(has_extra),
+            int(split_k),
+        )
+    return out
+
+
 def rocm_sparse_attn_decode(
     q: torch.Tensor,
     kv_cache: torch.Tensor | None,
@@ -2328,7 +2462,7 @@ def rocm_sparse_attn_decode(
     output: torch.Tensor,
 ) -> None:
     assert swa_k_cache.dtype == torch.uint8, (
-        "ROCm Triton sparse decode expects uint8 fp8_ds_mla SWA cache, "
+        "ROCm sparse decode expects uint8 fp8_ds_mla SWA cache, "
         f"got {swa_k_cache.dtype}"
     )
     _validate_dsv4_sparse_dims(
@@ -2338,38 +2472,146 @@ def rocm_sparse_attn_decode(
         "rocm_sparse_attn_decode",
     )
 
-    main_indices = swa_indices.reshape(swa_indices.shape[0], -1)
+    if _ON_GFX950:
+        _rocm_sparse_attn_decode_hip(
+            q=q,
+            kv_cache=kv_cache,
+            swa_k_cache=swa_k_cache,
+            swa_only=swa_only,
+            topk_indices=topk_indices,
+            topk_lens=topk_lens,
+            swa_indices=swa_indices,
+            swa_lens=swa_lens,
+            swa_ragged_indices=swa_ragged_indices,
+            swa_ragged_indptr=swa_ragged_indptr,
+            topk_ragged_indices=topk_ragged_indices,
+            topk_ragged_indptr=topk_ragged_indptr,
+            attn_sink=attn_sink,
+            scale=scale,
+            nope_head_dim=nope_head_dim,
+            rope_head_dim=rope_head_dim,
+            output=output,
+        )
+    else:
+        main_indices = swa_indices.reshape(swa_indices.shape[0], -1)
 
+        extra_cache = None
+        extra_indices = None
+        if not swa_only:
+            assert kv_cache is not None
+            assert topk_indices is not None or (
+                topk_ragged_indices is not None and topk_ragged_indptr is not None
+            )
+            assert kv_cache.dtype == torch.uint8
+            extra_cache = kv_cache
+            if topk_indices is not None:
+                extra_indices = topk_indices.reshape(topk_indices.shape[0], -1)
+
+        attn_out = _rocm_sparse_attn_decode_triton(
+            q=q,
+            main_cache=swa_k_cache,
+            main_indices=main_indices,
+            scale=scale,
+            attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
+            nope_head_dim=nope_head_dim,
+            rope_head_dim=rope_head_dim,
+            extra_cache=extra_cache,
+            extra_indices=extra_indices,
+            main_lengths=swa_lens,
+            extra_lengths=topk_lens,
+            main_ragged_indices=swa_ragged_indices,
+            main_ragged_indptr=swa_ragged_indptr,
+            extra_ragged_indices=topk_ragged_indices,
+            extra_ragged_indptr=topk_ragged_indptr,
+        )
+        output.copy_(attn_out.to(output.dtype))
+
+
+def _rocm_sparse_attn_decode_hip(
+    q,
+    kv_cache,
+    swa_k_cache,
+    swa_only,
+    topk_indices,
+    topk_lens,
+    swa_indices,
+    swa_lens,
+    swa_ragged_indices,
+    swa_ragged_indptr,
+    topk_ragged_indices,
+    topk_ragged_indptr,
+    attn_sink,
+    scale,
+    nope_head_dim,
+    rope_head_dim,
+    output,
+):
+    assert nope_head_dim == 448
+    assert rope_head_dim == 64
+
+    if swa_ragged_indices is None or swa_ragged_indptr is None:
+        main_indices_dense = swa_indices.reshape(swa_indices.shape[0], -1)
+        lengths = (
+            swa_lens
+            if swa_lens is not None
+            else (main_indices_dense >= 0).sum(dim=-1, dtype=torch.int32)
+        )
+        main_ragged_indices, main_ragged_indptr = build_ragged_indices_from_dense(
+            main_indices_dense,
+            lengths,
+            num_rows=swa_k_cache.shape[0] * swa_k_cache.shape[1],
+        )
+    else:
+        main_ragged_indices = swa_ragged_indices
+        main_ragged_indptr = swa_ragged_indptr
+
+    has_extra = not swa_only
     extra_cache = None
-    extra_indices = None
-    if not swa_only:
+    extra_ragged_indices = None
+    extra_ragged_indptr = None
+    if has_extra:
         assert kv_cache is not None
-        assert topk_indices is not None or (
-            topk_ragged_indices is not None and topk_ragged_indptr is not None
-        )
-        assert kv_cache.dtype == torch.uint8, (
-            "ROCm Triton sparse decode expects uint8 fp8_ds_mla extra cache, "
-            f"got {kv_cache.dtype}"
-        )
+        assert kv_cache.dtype == torch.uint8
         extra_cache = kv_cache
-        if topk_indices is not None:
-            extra_indices = topk_indices.reshape(topk_indices.shape[0], -1)
+        if topk_ragged_indices is None or topk_ragged_indptr is None:
+            assert topk_indices is not None
+            ex_dense = topk_indices.reshape(topk_indices.shape[0], -1)
+            lengths = (
+                topk_lens
+                if topk_lens is not None
+                else (ex_dense >= 0).sum(dim=-1, dtype=torch.int32)
+            )
+            extra_ragged_indices, extra_ragged_indptr = build_ragged_indices_from_dense(
+                ex_dense,
+                lengths,
+                num_rows=kv_cache.shape[0] * kv_cache.shape[1],
+            )
+        else:
+            extra_ragged_indices = topk_ragged_indices
+            extra_ragged_indptr = topk_ragged_indptr
 
-    attn_out = _rocm_sparse_attn_decode_triton(
+    if torch.cuda.is_current_stream_capturing():
+        max_main_len = swa_indices.shape[-1]
+        max_extra_len = max_main_len if has_extra else 0
+    else:
+        max_main_len = int(swa_lens.max().item()) if swa_lens is not None else 0
+        max_extra_len = 0
+        if has_extra and topk_lens is not None:
+            max_extra_len = int(topk_lens.max().item())
+
+    attn_out = _decode_sparse_mla_hip(
         q=q,
         main_cache=swa_k_cache,
-        main_indices=main_indices,
+        main_indices=main_ragged_indices,
+        main_indptr=main_ragged_indptr,
         scale=scale,
         attn_sink=None if attn_sink is None else attn_sink[: q.shape[1]],
         nope_head_dim=nope_head_dim,
         rope_head_dim=rope_head_dim,
         extra_cache=extra_cache,
-        extra_indices=extra_indices,
-        main_lengths=swa_lens,
-        extra_lengths=topk_lens,
-        main_ragged_indices=swa_ragged_indices,
-        main_ragged_indptr=swa_ragged_indptr,
-        extra_ragged_indices=topk_ragged_indices,
-        extra_ragged_indptr=topk_ragged_indptr,
+        extra_indices=extra_ragged_indices,
+        extra_indptr=extra_ragged_indptr,
+        max_main_len=max_main_len,
+        max_extra_len=max_extra_len,
     )
     output.copy_(attn_out.to(output.dtype))

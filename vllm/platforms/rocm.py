@@ -470,7 +470,7 @@ class RocmPlatform(Platform):
 
         import contextlib
 
-        # Import ROCm-specific extension
+        # Import ROCm-specific extensions
         with contextlib.suppress(ImportError):
             import vllm._rocm_C  # noqa: F401
 
