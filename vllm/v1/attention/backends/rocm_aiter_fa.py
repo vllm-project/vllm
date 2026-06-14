@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
@@ -1433,12 +1434,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
             )
 
     def fused_rope_kvcache_supported(self):
-        # Only support fusion when shuffle KV cache layout is not used;
-        # shuffle layout uses a different cache update path.
-        return (
-            rocm_aiter_ops.is_enabled()
-            and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-        )
+        # Shuffle KV cache layout uses a different cache update path — skip fusion.
+        if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+            return False
+        # Our native CUDA/HIP kernel handles FP8 per-tensor without AITER.
+        return is_quantized_kv_cache(self.kv_cache_dtype)
 
     def do_rope_and_kv_cache_update(
         self,
@@ -1452,26 +1452,48 @@ class AiterFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
     ):
-        key_cache, value_cache = kv_cache.unbind(1)
-        flash_layout = True
-
+        import os
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
-        if is_fp8_kv_cache:
-            key_cache = key_cache.view(current_platform.fp8_dtype())
-            value_cache = value_cache.view(current_platform.fp8_dtype())
+        key_cache, value_cache = kv_cache.unbind(1)
+        if is_fp8_kv_cache and os.environ.get("VLLM_DISABLE_FUSED_ROPE_FP8_KV") != "1":
+            # Rotate query in-place (since fused_rope_fp8_kvcache only
+            # rotates key and writes to cache)
+            ops.rotary_embedding(
+                positions,
+                query.view(query.shape[0], -1),
+                None,
+                self.head_size,
+                cos_sin_cache,
+                is_neox,
+            )
+            ops.fused_rope_fp8_kvcache(
+                key,
+                value,
+                key_cache.view(current_platform.fp8_dtype()),
+                value_cache.view(current_platform.fp8_dtype()),
+                layer_slot_mapping,
+                positions,
+                cos_sin_cache,
+                layer._k_scale,
+                layer._v_scale,
+                is_neox,
+                True,  # flash_layout
+            )
+        else:
+            # Non-FP8: keep existing AITER path
+            rocm_aiter_ops.triton_rope_and_cache(
+                query,
+                key,
+                value,
+                positions,
+                cos_sin_cache,
+                is_neox,
+                key_cache,
+                value_cache,
+                layer_slot_mapping,
+                layer._k_scale,
+                layer._v_scale,
+                True,   # flash_layout
+                False,  # is_fp8_kv_cache
+            )
 
-        rocm_aiter_ops.triton_rope_and_cache(
-            query,
-            key,
-            value,
-            positions,
-            cos_sin_cache,
-            is_neox,
-            key_cache,
-            value_cache,
-            layer_slot_mapping,
-            layer._k_scale,
-            layer._v_scale,
-            flash_layout,
-            is_fp8_kv_cache,
-        )

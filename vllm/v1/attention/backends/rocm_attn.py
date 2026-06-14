@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
@@ -506,7 +507,8 @@ class RocmAttentionImpl(AttentionImpl):
             )
 
     def fused_rope_kvcache_supported(self):
-        return rocm_aiter_ops.is_enabled()
+        # Our native CUDA/HIP kernel handles FP8 per-tensor without AITER.
+        return is_quantized_kv_cache(self.kv_cache_dtype)
 
     def do_rope_and_kv_cache_update(
         self,
@@ -522,30 +524,55 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache,
-            layer.num_kv_heads,  # type: ignore[attr-defined]
-            layer.head_size,  # type: ignore[attr-defined]
-        )
-        flash_layout = False
-
+        import os
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
-        if is_fp8_kv_cache:
-            key_cache = key_cache.view(self.fp8_dtype)
-            value_cache = value_cache.view(self.fp8_dtype)
+        if is_fp8_kv_cache and os.environ.get("VLLM_DISABLE_FUSED_ROPE_FP8_KV") != "1":
+            # Rotate query in-place (since fused_rope_fp8_kvcache only
+            # rotates key and writes to cache)
+            ops.rotary_embedding(
+                positions,
+                query.view(query.shape[0], -1),
+                None,
+                self.head_size,
+                cos_sin_cache,
+                is_neox,
+            )
+            # Bypass split_kv_cache (reshapes to 5D non-flash).
+            # kv_cache[0/1] is already NHD flash layout:
+            # [blocks, block_size, heads, head_size].
+            ops.fused_rope_fp8_kvcache(
+                key,
+                value,
+                kv_cache[0].view(self.fp8_dtype),
+                kv_cache[1].view(self.fp8_dtype),
+                layer_slot_mapping,
+                positions,
+                cos_sin_cache,
+                layer._k_scale,
+                layer._v_scale,
+                is_neox,
+                True,  # flash_layout
+            )
+        else:
+            # Non-FP8: keep existing AITER path (split_kv_cache → non-flash layout)
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache,
+                layer.num_kv_heads,  # type: ignore[attr-defined]
+                layer.head_size,  # type: ignore[attr-defined]
+            )
+            rocm_aiter_ops.triton_rope_and_cache(
+                query,
+                key,
+                value,
+                positions,
+                cos_sin_cache,
+                is_neox,
+                key_cache,
+                value_cache,
+                layer_slot_mapping,
+                layer._k_scale,
+                layer._v_scale,
+                False,  # flash_layout
+                False,  # is_fp8_kv_cache
+            )
 
-        rocm_aiter_ops.triton_rope_and_cache(
-            query,
-            key,
-            value,
-            positions,
-            cos_sin_cache,
-            is_neox,
-            key_cache,
-            value_cache,
-            layer_slot_mapping,
-            layer._k_scale,
-            layer._v_scale,
-            flash_layout,
-            is_fp8_kv_cache,
-        )

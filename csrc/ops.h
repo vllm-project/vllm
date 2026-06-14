@@ -48,6 +48,17 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       torch::Tensor& cos_sin_cache, bool is_neox,
                       int64_t rope_dim_offset, bool inverse);
 
+void fused_rope_fp8_kvcache(torch::Tensor const& key,
+                             torch::Tensor const& value,
+                             torch::Tensor& key_cache,
+                             torch::Tensor& value_cache,
+                             torch::Tensor const& slot_mapping,
+                             torch::Tensor const& positions,
+                             torch::Tensor const& cos_sin_cache,
+                             torch::Tensor const& k_scale,
+                             torch::Tensor const& v_scale, bool is_neox,
+                             bool flash_layout);
+
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void silu_and_mul_clamp(torch::Tensor& out, torch::Tensor& input, double limit);

@@ -51,6 +51,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // kernel launch. Registered in _C_stable_libtorch (incl. the FlashInfer V4
   // full-cache bf16/fp8 variants).
 
+  // Fused K RoPE + static FP8 per-tensor KV cache write (CUDA/HIP, no AITER)
+  ops.def(
+      "fused_rope_fp8_kvcache(Tensor key, Tensor value,"
+      "                       Tensor! key_cache, Tensor! value_cache,"
+      "                       Tensor slot_mapping, Tensor positions,"
+      "                       Tensor cos_sin_cache,"
+      "                       Tensor k_scale, Tensor v_scale,"
+      "                       bool is_neox, bool flash_layout) -> ()");
+  ops.impl("fused_rope_fp8_kvcache", torch::kCUDA, &fused_rope_fp8_kvcache);
+  
   // Quantization ops
 #ifndef USE_ROCM
 
