@@ -165,7 +165,10 @@ class ToolParser:
         return request
 
     def get_structural_tag(
-        self, request: ChatCompletionRequest, *, reasoning: bool = False
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        *,
+        reasoning: bool = False,
     ):
         if self.structural_tag_model is None:
             return None
