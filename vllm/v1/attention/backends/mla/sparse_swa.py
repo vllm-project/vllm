@@ -5,6 +5,7 @@ from typing import ClassVar, cast
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
@@ -376,6 +377,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             num_decode_tokens == 0
             or current_platform.is_rocm()
             or current_platform.is_xpu()
+            or envs.VLLM_USE_HW_AGNOSTIC
         ):
             return out
         for layer_type in self._layer_types:
