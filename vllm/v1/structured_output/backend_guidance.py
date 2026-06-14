@@ -19,6 +19,7 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputOptions,
 )
 from vllm.v1.structured_output.request import get_structured_output_key
+from vllm.v1.structured_output.schema import is_string_schema_with_pattern_length
 
 if TYPE_CHECKING:
     import llguidance
@@ -54,6 +55,12 @@ def has_guidance_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         # patternProperties is not supported by llguidance
         if "patternProperties" in obj:
+            return True
+
+        # llguidance currently accepts this combination during grammar
+        # validation, but vLLM can still return strings that satisfy the
+        # pattern while ignoring the JSON Schema length bound.
+        if is_string_schema_with_pattern_length(obj):
             return True
 
         # Recursively check all nested objects and arrays
@@ -292,6 +299,13 @@ def validate_guidance_grammar(
     if sampling_params.structured_outputs is None:
         return
     tp, grm = get_structured_output_key(sampling_params.structured_outputs)
+    if tp == StructuredOutputOptions.JSON:
+        schema = json.loads(grm)
+        if has_guidance_unsupported_json_features(schema):
+            raise ValueError(
+                "The provided JSON schema contains features not supported by guidance."
+            )
+
     guidance_grm = serialize_guidance_grammar(tp, grm)
     err = llguidance.LLMatcher.validate_grammar(guidance_grm, tokenizer)
     if err:
