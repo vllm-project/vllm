@@ -200,14 +200,31 @@ class GraniteSpeechMultiModalProcessor(
         )
 
         if "audio" in mm_data:
-            # Calculate the number of audio tokens per entry in the batch;
-            # This is used to split the batch back out after padding.
-            audio_token_index = self.info.get_hf_config().audio_token_index
-            processed_outputs["audio_embed_sizes"] = (
-                processed_outputs["input_ids"] == audio_token_index
-            ).sum(-1)
+            # GraniteSpeechProcessor leaves a single audio marker in the text.
+            # vLLM expands it later via PromptReplacement, so derive the
+            # embedding sizes from the audio instead of counting prompt tokens.
+            feature_extractor = self.info.get_hf_processor(
+                **mm_kwargs
+            ).audio_processor
+            audio_lengths = [audio.shape[-1] for audio in audios]
+            processed_outputs["audio_embed_sizes"] = torch.tensor(
+                feature_extractor._get_num_audio_features(audio_lengths),
+                dtype=torch.long,
+            )
 
         return processed_outputs
+
+    def _hf_processor_applies_updates(
+        self,
+        prompt_text: str,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> bool:
+        # GraniteSpeechProcessor tokenizes the audio marker but does not expand
+        # it to match the number of projected audio embeddings. Let vLLM apply
+        # the PromptReplacement declared in _get_prompt_updates.
+        return False
 
 
 class GraniteSpeechDummyInputsBuilder(
