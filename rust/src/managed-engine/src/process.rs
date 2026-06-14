@@ -160,7 +160,7 @@ impl ManagedEngineHandle {
 
 /// Process group helper functions for managing the Python subprocess and its
 /// potential children in a platform-aware way.
-mod process_group {
+pub mod process_group {
     use super::*;
 
     /// Place the Python child into its own process group so `serve` can tear

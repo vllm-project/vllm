@@ -3,6 +3,7 @@ use vllm_engine_core_client::TransportMode;
 use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
 
 use super::{Cli, Command};
+use crate::dp_supervisor::child_cli_args_from_parent_args;
 
 #[test]
 fn serve_args_forward_python_flags_with_separator() {
@@ -60,6 +61,11 @@ fn serve_args_forward_python_flags_with_separator() {
                             "float16",
                         ],
                     },
+                    data_parallel_multi_port_external_lb: false,
+                    data_parallel_supervisor_port: 9256,
+                    dp_supervisor_probe_interval_s: 5,
+                    dp_supervisor_probe_timeout_s: 5,
+                    dp_supervisor_probe_failure_threshold: 3,
                 },
             ),
         }
@@ -813,6 +819,11 @@ fn serve_args_accept_handshake_aliases() {
                         data_parallel_size_local: None,
                         python_args: [],
                     },
+                    data_parallel_multi_port_external_lb: false,
+                    data_parallel_supervisor_port: 9256,
+                    dp_supervisor_probe_interval_s: 5,
+                    dp_supervisor_probe_timeout_s: 5,
+                    dp_supervisor_probe_failure_threshold: 3,
                 },
             ),
         }
@@ -1104,4 +1115,141 @@ fn serve_frontend_config_uses_unix_listener_when_uds_is_present() {
             path: "/tmp/vllm.sock".to_string(),
         }
     );
+}
+
+#[test]
+fn serve_args_reject_overlapping_multi_port_supervisor_port() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--data-parallel-multi-port-external-lb",
+        "--data-parallel-size",
+        "4",
+        "--data-parallel-size-local",
+        "2",
+        "--data-parallel-supervisor-port",
+        "8001",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(
+        args.validate().unwrap_err(),
+        "Error: --data-parallel-supervisor-port 8001 overlaps with child rank ports 8000-8001"
+    );
+}
+
+#[test]
+fn serve_args_reject_multi_port_local_size_exceeding_total() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--data-parallel-multi-port-external-lb",
+        "--data-parallel-size",
+        "2",
+        "--data-parallel-size-local",
+        "3",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(
+        args.validate().unwrap_err(),
+        "Error: --data-parallel-size-local cannot exceed --data-parallel-size"
+    );
+}
+
+#[test]
+fn serve_args_reject_multi_port_non_divisible_local_size() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--data-parallel-multi-port-external-lb",
+        "--data-parallel-size",
+        "6",
+        "--data-parallel-size-local",
+        "4",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(
+        args.validate().unwrap_err(),
+        "Error: --data-parallel-size must be divisible by --data-parallel-size-local"
+    );
+}
+
+#[test]
+fn serve_multi_port_external_lb_child_cli_args_launch_independent_rust_child() {
+    let argv = child_cli_args_from_parent_args(
+        [
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--shutdown-timeout",
+            "7",
+            "--served-model-name",
+            "alias-a",
+            "--served-model-name",
+            "alias-b",
+            "--python",
+            "python-custom",
+            "--data-parallel-multi-port-external-lb",
+            "--data-parallel-size",
+            "8",
+            "--data-parallel-size-local",
+            "2",
+            "--dp-supervisor-probe-interval-s",
+            "7",
+            "--dp-supervisor-probe-timeout-s",
+            "9",
+            "--dp-supervisor-probe-failure-threshold",
+            "4",
+            "--data-parallel-rpc-port",
+            "13345",
+            "--data-parallel-address",
+            "10.0.0.7",
+            "--enable-request-id-headers",
+            "--",
+            "--dtype",
+            "float16",
+            "--tensor-parallel-size",
+            "2",
+        ]
+        .into_iter()
+        .map(Into::into),
+        8001,
+    );
+
+    expect![[r#"
+        [
+            "serve",
+            "Qwen/Qwen3-0.6B",
+            "--shutdown-timeout",
+            "7",
+            "--served-model-name",
+            "alias-a",
+            "--served-model-name",
+            "alias-b",
+            "--python",
+            "python-custom",
+            "--enable-request-id-headers",
+            "--port",
+            "8001",
+            "--",
+            "--dtype",
+            "float16",
+            "--tensor-parallel-size",
+            "2",
+        ]
+    "#]]
+    .assert_debug_eq(&argv);
 }
