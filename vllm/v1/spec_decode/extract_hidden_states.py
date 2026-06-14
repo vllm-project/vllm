@@ -390,9 +390,13 @@ class ExtractHiddenStatesProposer:
         """Validate all drafting layers belong to the same KV cache group
         and record the group index for common_attn_metadata selection."""
         assert len(self.attn_layer_names) == 1
-        layer = self.attn_layer_names[0]
-        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-            if layer in group.layer_names:
+        layer_name = self.attn_layer_names[0]
+        for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            if layer_name in kv_cache_group.layer_names:
                 self.kv_cache_gid = gid
                 return
-        raise ValueError(f"Cache-only layer {layer!r} not in any KV cache group")
+
+        raise ValueError(
+            "ExtractHiddenStatesModel cache layer was not found in any "
+            f"KV cache group: {layer_name}"
+        )

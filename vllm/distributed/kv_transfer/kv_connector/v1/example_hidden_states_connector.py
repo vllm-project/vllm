@@ -100,6 +100,55 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     Must be used in conjunction with the `extract_hidden_states` spec decoding method.
     """
 
+    def _cache_block_ids(self, block_ids: tuple[list[int], ...]) -> list[int]:
+        if self._cache_kv_group_id >= len(block_ids):
+            raise ValueError(
+                "Extract-hidden-states KV cache group index "
+                f"{self._cache_kv_group_id} is out of range for block ids "
+                f"with {len(block_ids)} groups."
+            )
+        return block_ids[self._cache_kv_group_id]
+
+    @classmethod
+    def _find_cache_kv_group_id(
+        cls,
+        kv_cache_config: "KVCacheConfig | None",
+    ) -> int:
+        if kv_cache_config is None:
+            return 0
+
+        # The extract_hidden_states draft layer registers a HiddenStateCacheSpec,
+        # which vLLM isolates into its own KV cache group. Match on the spec type
+        # rather than layer-name substrings so detection doesn't depend on the
+        # layer naming convention.
+        from vllm.v1.kv_cache_interface import HiddenStateCacheSpec
+
+        group_ids = [
+            gid
+            for gid, group in enumerate(kv_cache_config.kv_cache_groups)
+            if isinstance(group.kv_cache_spec, HiddenStateCacheSpec)
+        ]
+        if len(group_ids) == 1:
+            return group_ids[0]
+        if not group_ids and len(kv_cache_config.kv_cache_groups) == 1:
+            return 0
+
+        raise ValueError(
+            "Could not uniquely identify the extract-hidden-states KV cache "
+            f"group from {len(kv_cache_config.kv_cache_groups)} groups."
+        )
+
+    @staticmethod
+    def _get_cache_block_size(
+        vllm_config: "VllmConfig",
+        kv_cache_config: "KVCacheConfig | None",
+        cache_kv_group_id: int,
+    ) -> int:
+        if kv_cache_config is None:
+            return vllm_config.cache_config.block_size
+        cache_group = kv_cache_config.kv_cache_groups[cache_kv_group_id]
+        return cache_group.kv_cache_spec.block_size
+
     @property
     def prefer_cross_layer_blocks(self) -> bool:
         """
@@ -120,7 +169,14 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             role=role,
             kv_cache_config=kv_cache_config,
         )
-        self._block_size = vllm_config.cache_config.block_size
+        # Identify which KV cache group holds the extracted hidden states (this
+        # is not group 0 for hybrid Mamba+attention verifiers) and read its
+        # block size from that group's spec so slot mappings line up with the
+        # CacheOnlyAttentionLayer's KV cache tensor.
+        self._cache_kv_group_id = self._find_cache_kv_group_id(kv_cache_config)
+        self._block_size = self._get_cache_block_size(
+            vllm_config, kv_cache_config, self._cache_kv_group_id
+        )
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
         )
@@ -150,7 +206,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Worker-side state (set by register_kv_caches).
         self._kv_cache: torch.Tensor | None = None
-        self._hs_group_idx: int = 0
         # Only TP rank 0 writes hidden states to disk; other TP ranks no-op.
         # Set in register_kv_caches (after distributed init).
         self._is_tp_rank_zero: bool = True
@@ -259,13 +314,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             f"Expected 1 CacheOnlyAttentionLayer, got {len(self.cache_layers)}"
         )
         self._kv_cache = kv_caches[self.cache_layers[0]]
-
-        # Find the KV cache group index for hidden states
-        if self._kv_cache_config is not None:
-            for i, group in enumerate(self._kv_cache_config.kv_cache_groups):
-                if self.cache_layers[0] in group.layer_names:
-                    self._hs_group_idx = i
-                    break
 
     @staticmethod
     def _write_tensors(
@@ -536,7 +584,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
-        return self.request_finished(request, block_ids[self._hs_group_idx])
+        return self.request_finished(request, self._cache_block_ids(block_ids))
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

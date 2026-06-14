@@ -139,9 +139,14 @@ steps:
     - vllm/model_executor/models/extract_hidden_states.py
     - vllm/transformers_utils/configs/extract_hidden_states.py
     - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
+    - vllm/v1/core/kv_cache_utils.py
     - tests/v1/kv_connector/extract_hidden_states_integration
+    - tests/plugins/vllm_add_predictable_models
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    # Register the predictable dummy models via a general plugin so spawned
+    # workers and the model-inspection subprocess resolve them too.
+    - pip install -e ./plugins/vllm_add_predictable_models
     - pytest -v -s v1/kv_connector/extract_hidden_states_integration
 
 - label: Extract Hidden States Integration (2 GPUs)

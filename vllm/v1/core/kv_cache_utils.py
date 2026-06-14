@@ -1058,9 +1058,18 @@ def unify_kv_cache_spec_page_size(
                     "The page size of the layer is not divisible by the "
                     "maximum page size. Cannot unify by adjusting block_size."
                 )
-            ratio = max_page_size // layer_page_size
-            new_block_size = layer_spec.block_size * ratio
-            new_spec = replace(layer_spec, block_size=new_block_size)
+            new_spec: KVCacheSpec
+            if isinstance(layer_spec, MambaSpec):
+                # MambaSpec.page_size_bytes is shape/dtype-derived and ignores
+                # block_size, so scaling block_size cannot change it. Pad the page
+                # directly and leave block_size untouched: HMA only requires a
+                # uniform page size (groups already differ in block_size), and
+                # scaling block_size would distort cdiv(max_model_len, block_size)
+                # accounting in mamba_cache_mode="all".
+                new_spec = replace(layer_spec, page_size_padded=max_page_size)
+            else:
+                ratio = max_page_size // layer_page_size
+                new_spec = replace(layer_spec, block_size=layer_spec.block_size * ratio)
             assert new_spec.page_size_bytes == max_page_size
             new_kv_cache_spec[layer_name] = new_spec
     return new_kv_cache_spec
