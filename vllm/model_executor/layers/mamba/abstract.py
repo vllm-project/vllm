@@ -22,6 +22,7 @@ class MambaBase(AttentionLayerBase):
     # Contains the KV cache (mamba state) for the layer
     # in the shape specified by `self.get_state_shape`.
     kv_cache: tuple[torch.Tensor, ...]
+    supports_dcp: bool = False
 
     @abstractmethod
     def get_state_shape(self) -> Iterable[tuple[int, ...]]:

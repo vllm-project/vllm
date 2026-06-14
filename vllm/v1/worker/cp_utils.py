@@ -4,11 +4,14 @@ from typing import TYPE_CHECKING, Any, cast
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 else:
     AttentionLayerBase = object
+
+logger = init_logger(__name__)
 
 
 def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
@@ -18,7 +21,7 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
     if pcp_size * dcp_size > 1:
         layer_type = cast(type[Any], AttentionLayerBase)
         layers = get_layers_from_vllm_config(vllm_config, layer_type)
-        for layer in layers.values():
+        for layer_name, layer in layers.items():
             layer_impl = getattr(layer, "impl", None)
             if layer_impl is None:
                 continue
