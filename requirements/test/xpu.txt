@@ -33,7 +33,6 @@ arctic-inference==0.1.1
 attrs==26.1.0
     # via
     #   aiohttp
-    #   jsonlines
     #   jsonschema
     #   referencing
 audioread==3.0.1
@@ -225,8 +224,6 @@ joblib==1.5.3
     #   librosa
     #   nltk
     #   scikit-learn
-jsonlines==4.0.0
-    # via lm-eval
 jsonschema==4.26.0
     # via
     #   hypothesis-jsonschema
@@ -246,7 +243,7 @@ librosa==0.10.2.post1
     # via -r requirements/test/xpu.in
 llvmlite==0.47.0
     # via numba
-lm-eval==0.4.11
+lm-eval==0.4.12
     # via -r requirements/test/xpu.in
 lxml==6.0.2
     # via
@@ -733,5 +730,3 @@ xxhash==3.6.0
     #   evaluate
 yarl==1.23.0
     # via aiohttp
-zstandard==0.25.0
-    # via lm-eval
