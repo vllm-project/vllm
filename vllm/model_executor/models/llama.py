@@ -71,6 +71,7 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -442,6 +443,12 @@ class LlamaModel(nn.Module, EagleModelMixin):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            # FP8: remap HF scale names to vLLM scale names
+            if name.endswith('.activation_scale'):
+                name = name[:-len('.activation_scale')] + '.input_scale'
+            elif name.endswith('.weight_scale_inv'):
+                name = name[:-len('.weight_scale_inv')] + '.weight_scale'
+
             if "rotary_emb.inv_freq" in name:
                 continue
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
@@ -490,6 +497,16 @@ class LlamaForCausalLM(
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
+
+    # FP8 quantized HF checkpoints use "activation_scale" and
+    # "weight_scale_inv" but vLLM's FP8 linear layers register
+    # them as "input_scale" and "weight_scale".
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_suffix={
+            ".activation_scale": ".input_scale",
+            ".weight_scale_inv": ".weight_scale",
+        },
+    )
 
     # LoRA specific attributes
     embedding_modules = {
@@ -571,7 +588,7 @@ class LlamaForCausalLM(
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class LlamaBidirectionalForSequenceClassification(as_seq_cls_model(LlamaForCausalLM)):
