@@ -180,8 +180,8 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         )
 
         self.neg_inf_tensor = torch.tensor(
-            -float("inf"), dtype=torch.float32, device=self.device
-        )
+            -float("inf"), dtype=torch.float32, device="cpu", pin_memory=self.pin_memory
+        ).to(device=self.device, non_blocking=True)
 
     def is_argmax_invariant(self) -> bool:
         """By censoring stop tokens, min-tokens can change the outcome
