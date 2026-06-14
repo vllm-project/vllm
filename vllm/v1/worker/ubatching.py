@@ -77,7 +77,7 @@ class UBatchContext:
     def update_stream(self, stream):
         self.current_stream = stream
         if current_stream() != self.current_stream:
-            torch.cuda.set_stream(self.current_stream)
+            torch.accelerator.set_stream(self.current_stream)
 
     def _signal_comm_done(self):
         self.gpu_comm_done_event.record(self.comm_stream)
