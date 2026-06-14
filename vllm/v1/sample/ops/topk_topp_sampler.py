@@ -401,7 +401,10 @@ def apply_top_k_top_p_pytorch(
         logits_sort.masked_fill_(top_p_mask, -float("inf"))
 
     # Re-sort the probabilities.
-    return logits.scatter_(dim=-1, index=logits_idx, src=logits_sort)
+    # Use out-of-place scatter to avoid "operation not permitted when stream
+    # is capturing" errors on architectures where in-place ops are banned
+    # during cudagraph capture (e.g. Blackwell GB10, sm_121a).
+    return logits.scatter(dim=-1, index=logits_idx, src=logits_sort)
 
 
 def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
