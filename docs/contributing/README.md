@@ -50,6 +50,9 @@ To rebuild only the Rust frontend binary:
 ./build_rust.sh --debug  # faster build for development
 ```
 
+For the local Cargo workflow, testing conventions, and the parser-add
+checklist used by the Rust frontend, see [Rust Frontend](rust-frontend.md).
+
 If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
 
 ```bash
