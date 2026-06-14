@@ -1,12 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
+
 import pytest
 
 from vllm.tool_parsers.utils import (
+    UnexpectedAstError,
     coerce_to_schema_type,
     extract_types_from_schema,
+    get_parameter_value,
 )
+
+
+def _parse_keyword_value(src: str) -> ast.expr:
+    """Parse ``func(x=<expr>)`` and return the AST node for ``<expr>``."""
+    tree = ast.parse(src, mode="eval")
+    return tree.body.keywords[0].value  # type: ignore[attr-defined]
 
 
 class TestCoerceToSchemaType:
@@ -212,3 +222,101 @@ class TestExtractTypesFromSchema:
         }
         result = set(extract_types_from_schema(schema))
         assert result == {"integer", "null", "string"}
+
+
+class TestGetParameterValue:
+    """Tests for ``get_parameter_value`` covering literals and unary ops.
+
+    Regression coverage for GitHub #19569 — pythonic tool call parsing did
+    not handle negative numeric literals because Python's AST represents
+    them as ``UnaryOp(USub, Constant)``, not as a single ``Constant``.
+    """
+
+    # --- existing supported shapes (control cases) -----------------------
+
+    def test_positive_int_constant(self):
+        val = _parse_keyword_value("f(x=5)")
+        assert get_parameter_value(val) == 5
+
+    def test_positive_float_constant(self):
+        val = _parse_keyword_value("f(x=1.5)")
+        assert get_parameter_value(val) == 1.5
+
+    def test_string_constant(self):
+        val = _parse_keyword_value("f(x='hello')")
+        assert get_parameter_value(val) == "hello"
+
+    def test_true_constant(self):
+        val = _parse_keyword_value("f(x=True)")
+        assert get_parameter_value(val) is True
+
+    def test_none_constant(self):
+        val = _parse_keyword_value("f(x=None)")
+        assert get_parameter_value(val) is None
+
+    def test_json_style_null_name(self):
+        val = _parse_keyword_value("f(x=null)")
+        assert get_parameter_value(val) is None
+
+    def test_json_style_true_name(self):
+        val = _parse_keyword_value("f(x=true)")
+        assert get_parameter_value(val) is True
+
+    def test_list_of_constants(self):
+        val = _parse_keyword_value("f(x=[1, 2, 3])")
+        assert get_parameter_value(val) == [1, 2, 3]
+
+    def test_dict_of_constants(self):
+        val = _parse_keyword_value("f(x={'a': 1, 'b': 'two'})")
+        assert get_parameter_value(val) == {"a": 1, "b": "two"}
+
+    # --- unary op coverage (new) -----------------------------------------
+
+    def test_negative_int(self):
+        val = _parse_keyword_value("f(x=-5)")
+        assert get_parameter_value(val) == -5
+
+    def test_negative_float(self):
+        val = _parse_keyword_value("f(x=-1.5)")
+        assert get_parameter_value(val) == -1.5
+
+    def test_explicit_positive_int(self):
+        val = _parse_keyword_value("f(x=+5)")
+        assert get_parameter_value(val) == 5
+
+    def test_boolean_not_true(self):
+        val = _parse_keyword_value("f(x=not True)")
+        assert get_parameter_value(val) is False
+
+    def test_boolean_not_false(self):
+        val = _parse_keyword_value("f(x=not False)")
+        assert get_parameter_value(val) is True
+
+    def test_list_with_negative_numbers(self):
+        val = _parse_keyword_value("f(x=[-1, -2, -3])")
+        assert get_parameter_value(val) == [-1, -2, -3]
+
+    def test_dict_with_negative_value(self):
+        val = _parse_keyword_value("f(x={'delta': -10})")
+        assert get_parameter_value(val) == {"delta": -10}
+
+    def test_nested_unary_double_negative(self):
+        val = _parse_keyword_value("f(x=--5)")
+        assert get_parameter_value(val) == 5
+
+    # --- unsupported shapes still raise ----------------------------------
+
+    def test_bitwise_invert_rejected(self):
+        val = _parse_keyword_value("f(x=~5)")
+        with pytest.raises(UnexpectedAstError):
+            get_parameter_value(val)
+
+    def test_call_expression_rejected(self):
+        val = _parse_keyword_value("f(x=-g())")
+        with pytest.raises(UnexpectedAstError):
+            get_parameter_value(val)
+
+    def test_name_reference_rejected(self):
+        val = _parse_keyword_value("f(x=undefined_variable)")
+        with pytest.raises(UnexpectedAstError):
+            get_parameter_value(val)
