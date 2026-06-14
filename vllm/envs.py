@@ -129,6 +129,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
+    VLLM_ENABLE_QKNORM_ROPE_FUSION: bool = False
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -1175,6 +1176,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower() in ("true", "1")
+    ),
+    # Enable QK-Norm+RoPE fusion (ROCm-only). Fuses Q/K RMSNorm and RoPE
+    # into a single kernel. Disabled by default.
+    "VLLM_ENABLE_QKNORM_ROPE_FUSION": lambda: (
+        os.getenv("VLLM_ENABLE_QKNORM_ROPE_FUSION", "False").lower() in ("true", "1")
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (
