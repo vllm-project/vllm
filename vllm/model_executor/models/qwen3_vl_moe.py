@@ -28,6 +28,7 @@ import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
 
+import regex as re
 import torch
 from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
     Qwen3VLMoeConfig,
@@ -63,6 +64,18 @@ from .qwen3_vl import (
 from .utils import is_pp_missing_parameter, maybe_prefix
 
 logger = init_logger(__name__)
+
+# Match ModelOpt NVFP4 per-expert names (`experts.<proj>.<N>.<suffix>`)
+# and remap to vLLM's standard `experts.<N>.<proj>.<suffix>` ordering.
+_MODELOPT_PEREXP_RE = re.compile(
+    r"(?P<prefix>.*experts)\.(?P<proj>gate_proj|up_proj|down_proj)"
+    r"\.(?P<idx>\d+)(?P<suffix>\..*)"
+)
+# Match BMM-fused expert weights (Llama4 / GPT-OSS / unquantized HF). The
+# negative-lookahead excludes ModelOpt NVFP4 per-expert names, which are
+# remapped to fused-style ordering by `_MODELOPT_PEREXP_RE` above but must
+# still be loaded as 2D per-expert tensors.
+_FUSED_EXPERT_RE = re.compile(r"experts\.(gate_up_proj|down_proj)(?!\.\d)")
 
 
 class Qwen3VLMoeProcessingInfo(Qwen3VLProcessingInfo):
@@ -171,13 +184,18 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             ("gate_up_proj", "up_proj", 1),
         ]
         # Skip loading extra parameters for GPTQ/modelopt models.
+        # ModelOpt NVFP4 adds weight_scale_2 / *_global_scale / pre_quant_scale.
         ignore_suffixes = (
             ".bias",
             "_bias",
             ".weight_scale",
             "_weight_scale",
+            ".weight_scale_2",
+            ".weight_global_scale",
             ".input_scale",
             "_input_scale",
+            ".input_global_scale",
+            ".pre_quant_scale",
         )
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -202,16 +220,29 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         ]
         num_experts = self.config.num_experts
         for name, loaded_weight in weights:
+            # Remap ModelOpt un-BMM'd per-expert names from
+            # `experts.<proj>.<N>.<suffix>` to vLLM's standard
+            # `experts.<N>.<proj>.<suffix>` so the rest of the loader
+            # (which expects Mixtral-style per-expert ordering) works.
+            m = _MODELOPT_PEREXP_RE.match(name)
+            if m is not None:
+                name = (
+                    f"{m.group('prefix')}.{m.group('idx')}."
+                    f"{m.group('proj')}{m.group('suffix')}"
+                )
+
             if "scale" in name or "zero_point" in name:
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if "experts.gate_up_proj" in name or "experts.down_proj" in name:
-                    is_fused_expert = True
-                    expert_params_mapping = fused_expert_params_mapping
+            # Detect BMM-fused expert weights once per outer iteration —
+            # depends on `name` only, so hoist out of the inner loop below.
+            if _FUSED_EXPERT_RE.search(name):
+                is_fused_expert = True
+                expert_params_mapping = fused_expert_params_mapping
 
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
