@@ -21,7 +21,7 @@ BS_LIST = [32, 64] if check_shared_mem() else [16, 32]
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
     configs=[triton.Config({}, num_warps=num_warps) for num_warps in [1, 2, 4, 8]],
-    key=["B", "H", "BT", "IS_VARLEN", "REVERSE"],
+    key=["H", "BT", "IS_VARLEN", "REVERSE"],
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_local_cumsum_scalar_kernel(
@@ -30,7 +30,6 @@ def chunk_local_cumsum_scalar_kernel(
     cu_seqlens,
     chunk_indices,
     T,
-    B: tl.constexpr,
     H: tl.constexpr,
     BT: tl.constexpr,
     REVERSE: tl.constexpr,
@@ -78,7 +77,7 @@ def chunk_local_cumsum_scalar_kernel(
         for BS in BS_LIST
         for num_warps in [2, 4, 8]
     ],
-    key=["B", "H", "S", "BT", "IS_VARLEN", "REVERSE"],
+    key=["H", "S", "BT", "IS_VARLEN", "REVERSE"],
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_local_cumsum_vector_kernel(
@@ -87,7 +86,6 @@ def chunk_local_cumsum_vector_kernel(
     cu_seqlens,
     chunk_indices,
     T,
-    B: tl.constexpr,
     H: tl.constexpr,
     S: tl.constexpr,
     BT: tl.constexpr,
@@ -185,7 +183,6 @@ def chunk_local_cumsum_scalar(
         cu_seqlens,
         chunk_indices,
         T=T,
-        B=B,
         H=H,
         BT=BT,
         HEAD_FIRST=head_first,
@@ -229,7 +226,6 @@ def chunk_local_cumsum_vector(
         cu_seqlens,
         chunk_indices,
         T=T,
-        B=B,
         H=H,
         S=S,
         BT=BT,
