@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Sequence
 
 import regex as re
@@ -100,6 +101,10 @@ class DeepSeekV3ToolParser(ToolParser):
                 tool_calls = []
                 for match in function_call_tuples:
                     tool_type, function_name, function_args = match
+                    # Validate that arguments are well-formed JSON so clients
+                    # never receive a malformed arguments string (raises
+                    # json.JSONDecodeError, caught by the outer except block).
+                    json.loads(function_args)
                     tool_calls.append(
                         ToolCall(
                             type=tool_type,
@@ -111,7 +116,7 @@ class DeepSeekV3ToolParser(ToolParser):
 
                 content = model_output[: model_output.find(self.tool_calls_start_token)]
                 return ExtractedToolCallInformation(
-                    tools_called=True,
+                    tools_called=bool(tool_calls),
                     tool_calls=tool_calls,
                     content=content if content else None,
                 )
