@@ -6,10 +6,11 @@ from __future__ import annotations
 import hashlib
 import pickle
 from _hashlib import HASH, UnsupportedDigestmodError
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import cbor2
+import msgspec
 
 try:
     # It is important that this remains an optional dependency.
@@ -58,7 +59,16 @@ def sha256_cbor(input: Any) -> bytes:
     return hashlib.sha256(input_bytes).digest()
 
 
-def _xxhash_digest(input_bytes: bytes) -> bytes:
+_MSGPACK_ENCODER = msgspec.msgpack.Encoder()
+
+
+def sha256_msgpack(input: Any) -> bytes:
+    """Hash objects using MessagePack serialization and SHA-256."""
+    input_bytes = _MSGPACK_ENCODER.encode(input)
+    return hashlib.sha256(input_bytes).digest()
+
+
+def _xxhash_digest(input_bytes: bytes | bytearray | memoryview) -> bytes:
     if _xxhash is None:
         raise ModuleNotFoundError(
             "xxhash is required for the 'xxhash' prefix caching hash algorithms. "
@@ -79,6 +89,60 @@ def xxhash_cbor(input: Any) -> bytes:
     return _xxhash_digest(input_bytes)
 
 
+def xxhash_msgpack(input: Any) -> bytes:
+    """Hash objects serialized with MessagePack using xxHash."""
+    input_bytes = _MSGPACK_ENCODER.encode(input)
+    return _xxhash_digest(input_bytes)
+
+
+_MSGPACK_HASH_FUNCTIONS = frozenset({sha256_msgpack, xxhash_msgpack})
+
+
+def hash_block_token_sequence(
+    hash_function: Callable[[Any], bytes],
+    parent_block_hash: bytes,
+    curr_block_token_ids: Sequence[int],
+    extra_keys: tuple[Any, ...] | None = None,
+) -> bytes:
+    """Hash a prefix-cache block and its parent hash.
+
+    Existing algorithms preserve the legacy tuple-based object shape exactly.
+    MessagePack algorithms avoid the tuple conversion because MessagePack
+    encodes tuples and lists as the same array type.
+    """
+    if hash_function in _MSGPACK_HASH_FUNCTIONS:
+        return hash_function((parent_block_hash, curr_block_token_ids, extra_keys))
+
+    return hash_function((parent_block_hash, tuple(curr_block_token_ids), extra_keys))
+
+
+def get_block_hash_fn(
+    hash_function: Callable[[Any], bytes],
+) -> Callable[[bytes, Sequence[int], tuple[Any, ...] | None], bytes]:
+    """Return a block-hash function specialized for ``hash_function``."""
+    if hash_function in _MSGPACK_HASH_FUNCTIONS:
+
+        def msgpack_block_hash(
+            parent_block_hash: bytes,
+            curr_block_token_ids: Sequence[int],
+            extra_keys: tuple[Any, ...] | None = None,
+        ) -> bytes:
+            return hash_function((parent_block_hash, curr_block_token_ids, extra_keys))
+
+        return msgpack_block_hash
+
+    def tuple_block_hash(
+        parent_block_hash: bytes,
+        curr_block_token_ids: Sequence[int],
+        extra_keys: tuple[Any, ...] | None = None,
+    ) -> bytes:
+        return hash_function(
+            (parent_block_hash, tuple(curr_block_token_ids), extra_keys)
+        )
+
+    return tuple_block_hash
+
+
 def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
     """Get a hash function by name, or raise an error if the function is not found.
 
@@ -92,10 +156,14 @@ def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
         return sha256
     if hash_fn_name == "sha256_cbor":
         return sha256_cbor
+    if hash_fn_name == "sha256_msgpack":
+        return sha256_msgpack
     if hash_fn_name == "xxhash":
         return xxhash
     if hash_fn_name == "xxhash_cbor":
         return xxhash_cbor
+    if hash_fn_name == "xxhash_msgpack":
+        return xxhash_msgpack
 
     raise ValueError(f"Unsupported hash function: {hash_fn_name}")
 
