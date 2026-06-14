@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import base64
+import logging
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,8 @@ from vllm import envs
 from ..video import VIDEO_LOADER_REGISTRY
 from .base import MediaIO
 from .image import ImageMediaIO
+
+logger = logging.getLogger(__name__)
 
 
 class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
@@ -63,7 +67,9 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         video_loader_backend = (
             kwargs.pop("video_backend", None) or envs.VLLM_VIDEO_LOADER_BACKEND
         )
+
         self.kwargs = kwargs
+        self.video_loader_backend = video_loader_backend
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
@@ -142,7 +148,9 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, dict[str, Any]]:
         with filepath.open("rb") as f:
             data = f.read()
-
+        # Every backend (including DeepStream, which now feeds its
+        # GStreamer pipeline from an in-memory appsrc) consumes raw bytes,
+        # so a local file path never needs to leak into the loader kwargs.
         return self.load_bytes(data)
 
     def encode_base64(
