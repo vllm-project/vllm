@@ -81,6 +81,9 @@ def _correct_attn_cp_out_kernel(
         lse_idx * lses_stride_N + batch_idx * lses_stride_B + head_idx * lses_stride_H
     )
     lse_tmp = tl.load(lses_ptr + lse_offset)
+    valid_local_lse = (
+        (lse_tmp == lse_tmp) & (lse_tmp != float("inf")) & (lse_tmp != -float("inf"))
+    )
     lse_finally = lse_tmp - lse
     lse_finally = tl.where(
         (lse_finally != lse_finally) | (lse_finally == float("inf")),
@@ -89,7 +92,7 @@ def _correct_attn_cp_out_kernel(
     )
     factor = tl.exp(lse_finally) if IS_BASE_E else tl.exp2(lse_finally)
     output = tl.load(outputs_ptr + output_offsets)
-    output = output * factor
+    output = tl.where(valid_local_lse, output, 0.0) * factor
 
     tl.store(new_output_ptr + output_offsets, output)
 

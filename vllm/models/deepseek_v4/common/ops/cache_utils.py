@@ -8,8 +8,10 @@ preparation.
   the paged cache.
 - dequantize_and_gather_k_cache: gather and dequantize FP8 K from the paged
   cache for sparse/SWA prefill.
-- compute_global_topk_indices_and_lens: map local topk indices to global KV
-  cache slots and count valid entries.
+- compute_global_topk_indices_and_lens: map CP-global topk positions to local
+  KV cache slots and count valid entries.
+- compute_local_topk_indices_and_lens: map rank-local topk positions to local
+  KV cache slots and count valid entries.
 - combine_topk_swa_indices: concatenate topk compressed indices with SWA
   window indices for sparse prefill.
 """
@@ -18,6 +20,26 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
+
+
+@triton.jit
+def _cp_local_len(length, total_cp_world_size, total_cp_rank, interleave_size):
+    base = length // interleave_size // total_cp_world_size * interleave_size
+    remainder = length - base * total_cp_world_size
+    extra = tl.minimum(
+        tl.maximum(remainder - total_cp_rank * interleave_size, 0),
+        interleave_size,
+    )
+    return base + extra
+
+
+@triton.jit
+def _cp_map_pos(pos, total_cp_world_size, total_cp_rank, interleave_size):
+    owner_rank = (pos // interleave_size) % total_cp_world_size
+    local_pos = (pos // (total_cp_world_size * interleave_size)) * interleave_size + (
+        pos % interleave_size
+    )
+    return owner_rank == total_cp_rank, local_pos
 
 
 @triton.jit
@@ -204,6 +226,9 @@ def _dequantize_and_gather_k_kernel(
     block_table_ptr,
     offset,
     gather_lens_ptr,
+    total_cp_world_size,
+    total_cp_rank,
+    cp_kv_cache_interleave_size,
     # Constants
     max_blocks_per_seq: tl.constexpr,
     fp8_dim: tl.constexpr,  # 448
@@ -228,18 +253,41 @@ def _dequantize_and_gather_k_kernel(
         # Gather all tokens
         gather_len = seq_len
     start_pos = seq_len - gather_len
+    local_start_pos = _cp_local_len(
+        start_pos,
+        total_cp_world_size,
+        total_cp_rank,
+        cp_kv_cache_interleave_size,
+    )
 
     for i in range(worker_id, gather_len, num_workers):
         # Calculate the actual token index in the sequence
         pos = start_pos + i
+        is_local, local_pos = _cp_map_pos(
+            pos,
+            total_cp_world_size,
+            total_cp_rank,
+            cp_kv_cache_interleave_size,
+        )
+        output_pos = local_pos - local_start_pos
 
         # Calculate which block and position within block
-        block_in_seq = pos // cache_block_size
-        pos_in_block = pos % cache_block_size
+        virtual_block_size = cache_block_size * total_cp_world_size
+        block_in_seq = pos // virtual_block_size
+        virtual_block_offset = pos - block_in_seq * virtual_block_size
+        pos_in_block = (
+            virtual_block_offset // (total_cp_world_size * cp_kv_cache_interleave_size)
+        ) * cp_kv_cache_interleave_size + (
+            virtual_block_offset % cp_kv_cache_interleave_size
+        )
 
         # Get physical block index from block table
         block_table_row_ptr = block_table_ptr + batch_idx * max_blocks_per_seq
-        physical_block_idx = tl.load(block_table_row_ptr + block_in_seq)  # int32
+        physical_block_idx = tl.load(
+            block_table_row_ptr + block_in_seq,
+            mask=is_local,
+            other=0,
+        )  # int32
 
         # int64: physical_block_idx * block_stride can exceed 2^31 with many
         # KV-cache blocks (e.g. >= 57K at block_stride ~37K).
@@ -260,7 +308,9 @@ def _dequantize_and_gather_k_kernel(
         token_bf16_ptr = token_data_ptr + fp8_dim
 
         # Output pointer for this token (flattened)
-        output_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        output_row_ptr = (
+            out_ptr + batch_idx * out_stride0 + (offset + output_pos) * out_stride1
+        )
 
         # ========== Dequantize FP8 portion using UE8M0 ==========
         for qblock_idx in tl.static_range(n_quant_blocks):
@@ -289,7 +339,11 @@ def _dequantize_and_gather_k_kernel(
                 x_dequant = x_float * scale
 
                 # Store as bf16
-                tl.store(output_row_ptr + offsets, x_dequant.to(tl.bfloat16), mask=mask)
+                tl.store(
+                    output_row_ptr + offsets,
+                    x_dequant.to(tl.bfloat16),
+                    mask=mask & is_local,
+                )
 
         # ========== Copy BF16 portion directly ==========
         bf16_output_offset = fp8_dim  # After 448 elements in output
@@ -300,8 +354,16 @@ def _dequantize_and_gather_k_kernel(
         # Process in chunks of 16
         for j in tl.static_range(bf16_dim // 16):
             chunk_offsets = j * 16 + tl.arange(0, 16)
-            bf16_vals = tl.load(bf16_cache_ptr + chunk_offsets)
-            tl.store(output_row_ptr + bf16_output_offset + chunk_offsets, bf16_vals)
+            bf16_vals = tl.load(
+                bf16_cache_ptr + chunk_offsets,
+                mask=is_local,
+                other=0.0,
+            )
+            tl.store(
+                output_row_ptr + bf16_output_offset + chunk_offsets,
+                bf16_vals,
+                mask=is_local,
+            )
 
 
 def dequantize_and_gather_k_cache_triton(
@@ -317,6 +379,9 @@ def dequantize_and_gather_k_cache_triton(
     block_table: torch.Tensor,
     block_size: int,
     offset: int,
+    total_cp_world_size: int = 1,
+    total_cp_rank: int = 0,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> None:
     TOKEN_FP8_DIM = 448
     TOKEN_BF16_DIM = 64
@@ -336,6 +401,9 @@ def dequantize_and_gather_k_cache_triton(
         block_table,
         offset,
         gather_lens,
+        total_cp_world_size,
+        total_cp_rank,
+        cp_kv_cache_interleave_size,
         max_blocks_per_seq=block_table.shape[-1],
         fp8_dim=TOKEN_FP8_DIM,
         bf16_dim=TOKEN_BF16_DIM,
@@ -363,8 +431,11 @@ def dequantize_and_gather_k_cache(
     block_table: torch.Tensor,
     block_size: int,
     offset: int,
+    total_cp_world_size: int = 1,
+    total_cp_rank: int = 0,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> None:
-    if has_cutedsl():
+    if has_cutedsl() and total_cp_world_size == 1:
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (
             dequantize_and_gather_k_cache_cutedsl,
@@ -376,7 +447,16 @@ def dequantize_and_gather_k_cache(
         return
 
     dequantize_and_gather_k_cache_triton(
-        out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+        out,
+        k_cache,
+        seq_lens,
+        gather_lens,
+        block_table,
+        block_size,
+        offset,
+        total_cp_world_size,
+        total_cp_rank,
+        cp_kv_cache_interleave_size,
     )
 
 
@@ -386,6 +466,9 @@ def compute_global_topk_indices_and_lens(
     block_table: torch.Tensor,
     block_size: int,
     is_valid_token: torch.Tensor,
+    total_cp_world_size: int = 1,
+    total_cp_rank: int = 0,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Map local topk indices to global KV cache slots and count valid entries.
 
@@ -409,9 +492,32 @@ def compute_global_topk_indices_and_lens(
         block_table.stride(0),
         block_size,
         is_valid_token,
+        total_cp_world_size,
+        total_cp_rank,
+        cp_kv_cache_interleave_size,
         TRITON_BLOCK_SIZE=1024,
     )
     return global_topk_indices, topk_lens
+
+
+def compute_local_topk_indices_and_lens(
+    topk_indices: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    is_valid_token: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Map rank-local topk indices to KV cache slots and count valid entries."""
+    return compute_global_topk_indices_and_lens(
+        topk_indices,
+        token_to_req_indices,
+        block_table,
+        block_size,
+        is_valid_token,
+        total_cp_world_size=1,
+        total_cp_rank=0,
+        cp_kv_cache_interleave_size=1,
+    )
 
 
 @triton.jit
@@ -427,6 +533,9 @@ def _compute_global_topk_indices_and_lens_kernel(
     block_table_stride,
     block_size,
     is_valid_token_ptr,
+    total_cp_world_size,
+    total_cp_rank,
+    cp_kv_cache_interleave_size,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -437,6 +546,11 @@ def _compute_global_topk_indices_and_lens_kernel(
     for i in range(0, topk, TRITON_BLOCK_SIZE):
         offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
         mask = offset < topk
+        tl.store(
+            global_topk_indices_ptr + token_idx * global_topk_indices_stride + offset,
+            -1,
+            mask=mask,
+        )
 
         local_idx = tl.load(
             topk_indices_ptr + token_idx * topk_indices_stride + offset,
@@ -445,21 +559,33 @@ def _compute_global_topk_indices_and_lens_kernel(
         )
         is_valid = local_idx >= 0
 
-        block_indices = local_idx // block_size
+        virtual_block_size = block_size * total_cp_world_size
+        block_indices = local_idx // virtual_block_size
         block_numbers = tl.load(
             block_table_ptr + req_idx * block_table_stride + block_indices,
             mask=mask & is_valid,
         )
-        block_offsets = local_idx % block_size
-
-        slot_ids = block_numbers * block_size + block_offsets
-        slot_ids = tl.where(is_valid, slot_ids, -1)
-        tl.store(
-            global_topk_indices_ptr + token_idx * global_topk_indices_stride + offset,
-            slot_ids,
-            mask=mask,
+        virtual_block_offsets = local_idx - block_indices * virtual_block_size
+        is_local = (
+            virtual_block_offsets // cp_kv_cache_interleave_size
+        ) % total_cp_world_size == total_cp_rank
+        local_block_offsets = (
+            virtual_block_offsets // (total_cp_world_size * cp_kv_cache_interleave_size)
+        ) * cp_kv_cache_interleave_size + (
+            virtual_block_offsets % cp_kv_cache_interleave_size
         )
-        count += tl.sum(is_valid.to(tl.int32), axis=0)
+
+        slot_ids = block_numbers * block_size + local_block_offsets
+        is_valid_local = is_valid & is_local
+        local_rank = count + tl.cumsum(is_valid_local.to(tl.int32), 0) - 1
+        tl.store(
+            global_topk_indices_ptr
+            + token_idx * global_topk_indices_stride
+            + local_rank,
+            slot_ids,
+            mask=mask & is_valid_local,
+        )
+        count += tl.sum(is_valid_local.to(tl.int32), axis=0)
 
     # Zero out length for padding tokens.
     tl.store(topk_lens_ptr + token_idx, tl.where(is_valid_token, count, 0))
@@ -483,6 +609,9 @@ def combine_topk_swa_indices(
     topk: int,
     M: int,
     N: int,
+    total_cp_world_size: int = 1,
+    total_cp_rank: int = 0,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = topk_indices.shape[0]
     num_reqs = seq_lens.shape[0]
@@ -517,6 +646,9 @@ def combine_topk_swa_indices(
         COMPRESS_RATIO=compress_ratio,
         WINDOW_SIZE=window_size,
         PADDED_TOP_K=triton.next_power_of_2(topk_indices.shape[-1]),
+        TOTAL_CP_WORLD_SIZE=total_cp_world_size,
+        TOTAL_CP_RANK=total_cp_rank,
+        CP_KV_CACHE_INTERLEAVE_SIZE=cp_kv_cache_interleave_size,
     )
     return combined_indices, combined_lens
 
@@ -537,6 +669,9 @@ def _combine_topk_swa_indices_kernel(
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
     PADDED_TOP_K: tl.constexpr,
+    TOTAL_CP_WORLD_SIZE: tl.constexpr,
+    TOTAL_CP_RANK: tl.constexpr,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     worker_id = tl.program_id(1)
@@ -555,6 +690,12 @@ def _combine_topk_swa_indices_kernel(
     # (seq_len - gather_len), not position 0. We need this offset
     # to correctly index into the gathered buffer.
     gather_start = seq_len - gather_len
+    local_gather_start = _cp_local_len(
+        gather_start,
+        TOTAL_CP_WORLD_SIZE,
+        TOTAL_CP_RANK,
+        CP_KV_CACHE_INTERLEAVE_SIZE,
+    )
 
     for token_idx in range(query_start + worker_id, query_end, num_workers):
         # topk_len is fully determined by the query token's absolute position:
@@ -565,32 +706,45 @@ def _combine_topk_swa_indices_kernel(
         pos = start_pos + token_idx_in_query
         topk_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOP_K)
         swa_len = tl.minimum(pos + 1, WINDOW_SIZE)
+        combined_len = tl.zeros((), dtype=tl.int32)
 
         offset = tl.arange(0, PADDED_TOP_K)
         mask = offset < topk_len
         topk_indices = tl.load(
             topk_indices_ptr + token_idx * topk_indices_stride + offset,
             mask=mask,
+            other=-1,
         )
+        topk_valid = mask & (topk_indices >= 0)
+        topk_rank = combined_len + tl.cumsum(topk_valid.to(tl.int32), 0) - 1
         tl.store(
-            combined_indices_ptr + token_idx * combined_indices_stride + offset,
+            combined_indices_ptr + token_idx * combined_indices_stride + topk_rank,
             topk_indices + M * batch_idx,
-            mask=mask,
+            mask=topk_valid,
         )
+        combined_len += tl.sum(topk_valid.to(tl.int32), axis=0)
+
         offset = tl.arange(0, WINDOW_SIZE)
+        swa_pos = pos - swa_len + 1 + offset
+        is_local, local_pos = _cp_map_pos(
+            swa_pos,
+            TOTAL_CP_WORLD_SIZE,
+            TOTAL_CP_RANK,
+            CP_KV_CACHE_INTERLEAVE_SIZE,
+        )
+        swa_valid = offset < swa_len
+        swa_valid_local = swa_valid & is_local
+        swa_rank = combined_len + tl.cumsum(swa_valid_local.to(tl.int32), 0) - 1
         # Index into gathered buffer: N + (position - gather_start)
         # For positions [pos - swa_len + 1, pos], the buffer indices are:
         # [N + pos - swa_len + 1 - gather_start, N + pos - gather_start]
         tl.store(
-            combined_indices_ptr
-            + token_idx * combined_indices_stride
-            + topk_len
-            + offset,
-            M * batch_idx + N + offset + pos - swa_len + 1 - gather_start,
-            mask=offset < swa_len,
+            combined_indices_ptr + token_idx * combined_indices_stride + swa_rank,
+            M * batch_idx + N + local_pos - local_gather_start,
+            mask=swa_valid_local,
         )
 
-        combined_len = topk_len + swa_len
+        combined_len += tl.sum(swa_valid_local.to(tl.int32), axis=0)
         tl.store(combined_lens_ptr + token_idx, combined_len)
 
 
