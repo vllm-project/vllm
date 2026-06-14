@@ -32,6 +32,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.multimodal.inputs import NestedTensors
+from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
 
@@ -45,6 +47,192 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+@triton.jit
+def _dflash_batched_reshape_and_cache_kernel_flash(
+    key_ptr,  # [num_layers, num_tokens, num_kv_heads, head_size]
+    value_ptr,  # [num_layers, num_tokens, num_kv_heads, head_size]
+    key_cache_ptrs_ptr,  # [num_layers] int64
+    value_cache_ptrs_ptr,  # [num_layers] int64
+    slot_mapping_ptr,  # [num_tokens]
+    key_layer_stride: tl.int64,
+    value_layer_stride: tl.int64,
+    key_token_stride: tl.int64,
+    value_token_stride: tl.int64,
+    key_block_stride: tl.int64,
+    value_block_stride: tl.int64,
+    key_page_stride: tl.int64,
+    value_page_stride: tl.int64,
+    key_head_stride: tl.int64,
+    value_head_stride: tl.int64,
+    num_heads: tl.constexpr,
+    head_size: tl.constexpr,
+    block_size: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
+):
+    token_idx = tl.program_id(axis=0)
+    tile_i = tl.program_id(axis=1)
+    layer_idx = tl.program_id(axis=2)
+
+    slot_idx = tl.load(slot_mapping_ptr + token_idx).to(tl.int64)
+    if slot_idx < 0:
+        return
+
+    block_idx = slot_idx // block_size
+    block_offset = slot_idx % block_size
+
+    tile_offs = tl.arange(0, TILE_SIZE)
+    tile_pos = tile_i * TILE_SIZE + tile_offs
+    cur_head = tile_pos // head_size
+    cur_dim = tile_pos % head_size
+    valid = tile_pos < (num_heads * head_size)
+
+    src_key_idx = layer_idx * key_layer_stride + token_idx * key_token_stride
+    src_value_idx = layer_idx * value_layer_stride + token_idx * value_token_stride
+
+    key_cache_ptr = tl.cast(tl.load(key_cache_ptrs_ptr + layer_idx), key_ptr.dtype)
+    value_cache_ptr = tl.cast(tl.load(value_cache_ptrs_ptr + layer_idx), value_ptr.dtype)
+
+    tgt_idx_v = (
+        block_idx * value_block_stride
+        + block_offset * value_page_stride
+        + cur_head * value_head_stride
+        + cur_dim
+    )
+    tgt_idx_k = (
+        block_idx * key_block_stride
+        + block_offset * key_page_stride
+        + cur_head * key_head_stride
+        + cur_dim
+    )
+
+    key_tile = tl.load(key_ptr + src_key_idx + tile_pos, mask=valid)
+    value_tile = tl.load(value_ptr + src_value_idx + tile_pos, mask=valid)
+
+    tl.store(key_cache_ptr + tgt_idx_k, key_tile, mask=valid)
+    tl.store(value_cache_ptr + tgt_idx_v, value_tile, mask=valid)
+
+
+def _dflash_batched_reshape_and_cache_flash(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache_ptrs: torch.Tensor,
+    value_cache_ptrs: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    prototype_key_cache: torch.Tensor,
+    prototype_value_cache: torch.Tensor,
+) -> None:
+    """Batch KV cache update across layers in a single Triton launch.
+
+    This is intentionally limited to the non-quantized FlashAttention head-major
+    cache layout used by the DFlash profile investigated here.
+    """
+
+    assert key.ndim == 4 and value.ndim == 4
+    assert key.shape == value.shape
+    assert key_cache_ptrs.ndim == 1 and value_cache_ptrs.ndim == 1
+    assert key.shape[0] == key_cache_ptrs.numel() == value_cache_ptrs.numel()
+    assert slot_mapping.ndim == 1 and slot_mapping.shape[0] == key.shape[1]
+    assert prototype_key_cache.ndim == 4, prototype_key_cache.shape
+    assert prototype_value_cache.ndim == 4, prototype_value_cache.shape
+    assert prototype_key_cache.dtype == key.dtype, (
+        prototype_key_cache.dtype,
+        key.dtype,
+    )
+    assert prototype_value_cache.dtype == value.dtype, (
+        prototype_value_cache.dtype,
+        value.dtype,
+    )
+
+    num_heads = key.shape[2]
+    head_size = key.shape[3]
+    block_size = prototype_key_cache.shape[1]
+
+    n = num_heads * head_size
+    tile_size = min(2048, triton.next_power_of_2(n))
+    if current_platform.is_rocm() or current_platform.is_xpu():
+        num_stages = 4
+        num_warps = 8
+    else:
+        num_stages = 10
+        num_warps = 16
+        if torch.cuda.get_device_capability(key.device)[0] < 9:
+            tile_size = min(512, tile_size)
+
+    grid = lambda meta: (
+        slot_mapping.shape[0],
+        triton.cdiv(n, meta["TILE_SIZE"]),
+        key.shape[0],
+    )
+
+    _dflash_batched_reshape_and_cache_kernel_flash[grid](
+        key_ptr=key,
+        value_ptr=value,
+        key_cache_ptrs_ptr=key_cache_ptrs,
+        value_cache_ptrs_ptr=value_cache_ptrs,
+        slot_mapping_ptr=slot_mapping,
+        key_layer_stride=key.stride(0),
+        value_layer_stride=value.stride(0),
+        key_token_stride=key.stride(1),
+        value_token_stride=value.stride(1),
+        key_block_stride=prototype_key_cache.stride(0),
+        value_block_stride=prototype_value_cache.stride(0),
+        key_page_stride=prototype_key_cache.stride(1),
+        value_page_stride=prototype_value_cache.stride(1),
+        key_head_stride=prototype_key_cache.stride(2),
+        value_head_stride=prototype_value_cache.stride(2),
+        num_heads=num_heads,
+        head_size=head_size,
+        block_size=block_size,
+        TILE_SIZE=tile_size,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+
+
+def _can_use_dflash_batched_kv_cache_update(attn_layers: list[Attention]) -> bool:
+    if not attn_layers:
+        return False
+
+    first = attn_layers[0]
+    if getattr(first.impl, "kv_cache_dtype", None) != "auto":
+        return False
+    if not isinstance(first.kv_cache, torch.Tensor) or first.kv_cache.ndim != 5:
+        return False
+
+    first_k_cache, first_v_cache = first.kv_cache.unbind(0)
+    if first_k_cache.ndim != 4 or first_v_cache.ndim != 4:
+        return False
+    if first_k_cache.dtype != first_v_cache.dtype:
+        return False
+
+    ref_k_shape = tuple(first_k_cache.shape)
+    ref_v_shape = tuple(first_v_cache.shape)
+    ref_k_stride = tuple(first_k_cache.stride())
+    ref_v_stride = tuple(first_v_cache.stride())
+    ref_device = first_k_cache.device
+    ref_dtype = first_k_cache.dtype
+
+    for attn in attn_layers[1:]:
+        if getattr(attn.impl, "kv_cache_dtype", None) != "auto":
+            return False
+        kv_cache = attn.kv_cache
+        if not isinstance(kv_cache, torch.Tensor) or kv_cache.ndim != 5:
+            return False
+        k_cache, v_cache = kv_cache.unbind(0)
+        if (
+            tuple(k_cache.shape) != ref_k_shape
+            or tuple(v_cache.shape) != ref_v_shape
+            or tuple(k_cache.stride()) != ref_k_stride
+            or tuple(v_cache.stride()) != ref_v_stride
+            or k_cache.device != ref_device
+            or k_cache.dtype != ref_dtype
+            or v_cache.dtype != ref_dtype
+        ):
+            return False
+
+    return True
 
 
 class DFlashQwen3Attention(nn.Module):
@@ -118,6 +306,7 @@ class DFlashQwen3Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
+            use_non_causal=True,
         )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -424,6 +613,29 @@ class DFlashQwen3Model(nn.Module):
 
         # --- Per-layer cache insert ---
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
+        if _can_use_dflash_batched_kv_cache_update(self._attn_layers):
+            prototype_k_cache, prototype_v_cache = self._attn_layers[0].kv_cache.unbind(0)
+            key_cache_ptrs = torch.tensor(
+                [attn.kv_cache[0].data_ptr() for attn in self._attn_layers],
+                dtype=torch.int64,
+                device=all_k_final.device,
+            )
+            value_cache_ptrs = torch.tensor(
+                [attn.kv_cache[1].data_ptr() for attn in self._attn_layers],
+                dtype=torch.int64,
+                device=all_v.device,
+            )
+            _dflash_batched_reshape_and_cache_flash(
+                all_k_final,
+                all_v,
+                key_cache_ptrs,
+                value_cache_ptrs,
+                context_slot_mapping,
+                prototype_k_cache,
+                prototype_v_cache,
+            )
+            return
+
         for i in range(L):
             attn = self._attn_layers[i]
             kv_cache = attn.kv_cache
