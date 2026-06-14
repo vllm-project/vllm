@@ -611,6 +611,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # kernels see the same (B, next_n) layout as the MTP path.
             if seq_lens.dim() == 1:
                 seq_lens = seq_lens.unsqueeze(-1)
+            seq_lens = seq_lens.contiguous()
 
             # DeepGEMM is required for the paged MQA logits on CUDA devices
             if current_platform.is_cuda() and has_deep_gemm():
