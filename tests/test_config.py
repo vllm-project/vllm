@@ -28,6 +28,8 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
+from vllm.config.model import _get_and_verify_max_len
+from vllm.config.model_arch import ModelArchitectureConfig
 from vllm.config.utils import get_field
 from vllm.config.vllm import (
     OPTIMIZATION_LEVEL_TO_CONFIG,
@@ -708,6 +710,151 @@ def test_get_and_verify_max_len(
     else:
         actual_max_len = model_config.get_and_verify_max_len(max_model_len)
         assert actual_max_len == expected_max_len
+
+
+def _make_model_arch_config(
+    derived_max_model_len: int,
+    max_len_key: str = "max_position_embeddings",
+    architectures: list[str] | None = None,
+    model_type: str = "llama",
+) -> ModelArchitectureConfig:
+    return ModelArchitectureConfig(
+        architectures=architectures or ["LlamaForCausalLM"],
+        model_type=model_type,
+        text_model_type=None,
+        hidden_size=1,
+        total_num_hidden_layers=1,
+        total_num_attention_heads=1,
+        head_size=1,
+        vocab_size=1,
+        total_num_kv_heads=1,
+        num_experts=0,
+        quantization_config=None,
+        is_deepseek_mla=False,
+        is_mm_prefix_lm=False,
+        derived_max_model_len_and_key=(float(derived_max_model_len), max_len_key),
+    )
+
+
+def test_allow_long_max_model_len_extends_rope_config(monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+    hf_config = SimpleNamespace(
+        model_type="llama",
+        max_position_embeddings=16,
+        rope_parameters={"rope_type": "default"},
+    )
+
+    actual_max_len = _get_and_verify_max_len(
+        hf_config=hf_config,
+        model_arch_config=_make_model_arch_config(16),
+        tokenizer_config=None,
+        max_model_len=32,
+        disable_sliding_window=False,
+        sliding_window=None,
+    )
+
+    assert actual_max_len == 32
+    assert hf_config.max_position_embeddings == 32
+
+
+def test_allow_long_max_model_len_extends_rotary_dim_config(monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+    hf_config = SimpleNamespace(
+        model_type="gptj",
+        max_position_embeddings=16,
+        rotary_dim=8,
+    )
+
+    actual_max_len = _get_and_verify_max_len(
+        hf_config=hf_config,
+        model_arch_config=_make_model_arch_config(
+            16,
+            architectures=["GPTJForCausalLM"],
+            model_type="gptj",
+        ),
+        tokenizer_config=None,
+        max_model_len=32,
+        disable_sliding_window=False,
+        sliding_window=None,
+    )
+
+    assert actual_max_len == 32
+    assert hf_config.max_position_embeddings == 32
+
+
+def test_allow_long_max_model_len_rejects_absolute_positions(monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+    hf_config = SimpleNamespace(
+        model_type="bert",
+        max_position_embeddings=16,
+        position_embedding_type="absolute",
+    )
+
+    with pytest.raises(ValueError, match="absolute position embeddings"):
+        _get_and_verify_max_len(
+            hf_config=hf_config,
+            model_arch_config=_make_model_arch_config(16),
+            tokenizer_config=None,
+            max_model_len=32,
+            disable_sliding_window=False,
+            sliding_window=None,
+        )
+
+
+@pytest.mark.parametrize(
+    ("model_type", "architectures"),
+    [
+        ("custom", ["CustomForCausalLM"]),
+        ("gpt2", ["GPT2LMHeadModel"]),
+        ("gpt_bigcode", ["GPTBigCodeForCausalLM"]),
+        ("opt", ["OPTForCausalLM"]),
+    ],
+)
+def test_allow_long_max_model_len_rejects_non_rope_configs(
+    monkeypatch,
+    model_type,
+    architectures,
+):
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+    hf_config = SimpleNamespace(
+        model_type=model_type,
+        max_position_embeddings=16,
+    )
+
+    with pytest.raises(ValueError, match="unscaled RoPE"):
+        _get_and_verify_max_len(
+            hf_config=hf_config,
+            model_arch_config=_make_model_arch_config(
+                16,
+                architectures=architectures,
+                model_type=model_type,
+            ),
+            tokenizer_config=None,
+            max_model_len=32,
+            disable_sliding_window=False,
+            sliding_window=None,
+        )
+
+
+def test_allow_long_max_model_len_rejects_scaled_rope_config(monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
+    hf_config = SimpleNamespace(
+        model_type="llama",
+        max_position_embeddings=16,
+        rope_parameters={"rope_type": "dynamic", "factor": 2.0},
+    )
+
+    with pytest.raises(ValueError, match="unscaled RoPE"):
+        _get_and_verify_max_len(
+            hf_config=hf_config,
+            model_arch_config=_make_model_arch_config(16),
+            tokenizer_config=None,
+            max_model_len=64,
+            disable_sliding_window=False,
+            sliding_window=None,
+        )
+
+    assert hf_config.max_position_embeddings == 16
 
 
 class MockConfig:
