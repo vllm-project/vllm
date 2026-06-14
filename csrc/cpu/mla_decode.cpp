@@ -190,17 +190,19 @@ void mla_decode_block(
     const int nbytes = BLOCK_SIZE * HEAD_DIM * sizeof(float);
     kv_cache_f32 = static_cast<float*>(std::aligned_alloc(64, nbytes));
 
+    // With AVX512_BF16, K stays in native BF16 — only convert V section.
+    // Without AVX512_BF16, K also needs FP32 — convert the full block.
+    constexpr int CONVERT_DIM =
+        std::is_same<qk_load_vec_type, qk_vec_type>::value ? V_HEAD_DIM
+                                                           : HEAD_DIM;
     for (int block_offset = 0; block_offset < num_tokens; ++block_offset)
-      for (int i = 0; i < HEAD_DIM; i += V_NUM_ELEM) {
+      for (int i = 0; i < CONVERT_DIM; i += V_NUM_ELEM) {
         v_load_vec_type kv_load_vec(kv_cache + block_offset * HEAD_DIM + i);
         f32_vec_type kv_vec_f32(kv_load_vec);
         kv_vec_f32.save(kv_cache_f32 + block_offset * HEAD_DIM + i);
       }
 
     if constexpr (std::is_same<qk_load_vec_type, qk_vec_type>::value) {
-      // for AVX512_BF16, Q @ K.T uses BF16 for K (no conversion)
-      // NOTE: in this case, we only need to convert the V section to FP32.
-      // But for simplicity, we will convert the whole KV block to FP32.
       k_vecs = reinterpret_cast<const qk_vec_type*>(kv_cache);
     } else {
       k_vecs = reinterpret_cast<const qk_vec_type*>(kv_cache_f32);
