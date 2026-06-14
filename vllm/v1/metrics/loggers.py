@@ -709,6 +709,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.histogram_num_generation_tokens_request = create_metric_per_engine(
             histogram_num_generation_tokens_request, per_engine_labelvalues
         )
+        histogram_num_preemptions_request = self._histogram_cls(
+            name="vllm:request_num_preemptions",
+            documentation="Number of preemptions per finished request.",
+            buckets=[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+            labelnames=labelnames,
+        )
+        self.histogram_num_preemptions_request = create_metric_per_engine(
+            histogram_num_preemptions_request, per_engine_labelvalues
+        )
 
         # TODO: This metric might be incorrect in case of using multiple
         # api_server counts which uses prometheus mp.
@@ -1206,6 +1215,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.histogram_prefill_kv_computed_request[engine_idx].observe(
                 prefill_kv_computed
+            )
+            self.histogram_num_preemptions_request[engine_idx].observe(
+                finished_request.num_preemptions
             )
             self.histogram_num_prompt_tokens_request[engine_idx].observe(
                 finished_request.num_prompt_tokens
