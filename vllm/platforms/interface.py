@@ -570,8 +570,11 @@ class Platform:
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
-        elif cache_config.cache_dtype.startswith("turboquant_"):
-            # TQ has a packed K|V layout; the standard FullAttentionSpec
+        elif (
+            cache_config.cache_dtype.startswith("turboquant_")
+            or cache_config.cache_dtype == "squat"
+        ):
+            # TQ/SQuat has a packed K|V layout; the standard FullAttentionSpec
             # formula over-sizes it and trips unify_kv_cache_spec_page_size
             # when all attention layers are TQ. With mixed skip+TQ the skip
             # layers still use the standard layout — take max so mamba
@@ -581,8 +584,13 @@ class Platform:
             )
             from vllm.v1.kv_cache_interface import TQFullAttentionSpec
 
+            tq_dtype = (
+                "turboquant_4bit_nc"
+                if cache_config.cache_dtype == "squat"
+                else cache_config.cache_dtype
+            )
             tq_cfg = TurboQuantConfig.from_cache_dtype(
-                cache_config.cache_dtype, model_config.get_head_size()
+                tq_dtype, model_config.get_head_size()
             )
             tq_page = TQFullAttentionSpec(
                 block_size=1,

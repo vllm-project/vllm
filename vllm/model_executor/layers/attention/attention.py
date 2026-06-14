@@ -278,6 +278,12 @@ class Attention(nn.Module, AttentionLayerBase):
         )
         self.kv_cache_dtype = kv_cache_dtype
         self.calculate_kv_scales = calculate_kv_scales
+
+        if kv_cache_dtype == "squat":
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            self._squat_layer_idx = extract_layer_index(prefix)
+
         if num_kv_heads is None:
             num_kv_heads = num_heads
         assert num_heads % num_kv_heads == 0, (
@@ -582,15 +588,21 @@ class Attention(nn.Module, AttentionLayerBase):
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
             )
-        elif self.kv_cache_dtype.startswith("turboquant_"):
+        elif (
+            self.kv_cache_dtype.startswith("turboquant_")
+            or self.kv_cache_dtype == "squat"
+        ):
             from vllm.model_executor.layers.quantization.turboquant.config import (
                 TurboQuantConfig,
             )
             from vllm.v1.kv_cache_interface import TQFullAttentionSpec
 
-            tq_config = TurboQuantConfig.from_cache_dtype(
-                self.kv_cache_dtype, self.head_size
+            tq_preset = (
+                "turboquant_4bit_nc"
+                if self.kv_cache_dtype == "squat"
+                else self.kv_cache_dtype
             )
+            tq_config = TurboQuantConfig.from_cache_dtype(tq_preset, self.head_size)
             return TQFullAttentionSpec(
                 block_size=block_size,
                 num_kv_heads=self.num_kv_heads,
