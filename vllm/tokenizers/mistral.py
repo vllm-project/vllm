@@ -269,6 +269,15 @@ class MistralTokenizer(TokenizerLike):
 
     # the following attributes are set to fit vLLM's design and are used
     # by the structured output backends.
+    class TokenInfo:
+        def __init__(self, is_special):
+            self.special = is_special
+
+    @property
+    def added_tokens_decoder(self):
+        """Expose added_tokens_decoder for compatibility."""
+        return {tid: self.TokenInfo(True) for tid in self._special_token_ids}
+
     @property
     def all_special_tokens(self) -> list[str]:
         return self._special_tokens
