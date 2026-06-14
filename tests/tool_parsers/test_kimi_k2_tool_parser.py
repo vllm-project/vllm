@@ -580,3 +580,7 @@ class TestStreamingIntervals:
         assert len(rec.tool_calls) == 1
         assert rec.tool_calls[0].function.name == "get_weather"
         assert json.loads(rec.tool_calls[0].function.arguments) == {"city": "Beijing"}
+
+
+def test_named_and_required_routed_through_parser():
+    assert KimiK2ToolParser.supports_required_and_named is False
