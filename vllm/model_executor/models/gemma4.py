@@ -424,12 +424,6 @@ class Gemma4Attention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        # Q/K norms: output = norm(x) * weight (learnable per-head scale)
-        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        # V norm: no learnable scale (pure normalization only)
-        self.v_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
-
         # Determine layer type and sliding window
         layer_idx = extract_layer_index(prefix)
         layer_type = config.layer_types[layer_idx]
@@ -481,6 +475,15 @@ class Gemma4Attention(nn.Module):
                         f"{param_name_before_layers}.layers."
                         f"{kv_shared_layer_index}.self_attn.attn"
                     )
+
+        # Q/K norms: output = norm(x) * weight (learnable per-head scale)
+        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        if self.is_kv_shared_layer:
+            self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
+        else:
+            self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        # V norm: no learnable scale (pure normalization only)
+        self.v_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps, has_weight=False)
 
         self.rotary_emb = get_rope(
             self.head_dim,
