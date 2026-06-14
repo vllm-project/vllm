@@ -399,6 +399,37 @@ class TestStreamingExtraction:
                         args_text += arg
         return args_text
 
+    def _collect_arguments_by_index(self, results):
+        """Collect streamed argument deltas by tool-call index."""
+        args_by_index: dict[int, str] = {}
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    func = tc.function if isinstance(tc.function, dict) else tc.function
+                    if isinstance(func, dict):
+                        arg = func.get("arguments", "")
+                    else:
+                        arg = getattr(func, "arguments", "") or ""
+                    if arg:
+                        args_by_index[tc.index] = args_by_index.get(tc.index, "") + arg
+        return args_by_index
+
+    def _collect_arguments_by_index_collapsed_per_delta(self, results):
+        """Collect arguments like a client that coalesces indexes per chunk."""
+        args_by_index: dict[int, str] = {}
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                tool_calls_by_index = {tc.index: tc for tc in delta.tool_calls}
+                for tc in tool_calls_by_index.values():
+                    func = tc.function if isinstance(tc.function, dict) else tc.function
+                    if isinstance(func, dict):
+                        arg = func.get("arguments", "")
+                    else:
+                        arg = getattr(func, "arguments", "") or ""
+                    if arg:
+                        args_by_index[tc.index] = args_by_index.get(tc.index, "") + arg
+        return args_by_index
+
     def _collect_function_name(self, results):
         """Extract the function name from streaming results."""
         for delta, _ in results:
@@ -641,6 +672,98 @@ class TestStreamingExtraction:
         assert "<|" not in args_text, (
             f"Partial delimiter leaked into JSON: {args_text!r}"
         )
+
+    def test_streaming_mtp_chunk_crossing_tool_call_boundary(
+        self, parser, mock_request
+    ):
+        """MTP-sized deltas can contain one call's end and the next call's start."""
+        chunks = [
+            "<|tool_call>",
+            "call:getStationInfo{",
+            'location:<|"|>Milano<|"|>}<tool_call|><|tool_call>call:getStationInfo{',
+            'location:<|"|>Piacenza<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_by_index = self._collect_arguments_by_index(results)
+
+        assert set(args_by_index) == {0, 1}
+        assert json.loads(args_by_index[0]) == {"location": "Milano"}
+        assert json.loads(args_by_index[1]) == {"location": "Piacenza"}
+
+    def test_streaming_mtp_chunk_closes_existing_and_completes_next_call(
+        self, parser, mock_request
+    ):
+        """One MTP delta can close one call and fully contain the next call."""
+        chunks = [
+            "<|tool_call>",
+            "call:first{x:1",
+            "}<tool_call|><|tool_call>call:second{y:2}<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_by_index = self._collect_arguments_by_index(results)
+
+        assert set(args_by_index) == {0, 1}
+        assert json.loads(args_by_index[0]) == {"x": 1}
+        assert json.loads(args_by_index[1]) == {"y": 2}
+
+    def test_streaming_mtp_chunk_contains_two_complete_tool_calls(
+        self, parser, mock_request
+    ):
+        """A first streamed delta can contain two complete tool calls."""
+        chunks = [
+            "<|tool_call>call:first{x:1}<tool_call|>"
+            "<|tool_call>call:second{y:2}<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_by_index = self._collect_arguments_by_index(results)
+
+        assert set(args_by_index) == {0, 1}
+        assert json.loads(args_by_index[0]) == {"x": 1}
+        assert json.loads(args_by_index[1]) == {"y": 2}
+
+    def test_streaming_mtp_chunk_merges_same_index_argument_segments(
+        self, parser, mock_request
+    ):
+        """Segment replay should not emit duplicate index entries per chunk."""
+        chunks = [
+            "<|tool_call>",
+            "call:write_file{",
+            'path:<|"|>src/main.rs<|"|>}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        for delta, _ in results:
+            if delta and delta.tool_calls:
+                indexes = [tc.index for tc in delta.tool_calls]
+                assert len(indexes) == len(set(indexes))
+
+        args_by_index = self._collect_arguments_by_index_collapsed_per_delta(results)
+        assert set(args_by_index) == {0}
+        assert json.loads(args_by_index[0]) == {"path": "src/main.rs"}
+
+    def test_streaming_mtp_chunk_crossing_buffered_tool_call_boundary(
+        self, parser, mock_request
+    ):
+        """Segment replay must still run when buffering completes a delimiter."""
+        chunks = [
+            "<|tool_call>",
+            "call:getStationInfo{",
+            'location:<|"|>Milano<|"|>}<',
+            'tool_call|><|tool_call>call:getStationInfo{location:<|"|>Piacenza<|"|>}<',
+            "tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_by_index = self._collect_arguments_by_index(results)
+
+        assert set(args_by_index) == {0, 1}
+        assert json.loads(args_by_index[0]) == {"location": "Milano"}
+        assert json.loads(args_by_index[1]) == {"location": "Piacenza"}
 
     def test_streaming_does_not_duplicate_plain_text_after_tool_call(
         self, parser, mock_request, monkeypatch
