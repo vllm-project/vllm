@@ -28,7 +28,9 @@ from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_post_tilelang,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -90,6 +92,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.e_proj",
         )
         self.h_proj = ReplicatedLinear(
             config.hidden_size,
@@ -97,6 +100,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.h_proj",
         )
 
         self.hc_eps = config.hc_eps
@@ -337,7 +341,7 @@ class DeepSeekV4MTP(nn.Module):
                 self.config.n_routed_experts
             )
         else:
-            expert_mapping = FusedMoE.make_expert_params_mapping(
+            expert_mapping = fused_moe_make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="w1",
                 ckpt_down_proj_name="w2",
