@@ -473,6 +473,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
     "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
+    "Phi4FlashForCausalLM": _HfExamplesInfo(
+        "microsoft/Phi-4-mini-flash-reasoning",
+        trust_remote_code=True,
+        enable_prefix_caching=False,
+    ),
     "PhiMoEForCausalLM": _HfExamplesInfo(
         "microsoft/Phi-3.5-MoE-instruct", trust_remote_code=True
     ),
