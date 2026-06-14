@@ -73,6 +73,7 @@ class TestReasoningStructuredOutput:
         request.all_token_ids = [1, 2, 3, 4, 5, 6, 7, 8]
         request.num_computed_tokens = 5
         request.num_output_placeholders = 0
+        request.request_id = "mock_req"
         return request
 
     @pytest.fixture
@@ -258,3 +259,162 @@ class TestReasoningStructuredOutput:
 
         # Should return True since reasoning has ended
         assert result is True
+
+    def test_should_advance_uses_new_token_ids_when_provided(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Regression for #43388: when caller passes new_token_ids, the
+        reasoner sees the exact multi-token delta rather than the
+        placeholder-derived window.
+        """
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+
+        end_token_id = 248069
+
+        reasoner = MockReasoner(tokenizer=Mock())
+        # Detection mirrors the real Qwen3 parser: end token in the delta.
+        reasoner.is_reasoning_end_streaming = Mock(
+            side_effect=lambda input_ids, delta_ids: end_token_id
+            in list(delta_ids)
+        )
+        structured_req.reasoner = reasoner
+
+        # Scenario from #43388: async + spec decode K=4, 4 tokens accepted
+        # but only 1 placeholder remains (some drafts were rejected).
+        # The placeholder math would yield delta=[271] and miss </think>.
+        # Passing new_token_ids must override that.
+        new_token_ids = [9, 198, end_token_id, 271]
+        mock_request_with_structured_output.all_token_ids = (
+            [1, 2, 3, 4, 5] + new_token_ids
+        )
+        mock_request_with_structured_output.num_computed_tokens = 9
+        mock_request_with_structured_output.num_output_placeholders = 1
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=new_token_ids,
+        )
+
+        # First call to is_reasoning_end_streaming was with the full
+        # new_token_ids (not the truncated placeholder window).
+        first_call = reasoner.is_reasoning_end_streaming.call_args_list[0]
+        _, called_delta = first_call.args
+        assert list(called_delta) == new_token_ids
+
+        assert structured_req.reasoning_ended is True
+        assert result is False
+
+    def test_should_advance_without_new_token_ids_falls_back(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """Backward compat: callers that don't pass new_token_ids keep
+        the original placeholder-derived delta window.
+        """
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming.return_value = False
+        structured_req.reasoner = reasoner
+
+        mock_request_with_structured_output.all_token_ids = [1, 2, 3, 4, 5]
+        mock_request_with_structured_output.num_computed_tokens = 5
+        mock_request_with_structured_output.num_output_placeholders = 2
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output
+        )
+
+        # placeholder window: start = 5 - 2 = 3 → delta = [4, 5]
+        _, called_delta = reasoner.is_reasoning_end_streaming.call_args[0]
+        assert list(called_delta) == [4, 5]
+        assert result is False
+
+    def test_should_advance_drains_post_marker_into_grammar(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """On the step that ends reasoning, post-marker content tokens are
+        fed to the grammar so the next step's bitmask reflects the post-
+        marker FSM state. Without this, the model can emit a duplicate
+        opening token (e.g. "{{" for json_object).
+        """
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.structured_output_key = (
+            StructuredOutputOptions.JSON_OBJECT,
+            "{}",
+        )
+
+        marker = 248069
+
+        class MarkerReasoner:
+            def __init__(self, *_, **__):
+                pass
+
+            def is_reasoning_end_streaming(self, input_ids, delta_ids):
+                return marker in list(delta_ids)
+
+        structured_req.reasoner = MarkerReasoner()
+
+        new_token_ids = [9, 198, marker, 271, 5005]
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=new_token_ids,
+        )
+
+        # grammar.accept_tokens was called exactly once with the post-marker
+        # portion of new_token_ids — neither the reasoning prefix nor the
+        # marker itself.
+        accept_calls = structured_req.grammar.accept_tokens.call_args_list
+        assert len(accept_calls) == 1
+        _, fed_tokens = accept_calls[0].args
+        assert fed_tokens == [271, 5005]
+
+        assert structured_req.reasoning_ended is True
+        # Deferred backend: still return False so the scheduler does not
+        # also feed full new_token_ids (which would include reasoning).
+        assert result is False
+
+    def test_should_advance_no_postmarker_skips_grammar_accept(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """When the marker is the last token in new_token_ids, there is no
+        post-marker tail to drain, so grammar.accept_tokens is not called.
+        """
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+        structured_req.structured_output_key = (
+            StructuredOutputOptions.JSON_OBJECT,
+            "{}",
+        )
+
+        marker = 248069
+
+        class MarkerReasoner:
+            def __init__(self, *_, **__):
+                pass
+
+            def is_reasoning_end_streaming(self, input_ids, delta_ids):
+                return marker in list(delta_ids)
+
+        structured_req.reasoner = MarkerReasoner()
+
+        new_token_ids = [9, 198, marker]
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output,
+            new_token_ids=new_token_ids,
+        )
+
+        structured_req.grammar.accept_tokens.assert_not_called()
+        assert structured_req.reasoning_ended is True
+        assert result is False
