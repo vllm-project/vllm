@@ -8,6 +8,8 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any
 
+import torch
+
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import (
@@ -36,6 +38,7 @@ from vllm.v1.executor.ray_utils import (
 )
 
 if ray is not None:
+    import ray.cloudpickle  # noqa: F401
     from ray.actor import ActorHandle
     from ray.types import ObjectRef
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -98,11 +101,21 @@ class RayWorkerProc(WorkerProc):
     each instance is unaware which physical devices others hold, and the
     externally managed placement group avoids CUDA_VISIBLE_DEVICES conflicts
     by binding workers to specific placement group bundles.
+
+    Because CUDA_VISIBLE_DEVICES is only correct *after* step 3, __init__ must not
+    do anything that creates a CUDA context. In particular ``vllm_config`` is held
+    in serialized form and only deserialized inside ``initialize_worker`` once
+    CUDA_VISIBLE_DEVICES is set: deserializing it imports model/quantization
+    modules whose import side effects (e.g. AutoGPTQ -> fused_moe -> flashinfer)
+    create a CUDA context. If that happened at construction time, with
+    RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES set, the context would bind to
+    cuda:0 and every colocated worker would pile onto the same physical GPU regardless
+    of the CUDA_VISIBLE_DEVICES set later.
     """
 
     def __init__(
         self,
-        vllm_config: VllmConfig,
+        vllm_config_serialized: bytes,
         rank: int,
         distributed_init_method: str,
         input_shm_handle: Handle,
@@ -110,9 +123,14 @@ class RayWorkerProc(WorkerProc):
         is_driver_node: bool = False,
     ):
         # Defer WorkerProc.__init__ until GPU IDs are known.
+        #
+        # Keep vllm_config serialized here; it is deserialized in
+        # initialize_worker() after CUDA_VISIBLE_DEVICES is set so that any
+        # CUDA-context-creating imports (e.g. flashinfer) bind to this worker's
+        # assigned GPU rather than cuda:0.
         self._is_driver_node = is_driver_node
+        self._vllm_config_serialized = vllm_config_serialized
         self._init_kwargs = dict(
-            vllm_config=vllm_config,
             rank=rank,
             distributed_init_method=distributed_init_method,
             input_shm_handle=input_shm_handle,
@@ -143,14 +161,24 @@ class RayWorkerProc(WorkerProc):
         in missing vars but never overwrite node-local values.
         *env_vars* (e.g. CUDA_VISIBLE_DEVICES) always overwrite.
         """
+        if torch.cuda.is_initialized():
+            raise RuntimeError(
+                "CUDA context was already initialized in RayWorkerProc "
+                "before CUDA_VISIBLE_DEVICES was set."
+            )
+
         if driver_env_vars:
             for key, value in driver_env_vars.items():
                 os.environ.setdefault(key, value)
         for key, value in env_vars.items():
             os.environ[key] = value
 
+        # Deserialize vllm_config only now, after CUDA_VISIBLE_DEVICES is set.
+        vllm_config = ray.cloudpickle.loads(self._vllm_config_serialized)
+
         self.local_rank = local_rank
         super().__init__(
+            vllm_config=vllm_config,
             local_rank=local_rank,
             **self._init_kwargs,
         )
@@ -323,6 +351,8 @@ class RayExecutorV2(MultiprocExecutor):
         runtime_env = self._build_runtime_env()
         resource_kwargs = self._get_actor_resource_kwargs()
 
+        vllm_config_serialized = ray.cloudpickle.dumps(self.vllm_config)
+
         for bundle_idx in range(self.world_size):
             bundle = bundle_assignments[bundle_idx]
             is_driver_worker = self._is_driver_worker(bundle["rank"])
@@ -347,7 +377,7 @@ class RayExecutorV2(MultiprocExecutor):
                     runtime_env=runtime_env,
                 )
                 .remote(
-                    vllm_config=self.vllm_config,
+                    vllm_config_serialized=vllm_config_serialized,
                     rank=bundle["rank"],
                     distributed_init_method=distributed_init_method,
                     input_shm_handle=scheduler_output_handle,
