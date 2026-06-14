@@ -373,6 +373,7 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         )
         buffer = Buffer(
             rank=self.rank,
+            disable_ll_nvlink=True,
             tcp_store_group=self.tcp_store_group.store,
         )
         buffer.update_memory_buffers(
