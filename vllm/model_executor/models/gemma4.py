@@ -1374,6 +1374,13 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         #   moe.experts.{id}.up_proj   → FusedMoE w3 (shard of w13)
         #   moe.experts.{id}.down_proj → FusedMoE w2
         num_experts = getattr(self.config, "num_experts", None) or 0
+        _MOE_SUFFIX_MAP = {
+            "": "weight",
+            "weight": "weight",
+            "weight_scale": "weight_scale",
+            "weight_scale_2": "weight_scale_2",
+            "input_scale": "input_scale",
+        }
         # Strategy A: dot-separated suffix
         # (standard AWQ/GPTQ e.g. .qweight, .scales, .weight)
         dot_suffix_expert_params_mapping = fused_moe_make_expert_params_mapping(
@@ -1441,21 +1448,20 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     expert_id,
                     shard_id,
                 ) in expert_params_mapping:
-                    # Match both:
-                    #  - Bare weights: "experts.0.down_proj" (from 3D explosion)
-                    #  - With suffix: "experts.0.down_proj.weight_scale" (2D quantized)
-                    # weight_name has trailing dot, so check with and without it
+                    # Deterministic boundary matching prevents namespace collisions.
                     weight_name_base = weight_name.rstrip(".")
-                    if weight_name in name:
-                        # Has suffix (e.g., .weight_scale)
-                        moe_name = name.replace(weight_name, param_name)
-                    elif name.endswith(weight_name_base):
-                        # Bare weight (no suffix)
-                        moe_name = name.replace(
-                            weight_name_base, param_name.rstrip("_") + "_weight"
-                        )
-                    else:
+                    idx = name.find(weight_name_base)
+                    if idx == -1:
                         continue
+                    prefix_part = name[:idx]
+                    suffix = name[idx + len(weight_name_base):]
+                    if suffix.startswith(".") or suffix.startswith("_"):
+                        suffix = suffix[1:]
+                    elif suffix:
+                        continue
+                    mapped_suffix = _MOE_SUFFIX_MAP.get(suffix, suffix)
+                    moe_name = prefix_part + param_name + mapped_suffix
+                    wl_name = name[idx:]
                     if moe_name not in params_dict:
                         continue
                     if is_pp_missing_parameter(moe_name, self):
@@ -1470,7 +1476,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     weight_loader(
                         param,
                         loaded_weight,
-                        moe_name,  # Pass mapped name (handles both weights and scales)
+                        wl_name,
                         shard_id=shard_id,
                         expert_id=expert_id,
                     )
