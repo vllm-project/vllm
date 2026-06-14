@@ -57,6 +57,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
+        # Set by from_existing_pynccl when this communicator wraps a split
+        # NCCL group; in that path symmetric ops are not registered.
+        self.disable_pynccl_symmetric_ops: bool = False
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -251,11 +254,48 @@ class CudaCommunicator(DeviceCommunicatorBase):
             scope="global",
         )
 
+    @classmethod
+    def from_existing_pynccl(
+        cls,
+        parent: "CudaCommunicator",
+        pynccl_comm,
+        unique_name: str,
+        global_ranks: list[int],
+    ) -> "CudaCommunicator":
+        self = cls.__new__(cls)
+        self.device = parent.device
+        self.cpu_group = parent.cpu_group
+        self.device_group = parent.device_group
+        self.unique_name = unique_name
+        self.pynccl_comm = pynccl_comm
+        self.rank = pynccl_comm.rank
+        self.world_size = pynccl_comm.world_size
+        self.ranks = global_ranks
+        self.global_rank = parent.global_rank
+        self.global_world_size = parent.global_world_size
+        self.rank_in_group = pynccl_comm.rank
+
+        self.use_custom_allreduce = False
+        self.use_torch_symm_mem = False
+        self.use_flashinfer_allreduce = False
+        self.ca_comm = None
+        self.qr_comm = None
+        self.symm_mem_comm = None
+        self.fi_ar_comm = None
+        self.disable_pynccl_symmetric_ops = True
+        self.is_ep_communicator = False
+        self.use_all2all = False
+        self.all2all_backend = None
+        self.all2all_manager = None
+        return self
+
     def all_reduce(self, input_):
         # since currently we perform copy input -> symm_input -> out-of-place AR
         # return symm_output, we don't need to check if input is symmetric
-        if self.pynccl_comm is not None and should_nccl_symm_mem_allreduce(
-            self.pynccl_comm.world_size, input_
+        if (
+            self.pynccl_comm is not None
+            and not getattr(self, "disable_pynccl_symmetric_ops", False)
+            and should_nccl_symm_mem_allreduce(self.pynccl_comm.world_size, input_)
         ):
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:

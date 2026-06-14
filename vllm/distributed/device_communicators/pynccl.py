@@ -11,6 +11,7 @@ from torch.distributed import ProcessGroup, ReduceOp
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl_wrapper import (
+    NCCL_SPLIT_NOCOLOR,
     NCCLLibrary,
     buffer_type,
     cudaStream_t,
@@ -144,6 +145,42 @@ class PyNcclCommunicator:
             self.all_reduce(data)
             stream.synchronize()
             del data
+
+    @classmethod
+    def _from_existing_comm(
+        cls,
+        parent: "PyNcclCommunicator",
+        comm: ncclComm_t,
+    ) -> "PyNcclCommunicator":
+        self = cls.__new__(cls)
+        self.group = parent.group
+        self.nccl = parent.nccl
+        self.nccl_version = parent.nccl_version
+        self.comm = comm
+        self.rank = self.nccl.ncclCommUserRank(comm)
+        self.world_size = self.nccl.ncclCommCount(comm)
+        self.device = parent.device
+        self.available = True
+        self.disabled = False
+        return self
+
+    def split(
+        self, color: int | None, key: int | None = None
+    ) -> "PyNcclCommunicator | None":
+        if self.disabled:
+            return None
+        if color is None:
+            color = NCCL_SPLIT_NOCOLOR
+        elif color < 0:
+            raise ValueError("color must be non-negative or None")
+        if key is None:
+            key = self.rank
+
+        with torch.accelerator.device_index(self.device.index):
+            comm = self.nccl.ncclCommSplit(self.comm, color, key)
+        if comm is None:
+            return None
+        return self._from_existing_comm(self, comm)
 
     def destroy(self):
         if self.available and not self.disabled:

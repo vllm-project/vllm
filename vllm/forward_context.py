@@ -11,6 +11,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionMetadata
@@ -24,6 +25,12 @@ last_logging_time: float = 0
 forward_start_time: float = 0
 batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
 batchsize_forward_time: defaultdict = defaultdict(list)
+
+
+def runtime_dp_world_size(parallel_config: ParallelConfig) -> int:
+    if parallel_config.data_parallel_size <= 1:
+        return 1
+    return get_dp_group().world_size
 
 
 @dataclass(frozen=True)
@@ -269,7 +276,7 @@ def set_forward_context(
 
     dp_metadata: DPMetadata | None = None
     if (
-        vllm_config.parallel_config.data_parallel_size > 1
+        runtime_dp_world_size(vllm_config.parallel_config) > 1
         and vllm_config.parallel_config.is_moe_model is not False
         and (attn_metadata is not None or num_tokens is not None)
     ):

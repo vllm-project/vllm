@@ -67,6 +67,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.sleep_tags import WEIGHT_SLEEP_TAGS, expand_weight_sleep_tags
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -162,7 +163,7 @@ class Worker(WorkerBase):
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
-    def sleep(self, level: int = 1) -> None:
+    def sleep(self, level: int = 1, tags: list[str] | None = None) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
         # Save the buffers before level 2 sleep
@@ -172,8 +173,15 @@ class Worker(WorkerBase):
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
 
+        self.model_runner.skip_dummy_model_forward = True
+
         allocator = get_mem_allocator_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        if level == 1:
+            selected_tags = expand_weight_sleep_tags(tags)
+            offload_tags = tuple(selected_tags) if selected_tags else WEIGHT_SLEEP_TAGS
+        else:
+            offload_tags = tuple()
+        allocator.sleep(offload_tags=offload_tags)
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -186,7 +194,7 @@ class Worker(WorkerBase):
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         allocator = get_mem_allocator_instance()
-        allocator.wake_up(tags)
+        allocator.wake_up(expand_weight_sleep_tags(tags))
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
@@ -196,8 +204,15 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
+        self.model_runner.skip_dummy_model_forward = False
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
+
+    def resize_sleep_ep_ranks(self, sleeping_ep_ranks: list[int]) -> None:
+        self.model_runner.resize_sleep_ep_ranks(sleeping_ep_ranks)
+
+    def get_ep_sleep_state(self) -> dict[str, object]:
+        return self.model_runner.get_ep_sleep_state()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
@@ -361,6 +376,33 @@ class Worker(WorkerBase):
                 self.vllm_config.parallel_config,
                 self.model_runner.get_model(),
             )
+
+    def sleep_ep_ranks_by_tags(
+        self,
+        sleeping_ep_ranks: list[int],
+        tags: list[str],
+        level: int = 1,
+    ) -> None:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        if get_ep_group().rank not in sleeping_ep_ranks:
+            return
+
+        selected_tags = list(dict.fromkeys(tags))
+        if not selected_tags:
+            raise ValueError("tags must not be empty")
+
+        self.sleep(level=level, tags=selected_tags)
+
+    def wake_up_ep_ranks(
+        self,
+        sleeping_ep_ranks: list[int],
+        tags: list[str] | None = None,
+    ) -> None:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        if get_ep_group().rank in sleeping_ep_ranks:
+            self.wake_up(tags=tags)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)

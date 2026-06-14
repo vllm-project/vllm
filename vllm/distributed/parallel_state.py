@@ -33,7 +33,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
 from multiprocessing import shared_memory
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from unittest.mock import patch
 
 import torch
@@ -1317,12 +1317,20 @@ def _replace_active_groups(
     Destruction is collective — all ranks in the old groups must call this
     function together.  Pass all-``None`` to tear down without replacement.
     """
-    global _WORLD, _DP, _EP, _EPLB, _NODE_COUNT
-    for group in (_DP, _EP, _WORLD, _EPLB):
+    global _WORLD, _DP, _DP_MAX, _DP_SPLIT_SIZE, _EP, _EPLB, _NODE_COUNT
+    if _DP is not None and _DP is not _DP_MAX:
+        _destroy_split_dp_group(_DP)
+    if _DP_MAX is not None:
+        _DP_MAX.destroy()
+    elif _DP is not None:
+        _DP.destroy()
+    for group in (_EP, _WORLD, _EPLB):
         if group is not None:
             group.destroy()
     _WORLD = world
     _DP = dp
+    _DP_MAX = dp
+    _DP_SPLIT_SIZE = dp.world_size if dp is not None else None
     _EP = ep
     _EPLB = eplb
     _NODE_COUNT = node_count
@@ -1353,10 +1361,110 @@ def get_pp_group() -> GroupCoordinator:
 
 
 _DP: GroupCoordinator | None = None
+_DP_MAX: GroupCoordinator | None = None
+_DP_SPLIT_SIZE: int | None = None
 
 
-def get_dp_group() -> GroupCoordinator:
+def _get_dp_pynccl_comm(group: GroupCoordinator):
+    device_communicator = group.device_communicator
+    if device_communicator is None:
+        return None
+    return getattr(device_communicator, "pynccl_comm", None)
+
+
+def _destroy_split_dp_group(group: GroupCoordinator | None) -> None:
+    if group is None or group is _DP_MAX:
+        return
+    if group.device_communicator is not None:
+        group.device_communicator.destroy()
+        group.device_communicator = None
+    if group.mq_broadcaster is not None:
+        group.mq_broadcaster = None
+
+
+def _make_split_dp_group(
+    parent: GroupCoordinator,
+    pynccl_comm: Any,
+    new_comm_size: int,
+) -> GroupCoordinator:
+    from vllm.distributed.device_communicators.cuda_communicator import (
+        CudaCommunicator,
+    )
+
+    assert parent.device_communicator is not None
+    child = GroupCoordinator.__new__(GroupCoordinator)
+    child.unique_name = _get_unique_name("dp")
+    _register_group(child)
+
+    child.rank = parent.rank
+    child.local_rank = parent.local_rank
+    child.ranks = parent.ranks[:new_comm_size]
+    child.world_size = new_comm_size
+    child.rank_in_group = pynccl_comm.rank
+    child.cpu_group = parent.cpu_group
+    child.device_group = parent.device_group
+    child.device = parent.device
+    child.use_device_communicator = parent.use_device_communicator
+    child.device_communicator = CudaCommunicator.from_existing_pynccl(
+        parent=cast(CudaCommunicator, parent.device_communicator),
+        pynccl_comm=pynccl_comm,
+        unique_name=child.unique_name,
+        global_ranks=child.ranks,
+    )
+    child.mq_broadcaster = None
+    child.use_custom_op_call = parent.use_custom_op_call
+    child.use_cpu_custom_send_recv = False
+    return child
+
+
+def get_dp_group(new_comm_size: int | None = None) -> GroupCoordinator:
+    """Return the active DP group, optionally resizing it with NCCL split.
+
+    Resizing is collective over the original maximum DP communicator. Ranks
+    outside ``new_comm_size`` pass NCCL_SPLIT_NOCOLOR and keep the max group.
+    """
+    global _DP, _DP_MAX, _DP_SPLIT_SIZE
     assert _DP is not None, "data parallel group is not initialized"
+    if new_comm_size is None:
+        return _DP
+
+    if _DP_MAX is None:
+        _DP_MAX = _DP
+    if new_comm_size == _DP_SPLIT_SIZE:
+        return _DP
+
+    parent = _DP_MAX
+    if not 0 < new_comm_size <= parent.world_size:
+        raise ValueError(
+            f"new_comm_size must be in [1, {parent.world_size}], got {new_comm_size}"
+        )
+
+    if new_comm_size == parent.world_size:
+        _destroy_split_dp_group(_DP)
+        _DP = parent
+        _DP_SPLIT_SIZE = new_comm_size
+        return _DP
+
+    parent_pynccl_comm = _get_dp_pynccl_comm(parent)
+    if parent_pynccl_comm is None or parent_pynccl_comm.disabled:
+        raise RuntimeError("DP NCCL split requires an enabled PyNCCL communicator")
+
+    if parent.device.type != "cpu":
+        torch.accelerator.synchronize()
+
+    parent_rank = parent.rank_in_group
+    split_comm = parent_pynccl_comm.split(
+        color=0 if parent_rank < new_comm_size else None,
+        key=parent_rank,
+    )
+
+    old_dp = _DP
+    if split_comm is None:
+        _DP = parent
+    else:
+        _DP = _make_split_dp_group(parent, split_comm, new_comm_size)
+    _DP_SPLIT_SIZE = new_comm_size
+    _destroy_split_dp_group(old_dp)
     return _DP
 
 
@@ -1830,7 +1938,7 @@ def initialize_model_parallel(
         group_ranks, get_world_group().local_rank, backend, group_name="pp"
     )
 
-    global _DP
+    global _DP, _DP_MAX, _DP_SPLIT_SIZE
     assert _DP is None, "data parallel group is already initialized"
     group_ranks = all_ranks.transpose(1, 4).reshape(-1, data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
@@ -1846,6 +1954,8 @@ def initialize_model_parallel(
         _DP = init_model_parallel_group(
             group_ranks, get_world_group().local_rank, backend, group_name="dp"
         )
+    _DP_MAX = _DP
+    _DP_SPLIT_SIZE = _DP.world_size
 
     global _EP
     assert _EP is None, "expert parallel group is already initialized"
@@ -2028,10 +2138,16 @@ def destroy_model_parallel():
         _PP.destroy()
     _PP = None
 
-    global _DP
-    if _DP:
+    global _DP, _DP_MAX, _DP_SPLIT_SIZE
+    if _DP is not None and _DP is not _DP_MAX:
+        _destroy_split_dp_group(_DP)
+    if _DP_MAX is not None:
+        _DP_MAX.destroy()
+    elif _DP:
         _DP.destroy()
     _DP = None
+    _DP_MAX = None
+    _DP_SPLIT_SIZE = None
 
     global _EP
     if _EP:

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, Iterable, Mapping
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -212,6 +212,25 @@ class EngineClient(ABC):
     async def is_paused(self) -> bool:
         """Return whether the engine is currently paused."""
         ...
+
+    def set_active_data_parallel_size(  # noqa: B027
+        self, active_data_parallel_size: int
+    ) -> None:
+        """Restrict request routing to the active DP rank prefix.
+
+        Default no-op so that engines without elastic DP routing are not
+        forced to implement this.
+        """
+
+    async def wait_for_dp_ranks_to_drain(  # noqa: B027
+        self,
+        dp_ranks: Sequence[int],
+        timeout: float = 300,
+    ) -> None:
+        """Wait until the listed DP ranks have no queued or running requests.
+
+        Default no-op for engines that do not track per-rank load.
+        """
 
     @abstractmethod
     def shutdown(self, timeout: float | None = None) -> None:

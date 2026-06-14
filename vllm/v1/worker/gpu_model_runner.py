@@ -8,7 +8,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
@@ -43,6 +43,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_dp_group,
     get_pp_group,
     get_tp_group,
     graph_capture,
@@ -538,6 +539,7 @@ class GPUModelRunner(
         self.encoder_cudagraph_manager: EncoderCudaGraphManager | None = None
 
         self.use_aux_hidden_state_outputs = False
+        self.skip_dummy_model_forward: bool = False
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
@@ -1879,6 +1881,29 @@ class GPUModelRunner(
         encoder_seq_lens_cpu = self.encoder_seq_lens.np[:num_reqs]
 
         return encoder_seq_lens, encoder_seq_lens_cpu
+
+    def retag_sleep_mode_weights(self, model: nn.Module | None = None) -> None:
+        """Split sleep-mode weight allocations into shared/expert buckets."""
+        if not self.vllm_config.model_config.enable_sleep_mode:
+            return
+
+        model = model or self.get_model()
+        if not is_mixture_of_experts(model):
+            return
+
+        from vllm.device_allocator.cumem import CuMemAllocator
+
+        allocator = CuMemAllocator.get_instance()
+        allocator.rename_tag("weights", "shared_weights")
+
+        expert_ptrs: set[int] = set()
+        for weight_group in model.expert_weights:
+            for weight in weight_group:
+                expert_ptrs.add(weight.data_ptr())
+                with suppress(RuntimeError):
+                    expert_ptrs.add(weight.untyped_storage().data_ptr())
+
+        allocator.retag_allocations_by_ptrs(expert_ptrs, "expert_weights")
 
     def _prepare_inputs(
         self,
@@ -3310,6 +3335,8 @@ class GPUModelRunner(
             return
 
         assert self.eplb_state is not None
+        if self.eplb_state.is_logical_sleep_active():
+            return
         assert self._moe_model is not None
         self.eplb_state.step(
             is_dummy,
@@ -5146,6 +5173,7 @@ class GPUModelRunner(
                             spec_config.draft_model_config,
                         )
                         eplb_models += 1
+                        self.retag_sleep_mode_weights(self.drafter.model)
 
                 self._setup_eagle3_aux_hidden_state_outputs()
 
@@ -5176,6 +5204,7 @@ class GPUModelRunner(
                         self.model_config,
                     )
                     eplb_models += 1
+                    self.retag_sleep_mode_weights(self._moe_model)
 
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory
@@ -5509,6 +5538,59 @@ class GPUModelRunner(
 
         return prompt_logprobs_dict
 
+    def _update_nixl_ep_sleep_mask(self, sleeping_ep_ranks: Sequence[int]) -> None:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        device_communicator = get_ep_group().device_communicator
+        if device_communicator is None:
+            if sleeping_ep_ranks:
+                raise RuntimeError(
+                    "Flash EP scaling requires an EP device communicator with "
+                    "NIXL peer masking support."
+                )
+            return
+        all2all_manager = device_communicator.all2all_manager
+        if all2all_manager is None or not hasattr(all2all_manager, "set_masked_ranks"):
+            if sleeping_ep_ranks:
+                raise RuntimeError(
+                    "Flash EP scaling requires --all2all-backend nixl_ep so "
+                    "sleeping EP ranks can be masked."
+                )
+            return
+        all2all_manager.set_masked_ranks(list(sleeping_ep_ranks))
+
+    def get_ep_sleep_state(self) -> dict[str, Any]:
+        from vllm.distributed.parallel_state import get_ep_group
+
+        ep_world_size = get_ep_group().world_size
+        sleeping_ep_ranks: list[int] = []
+        if (
+            self.eplb_state is not None
+            and self.eplb_state.logical_sleep_state is not None
+        ):
+            sleep_state = self.eplb_state.logical_sleep_state
+            sleeping_ep_ranks = sorted(
+                rank
+                for rank, new_rank in sleep_state.rank_mapping.items()
+                if new_rank == -1
+            )
+        active_ep_size = ep_world_size - len(sleeping_ep_ranks)
+        return {
+            "ep_world_size": ep_world_size,
+            "active_ep_size": active_ep_size,
+            "sleeping_ep_ranks": sleeping_ep_ranks,
+        }
+
+    def _sync_dp_group_to_active_ep_size(
+        self, active_ep_size: int | None = None
+    ) -> int:
+        if active_ep_size is None:
+            active_ep_size = int(self.get_ep_sleep_state()["active_ep_size"])
+        if self.parallel_config.data_parallel_size <= 1:
+            return active_ep_size
+        get_dp_group(active_ep_size)
+        return active_ep_size
+
     def _get_nans_in_logits(
         self,
         logits: torch.Tensor | None,
@@ -5603,6 +5685,25 @@ class GPUModelRunner(
                 pin_memory=self.pin_memory,
             )
         )
+
+    def resize_sleep_ep_ranks(self, sleeping_ep_ranks: list[int]) -> None:
+        assert self.parallel_config.enable_eplb, (
+            "Logical EP sleep requires EPLB to manage expert mappings."
+        )
+        assert self.eplb_state is not None
+        model = self.get_model()
+        assert is_mixture_of_experts(model), "Logical EP sleep requires an MoE model."
+        if sleeping_ep_ranks:
+            if self.eplb_state.is_logical_sleep_active():
+                self.eplb_state.resize_logical_sleep(sleeping_ep_ranks)
+            else:
+                self.eplb_state.prepare_logical_sleep(sleeping_ep_ranks)
+        else:
+            self.eplb_state.restore_logical_sleep()
+        self._update_nixl_ep_sleep_mask(sleeping_ep_ranks)
+        ep_world_size = int(self.get_ep_sleep_state()["ep_world_size"])
+        self._sync_dp_group_to_active_ep_size(ep_world_size - len(sleeping_ep_ranks))
+        torch.accelerator.synchronize()
 
     @torch.inference_mode()
     def _dummy_run(
@@ -5708,6 +5809,18 @@ class GPUModelRunner(
         num_tokens_unpadded = int(num_scheduled_tokens.sum())
 
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
+
+        _sleep_skip_forward = self.skip_dummy_model_forward
+        ep_sleep_state = self.get_ep_sleep_state()
+        active_ep_size = int(ep_sleep_state["active_ep_size"])
+        ep_world_size = int(ep_sleep_state["ep_world_size"])
+        self._sync_dp_group_to_active_ep_size(active_ep_size)
+        logical_sleep_active = active_ep_size < ep_world_size
+        if (
+            _sleep_skip_forward
+            and self.parallel_config.data_parallel_rank >= active_ep_size
+        ):
+            return torch.tensor([]), torch.tensor([])
 
         _cudagraph_mode, batch_desc, should_ubatch, num_tokens_across_dp, _ = (
             self._determine_batch_execution_and_padding(
@@ -5894,23 +6007,33 @@ class GPUModelRunner(
                     slot_mapping=slot_mappings,
                 ),
             ):
-                outputs = self.model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                    **model_kwargs,
-                )
+                if not _sleep_skip_forward:
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        positions=positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=inputs_embeds,
+                        **model_kwargs,
+                    )
+                else:
+                    outputs = None
 
-            if self.use_aux_hidden_state_outputs:
-                hidden_states, _ = outputs
+            if outputs is not None:
+                if self.use_aux_hidden_state_outputs:
+                    hidden_states, _ = outputs
+                else:
+                    hidden_states = outputs
             else:
-                hidden_states = outputs
+                hidden_states = None
 
-            if self.speculative_config and (
-                self.speculative_config.use_eagle()
-                or self.speculative_config.uses_draft_model()
-                or self.speculative_config.uses_extract_hidden_states()
+            if (
+                not _sleep_skip_forward
+                and self.speculative_config
+                and (
+                    self.speculative_config.use_eagle()
+                    or self.speculative_config.uses_draft_model()
+                    or self.speculative_config.uses_extract_hidden_states()
+                )
             ):
                 assert isinstance(
                     self.drafter,
@@ -5970,8 +6093,17 @@ class GPUModelRunner(
         # not have any requests to process, so they're executing dummy batches.
         # In such cases, we still have to trigger EPLB to make sure
         # ranks execute the rearrangement in synchronization.
-        if not skip_eplb:
+        if not skip_eplb and not logical_sleep_active:
             self.eplb_step(is_dummy=True, is_profile=is_profile)
+
+        if _sleep_skip_forward:
+            logger.debug_once(
+                "Dummy run skipped model/drafter (sync-only EP sleep or CuMem "
+                "weight offload); returning empty hidden states."
+            )
+            return torch.tensor([]), torch.tensor([])
+
+        assert hidden_states is not None
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         logit_indices_device = torch.from_numpy(logit_indices).to(
