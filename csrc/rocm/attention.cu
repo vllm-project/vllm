@@ -327,6 +327,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ seq_lens,   // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,   // [num_seqs]
+    const int64_t* __restrict__ slot_mapping_ptr,
+    const int* __restrict__ cu_kv_seqlens_ptr,
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes, // [num_heads]
     const int q_stride,
@@ -416,26 +418,27 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   // output layout from QKmfma : QH16xT4x4 16 qheads across 16 lanes, 16 tokens
   // across 4 rows x 4 tokens per lane
 
-  const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
-  const int last_seq_block = num_seq_blocks - 1;
-
-  const int* block_table_seq = block_tables + seq_idx * max_num_blocks_per_seq;
-
   int kphysical_block_number[TLOOP];
   #if defined(__HIP__FP8MFMA__)
   float q_max = 0;
   float q_scale = 1.0;
   #endif
 
+  // Per-sequence base offset into the flat slot_mapping tensor.
+  const int kv_seq_base = cu_kv_seqlens_ptr[seq_idx];
+
   // fetch k physical block numbers
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
     const int kglobal_token_idx = partition_start_token_idx + klocal_token_idx;
-    const int kblock_idx = (kglobal_token_idx < seq_len)
-                               ? kglobal_token_idx / BLOCK_SIZE
-                               : last_seq_block;
-    kphysical_block_number[token_depth] = block_table_seq[kblock_idx];
+    int slot_idx = 0;
+    if (kglobal_token_idx < seq_len) {
+      slot_idx = slot_mapping_ptr[kv_seq_base + kglobal_token_idx];
+    } else {
+      slot_idx = slot_mapping_ptr[kv_seq_base + seq_len - 1];
+    }
+    kphysical_block_number[token_depth] = slot_idx / BLOCK_SIZE;
   }
 
   // fetch Q in shared across warps and then write to registers
@@ -500,7 +503,12 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const cache_t* k_ptr2 = k_ptr + kblock_number * kv_block_stride;
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
-    const int kphysical_block_offset = klocal_token_idx % BLOCK_SIZE;
+    const int kglobal_token_idx =
+        partition_start_token_idx + klocal_token_idx;
+    const int safe_kglobal_idx =
+        (kglobal_token_idx < seq_len) ? kglobal_token_idx : (seq_len - 1);
+    const int kphysical_block_offset =
+        slot_mapping_ptr[kv_seq_base + safe_kglobal_idx] % BLOCK_SIZE;
     const cache_t* k_ptr3 = k_ptr2 + kphysical_block_offset * KX;
 
     for (int qkhe_depth = 0; qkhe_depth < QKHELOOP; qkhe_depth++) {
@@ -544,11 +552,11 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
       // tokens
       const int vglobal_token_idx =
           partition_start_token_idx + vlocal_token_idx;
-      const int vblock_idx = (vglobal_token_idx < seq_len)
-                                 ? vglobal_token_idx / BLOCK_SIZE
-                                 : last_seq_block;
+      const int clamped_idx =
+          (vglobal_token_idx < seq_len) ? vglobal_token_idx : (seq_len - 1);
+      const int vslot_idx = slot_mapping_ptr[kv_seq_base + clamped_idx];
       vphysical_block_number[vtoken_depth][vblock_depth] =
-          block_table_seq[vblock_idx];
+          vslot_idx / BLOCK_SIZE;
     }
   }
 
@@ -928,6 +936,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ seq_lens,   // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,   // [num_seqs]
+    const int64_t* __restrict__ slot_mapping,
+    const int* __restrict__ cu_kv_seqlens_ptr,
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes, // [num_heads]
     const int q_stride,
@@ -1009,33 +1019,34 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     }
   } else {  // warp within context
 
-    const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
-    const int last_seq_block = num_seq_blocks - 1;
-
-    const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
     // token id within partition
     const auto local_token_idx = threadIdx.x;
     // token id within sequence
     const int global_token_idx = partition_start_token_idx + local_token_idx;
 
-    // fetch block number for k
-    const int block_idx = (global_token_idx < seq_len)
-                              ? global_token_idx / BLOCK_SIZE
-                              : last_seq_block;
+    // Per-sequence base offset into the flat slot_mapping tensor.
+    const int kv_seq_base = cu_kv_seqlens_ptr[seq_idx];
 
-    // fetch k physical block number
-    //  int32 physical_block_number leads to overflow when multiplied with
-    //  kv_block_stride
+    // fetch slot (and derived block number) for k
+    const int slot =
+        (global_token_idx < seq_len)
+            ? slot_mapping[kv_seq_base + global_token_idx]
+            : slot_mapping[kv_seq_base + seq_len - 1];
+
     const int64_t physical_block_number =
-        static_cast<int64_t>(block_table[block_idx]);
+        static_cast<int64_t>(slot / BLOCK_SIZE);
 
     // fetch vphysical block numbers up front
-    const int warp_start_block_idx = warp_start_token_idx / BLOCK_SIZE;
     for (int b = 0; b < VBLOCKS; b++) {
-      const int vblock_idx = warp_start_block_idx + b;
-      const int vblock_idx_ctx =
-          (vblock_idx <= last_seq_block) ? vblock_idx : last_seq_block;
-      vphysical_blocks[b] = block_table[vblock_idx_ctx];
+      const int token_idx =
+          warp_start_token_idx + b * BLOCK_SIZE;
+      const int clamped_token_idx =
+          (token_idx < seq_len)
+              ? token_idx
+              : (seq_len - 1);
+      const int slot_v =
+          slot_mapping[kv_seq_base + clamped_token_idx];
+      vphysical_blocks[b] = slot_v / BLOCK_SIZE;
     }
 
     // fetch q elements
@@ -1065,7 +1076,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
                            wg_start_kv_head_idx * kv_head_stride;
 
     // physical_block_offset is already cast in terms of _B16x8
-    const int physical_block_offset = local_token_idx % BLOCK_SIZE;
+    const int physical_block_offset = slot % BLOCK_SIZE;
 
     // each K fetch is for 8 elements of cache_t which are later dequantized to
     // scalar_t for fp8
@@ -1730,6 +1741,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ seq_lens,  // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,   // [num_seqs]
+    const int64_t* __restrict__ slot_mapping_ptr,
+    const int* __restrict__ cu_kv_seqlens_ptr,
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
@@ -1862,10 +1875,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     }
   }
 
-  const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
-  const int last_seq_block = num_seq_blocks - 1;
-
-  const int* block_table_seq = block_tables + seq_idx * max_num_blocks_per_seq;
+  // Per-sequence base offset into the flat slot_mapping tensor.
+  const int kv_seq_base = cu_kv_seqlens_ptr[seq_idx];
 
   int kphysical_block_number[TLOOP];
 
@@ -1874,10 +1885,13 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
     const int kglobal_token_idx = partition_start_token_idx + klocal_token_idx;
-    const int kblock_idx = (kglobal_token_idx < seq_len)
-                               ? kglobal_token_idx / BLOCK_SIZE
-                               : last_seq_block;
-    kphysical_block_number[token_depth] = block_table_seq[kblock_idx];
+    int slot_idx = 0;
+    if (kglobal_token_idx < seq_len) {
+      slot_idx = slot_mapping_ptr[kv_seq_base + kglobal_token_idx];
+    } else {
+      slot_idx = slot_mapping_ptr[kv_seq_base + seq_len - 1];
+    }
+    kphysical_block_number[token_depth] = slot_idx / BLOCK_SIZE;
   }
 
   constexpr int KX = 16 / sizeof(cache_t);
@@ -1891,7 +1905,12 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const cache_t* k_ptr2 = k_ptr + kblock_number * kv_block_stride;
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
-    const int kphysical_block_offset = klocal_token_idx % BLOCK_SIZE;
+    const int kglobal_token_idx =
+        partition_start_token_idx + klocal_token_idx;
+    const int safe_kglobal_idx =
+        (kglobal_token_idx < seq_len) ? kglobal_token_idx : (seq_len - 1);
+    const int kphysical_block_offset =
+        slot_mapping_ptr[kv_seq_base + safe_kglobal_idx] % BLOCK_SIZE;
     const cache_t* k_ptr3 = k_ptr2 + kphysical_block_offset * KX;
 
     for (int qkhe_depth = 0; qkhe_depth < QKHELOOP; qkhe_depth++) {
@@ -1928,11 +1947,11 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
           vblock_depth * BLOCK_SIZE;
       const int vglobal_token_idx =
           partition_start_token_idx + vlocal_token_idx;
-      const int vblock_idx = (vglobal_token_idx < seq_len)
-                                 ? vglobal_token_idx / BLOCK_SIZE
-                                 : last_seq_block;
+      const int clamped_idx =
+          (vglobal_token_idx < seq_len) ? vglobal_token_idx : (seq_len - 1);
+      const int vslot_idx = slot_mapping_ptr[kv_seq_base + clamped_idx];
       vphysical_block_number[vtoken_depth][vblock_depth] =
-          block_table_seq[vblock_idx];
+          vslot_idx / BLOCK_SIZE;
     }
   }
 
@@ -2167,6 +2186,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
+    const int64_t* __restrict__ slot_mapping_ptr,
+    const int* __restrict__ cu_kv_seqlens_ptr,
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
@@ -2498,6 +2519,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ seq_lens,  // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,   // [num_seqs]
+    const int64_t* __restrict__ slot_mapping_ptr,
+    const int* __restrict__ cu_kv_seqlens_ptr,
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
@@ -2629,10 +2652,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     }
   }
 
-  const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
-  const int last_seq_block = num_seq_blocks - 1;
-
-  const int* block_table_seq = block_tables + seq_idx * max_num_blocks_per_seq;
+  // Per-sequence base offset into the flat slot_mapping tensor.
+  const int kv_seq_base = cu_kv_seqlens_ptr[seq_idx];
 
   int kphysical_block_number[TLOOP];
 
@@ -2641,10 +2662,13 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
     const int kglobal_token_idx = partition_start_token_idx + klocal_token_idx;
-    const int kblock_idx = (kglobal_token_idx < seq_len)
-                               ? kglobal_token_idx / BLOCK_SIZE
-                               : last_seq_block;
-    kphysical_block_number[token_depth] = block_table_seq[kblock_idx];
+    int slot_idx = 0;
+    if (kglobal_token_idx < seq_len) {
+      slot_idx = slot_mapping_ptr[kv_seq_base + kglobal_token_idx];
+    } else {
+      slot_idx = slot_mapping_ptr[kv_seq_base + seq_len - 1];
+    }
+    kphysical_block_number[token_depth] = slot_idx / BLOCK_SIZE;
   }
 
   constexpr int KX = 16 / sizeof(cache_t);
@@ -2658,7 +2682,12 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const cache_t* k_ptr2 = k_ptr + kblock_number * kv_block_stride;
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
-    const int kphysical_block_offset = klocal_token_idx % BLOCK_SIZE;
+    const int kglobal_token_idx =
+        partition_start_token_idx + klocal_token_idx;
+    const int safe_kglobal_idx =
+        (kglobal_token_idx < seq_len) ? kglobal_token_idx : (seq_len - 1);
+    const int kphysical_block_offset =
+        slot_mapping_ptr[kv_seq_base + safe_kglobal_idx] % BLOCK_SIZE;
     const cache_t* k_ptr3 = k_ptr2 + kphysical_block_offset * KX;
 
     for (int qkhe_depth = 0; qkhe_depth < QKHELOOP; qkhe_depth++) {
@@ -2695,11 +2724,11 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
           rowid * VTOKENS_PER_LANE + vblock_depth * BLOCK_SIZE;
       const int vglobal_token_idx =
           partition_start_token_idx + vlocal_token_idx;
-      const int vblock_idx = (vglobal_token_idx < seq_len)
-                                 ? vglobal_token_idx / BLOCK_SIZE
-                                 : last_seq_block;
+      const int clamped_idx =
+          (vglobal_token_idx < seq_len) ? vglobal_token_idx : (seq_len - 1);
+      const int vslot_idx = slot_mapping_ptr[kv_seq_base + clamped_idx];
       vphysical_block_number[vtoken_depth][vblock_depth] =
-          block_table_seq[vblock_idx];
+          vslot_idx / BLOCK_SIZE;
     }
   }
 
@@ -2900,6 +2929,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ seq_lens,      // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
+    const int64_t* __restrict__ slot_mapping_ptr,
+    const int* __restrict__ cu_kv_seqlens_ptr,
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
@@ -3129,6 +3160,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int* __restrict__ block_tables,    // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ seq_lens,    // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
+    const int64_t* __restrict__ slot_mapping_ptr,
+    const int* __restrict__ cu_kv_seqlens_ptr,
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride,
@@ -3156,6 +3189,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int* __restrict__ block_tables,    // [num_seqs, max_num_blocks_per_seq]
     const int* __restrict__ seq_lens,    // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
+    const int64_t* __restrict__ slot_mapping_ptr,
+    const int* __restrict__ cu_kv_seqlens_ptr,
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride,
@@ -3193,10 +3228,11 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                           GQA_RATIO, MFMA_TYPE>                \
       <<<grid, block, 0, stream>>>(                                            \
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
-          block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
-          max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride, \
-          kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,  \
-          max_ctx_blocks, k_scale_ptr, v_scale_ptr);
+          block_tables_ptr, seq_lens_ptr, query_start_loc_ptr, slot_mapping_ptr,\
+          cu_kv_seqlens_ptr, max_num_blocks_per_seq, alibi_slopes_ptr,         \
+          q_stride, kv_block_stride, kv_head_stride, exp_sums_ptr,             \
+          max_logits_ptr, tmp_out_ptr, out_ptr, max_ctx_blocks, k_scale_ptr,   \
+          v_scale_ptr);
 
 #define LAUNCH_CUSTOM_ATTENTION_MFMA4(GQA_RATIO)                               \
   paged_attention_ll4mi_QKV_mfma4_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,   \
@@ -3205,8 +3241,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
       <<<grid, block, 0, stream>>>(                                            \
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
           block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
-          max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride, \
-          kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,  \
+          slot_mapping_ptr, cu_kv_seqlens_ptr, max_num_blocks_per_seq,         \
+          alibi_slopes_ptr, q_stride, kv_block_stride, kv_head_stride,         \
+          exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,                  \
           max_ctx_blocks, k_scale_ptr, v_scale_ptr);
 
 #define LAUNCH_CUSTOM_REDUCTION(NPAR_LOOPS)                                 \
@@ -3224,7 +3261,8 @@ void paged_attention_custom_launcher(
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, const int num_kv_heads, float scale,
     torch::Tensor& block_tables, torch::Tensor& seq_lens,
-    const std::optional<torch::Tensor>& query_start_loc, int max_seq_len,
+    const std::optional<torch::Tensor>& query_start_loc,
+    torch::Tensor& slot_mapping, int max_seq_len,
     const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
     torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale) {
   int num_seqs = block_tables.size(0);
@@ -3235,12 +3273,31 @@ void paged_attention_custom_launcher(
   int kv_block_stride = key_cache.stride(0);
   int kv_head_stride = key_cache.stride(1);
 
+  // Set up device guard and stream BEFORE allocating any temporary tensors
+  // (cu_kv_seqlens below). The kernel runs on `stream`; if cu_kv_seqlens is
+  // allocated on a different stream, the caching allocator will reclaim its
+  // memory before the kernel finishes reading it.
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
   // NOTE: query start location is optional for V0 decode should not be used.
   // If batch contains mix of prefills and decode, prefills should be skipped.
   const int* query_start_loc_ptr =
       query_start_loc
           ? reinterpret_cast<const int*>(query_start_loc.value().data_ptr())
           : nullptr;
+  const int64_t* slot_mapping_ptr =
+      reinterpret_cast<const int64_t*>(slot_mapping.data_ptr());
+
+  // Build cumulative KV seq-length offsets so the kernel can find each
+  // sequence's base offset in the flat slot_mapping tensor:
+  //   cu_kv_seqlens[i] == sum(seq_lens[:i]),  length = num_seqs + 1
+  auto _seq_lens_i32 = seq_lens.to(at::kInt);
+  auto _cumsum = at::cumsum(_seq_lens_i32, 0).to(at::kInt);
+  auto _zero = at::zeros(
+      {1}, at::TensorOptions().dtype(at::kInt).device(seq_lens.device()));
+  at::Tensor cu_kv_seqlens = at::cat({_zero, _cumsum}, 0);
+  const int* cu_kv_seqlens_ptr = cu_kv_seqlens.data_ptr<int>();
 
   // NOTE: alibi_slopes is optional.
   const float* alibi_slopes_ptr =
@@ -3278,8 +3335,6 @@ void paged_attention_custom_launcher(
   constexpr int NTHR = 256;
   dim3 grid(num_seqs, max_num_partitions, num_kv_heads);
   dim3 block(NTHR);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // mfma4 kernel is faster than mfma16 for gqa_ratio <= 4
   switch (gqa_ratio) {
@@ -3380,7 +3435,8 @@ void paged_attention_custom_launcher_navi(
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, const int num_kv_heads, float scale,
     torch::Tensor& block_tables, torch::Tensor& seq_lens,
-    const std::optional<torch::Tensor>& query_start_loc, int max_seq_len,
+    const std::optional<torch::Tensor>& query_start_loc,
+    torch::Tensor& slot_mapping, int max_seq_len,
     const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
     torch::Tensor& v_scale) {
   int num_seqs = block_tables.size(0);
@@ -3391,12 +3447,31 @@ void paged_attention_custom_launcher_navi(
   int kv_block_stride = key_cache.stride(0);
   int kv_head_stride = key_cache.stride(1);
 
+  // Set up device guard and stream BEFORE allocating any temporary tensors
+  // (cu_kv_seqlens below). The kernel runs on `stream`; if cu_kv_seqlens is
+  // allocated on a different stream, the caching allocator will reclaim its
+  // memory before the kernel finishes reading it.
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
   // NOTE: query start location is optional for V0 decode should not be used.
   // If batch contains mix of prefills and decode, prefills should be skipped.
   const int* query_start_loc_ptr =
       query_start_loc
           ? reinterpret_cast<const int*>(query_start_loc.value().data_ptr())
           : nullptr;
+  const int64_t* slot_mapping_ptr =
+      reinterpret_cast<const int64_t*>(slot_mapping.data_ptr());
+
+  // Build cumulative KV seq-length offsets so the kernel can find each
+  // sequence's base offset in the flat slot_mapping tensor:
+  //   cu_kv_seqlens[i] == sum(seq_lens[:i]),  length = num_seqs + 1
+  auto _seq_lens_i32 = seq_lens.to(at::kInt);
+  auto _cumsum = at::cumsum(_seq_lens_i32, 0).to(at::kInt);
+  auto _zero = at::zeros(
+      {1}, at::TensorOptions().dtype(at::kInt).device(seq_lens.device()));
+  at::Tensor cu_kv_seqlens = at::cat({_zero, _cumsum}, 0);
+  const int* cu_kv_seqlens_ptr = cu_kv_seqlens.data_ptr<int>();
 
   // NOTE: Navi does not support alibi_slopes.
   const float* alibi_slopes_ptr = nullptr;
@@ -3427,8 +3502,6 @@ void paged_attention_custom_launcher_navi(
   constexpr int NTHR = 256;
   dim3 grid(num_seqs, max_num_partitions, num_kv_heads);
   dim3 block(NTHR);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   switch (gqa_ratio) {
     case 1:
@@ -3551,14 +3624,14 @@ void paged_attention_custom_launcher_navi(
     paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
                                     OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE>( \
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
-        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
+        num_kv_heads, scale, block_tables, seq_lens, query_start_loc, slot_mapping,\
         max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);        \
   } else {                                                                  \
     paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,        \
                                          HEAD_SIZE, OUTT, PSIZE,            \
                                          ALIBI_ENABLED, MFMA_TYPE>(         \
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
-        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
+        num_kv_heads, scale, block_tables, seq_lens, query_start_loc, slot_mapping,\
         max_seq_len, alibi_slopes, k_scale, v_scale);                       \
   }
 
@@ -3651,6 +3724,7 @@ void paged_attention(
     torch::Tensor& block_tables, // [num_seqs, max_num_blocks_per_seq]
     torch::Tensor& seq_lens, // [num_seqs]
     const std::optional<torch::Tensor>& query_start_loc, // [num_seqs]
+    torch::Tensor& slot_mapping,
     int64_t block_size, int64_t max_seq_len,
     const std::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
