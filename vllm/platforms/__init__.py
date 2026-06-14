@@ -108,6 +108,34 @@ def cuda_platform_plugin() -> str | None:
     return "vllm.platforms.cuda.CudaPlatform" if is_cuda else None
 
 
+def _rocm_detect_via_hip() -> bool:
+    """Fallback ROCm detection using ctypes HIP when amdsmi is unavailable.
+
+    amdsmi requires sysfs/hwmon paths that may not be exposed inside
+    unprivileged containers even when the GPU is accessible via /dev/kfd and
+    /dev/dri.  hipGetDeviceCount() succeeds as long as those device nodes are
+    mounted, making it a reliable fallback for containerised deployments.
+
+    See: https://github.com/ROCm/amdsmi/issues/75 and
+    https://github.com/ROCm/ROCm/issues/5000
+    """
+    try:
+        import ctypes
+
+        hip = ctypes.CDLL("libamdhip64.so")
+        count = ctypes.c_int(0)
+        if hip.hipGetDeviceCount(ctypes.byref(count)) == 0 and count.value > 0:
+            logger.debug(
+                "Confirmed ROCm platform via HIP ctypes fallback "
+                "(%d device(s)).",
+                count.value,
+            )
+            return True
+    except Exception as e:
+        logger.debug("HIP ctypes fallback also failed: %s", e)
+    return False
+
+
 def rocm_platform_plugin() -> str | None:
     is_rocm = False
     logger.debug("Checking if ROCm platform is available.")
@@ -124,7 +152,10 @@ def rocm_platform_plugin() -> str | None:
         finally:
             amdsmi.amdsmi_shut_down()
     except Exception as e:
-        logger.debug("ROCm platform is not available because: %s", str(e))
+        logger.debug(
+            "amdsmi unavailable (%s); trying HIP ctypes fallback.", str(e)
+        )
+        is_rocm = _rocm_detect_via_hip()
 
     return "vllm.platforms.rocm.RocmPlatform" if is_rocm else None
 
