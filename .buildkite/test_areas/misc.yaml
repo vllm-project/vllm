@@ -138,10 +138,25 @@ steps:
     - vllm/v1/spec_decode/extract_hidden_states.py
     - vllm/model_executor/models/extract_hidden_states.py
     - vllm/transformers_utils/configs/extract_hidden_states.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
     - tests/v1/kv_connector/extract_hidden_states_integration
   commands:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s v1/kv_connector/extract_hidden_states_integration
+
+- label: Extract Hidden States Integration (2 GPUs)
+  key: extract-hidden-states-integration-2-gpus
+  timeout_in_minutes: 20
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/v1/spec_decode/extract_hidden_states.py
+    - vllm/model_executor/models/extract_hidden_states.py
+    - vllm/transformers_utils/configs/extract_hidden_states.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
+    - tests/v1/kv_connector/extract_hidden_states_integration
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s -m 'distributed' v1/kv_connector/extract_hidden_states_integration
 
 - label: Regression
   key: regression

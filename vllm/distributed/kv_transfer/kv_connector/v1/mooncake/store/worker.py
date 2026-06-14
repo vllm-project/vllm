@@ -1426,6 +1426,22 @@ class MooncakeStoreWorker:
             return self.kv_send_thread.get_kv_events()
         return []
 
+    def close(self) -> None:
+        """Release the MooncakeDistributedStore handle on teardown.
+
+        Closing the store frees its TransferEngine, the registered RDMA
+        buffers, and the connection to the master server. Idempotent so it is
+        safe to call from both the explicit shutdown path and ``__del__``.
+        """
+        store = getattr(self, "store", None)
+        if store is None:
+            return
+        self.store = None
+        try:
+            store.close()
+        except Exception as e:
+            logger.warning("Error closing MooncakeDistributedStore: %s", e)
+
 
 # ============================================================
 # Lookup Key Server
