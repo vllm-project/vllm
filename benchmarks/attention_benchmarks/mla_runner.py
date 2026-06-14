@@ -8,6 +8,8 @@ This module provides helpers for running MLA backends without
 needing full VllmConfig integration.
 """
 
+import statistics
+
 import numpy as np
 import torch
 from batch_spec import parse_batch_spec
@@ -17,6 +19,8 @@ from common import (
     MockIndexer,
     MockKVBProj,
     MockLayer,
+    run_do_bench,
+    run_ncu_profile,
     setup_mla_dims,
 )
 
@@ -29,6 +33,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 
 # ============================================================================
 # VllmConfig Creation
@@ -79,8 +84,8 @@ def create_minimal_vllm_config(
         index_topk: Optional topk value for sparse MLA backends. If provided,
                     the config will include index_topk for sparse attention.
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4", "flashinfer",
-                        "cudnn", "trtllm"). Configures the attention config to
-                        force the specified prefill backend.
+                        "trtllm"). Configures the attention config to force
+                        the specified prefill backend.
 
     Returns:
         VllmConfig for benchmarking
@@ -179,27 +184,13 @@ def create_minimal_vllm_config(
 
     if prefill_backend is not None:
         prefill_cfg = get_prefill_backend_config(prefill_backend)
-        if prefill_cfg.get("mla_prefill_backend_enum") is not None:
-            # Registry-based backends bypass the deprecated boolean flags.
-            from vllm.v1.attention.backends.mla.prefill import MLAPrefillBackendEnum
-
-            vllm_config.attention_config.mla_prefill_backend = MLAPrefillBackendEnum[
-                prefill_cfg["mla_prefill_backend_enum"]
+        vllm_config.attention_config.mla_prefill_backend = prefill_cfg[
+            "mla_prefill_backend"
+        ]
+        if prefill_cfg["flash_attn_version"] is not None:
+            vllm_config.attention_config.flash_attn_version = prefill_cfg[
+                "flash_attn_version"
             ]
-        else:
-            if prefill_cfg["flash_attn_version"] is not None:
-                vllm_config.attention_config.flash_attn_version = prefill_cfg[
-                    "flash_attn_version"
-                ]
-            vllm_config.attention_config.disable_flashinfer_prefill = prefill_cfg[
-                "disable_flashinfer_prefill"
-            ]
-            vllm_config.attention_config.use_cudnn_prefill = prefill_cfg[
-                "use_cudnn_prefill"
-            ]
-            vllm_config.attention_config.use_trtllm_ragged_deepseek_prefill = (
-                prefill_cfg["use_trtllm_ragged_deepseek_prefill"]
-            )
 
     return vllm_config
 
@@ -214,34 +205,27 @@ def create_minimal_vllm_config(
 _PREFILL_BACKEND_CONFIG: dict[str, dict] = {
     "fa2": {
         "flash_attn_version": 2,
-        "disable_flashinfer_prefill": True,
-        "use_cudnn_prefill": False,
-        "use_trtllm_ragged_deepseek_prefill": False,
+        "mla_prefill_backend": MLAPrefillBackendEnum.FLASH_ATTN,
     },
     "fa3": {
         "flash_attn_version": 3,
-        "disable_flashinfer_prefill": True,
-        "use_cudnn_prefill": False,
-        "use_trtllm_ragged_deepseek_prefill": False,
+        "mla_prefill_backend": MLAPrefillBackendEnum.FLASH_ATTN,
     },
     "fa4": {
         "flash_attn_version": 4,
-        "disable_flashinfer_prefill": True,
-        "use_cudnn_prefill": False,
-        "use_trtllm_ragged_deepseek_prefill": False,
+        "mla_prefill_backend": MLAPrefillBackendEnum.FLASH_ATTN,
     },
     "flashinfer": {
-        "mla_prefill_backend_enum": "FLASHINFER",
-    },
-    "cudnn": {
-        # cuDNN prefill backend was removed; AttentionConfig raises on use.
-        "mla_prefill_backend_enum": "FLASHINFER",
+        "flash_attn_version": None,
+        "mla_prefill_backend": MLAPrefillBackendEnum.FLASHINFER,
     },
     "trtllm": {
-        "mla_prefill_backend_enum": "TRTLLM_RAGGED",
+        "flash_attn_version": None,
+        "mla_prefill_backend": MLAPrefillBackendEnum.TRTLLM_RAGGED,
     },
     "tokenspeed": {
-        "mla_prefill_backend_enum": "TOKENSPEED_MLA",
+        "flash_attn_version": None,
+        "mla_prefill_backend": MLAPrefillBackendEnum.TOKENSPEED_MLA,
     },
 }
 
@@ -840,7 +824,7 @@ def _run_single_benchmark(
             num_prefill, mla_dims, query_fmt, device, torch.bfloat16
         )
 
-    # Build forward function
+    # Build forward function (runs a single decode/prefill pass)
     def forward_fn():
         results = []
         if has_decode:
@@ -859,44 +843,35 @@ def _run_single_benchmark(
             )
         return results[0] if len(results) == 1 else tuple(results)
 
-    # Warmup
-    for _ in range(config.warmup_iters):
-        forward_fn()
-    torch.accelerator.synchronize()
-
-    # Optionally capture a CUDA graph after warmup.
-    # Graph replay eliminates CPU launch overhead so timings reflect pure
-    # kernel time.
-    if config.use_cuda_graphs:
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            forward_fn()
-        benchmark_fn = graph.replay
-    else:
-        benchmark_fn = forward_fn
-
-    # Benchmark
-    times = []
-    for _ in range(config.repeats):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-
-        start.record()
+    def benchmark_fn():
         for _ in range(config.num_layers):
-            benchmark_fn()
-        end.record()
+            forward_fn()
 
-        torch.accelerator.synchronize()
-        elapsed_ms = start.elapsed_time(end)
-        times.append(elapsed_ms / 1000.0 / config.num_layers)
+    if config.ncu_profile:
+        run_ncu_profile(benchmark_fn)
+        return BenchmarkResult(
+            config=config,
+            mean_time=0.0,
+            median_time=0.0,
+            std_time=0.0,
+            min_time=0.0,
+            max_time=0.0,
+            throughput_tokens_per_sec=0.0,
+        )
 
-    mean_time = float(np.mean(times))
+    all_ms = run_do_bench(benchmark_fn, config.use_cuda_graphs, config.warmup_ms)
+
+    # Convert ms to seconds per layer
+    times = [t / 1000.0 / config.num_layers for t in all_ms]
+    mean_time = statistics.mean(times)
+
     return BenchmarkResult(
         config=config,
         mean_time=mean_time,
-        std_time=float(np.std(times)),
-        min_time=float(np.min(times)),
-        max_time=float(np.max(times)),
+        median_time=statistics.median(times),
+        std_time=statistics.stdev(times) if len(times) > 1 else 0.0,
+        min_time=min(times),
+        max_time=max(times),
         throughput_tokens_per_sec=total_q / mean_time if mean_time > 0 else 0,
     )
 
@@ -1020,7 +995,6 @@ def _run_mla_benchmark_batched(
                         f"version {fa_version}, got "
                         f"{actual_fa_version} on {actual_class}."
                     )
-
         # Run each benchmark with the shared impl
         for config, threshold, num_splits in configs_with_params:
             # Set threshold for this benchmark (FlashAttn/FlashMLA only)

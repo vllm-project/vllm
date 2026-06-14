@@ -173,7 +173,7 @@ def main():
     start_weight_update(BASE_URL, is_checkpoint_format=False)
 
     print("Broadcasting weights via CUDA IPC (HTTP)...")
-    trainer_args = IPCTrainerSendWeightsArgs(mode="http", url=BASE_URL)
+    trainer_args = IPCTrainerSendWeightsArgs(send_mode="http", url=BASE_URL)
     IPCWeightTransferEngine.trainer_send_weights(
         iterator=train_model.named_parameters(),
         trainer_args=trainer_args,

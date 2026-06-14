@@ -397,20 +397,12 @@ class CLIPAttention(nn.Module):
         )
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        if attn_cls == MMEncoderAttention:
-            self.attn = attn_cls(
-                self.num_heads_per_partition,
-                self.head_dim,
-                self.scale,
-                prefix=f"{prefix}.attn",
-            )
-        else:
-            self.attn = attn_cls(
-                self.num_heads_per_partition,
-                self.head_dim,
-                self.scale,
-                prefix=f"{prefix}.attn",
-            )
+        self.attn = attn_cls(
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,

@@ -6,7 +6,9 @@ import nixl_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import envs
+from vllm.config import get_current_vllm_config
+from vllm.distributed import get_ep_group
+from vllm.distributed.device_communicators.all2all import NixlEPAll2AllManager
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -138,6 +140,17 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def max_num_tokens_per_rank(self) -> int | None:
         return self.max_tokens_per_rank
 
+    def on_commit(self) -> None:
+        device_communicator = get_ep_group().device_communicator
+        assert device_communicator is not None
+        all2all_manager = device_communicator.all2all_manager
+        assert isinstance(all2all_manager, NixlEPAll2AllManager)
+        # maybe_make_prepare_finalize(..., eep_stage=True) initializes self.buffer
+        # with get_handle(..., stage=True), which stages global NIXL state for the
+        # new config but leaves it inactive while the old config remains active.
+        # When EEP commit switches to this P/F, this P/F needs to commit that state.
+        all2all_manager.commit_staged_state()
+
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int64
 
@@ -179,10 +192,11 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         x = x.view((-1, hidden_dim))
         q_dtype = quant_config.quant_dtype
 
-        if envs.VLLM_FLASHINFER_MOE_BACKEND == "masked_gemm":
+        moe_backend = get_current_vllm_config().kernel_config.moe_backend
+        if moe_backend == "flashinfer_cutedsl":
             logger.info_once(
-                "Skip quantization when using FlashInfer CUTEDSL(masked_gemm) "
-                "for ModelOptNvFp4FusedMoE."
+                "Skip quantization when using FlashInfer CUTEDSL "
+                "(--moe-backend flashinfer_cutedsl) for ModelOptNvFp4FusedMoE."
             )
             q_dtype = None
 

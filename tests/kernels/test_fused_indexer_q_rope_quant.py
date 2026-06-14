@@ -13,6 +13,9 @@ the DeepseekV4 indexer in model_tracking:
 Expects bit-exact equality on both q_fp8 and weights_out.
 """
 
+import contextlib
+from unittest import mock
+
 import pytest
 import torch
 
@@ -20,9 +23,8 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
-from vllm.v1.attention.ops.deepseek_v4_ops.fused_indexer_q import (
-    fused_indexer_q_rope_quant,
-)
+from vllm.models.deepseek_v4.common.ops import fused_indexer_q_rope_quant
+from vllm.utils.import_utils import has_cutedsl
 
 HEAD_DIM = 128
 ROPE_DIM = 64
@@ -125,8 +127,14 @@ def _reference(
 @pytest.mark.parametrize("num_tokens", [1, 7, 32, 257, 1023])
 @pytest.mark.parametrize("cache_dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("use_fp4", [False, True])
+@pytest.mark.parametrize("use_cutedsl", [False, True])
 @torch.inference_mode()
-def test_fused_indexer_q_rope_quant_matches_unfused(num_tokens, cache_dtype, use_fp4):
+def test_fused_indexer_q_rope_quant_matches_unfused(
+    num_tokens, cache_dtype, use_fp4, use_cutedsl
+):
+    if use_cutedsl and not has_cutedsl():
+        pytest.skip("cutedsl (cutlass) not installed")
+
     device = "cuda"
     torch.manual_seed(0)
 
@@ -142,9 +150,26 @@ def test_fused_indexer_q_rope_quant_matches_unfused(num_tokens, cache_dtype, use
     q_quant_ref, weights_ref = _reference(
         positions, q, cos_sin_cache, weights, softmax_scale, head_scale, use_fp4
     )
-    q_quant_fused, weights_fused = fused_indexer_q_rope_quant(
-        positions, q.clone(), cos_sin_cache, weights, softmax_scale, head_scale, use_fp4
+    # use_cutedsl=False: force the triton path even when cutedsl is installed
+    # by patching the dispatcher's has_cutedsl() binding to return False.
+    cutedsl_patch = (
+        mock.patch(
+            "vllm.models.deepseek_v4.common.ops.fused_indexer_q.has_cutedsl",
+            return_value=False,
+        )
+        if not use_cutedsl
+        else contextlib.nullcontext()
     )
+    with cutedsl_patch:
+        q_quant_fused, weights_fused = fused_indexer_q_rope_quant(
+            positions,
+            q.clone(),
+            cos_sin_cache,
+            weights,
+            softmax_scale,
+            head_scale,
+            use_fp4,
+        )
 
     if use_fp4:
         q_quant_ref, q_scale_ref = q_quant_ref
