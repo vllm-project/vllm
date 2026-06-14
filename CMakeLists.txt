@@ -385,76 +385,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
-  #
-  # Machete kernels
-
-  # The machete kernels only work on hopper and require CUDA 12.0 or later.
-  # Only build Machete kernels if we are building for something compatible with sm90a
-  cuda_archs_loose_intersection(MACHETE_ARCHS "9.0a" "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND MACHETE_ARCHS)
-    #
-    # For the Machete kernels we automatically generate sources for various
-    # preselected input type pairs and schedules.
-    # Generate sources:
-    set(MACHETE_GEN_SCRIPT
-      ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py)
-    file(MD5 ${MACHETE_GEN_SCRIPT} MACHETE_GEN_SCRIPT_HASH)
-
-    message(STATUS "Machete generation script hash: ${MACHETE_GEN_SCRIPT_HASH}")
-    message(STATUS "Last run machete generate script hash: $CACHE{MACHETE_GEN_SCRIPT_HASH}")
-
-    if (NOT DEFINED CACHE{MACHETE_GEN_SCRIPT_HASH}
-        OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
-      execute_process(
-        COMMAND ${CMAKE_COMMAND} -E env
-        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
-          ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT}
-        RESULT_VARIABLE machete_generation_result
-        OUTPUT_VARIABLE machete_generation_output
-        OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
-        ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
-      )
-
-      if (NOT machete_generation_result EQUAL 0)
-        message(FATAL_ERROR "Machete generation failed."
-                            " Result: \"${machete_generation_result}\""
-                            "\nCheck the log for details: "
-                            "${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log")
-      else()
-        set(MACHETE_GEN_SCRIPT_HASH ${MACHETE_GEN_SCRIPT_HASH}
-            CACHE STRING "Last run machete generate script hash" FORCE)
-        message(STATUS "Machete generation completed successfully.")
-      endif()
-    else()
-      message(STATUS "Machete generation script has not changed, skipping generation.")
-    endif()
-
-    # Add machete generated sources
-    file(GLOB MACHETE_GEN_SOURCES "csrc/quantization/machete/generated/*.cu")
-    list(APPEND VLLM_EXT_SRC ${MACHETE_GEN_SOURCES})
-
-    # forward compatible
-    set_gencode_flags_for_srcs(
-      SRCS "${MACHETE_GEN_SOURCES}"
-      CUDA_ARCHS "${MACHETE_ARCHS}")
-
-    list(APPEND VLLM_EXT_SRC
-      csrc/quantization/machete/machete_pytorch.cu)
-
-    message(STATUS "Building Machete kernels for archs: ${MACHETE_ARCHS}")
-  else()
-    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0
-        AND MACHETE_ARCHS)
-      message(STATUS "Not building Machete kernels as CUDA Compiler version is "
-                     "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
-                     "later if you intend on running w4a16 quantized models on "
-                     "Hopper.")
-    else()
-      message(STATUS "Not building Machete kernels as no compatible archs "
-                     "found in CUDA target architectures")
-    endif()
-  endif()
-
 
 
 # if CUDA endif
@@ -503,7 +433,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
     "csrc/libtorch_stable/permute_cols.cu"
     "csrc/libtorch_stable/quantization/gptq/q_gemm.cu"
-    "csrc/libtorch_stable/quantization/gguf/gguf_kernel.cu"
     "csrc/libtorch_stable/pos_encoding_kernels.cu"
     "csrc/libtorch_stable/fused_qknorm_rope_kernel.cu"
     "csrc/libtorch_stable/layernorm_kernels.cu"
@@ -532,6 +461,75 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu"
       "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu"
       "csrc/libtorch_stable/minimax_reduce_rms_kernel.cu")
+
+    #
+    # Machete kernels
+    #
+    # The machete kernels only work on hopper and require CUDA 12.0 or later.
+    # Only build Machete kernels if we are building for something compatible with sm90a
+    cuda_archs_loose_intersection(MACHETE_ARCHS "9.0a" "${CUDA_ARCHS}")
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND MACHETE_ARCHS)
+      #
+      # For the Machete kernels we automatically generate sources for various
+      # preselected input type pairs and schedules.
+      # Generate sources:
+      set(MACHETE_GEN_SCRIPT
+        ${CMAKE_CURRENT_SOURCE_DIR}/csrc/libtorch_stable/quantization/machete/generate.py)
+      file(MD5 ${MACHETE_GEN_SCRIPT} MACHETE_GEN_SCRIPT_HASH)
+
+      message(STATUS "Machete generation script hash: ${MACHETE_GEN_SCRIPT_HASH}")
+      message(STATUS "Last run machete generate script hash: $CACHE{MACHETE_GEN_SCRIPT_HASH}")
+
+      if (NOT DEFINED CACHE{MACHETE_GEN_SCRIPT_HASH}
+          OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
+        execute_process(
+          COMMAND ${CMAKE_COMMAND} -E env
+          PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$ENV{PYTHONPATH}
+            ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT}
+          RESULT_VARIABLE machete_generation_result
+          OUTPUT_VARIABLE machete_generation_output
+          OUTPUT_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
+          ERROR_FILE ${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log
+        )
+
+        if (NOT machete_generation_result EQUAL 0)
+          message(FATAL_ERROR "Machete generation failed."
+                              " Result: \"${machete_generation_result}\""
+                              "\nCheck the log for details: "
+                              "${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log")
+        else()
+          set(MACHETE_GEN_SCRIPT_HASH ${MACHETE_GEN_SCRIPT_HASH}
+              CACHE STRING "Last run machete generate script hash" FORCE)
+          message(STATUS "Machete generation completed successfully.")
+        endif()
+      else()
+        message(STATUS "Machete generation script has not changed, skipping generation.")
+      endif()
+
+      # Add machete generated sources
+      file(GLOB MACHETE_GEN_SOURCES "csrc/libtorch_stable/quantization/machete/generated/*.cu")
+      list(APPEND VLLM_STABLE_EXT_SRC ${MACHETE_GEN_SOURCES})
+
+      # forward compatible
+      set_gencode_flags_for_srcs(
+        SRCS "${MACHETE_GEN_SOURCES}"
+        CUDA_ARCHS "${MACHETE_ARCHS}")
+
+      list(APPEND VLLM_STABLE_EXT_SRC
+        csrc/libtorch_stable/quantization/machete/machete_pytorch.cu)
+      message(STATUS "Building Machete kernels for archs: ${MACHETE_ARCHS}")
+    else()
+      if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0
+          AND MACHETE_ARCHS)
+        message(STATUS "Not building Machete kernels as CUDA Compiler version is "
+                       "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
+                       "later if you intend on running w4a16 quantized models on "
+                       "Hopper.")
+      else()
+        message(STATUS "Not building Machete kernels as no compatible archs "
+                       "found in CUDA target architectures")
+      endif()
+    endif()
 
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_STABLE_EXT_SRC}"
