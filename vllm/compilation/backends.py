@@ -824,6 +824,14 @@ class VllmBackend:
     # Copy of CompilationConfig.inductor_compile_config +
     # an entry for PostGradPassManager
     inductor_config: dict[str, Any]
+    # Shared size → range-entry index map, eagerly built once at init time.
+    # _size_to_range_index[runtime_shape] gives a non-negative index into each
+    # PiecewiseBackend's _range_index_to_entry list, or -1 if no compile range
+    # covers that size (e.g. shape=0, or configs where endpoints don't reach
+    # max_tokens). Callers must guard against -1 before using the index.
+    # Preallocated to max_num_batched_tokens+1 so lookup is a plain list index.
+    _size_to_range_index: list[int]
+    _num_range_entries: int
 
     def __init__(
         self,
@@ -861,6 +869,55 @@ class VllmBackend:
         # in future we need PostGradPassManager.uuid() to be executed
         # only at compile time.
         self.inductor_config = deepcopy(self.compilation_config.inductor_compile_config)
+
+        # Build the shared size → range-entry index mapping eagerly.
+        # Every possible runtime_shape in [1, max_tokens] is mapped to the
+        # index of its matching compile range / exact size.
+        # Each PiecewiseBackend then keeps a parallel index → RangeEntry array
+        # so dispatch is two plain list dereferences — zero hashing.
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+
+        compile_ranges = self.compilation_config.get_compile_ranges()
+        if self.is_encoder:
+            # Encoder compilation extends the last range to max_int32,
+            # mirroring the logic in PiecewiseBackend.__init__.
+            max_int32 = 2**31 - 1
+            last = compile_ranges[-1]
+            compile_ranges[-1] = Range(start=last.start, end=max_int32)
+
+        compile_sizes = self.compilation_config.compile_sizes
+
+        # Index assignment:
+        #   0 .. len(compile_ranges)-1  →  one per compile range
+        #   len(compile_ranges) ..      →  exact sizes not in compile_ranges
+        next_idx = len(compile_ranges)
+        extra_size_indices: dict[int, int] = {}
+        if compile_sizes is not None:
+            for s in compile_sizes:
+                if isinstance(s, int):
+                    r = Range(start=s, end=s)
+                    if r not in compile_ranges and s not in extra_size_indices:
+                        extra_size_indices[s] = next_idx
+                        next_idx += 1
+
+        self._num_range_entries = next_idx
+
+        # Map every size in [1, max_tokens] to its range index (-1 = no match).
+        # In typical production configs compile ranges tile the full [1, max_tokens]
+        # domain, but -1 can remain for shape=0 or configs with gaps. Iterate in
+        # reverse so earlier ranges (lower index) take priority over later ones.
+        self._size_to_range_index: list[int] = [-1] * (max_tokens + 1)
+        for i in range(len(compile_ranges) - 1, -1, -1):
+            cr = compile_ranges[i]
+            lo = max(0, cr.start)
+            hi = min(max_tokens, cr.end)
+            for size in range(lo, hi + 1):
+                self._size_to_range_index[size] = i
+
+        # Exact-size entries override the broader range entry.
+        for s, idx in extra_size_indices.items():
+            if 0 <= s <= max_tokens:
+                self._size_to_range_index[s] = idx
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 

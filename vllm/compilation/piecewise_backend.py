@@ -84,6 +84,10 @@ class RangeEntry:
 
 
 class PiecewiseBackend:
+    # Per-subgraph array mapping range-entry index → RangeEntry.
+    # The shared size → range-entry index lives on VllmBackend.
+    _range_index_to_entry: list[RangeEntry | None]
+
     def __init__(
         self,
         graph: fx.GraphModule | None,
@@ -185,6 +189,8 @@ class PiecewiseBackend:
 
         # Track whether we've logged the graph for this subgraph (only log once)
         self._graph_logged = False
+
+        self._build_find_range_caches()
 
         if self.graph is not None:
             self.compile_all_ranges()
@@ -340,19 +346,64 @@ class PiecewiseBackend:
             )
             range_entry.compiled = True
 
+    def _build_find_range_caches(self) -> None:
+        """Precompute lookup structures used by _find_range_for_shape.
+
+        Called once at the end of __init__ after range_entries is finalized.
+        The shared _size_to_range_index (built eagerly by VllmBackend) maps
+        every possible runtime_shape to a range-entry index.  This method
+        builds the per-subgraph _range_index_to_entry array so that dispatch
+        in __call__ is just two plain list dereferences.
+        """
+        num_entries = self.vllm_backend._num_range_entries
+
+        # Build per-subgraph index → RangeEntry array.
+        self._range_index_to_entry = [None] * num_entries
+
+        # Indices 0 .. len(compile_ranges)-1 correspond to compile ranges.
+        for i, r in enumerate(self.compile_ranges):
+            if i < num_entries and r in self.range_entries:
+                self._range_index_to_entry[i] = self.range_entries[r]
+
+        # Remaining indices correspond to exact compile sizes not in
+        # compile_ranges, assigned in iteration order of compile_sizes.
+        if self.compile_sizes is not None:
+            idx = len(self.compile_ranges)
+            seen: set[int] = set()
+            for s in self.compile_sizes:
+                if isinstance(s, int):
+                    r = Range(start=s, end=s)
+                    if r not in self.compile_ranges and s not in seen:
+                        seen.add(s)
+                        if idx < num_entries and r in self.range_entries:
+                            self._range_index_to_entry[idx] = self.range_entries[r]
+                        idx += 1
+
     def _find_range_for_shape(self, runtime_shape: int) -> RangeEntry | None:
-        # First we try to find the range entry for the concrete compile size
-        # If not found, we search for the range entry
-        # that contains the runtime shape.
         if self.compile_sizes is None:
             return None
 
-        if runtime_shape in self.compile_sizes:
-            return self.range_entries[Range(start=runtime_shape, end=runtime_shape)]
-        else:
-            for range in self.compile_ranges:
-                if runtime_shape in range:
-                    return self.range_entries[range]
+        # Two list dereferences: size → index, index → RangeEntry.
+        # Guard against idx < 0: the mapping is initialised with -1 as a
+        # sentinel for "no range covers this size" (e.g. shape=0, or shapes
+        # outside compile-range endpoints in test / non-standard configs).
+        # Without the guard, Python would silently return list[-1] (the last
+        # element), giving a wrong dispatch with no error.
+        cache = self.vllm_backend._size_to_range_index
+        if 0 <= runtime_shape < len(cache):
+            idx = cache[runtime_shape]
+            if idx < 0:
+                return None
+            entry = self._range_index_to_entry[idx]
+            if entry is None:
+                return None
+            return entry
+
+        # runtime_shape exceeds preallocated cache (rare — e.g. encoder shapes
+        # beyond max_num_batched_tokens). Fall back to a linear scan.
+        for r, entry in self.range_entries.items():
+            if runtime_shape in r:
+                return entry
         return None
 
     def __call__(self, *args: Any) -> Any:
