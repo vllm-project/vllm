@@ -385,6 +385,11 @@ class SwigluOAIAndMul(CustomOp):
         super().__init__()
         self.alpha = alpha
         self.limit = limit
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+            if hasattr(torch.ops._C, "swigluoai_and_mul"):
+                self.op = torch.ops._C.swigluoai_and_mul
+            else:
+                self._forward_method = self.forward_native
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
@@ -400,8 +405,11 @@ class SwigluOAIAndMul(CustomOp):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        torch.ops._C.swigluoai_and_mul(out, x, self.alpha, self.limit)
+        self.op(out, x, self.alpha, self.limit)
         return out
+
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_cuda(x)
 
     def extra_repr(self) -> str:
         return f"alpha={repr(self.alpha)}, limit={repr(self.limit)}"
