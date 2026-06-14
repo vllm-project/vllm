@@ -250,12 +250,22 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # GEMM on the default stream and the LoRA fast-path on aux_stream;
         # the LoRA writes its delta into a fresh zero buffer (add_inputs=
         # False) and we sum it into intermediate_cache1 after both finish.
+        #
+        # Use the original unquantized hidden states (stashed on the context
+        # by the modular kernel) so the LoRA shrink kernel sees correct-
+        # magnitude bf16/fp16 activations rather than raw FP8/INT8 values.
 
         sorted_token_ids_lora = None
         expert_ids_lora = None
         num_tokens_post_padded_lora = None
         token_lora_mapping = None
         lora_context = self._lora_context
+        lora_x = (
+            lora_context.original_hidden_states
+            if lora_context is not None
+            and lora_context.original_hidden_states is not None
+            else hidden_states
+        )
 
         def _base_w13_fn():
             invoke_fused_moe_triton_kernel(
@@ -292,7 +302,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 return self.apply_w13_lora(
                     lora_context,
                     y=lora_delta_w13,
-                    x=hidden_states,
+                    x=lora_x,
                     topk_ids=topk_ids,
                     topk_weights=topk_weights,
                     expert_map=expert_map,
@@ -329,7 +339,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 ) = self.apply_w13_lora(
                     lora_context,
                     y=intermediate_cache1,
-                    x=hidden_states,
+                    x=lora_x,
                     topk_ids=topk_ids,
                     topk_weights=topk_weights,
                     expert_map=expert_map,
