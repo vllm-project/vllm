@@ -50,6 +50,13 @@ class StructuredOutputRequest:
                 self.status = RequestStatus.WAITING
             except TimeoutError:
                 return False
+            except Exception as e:
+                # Grammar compilation failed (e.g. malformed EBNF rejected by
+                # the backend). Re-raise as ValueError so the scheduler can
+                # fail this single request instead of crashing the engine.
+                raise ValueError(
+                    f"Failed to compile structured output grammar: {e}"
+                ) from e
         return True
 
     @property
