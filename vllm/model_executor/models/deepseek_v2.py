@@ -1725,13 +1725,19 @@ class DeepseekV2ForCausalLM(
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
+        rocm_aiter_moe_shared_expert_enabled = (
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        )
+        num_experts = self.num_routed_experts or 0
+        if rocm_aiter_moe_shared_expert_enabled:
+            num_experts += self.num_shared_experts or 0
         return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
-            num_experts=self.config.n_routed_experts,
-            num_redundant_experts=0,
+            num_experts=num_experts,
+            num_redundant_experts=self.num_redundant_experts or 0,
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
