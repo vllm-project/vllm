@@ -701,3 +701,72 @@ def test_decompose_size_with_getitem_user():
                 f"getitem node '{node.name}' has {len(node.args)} args "
                 f"(expected 2): {node.args}"
             )
+
+
+def test_decompose_size_with_slice_user():
+    """
+    Regression test: _decompose_size_nodes must handle a scalar x.size(dim)
+    node nested inside a slice bound.
+
+    This comes from the punica LoRA path (token_lora_mapping[:x.size(0)]):
+    with a dynamic batch dim, x.size(0) is traced as an FX node sitting
+    inside a slice object. The old pass only scanned top-level args, so it
+    never found the node inside the slice and erase_node crashed with
+    "still had N users".
+
+        %size   = call_method[target="size"](args = (%x, 0))
+        %sliced = call_function[target=getitem](
+                      args = (%token_lora_mapping, slice(None, %size, None)))
+    """
+    from torch._dynamo.source import LocalSource
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+    # Build graph:
+    #   %x       = placeholder
+    #   %mapping = placeholder
+    #   %size    = x.size(0)                                  # scalar, with a dim arg
+    #   %sliced  = mapping[slice(None, %size, None)]          # size node inside a slice
+    graph = fx.Graph()
+    x = graph.placeholder("x")
+    mapping = graph.placeholder("token_lora_mapping")
+    size_node = graph.call_method("size", args=(x, 0))
+    sliced_node = graph.call_function(
+        operator.getitem,
+        args=(mapping, slice(None, size_node, None)),
+    )
+    graph.output((sliced_node,))
+
+    # Attach example_value with a dynamic dim 0 so the pass creates a
+    # sym_size.int node (the realistic case from the Unsloth+LoRA workload).
+    shape_env = ShapeEnv()
+    src = LocalSource("tokens")
+    sym_tokens = shape_env.create_symintnode(shape_env.create_symbol(4, src), hint=4)
+    fake_mode = FakeTensorMode(shape_env=shape_env)
+    with fake_mode:
+        fake_x = torch.empty_strided((sym_tokens, 8), (8, 1))
+    x.meta["example_value"] = fake_x
+
+    gm = fx.GraphModule(torch.nn.Module(), graph)
+
+    _decompose_size_nodes(gm)
+
+    # No size() nodes should remain.
+    remaining = list(gm.graph.find_nodes(op="call_method", target="size"))
+    assert len(remaining) == 0, (
+        f"size() nodes remain after decomposition: {[n.name for n in remaining]}"
+    )
+
+    # The slice bound must have been replaced with a scalar node or int —
+    # never with the original size_node (which has been erased).
+    erased_names = {size_node.name}
+    for node in gm.graph.nodes:
+        for arg in node.args:
+            if isinstance(arg, slice):
+                for part in (arg.start, arg.stop, arg.step):
+                    assert not (
+                        isinstance(part, fx.Node) and part.name in erased_names
+                    ), (
+                        f"Slice bound in '{node.name}' still references "
+                        f"erased size node '{part.name}'"
+                    )
