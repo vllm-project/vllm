@@ -17,6 +17,7 @@ from inspect import isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
 from typing import Any, TypeVar, cast
+from uuid import uuid4
 
 import msgspec
 import zmq
@@ -808,6 +809,54 @@ class EngineShutdownState(IntEnum):
     RUNNING = 0
     REQUESTED = 1
     SHUTTING_DOWN = 2
+
+
+def _rotate_snapshot_engine_id(engine_id: str) -> str:
+    """Replace the process-level uuid in runtime engine_id, keep instance_id prefix."""
+    match = re.match(r"^(.+)-([0-9a-f]{32})(_dp\d+)?$", engine_id)
+    if match is None:
+        logger.warning(
+            "[snapshot][rebuild] engine_id %s does not match expected format, "
+            "append new uuid suffix",
+            engine_id,
+        )
+        return f"{engine_id}-{uuid4().hex}"
+    prefix = match.group(1)
+    dp_suffix = match.group(3) or ""
+    return f"{prefix}-{uuid4().hex}{dp_suffix}"
+
+
+def _refresh_scheduler_after_resume(engine_core: "EngineCoreProc", local_ip: str) -> None:
+    """[snapshot] Refresh scheduler side_channel_host and rotate engine_id (P/D)."""
+    kv_cfg = getattr(getattr(engine_core, "vllm_config", None), "kv_transfer_config", None)
+    if kv_cfg is None:
+        return
+    connector_name = getattr(kv_cfg, "kv_connector", "") or ""
+    if "Hybrid" in connector_name or not (
+        getattr(kv_cfg, "is_kv_producer", False) or getattr(kv_cfg, "is_kv_consumer", False)
+    ):
+        return
+
+    connector = getattr(getattr(engine_core, "scheduler", None), "connector", None)
+    cs = getattr(connector, "connector_scheduler", None) if connector else None
+    if cs is None:
+        return
+
+    if hasattr(cs, "side_channel_host"):
+        old_host = cs.side_channel_host
+        cs.side_channel_host = local_ip
+        logger.info(
+            "[snapshot][rebuild] scheduler side_channel_host %s->%s", old_host, local_ip
+        )
+
+    if hasattr(cs, "engine_id"):
+        old_id = str(cs.engine_id)
+        new_id = _rotate_snapshot_engine_id(old_id)
+        cs.engine_id = new_id
+        if connector is not None and hasattr(connector, "engine_id"):
+            connector.engine_id = new_id
+        kv_cfg.engine_id = new_id
+        logger.info("[snapshot][rebuild] scheduler engine_id %s->%s", old_id, new_id)
 
 
 class EngineCoreProc(EngineCore):
@@ -1722,14 +1771,17 @@ class EngineCoreProc(EngineCore):
         logger.info(f"[snapshot] [engine] " + "-"*20 + "aclrt_snapshot_process_unlock" + "-"*20)
         self.collective_rpc("aclrt_snapshot_process_unlock")
 
-        logger.info(f"[snapshot] [engine] " + "-"*20 + "after_snapshot_restore_update_info_for_worker" + "-"*20)
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "update_worker_info_after_resume" + "-"*20)
         local_ip = get_local_ip()
         os.environ['HCCL_IF_IP'] = local_ip
         self.vllm_config.parallel_config.data_parallel_master_ip = data_parallel_master_ip
-        self.collective_rpc("after_snapshot_restore_update_info_for_worker", args=(local_ip, data_parallel_master_ip,))
+        self.collective_rpc(
+            "update_worker_info_after_resume",
+            args=(local_ip, data_parallel_master_ip),
+        )
 
-        logger.info(f"[snapshot] [engine] " + "-"*20 + "rebuild_group_resume" + "-"*20)
-        self.collective_rpc("rebuild_group_resume")
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "rebuild_parallel_group_after_resume" + "-"*20)
+        self.collective_rpc("rebuild_parallel_group_after_resume")
 
         # Stateless DP process group exists only for DPEngineCoreProc (DP>1).
         # For data_parallel_size==1, EngineCoreProc._init_data_parallel is a no-op
@@ -1759,6 +1811,18 @@ class EngineCoreProc(EngineCore):
 
         logger.info(f"[snapshot] [engine] " + "-"*20 + "recapture_graph" + "-"*20)
         self.collective_rpc("recapture_graph")
+
+        # Refresh worker side_channel_host to new pod IP (P and D).
+        logger.info(
+            f"[snapshot] [engine] " + "-" * 20 + "rebuild_kv_transfer_engine_after_resume" + "-" * 20
+        )
+        self.collective_rpc("rebuild_kv_transfer_engine_after_resume", args=(local_ip,))
+
+        # Refresh scheduler-side KV state in engine core (P and D).
+        logger.info(
+            f"[snapshot] [engine] " + "-" * 20 + "snapshot_refresh_scheduler_after_resume" + "-" * 20
+        )
+        _refresh_scheduler_after_resume(self, local_ip)
 
 
 class DPEngineCoreProc(EngineCoreProc):

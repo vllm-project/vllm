@@ -286,7 +286,6 @@ class DPCoordinatorProc:
             poller.register(publish_front, zmq.POLLIN)
             poller.register(publish_back, zmq.POLLIN)
             poller.register(output_back, zmq.POLLIN)
-            poller.register(publish_back, zmq.POLLIN)
             last_publish_time = 0
             while True:
                 elapsed = int(time.time() * 1000) - last_publish_time

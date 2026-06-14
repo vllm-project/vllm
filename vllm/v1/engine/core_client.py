@@ -997,9 +997,6 @@ class AsyncMPClient(MPClient):
 
                     if outputs.outputs or outputs.scheduler_stats:
                         outputs_queue.put_nowait(outputs)
-            except asyncio.CancelledError:
-                logger.info(f"[snapshot] api server stats_update_task raise cancelled")
-                raise
             except Exception as e:
                 outputs_queue.put_nowait(e)
             except asyncio.CancelledError:
@@ -1383,7 +1380,7 @@ class DPAsyncMPClient(AsyncMPClient):
                             )
                 except asyncio.CancelledError:
                     logger.info(
-                        "[snopshot] api server stats_update_task raise cancelled"
+                        "[snapshot] api server stats_update_task raise cancelled"
                     )
                     raise
 
