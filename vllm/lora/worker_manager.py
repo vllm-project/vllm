@@ -182,6 +182,7 @@ class WorkerLoRAManager:
 
     def set_active_adapters(self, requests: set[Any], mapping: Any | None) -> None:
         self._apply_adapters(requests)
+        self._adapter_manager.wait_for_pending_loads()
         if mapping is not None:
             self._adapter_manager.set_adapter_mapping(mapping)
 

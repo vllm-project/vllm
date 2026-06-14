@@ -3,6 +3,7 @@
 
 import math
 from collections.abc import Callable
+from contextlib import nullcontext
 from typing import TypeVar
 
 import torch
@@ -18,6 +19,7 @@ from vllm.lora.layers import (
     LoRAMapping,
     LoRAMappingType,
 )
+from vllm.lora.lora_overlap_loader import LoRAOverlapLoader
 from vllm.lora.lora_model import LoRAModel, MoEEPLoadSpec
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
@@ -131,7 +133,12 @@ class LoRAModelManager:
         )
         self._init_punica_wrapper(max_num_batched_tokens, vllm_config)
         self._create_lora_modules()
-
+        self._overlap_loader: LoRAOverlapLoader | None = None
+        if (
+            self.lora_config.enable_lora_overlap_loading
+            and torch.device(self.device).type == "cuda"
+        ):
+            self._overlap_loader = LoRAOverlapLoader(self.device)
         self.moe_ep_load_spec: MoEEPLoadSpec | None = self._build_moe_ep_load_spec()
 
         self.model.lora_manager = self
@@ -306,22 +313,34 @@ class LoRAModelManager:
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
         self.lora_index_to_id[index] = lora_model.id
-        for module_name, module in self.modules.items():
-            module_lora = self._get_lora_layer_weights(lora_model, module_name)
-            if not module_lora:
-                module.reset_lora(index)
-                logger.debug(
-                    "No LoRA weights found for module %s, skipping.", module_name
-                )
-                continue
+        ctx = (
+            self._overlap_loader.load_context()
+            if self._overlap_loader is not None
+            else nullcontext()
+        )
+        with ctx:
+            for module_name, module in self.modules.items():
+                module_lora = self._get_lora_layer_weights(lora_model, module_name)
+                if not module_lora:
+                    module.reset_lora(index)
+                    logger.debug(
+                        "No LoRA weights found for module %s, skipping.", module_name
+                    )
+                    continue
 
-            module.set_lora(
-                index,
-                module_lora.lora_a,
-                module_lora.lora_b,
-            )
-            logger.debug("Successfully loaded LoRA weights for module %s.", module_name)
+                module.set_lora(
+                    index,
+                    module_lora.lora_a,
+                    module_lora.lora_b,
+                )
+                logger.debug(
+                    "Successfully loaded LoRA weights for module %s.", module_name
+                )
         return True
+
+    def wait_for_pending_loads(self) -> None:
+        if self._overlap_loader is not None:
+            self._overlap_loader.synchronize()
 
     def _deactivate_adapter(self, lora_id: int):
         try:
