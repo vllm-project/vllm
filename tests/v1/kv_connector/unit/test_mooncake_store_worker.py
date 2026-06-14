@@ -50,7 +50,10 @@ def _make_store_sending_thread(
     coord: mooncake_store_worker.MooncakeStoreCoordinator | None = None,
     token_databases: list[ChunkedTokenDatabase] | None = None,
     block_size: int = 16,
+    tp_rank: int = 0,
     replicate_config: object | None = None,
+    enable_group_semantics: bool = False,
+    supports_group_ids: bool = False,
 ) -> mooncake_store_worker.KVCacheStoreSendingThread:
     if coord is None:
         coord = _default_send_coord()
@@ -64,11 +67,13 @@ def _make_store_sending_thread(
         token_databases=token_databases,
         block_size=block_size,
         coord=coord,
-        tp_rank=0,
+        tp_rank=tp_rank,
         put_step=1,
         kv_role="kv_producer",
         ready_event=threading.Event(),
         replicate_config=replicate_config,
+        enable_group_semantics=enable_group_semantics,
+        supports_group_ids=supports_group_ids,
     )
     thread.request_queue.task_done = MagicMock()
     return thread
@@ -132,6 +137,16 @@ def _make_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMeta:
         req_id=req_id,
         token_len_chunk=32,
         block_ids=([0, 1],),
+        block_hashes=block_hashes,
+        can_save=True,
+    )
+
+
+def _make_multi_group_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMeta:
+    return ReqMeta(
+        req_id=req_id,
+        token_len_chunk=32,
+        block_ids=([0, 1], [2, 3]),
         block_hashes=block_hashes,
         can_save=True,
     )
@@ -238,6 +253,7 @@ def _patch_worker_runtime(monkeypatch, *, local_ip: str = "10.0.0.7") -> None:
     monkeypatch.setattr(worker, "get_pcp_group", lambda: single_rank_group)
     monkeypatch.setattr(worker, "get_dcp_group", lambda: single_rank_group)
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
+    monkeypatch.setattr(worker, "LookupKeyServer", MagicMock())
 
 
 def test_default_local_buffer_size_matches_pr40900():
@@ -495,6 +511,279 @@ def test_store_sending_thread_passes_default_replicate_config_when_no_preferred_
     call_args = store.batch_put_from_multi_buffers.call_args.args
     assert len(call_args) == 4
     assert call_args[3] is replicate_config
+
+
+def test_group_id_detection_uses_class_attribute_without_instantiating():
+    class ReplicateConfigWithClassGroupIdsAndRequiredInit:
+        group_ids = None
+
+        def __init__(self, required):
+            self.group_ids = required
+
+    assert worker._replicate_config_supports_group_ids(
+        ReplicateConfigWithClassGroupIdsAndRequiredInit,
+        object(),
+    )
+
+
+def test_group_id_detection_uses_instance_attribute_when_class_lacks_attribute():
+    class ReplicateConfigWithInstanceGroupIds:
+        def __init__(self) -> None:
+            self.group_ids = None
+
+    replicate_config = ReplicateConfigWithInstanceGroupIds()
+
+    assert worker._replicate_config_supports_group_ids(
+        ReplicateConfigWithInstanceGroupIds,
+        replicate_config,
+    )
+
+
+def test_group_id_detection_rejects_old_replicate_config():
+    class ReplicateConfigWithoutGroupIds:
+        __slots__ = ()
+
+    assert not worker._replicate_config_supports_group_ids(
+        ReplicateConfigWithoutGroupIds,
+        ReplicateConfigWithoutGroupIds(),
+    )
+
+
+def test_store_sending_thread_sets_group_ids_when_enabled():
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    replicate_config = SimpleNamespace(group_ids=None)
+    thread = _make_store_sending_thread(
+        store,
+        replicate_config=replicate_config,
+        enable_group_semantics=True,
+        supports_group_ids=True,
+    )
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+
+    assert store.batch_put_from_multi_buffers.call_count == 1
+    keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
+    assert config is replicate_config
+    assert config.group_ids == [
+        "vllm-mooncake-store:test-model@6130",
+        "vllm-mooncake-store:test-model@6131",
+    ]
+    assert len(config.group_ids) == len(keys)
+
+
+def test_store_sending_thread_leaves_group_ids_unchanged_when_flag_disabled():
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    replicate_config = SimpleNamespace(group_ids=["existing"])
+    thread = _make_store_sending_thread(
+        store,
+        replicate_config=replicate_config,
+        enable_group_semantics=False,
+        supports_group_ids=True,
+    )
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+
+    assert store.batch_put_from_multi_buffers.call_count == 1
+    assert store.batch_put_from_multi_buffers.call_args.args[3] is replicate_config
+    assert replicate_config.group_ids == ["existing"]
+
+
+def test_store_sending_thread_leaves_group_ids_unchanged_when_unsupported():
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    replicate_config = SimpleNamespace(group_ids=["existing"])
+    thread = _make_store_sending_thread(
+        store,
+        replicate_config=replicate_config,
+        enable_group_semantics=True,
+        supports_group_ids=False,
+    )
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+
+    assert store.batch_put_from_multi_buffers.call_count == 1
+    assert store.batch_put_from_multi_buffers.call_args.args[3] is replicate_config
+    assert replicate_config.group_ids == ["existing"]
+
+
+def test_mooncake_group_id_uses_logical_chunk_and_excludes_physical_ranks():
+    group_id = worker._make_mooncake_group_id(
+        KeyMetadata(
+            "test-model",
+            tp_rank=3,
+            pcp_rank=5,
+            dcp_rank=7,
+            pp_rank=11,
+            group_id=13,
+        ),
+        "abcdef",
+    )
+
+    assert group_id == "vllm-mooncake-store:test-model@abcdef"
+    assert "tp_rank" not in group_id
+    assert "pp_rank" not in group_id
+    assert "pcp" not in group_id
+    assert "dcp" not in group_id
+    assert "group:" not in group_id
+
+
+def test_store_sending_thread_group_id_excludes_physical_sharding():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+    replicate_config = SimpleNamespace(group_ids=None)
+    db = ChunkedTokenDatabase(
+        KeyMetadata(
+            "test-model",
+            tp_rank=2,
+            pcp_rank=0,
+            dcp_rank=0,
+            pp_rank=0,
+            group_id=0,
+        ),
+        block_size=16,
+    )
+    db.set_kv_caches_base_addr([0x1000])
+    db.set_block_len([256])
+    thread = _make_store_sending_thread(
+        store,
+        token_databases=[db],
+        tp_rank=2,
+        replicate_config=replicate_config,
+        enable_group_semantics=True,
+        supports_group_ids=True,
+    )
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+
+    keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
+    assert keys == [
+        "test-model@tp_rank:2@pcp0@dcp0@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:2@pcp0@dcp0@pp_rank:0@group:0@6131",
+    ]
+    assert config.group_ids == [
+        "vllm-mooncake-store:test-model@6130",
+        "vllm-mooncake-store:test-model@6131",
+    ]
+
+
+def test_store_sending_thread_multiple_segments_share_logical_group_id():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0]
+    store.batch_put_from_multi_buffers.return_value = [512, 512]
+    replicate_config = SimpleNamespace(group_ids=None)
+    db = ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), block_size=16)
+    db.set_kv_caches_base_addr([0x1000, 0x2000])
+    db.set_block_len([256, 256])
+    thread = _make_store_sending_thread(
+        store,
+        token_databases=[db],
+        replicate_config=replicate_config,
+        enable_group_semantics=True,
+        supports_group_ids=True,
+    )
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+
+    keys, addrs, sizes, config = store.batch_put_from_multi_buffers.call_args.args
+    assert keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
+    ]
+    assert addrs == [[0x1000, 0x2000], [0x1100, 0x2100]]
+    assert sizes == [[256, 256], [256, 256]]
+    assert config.group_ids == [
+        "vllm-mooncake-store:test-model@6130",
+        "vllm-mooncake-store:test-model@6131",
+    ]
+
+
+def test_store_sending_thread_group_ids_share_across_kv_cache_groups():
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0, 0, 0, 0]
+    store.batch_put_from_multi_buffers.return_value = [256, 256, 256, 256]
+    replicate_config = SimpleNamespace(group_ids=None)
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [
+            KVCacheGroupSpec(["layer0"], spec),
+            KVCacheGroupSpec(["layer1"], spec),
+        ],
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+    token_databases = []
+    for group_id, base_addr in enumerate([0x1000, 0x3000]):
+        db = ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=group_id),
+            block_size=16,
+        )
+        db.set_kv_caches_base_addr([base_addr])
+        db.set_block_len([256])
+        token_databases.append(db)
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=token_databases,
+        replicate_config=replicate_config,
+        enable_group_semantics=True,
+        supports_group_ids=True,
+    )
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_multi_group_store_req("req-a", [b"a0", b"a1"]))
+
+    keys, addrs, sizes, config = store.batch_put_from_multi_buffers.call_args.args
+    assert keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6130",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6131",
+    ]
+    assert addrs == [[0x1000], [0x1100], [0x3200], [0x3300]]
+    assert sizes == [[256], [256], [256], [256]]
+    # Different vLLM KV cache groups for the same prefix chunk share the
+    # same Mooncake lifecycle group id.
+    assert config.group_ids == [
+        "vllm-mooncake-store:test-model@6130",
+        "vllm-mooncake-store:test-model@6131",
+        "vllm-mooncake-store:test-model@6130",
+        "vllm-mooncake-store:test-model@6131",
+    ]
+    assert config.group_ids[0] == config.group_ids[2]
+    assert config.group_ids[1] == config.group_ids[3]
+
+
+def test_store_sending_thread_group_ids_follow_missing_key_filter():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [1, 0]
+    store.batch_put_from_multi_buffers.return_value = [256]
+    replicate_config = SimpleNamespace(group_ids=None)
+    thread = _make_store_sending_thread(
+        store,
+        replicate_config=replicate_config,
+        enable_group_semantics=True,
+        supports_group_ids=True,
+    )
+
+    thread.add_stored_request("req-a")
+    thread._handle_request(_make_store_req("req-a", [b"a0", b"a1"]))
+
+    keys, _addrs, _sizes, config = store.batch_put_from_multi_buffers.call_args.args
+    assert keys == ["test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6131"]
+    assert config.group_ids == ["vllm-mooncake-store:test-model@6131"]
 
 
 def test_estimate_disk_offload_staging_bytes_sums_multi_segment_sizes():
@@ -858,6 +1147,130 @@ def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
     assert w.store_replicate_config.preferred_segment == "10.0.0.7:50053"
 
 
+def test_requester_worker_group_semantics_falls_back_without_group_ids(
+    tmp_path,
+    monkeypatch,
+):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    warning = MagicMock()
+    monkeypatch.setattr(worker.logger, "warning", warning)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    w = worker.MooncakeStoreWorker(
+        _make_vllm_config(
+            extra_config={
+                "enable_group_semantics": True,
+            }
+        ),
+        _make_kv_cache_config(),
+    )
+
+    assert w.enable_group_semantics is True
+    assert w._supports_group_ids is False
+    assert any(
+        "does not support ReplicateConfig.group_ids" in call.args[0]
+        for call in warning.call_args_list
+    )
+
+
+def test_requester_worker_group_semantics_string_false_does_not_enable(
+    tmp_path,
+    monkeypatch,
+):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    warning = MagicMock()
+    monkeypatch.setattr(worker.logger, "warning", warning)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    w = worker.MooncakeStoreWorker(
+        _make_vllm_config(
+            extra_config={
+                "enable_group_semantics": "false",
+            }
+        ),
+        _make_kv_cache_config(),
+    )
+
+    assert w.enable_group_semantics is False
+    assert not any(
+        "does not support ReplicateConfig.group_ids" in call.args[0]
+        for call in warning.call_args_list
+    )
+
+
+def test_requester_worker_group_semantics_string_true_enables(
+    tmp_path,
+    monkeypatch,
+):
+    store = MagicMock()
+    store.setup.return_value = 0
+
+    class FakeReplicateConfig:
+        def __init__(self) -> None:
+            self.group_ids = None
+
+    fake_store_module = types.ModuleType("mooncake.store")
+    fake_store_module.MooncakeDistributedStore = lambda: store  # type: ignore[attr-defined]
+    fake_store_module.ReplicateConfig = FakeReplicateConfig  # type: ignore[attr-defined]
+    fake_mooncake_module = types.ModuleType("mooncake")
+    fake_mooncake_module.store = fake_store_module  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mooncake", fake_mooncake_module)
+    monkeypatch.setitem(sys.modules, "mooncake.store", fake_store_module)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    w = worker.MooncakeStoreWorker(
+        _make_vllm_config(
+            extra_config={
+                "enable_group_semantics": "true",
+            }
+        ),
+        _make_kv_cache_config(),
+    )
+
+    assert w.enable_group_semantics is True
+    assert w._supports_group_ids is True
+
+
 # ---------------------------------------------------------------------------
 # Helpers for register_kv_caches tests
 # ---------------------------------------------------------------------------
@@ -946,8 +1359,8 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
 
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.side_effect = lambda keys, addrs, sizes: (
-        [256] * len(keys)
+    store.batch_put_from_multi_buffers.side_effect = (
+        lambda keys, addrs, sizes, *_args: [256] * len(keys)
     )
 
     full_spec = FullAttentionSpec(
@@ -1152,6 +1565,8 @@ def _make_bare_worker(
 
     worker.disk_offload_buffer_budget_bytes = None
     worker.store_replicate_config = SimpleNamespace()
+    worker.enable_group_semantics = False
+    worker._supports_group_ids = False
     worker._kv_connector_stats_lock = threading.Lock()
     worker.kv_connector_stats = MooncakeStoreConnectorStats()
 
