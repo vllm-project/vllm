@@ -999,7 +999,7 @@ def zero_experts_compute_triton(
 def get_config_file_name(
     E: int, N: int, dtype: str | None, block_shape: list[int] | None = None
 ) -> str:
-    device_name = current_platform.get_device_name().replace(" ", "_")
+    device_name = _get_moe_config_device_name().replace(" ", "_")
     # Set device_name to H200 if a device from the H200 family is detected
     if "H200" in device_name.split("_"):
         device_name = "NVIDIA_H200"
@@ -1030,6 +1030,11 @@ def get_moe_configs(
 
     # Avoid optimizing for the batch invariant case. Use default config
     if envs.VLLM_BATCH_INVARIANT:
+        return None
+
+    # Tuned-config discovery is performance-only. Avoid tracing filesystem
+    # operations such as realpath/exists/open through torch.compile.
+    if torch.compiler.is_compiling():
         return None
 
     # First look up if an optimized configuration is available in the configs
@@ -1074,6 +1079,19 @@ def get_moe_configs(
         ", ".join(config_file_paths),
     )
     return None
+
+
+@functools.lru_cache
+def _get_moe_config_device_name_eager() -> str:
+    return current_platform.get_device_name()
+
+
+def _get_moe_config_device_name() -> str:
+    # Device-name lookup is only used to select an optional tuned MoE config
+    # file. Avoid tracing NVML-backed metadata queries through torch.compile.
+    if torch.compiler.is_compiling():
+        return current_platform.device_name
+    return _get_moe_config_device_name_eager()
 
 
 def _ensure_block_size_k_divisible(
