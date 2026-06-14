@@ -22,6 +22,8 @@
 # limitations under the License.
 """Inference-only Qwen2.5-Omni model (thinker part)."""
 
+import hashlib
+from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal
@@ -46,7 +48,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
-from vllm.inputs import ModalityData, MultiModalDataDict
+from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalHashes
 from vllm.logger import init_logger
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_5_vl import (
@@ -80,8 +82,11 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
 )
+from vllm.multimodal.processing.context import TimingContext
+from vllm.multimodal.processing.inputs import ProcessorInputs
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
+    MultiModalProcessingInfo,
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
     PromptReplacement,
@@ -461,6 +466,229 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
 class Qwen2_5OmniThinkerMultiModalProcessor(
     BaseMultiModalProcessor[Qwen2_5OmniThinkerProcessingInfo]
 ):
+    def _get_audio_in_video_coupled_groups(
+        self,
+        mm_data_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> list[list[tuple[str, int]]]:
+        """Groups of ``(modality, item_idx)`` that the HF processor handles as
+        one indivisible unit.
+
+        With ``use_audio_in_video=True`` the audio track is interleaved into
+        the video by the HF processor, so ``video[i]`` and its paired
+        ``audio[i]`` cannot be processed independently. Returns no groups when
+        the flag is off, in which case the standard base-class cache path is
+        used unchanged. Inherited by ``Qwen3OmniMoeThinkerMultiModalProcessor``.
+        See https://github.com/vllm-project/vllm/issues/44538.
+        """
+        if not hf_processor_mm_kwargs.get("use_audio_in_video", False):
+            return []
+
+        num_videos = mm_data_items.get_count("video", strict=False)
+        num_audios = mm_data_items.get_count("audio", strict=False)
+        # use_audio_in_video pairs each video with exactly one audio item
+        # (extracted from that video); guard with min() in case the counts
+        # ever disagree.
+        num_pairs = min(num_videos, num_audios)
+        return [[("video", i), ("audio", i)] for i in range(num_pairs)]
+
+    @staticmethod
+    def _coupled_cache_keys(
+        mm_hashes: "MultiModalHashes",
+        coupled_groups: list[list[tuple[str, int]]],
+    ) -> "MultiModalHashes":
+        """Derive processor-cache keys in which every coupled member's key
+        incorporates the content hash of *all* members of its group.
+
+        A group is therefore reused only when all its members match, and any
+        change to any member misses the whole group together. This keeps the
+        cached ``(kwargs, prompt_updates)`` valid even though a coupled item's
+        prompt-update layout depends on the whole group. The semantic
+        ``mm_hashes`` (which become ``MultiModalFeatureSpec.identifier`` and
+        feed the encoder-output / prefix caches) are left untouched.
+        """
+        mm_cache_keys = {
+            modality: list(hashes) for modality, hashes in mm_hashes.items()
+        }
+        for group in coupled_groups:
+            members = [
+                (modality, idx)
+                for modality, idx in group
+                if 0 <= idx < len(mm_cache_keys.get(modality, ()))
+            ]
+            if len(members) < 2:
+                continue
+            group_token = hashlib.sha256(
+                "\0".join(
+                    f"{modality}:{mm_hashes[modality][idx]}"
+                    for modality, idx in sorted(members)
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+            for modality, idx in members:
+                mm_cache_keys[modality][idx] = (
+                    f"{mm_hashes[modality][idx]}-aiv-{group_token}"
+                )
+        return mm_cache_keys
+
+    def _cached_apply_hf_processor(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+        """Cache-aware processing that couples ``use_audio_in_video`` audio
+        with its paired video (issue #44538).
+
+        When no coupling applies (the common case, including
+        ``use_audio_in_video=False``) this defers entirely to the base
+        implementation, so non-omni behavior is unchanged. When the audio is
+        interleaved into the video, the audio item extracted from the video is
+        hashed independently by the processor cache, so two requests with
+        different videos but a byte-identical audio track would otherwise
+        collide on the audio entry: the second request's video misses while its
+        audio hits, the HF processor is run on the video alone, and it raises
+        ``StopIteration``. The reverse polarity (same video, different audio)
+        reuses a stale interleaved layout.
+
+        Both are fixed by (1) group-aware cache keys so a member is never reused
+        for a different pairing, and (2) reprocessing the whole group whenever
+        any member is missing — including when LRU eviction drops one member but
+        not its partner.
+        """
+        cache = self.cache
+        _, passthrough_data = self._get_hf_mm_data(inputs.mm_data_items)
+        coupled_groups = self._get_audio_in_video_coupled_groups(
+            inputs.mm_data_items, inputs.hf_processor_mm_kwargs
+        )
+        if cache is None or passthrough_data or not coupled_groups:
+            return super()._cached_apply_hf_processor(inputs, timing_ctx)
+
+        with timing_ctx.record("get_mm_hashes"):
+            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+
+        mm_cache_keys = self._coupled_cache_keys(mm_hashes, coupled_groups)
+
+        with timing_ctx.record("get_cache_missing_items"):
+            mm_is_cached = {
+                modality: cache.is_cached(keys)
+                for modality, keys in mm_cache_keys.items()
+            }
+            # Expand the cache-miss set over coupling groups: if any member of
+            # a group needs processing, every member does (covers both a
+            # different-pairing miss and LRU evicting one member of the pair).
+            mm_needs_processing = {
+                modality: [not c for c in items_is_cached]
+                for modality, items_is_cached in mm_is_cached.items()
+            }
+            for group in coupled_groups:
+                members = [
+                    (modality, idx)
+                    for modality, idx in group
+                    if 0 <= idx < len(mm_needs_processing.get(modality, ()))
+                ]
+                if any(mm_needs_processing[m][i] for m, i in members):
+                    for m, i in members:
+                        mm_needs_processing[m][i] = True
+
+            mm_missing_data = {}
+            for modality, needs in mm_needs_processing.items():
+                missing_modality_data = []
+                for idx, item_needs_processing in enumerate(needs):
+                    if not item_needs_processing:
+                        continue
+                    data = inputs.mm_data_items[modality][idx]
+                    if data is None:
+                        raise ValueError(
+                            f"Cache miss for {modality} at index {idx} "
+                            f"but data is not provided."
+                        )
+                    missing_modality_data.append(data)
+                mm_missing_data[modality] = missing_modality_data
+            mm_missing_data_items = self.info.parse_mm_data(
+                mm_missing_data, validate=False
+            )
+
+        with timing_ctx.record("apply_hf_processor"):
+            (
+                prompt_ids,
+                mm_missing_processed_data,
+                is_update_applied,
+            ) = self._apply_hf_processor_main(
+                prompt=inputs.prompt,
+                mm_items=mm_missing_data_items,
+                hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
+                tokenization_kwargs=inputs.tokenization_kwargs,
+                enable_hf_prompt_update=False,
+            )
+
+        mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
+            mm_missing_processed_data,
+            self._get_mm_fields_config(
+                mm_missing_processed_data, inputs.hf_processor_mm_kwargs
+            ),
+        )
+        mm_missing_prompt_updates = self._get_mm_prompt_updates(
+            mm_missing_data_items,
+            inputs.hf_processor_mm_kwargs,
+            mm_missing_kwargs,
+        )
+
+        with timing_ctx.record("merge_mm_kwargs"):
+            mm_kwargs, mm_prompt_updates = self._merge_coupled_mm_kwargs(
+                cache,
+                mm_cache_keys=mm_cache_keys,
+                mm_needs_processing=mm_needs_processing,
+                mm_missing_kwargs=mm_missing_kwargs,
+                mm_missing_prompt_updates=mm_missing_prompt_updates,
+            )
+
+        # ``mm_info.hashes`` uses the unchanged semantic hashes, not the
+        # group-aware cache keys, so downstream identity matches the base path.
+        mm_info = MultiModalProcessingInfo(
+            kwargs=mm_kwargs,
+            hashes=mm_hashes,
+            prompt_updates=mm_prompt_updates,
+        )
+        return prompt_ids, mm_info, is_update_applied
+
+    def _merge_coupled_mm_kwargs(
+        self,
+        cache,
+        mm_cache_keys: "MultiModalHashes",
+        mm_needs_processing: dict[str, list[bool]],
+        mm_missing_kwargs: MultiModalKwargsItems,
+        mm_missing_prompt_updates: MultiModalPromptUpdates,
+    ):
+        """Like the base ``_merge_mm_kwargs`` but keyed off
+        ``mm_needs_processing`` (the group-expanded mask) and the group-aware
+        cache keys: every reprocessed item consumes one HF output slot and is
+        stored/served under its group key."""
+        for keys in mm_cache_keys.values():
+            for item_hash in keys:
+                cache.touch_sender_cache_item(item_hash)
+
+        mm_missing_next_idx: dict[str, int] = defaultdict(int)
+        merged_kwargs = defaultdict(list)
+        merged_prompt_updates = defaultdict(list)
+        for modality, keys in mm_cache_keys.items():
+            missing_kwargs = mm_missing_kwargs.get(modality, [])
+            missing_prompt_updates = mm_missing_prompt_updates.get(modality, [])
+            for item_idx, item_hash in enumerate(keys):
+                if mm_needs_processing[modality][item_idx]:
+                    next_idx = mm_missing_next_idx[modality]
+                    item = (missing_kwargs[next_idx], missing_prompt_updates[next_idx])
+                    mm_missing_next_idx[modality] += 1
+                else:
+                    item = None
+                kwargs, updates = cache.get_and_update_item(item, item_hash)
+                merged_kwargs[modality].append(kwargs)
+                merged_prompt_updates[modality].append(
+                    [
+                        self._recompute_cached_prompt_update(update, item_idx)
+                        for update in updates
+                    ]
+                )
+        return MultiModalKwargsItems(merged_kwargs), dict(merged_prompt_updates)
+
     def _call_hf_processor(
         self,
         prompt: str,
