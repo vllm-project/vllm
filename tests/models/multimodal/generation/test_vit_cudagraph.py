@@ -47,6 +47,13 @@ def internvl_chat_template(content: str) -> str:
     return f"<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n"
 
 
+def kimi_vl_chat_template(content: str) -> str:
+    return (
+        f"<|im_user|>user<|im_middle|>{content}<|im_end|>"
+        "<|im_assistant|>assistant<|im_middle|>"
+    )
+
+
 def step3_vl_chat_template(content: str) -> str:
     return (
         "<｜begin▁of▁sentence｜> You are a helpful assistant.<|BOT|>user\n "
@@ -96,6 +103,17 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "Describe this video in one sentence."
         ),
         needs_video_metadata=False,
+        marks=[pytest.mark.core_model],
+    ),
+    "kimi_vl": VitCudagraphTestConfig(
+        model="moonshotai/Kimi-VL-A3B-Instruct",
+        modalities=["image"],
+        image_prompt=kimi_vl_chat_template(
+            "<|media_start|>image<|media_content|><|media_pad|><|media_end|>"
+            "What is in this image?"
+        ),
+        needs_video_metadata=False,
+        vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
     "qwen3_vl": VitCudagraphTestConfig(
