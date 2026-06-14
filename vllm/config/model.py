@@ -349,6 +349,7 @@ class ModelConfig:
     mm_encoder_fp8_scale_save_margin: InitVar[float | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
+    enable_client_mm_cache_keys: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
     mm_tensor_ipc: InitVar[MMTensorIPC] = None
 
@@ -397,6 +398,7 @@ class ModelConfig:
             "mm_encoder_tp_mode",
             "interleave_mm_strings",
             "skip_mm_profiling",
+            "enable_client_mm_cache_keys",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -475,6 +477,7 @@ class ModelConfig:
         mm_encoder_fp8_scale_save_margin: float | None,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
+        enable_client_mm_cache_keys: bool | None,
         video_pruning_rate: float | None,
         mm_tensor_ipc: MMTensorIPC,
     ) -> None:
@@ -690,6 +693,7 @@ class ModelConfig:
                 mm_encoder_fp8_scale_save_margin=mm_encoder_fp8_scale_save_margin,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
+                enable_client_mm_cache_keys=enable_client_mm_cache_keys,
                 video_pruning_rate=video_pruning_rate,
                 mm_tensor_ipc=mm_tensor_ipc,
             )
