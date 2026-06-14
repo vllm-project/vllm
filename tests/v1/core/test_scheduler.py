@@ -1234,6 +1234,40 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
 
 
 @pytest.mark.parametrize("is_async", [False, True])
+def test_kv_connector_skip_reading_prefix_cache(is_async: bool):
+    """
+    Requests that set skip_reading_prefix_cache (e.g. prompt_logprobs) must
+    not consume external KV blocks from the connector. KVCacheManager
+    already returns 0 cached tokens for these requests, so a connector hit
+    would leave num_computed_tokens ahead of the allocated blocks and the
+    runner would read uninitialized memory for the "matched" positions.
+    """
+    BLOCK_SIZE = 16
+    MATCHED = BLOCK_SIZE * 2
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=MATCHED, is_async=is_async),
+        block_size=BLOCK_SIZE,
+    )
+
+    (req,) = create_requests(
+        num_requests=1,
+        num_tokens=MATCHED * 2,
+        prompt_logprobs=1,
+        block_size=BLOCK_SIZE,
+    )
+    assert req.skip_reading_prefix_cache
+    scheduler.add_request(req)
+
+    output = scheduler.schedule()
+
+    assert req.prefill_stats is not None
+    assert req.prefill_stats.num_external_cached_tokens == 0
+    assert req.prefill_stats.num_local_cached_tokens == 0
+    assert output.num_scheduled_tokens[req.request_id] == req.num_tokens
+
+
+@pytest.mark.parametrize("is_async", [False, True])
 def test_kv_connector_basic(is_async: bool):
     """
     Test whether Scheduler with KVConnector schedules tokens, allocates

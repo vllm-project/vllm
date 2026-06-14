@@ -677,7 +677,13 @@ class Scheduler(SchedulerInterface):
                         )
 
                     # Get externally-cached tokens if using a KVConnector.
-                    if self.connector is not None:
+                    # Mirror get_computed_blocks' skip_reading_prefix_cache
+                    # behavior; otherwise prompt-logprob requests read
+                    # uninitialized memory for connector-claimed positions.
+                    if (
+                        self.connector is not None
+                        and not request.skip_reading_prefix_cache
+                    ):
                         ext_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens
