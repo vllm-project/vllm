@@ -48,6 +48,9 @@ class MLAPrefillBackendEnum(Enum, metaclass=_MLAPrefillBackendEnumMeta):
         "vllm.v1.attention.backends.mla.prefill.tokenspeed_mla."
         "TokenspeedMLAPrefillBackend"
     )
+    AITER_ASM = (
+        "vllm.v1.attention.backends.mla.prefill.aiter_asm.AiterAsmPrefillBackend"
+    )
     # Placeholder for third-party/custom backends - must be registered before use
     # set to None to avoid alias with other backend, whose value is an empty string
     CUSTOM = None
