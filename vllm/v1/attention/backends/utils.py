@@ -653,10 +653,12 @@ def reorder_batch_to_split_decodes_and_prefills(
         True if the batch was modified, False otherwise.
     """
     num_reqs = len(input_batch.req_ids)
-    num_scheduled_tokens = [
-        scheduler_output.num_scheduled_tokens[id] for id in input_batch.req_ids
-    ]
-    num_scheduled_tokens_np = np.array(num_scheduled_tokens)
+    nst = scheduler_output.num_scheduled_tokens
+    num_scheduled_tokens_np = np.fromiter(
+        map(nst.__getitem__, input_batch.req_ids),
+        dtype=np.int32,
+        count=num_reqs,
+    )
     num_computed_tokens_np = input_batch.num_computed_tokens_cpu[:num_reqs]
     num_prompt_tokens_np = input_batch.num_prompt_tokens[:num_reqs]
 

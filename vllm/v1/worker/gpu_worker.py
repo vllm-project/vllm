@@ -826,9 +826,11 @@ class Worker(WorkerBase):
         ):
             # currently only supported by V1 GPUModelRunner
             assert not self.use_v2_model_runner
-            num_scheduled_tokens_np = np.array(
-                list(scheduler_output.num_scheduled_tokens.values()),
+            nst = scheduler_output.num_scheduled_tokens
+            num_scheduled_tokens_np = np.fromiter(
+                nst.values(),
                 dtype=np.int32,
+                count=len(nst),
             )
             # TODO(lucas): This is pretty gross; ideally we should only ever call
             # `_determine_batch_execution_and_padding` once (will get called again
