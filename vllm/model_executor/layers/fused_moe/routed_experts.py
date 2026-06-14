@@ -284,10 +284,11 @@ class RoutedExperts(PluggableLayer):
             # We have to keep the weight scales of w1 and w3 because
             # we need to re-quantize w1/w3 weights after weight loading.
             idx = 0 if shard_id == "w1" else 1
-            param_data[expert_id][idx] = loaded_weight
+            # llm-compressor NVFP4 emits shape-(1,) scales; coerce to 0-D scalar.
+            param_data[expert_id][idx] = loaded_weight.view([])
         # If we are in the row parallel case (down_proj)
         elif shard_id == "w2":
-            param_data[expert_id] = loaded_weight
+            param_data[expert_id] = loaded_weight.view([])
 
     def _load_combined_w13_weight_scale(
         self,
@@ -521,7 +522,7 @@ class RoutedExperts(PluggableLayer):
         param_data = param.data
 
         # Input scales can be loaded directly and should be equal.
-        param_data[expert_id] = loaded_weight
+        param_data[expert_id] = loaded_weight.view([])
 
     def _load_g_idx(
         self,
