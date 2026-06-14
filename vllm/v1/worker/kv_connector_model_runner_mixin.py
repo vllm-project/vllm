@@ -14,10 +14,19 @@ from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    CanonicalKVCaches,
+    KVCacheBlockDataRef,
+    KVCacheBlockTensor,
+    supports_hma,
+)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+)
 from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
@@ -274,3 +283,217 @@ class KVConnectorModelRunnerMixin:
                 kv_caches[layer_name] = tensor
 
         return kv_caches, cross_layers_kv_cache, attn_backend
+
+    @staticmethod
+    def use_canonical_kv_caches(
+        kv_cache_config: KVCacheConfig,
+        attn_groups: list[list[AttentionGroup]],
+        cache_dtype: CacheDType,
+    ) -> bool:
+        """
+        Determines whether a contiguous canonical KV cache should be
+        allocated for HMA (Hybrid Multi-Attention) models.
+
+        A canonical layout allocates a single contiguous buffer where,
+        for a given block number, the KV data for all layers is
+        contiguous. This allows efficient KV transfer of per-block data.
+
+        This layout will only be applied given 5 conditions:
+        1. A KV connector is configured and prefers cross-layer blocks.
+        2. The connector supports HMA.
+        3. The model has multiple KV cache groups (HMA).
+        4. All groups use AttentionSpec with uniform page size.
+        5. All backends share the same stride order that places
+           num_blocks first in the physical layout.
+
+        Args:
+            kv_cache_config: The KV cache configuration.
+            attn_groups: The attention groups (indexed [group_id][...]).
+            cache_dtype: The KV cache dtype.
+        Returns:
+            True if we should use contiguous canonical allocation.
+        """
+        if not has_kv_transfer_group():
+            return False
+        if not get_kv_transfer_group().prefer_cross_layer_blocks:
+            return False
+
+        # The connector must support HMA
+        if not supports_hma(get_kv_transfer_group()):
+            return False
+        if len(kv_cache_config.kv_cache_groups) < 1:
+            return False
+
+        # Currently, all groups must use AttentionSpec with uniform page size
+        # We plan to gradually relax this requirement to support other cases
+        page_sizes: set[int] = set()
+        for group in kv_cache_config.kv_cache_groups:
+            if not isinstance(group.kv_cache_spec, AttentionSpec):
+                return False
+            page_sizes.add(group.kv_cache_spec.page_size_bytes)
+        if len(page_sizes) != 1:
+            return False
+
+        # all kv cache tensors must have the same size so that
+        # they can share a single contiguous buffer
+        tensor_sizes = set(t.size for t in kv_cache_config.kv_cache_tensors)
+        if len(tensor_sizes) != 1:
+            return False
+
+        # all backends must agree on the same stride order
+        common_stride_order: tuple[int, ...] | None = None
+        for groups in attn_groups:
+            for attn_group in groups:
+                attn_backend = attn_group.backend
+                spec = attn_group.kv_cache_spec
+                assert isinstance(spec, AttentionSpec)
+                kv_cache_shape = attn_backend.get_kv_cache_shape(
+                    1234,
+                    spec.block_size,
+                    spec.num_kv_heads,
+                    spec.head_size,
+                    cache_dtype_str=cache_dtype,
+                )
+
+                try:
+                    stride_order = attn_backend.get_kv_cache_stride_order(
+                        include_num_layers_dimension=True
+                    )
+                except (AttributeError, NotImplementedError):
+                    return False
+
+                if len(stride_order) != len(kv_cache_shape) + 1:
+                    return False
+
+                # num_blocks must be the leading physical dimension.
+                # +1 accounts for the prepended group_size dimension.
+                if stride_order[0] != kv_cache_shape.index(1234) + 1:
+                    return False
+
+                if common_stride_order is None:
+                    common_stride_order = stride_order
+                elif stride_order != common_stride_order:
+                    return False
+
+        return common_stride_order is not None
+
+    @staticmethod
+    def allocate_canonical_kv_caches(
+        kv_cache_config: KVCacheConfig,
+        attn_groups: list[list[AttentionGroup]],
+        cache_dtype: CacheDType,
+        device: torch.device,
+        kernel_block_sizes: list[int],
+    ) -> tuple[dict[str, torch.Tensor], CanonicalKVCaches]:
+        """
+        Allocates contiguous KV caches for HMA models where all
+        groups share the same page size.
+
+        Follows the same pattern as allocate_uniform_kv_caches: a single
+        flat buffer reshaped per the backend stride order. The physical
+        layout places num_blocks as the leading dimension, giving
+        per-block cross-layer contiguity.
+
+        This function assumes use_canonical_kv_caches() returned True.
+
+        Args:
+            kv_cache_config: The KV cache config.
+            attn_groups: The attention groups (indexed [group_id][...]).
+            cache_dtype: The KV cache dtype.
+            device: The torch device to allocate on.
+            kernel_block_sizes: The kernel block sizes per KV cache group.
+        Returns:
+            A tuple (kv_caches, canonical_kv_caches) where:
+                kv_caches is a dict mapping between layer names to their
+                    corresponding memory buffer for KV cache.
+                canonical_kv_caches is the CanonicalKVCaches wrapping
+                    for the connector.
+        """
+        first_spec = kv_cache_config.kv_cache_groups[0].kv_cache_spec
+        assert isinstance(first_spec, AttentionSpec)
+
+        tensor_sizes = set(t.size for t in kv_cache_config.kv_cache_tensors)
+        assert len(tensor_sizes) == 1
+        tensor_size = tensor_sizes.pop()
+
+        page_size = first_spec.page_size_bytes
+        num_blocks = kv_cache_config.num_blocks
+        assert tensor_size == page_size * num_blocks
+        group_size = len(kv_cache_config.kv_cache_tensors)
+        total_size = tensor_size * group_size
+
+        logger.info("Allocating canonical KV cache: group_size=%d", group_size)
+
+        # allocate one flat contiguous buffer
+        contiguous_buffer_bytes = torch.zeros(
+            total_size, dtype=torch.int8, device=device
+        )
+
+        # build layer_name -> group_idx mapping
+        layer_to_group_idx: dict[str, int] = {}
+        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
+            for layer_name in group.layer_names:
+                layer_to_group_idx[layer_name] = gid
+
+        kv_caches: dict[str, torch.Tensor] = {}
+        group_data_refs: list[list[KVCacheBlockDataRef]] = [
+            [KVCacheBlockDataRef(tensor_idx=0, page_size_bytes=page_size * group_size)]
+            for _ in kv_cache_config.kv_cache_groups
+        ]
+
+        # Single cross-layers canonical tensor: (num_blocks, page_size_bytes)
+        # as raw int8, where page_size_bytes covers all positions.
+        cross_layer_page_size = page_size * group_size
+        cross_layers_tensor = contiguous_buffer_bytes.view(
+            num_blocks, cross_layer_page_size
+        )
+
+        for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+            # Per-layer reshape: compute shape from each layer's own
+            # spec and backend, then view the flat buffer accordingly.
+            for layer_name in kv_cache_tensor.shared_by:
+                gid = layer_to_group_idx[layer_name]
+                spec = kv_cache_config.kv_cache_groups[gid].kv_cache_spec
+                assert isinstance(spec, AttentionSpec)
+
+                attn_backend = attn_groups[gid][0].backend
+                kernel_block_size = kernel_block_sizes[gid]
+                num_blocks_per_kv_block = spec.block_size // kernel_block_size
+                kernel_num_blocks = num_blocks * num_blocks_per_kv_block
+
+                kv_cache_shape = attn_backend.get_kv_cache_shape(
+                    kernel_num_blocks,
+                    kernel_block_size,
+                    spec.num_kv_heads,
+                    spec.head_size,
+                    cache_dtype_str=cache_dtype,
+                )
+
+                # prepend a group_size dimension into the shape
+                full_shape = (group_size,) + kv_cache_shape
+
+                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
+                    include_num_layers_dimension=True
+                )
+                assert len(kv_cache_stride_order) == len(full_shape)
+
+                physical_shape = tuple(full_shape[j] for j in kv_cache_stride_order)
+                inv_order = [
+                    kv_cache_stride_order.index(j)
+                    for j in range(len(kv_cache_stride_order))
+                ]
+
+                typed_buffer = contiguous_buffer_bytes.view(spec.dtype).view(
+                    physical_shape
+                )
+                kv_caches[layer_name] = typed_buffer.permute(*inv_order)[i]
+
+        return kv_caches, CanonicalKVCaches(
+            tensors=[
+                KVCacheBlockTensor(
+                    tensor=cross_layers_tensor,
+                    page_size_bytes=cross_layer_page_size,
+                )
+            ],
+            group_data_refs=group_data_refs,
+        )
