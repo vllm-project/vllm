@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
+    EPLBConfig,
     KernelConfig,
     ModelConfig,
     ParallelConfig,
@@ -1453,6 +1454,11 @@ def test_renderer_num_workers_with_mm_cache():
     # Should pass: single worker + cache enabled (default)
     config = ModelConfig(mm_model, renderer_num_workers=1)
     assert config.renderer_num_workers == 1
+
+
+def test_eplb_config_rejects_redundancy_above_max():
+    with pytest.raises(ValidationError, match="num_redundant_experts"):
+        EPLBConfig(num_redundant_experts=2, max_expert_redundancy=1)
 
 
 def test_eagle_draft_model_config():

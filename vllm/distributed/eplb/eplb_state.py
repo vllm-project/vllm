@@ -113,7 +113,11 @@ class EplbModelState:
 
     This is a sparse matrix, where -1 indicates no mapping.
 
-    Shape: (num_moe_layers, num_logical_experts, num_redundant_experts + 1)
+    Shape: (num_moe_layers, num_logical_experts,
+        max_expert_redundancy + 1)
+
+    The last dimension is reserved capacity. Active replicas are tracked by
+    `logical_replica_count`.
 
     # Example
 
@@ -360,15 +364,15 @@ class EplbState:
             physical_to_logical_map_list,
             device=self.device,
         )
+        max_expert_redundancy = self.parallel_config.eplb_config.max_expert_redundancy
         # Assuming 8 GPUs per node, this supports up to
-        # (1023 + 1) / 8 = 128 nodes for now.
-        # TODO(rui): make this configurable
-        MAX_EXPERT_REDUNDANCY = 1023
-        assert model.num_redundant_experts <= MAX_EXPERT_REDUNDANCY, (
-            f"num_redundant_experts {model.num_redundant_experts} "
-            f"must be less than or equal to {MAX_EXPERT_REDUNDANCY}"
+        # (max_expert_redundancy + 1) / 8 nodes.
+        assert model.num_redundant_experts <= max_expert_redundancy, (
+            f"num_redundant_experts {model.num_redundant_experts} must be less "
+            "than or equal to eplb_config.max_expert_redundancy "
+            f"{max_expert_redundancy}"
         )
-        max_slots_per_logical_expert = MAX_EXPERT_REDUNDANCY + 1
+        max_slots_per_logical_expert = max_expert_redundancy + 1
         logical_to_physical_map = torch.full(
             (model.num_logical_experts, max_slots_per_logical_expert),
             -1,
