@@ -173,6 +173,37 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   }
 }
 
+__global__ void repack_nvfp4_scale_kernel(int32_t numRows, int32_t sfCols,
+                                          int32_t roundedRows,
+                                          int32_t roundedSfCols,
+                                          uint8_t const* __restrict__ in,
+                                          uint8_t* __restrict__ out) {
+  int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  int64_t total = static_cast<int64_t>(roundedRows) * roundedSfCols;
+  if (idx >= total) {
+    return;
+  }
+
+  int32_t row = idx / roundedSfCols;
+  int32_t sfCol = idx - static_cast<int64_t>(row) * roundedSfCols;
+  uint8_t value = 0;
+  if (row < numRows && sfCol < sfCols) {
+    value = in[static_cast<int64_t>(row) * sfCols + sfCol];
+  }
+
+  int32_t numKTiles = roundedSfCols >> 2;
+  int32_t mTileIdx = row >> 7;
+  int32_t outerMIdx = row & 31;
+  int32_t innerMIdx = (row >> 5) & 3;
+  int32_t kTileIdx = sfCol >> 2;
+  int32_t innerKIdx = sfCol & 3;
+
+  int64_t outOffset = (static_cast<int64_t>(mTileIdx) * numKTiles + kTileIdx)
+                          << 9 |
+                      (outerMIdx << 4) | (innerMIdx << 2) | innerKIdx;
+  out[outOffset] = value;
+}
+
 }  // namespace vllm
 
 void scaled_fp4_quant_sm1xxa(torch::stable::Tensor const& output,
@@ -248,4 +279,30 @@ void scaled_fp4_quant_sm1xxa(torch::stable::Tensor const& output,
                   reinterpret_cast<uint32_t*>(sf_out));
         });
   }
+}
+
+void repack_nvfp4_scale_sm1xxa(torch::stable::Tensor const& row_major_scale,
+                               torch::stable::Tensor& output_scale) {
+  int32_t m = row_major_scale.size(0);
+  int32_t sf_n = row_major_scale.size(1);
+  int32_t rounded_m = vllm::round_up(m, 128);
+  int32_t rounded_sf_n = vllm::round_up(sf_n, 4);
+
+  STD_TORCH_CHECK(output_scale.size(0) == rounded_m &&
+                      output_scale.size(1) == rounded_sf_n / 4,
+                  "output_scale must be padded and swizzled to a shape (",
+                  rounded_m, "x", rounded_sf_n / 4, "), but got a shape (",
+                  output_scale.size(0), "x", output_scale.size(1), ")");
+
+  auto input_ptr = static_cast<uint8_t const*>(row_major_scale.data_ptr());
+  auto output_ptr = static_cast<uint8_t*>(output_scale.data_ptr());
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      row_major_scale.get_device_index());
+  auto stream = get_current_cuda_stream(row_major_scale.get_device_index());
+
+  constexpr int block = 256;
+  int64_t total = static_cast<int64_t>(rounded_m) * rounded_sf_n;
+  int grid = vllm::div_round_up(total, static_cast<int64_t>(block));
+  vllm::repack_nvfp4_scale_kernel<<<grid, block, 0, stream>>>(
+      m, sf_n, rounded_m, rounded_sf_n, input_ptr, output_ptr);
 }

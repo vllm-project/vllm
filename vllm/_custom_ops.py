@@ -109,6 +109,18 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
     ) -> None:
         return None
 
+    if hasattr(torch.ops._C, "repack_nvfp4_scale"):
+
+        @register_fake("_C::repack_nvfp4_scale")
+        def _repack_nvfp4_scale_fake(row_major_scale: torch.Tensor) -> torch.Tensor:
+            rounded_m = cdiv(row_major_scale.shape[0], 128) * 128
+            rounded_n = cdiv(row_major_scale.shape[1], 4) * 4
+            return torch.empty(
+                (rounded_m, rounded_n // 4),
+                dtype=torch.int32,
+                device=row_major_scale.device,
+            )
+
 
 # page attention ops
 def paged_attention_v1(

@@ -127,6 +127,15 @@ def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
 
+def get_group_by_name(group_name: str) -> "GroupCoordinator":
+    if group_name not in _groups:
+        raise RuntimeError(f"Group {group_name} is not found.")
+    group = _groups[group_name]()
+    if group is None:
+        raise RuntimeError(f"Group {group_name} is destroyed.")
+    return group
+
+
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()

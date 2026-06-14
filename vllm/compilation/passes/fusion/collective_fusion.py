@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Callable
 from contextlib import suppress
 
@@ -897,6 +898,84 @@ class FlashInferAllGatherFP4Pattern(
         return _replacement
 
 
+class FlashInferFP4ReduceScatterPattern(
+    BasePattern, VllmPatternReplacement[..., torch.Tensor]
+):
+    def __init__(
+        self,
+        dtype: torch.dtype,
+        device: str | None,
+        backend: str,
+        use_8x4_sf_layout: bool,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.backend = backend
+        self.use_8x4_sf_layout = use_8x4_sf_layout
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        a_2d = torch.empty([16, 8], device=self.device, dtype=torch.uint8)
+        b_2d = torch.empty([8, 16], device=self.device, dtype=torch.uint8)
+        a_scale = torch.empty([128, 4], device=self.device, dtype=torch.uint8)
+        b_scale = torch.empty([4, 16], device=self.device, dtype=torch.uint8)
+        alpha = torch.empty([], device=self.device, dtype=torch.float32)
+        return [a_2d, b_2d, a_scale, b_scale, alpha]
+
+    @property
+    def pattern(self) -> Callable[..., torch.Tensor]:
+        def _pattern(
+            a_2d: torch.Tensor,
+            b_2d: torch.Tensor,
+            a_scale: torch.Tensor,
+            b_scale: torch.Tensor,
+            alpha: torch.Tensor,
+        ) -> torch.Tensor:
+            mm = torch.ops.vllm.flashinfer_mm_fp4.default(
+                a_2d,
+                b_2d,
+                a_scale,
+                b_scale,
+                alpha,
+                self.dtype,
+                self.use_8x4_sf_layout,
+                self.backend,
+            )
+            return torch.ops.vllm.reduce_scatter.default(
+                mm,
+                dim=0,
+                world_size=self.tp_size,
+                group_name=self.tp.unique_name,
+            )
+
+        return _pattern
+
+    @property
+    def replacement(self) -> Callable[..., torch.Tensor]:
+        def _replacement(
+            a_2d: torch.Tensor,
+            b_2d: torch.Tensor,
+            a_scale: torch.Tensor,
+            b_scale: torch.Tensor,
+            alpha: torch.Tensor,
+        ) -> torch.Tensor:
+            return torch.ops.vllm.fused_flashinfer_fp4_matmul_reduce_scatter.default(
+                a_2d,
+                b_2d,
+                a_scale,
+                b_scale,
+                alpha,
+                "sum",
+                0,
+                self.tp_size,
+                self.tp.unique_name,
+                self.tp.device_group.group_name,
+                self.dtype,
+                self.use_8x4_sf_layout,
+                self.backend,
+            )
+
+        return _replacement
+
+
 class AsyncTPPass(VllmFusionPatternMatcherPass):
     @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
@@ -934,6 +1013,26 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
                     FlashInferBMMFP8ReduceScatterPattern(self.model_dtype, self.device)
                 )
             if hasattr(torch.ops.vllm, "flashinfer_mm_fp4"):
+                fp4_rs_enabled = os.getenv("VLLM_NVFP4_RS_FUSION", "1") != "0"
+                if fp4_rs_enabled:
+                    for backend in ("cutlass", "cudnn"):
+                        self.register(
+                            FlashInferFP4ReduceScatterPattern(
+                                self.model_dtype,
+                                self.device,
+                                backend,
+                                use_8x4_sf_layout=False,
+                            )
+                        )
+                    for use_8x4_sf_layout in (False, True):
+                        self.register(
+                            FlashInferFP4ReduceScatterPattern(
+                                self.model_dtype,
+                                self.device,
+                                "trtllm",
+                                use_8x4_sf_layout=use_8x4_sf_layout,
+                            )
+                        )
                 for backend in ("cutlass", "cudnn"):
                     for a_scale_view in ("float8_uint8", "uint8"):
                         self.register(
@@ -956,11 +1055,6 @@ class AsyncTPPass(VllmFusionPatternMatcherPass):
                                 a_scale_view=a_scale_view,
                             )
                         )
-                # NVFP4 reduce-scatter does not need scale communication: FP4
-                # scales are consumed by the local GEMM and only BF16 partial
-                # outputs are reduced. Keep this PR scoped to the all-gather
-                # path; reduce-scatter needs a dedicated FP4 producer rather
-                # than the existing FP8-style helper.
 
         self.dump_patterns(config, self.pm_pass)
 

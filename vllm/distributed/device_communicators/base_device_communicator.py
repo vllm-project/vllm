@@ -247,6 +247,14 @@ class DeviceCommunicatorBase:
         # Reshape before returning
         return output_tensor.movedim(0, dim).contiguous()
 
+    def reduce_scatter_out(
+        self,
+        output: torch.Tensor,
+        input_: torch.Tensor,
+        stream: object | None = None,
+    ) -> None:
+        raise NotImplementedError
+
     def reduce_scatterv(
         self, input_: torch.Tensor, dim: int = -1, sizes: list[int] | None = None
     ) -> torch.Tensor:

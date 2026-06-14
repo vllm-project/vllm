@@ -208,6 +208,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "is_sf_swizzled_layout, *, Tensor(a!) output, Tensor(b!) output_scale) "
       "-> ()");
 
+  ops.def("repack_nvfp4_scale(Tensor row_major_scale) -> Tensor");
+
   // Compute NVFP4 experts quantization.
   ops.def(
       "scaled_fp4_experts_quant(Tensor! output, Tensor! output_scale,"
@@ -628,6 +630,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("cutlass_scaled_fp4_mm", TORCH_BOX(&cutlass_scaled_fp4_mm));
   ops.impl("scaled_fp4_quant", TORCH_BOX(&scaled_fp4_quant_func));
   ops.impl("scaled_fp4_quant.out", TORCH_BOX(&scaled_fp4_quant_out));
+  ops.impl("repack_nvfp4_scale", TORCH_BOX(&repack_nvfp4_scale));
   ops.impl("scaled_fp4_experts_quant", TORCH_BOX(&scaled_fp4_experts_quant));
   ops.impl("silu_and_mul_scaled_fp4_experts_quant",
            TORCH_BOX(&silu_and_mul_scaled_fp4_experts_quant));
