@@ -5,6 +5,8 @@ import argparse
 import glob
 import sys
 
+import regex as re
+
 # Only strip targeted libraries when checking prefix
 TORCH_LIB_PREFIXES = (
     # requirements/*.txt/in
@@ -15,6 +17,13 @@ TORCH_LIB_PREFIXES = (
     '"torch =',
     '"torchvision =',
     '"torchaudio =',
+)
+
+# Match lines where the package name is exactly torch/torchvision/torchaudio,
+# not a substring of another package (e.g. terratorch, open_clip_torch).
+_TORCH_PKG_RE = re.compile(
+    r"""^\s*['"]?\s*(?:torchvision|torchaudio|torch)\s*(?:[=<>!;\[,\]'"@~#(]|$)""",
+    re.IGNORECASE,
 )
 
 
@@ -43,7 +52,7 @@ def main(argv):
                         args.prefix
                         and not line.lower().strip().startswith(TORCH_LIB_PREFIXES)
                         or not args.prefix
-                        and "torch" not in line.lower()
+                        and not _TORCH_PKG_RE.match(line)
                     ):
                         f.write(line)
                     else:
