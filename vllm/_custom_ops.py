@@ -773,6 +773,14 @@ def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
 
 
+def mxfp4_experts_quant_supported(cuda_device_capability: int) -> bool:
+    try:
+        return torch.ops._C.mxfp4_experts_quant_supported(cuda_device_capability)
+    except AttributeError:
+        # Return False on builds where the CUDA helper is not available.
+        return False
+
+
 def cutlass_scaled_fp4_mm(
     a: torch.Tensor,
     b: torch.Tensor,

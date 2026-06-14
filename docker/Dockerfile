@@ -261,7 +261,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Explicitly set the list to avoid issues with torch 2.2
 # See https://github.com/pytorch/pytorch/pull/123243
 # From versions.json: .torch.cuda_arch_list
-ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
+# Do not add +PTX here: vLLM filters torch's top-level PTX flag when it
+# converts global gencode flags into per-kernel arch lists. If a specific
+# kernel needs PTX, add +PTX to that kernel's CMake arch list instead.
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BUILD BASE IMAGE ####################
 
@@ -1010,7 +1013,8 @@ ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
 ENV UV_HTTP_TIMEOUT=500
 
 # install kv_connectors if requested
-ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX'
+# Do not add +PTX here; see the main TORCH_CUDA_ARCH_LIST comment above.
+ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 RUN --mount=type=cache,target=/opt/uv/cache \
     --mount=type=bind,source=requirements/kv_connectors.txt,target=/tmp/kv_connectors.txt,ro \
