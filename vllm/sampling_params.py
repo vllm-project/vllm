@@ -998,6 +998,15 @@ class SamplingParams(
             # Remember that this backend was set automatically
             self.structured_outputs._backend_was_auto = True
 
+        if (
+            structured_outputs_config.disable_any_whitespace
+            or self.structured_outputs.disable_any_whitespace
+        ) and self.structured_outputs._backend not in ("xgrammar", "guidance"):
+            raise ValueError(
+                "disable_any_whitespace is only supported for "
+                "xgrammar and guidance backends."
+            )
+
         # Run post-init validation. This is also important to ensure subsequent
         # roundtrip serialization/deserialization won't fail.
         self.structured_outputs.__post_init__()
