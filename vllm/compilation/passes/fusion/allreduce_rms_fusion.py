@@ -1483,7 +1483,7 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
         # `_pool` attribute and skip fusion for unsupported sizes.
         # Ref (old kernel): https://github.com/ROCm/aiter/blob/6a0e7b26ccf33164785531212cc2ec2cde0b9243/csrc/include/custom_all_reduce.cuh#L2590
         aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
-        _AITER_OLD_FUSED_AR_RMS_HIDDEN = (512, 1024, 2048, 4096)
+        _AITER_OLD_FUSED_AR_RMS_HIDDEN = (512, 1024, 2048, 4096, 7168)
         if (
             aiter_ar is not None
             and not hasattr(aiter_ar, "_pool")
