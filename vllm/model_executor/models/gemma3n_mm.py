@@ -722,7 +722,7 @@ class Gemma3nForConditionalGeneration(
         # select a chunk of pre-allocated PLEs. During normal execution,
         # `embed_input_ids` is called before forward, hence this slice
         # will contain PLEs computed from the actual input_ids.
-        per_layer_inputs = self.per_layer_embeddings[: inputs_embeds.shape[0]]
+        per_layer_inputs = self.per_layer_embeddings[:positions.shape[0]]
 
         hidden_states = self.language_model.model(
             input_ids,
