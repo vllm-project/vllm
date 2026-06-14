@@ -556,7 +556,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        kv_cache_dummy_dep: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """``kv_cache_dummy_dep``: when an upstream fused producer has already
+        written this layer's KV cache, it passes the producer op's dummy output
+        here. The KV-cache update below is then skipped, and the dummy is
+        threaded into the attention op so torch.compile preserves the write ->
+        attend order.
+        """
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(
                 q,
@@ -583,14 +590,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
-            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-                kv_c_normed,
-                k_pe,
-                self_kv_cache,
-                slot_mapping.get(self.layer_name),
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
+            if kv_cache_dummy_dep is None:
+                self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                    kv_c_normed,
+                    k_pe,
+                    self_kv_cache,
+                    slot_mapping.get(self.layer_name),
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
             self.forward_impl(
                 q,
@@ -603,13 +611,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             return output
         else:
             encoded = _encode_layer_name(self.layer_name)
-            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                encoded,
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
+            if kv_cache_dummy_dep is None:
+                kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+                    kv_c_normed,
+                    k_pe,
+                    encoded,
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
             torch.ops.vllm.unified_mla_attention_with_output(
                 q,
@@ -1074,6 +1083,57 @@ direct_register_custom_op(
     op_name="unified_mla_kv_cache_update",
     op_func=unified_mla_kv_cache_update,
     fake_impl=unified_mla_kv_cache_update_fake,
+)
+
+
+def fused_rope_unified_mla_kv_cache_update_impl(
+    positions: torch.Tensor,
+    q_pe: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_c: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    kv_cache_dtype: str,
+    kv_cache_scale: torch.Tensor,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    layer_name = _resolve_layer_name(layer_name)
+    attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    if layer_slot_mapping is not None:
+        ops.concat_and_cache_mla_rope_fused(
+            positions,
+            q_pe,
+            k_pe,
+            kv_c,
+            cos_sin_cache,
+            is_neox,
+            layer_slot_mapping,
+            kv_cache,
+            kv_cache_dtype,
+            kv_cache_scale,
+        )
+    return torch.empty(0, device=kv_c.device, dtype=kv_c.dtype)
+
+
+def fused_rope_unified_mla_kv_cache_update_fake(
+    positions: torch.Tensor,
+    q_pe: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_c: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    kv_cache_dtype: str,
+    kv_cache_scale: torch.Tensor,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    return torch.empty(0, dtype=kv_c.dtype, device=kv_c.device)
+
+
+direct_register_custom_op(
+    op_name="fused_rope_unified_mla_kv_cache_update",
+    op_func=fused_rope_unified_mla_kv_cache_update_impl,
+    fake_impl=fused_rope_unified_mla_kv_cache_update_fake,
+    mutates_args=["q_pe", "k_pe"],
 )
 
 
