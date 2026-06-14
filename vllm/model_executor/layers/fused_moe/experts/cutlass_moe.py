@@ -703,6 +703,19 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         return True
 
     @staticmethod
+    def _supports_batch_invariance() -> bool:
+        # The CUTLASS NVFP4 group GEMM uses weight-static activation scales
+        # (``a1_gscale`` / ``a2_gscale`` are loaded weight attributes, not
+        # derived from the batch) and a fixed per-expert tile, so the kernel
+        # output for a given ``(m_per_expert, n, k)`` is deterministic
+        # regardless of the surrounding batch composition. Declaring this
+        # lets ``VLLM_BATCH_INVARIANT=1`` users pair this MoE kernel with a
+        # batch-invariant attention backend (e.g. FlashInfer with its
+        # batch-invariant planner) and avoid the concurrent same-prompt
+        # repetition described in issue #31856.
+        return True
+
+    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
