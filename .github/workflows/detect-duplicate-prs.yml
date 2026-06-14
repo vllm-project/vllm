@@ -1,0 +1,55 @@
+name: Detect Duplicate PRs
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited, ready_for_review]
+
+jobs:
+  detect-duplicate:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install requests numpy scikit-learn sentence-transformers
+
+      - name: Compute cache key epoch (weekly)
+        id: cache-epoch
+        run: echo "week=$(date +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore PR file cache
+        id: restore-pr-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .github/workflows/.dup_pr_cache/files
+          key: dup-pr-files-${{ github.repository }}-${{ steps.cache-epoch.outputs.week }}
+          restore-keys: |
+            dup-pr-files-${{ github.repository }}-
+
+      - name: Run duplicate PR detection
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          DRY_RUN: 0
+          PR_FILE_CACHE_DIR: .github/workflows/.dup_pr_cache/files
+          PR_FILE_CACHE_WRITE: 1
+          PREFETCH_CANDIDATE_FILES: 1
+        run: python .github/workflows/scripts/detect_duplicate_prs.py
+
+      - name: Save PR file cache
+        if: ${{ github.event.pull_request.head.repo.full_name == github.repository && steps.restore-pr-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .github/workflows/.dup_pr_cache/files
+          key: dup-pr-files-${{ github.repository }}-${{ steps.cache-epoch.outputs.week }}

@@ -1,0 +1,64 @@
+name: Detect Duplicate Issues
+
+on:
+  issues:
+    types: [opened, reopened, edited]
+
+jobs:
+  detect-duplicate:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install requests numpy scikit-learn sentence-transformers
+
+      - name: Compute cache key epoch (weekly)
+        id: cache-epoch
+        run: echo "week=$(date +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore issue embedding cache
+        id: restore-issue-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .github/workflows/.dup_issue_cache/embeddings
+          key: dup-issue-emb-${{ github.repository }}-${{ steps.cache-epoch.outputs.week }}
+          restore-keys: |
+            dup-issue-emb-${{ github.repository }}-
+
+      - name: Run duplicate Issue detection
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          DRY_RUN: 0
+          USE_SENTENCE_TRANSFORMERS: 1
+          ISSUE_CANDIDATE_STATE: all
+          MAX_CANDIDATES: 500
+          TITLE_COMPARE_TOP_N: 25
+          TOP_K: 5
+          SIMILARITY_THRESHOLD: 0.82
+          TEXT_WEIGHT: 0.8
+          TITLE_WEIGHT: 0.2
+          AUTO_LABEL: 1
+          DUPLICATE_LABEL: possible-duplicate
+          ISSUE_EMBED_CACHE_DIR: .github/workflows/.dup_issue_cache/embeddings
+          ISSUE_EMBED_CACHE_WRITE: 1
+        run: python .github/workflows/scripts/detect_duplicate_issues.py
+
+      - name: Save issue embedding cache
+        if: ${{ steps.restore-issue-cache.outputs.cache-hit != 'true' }}
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .github/workflows/.dup_issue_cache/embeddings
+          key: dup-issue-emb-${{ github.repository }}-${{ steps.cache-epoch.outputs.week }}
