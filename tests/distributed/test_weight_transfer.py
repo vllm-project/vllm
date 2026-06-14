@@ -162,9 +162,7 @@ class TestNCCLEngineParsing:
         """Test parsing valid init info dict."""
         config = WeightTransferConfig(backend="nccl")
         parallel_config = create_mock_parallel_config()
-        engine = NCCLWeightTransferEngine(
-            config, parallel_config, MagicMock(spec=torch.nn.Module)
-        )
+        engine = NCCLWeightTransferEngine(config, parallel_config)
 
         init_info = engine.parse_init_info(
             {
@@ -185,9 +183,7 @@ class TestNCCLEngineParsing:
         """Test parsing init info with missing required field."""
         config = WeightTransferConfig(backend="nccl")
         parallel_config = create_mock_parallel_config()
-        engine = NCCLWeightTransferEngine(
-            config, parallel_config, MagicMock(spec=torch.nn.Module)
-        )
+        engine = NCCLWeightTransferEngine(config, parallel_config)
 
         with pytest.raises(ValueError, match="Invalid init_info"):
             engine.parse_init_info(
@@ -201,9 +197,7 @@ class TestNCCLEngineParsing:
         """Test parsing valid update info dict."""
         config = WeightTransferConfig(backend="nccl")
         parallel_config = create_mock_parallel_config()
-        engine = NCCLWeightTransferEngine(
-            config, parallel_config, MagicMock(spec=torch.nn.Module)
-        )
+        engine = NCCLWeightTransferEngine(config, parallel_config)
 
         update_info = engine.parse_update_info(
             {
@@ -229,18 +223,14 @@ class TestEngineRegistry:
         """Test factory creates NCCL engine."""
         config = WeightTransferConfig(backend="nccl")
         parallel_config = create_mock_parallel_config()
-        engine = WeightTransferEngineFactory.create_engine(
-            config, parallel_config, MagicMock(spec=torch.nn.Module)
-        )
+        engine = WeightTransferEngineFactory.create_engine(config, parallel_config)
         assert isinstance(engine, NCCLWeightTransferEngine)
 
     def test_create_engine_ipc(self):
         """Test factory creates IPC engine."""
         config = WeightTransferConfig(backend="ipc")
         parallel_config = create_mock_parallel_config()
-        engine = WeightTransferEngineFactory.create_engine(
-            config, parallel_config, MagicMock(spec=torch.nn.Module)
-        )
+        engine = WeightTransferEngineFactory.create_engine(config, parallel_config)
         assert isinstance(engine, IPCWeightTransferEngine)
 
     def test_create_engine_invalid_backend(self):
@@ -248,9 +238,7 @@ class TestEngineRegistry:
         config = WeightTransferConfig(backend="invalid")
         parallel_config = create_mock_parallel_config()
         with pytest.raises(ValueError, match="Invalid weight transfer backend"):
-            WeightTransferEngineFactory.create_engine(
-                config, parallel_config, MagicMock(spec=torch.nn.Module)
-            )
+            WeightTransferEngineFactory.create_engine(config, parallel_config)
 
     def test_register_duplicate_raises(self):
         """Test registering duplicate engine name raises."""
@@ -270,9 +258,7 @@ def test_nccl_receive_weights_without_init_raises():
 
     config = WeightTransferConfig(backend="nccl")
     parallel_config = create_mock_parallel_config()
-    engine = NCCLWeightTransferEngine(
-        config, parallel_config, MagicMock(spec=torch.nn.Module)
-    )
+    engine = NCCLWeightTransferEngine(config, parallel_config)
 
     update_info = NCCLWeightTransferUpdateInfo(
         names=["w"],
@@ -372,9 +358,7 @@ def inference_receive_tensor(
     parallel_config.data_parallel_rank = 0
     parallel_config.data_parallel_index = 0
 
-    engine = NCCLWeightTransferEngine(
-        config, parallel_config, MagicMock(spec=torch.nn.Module)
-    )
+    engine = NCCLWeightTransferEngine(config, parallel_config)
 
     # Initialize the engine (joins as rank 1)
     init_info = NCCLWeightTransferInitInfo(
@@ -803,9 +787,7 @@ class TestIPCEngineParsing:
 
         config = WeightTransferConfig(backend="ipc")
         parallel_config = create_mock_parallel_config()
-        engine = IPCWeightTransferEngine(
-            config, parallel_config, MagicMock(spec=torch.nn.Module)
-        )
+        engine = IPCWeightTransferEngine(config, parallel_config)
 
         # Create dummy IPC handles
         dummy_tensor1 = torch.ones(100, 100, device="cuda:0")
@@ -839,9 +821,7 @@ class TestIPCEngineParsing:
 
         config = WeightTransferConfig(backend="ipc")
         parallel_config = create_mock_parallel_config()
-        engine = IPCWeightTransferEngine(
-            config, parallel_config, MagicMock(spec=torch.nn.Module)
-        )
+        engine = IPCWeightTransferEngine(config, parallel_config)
 
         dummy_tensor1 = torch.ones(100, 100, device="cuda:0")
         dummy_tensor2 = torch.ones(50, device="cuda:0")
@@ -896,9 +876,7 @@ class TestIPCEngineParsing:
 
         config = WeightTransferConfig(backend="ipc")
         parallel_config = create_mock_parallel_config()
-        engine = IPCWeightTransferEngine(
-            config, parallel_config, MagicMock(spec=torch.nn.Module)
-        )
+        engine = IPCWeightTransferEngine(config, parallel_config)
 
         dummy_tensor = torch.ones(10, 10, device="cuda:0")
         _, ipc_handle = reduce_tensor(dummy_tensor)
@@ -988,9 +966,7 @@ def inference_receive_ipc_tensor(
     parallel_config.data_parallel_rank = 0
     parallel_config.data_parallel_index = 0
 
-    engine = IPCWeightTransferEngine(
-        config, parallel_config, MagicMock(spec=torch.nn.Module)
-    )
+    engine = IPCWeightTransferEngine(config, parallel_config)
 
     # Initialize the engine (no-op for IPC)
     init_info = IPCWeightTransferInitInfo()
@@ -1118,9 +1094,7 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
 
     config = WeightTransferConfig(backend="ipc")
     parallel_config = create_mock_parallel_config()
-    engine = IPCWeightTransferEngine(
-        config, parallel_config, MagicMock(spec=torch.nn.Module)
-    )
+    engine = IPCWeightTransferEngine(config, parallel_config)
 
     # Create IPC handle with wrong GPU UUID
     dummy_tensor = torch.ones(10, 10, device="cuda:0")
