@@ -78,6 +78,13 @@ class SpecDecodeBaseProposer:
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
 
+        # P/D: on a kv_producer we run drafter prefill (to populate the drafter KV cache
+        # for transfer) but skip sampling and autoregressive drafting st P never decodes
+        self._is_kv_producer = (
+            vllm_config.kv_transfer_config is not None
+            and vllm_config.kv_transfer_config.is_kv_producer
+        )
+
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
@@ -520,6 +527,16 @@ class SpecDecodeBaseProposer:
         # and read the indices that step 0 just wrote into the shared buffer.
         if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
             self.model.model.set_skip_topk(True)
+
+        if self._is_kv_producer:
+            # P only needs drafter prefill to populate KV cache for transfer;
+            # skip sampling and autoregressive drafting.
+            return torch.zeros(
+                batch_size,
+                self.num_speculative_tokens,
+                dtype=torch.long,
+                device=self.device,
+            )
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 

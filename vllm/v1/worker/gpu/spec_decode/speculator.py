@@ -96,6 +96,13 @@ class DraftModelSpeculator(BaseSpeculator):
         self.dtype = vllm_config.model_config.dtype
         self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
 
+        # P/D: on a kv_producer we run drafter prefill (to populate the drafter KV cache
+        # for transfer) but skip sampling and autoregressive drafting st P never decodes
+        self._is_kv_producer = (
+            vllm_config.kv_transfer_config is not None
+            and vllm_config.kv_transfer_config.is_kv_producer
+        )
+
         # DP configuration
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank

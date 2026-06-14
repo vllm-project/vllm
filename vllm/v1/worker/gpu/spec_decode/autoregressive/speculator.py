@@ -241,6 +241,11 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 mm_inputs=mm_inputs,
             )
 
+        if self._is_kv_producer:
+            # P only needs drafter prefill to populate KV cache for transfer;
+            # skip sampling and autoregressive drafting.
+            return self.draft_tokens[:num_reqs]
+
         if self.num_speculative_steps == 1:
             # Early exit.
             return self.draft_tokens[:num_reqs, :1]
@@ -357,17 +362,18 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             mm_inputs=mm_inputs,
         )
-        sample_hidden_states = last_hidden_states[last_token_indices]
 
-        self.draft_tokens[:num_reqs, 0] = self.sample_draft(
-            sample_hidden_states,
-            positions,
-            idx_mapping,
-            self.temperature,
-            self.seeds,
-            self.current_draft_step,
-            self.draft_logits,
-        )
+        if not self._is_kv_producer:
+            sample_hidden_states = last_hidden_states[last_token_indices]
+            self.draft_tokens[:num_reqs, 0] = self.sample_draft(
+                sample_hidden_states,
+                positions,
+                idx_mapping,
+                self.temperature,
+                self.seeds,
+                self.current_draft_step,
+                self.draft_logits,
+            )
         self.hidden_states[:num_reqs] = hidden_states[last_token_indices]
         self.input_buffers.positions[:num_reqs] = positions
 
