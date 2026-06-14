@@ -19,12 +19,12 @@
 namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
-template <typename scalar_t, typename fp8_type, int VEC_SIZE>
+template <typename scalar_t, typename scalar_wt_t, typename fp8_type, int VEC_SIZE>
 __global__ void rms_norm_static_fp8_quant_kernel(
     fp8_type* __restrict__ out,          // [..., hidden_size]
     const scalar_t* __restrict__ input,  // [..., hidden_size]
     const int input_stride,
-    const scalar_t* __restrict__ weight,  // [hidden_size]
+    const scalar_wt_t* __restrict__ weight,  // [hidden_size]
     const float* __restrict__ scale,      // [1]
     const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
@@ -59,15 +59,15 @@ __global__ void rms_norm_static_fp8_quant_kernel(
   float const scale_inv = 1.0f / *scale;
 
   auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
-  auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
+  auto* v_w = reinterpret_cast<const vec_n_t<scalar_wt_t, VEC_SIZE>*>(weight);
   for (int idx = threadIdx.x; idx < hidden_size / VEC_SIZE; idx += blockDim.x) {
     vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[idx];
-    vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[idx];
+    vec_n_t<scalar_wt_t, VEC_SIZE> src2 = v_w[idx];
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; j++) {
       float x = static_cast<float>(src1.val[j]);
       // Multiply in weight's native dtype to match rms_norm_kernel.
-      scalar_t out_norm = static_cast<scalar_t>(x * s_variance) * src2.val[j];
+      scalar_t out_norm = static_cast<scalar_t>(static_cast<scalar_wt_t>(x * s_variance) * src2.val[j]);
       out[blockIdx.x * hidden_size + idx * VEC_SIZE + j] =
           scaled_fp8_conversion<true, fp8_type>(static_cast<float>(out_norm),
                                                 scale_inv);
@@ -79,19 +79,21 @@ __global__ void rms_norm_static_fp8_quant_kernel(
    Additional optimizations we can make in this case are
    packed and vectorized operations, which help with the
    memory latency bottleneck. */
-template <typename scalar_t, int width, typename fp8_type>
-__global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
+template <typename scalar_t, typename scalar_wt_t, int width, typename fp8_type>
+__global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists && _typeConvert<scalar_wt_t>::exists>
 fused_add_rms_norm_static_fp8_quant_kernel(
     fp8_type* __restrict__ out,    // [..., hidden_size]
     scalar_t* __restrict__ input,  // [..., hidden_size]
     const int input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
-    const scalar_t* __restrict__ weight,  // [hidden_size]
+    const scalar_wt_t* __restrict__ weight,  // [hidden_size]
     const float* __restrict__ scale,      // [1]
     const float epsilon, const int num_tokens, const int hidden_size) {
   // Sanity checks on our vector struct and type-punned pointer arithmetic
   static_assert(std::is_pod_v<_f16Vec<scalar_t, width>>);
+  static_assert(std::is_pod_v<_f16Vec<scalar_wt_t, width>>);
   static_assert(sizeof(_f16Vec<scalar_t, width>) == sizeof(scalar_t) * width);
+  static_assert(sizeof(_f16Vec<scalar_wt_t, width>) == sizeof(scalar_wt_t) * width);
 
   const int vec_hidden_size = hidden_size / width;
   const int vec_input_stride = input_stride / width;
@@ -105,7 +107,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   auto* __restrict__ residual_v =
       reinterpret_cast<_f16Vec<scalar_t, width>*>(residual);
   auto* __restrict__ weight_v =
-      reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
+      reinterpret_cast<const _f16Vec<scalar_wt_t, width>*>(weight);
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int stride_id = blockIdx.x * vec_input_stride + idx;
@@ -113,7 +115,6 @@ fused_add_rms_norm_static_fp8_quant_kernel(
     _f16Vec<scalar_t, width> temp = input_v[stride_id];
     temp += residual_v[id];
     variance += temp.sum_squares();
-    residual_v[id] = temp;
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -129,44 +130,49 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   float const scale_inv = 1.0f / *scale;
 
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
+    int stride_id = blockIdx.x * vec_input_stride + idx;
     int id = blockIdx.x * vec_hidden_size + idx;
+    _f16Vec<scalar_t, width> inp = input_v[stride_id];
     _f16Vec<scalar_t, width> res = residual_v[id];
-    _f16Vec<scalar_t, width> w = weight_v[idx];
+    _f16Vec<scalar_wt_t, width> w = weight_v[idx];
     using Converter = _typeConvert<scalar_t>;
+    using WeightConverter = _typeConvert<scalar_wt_t>;
     using HipT = typename Converter::hip_type;
 #pragma unroll
     for (int i = 0; i < width; ++i) {
-      float x = Converter::convert(res.data[i]);
+      float x = Converter::convert(inp.data[i]);
+      x += Converter::convert(res.data[i]);
       // Multiply in weight's native dtype to match fused_add_rms_norm_kernel.
-      HipT out_norm_h = Converter::convert(x * s_variance) * w.data[i];
+      // temp hack to convert from wt_dtype -> float -> inp_dtype 
+      // as direct wt_dtype -> inp_dtype isn't available 
+      HipT out_norm_h = Converter::convert(WeightConverter::convert(WeightConverter::convert(x * s_variance) * w.data[i]));
       out[id * width + i] = scaled_fp8_conversion<true, fp8_type>(
           Converter::convert(out_norm_h), scale_inv);
     }
+    residual_v[id] += inp;
   }
 }
 
 /* Generic fused_add_rms_norm_kernel
    The width field is not used here but necessary for other specializations.
  */
-template <typename scalar_t, int width, typename fp8_type>
-__global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
+template <typename scalar_t, typename scalar_wt_t, int width, typename fp8_type>
+__global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists || !_typeConvert<scalar_wt_t>::exists>
 fused_add_rms_norm_static_fp8_quant_kernel(
     fp8_type* __restrict__ out,    // [..., hidden_size]
     scalar_t* __restrict__ input,  // [..., hidden_size]
     const int input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
-    const scalar_t* __restrict__ weight,  // [hidden_size]
+    const scalar_wt_t* __restrict__ weight,  // [hidden_size]
     const float* __restrict__ scale,      // [1]
     const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    scalar_t z = input[blockIdx.x * input_stride + idx];
-    z += residual[blockIdx.x * hidden_size + idx];
-    float x = (float)z;
+    float x = input[blockIdx.x * input_stride + idx];
+    x += residual[blockIdx.x * hidden_size + idx];
     variance += x * x;
-    residual[blockIdx.x * hidden_size + idx] = z;
   }
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
@@ -182,11 +188,13 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   float const scale_inv = 1.0f / *scale;
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[blockIdx.x * hidden_size + idx];
+    float x = (float)input[blockIdx.x * input_stride + idx];
+    x += residual[blockIdx.x * hidden_size + idx];
     // Multiply in weight's native dtype to match fused_add_rms_norm_kernel.
-    scalar_t out_norm = static_cast<scalar_t>(x * s_variance) * weight[idx];
+    scalar_t out_norm = static_cast<scalar_t>(static_cast<scalar_wt_t>(x * s_variance) * weight[idx]);
     out[blockIdx.x * hidden_size + idx] = scaled_fp8_conversion<true, fp8_type>(
         static_cast<float>(out_norm), scale_inv);
+    residual[blockIdx.x * hidden_size + idx] = static_cast<scalar_t>(x);
   }
 }
 
@@ -211,43 +219,51 @@ void rms_norm_static_fp8_quant(
   const cudaStream_t stream = get_current_cuda_stream();
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_kernel_scalar_type", [&] {
-        VLLM_STABLE_DISPATCH_FP8_TYPES(
-            out.scalar_type(), "rms_norm_kernel_fp8_type", [&] {
-              const int calculated_vec_size =
-                  std::gcd(16 / sizeof(scalar_t), hidden_size);
-              const int block_size =
-                  std::min(hidden_size / calculated_vec_size, max_block_size);
-              dim3 block(block_size);
-              VLLM_STABLE_DISPATCH_VEC_SIZE(calculated_vec_size, [&] {
-                vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t,
-                                                       vec_size>
-                    <<<grid, block, 0, stream>>>(
-                        out.mutable_data_ptr<fp8_t>(),
-                        input.const_data_ptr<scalar_t>(), input_stride,
-                        weight.const_data_ptr<scalar_t>(),
-                        scale.const_data_ptr<float>(), epsilon, num_tokens,
-                        hidden_size);
+        using scalar_in_t = scalar_t;
+        VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+          weight.scalar_type(), "rms_norm_kernel_wt_type", [&] {
+            VLLM_STABLE_DISPATCH_FP8_TYPES(
+              out.scalar_type(), "rms_norm_kernel_fp8_type", [&] {
+                const int calculated_vec_size =
+                    std::gcd(16 / sizeof(scalar_t), hidden_size);
+                const int block_size =
+                    std::min(hidden_size / calculated_vec_size, max_block_size);
+                dim3 block(block_size);
+                VLLM_STABLE_DISPATCH_VEC_SIZE(calculated_vec_size, [&] {
+                  vllm::rms_norm_static_fp8_quant_kernel<scalar_in_t, scalar_t, fp8_t,
+                                                        vec_size>
+                      <<<grid, block, 0, stream>>>(
+                          out.mutable_data_ptr<fp8_t>(),
+                          input.const_data_ptr<scalar_in_t>(), input_stride,
+                          weight.const_data_ptr<scalar_t>(),
+                          scale.const_data_ptr<float>(), epsilon, num_tokens,
+                          hidden_size);
+                });
               });
-            });
+          });
       });
 }
 
-#define LAUNCH_FUSED_ADD_RMS_NORM(width)                                     \
-  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                       \
-      input.scalar_type(), "fused_add_rms_norm_kernel_scalar_type", [&] {    \
-        VLLM_STABLE_DISPATCH_FP8_TYPES(                                      \
-            out.scalar_type(), "fused_add_rms_norm_kernel_fp8_type", [&] {   \
-              vllm::fused_add_rms_norm_static_fp8_quant_kernel<scalar_t,     \
-                                                               width, fp8_t> \
-                  <<<grid, block, 0, stream>>>(                              \
-                      out.mutable_data_ptr<fp8_t>(),                         \
-                      input.mutable_data_ptr<scalar_t>(), input_stride,      \
-                      residual.mutable_data_ptr<scalar_t>(),                 \
-                      weight.const_data_ptr<scalar_t>(),                     \
-                      scale.const_data_ptr<float>(), epsilon, num_tokens,    \
-                      hidden_size);                                          \
-            });                                                              \
-      });
+#define LAUNCH_FUSED_ADD_RMS_NORM(width)                                       \
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                         \
+      input.scalar_type(), "fused_add_rms_norm_kernel_scalar_type", [&] {      \
+        using scalar_in_t = scalar_t;                                          \
+        VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                   \
+          weight.scalar_type(), "fused_add_rms_norm_kernel_wt_type", [&] {     \
+             VLLM_STABLE_DISPATCH_FP8_TYPES(                                   \
+              out.scalar_type(), "fused_add_rms_norm_kernel_fp8_type", [&] {   \
+                vllm::fused_add_rms_norm_static_fp8_quant_kernel<scalar_in_t,  \
+                                                      scalar_t, width, fp8_t>  \
+                    <<<grid, block, 0, stream>>>(                              \
+                        out.mutable_data_ptr<fp8_t>(),                         \
+                        input.mutable_data_ptr<scalar_in_t>(), input_stride,   \
+                        residual.mutable_data_ptr<scalar_in_t>(),              \
+                        weight.const_data_ptr<scalar_t>(),                     \
+                        scale.const_data_ptr<float>(), epsilon, num_tokens,    \
+                        hidden_size);                                          \
+              });                                                              \
+          });                                                                  \
+      });                                                                      
 void fused_add_rms_norm_static_fp8_quant(
     torch::stable::Tensor& out,       // [..., hidden_size],
     torch::stable::Tensor& input,     // [..., hidden_size]
@@ -258,7 +274,6 @@ void fused_add_rms_norm_static_fp8_quant(
   STD_TORCH_CHECK(out.is_contiguous());
   STD_TORCH_CHECK(residual.is_contiguous());
   STD_TORCH_CHECK(residual.scalar_type() == input.scalar_type());
-  STD_TORCH_CHECK(weight.scalar_type() == input.scalar_type());
   int hidden_size = input.size(-1);
   int input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;

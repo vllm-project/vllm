@@ -158,6 +158,7 @@ def ops_impl(
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
 @pytest.mark.parametrize("has_scale_ub", SCALE_UBS)
 @pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("wt_dtype", DTYPES)
 @pytest.mark.parametrize("quant_dtype", QUANT_DTYPES)
 @pytest.mark.parametrize(
     "group_size, tma_alignment",
@@ -174,6 +175,7 @@ def test_rms_norm(
     add_residual: bool,
     has_scale_ub: bool,
     dtype: torch.dtype,
+    wt_dtype: torch.dtype,
     quant_dtype: torch.dtype,
     group_size: list[int] | None,
     tma_alignment: int,
@@ -211,7 +213,14 @@ def test_rms_norm(
         # skip
         pytest.skip("scale_ub only supported for fp8 quantization")
 
-    layer = RMSNorm(hidden_size, EPS).to(dtype=dtype)
+    if (
+        dtype != wt_dtype
+        and dtype in (torch.half, torch.bfloat16)
+        and wt_dtype in (torch.half, torch.bfloat16)
+    ):
+        pytest.skip("unsupported input and weight dtype combination")
+
+    layer = RMSNorm(hidden_size, EPS, dtype=wt_dtype)
 
     # Make weights
     layer.weight.data.normal_(mean=1.0, std=0.1)
