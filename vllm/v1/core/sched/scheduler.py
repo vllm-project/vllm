@@ -360,6 +360,22 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = num_uncached_common_prefix_tokens
                 # keep alignment to block_size
                 num_new_tokens = num_new_tokens // block_size * block_size
+
+            single_block_prefill = getattr(
+                getattr(self, "scheduler_config", None),
+                "mamba_align_single_block_prefill",
+                False,
+            )
+            if (
+                single_block_prefill
+                and num_computed_tokens < last_cache_position
+                and num_new_tokens > block_size
+            ):
+                # In align mode, Mamba keeps only the running state for the
+                # current scheduler step. External KV stores need every cached
+                # block boundary to have a real snapshot, so do not let one
+                # cacheable prefill step skip over multiple boundaries.
+                num_new_tokens = block_size
         return num_new_tokens
 
     def schedule(self) -> SchedulerOutput:
@@ -738,6 +754,7 @@ class Scheduler(SchedulerInterface):
                     # after async KV recvs are completed.
                     new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
                     num_new_local_computed_tokens = 0
+                    num_uncached_common_prefix_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
 
                 encoder_inputs_to_schedule = None

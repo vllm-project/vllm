@@ -1085,6 +1085,72 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     manager.free(req_2)
 
 
+def test_mamba_align_single_block_prefill_cap():
+    block_size = 16
+    request = SimpleNamespace(
+        num_computed_tokens=0,
+        num_prompt_tokens=5 * block_size,
+        num_tokens=5 * block_size,
+    )
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        scheduler_config=SimpleNamespace(mamba_align_single_block_prefill=True),
+        use_eagle=False,
+    )
+
+    num_new_tokens = Scheduler._mamba_block_aligned_split(
+        self=mock,
+        request=request,
+        num_new_tokens=5 * block_size,
+    )
+
+    assert num_new_tokens == block_size
+
+
+def test_mamba_align_single_block_prefill_cap_preserves_default():
+    block_size = 16
+    request = SimpleNamespace(
+        num_computed_tokens=0,
+        num_prompt_tokens=5 * block_size,
+        num_tokens=5 * block_size,
+    )
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        scheduler_config=SimpleNamespace(mamba_align_single_block_prefill=False),
+        use_eagle=False,
+    )
+
+    num_new_tokens = Scheduler._mamba_block_aligned_split(
+        self=mock,
+        request=request,
+        num_new_tokens=5 * block_size,
+    )
+
+    assert num_new_tokens == 5 * block_size
+
+
+def test_mamba_align_single_block_prefill_cap_preserves_partial_tail():
+    block_size = 16
+    request = SimpleNamespace(
+        num_computed_tokens=4 * block_size,
+        num_prompt_tokens=4 * block_size + 7,
+        num_tokens=4 * block_size + 7,
+    )
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        scheduler_config=SimpleNamespace(mamba_align_single_block_prefill=True),
+        use_eagle=False,
+    )
+
+    num_new_tokens = Scheduler._mamba_block_aligned_split(
+        self=mock,
+        request=request,
+        num_new_tokens=7,
+    )
+
+    assert num_new_tokens == 7
+
+
 def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
     """Regression test for https://github.com/vllm-project/vllm/issues/39271.
 

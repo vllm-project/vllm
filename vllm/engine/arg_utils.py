@@ -602,6 +602,10 @@ class EngineArgs:
 
     watermark: float = SchedulerConfig.watermark
 
+    mamba_align_single_block_prefill: bool = (
+        SchedulerConfig.mamba_align_single_block_prefill
+    )
+
     disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
     )
@@ -1413,6 +1417,10 @@ class EngineArgs:
         )
         scheduler_group.add_argument("--watermark", **scheduler_kwargs["watermark"])
         scheduler_group.add_argument(
+            "--mamba-align-single-block-prefill",
+            **scheduler_kwargs["mamba_align_single_block_prefill"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2059,6 +2067,9 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
+            mamba_align_single_block_prefill=(
+                self.mamba_align_single_block_prefill
+            ),
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
