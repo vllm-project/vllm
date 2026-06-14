@@ -185,7 +185,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
         self.num_speculative_steps = vllm_config.num_speculative_tokens
-        if self.speculative_config is not None:
+        # Grammar spec decoding: draft tokens come from the scheduler via
+        # scheduled_spec_decode_tokens; there is no worker-side drafter.
+        self.use_grammar_spec = (
+            self.speculative_config is not None
+            and self.speculative_config.method == "grammar"
+        )
+        if self.speculative_config is not None and not self.use_grammar_spec:
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
 
@@ -875,6 +881,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 idx_mapping, total_num_logits, cu_num_logits, max_expand_len
             )
 
+            if self.use_grammar_spec:
+                # Write the scheduler-supplied draft tokens into the buffer
+                # read by combine_sampled_and_draft_tokens. -1 paddings are
+                # clamped to 0; they never match the verified sample, so they
+                # are rejected naturally.
+                draft_table = np.zeros(
+                    (num_reqs, self.num_speculative_steps), dtype=np.int64
+                )
+                for i, req_id in enumerate(req_ids):
+                    toks = draft_tokens.get(req_id)
+                    if toks:
+                        draft_table[i, : len(toks)] = toks
+                np.maximum(draft_table, 0, out=draft_table)
+                self.req_states.draft_tokens[idx_mapping] = async_copy_to_gpu(
+                    draft_table, device=self.device
+                )
+
         # Get query_start_loc.
         # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
         num_reqs_padded = batch_desc.num_reqs or num_reqs
@@ -1038,12 +1061,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
-            assert self.speculator is not None
             sampler_output = self.rejection_sampler(
                 logits,
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
-                self.speculator.draft_logits,
+                self.speculator.draft_logits if self.speculator is not None else None,
             )
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
@@ -1444,9 +1466,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
 
-        if self.num_speculative_steps > 0:
+        if self.num_speculative_steps > 0 and not self.use_grammar_spec:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
-            # not have a speculator (i.e. self.speculator is None)
+            # not have a speculator (i.e. self.speculator is None). Grammar spec
+            # drafts came from the scheduler, so there is nothing to send back.
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],

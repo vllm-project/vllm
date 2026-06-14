@@ -937,11 +937,11 @@ class VllmConfig:
                 if (
                     self.speculative_config.method not in get_args(EagleModelTypes)
                     and self.speculative_config.method not in get_args(NgramGPUTypes)
-                    and self.speculative_config.method != "draft_model"
+                    and self.speculative_config.method not in ("draft_model", "grammar")
                 ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP/Draft Model/NGram GPU kind of "
+                        "with EAGLE/MTP/Draft Model/NGram GPU/Grammar kind of "
                         "speculative decoding"
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
@@ -969,6 +969,7 @@ class VllmConfig:
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
                 and self.speculative_config.method not in get_args(NgramGPUTypes)
+                and self.speculative_config.method != "grammar"
             ):
                 logger.warning_once(
                     "Async scheduling not supported with %s-based "
@@ -999,6 +1000,24 @@ class VllmConfig:
             "Asynchronous scheduling is %s.",
             "enabled" if self.scheduler_config.async_scheduling else "disabled",
         )
+
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "grammar"
+        ):
+            if self.structured_outputs_config.backend != "guidance":
+                raise ValueError(
+                    "Grammar speculative decoding (method='grammar') requires "
+                    "the guidance structured outputs backend, since only "
+                    "guidance can compute fast-forward tokens. Set "
+                    '--structured-outputs-config \'{"backend": "guidance"}\'.'
+                )
+            if not self.use_v2_model_runner:
+                raise ValueError(
+                    "Grammar speculative decoding (method='grammar') is only "
+                    "supported with the V2 model runner. Set "
+                    "VLLM_USE_V2_MODEL_RUNNER=1."
+                )
 
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
@@ -2002,7 +2021,13 @@ class VllmConfig:
             # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
             if speculative_config.method in ("ngram", "ngram_gpu"):
                 unsupported.append("ngram/ngram_gpu speculative decoding")
-            elif speculative_config.method not in ("eagle", "eagle3", "mtp", "dflash"):
+            elif speculative_config.method not in (
+                "eagle",
+                "eagle3",
+                "mtp",
+                "dflash",
+                "grammar",
+            ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle)

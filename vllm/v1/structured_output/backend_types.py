@@ -88,6 +88,13 @@ class StructuredOutputGrammar(ABC):
             bool: True if the process is terminated, False otherwise.
         """
 
+    def compute_ff_tokens(self) -> list[int]:
+        """Returns the deterministic continuation forced by the grammar,
+        without advancing the parser. Backends that do not support
+        fast-forward computation return an empty list.
+        """
+        return []
+
     @abstractmethod
     def reset(self):
         """
