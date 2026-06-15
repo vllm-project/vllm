@@ -179,12 +179,6 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
     @override
-    def has_pending_work(self) -> bool:
-        # Transfers are tracked by the tiering manager; report this tier's own
-        # async lookups that are still in flight.
-        return self._lookup_manager.has_pending()
-
-    @override
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context.req_id)
 

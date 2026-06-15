@@ -154,9 +154,10 @@ class SecondaryTierManager(ABC):
         pass
 
     def has_pending_work(self) -> bool:
-        """Whether this tier has in-flight work (transfers or lookups).
+        """Whether this tier needs the engine to keep stepping.
 
-        Default: no pending work. Tiers with async I/O override this.
+        While True, on_schedule_end() and get_finished_jobs() continue
+        to be called even when no requests are scheduled.
         """
         return False
 

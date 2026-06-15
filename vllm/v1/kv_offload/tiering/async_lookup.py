@@ -157,15 +157,6 @@ class AsyncLookupManager(ABC):
             self._lookup_queue.put(self._lookup_batch)
             self._lookup_batch = []
 
-    def has_pending(self) -> bool:
-        """Whether any lookup is accumulated, in flight, or undrained."""
-        return (
-            bool(self._lookup_batch)
-            or self._need_to_drain
-            or not self._lookup_queue.empty()
-            or not self._pending_results.empty()
-        )
-
     def drain_results(self) -> None:
         """Apply pending worker results to _lookup_state.
 

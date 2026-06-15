@@ -970,7 +970,11 @@ class OffloadingConnectorScheduler:
         return meta
 
     def has_pending_push_work(self) -> bool:
-        """True while a GPU->CPU or secondary-tier transfer is in flight."""
+        """Whether the engine must keep stepping.
+
+        While True, build_connector_meta() and update_connector_output()
+        continue to be called even when no requests are scheduled.
+        """
         return bool(self._jobs) or self.manager.has_pending_work()
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
