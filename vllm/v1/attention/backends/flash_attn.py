@@ -67,24 +67,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 logger = init_logger(__name__)
 
 
-# --- Temporary PCP debug instrumentation. Remove once root cause is found. ---
-import os as _os  # noqa: E402
-
-_PCP_DEBUG = _os.environ.get("PCP_DEBUG") == "1"
-# How many prefill / decode calls to dump (across layers) before going quiet.
-_PCP_DEBUG_MAX = int(_os.environ.get("PCP_DEBUG_MAX", "2"))
-_PCP_DEBUG_PREFILL_N = 0
-_PCP_DEBUG_DECODE_N = 0
-_PCP_DEBUG_KV_N = 0
-
-
-def _pcp_dbg(s: str) -> None:
-    print(s, flush=True)
-
-
-# --- end PCP debug instrumentation ---
-
-
 class FlashAttentionBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -1096,49 +1078,6 @@ class FlashAttentionImpl(AttentionImpl):
             value = value.contiguous()
             prefill_start = num_decode_tokens * self.pcp_world_size
             prefill_end = pcp_metadata.num_actual_tokens_pcp_padded
-            _probe = None
-            if _os.environ.get("PCP_DUMP") == "1" and self.pcp_rank == 0:
-                _ps = slot_mapping[prefill_start:prefill_end]
-                _bs = key_cache.shape[1]
-                _all_slots = _ps.tolist()
-                _seen: dict[int, int] = {}
-                _dups = [s for s in _all_slots if s >= 0 and _all_slots.count(s) > 1]
-                _pcp_dbg(
-                    f"[PCP r0] SLOTMAP rng=[{prefill_start},{prefill_end}] "
-                    f"slots={_all_slots} dups={sorted(set(_dups))}"
-                )
-                for _i in range(_ps.shape[0]):
-                    _s = int(_ps[_i].item())
-                    if _s >= 0:
-                        _probe = (
-                            _i,
-                            _s,
-                            key_cache[_s // _bs, _s % _bs].clone(),
-                            key[prefill_start + _i].clone(),
-                            value[prefill_start + _i].clone(),
-                        )
-                        _pcp_dbg(
-                            f"[PCP r0] PROBE before i={_i} slot={_s} "
-                            f"cache_before.norm={_probe[2].float().norm().item():.4f} "
-                            f"key[i].norm={_probe[3].float().norm().item():.4f} "
-                            f"value[i].norm={_probe[4].float().norm().item():.4f}"
-                        )
-                        break
-            if _os.environ.get("PCP_DUMP") == "1" and self.pcp_rank == 0 and _probe is not None:
-                # Manual location test: write key[0] directly to the slot and
-                # read it back, to verify key_cache[block,off] is the right
-                # place (isolates reshape_and_cache from the view/location).
-                _mslot = _probe[1]
-                _mbs = key_cache.shape[1]
-                _mk = key[prefill_start + _probe[0]]
-                key_cache[_mslot // _mbs, _mslot % _mbs] = _mk
-                torch.cuda.synchronize()
-                _mread = key_cache[_mslot // _mbs, _mslot % _mbs].clone()
-                _pcp_dbg(
-                    f"[PCP r0] MANUAL slot={_mslot} "
-                    f"readback_diff_vs_key={(_mread.float() - _mk.float()).abs().max().item():.4f}"
-                )
-                key_cache[_mslot // _mbs, _mslot % _mbs].zero_()
             reshape_and_cache_flash(
                 key[prefill_start:prefill_end],
                 value[prefill_start:prefill_end],
@@ -1149,91 +1088,6 @@ class FlashAttentionImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
-            if _PCP_DEBUG:
-                global _PCP_DEBUG_KV_N
-                if _PCP_DEBUG_KV_N < _PCP_DEBUG_MAX:
-                    _PCP_DEBUG_KV_N += 1
-                    prefill_slots = slot_mapping[prefill_start:prefill_end]
-                    n_valid = int((prefill_slots >= 0).sum().item())
-                    _pcp_dbg(
-                        f"[PCP r{self.pcp_rank}] KVWRITE ndec_tok={num_decode_tokens} "
-                        f"local_pad={local_padded_tokens} "
-                        f"pad_total={pcp_metadata.num_actual_tokens_pcp_padded} "
-                        f"prefill_rng=[{prefill_start},{prefill_end}] "
-                        f"prefill_valid_slots={n_valid} "
-                        f"key.sh={tuple(key.shape)}"
-                    )
-            if _os.environ.get("PCP_DUMP") == "1" and self.pcp_rank == 0:
-                # Read back the just-written cache slots and compare to the K/V
-                # that were written, to verify the prefill cache write.
-                torch.cuda.synchronize()
-                prefill_slots = slot_mapping[prefill_start:prefill_end]
-                bs = key_cache.shape[1]
-                _pcp_dbg(
-                    f"[PCP r0] WRITECHK kv_dtype={self.kv_cache_dtype} "
-                    f"kc.dtype={key_cache.dtype} kc.shape={tuple(key_cache.shape)} "
-                    f"kc.stride={key_cache.stride()} key.dtype={key.dtype} bs={bs}"
-                )
-                mism = 0
-                chk = 0
-                n_check = min(prefill_end - prefill_start, 24)
-                ref_all = key[prefill_start:prefill_end].to(torch.float32)
-                ref_val_all = value[prefill_start:prefill_end].to(torch.float32)
-                did_bestmatch = False
-                for i in range(n_check):
-                    s = int(prefill_slots[i].item())
-                    if s >= 0:
-                        chk += 1
-                        block_id = s // bs
-                        offset = s % bs
-                        got = key_cache[block_id, offset].to(torch.float32)
-                        exp = ref_all[i]
-                        d = (got - exp).abs().max().item()
-                        if d > 1.0:
-                            mism += 1
-                        if chk <= 4:
-                            _pcp_dbg(
-                                f"[PCP r0] WRITECHK canon_pos={prefill_start + i} "
-                                f"slot={s} block={block_id} off={offset} "
-                                f"maxdiff={d:.4f}"
-                            )
-                        # For the first valid slot, find which written key
-                        # position actually matches what is in the cache.
-                        if not did_bestmatch and d > 1.0:
-                            did_bestmatch = True
-                            kflat = (
-                                (ref_all - got)
-                                .abs()
-                                .reshape(ref_all.shape[0], -1)
-                                .max(dim=1)
-                                .values
-                            )
-                            kbest = int(kflat.argmin().item())
-                            vflat = (
-                                (ref_val_all - got)
-                                .abs()
-                                .reshape(ref_val_all.shape[0], -1)
-                                .max(dim=1)
-                                .values
-                            )
-                            vbest = int(vflat.argmin().item())
-                            _pcp_dbg(
-                                f"[PCP r0] WRITECHK slot{s} "
-                                f"best_key_pos={kbest}(d={kflat[kbest].item():.4f}) "
-                                f"best_value_pos={vbest}(d={vflat[vbest].item():.4f}) "
-                                f"expected_key={prefill_start + i}"
-                            )
-                _pcp_dbg(f"[PCP r0] WRITECHK checked={chk} mismatched={mism}")
-                if _probe is not None:
-                    _pi, _ps_slot, _before, _ki, _vi = _probe
-                    _after = key_cache[_ps_slot // bs, _ps_slot % bs].to(torch.float32)
-                    _pcp_dbg(
-                        f"[PCP r0] PROBE after slot={_ps_slot} "
-                        f"after.norm={_after.norm().item():.4f} "
-                        f"diff_after_vs_key={(_after - _ki.to(torch.float32)).abs().max().item():.4f} "
-                        f"diff_after_vs_value={(_after - _vi.to(torch.float32)).abs().max().item():.4f} "
-                        f"diff_after_vs_before={(_after - _before.to(torch.float32)).abs().max().item():.4f}"
-                    )
             return
 
         # Scatter write into the KV cache using slot_mapping indices.
@@ -1350,63 +1204,10 @@ class FlashAttentionImpl(AttentionImpl):
                 v_descale=v_descale[:num_decodes] if v_descale is not None else None,
                 num_splits=attn_metadata.max_num_splits,
             )
-            if _PCP_DEBUG:
-                global _PCP_DEBUG_DECODE_N
-                if _PCP_DEBUG_DECODE_N < _PCP_DEBUG_MAX:
-                    _PCP_DEBUG_DECODE_N += 1
-                    kv = attn_metadata.pcp_decode_context_kv_lens
-                    _pcp_dbg(
-                        f"[PCP r{self.pcp_rank}] DECODE ndec={num_decodes} "
-                        f"ndec_tok={num_decode_tokens} "
-                        f"q.sh={tuple(query[:num_decode_tokens].shape)} "
-                        f"q.norm={query[:num_decode_tokens].norm().item():.4f} "
-                        f"out.sh={tuple(decode_attn_out.shape)} "
-                        f"out.norm={decode_attn_out.norm().item():.4f} "
-                        f"lse.sh={tuple(decode_lse.shape)} "
-                        f"lse.norm={decode_lse.norm().item():.4f} "
-                        f"nan={torch.isnan(decode_attn_out).any().item()} "
-                        f"inf={torch.isinf(decode_attn_out).any().item()} "
-                        f"lse_rng=[{decode_lse.min().item():.3f},"
-                        f"{decode_lse.max().item():.3f}] "
-                        f"kv_lens={kv.tolist() if kv is not None else None} "
-                        f"maxkv={attn_metadata.pcp_max_decode_context_kv_len} "
-                        f"qsl={attn_metadata.query_start_loc[: num_decodes + 1].tolist()}"
-                    )
-            if _os.environ.get("PCP_DUMP") == "1" and self.pcp_rank == 0:
-                bt0 = attn_metadata.block_table[0]
-                sk = int(attn_metadata.pcp_decode_context_kv_lens[0].item())
-                bs = key_cache.shape[1]
-                nblk = (sk + bs - 1) // bs
-                blocks = bt0[:nblk].long()
-                k_read = key_cache[blocks].reshape(-1, *key_cache.shape[-2:])[:sk]
-                _pcp_dbg(
-                    f"[PCP r0] DECADEREAD sk={sk} bs={bs} nblk={nblk} "
-                    f"blocks={blocks.tolist()} "
-                    f"k_read.norm={k_read.norm().item():.4f} "
-                    f"k0.norm={k_read[0].norm().item():.4f} "
-                    f"k_read_nan={torch.isnan(k_read).any().item()}"
-                )
-                torch.save(
-                    {
-                        "k_read": k_read.cpu(),
-                        "q": query[0].cpu(),
-                        "sk": sk,
-                        "blocks": blocks.tolist(),
-                    },
-                    "/tmp/pcp2_decode_read_r0.pt",
-                )
             output[:num_decode_tokens] = self._merge_pcp_attn_states(
                 decode_attn_out,
                 decode_lse.transpose(0, 1),
             )
-            if _PCP_DEBUG and num_decode_tokens > 0:
-                m = output[:num_decode_tokens]
-                _pcp_dbg(
-                    f"[PCP r{self.pcp_rank}] DECODE merged sh={tuple(m.shape)} "
-                    f"norm={m.norm().item():.4f} "
-                    f"nan={torch.isnan(m).any().item()} "
-                    f"inf={torch.isinf(m).any().item()}"
-                )
 
         if num_decode_tokens == attn_metadata.num_actual_tokens:
             return output
@@ -1475,24 +1276,6 @@ class FlashAttentionImpl(AttentionImpl):
                 v_descale=v_descale[num_decodes:] if v_descale is not None else None,
                 num_splits=attn_metadata.max_num_splits,
             )
-
-        if _PCP_DEBUG:
-            global _PCP_DEBUG_PREFILL_N
-            if _PCP_DEBUG_PREFILL_N < _PCP_DEBUG_MAX:
-                _PCP_DEBUG_PREFILL_N += 1
-                pnorm = prefill_out.norm().item() if prefill_q.shape[0] > 0 else 0.0
-                _pcp_dbg(
-                    f"[PCP r{self.pcp_rank}] PREFILL local_pad={local_padded_tokens} "
-                    f"qkv_full.sh={tuple(qkv.shape)} "
-                    f"q_full_padded.sh={tuple(q_full_padded.shape)} "
-                    f"unpad_real={int(unpad_mask.sum().item())} "
-                    f"prefill_q.sh={tuple(prefill_q.shape)} "
-                    f"prefill_out.norm={pnorm:.4f} "
-                    f"nan={torch.isnan(prefill_out).any().item() if prefill_q.shape[0] > 0 else False} "
-                    f"prefill_qsl={prefill_qsl.tolist()} "
-                    f"max_query_len={attn_metadata.max_query_len} "
-                    f"ndec_tok={num_decode_tokens}"
-                )
 
         inverse_restore = torch.empty_like(restore_idx[: qkv.shape[0]])
         inverse_restore[restore_idx[: qkv.shape[0]]] = torch.arange(

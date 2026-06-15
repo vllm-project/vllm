@@ -4,7 +4,6 @@
 import functools
 import gc
 import itertools
-import os
 import threading
 import time
 from collections import defaultdict
@@ -4527,28 +4526,6 @@ class GPUModelRunner(
 
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
-                if os.environ.get("PCP_DUMP") == "1" and self.pcp_rank == 0:
-                    n = getattr(self, "_pcp_dump_n", 0)
-                    if n < 5:
-                        self._pcp_dump_n = n + 1
-                        l0 = logits[0].float().detach()
-                        vals, idx = torch.topk(l0, 5)
-                        print(
-                            f"[PCP_DUMP step{n}] "
-                            f"argmax={int(idx[0])} top5_ids={idx.tolist()} "
-                            f"top5_vals={[round(v, 2) for v in vals.tolist()]}",
-                            flush=True,
-                        )
-                        torch.save(
-                            {
-                                "logits": l0.cpu(),
-                                "hidden": sample_hidden_states[0]
-                                .float()
-                                .detach()
-                                .cpu(),
-                            },
-                            f"/tmp/pcp_logits_step{n}.pt",
-                        )
             else:
                 # Rare case.
                 assert not self.is_pooling_model
