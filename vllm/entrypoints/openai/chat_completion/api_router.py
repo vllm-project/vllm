@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
+    track_request_exit,
     validate_json_request,
     with_cancellation,
 )
@@ -50,6 +51,7 @@ def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
 )
 @with_cancellation
 @load_aware_call
+@track_request_exit
 async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
     metrics_header_format = raw_request.headers.get(
         ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
