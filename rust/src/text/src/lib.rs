@@ -151,6 +151,12 @@ impl TextLlm {
         Ok((text_request, raw_stream))
     }
 
+    /// Abort in-flight requests by their external (user-supplied) request ids.
+    pub async fn abort(&self, external_ids: &[String]) -> Result<()> {
+        self.llm.abort(external_ids).await?;
+        Ok(())
+    }
+
     /// Shut down the underlying LLM client and its background tasks.
     pub async fn shutdown(self) -> Result<()> {
         self.llm.shutdown().await?;
