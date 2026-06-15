@@ -14,6 +14,7 @@ from vllm.config import (
     str_dtype_to_torch_dtype,
 )
 from vllm.distributed import (
+    divide,
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -35,6 +36,11 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    scaled_dequantize,
+    scaled_quantize,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -46,6 +52,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -61,6 +68,491 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _mimo_v2_qkv_pair_key(name: str) -> tuple[str, str] | None:
+    if name.endswith(".qkv_proj.weight"):
+        return name[: -len(".weight")], "weight"
+    if name.endswith(".qkv_proj.weight_scale_inv"):
+        return name[: -len(".weight_scale_inv")], "scale"
+    return None
+
+
+def _mimo_v2_kv_shard_range(
+    total_num_kv_heads: int,
+    head_size: int,
+    tp_rank: int,
+    tp_size: int,
+) -> tuple[int, int]:
+    if tp_size >= total_num_kv_heads:
+        num_replicas = divide(tp_size, total_num_kv_heads)
+        kv_head_idx = tp_rank // num_replicas
+        return kv_head_idx * head_size, head_size
+
+    num_heads = divide(total_num_kv_heads, tp_size)
+    shard_size = num_heads * head_size
+    return tp_rank * shard_size, shard_size
+
+
+def _mimo_v2_qkv_dims(
+    config,
+    layer_idx: int | None,
+) -> tuple[int, int, int, int, int, int, int]:
+    is_swa = (
+        layer_idx is not None
+        and hasattr(config, "hybrid_layer_pattern")
+        and layer_idx < len(config.hybrid_layer_pattern)
+        and config.hybrid_layer_pattern[layer_idx] == 1
+    )
+    if is_swa:
+        head_dim = getattr(config, "swa_head_dim", config.head_dim)
+        v_head_dim = getattr(config, "swa_v_head_dim", config.v_head_dim)
+        num_heads = getattr(
+            config, "swa_num_attention_heads", config.num_attention_heads
+        )
+        num_kv_heads = getattr(
+            config, "swa_num_key_value_heads", config.num_key_value_heads
+        )
+    else:
+        head_dim = config.head_dim
+        v_head_dim = getattr(config, "v_head_dim", head_dim)
+        num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
+
+    q_rows = num_heads * head_dim
+    k_rows = num_kv_heads * head_dim
+    v_rows = num_kv_heads * v_head_dim
+    return q_rows, k_rows, v_rows, head_dim, v_head_dim, num_heads, num_kv_heads
+
+
+def _mimo_v2_dequant_block_shard(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    row_start: int,
+    row_count: int,
+    block_n: int,
+    block_k: int,
+    device: torch.device,
+) -> torch.Tensor:
+    block_start = row_start // block_n
+    block_end = cdiv(row_start + row_count, block_n)
+    expanded_start = block_start * block_n
+    expanded_rows = (block_end - block_start) * block_n
+    available_rows = min(expanded_rows, weight.shape[0] - expanded_start)
+    expanded_weight = weight.narrow(0, expanded_start, available_rows).to(device)
+    if available_rows != expanded_rows:
+        padded = torch.empty(
+            (expanded_rows, weight.shape[1]),
+            dtype=expanded_weight.dtype,
+            device=device,
+        )
+        padded.zero_()
+        padded[:available_rows] = expanded_weight
+        expanded_weight = padded
+    expanded_scale = scale.narrow(0, block_start, block_end - block_start).to(device)
+    dequant_weight = scaled_dequantize(
+        expanded_weight,
+        expanded_scale,
+        group_shape=GroupShape(block_n, block_k),
+        out_dtype=torch.float32,
+    )
+    local_start = row_start - expanded_start
+    return dequant_weight.narrow(0, local_start, row_count)
+
+
+def _mimo_v2_quantize_block_weight(
+    weight: torch.Tensor,
+    block_n: int,
+    block_k: int,
+    quant_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    rows, cols = weight.shape
+    padded_rows = round_up(rows, block_n)
+    padded_cols = round_up(cols, block_k)
+    if padded_rows != rows or padded_cols != cols:
+        padded = torch.empty(
+            (padded_rows, padded_cols),
+            dtype=weight.dtype,
+            device=weight.device,
+        )
+        padded.zero_()
+        padded[:rows, :cols] = weight
+        weight = padded
+
+    qweight, scale = scaled_quantize(
+        weight,
+        GroupShape(block_n, block_k),
+        quant_dtype=quant_dtype,
+        compute_dtype=torch.float32,
+    )
+    return qweight[:rows, :cols].contiguous(), scale
+
+
+def _mimo_v2_copy_presharded_qkv_bf16(
+    *,
+    config,
+    weight_name: str,
+    weight_param: torch.nn.Parameter,
+    loaded_weight: torch.Tensor,
+    tp_rank: int,
+    tp_size: int,
+) -> bool:
+    """Handle a pre-sharded fused-QKV BF16 weight at any local TP factor.
+
+    Returns True if the layout was pre-sharded and handled here; False if the
+    layout isn't pre-sharded and the caller should fall back to the regular
+    per-rank weight_loader.
+
+    The source ships the fused QKV as the row-wise concatenation of
+    ``num_kv_heads`` independently-sharded TP chunks, each laid out as
+    ``[Q_chunk, K_chunk, V_chunk]``. vLLM's ``QKVParallelLinear`` weight
+    loader assumes a canonical ``[Q_global, K_global, V_global]`` layout, so
+    handing it the pre-sharded tensor produces structurally wrong slices.
+    Reassemble per-rank Q / K / V from the relevant ckpt chunks instead.
+    """
+    layer_idx = extract_layer_index(weight_name)
+    (
+        q_rows,
+        k_rows,
+        v_rows,
+        head_dim,
+        v_head_dim,
+        num_heads,
+        num_kv_heads,
+    ) = _mimo_v2_qkv_dims(config, layer_idx)
+
+    ckpt_tp = num_kv_heads
+    q_heads_per_ckpt_rank = divide(num_heads, ckpt_tp)
+    ckpt_q_rows = q_heads_per_ckpt_rank * head_dim
+    ckpt_k_rows = head_dim
+    ckpt_v_rows = v_head_dim
+    ckpt_chunk_rows = ckpt_q_rows + ckpt_k_rows + ckpt_v_rows
+
+    if loaded_weight.shape[0] != ckpt_tp * ckpt_chunk_rows:
+        return False
+
+    if tp_size == ckpt_tp:
+        local_weight = loaded_weight.narrow(
+            0, tp_rank * ckpt_chunk_rows, ckpt_chunk_rows
+        )
+    else:
+
+        def chunk_slice(ckpt_rank: int, row_start: int, row_count: int) -> torch.Tensor:
+            base = ckpt_rank * ckpt_chunk_rows + row_start
+            return loaded_weight.narrow(0, base, row_count)
+
+        q_heads_per_rank = divide(num_heads, tp_size)
+        q_head_start = tp_rank * q_heads_per_rank
+        q_head_end = q_head_start + q_heads_per_rank
+        q_parts: list[torch.Tensor] = []
+        next_q_head = q_head_start
+        while next_q_head < q_head_end:
+            ckpt_rank = next_q_head // q_heads_per_ckpt_rank
+            ckpt_head_start = ckpt_rank * q_heads_per_ckpt_rank
+            part_head_end = min(q_head_end, ckpt_head_start + q_heads_per_ckpt_rank)
+            part_rows = (part_head_end - next_q_head) * head_dim
+            part_start = (next_q_head - ckpt_head_start) * head_dim
+            q_parts.append(chunk_slice(ckpt_rank, part_start, part_rows))
+            next_q_head = part_head_end
+
+        if tp_size >= num_kv_heads:
+            num_replicas = divide(tp_size, num_kv_heads)
+            kv_head_start = tp_rank // num_replicas
+            kv_head_count = 1
+        else:
+            kv_head_count = divide(num_kv_heads, tp_size)
+            kv_head_start = tp_rank * kv_head_count
+        kv_head_end = kv_head_start + kv_head_count
+        k_parts = [
+            chunk_slice(ckpt_rank, ckpt_q_rows, ckpt_k_rows)
+            for ckpt_rank in range(kv_head_start, kv_head_end)
+        ]
+        v_parts = [
+            chunk_slice(ckpt_rank, ckpt_q_rows + ckpt_k_rows, ckpt_v_rows)
+            for ckpt_rank in range(kv_head_start, kv_head_end)
+        ]
+        local_weight = torch.cat([*q_parts, *k_parts, *v_parts], dim=0).contiguous()
+
+    if tuple(local_weight.shape) != tuple(weight_param.shape):
+        raise ValueError(
+            f"{weight_name} local shard has shape {tuple(local_weight.shape)}, "
+            f"expected {tuple(weight_param.shape)}."
+        )
+    weight_param.data.copy_(local_weight.to(weight_param.device))
+    return True
+
+
+def _mimo_v2_copy_paired_qkv_fp8(
+    *,
+    config,
+    weight_name: str,
+    scale_name: str,
+    weight_param: torch.nn.Parameter,
+    scale_param: torch.nn.Parameter,
+    loaded_weight: torch.Tensor,
+    loaded_scale: torch.Tensor,
+    tp_rank: int,
+    tp_size: int,
+    block_size: list[int],
+) -> None:
+    block_n, block_k = block_size
+    layer_idx = extract_layer_index(weight_name)
+    (
+        q_rows,
+        k_rows,
+        v_rows,
+        head_dim,
+        v_head_dim,
+        num_heads,
+        num_kv_heads,
+    ) = _mimo_v2_qkv_dims(config, layer_idx)
+    expected_rows = q_rows + k_rows + v_rows
+    if loaded_weight.shape[0] != expected_rows:
+        raise ValueError(
+            f"{weight_name} has {loaded_weight.shape[0]} rows, expected "
+            f"{expected_rows} from q={q_rows}, k={k_rows}, v={v_rows}."
+        )
+
+    # Detect ckpt_tp from scale shape; weight shape alone is degenerate.
+    ckpt_tp = None
+    q_heads_per_ckpt_rank = None
+    ckpt_q_rows = ckpt_k_rows = 0
+    ckpt_chunk_rows = ckpt_chunk_scale_rows = 0
+    for candidate in range(min(num_heads, num_kv_heads), 0, -1):
+        if num_heads % candidate != 0 or num_kv_heads % candidate != 0:
+            continue
+        cand_q_heads = num_heads // candidate
+        cand_kv_heads = num_kv_heads // candidate
+        cand_q_rows = cand_q_heads * head_dim
+        cand_k_rows = cand_kv_heads * head_dim
+        cand_v_rows = cand_kv_heads * v_head_dim
+        cand_chunk_rows = cand_q_rows + cand_k_rows + cand_v_rows
+        cand_chunk_scale_rows = cdiv(cand_chunk_rows, block_n)
+        if (
+            loaded_weight.shape[0] == candidate * cand_chunk_rows
+            and loaded_scale.shape[0] == candidate * cand_chunk_scale_rows
+        ):
+            ckpt_tp = candidate
+            q_heads_per_ckpt_rank = cand_q_heads
+            ckpt_q_rows = cand_q_rows
+            ckpt_k_rows = cand_k_rows
+            ckpt_chunk_rows = cand_chunk_rows
+            ckpt_chunk_scale_rows = cand_chunk_scale_rows
+            break
+    if ckpt_tp is not None:
+        logger.info_once(
+            "Detected MiMo-V2 TP%d pre-sharded fused-QKV FP8 checkpoint layout.",
+            ckpt_tp,
+        )
+        if tp_size == ckpt_tp:
+            local_weight = loaded_weight.narrow(
+                0, tp_rank * ckpt_chunk_rows, ckpt_chunk_rows
+            )
+            local_scale = loaded_scale.narrow(
+                0, tp_rank * ckpt_chunk_scale_rows, ckpt_chunk_scale_rows
+            )
+        else:
+            device = weight_param.device
+
+            def dequant_ckpt_shard(
+                ckpt_rank: int,
+                row_start: int,
+                row_count: int,
+            ) -> torch.Tensor:
+                chunk_weight = loaded_weight.narrow(
+                    0, ckpt_rank * ckpt_chunk_rows, ckpt_chunk_rows
+                )
+                chunk_scale = loaded_scale.narrow(
+                    0, ckpt_rank * ckpt_chunk_scale_rows, ckpt_chunk_scale_rows
+                )
+                return _mimo_v2_dequant_block_shard(
+                    chunk_weight,
+                    chunk_scale,
+                    row_start,
+                    row_count,
+                    block_n,
+                    block_k,
+                    device,
+                )
+
+            q_heads_per_rank = divide(num_heads, tp_size)
+            q_head_start = tp_rank * q_heads_per_rank
+            q_head_end = q_head_start + q_heads_per_rank
+            q_parts: list[torch.Tensor] = []
+            next_q_head = q_head_start
+            while next_q_head < q_head_end:
+                ckpt_rank = next_q_head // q_heads_per_ckpt_rank
+                ckpt_head_start = ckpt_rank * q_heads_per_ckpt_rank
+                part_head_end = min(q_head_end, ckpt_head_start + q_heads_per_ckpt_rank)
+                part_rows = (part_head_end - next_q_head) * head_dim
+                part_start = (next_q_head - ckpt_head_start) * head_dim
+                q_parts.append(dequant_ckpt_shard(ckpt_rank, part_start, part_rows))
+                next_q_head = part_head_end
+
+            if tp_size >= num_kv_heads:
+                num_replicas = divide(tp_size, num_kv_heads)
+                kv_head_start = tp_rank // num_replicas
+                kv_head_count = 1
+            else:
+                kv_head_count = divide(num_kv_heads, tp_size)
+                kv_head_start = tp_rank * kv_head_count
+            kv_head_end = kv_head_start + kv_head_count
+
+            kv_heads_per_ckpt_rank = divide(num_kv_heads, ckpt_tp)
+
+            def _kv_parts(
+                intra_chunk_offset: int, per_head_rows: int
+            ) -> list[torch.Tensor]:
+                parts: list[torch.Tensor] = []
+                next_kv_head = kv_head_start
+                while next_kv_head < kv_head_end:
+                    ckpt_rank = next_kv_head // kv_heads_per_ckpt_rank
+                    ckpt_head_start = ckpt_rank * kv_heads_per_ckpt_rank
+                    part_head_end = min(
+                        kv_head_end, ckpt_head_start + kv_heads_per_ckpt_rank
+                    )
+                    part_rows = (part_head_end - next_kv_head) * per_head_rows
+                    part_start = (
+                        intra_chunk_offset
+                        + (next_kv_head - ckpt_head_start) * per_head_rows
+                    )
+                    parts.append(dequant_ckpt_shard(ckpt_rank, part_start, part_rows))
+                    next_kv_head = part_head_end
+                return parts
+
+            k_parts = _kv_parts(ckpt_q_rows, head_dim)
+            v_parts = _kv_parts(ckpt_q_rows + ckpt_k_rows, v_head_dim)
+            local_dense = torch.cat([*q_parts, *k_parts, *v_parts], dim=0)
+            local_weight, local_scale = _mimo_v2_quantize_block_weight(
+                local_dense,
+                block_n,
+                block_k,
+                weight_param.dtype,
+            )
+
+        if tuple(local_weight.shape) != tuple(weight_param.shape):
+            raise ValueError(
+                f"{weight_name} local shard has shape "
+                f"{tuple(local_weight.shape)}, expected "
+                f"{tuple(weight_param.shape)}."
+            )
+        if tuple(local_scale.shape) != tuple(scale_param.shape):
+            raise ValueError(
+                f"{scale_name} local shard has shape "
+                f"{tuple(local_scale.shape)}, expected "
+                f"{tuple(scale_param.shape)}."
+            )
+
+        weight_param.data.copy_(local_weight.to(weight_param.device))
+        scale_param.data.copy_(local_scale.to(scale_param.device))
+        return
+
+    q_scale_rows = cdiv(q_rows, block_n)
+    k_scale_rows = cdiv(k_rows, block_n)
+    v_scale_rows = cdiv(v_rows, block_n)
+    expected_scale_rows = q_scale_rows + k_scale_rows + v_scale_rows
+    if loaded_scale.shape[0] < expected_scale_rows:
+        raise ValueError(
+            f"{scale_name} has {loaded_scale.shape[0]} rows, expected at "
+            f"least {expected_scale_rows}."
+        )
+    extra_scale_rows = loaded_scale.shape[0] - expected_scale_rows
+    if extra_scale_rows:
+        logger.info_once(
+            "Dropping %d extra MiMo-V2 fused-QKV FP8 scale rows from %s. "
+            "The checkpoint has q/k/v scale rows %d/%d/%d plus extras, "
+            "while q/k/v weight rows imply %d/%d/%d.",
+            extra_scale_rows,
+            scale_name,
+            q_scale_rows,
+            k_scale_rows,
+            v_scale_rows,
+            q_rows,
+            k_rows,
+            v_rows,
+        )
+
+    q_weight = loaded_weight.narrow(0, 0, q_rows)
+    k_weight = loaded_weight.narrow(0, q_rows, k_rows)
+    v_weight = loaded_weight.narrow(0, q_rows + k_rows, v_rows)
+    q_scale = loaded_scale.narrow(0, 0, q_scale_rows)
+    k_scale = loaded_scale.narrow(0, q_scale_rows, k_scale_rows)
+    v_scale = loaded_scale.narrow(0, q_scale_rows + k_scale_rows, v_scale_rows)
+
+    q_shard_rows = divide(q_rows, tp_size)
+    q_start = tp_rank * q_shard_rows
+    k_start, k_shard_rows = _mimo_v2_kv_shard_range(
+        config.num_key_value_heads, head_dim, tp_rank, tp_size
+    )
+    v_start, v_shard_rows = _mimo_v2_kv_shard_range(
+        config.num_key_value_heads, v_head_dim, tp_rank, tp_size
+    )
+
+    direct_copy = all(
+        value % block_n == 0
+        for value in (
+            q_start,
+            q_shard_rows,
+            k_start,
+            k_shard_rows,
+            v_start,
+            v_shard_rows,
+        )
+    )
+
+    if direct_copy:
+        local_weight = torch.cat(
+            [
+                q_weight.narrow(0, q_start, q_shard_rows),
+                k_weight.narrow(0, k_start, k_shard_rows),
+                v_weight.narrow(0, v_start, v_shard_rows),
+            ],
+            dim=0,
+        )
+        local_scale = torch.cat(
+            [
+                q_scale.narrow(0, q_start // block_n, q_shard_rows // block_n),
+                k_scale.narrow(0, k_start // block_n, k_shard_rows // block_n),
+                v_scale.narrow(0, v_start // block_n, v_shard_rows // block_n),
+            ],
+            dim=0,
+        )
+    else:
+        device = weight_param.device
+        local_dense = torch.cat(
+            [
+                _mimo_v2_dequant_block_shard(
+                    q_weight, q_scale, q_start, q_shard_rows, block_n, block_k, device
+                ),
+                _mimo_v2_dequant_block_shard(
+                    k_weight, k_scale, k_start, k_shard_rows, block_n, block_k, device
+                ),
+                _mimo_v2_dequant_block_shard(
+                    v_weight, v_scale, v_start, v_shard_rows, block_n, block_k, device
+                ),
+            ],
+            dim=0,
+        )
+        local_weight, local_scale = _mimo_v2_quantize_block_weight(
+            local_dense,
+            block_n,
+            block_k,
+            weight_param.dtype,
+        )
+
+    if tuple(local_weight.shape) != tuple(weight_param.shape):
+        raise ValueError(
+            f"{weight_name} local shard has shape {tuple(local_weight.shape)}, "
+            f"expected {tuple(weight_param.shape)}."
+        )
+    if tuple(local_scale.shape) != tuple(scale_param.shape):
+        raise ValueError(
+            f"{scale_name} local shard has shape {tuple(local_scale.shape)}, "
+            f"expected {tuple(scale_param.shape)}."
+        )
+
+    weight_param.data.copy_(local_weight.to(weight_param.device))
+    scale_param.data.copy_(local_scale.to(scale_param.device))
 
 
 class MiMoV2MLP(nn.Module):
@@ -561,6 +1053,7 @@ class MiMoV2Model(nn.Module):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
+        qkv_buffers: dict[str, dict[str, torch.Tensor]] = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -603,12 +1096,64 @@ class MiMoV2Model(nn.Module):
 
             if expert_matched:
                 continue
-            # Support fused qkv_proj checkpoint (Pro format)
-            if "qkv_proj" in name:
-                if name in params_dict:
-                    param = params_dict[name]
-                    loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
-                    default_weight_loader(param, loaded_weight)
+            qkv_pair = _mimo_v2_qkv_pair_key(name)
+            if qkv_pair is not None:
+                qkv_base_name, qkv_kind = qkv_pair
+                weight_name = f"{qkv_base_name}.weight"
+                scale_name = f"{qkv_base_name}.weight_scale_inv"
+                has_paired_qkv = (
+                    weight_name in params_dict
+                    and scale_name in params_dict
+                    and getattr(self.quant_config, "weight_block_size", None)
+                    is not None
+                )
+                if not has_paired_qkv:
+                    if name in params_dict:
+                        param = params_dict[name]
+                        # Detect pre-sharded BF16 layout first. This applies
+                        # when the source's fused QKV is the row-wise concat
+                        # of per-ckpt-TP chunks (e.g. after Quark dequantizes
+                        # the source FP8 to BF16 in --file2file_quantization).
+                        # Vllm's QKVParallelLinear loader assumes canonical
+                        # [Q_global,K,V] and would incorrectly slice the pre-sharded
+                        # tensor; reassemble per-rank Q/K/V from ckpt chunks.
+                        handled = (
+                            qkv_kind == "weight"
+                            and _mimo_v2_copy_presharded_qkv_bf16(
+                                config=self.config,
+                                weight_name=name,
+                                weight_param=param,
+                                loaded_weight=loaded_weight,
+                                tp_rank=tp_rank,
+                                tp_size=tp_size,
+                            )
+                        )
+                        if not handled:
+                            weight_loader = getattr(
+                                param, "weight_loader", default_weight_loader
+                            )
+                            weight_loader(param, loaded_weight)
+                        loaded_params.add(name)
+                    continue
+
+                qkv_buffer = qkv_buffers.setdefault(qkv_base_name, {})
+                qkv_buffer[qkv_kind] = loaded_weight
+                if "weight" in qkv_buffer and "scale" in qkv_buffer:
+                    _mimo_v2_copy_paired_qkv_fp8(
+                        config=self.config,
+                        weight_name=weight_name,
+                        scale_name=scale_name,
+                        weight_param=params_dict[weight_name],
+                        scale_param=params_dict[scale_name],
+                        loaded_weight=qkv_buffer["weight"],
+                        loaded_scale=qkv_buffer["scale"],
+                        tp_rank=tp_rank,
+                        tp_size=tp_size,
+                        block_size=self.quant_config.weight_block_size,
+                    )
+                    loaded_params.add(weight_name)
+                    loaded_params.add(scale_name)
+                    del qkv_buffers[qkv_base_name]
                 continue
             stacked_matched = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -663,6 +1208,13 @@ class MiMoV2Model(nn.Module):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
+
+        if qkv_buffers:
+            missing = ", ".join(sorted(qkv_buffers))
+            raise RuntimeError(
+                "Missing fused-QKV FP8 weight/scale pair for MiMo-V2 "
+                f"checkpoint tensors: {missing}"
+            )
 
         return loaded_params
 
