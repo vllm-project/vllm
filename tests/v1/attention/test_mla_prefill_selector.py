@@ -35,6 +35,14 @@ def _aiter_asm_class():
         return None
 
 
+@pytest.fixture
+def aiter_asm_cls():
+    cls = _aiter_asm_class()
+    if cls is None:
+        pytest.skip("AITER_ASM backend not importable")
+    return cls
+
+
 def _make_mock_model_config(
     qk_nope_head_dim: int = 128,
     qk_rope_head_dim: int = 64,
@@ -313,11 +321,15 @@ class TestAiterAsmValidation:
         ],
     )
     def test_validate_configuration(
-        self, capability, cache_dtype, is_r1_compatible, expect_valid, reason
+        self,
+        aiter_asm_cls,
+        capability,
+        cache_dtype,
+        is_r1_compatible,
+        expect_valid,
+        reason,
     ):
-        cls = _aiter_asm_class()
-        if cls is None:
-            pytest.skip("AITER_ASM backend not importable")
+        cls = aiter_asm_cls
         with patch.object(cls, "is_available", return_value=True):
             reasons = cls.validate_configuration(
                 capability,
@@ -336,10 +348,8 @@ class TestAiterAsmValidation:
 class TestAiterAsmSelectorPriority:
     """On gfx950, AITER_ASM should win over FLASH_ATTN when FP8 KV is on."""
 
-    def test_aiter_asm_wins_on_gfx950_fp8(self):
-        cls = _aiter_asm_class()
-        if cls is None:
-            pytest.skip("AITER_ASM backend not importable")
+    def test_aiter_asm_wins_on_gfx950_fp8(self, aiter_asm_cls):
+        cls = aiter_asm_cls
         cfg = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
             is_r1_compatible=True,
@@ -349,10 +359,8 @@ class TestAiterAsmSelectorPriority:
             selected = _auto_select_mla_prefill_backend(GFX950, cfg)
             assert selected.get_name() == "AITER_ASM"
 
-    def test_falls_through_to_flash_attn_when_not_fp8(self):
-        cls = _aiter_asm_class()
-        if cls is None:
-            pytest.skip("AITER_ASM backend not importable")
+    def test_falls_through_to_flash_attn_when_not_fp8(self, aiter_asm_cls):
+        cls = aiter_asm_cls
         try:
             fa_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
         except ImportError:
