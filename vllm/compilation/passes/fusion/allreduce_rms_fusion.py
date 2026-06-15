@@ -1633,20 +1633,42 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
 
         self.disabled = False
 
+        # Profiling aid (#45639): surface activation at INFO so a run's logs
+        # show the pass registered and the decode cap it fuses under, without
+        # needing VLLM_LOGGING_LEVEL=DEBUG. Downgrade to debug before merge.
+        logger.info_once(
+            "%s active: patterns registered; fuses only compile ranges with "
+            "end <= max_token_num=%d (decode). If compile_ranges_endpoints "
+            "doesn't split a decode range at/below this, the pass never runs.",
+            self.__class__.__name__,
+            self.max_token_num,
+        )
+
         self.dump_patterns(config, self.pm_pass)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         if self.disabled:
             logger.warning_once("AllReduce fusion pass is disabled.")
             return False
-        return bool(compile_range.end <= self.max_token_num)
+        applicable = bool(compile_range.end <= self.max_token_num)
+        # Profiling aid (#45639): the False case is otherwise silent.
+        logger.info_once(
+            "%s applicable for compile range end=%s (max_token_num=%d): %s",
+            self.__class__.__name__,
+            compile_range.end,
+            self.max_token_num,
+            applicable,
+        )
+        return applicable
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         self.matched_count = self.pm_pass.apply(graph)
         VllmPatternMatcherPass.match_table[self.pass_name] += self.matched_count
-        logger.debug(
-            "%s Replaced %s patterns", self.__class__.__name__, self.matched_count
+        # Profiling aid (#45639): info (was debug) so the verdict is visible at
+        # default log level. Downgrade to debug before merge.
+        logger.info(
+            "%s replaced %s patterns", self.__class__.__name__, self.matched_count
         )
 
     def __del__(self) -> None:
