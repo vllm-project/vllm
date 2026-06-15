@@ -1052,9 +1052,12 @@ def test_propose_stores_probabilistic_draft_probs(monkeypatch):
         device=device,
     )
 
-    attn_metadata_builder_cls, _ = try_get_attention_backend(
-        AttentionBackendEnum.FLASH_ATTN
+    attn_backend = (
+        AttentionBackendEnum.TRITON_ATTN
+        if current_platform.is_rocm()
+        else AttentionBackendEnum.FLASH_ATTN
     )
+    attn_metadata_builder_cls, _ = try_get_attention_backend(attn_backend)
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
         layer_names=proposer._draft_attn_layer_names,
