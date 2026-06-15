@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+import math
 from collections.abc import Callable
 from typing import NamedTuple, TypeAlias
 
@@ -1236,12 +1237,27 @@ def _make_holder_in_soft_zone(reasoning_config):
     return h, output_token_ids
 
 
+def _expected_soft_sigmoid_ramp(progress: float) -> float:
+    center = 0.8
+    sharpness = 10.0
+
+    def sigmoid(x: float) -> float:
+        return 1.0 / (1.0 + math.exp(-sharpness * x))
+
+    start = sigmoid(0.0 - center)
+    finish = sigmoid(1.0 - center)
+    value = sigmoid(progress - center)
+    return min(max((value - start) / (finish - start), 0.0), 1.0)
+
+
 def test_thinking_budget_soft_zone_biases_before_hard_force():
     h, _ = _make_holder_in_soft_zone(MockReasoningConfig())
     state = h._state[0]
     assert state["in_think"]
     assert not state["in_end"]
-    assert state["soft_progress"] > 0.0
+    assert state["soft_progress"] == pytest.approx(
+        _expected_soft_sigmoid_ramp(0.5)
+    )
 
     logits = torch.zeros((1, VOCAB_SIZE), dtype=torch.float32)
     logits[0, 7] = 10.0
@@ -1251,6 +1267,17 @@ def test_thinking_budget_soft_zone_biases_before_hard_force():
     expected = 2.0 + state["soft_progress"] * (10.0 - 0.25 - 2.0)
     assert logits[0, THINK_END_TOKEN_ID] == pytest.approx(expected)
     assert logits[0, 7] == 10.0
+
+
+def test_thinking_budget_soft_zone_reaches_full_ramp_before_hard_force():
+    h, output_token_ids = _make_holder_in_soft_zone(MockReasoningConfig())
+    output_token_ids.append(99)
+    h.update_state([output_token_ids], None, None)
+
+    state = h._state[0]
+    assert state["in_think"]
+    assert not state["in_end"]
+    assert state["soft_progress"] == pytest.approx(1.0)
 
 
 def test_thinking_budget_soft_zone_does_not_overtake_top_logit():

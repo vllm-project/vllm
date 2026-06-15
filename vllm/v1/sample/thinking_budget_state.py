@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-batch thinking token budget state; applied after penalties at sample time."""
 
+import math
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -44,6 +45,8 @@ class ThinkingBudgetStateHolder:
 
     # Fraction of budget where the soft zone begins (0.7 = last 30%).
     _SOFT_ZONE_START_FRAC = 0.7
+    _SOFT_SIGMOID_CENTER = 0.8
+    _SOFT_SIGMOID_SHARPNESS = 10.0
     # Keep the soft target just below the current best logit so it nudges the
     # model toward a natural close without becoming the argmax at temperature 0.
     _SOFT_TARGET_MARGIN = 0.25
@@ -247,7 +250,7 @@ class ThinkingBudgetStateHolder:
         return {
             "in_think": in_think,
             "in_end": in_end,
-            "soft_progress": 0.0,  # 0..1 ramp through the soft budget zone
+            "soft_progress": 0.0,  # 0..1 sigmoid ramp through the soft zone
             "check_count_down": countdown,
             "think_count": think_count,
             "end_count": 0,
@@ -414,13 +417,15 @@ class ThinkingBudgetStateHolder:
             else:
                 state["check_count_down"] = state["thinking_token_budget"]
 
-            # Soft zone: ramp progress from 0.0 to 1.0 over the last 30% of
-            # the budget; 0.0 outside the zone or when not thinking.
+            # Soft zone: map progress through a late sigmoid over the last
+            # 30% of the budget; 0.0 outside the zone or when not thinking.
             soft_start = int(budget * self._SOFT_ZONE_START_FRAC)
             if state["in_think"] and state["think_count"] > soft_start:
+                progress = (state["think_count"] - soft_start) / max(
+                    1, budget - soft_start - 1
+                )
                 state["soft_progress"] = min(
-                    1.0,
-                    (state["think_count"] - soft_start) / max(1, budget - soft_start),
+                    1.0, self._normalized_soft_ramp(progress)
                 )
             else:
                 state["soft_progress"] = 0.0
@@ -565,9 +570,9 @@ class ThinkingBudgetStateHolder:
             ):
                 # Adaptive soft bias: pull the end-of-thinking logit toward
                 # just below the current top logit.
-                #   progress=0%   -> target = end_logit (no change)
-                #   progress=50%  -> halfway to top_logit - margin
-                #   progress=100% -> target = top_logit - margin
+                #   ramp=0%   -> target = end_logit (no change)
+                #   ramp=50%  -> halfway to top_logit - margin
+                #   ramp=100% -> target = top_logit - margin
                 #
                 # Kept entirely in torch ops — no ``.item()`` — so the
                 # sampler never syncs device->host on this path. Only the
@@ -615,3 +620,16 @@ class ThinkingBudgetStateHolder:
                 logits.index_put_((active_indices, force_tokens), fill)
 
         return logits
+
+    @classmethod
+    def _normalized_soft_ramp(cls, progress: float) -> float:
+        """Map soft-zone progress [0, 1] to a late-rising sigmoid [0, 1]."""
+        progress = min(max(progress, 0.0), 1.0)
+
+        def sigmoid(x: float) -> float:
+            return 1.0 / (1.0 + math.exp(-cls._SOFT_SIGMOID_SHARPNESS * x))
+
+        start = sigmoid(0.0 - cls._SOFT_SIGMOID_CENTER)
+        finish = sigmoid(1.0 - cls._SOFT_SIGMOID_CENTER)
+        value = sigmoid(progress - cls._SOFT_SIGMOID_CENTER)
+        return min(max((value - start) / (finish - start), 0.0), 1.0)
