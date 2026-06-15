@@ -21,7 +21,7 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
     if pcp_size * dcp_size > 1:
         layer_type = cast(type[Any], AttentionLayerBase)
         layers = get_layers_from_vllm_config(vllm_config, layer_type)
-        for layer_name, layer in layers.items():
+        for layer in layers.values():
             layer_impl = getattr(layer, "impl", None)
             if layer_impl is None:
                 continue
