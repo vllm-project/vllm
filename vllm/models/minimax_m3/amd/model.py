@@ -23,7 +23,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm import _custom_ops as ops
+from vllm import _custom_ops as ops, ir
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     CacheConfig,
@@ -32,6 +32,7 @@ from vllm.config import (
 )
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
@@ -160,17 +161,24 @@ def _build_rotary_emb(config: PretrainedConfig, head_dim: int):
     )
 
 
-class MiniMAXGemmaRMSNorm(nn.Module):
-    """Gemma-style RMS normalization (native ROCm implementation).
+@CustomOp.register("minimax_gemma_rms_norm")
+class MiniMAXGemmaRMSNorm(CustomOp):
+    """Gemma-style RMS normalization for the M3 ROCm path.
 
-    Normalizes in fp32 and scales by ``(1 + weight)`` — numerically equivalent
-    to the FlashInfer ``gemma_rmsnorm`` / ``gemma_fused_add_rmsnorm`` kernels
-    used in the NVIDIA path, which are unavailable on ROCm. When ``residual`` is
-    given, the fused add + norm returns the updated ``(normed, residual)`` pair.
+    Default (custom op enabled, ``forward_hip``): an fp32 Triton pass
+    (``amd.ops.gemma_rmsnorm`` / ``gemma_fused_add_rmsnorm``) — numerically
+    equivalent to the FlashInfer ``gemma_rmsnorm`` kernels used in the NVIDIA
+    path, which are unavailable on ROCm. This is the unchanged M3 default.
 
-    The fp32 normalize + scale + (optional) residual-add run in a single fused
-    Triton pass (``amd.ops.gemma_rmsnorm`` / ``gemma_fused_add_rmsnorm``) instead
-    of a chain of elementwise PyTorch kernels.
+    When the custom op is disabled (``--compilation-config
+    '{"custom_ops":["-minimax_gemma_rms_norm"]}'``), ``forward_native`` instead
+    emits the plain ``ir.ops.rms_norm`` / ``ir.ops.fused_add_rms_norm`` IR ops,
+    with the Gemma ``1 + weight`` offset folded into the weight. That exposes the
+    post-attention ``all_reduce -> fused_add_rms_norm`` sequence to the AITER
+    AR+RMS fusion pass (``RocmAiterAllReduceFusionPass``), letting it fuse the
+    decode-time allreduce + residual-add + rmsnorm into a single AITER kernel at
+    TP>1. Opt-in because it swaps M3's accuracy-tuned fp32 norm path for the IR
+    lowering: validate gsm8k parity before enabling by default.
     """
 
     def __init__(
@@ -182,11 +190,24 @@ class MiniMAXGemmaRMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.zeros(hidden_size))
         self.variance_epsilon = eps
 
-    def forward(
+    def forward_native(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # Fusable IR path, matched by the AITER AR+RMS fusion pass. Fold the
+        # Gemma ``1 + weight`` offset into the weight in x's dtype.
+        weight = self.weight.data.to(x.dtype) + 1.0
+        if residual is None:
+            return ir.ops.rms_norm(x, weight, self.variance_epsilon)
+        return ir.ops.fused_add_rms_norm(x, residual, weight, self.variance_epsilon)
+
+    def forward_hip(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # Default ROCm path: fp32 Triton gemma kernels (unchanged M3 behavior).
         if residual is None:
             return gemma_rmsnorm(x, self.weight, self.variance_epsilon)
         return gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
