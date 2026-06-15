@@ -1025,15 +1025,37 @@ class FlashAttentionImpl(AttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
 
-        pcp_metadata = self._get_pcp_metadata_for_layer(layer)
+        pcp_attn_metadata = self._get_pcp_attn_metadata_for_layer(layer)
+        pcp_metadata = (
+            pcp_attn_metadata.pcp_metadata if pcp_attn_metadata is not None else None
+        )
         if pcp_metadata is not None and self.pcp_world_size > 1:
+            assert pcp_attn_metadata is not None
             assert not pcp_metadata.pcp_use_hybrid_attn, (
                 "FlashAttention PCP for hybrid-attention models should use the "
                 "hybrid PCP backend."
             )
+            key_cache, value_cache = kv_cache.unbind(1)
+            num_decode_tokens = pcp_attn_metadata.pcp_num_decode_tokens
+            if num_decode_tokens > 0:
+                decode_slot_mapping = slot_mapping[
+                    : num_decode_tokens * self.pcp_world_size : self.pcp_world_size
+                ]
+                reshape_and_cache_flash(
+                    key[:num_decode_tokens],
+                    value[:num_decode_tokens],
+                    key_cache,
+                    value_cache,
+                    decode_slot_mapping,
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
             local_padded_tokens = (
                 pcp_metadata.num_actual_tokens_pcp_padded // self.pcp_world_size
             )
+            if local_padded_tokens == num_decode_tokens:
+                return
             kv = torch.cat(
                 [
                     key[:local_padded_tokens],
@@ -1046,6 +1068,19 @@ class FlashAttentionImpl(AttentionImpl):
             assert restore_idx is not None
             kv = torch.index_select(kv, 0, restore_idx[: kv.shape[0]])
             key, value = kv.split([key.shape[-1], value.shape[-1]], dim=-1)
+            prefill_start = num_decode_tokens * self.pcp_world_size
+            prefill_end = pcp_metadata.num_actual_tokens_pcp_padded
+            reshape_and_cache_flash(
+                key[prefill_start:prefill_end],
+                value[prefill_start:prefill_end],
+                key_cache,
+                value_cache,
+                slot_mapping[prefill_start:prefill_end],
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
+            return
 
         # Scatter write into the KV cache using slot_mapping indices.
         # No TMA kernel is invoked here, so stride canonicalization is not needed.
@@ -1069,9 +1104,9 @@ class FlashAttentionImpl(AttentionImpl):
             layer._v_scale,
         )
 
-    def _get_pcp_metadata_for_layer(
+    def _get_pcp_attn_metadata_for_layer(
         self, layer: torch.nn.Module
-    ) -> PrefillContextParallelMetadata | None:
+    ) -> FlashAttentionMetadata | None:
         if self.pcp_world_size <= 1 or not is_forward_context_available():
             return None
         attn_metadata_raw = get_forward_context().attn_metadata
@@ -1084,6 +1119,14 @@ class FlashAttentionImpl(AttentionImpl):
         else:
             attn_metadata = None
         if not isinstance(attn_metadata, FlashAttentionMetadata):
+            return None
+        return attn_metadata
+
+    def _get_pcp_metadata_for_layer(
+        self, layer: torch.nn.Module
+    ) -> PrefillContextParallelMetadata | None:
+        attn_metadata = self._get_pcp_attn_metadata_for_layer(layer)
+        if attn_metadata is None:
             return None
         return attn_metadata.pcp_metadata
 
