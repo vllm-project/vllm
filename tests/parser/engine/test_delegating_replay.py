@@ -29,8 +29,9 @@ from vllm.parser.parser_manager import ParserManager
 
 _TOOLS_VALIDATOR = TypeAdapter(list[ChatCompletionToolsParam])
 
-_PAIRINGS: dict[str, tuple[str, str]] = {
-    "engine": ("qwen3_coder", "qwen3"),
+_PAIRINGS: dict[str, tuple[str, str, str]] = {
+    "engine": ("qwen3_coder", "qwen3", "qwen3"),
+    "gemma4_engine": ("gemma4", "gemma4", "gemma4"),
 }
 
 CHUNK_SIZES = [1, 2, 3, 5, 11, 23, None]
@@ -38,7 +39,7 @@ CHUNK_SIZES = [1, 2, 3, 5, 11, 23, None]
 
 @lru_cache
 def _get_delegating_parser_cls(pairings: str) -> type[Parser]:
-    tool_name, reasoning_name = _PAIRINGS[pairings]
+    tool_name, reasoning_name, _ = _PAIRINGS[pairings]
     parser_cls = ParserManager.get_parser(
         tool_parser_name=tool_name,
         reasoning_parser_name=reasoning_name,
@@ -48,16 +49,23 @@ def _get_delegating_parser_cls(pairings: str) -> type[Parser]:
     return parser_cls
 
 
-_all_samples = build_samples("qwen3")
+def _pairing_samples() -> list[tuple[str, object]]:
+    items: list[tuple[str, object]] = []
+    for pairing_name, (_, _, model) in _PAIRINGS.items():
+        for sample in build_samples(model):
+            items.append((pairing_name, sample))
+    return items
 
 
-@pytest.mark.parametrize(
-    "pairings",
-    list(_PAIRINGS),
-    ids=lambda p: f"mode={p}",
-)
+_all_pairing_samples = _pairing_samples()
+
+
 @pytest.mark.parametrize("chunk_size", CHUNK_SIZES, ids=lambda c: f"chunk={c}")
-@pytest.mark.parametrize("sample", _all_samples, ids=lambda s: s.id)
+@pytest.mark.parametrize(
+    "pairings,sample",
+    _all_pairing_samples,
+    ids=lambda v: v.id if hasattr(v, "id") else v,
+)
 def test_delegating_replay(sample, chunk_size, pairings):
     parser_cls = _get_delegating_parser_cls(pairings=pairings)
 
@@ -77,6 +85,7 @@ def test_delegating_replay(sample, chunk_size, pairings):
         chunk_size=chunk_size,
         finished_on_last=True,
         tools=sample.tools,
+        prompt_token_ids=sample.prompt_token_ids,
     )
     output = collect_output(deltas)
     assert_parse_output(output, sample)
