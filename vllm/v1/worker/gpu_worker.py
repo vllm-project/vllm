@@ -252,11 +252,25 @@ class Worker(WorkerBase):
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             parallel_config = self.parallel_config
-            if (
-                parallel_config.distributed_executor_backend
-                not in ("ray", "external_launcher")
-                and parallel_config.data_parallel_backend != "ray"
-                and parallel_config.nnodes_within_dp == 1
+            # DeepGEMM mega-MoE binds each DP rank to a distinct physical GPU
+            # (cuda:{dp_rank}) with all GPUs visible, like the mp backend, so the
+            # symmetric-memory rendezvous sees distinct devices. The executor
+            # leaves CUDA_VISIBLE_DEVICES wide for this backend, so run the DP
+            # device remap even under ray.
+            # See https://github.com/vllm-project/vllm/issues/44556.
+            kernel_config = self.vllm_config.kernel_config
+            megamoe = (
+                kernel_config is not None
+                and getattr(kernel_config, "moe_backend", None)
+                == "deep_gemm_mega_moe"
+            )
+            if parallel_config.nnodes_within_dp == 1 and (
+                megamoe
+                or (
+                    parallel_config.distributed_executor_backend
+                    not in ("ray", "external_launcher")
+                    and parallel_config.data_parallel_backend != "ray"
+                )
             ):
                 # Use local DP rank if available, otherwise use global DP rank.
                 dp_local_rank = self.parallel_config.data_parallel_rank_local

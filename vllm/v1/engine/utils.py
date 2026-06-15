@@ -185,8 +185,20 @@ class CoreEngineProcManager:
                 needs_device_env_isolation = not (
                     current_platform.is_cuda_alike() or current_platform.is_xpu()
                 )
+                # DeepGEMM mega-MoE symmetric memory needs every rank to see all
+                # node GPUs and bind a distinct physical device, like the mp
+                # backend. Skip the per-DP-rank CUDA_VISIBLE_DEVICES masking Ray
+                # would otherwise apply so the engine core keeps full visibility;
+                # the worker binds cuda:{dp_rank} in gpu_worker.init_device.
+                kernel_config = vllm_config.kernel_config
+                megamoe = (
+                    kernel_config is not None
+                    and getattr(kernel_config, "moe_backend", None)
+                    == "deep_gemm_mega_moe"
+                )
                 if is_dp and (
-                    needs_device_env_isolation or vllm_config.parallel_config.use_ray
+                    needs_device_env_isolation
+                    or (vllm_config.parallel_config.use_ray and not megamoe)
                 ):
                     device_control_context = set_device_control_env_var(
                         vllm_config, local_dp_rank
