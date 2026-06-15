@@ -1116,6 +1116,21 @@ class FlashAttentionImpl(AttentionImpl):
                             f"value[i].norm={_probe[4].float().norm().item():.4f}"
                         )
                         break
+            if _os.environ.get("PCP_DUMP") == "1" and self.pcp_rank == 0 and _probe is not None:
+                # Manual location test: write key[0] directly to the slot and
+                # read it back, to verify key_cache[block,off] is the right
+                # place (isolates reshape_and_cache from the view/location).
+                _mslot = _probe[1]
+                _mbs = key_cache.shape[1]
+                _mk = key[prefill_start + _probe[0]]
+                key_cache[_mslot // _mbs, _mslot % _mbs] = _mk
+                torch.cuda.synchronize()
+                _mread = key_cache[_mslot // _mbs, _mslot % _mbs].clone()
+                _pcp_dbg(
+                    f"[PCP r0] MANUAL slot={_mslot} "
+                    f"readback_diff_vs_key={(_mread.float() - _mk.float()).abs().max().item():.4f}"
+                )
+                key_cache[_mslot // _mbs, _mslot % _mbs].zero_()
             reshape_and_cache_flash(
                 key[prefill_start:prefill_end],
                 value[prefill_start:prefill_end],
@@ -1155,6 +1170,7 @@ class FlashAttentionImpl(AttentionImpl):
                 chk = 0
                 n_check = min(prefill_end - prefill_start, 24)
                 ref_all = key[prefill_start:prefill_end].to(torch.float32)
+                ref_val_all = value[prefill_start:prefill_end].to(torch.float32)
                 did_bestmatch = False
                 for i in range(n_check):
                     s = int(prefill_slots[i].item())
@@ -1177,18 +1193,27 @@ class FlashAttentionImpl(AttentionImpl):
                         # position actually matches what is in the cache.
                         if not did_bestmatch and d > 1.0:
                             did_bestmatch = True
-                            flat = (
+                            kflat = (
                                 (ref_all - got)
                                 .abs()
                                 .reshape(ref_all.shape[0], -1)
                                 .max(dim=1)
                                 .values
                             )
-                            best = int(flat.argmin().item())
+                            kbest = int(kflat.argmin().item())
+                            vflat = (
+                                (ref_val_all - got)
+                                .abs()
+                                .reshape(ref_val_all.shape[0], -1)
+                                .max(dim=1)
+                                .values
+                            )
+                            vbest = int(vflat.argmin().item())
                             _pcp_dbg(
-                                f"[PCP r0] WRITECHK slot{s} actually_holds_"
-                                f"key_pos={best} (expected {prefill_start + i}) "
-                                f"its_maxdiff={flat[best].item():.4f}"
+                                f"[PCP r0] WRITECHK slot{s} "
+                                f"best_key_pos={kbest}(d={kflat[kbest].item():.4f}) "
+                                f"best_value_pos={vbest}(d={vflat[vbest].item():.4f}) "
+                                f"expected_key={prefill_start + i}"
                             )
                 _pcp_dbg(f"[PCP r0] WRITECHK checked={chk} mismatched={mism}")
                 if _probe is not None:
