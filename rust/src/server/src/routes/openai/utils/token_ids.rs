@@ -80,3 +80,20 @@ pub(crate) fn validate_logit_bias_token_ids(
     }
     Ok(())
 }
+
+/// Reject `logprob_token_ids` entries at or above `bound` (the `generate` route's
+/// per-position logprob ids, gathered from the engine's logits tensor).
+pub(crate) fn validate_logprob_token_ids(
+    logprob_token_ids: Option<&[u32]>,
+    bound: usize,
+) -> Result<(), ApiError> {
+    if let Some(ids) = logprob_token_ids
+        && let Some(&bad) = ids.iter().find(|&&id| id as usize >= bound)
+    {
+        bail_invalid_request!(
+            param = "logprob_token_ids",
+            "logprob_token_ids contains out-of-vocab token id {bad}; vocabulary size is {bound}."
+        );
+    }
+    Ok(())
+}

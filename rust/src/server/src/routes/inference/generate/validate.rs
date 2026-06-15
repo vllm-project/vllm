@@ -1,7 +1,8 @@
 use super::types::GenerateRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::routes::openai::utils::token_ids::{
-    validate_allowed_token_ids, validate_logit_bias_token_ids, validate_token_ids,
+    validate_allowed_token_ids, validate_logit_bias_token_ids, validate_logprob_token_ids,
+    validate_token_ids,
 };
 
 /// Enforce the minimal compatibility contract for the Rust token generate
@@ -64,6 +65,14 @@ pub(super) fn validate_token_id_ranges(
     )?;
     validate_logit_bias_token_ids(
         request.sampling_params.logit_bias.as_ref(),
+        model_vocab_size.unwrap_or(usize::MAX),
+    )?;
+    // The engine gathers `logprob_token_ids` straight from the model's logits
+    // tensor, so an id beyond the model vocab indexes out of bounds and aborts
+    // EngineCore; Python's `SamplingParams._validate_logprobs` bounds it by the
+    // model vocab too.
+    validate_logprob_token_ids(
+        request.sampling_params.logprob_token_ids.as_deref(),
         model_vocab_size.unwrap_or(usize::MAX),
     )
 }
@@ -139,6 +148,13 @@ mod tests {
         request.sampling_params.allowed_token_ids = None;
         request.sampling_params.logit_bias = Some(HashMap::from([(150, 1.0)]));
         assert!(validate_token_id_ranges(&request, 200, Some(100)).is_err());
+
+        // logprob_token_ids is bounded by the model vocab (the engine gathers from the logits tensor)
+        let mut request = base_request();
+        request.sampling_params.logprob_token_ids = Some(vec![150]);
+        assert!(validate_token_id_ranges(&request, 200, Some(100)).is_err());
+        request.sampling_params.logprob_token_ids = Some(vec![150]);
+        assert!(validate_token_id_ranges(&request, 100, Some(200)).is_ok());
 
         // unknown vocab sizes skip the check
         request = base_request();
