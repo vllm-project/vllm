@@ -36,26 +36,23 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
     The PS metadata is built once per batch for the new-tokens chunk and once per
     context chunk, then reused inside the kernel dispatch.
 
-    Requires:
-        - gfx950 (``DeviceCapability`` ``major=9, minor=5``)
-        - AITER built with ``mla_prefill_ps_asm_fwd``, ``mla_reduce_v1``,
-          ``get_ps_metadata_v1``, ``get_ps_metadata_info_v1`` exported
-        - DeepSeek R1 MLA dimensions (qk_nope=128, qk_rope=64, v_head_dim=128)
-        - FP8 KV cache (the FP8 ASM kernel produces wrong results otherwise)
+    Requires FP8 KV cache and gfx950.
     """
 
     supported_dtypes = [torch.float16, torch.bfloat16]
     requires_r1_mla_dimensions = True
-    # mla_prefill_ps_asm_fwd only accepts FP8 Q/K/V; force the cast in the
-    # parent regardless of attention_config.use_prefill_query_quantization.
+    # mla_prefill_ps_asm_fwd only accepts FP8 Q/K/V
     requires_fp8_query_quantization = True
 
-    # Process-wide cache of the kv_indices arange buffer, keyed by
-    # (device, length, dtype). Reused across layers and chunks; sliced per call.
+    # Optimizations.
+    # Cache of the kv_indices arange buffer, reused per layer and chunk
+    # Key: (device, length, dtype).
     _KV_INDICES_BUFFERS: dict[tuple, torch.Tensor] = {}
-    # Process-wide gate for the noncausal JIT warmup. Keyed by
-    # (device, num_heads, max_num_reqs, max_qlen, max_kvlen) so only the first
-    # MLA layer instance on a given rank actually fires the warmup kernel.
+    # Cache of scalar 1.0 dequant scale passed as q/k/v_scale. Reused per layer/chunk.
+    # Key: device.
+    _ONE_SCALE_BUFFERS: dict[str, torch.Tensor] = {}
+    # The (device, num_heads, max_num_reqs, max_qlen, max_kvlen) that have been
+    # warmed up (non-causal JIT).
     _WARMUP_DONE: set[tuple] = set()
 
     @staticmethod
@@ -94,7 +91,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         invalid_reasons = super().validate_configuration(
             device_capability, selector_config
         )
-        # Otherwise produces incorrect results
         if selector_config.cache_dtype not in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             invalid_reasons.append(
                 f"cache_dtype {selector_config.cache_dtype!r} is not FP8 "
@@ -134,17 +130,15 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         self._get_ps_metadata_v1 = get_ps_metadata_v1
         self._get_ps_metadata_info_v1 = get_ps_metadata_info_v1
 
-        # Populated by prepare_metadata before each forward pass: the
-        # new-tokens (causal) PS metadata dict, and the list of per-context-
-        # chunk (noncausal) PS metadata dicts indexed by chunk_idx. Each is
-        # built once per forward, right-sized to actual geometry, and reused
-        # by every MLA layer that forward.
+        # Persistent-scheduling buffers. Populated once per forward for new tokens
+        # and every chunk, respectively. The PS kernels then use these.
         self._new_tokens_ps: dict | None = None
         self._context_ps: list[dict] = []
 
+        # TODO: check if we can delete this warmup now.
         # Warmup-gate shape constants. These no longer size any persistent
         # buffer (PS scratch is now allocated per-forward, right-sized to
-        # actual geometry in _build_owned_ps_for_chunk); they only key and
+        # actual geometry in _build_ps_metadata_for_chunk); they only key and
         # log the one-time noncausal JIT warmup. _ps_max_context_kvlen is the
         # chunked-prefill workspace size, the upper bound on a context chunk's
         # per-sequence K length.
@@ -154,14 +148,15 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             MLACommonMetadataBuilder,
         )
 
+        # TODO: check if we can delete this warmup now.
+        # Used in warmup
         self._ps_max_context_kvlen = (
             MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
                 vllm_config
             )
         )
-        # Used by _get_kv_indices_buf to size the shared arange buffer; the
-        # scheduler never emits more than max_num_batched_tokens new tokens
-        # per forward.
+        # Used to size the shared KV indices buffer. It is at
+        # most max_num_batched_tokens long
         self._ps_max_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
         )
@@ -169,12 +164,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
     def _get_kv_indices_buf(self, device: torch.device, length: int) -> torch.Tensor:
         """Return a [0, 1, ..., length-1] int32 view into a shared arange buffer.
 
-        kv_indices feeds the PS kernel as a contiguous identity map. Allocating
-        a fresh ``torch.arange`` per layer per chunk shows up in profiles as
-        an HtoD DtoD copy + arange kernel right before each prefill launch.
-        We allocate one buffer per (device, length-class) on first use, sized
-        to ``max(length, max_num_batched_tokens)`` so subsequent calls slice
-        into it instead of allocating.
+        This avoids an arange and memcopy per layer and chunk.
         """
         size = max(length, self._ps_max_batched_tokens)
         key = (str(device), size)
@@ -184,7 +174,20 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             type(self)._KV_INDICES_BUFFERS[key] = buf
         return buf[:length]
 
-    def _build_owned_ps_for_chunk(
+    def _get_one_scale(self, device: torch.device) -> torch.Tensor:
+        """Return the shared scalar 1.0 dequant scale for this device.
+
+        Passed as q_scale/k_scale/v_scale to the FP8 ASM kernel, which only
+        reads it. This removes a fill op from the critical path.
+        """
+        key = str(device)
+        buf = type(self)._ONE_SCALE_BUFFERS.get(key)
+        if buf is None:
+            buf = torch.ones((), dtype=torch.float32, device=device)
+            type(self)._ONE_SCALE_BUFFERS[key] = buf
+        return buf
+
+    def _build_ps_metadata_for_chunk(
         self,
         qo_indptr_cpu: torch.Tensor,
         kv_indptr_cpu: torch.Tensor,
@@ -194,42 +197,20 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         max_qlen: int,
         max_kvlen: int | None,
     ) -> dict:
-        """Build PS metadata into freshly allocated, right-sized buffers.
+        """Build persistent-scheduling metadata buffers for this chunk.
 
-        Unlike a persistent worst-case buffer shared across the whole run,
-        each call allocates scratch sized to THIS chunk's actual geometry
-        (batch_size, max_qlen, max_kvlen) via get_ps_metadata_info_v1, then
-        fills it with get_ps_metadata_v1. The caller is expected to invoke
-        this once per (new-tokens / context-chunk) per forward, in
-        prepare_metadata, and stash the returned dict so all ~30 MLA layers
-        reuse it. That collapses the C++ get_ps_metadata_v1 call (and its 5
-        pageable H2D copies, each of which syncs the stream) from once per
-        layer per chunk to once per chunk per forward.
+        Instead of allocating a single worst-case buffer using the worst case size
+        and re-using that in every chunk, we build correctly sized buffers for
+        the new-token chunk and each context chunk. The buffers are only read by the
+        kernel so it's safe to share them across layers.
 
-        ``seq_lens_cpu`` drives the PS scheduler's K-side work split.
-        ``max_kvlen`` is the max KV length per sequence in this chunk; pass
-        None for the causal new-tokens chunk (K == Q, so it falls back to
-        max_qlen).
+        Note: this is an expensive call because get_ps_metadata_v1 involves several
+        host-to-device syncs/copies. Same for num_partial_tiles. Hence we build
+        it once per forward and re-use across layers.
 
-        num_partial_tiles (which sizes the per-call logits/attn_lse scratch in
-        _run_kernel) is read from device truth: reduce_indptr[-1], the actual
-        number of partials the scheduler emitted. This costs one DtoH sync, but
-        it is paid once per chunk per forward (this method runs once in
-        prepare_metadata and its result is reused by all ~30 MLA layers), not
-        per layer. Device truth is exact: it never under-counts (unlike the
-        earlier sync-free host bound qt + tgs_per_cluster, which under-counted
-        noncausal long-context at large batch and let the kernel write past
-        logits/attn_lse, causing the 256-concurrency MAF), and it stays far
-        below the info call's loose reduce_partial_map_size (which over-counts by
-        ~256x for long context and previously ballooned logits to hundreds of
-        GB).
-
-        Buffers are read-only after the build: the kernel reads work_indptr/
-        work_info/reduce_* and writes only the per-call logits/attn_lse/out
-        allocated in _run_kernel. Sharing the same metadata across all layers
-        in a forward is therefore safe; vLLM runs prepare_metadata once before
-        any layer executes.
+        max_kvlen=None means causal: i.e. num K tokens == num Q tokens.
         """
+        assert is_causal == (max_kvlen is None)
         num_head_k = self.num_heads
 
         (
@@ -265,11 +246,13 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             reduce_partial_map_size, dtype=reduce_partial_map_dtype, device=device
         )
 
+        # Prefill is non-absorbed
+        gqa_ratio = 1
         self._get_ps_metadata_v1(
             qo_indptr_cpu,
             kv_indptr_cpu,
             seq_lens_cpu,
-            1,  # gqa_ratio: K is decompressed to num_heads, matching Q.
+            gqa_ratio,
             num_head_k,
             work_metadata,
             work_indptr,
@@ -284,24 +267,9 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             is_causal=is_causal,
         )
 
-        # Device-truth partial-tile count: the scheduler has already written the
-        # actual number of emitted partials into reduce_indptr[-1]. The prefill
-        # ASM kernel writes a tile_q-row partial at partial_o_loc = tile_q *
-        # partial_tile_idx, and partial_tile_idx is exactly what reduce_indptr[-1]
-        # counts, so this is the precise number of partial slots the kernel
-        # touches. logits/attn_lse are sized to num_partial_tiles * tile_q rows.
-        #
-        # We accept one DtoH sync here. It is paid once per chunk per forward
-        # (this method runs from prepare_metadata, whose result is reused by all
-        # ~30 MLA layers), not per layer. The earlier host bound
-        # (qt + tgs_per_cluster) was sync-free but could UNDER-count noncausal
-        # long-context chunks at large batch, letting the kernel write past
-        # logits/attn_lse and corrupt a neighboring allocation (the 256-conc
-        # MAF). Device truth never under-counts. It also stays far below the
-        # info call's loose reduce_partial_map_size (which over-counts by ~256x
-        # for long context and previously ballooned logits to hundreds of GB),
-        # so out/final_lse (sized by total_q, not this) and logits/attn_lse all
-        # stay correctly sized.
+        # The actual number of partial tiles emitted by the scheduler.
+        # Required for correctly sizing the (partial) logits/attn_lse buffers that we
+        # reduce over.
         num_partial_tiles = int(reduce_indptr[-1].item())
 
         return {
@@ -356,7 +324,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
 
         # Build right-sized noncausal metadata just to exercise the JIT/hsaco
         # load path; the buffers are discarded after this warmup call.
-        ps = self._build_owned_ps_for_chunk(
+        ps = self._build_ps_metadata_for_chunk(
             qo_indptr_cpu=qo_indptr_cpu,
             kv_indptr_cpu=kv_indptr_cpu,
             seq_lens_cpu=seq_lens_cpu,
@@ -387,7 +355,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             device=device,
         )
         final_lse = torch.empty((total_q, nhead), dtype=torch.float32, device=device)
-        one_scale = torch.ones((), dtype=torch.float32, device=device)
+        one_scale = self._get_one_scale(device)
 
         self._mla_prefill_ps_asm_fwd(
             q,
@@ -433,16 +401,15 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         qo_indptr = prefill_metadata.query_start_loc  # device int32 [bs+1]
         device = qo_indptr.device
         self._warmup_noncausal(device)
-        # Use the CPU mirror the metadata builder already populated; avoids
-        # one DtoH copy + host sync per layer per forward (~30x with DSV3).
+
+        # Use CPU buffers to avoid host-device sync
         qo_indptr_cpu = prefill_metadata.query_start_loc_cpu.to(torch.int32)
         q_seq_lens_cpu = (qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]).to(torch.int32)
         total_q = int(qo_indptr_cpu[-1].item())
         max_query_len = prefill_metadata.max_query_len
 
-        # New-tokens chunk (causal): K == Q. Built once here and reused by
-        # every MLA layer's run_prefill_new_tokens this forward.
-        ps = self._build_owned_ps_for_chunk(
+        # 1. Prep buffers for new-tokens chunk (causal)
+        ps = self._build_ps_metadata_for_chunk(
             qo_indptr_cpu=qo_indptr_cpu,
             kv_indptr_cpu=qo_indptr_cpu,
             seq_lens_cpu=q_seq_lens_cpu,
@@ -456,13 +423,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         ps["kv_indices"] = self._get_kv_indices_buf(device, total_q)
         self._new_tokens_ps = ps
 
-        # Context chunks (noncausal): build every chunk's PS metadata once
-        # here, right-sized to that chunk's geometry, and stash by chunk index.
-        # run_prefill_context_chunk(chunk_idx=i) then just reads the prebuilt
-        # entry. Both _compute_prefill_context paths iterate chunk indices
-        # 0..len(seq_tot)-1 with the same cu_seq_lens[i] geometry used here,
-        # so per-index reuse is exact. Building all chunks upfront collapses
-        # the per-layer-per-chunk get_ps_metadata_v1 syncs to one per chunk.
+        # 2. Prep buffers for each context chunk (non-causal).
         self._context_ps = []
         cc = prefill_metadata.chunked_context
         if cc is not None:
@@ -473,7 +434,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
                     torch.int32
                 )
                 total_k = int(kv_indptr_cpu[-1].item())
-                chunk_ps = self._build_owned_ps_for_chunk(
+                chunk_ps = self._build_ps_metadata_for_chunk(
                     qo_indptr_cpu=qo_indptr_cpu,
                     kv_indptr_cpu=kv_indptr_cpu,
                     seq_lens_cpu=k_seq_lens_cpu,
@@ -501,50 +462,39 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         can feed it directly to `merge_attn_states` or copy it into the
         final `output` buffer.
         """
-        # AITER ASM kernel requires V contiguous in (seq, head, v_head_dim).
-        # cp_gather_cache produces V as a slice of a wider nope+rope buffer
-        # (stride[1] = qk_head_dim, not v_head_dim), so force a copy here.
+        # mla_prefill_ps_asm_fwd requires contiguous V in (seq, head, v_head_dim).
+        # cp_gather_cache produces V as a slice of the wider nope+rope buffer
+        # so we need to copy.
         v = v.contiguous()
 
-        total_q = q.shape[0]
-        nhead = self.num_heads
-        v_head_dim = self.v_head_dim
-        tile_q = _FP8_PREFILL_TILE_Q
+        # Partial output buffers for the PS kernel.
         num_partial_tiles = ps["num_partial_tiles"]
-
-        out_dtype = self._prefill_metadata.output_dtype
-        assert out_dtype is not None
-        out = torch.empty(
-            (total_q, nhead, v_head_dim),
-            dtype=out_dtype,
-            device=q.device,
-        )
-
-        one_scale = torch.ones((), dtype=torch.float32, device=q.device)
-
-        # Allocate scratch directly instead of going through the workspace
-        # manager. The manager is locked after profile_run + graph capture,
-        # but profile_run never exercises a noncausal chunked-context shape,
-        # so the lock-time size is too small and a later long-context request
-        # silently gets an undersized view, causing GPU OOB writes. Direct
-        # torch.empty hits the caching allocator, which amortizes reuse for
-        # the common shapes after warmup.
         logits = torch.empty(
-            (num_partial_tiles * tile_q, nhead, v_head_dim),
+            (num_partial_tiles * _FP8_PREFILL_TILE_Q, self.num_heads, self.v_head_dim),
             dtype=torch.float32,
             device=q.device,
         )
         attn_lse = torch.empty(
-            (num_partial_tiles * tile_q, nhead),
+            (num_partial_tiles * _FP8_PREFILL_TILE_Q, self.num_heads),
             dtype=torch.float32,
             device=q.device,
         )
+        # Output buffers
+        total_q = q.shape[0]
+        out_dtype = self._prefill_metadata.output_dtype
+        assert out_dtype is not None
         final_lse = torch.empty(
-            (total_q, nhead),
+            (total_q, self.num_heads),
             dtype=torch.float32,
+            device=q.device,
+        )
+        out = torch.empty(
+            (total_q, self.num_heads, self.v_head_dim),
+            dtype=out_dtype,
             device=q.device,
         )
 
+        one_scale = self._get_one_scale(q.device)
         self._mla_prefill_ps_asm_fwd(
             q,
             k,
@@ -560,13 +510,6 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             logits,
             attn_lse,
             out,
-            # Per-tensor dequant scales for Q/K/V passed to the AITER FP8
-            # ASM kernel. We hardcode 1.0 because this backend currently
-            # assumes inputs are in real units (no per-tensor FP8 dequant
-            # scale to undo). Supporting q_scale/k_scale/v_scale != 1 would
-            # require plumbing the layer's _q_scale/_k_scale/_v_scale tensors
-            # through prepare_metadata or a bind step. The test suite is
-            # expected to skip non-unit scales for this backend.
             one_scale,
             one_scale,
             one_scale,
@@ -577,19 +520,14 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             ps["reduce_indptr"],
             ps["reduce_final_map"],
             ps["reduce_partial_map"],
-            tile_q,
+            _FP8_PREFILL_TILE_Q,
             0,
             out,
             final_lse,
         )
 
-        # AITER mla_reduce_v1 writes final_lse as (total_q, num_heads) with a
-        # hardcoded byte offset (seq_idx * num_heads + head_idx) and no stride
-        # parameter, so we cannot ask it to write transposed. The downstream
-        # consumer on ROCm is triton_merge_attn_states, which indexes
-        # (head_idx * num_tokens + token_idx) and requires the buffer
-        # contiguous in (num_heads, total_q) layout. Hence transpose +
-        # contiguous; can't be elided without changing one of the kernels.
+        # mla_reduce_v1 writes final_lse as (total_q, num_heads), but
+        # triton_merge_attn_states wants it as (num_heads, total_q)
         return out, final_lse.transpose(0, 1).contiguous()
 
     def run_prefill_new_tokens(
@@ -614,15 +552,5 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Non-causal ASM prefill over one cached-context chunk.
-
-        Q is the full new-tokens query (same across chunks). K/V are the
-        chunk's cached context, already loaded into contiguous tensors by
-        the parent ``_compute_prefill_context`` loop. The chunk's PS metadata
-        was built once in prepare_metadata (right-sized to this chunk's
-        geometry) and stashed at ``self._context_ps[chunk_idx]``; all MLA
-        layers in this forward reuse it, so the per-layer get_ps_metadata_v1
-        sync is gone.
-        """
         ps = self._context_ps[chunk_idx]
         return self._run_kernel(q, k, v, ps, is_causal=False)
