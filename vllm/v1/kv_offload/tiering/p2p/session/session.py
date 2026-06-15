@@ -52,7 +52,7 @@ _STORE_TIMEOUT_S = 30.0
 class _InboundRequestState:
     """Client-role state for a single load request."""
 
-    job_id: int
+    job_id: int  # opaque ID assigned by the manager to this load request
     kv_request_id: str
     submitted_at: float
     aborted_at: float | None = None
