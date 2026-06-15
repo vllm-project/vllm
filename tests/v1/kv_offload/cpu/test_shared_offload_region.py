@@ -19,7 +19,15 @@ import pytest
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu import host_register as host_register_module
+from vllm.v1.kv_offload.cpu import memory as memory_module
 from vllm.v1.kv_offload.cpu import shared_offload_region as region_module
+from vllm.v1.kv_offload.cpu.memory import (
+    HUGEPAGE_1GB,
+    HUGEPAGE_2MB,
+    CPUOffloadMemoryBackend,
+    CPUOffloadMemoryConfig,
+    MountInfo,
+)
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
     SharedOffloadRegion,
     _wait_for_file_size,
@@ -49,6 +57,7 @@ def _make_region(
     rank: int = 0,
     barrier=None,
     populate_shard: tuple[int, int] | None = None,
+    memory_config: CPUOffloadMemoryConfig | None = None,
 ) -> SharedOffloadRegion:
     assert cpu_page_size % PAGE_SIZE == 0
     return SharedOffloadRegion(
@@ -59,6 +68,7 @@ def _make_region(
         cpu_page_size=cpu_page_size,
         barrier=barrier,
         populate_shard=populate_shard,
+        memory_config=memory_config,
     )
 
 
@@ -249,6 +259,130 @@ def _mp_barrier_construct_and_hold(
 def iid():
     """Fresh instance ID for each test."""
     return str(uuid.uuid4())
+
+
+# ---------------------------------------------------------------------------
+# CPUOffloadMemoryConfig — parsing and path selection
+# ---------------------------------------------------------------------------
+
+
+def test_memory_config_defaults_to_shm_path(iid):
+    """No new keys must preserve the existing /dev/shm mmap path."""
+    config = CPUOffloadMemoryConfig.from_extra_config({})
+
+    assert config.backend == CPUOffloadMemoryBackend.DEFAULT
+    assert config.effective_backend == CPUOffloadMemoryBackend.SHM
+    assert config.mmap_path(iid) == f"/dev/shm/vllm_offload_{iid}.mmap"
+    assert config.mapped_size(PAGE_SIZE) == PAGE_SIZE
+
+
+def test_memory_config_invalid_backend_raises():
+    with pytest.raises(ValueError, match="Invalid cpu_memory_backend"):
+        CPUOffloadMemoryConfig.from_extra_config({"cpu_memory_backend": "invalid"})
+
+
+def test_memory_config_hugetlbfs_requires_path():
+    with pytest.raises(ValueError, match="cpu_memory_path is required"):
+        CPUOffloadMemoryConfig.from_extra_config({"cpu_memory_backend": "hugetlbfs"})
+
+
+def test_memory_config_invalid_hugepage_block_size_raises(tmp_path):
+    with pytest.raises(ValueError, match="cpu_hugepage_block_size"):
+        CPUOffloadMemoryConfig.from_extra_config(
+            {
+                "cpu_memory_backend": "hugetlbfs",
+                "cpu_memory_path": str(tmp_path),
+                "cpu_hugepage_block_size": "4MB",
+            }
+        )
+
+
+def test_shm_memory_path_changes_mmap_path(tmp_path, iid):
+    """An explicit shm path should relocate the shared mmap file."""
+    config = CPUOffloadMemoryConfig.from_extra_config(
+        {"cpu_memory_backend": "shm", "cpu_memory_path": str(tmp_path)}
+    )
+
+    with _region(iid, memory_config=config) as r:
+        assert r.mmap_path == str(tmp_path / f"vllm_offload_{iid}.mmap")
+        assert os.path.exists(r.mmap_path)
+        assert os.path.getsize(r.mmap_path) == r.total_size_bytes
+
+
+def test_hugetlbfs_rejects_dev_shm(iid):
+    config = CPUOffloadMemoryConfig.from_extra_config(
+        {"cpu_memory_backend": "hugetlbfs", "cpu_memory_path": "/dev/shm"}
+    )
+
+    with pytest.raises(ValueError, match="must not be under /dev/shm"):
+        _make_region(iid, memory_config=config)
+
+
+def test_hugetlbfs_rejects_mount_page_size_mismatch(monkeypatch, tmp_path, iid):
+    config = CPUOffloadMemoryConfig(
+        backend=CPUOffloadMemoryBackend.HUGETLBFS,
+        path=str(tmp_path),
+        hugepage_block_size=HUGEPAGE_1GB,
+    )
+    monkeypatch.setattr(
+        memory_module,
+        "_get_mount_info",
+        lambda _: MountInfo(
+            mount_point=str(tmp_path), fs_type="hugetlbfs", options=("pagesize=2M",)
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not match hugetlbfs mount"):
+        _make_region(iid, memory_config=config)
+
+
+def test_hugetlbfs_maps_aligned_size_but_exposes_logical_view(
+    monkeypatch, tmp_path, iid
+):
+    config = CPUOffloadMemoryConfig.from_extra_config(
+        {"cpu_memory_backend": "hugetlbfs", "cpu_memory_path": str(tmp_path)}
+    )
+    monkeypatch.setattr(
+        memory_module,
+        "_get_mount_info",
+        lambda _: MountInfo(
+            mount_point=str(tmp_path), fs_type="hugetlbfs", options=("pagesize=2M",)
+        ),
+    )
+
+    with _region(iid, num_chunks=1, memory_config=config) as r:
+        assert r.total_size_bytes == PAGE_SIZE
+        assert r.mapped_size_bytes == HUGEPAGE_2MB
+        assert len(r.mmap_obj) == HUGEPAGE_2MB
+        assert os.path.getsize(r.mmap_path) == HUGEPAGE_2MB
+        assert r._base.numel() == PAGE_SIZE
+
+        view = r.create_kv_memoryview()
+        assert view.nbytes == PAGE_SIZE
+        assert view.shape == (1, PAGE_SIZE)
+        del view
+
+
+def test_hugetlbfs_allocation_with_env_path(iid):
+    hugepage_path = os.environ.get("VLLM_TEST_HUGETLBFS_PATH")
+    if not hugepage_path:
+        pytest.skip("VLLM_TEST_HUGETLBFS_PATH is not set")
+
+    config = CPUOffloadMemoryConfig.from_extra_config(
+        {
+            "cpu_memory_backend": "hugetlbfs",
+            "cpu_memory_path": hugepage_path,
+            "cpu_hugepage_block_size": os.environ.get(
+                "VLLM_TEST_HUGETLBFS_BLOCK_SIZE", "2MB"
+            ),
+        }
+    )
+
+    with _region(iid, num_chunks=1, memory_config=config) as r:
+        assert r.mmap_path == os.path.join(hugepage_path, f"vllm_offload_{iid}.mmap")
+        assert r.total_size_bytes == PAGE_SIZE
+        assert r.mapped_size_bytes == config.hugepage_block_size
+        assert os.path.exists(r.mmap_path)
 
 
 # ---------------------------------------------------------------------------
@@ -1214,21 +1348,19 @@ def test_creator_memory_check_runs_only_for_creator(iid):
 
 def test_insufficient_space_raises_clear_error(monkeypatch):
     """A failed creator capacity check must clean up and give a clear error."""
-    import vllm.v1.kv_offload.cpu.shared_offload_region as region
-
     engine_id = str(uuid.uuid4())
     mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
     mock_open = MagicMock(return_value=9999)
     mock_unlink = MagicMock()
     mock_close = MagicMock()
-    monkeypatch.setattr(region.os, "open", mock_open)
-    monkeypatch.setattr(region.os, "unlink", mock_unlink)
-    monkeypatch.setattr(region.os, "close", mock_close)
+    monkeypatch.setattr(region_module.os, "open", mock_open)
+    monkeypatch.setattr(region_module.os, "unlink", mock_unlink)
+    monkeypatch.setattr(region_module.os, "close", mock_close)
     mock_check = MagicMock(
         side_effect=RuntimeError("Insufficient space in /dev/shm: 30 GB required.")
     )
     monkeypatch.setattr(
-        region,
+        region_module,
         "check_shm_free_space",
         mock_check,
     )
@@ -1246,24 +1378,23 @@ def test_insufficient_space_raises_clear_error(monkeypatch):
     mock_close.assert_called_once_with(9999)
     mock_check.assert_called_once_with(
         4 * PAGE_SIZE,
+        "/dev/shm",
         allocation_name="CPU KV offload shared region in /dev/shm",
     )
 
 
 def test_ftruncate_failure_cleans_up_creator(monkeypatch):
     """A failed creator ftruncate must close and unlink before re-raising."""
-    import vllm.v1.kv_offload.cpu.shared_offload_region as region
-
     engine_id = str(uuid.uuid4())
     mmap_path = f"/dev/shm/vllm_offload_{engine_id}.mmap"
     mock_unlink = MagicMock()
     mock_close = MagicMock()
-    monkeypatch.setattr(region.os, "open", MagicMock(return_value=9999))
-    monkeypatch.setattr(region.os, "unlink", mock_unlink)
-    monkeypatch.setattr(region.os, "close", mock_close)
-    monkeypatch.setattr(region, "check_shm_free_space", MagicMock())
+    monkeypatch.setattr(region_module.os, "open", MagicMock(return_value=9999))
+    monkeypatch.setattr(region_module.os, "unlink", mock_unlink)
+    monkeypatch.setattr(region_module.os, "close", mock_close)
+    monkeypatch.setattr(region_module, "check_shm_free_space", MagicMock())
     monkeypatch.setattr(
-        region.os,
+        region_module.os,
         "ftruncate",
         MagicMock(side_effect=OSError("ftruncate failed")),
     )
@@ -1279,6 +1410,34 @@ def test_ftruncate_failure_cleans_up_creator(monkeypatch):
 
     mock_unlink.assert_called_once_with(mmap_path)
     mock_close.assert_called_once_with(9999)
+
+
+def test_hugetlbfs_sizing_failure_cleans_up_creator(monkeypatch, tmp_path, iid):
+    """A hugetlbfs creator that cannot size the file unlinks it and raises a
+    clear error mentioning the backend."""
+    config = CPUOffloadMemoryConfig(
+        backend=CPUOffloadMemoryBackend.HUGETLBFS,
+        path=str(tmp_path),
+    )
+    monkeypatch.setattr(
+        memory_module,
+        "_get_mount_info",
+        lambda _: MountInfo(
+            mount_point=str(tmp_path), fs_type="hugetlbfs", options=("pagesize=2M",)
+        ),
+    )
+    mock_unlink = MagicMock()
+    monkeypatch.setattr(memory_module.os, "unlink", mock_unlink)
+    monkeypatch.setattr(
+        memory_module.os,
+        "ftruncate",
+        MagicMock(side_effect=OSError("insufficient hugepages")),
+    )
+
+    with pytest.raises(OSError, match="Failed to size offload mmap file"):
+        _make_region(iid, memory_config=config)
+
+    mock_unlink.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
