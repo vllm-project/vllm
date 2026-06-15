@@ -145,7 +145,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.is_encoder_decoder = self.model_config.is_encoder_decoder
 
-        self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
 
         # Pipeline parallelism.
@@ -367,8 +366,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner as GPUModelRunnerV1
 
         GPUModelRunnerV1.reload_weights(self, *args, **kwargs)  # type: ignore[arg-type]
-        self.reset_encoder_cache()
-        self.reset_mm_cache()
 
     def apply_sparse_weight_patches(self, *args, **kwargs) -> None:
         # TODO: Use full version instead of import when fully migrated to v2
@@ -1459,9 +1456,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
 
-        if self.use_async_scheduling:
-            return async_output
-        return async_output.get_output()
+        return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()
@@ -1505,9 +1500,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.postprocess_num_computed_tokens(input_batch)
-        if self.use_async_scheduling:
-            return async_output
-        return async_output.get_output()
+        return async_output
 
     def postprocess_num_computed_tokens(self, input_batch: InputBatch) -> None:
         # Update the number of computed tokens.

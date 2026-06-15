@@ -8,6 +8,10 @@ from typing import Generic, TypeVar
 
 import torch
 
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -71,6 +75,17 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
         self.config = c
         self.layer_param_names = layer_param_names
 
+    def input_quant_key(self) -> QuantKey | None:
+        """The activation quant key this kernel can consume pre-quantized.
+
+        Manual fusion uses this to decide whether to hoist activation
+        quantization out of apply_weights into an upstream fused kernel.
+        Return None when the kernel needs in-kernel quantization (custom
+        padding or swizzling, dynamic scales, etc.). Kernels that return a
+        key must consume the activation via as_quantized_activation.
+        """
+        return None
+
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         raise NotImplementedError
@@ -120,30 +135,30 @@ class FP8ScaledMMLinearKernel(
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         fp8_dtype = self.fp8_dtype
         maybe_out_dtype = self.config.out_dtype
         w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
 
-        #   ops.scaled_fp8_quant supports both dynamic and static quant.
-        #   If dynamic, layer.input_scale is None and x_s computed from x.
-        #   If static, layer.input_scale is scalar and x_s is input_scale.
-        # View input as 2D matrix for fp8 methods
-        x_2d = x.view(-1, x.shape[-1])
-        output_shape = [*x.shape[:-1], w.shape[1]]
-        out_dtype = x.dtype if maybe_out_dtype is None else maybe_out_dtype
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            x_data, x_s = qa.data, qa.scale
+            orig_shape, orig_dtype = qa.orig_shape, qa.orig_dtype
+            assert x_data.dtype == fp8_dtype
+        else:
+            assert isinstance(x, torch.Tensor)
+            x_data = x
+            orig_shape, orig_dtype = x.shape, x.dtype
 
-        # If input not quantized
-        # TODO(luka) remove this path if not used anymore
+        x_2d = x_data.view(-1, x_data.shape[-1])
+        output_shape = [*orig_shape[:-1], w.shape[1]]
+        out_dtype = orig_dtype if maybe_out_dtype is None else maybe_out_dtype
+
         x_2d_q = x_2d
-        if x.dtype != fp8_dtype:
-            x_2d_q, x_s = self.quant_fp8(
-                x_2d,
-                x_s,
-                x_s_ub,
-            )
+        if qa is None:
+            x_2d_q, x_s = self.quant_fp8(x_2d, x_s, x_s_ub)
         return self.apply_scaled_mm(
             A=x_2d_q,
             B=w,
