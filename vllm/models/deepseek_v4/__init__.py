@@ -6,13 +6,12 @@ Implementations live under ``nvidia/``, ``amd/``, ``xpu/``, and
 ``hw_agnostic/``; this module picks one and re-exports the public classes
 used by the model registry and quantization config lookup.
 
-Setting ``VLLM_USE_HW_AGNOSTIC=1`` forces the ``hw_agnostic/`` branch on
-every platform, overriding the platform dispatch below.
+Out-of-tree platforms (registered via the ``vllm.platform_plugins`` entry
+point group) automatically select the ``hw_agnostic/`` branch.
 """
 
 from typing import TYPE_CHECKING
 
-import vllm.envs as envs
 from vllm.platforms import current_platform
 
 from .quant_config import DeepseekV4FP8Config
@@ -23,7 +22,7 @@ if TYPE_CHECKING:
     from .nvidia.model import DeepseekV4ForCausalLM
     from .nvidia.mtp import DeepSeekV4MTP
 
-if envs.VLLM_USE_HW_AGNOSTIC:
+if current_platform.is_out_of_tree():
     from .hw_agnostic.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .hw_agnostic.mtp import DeepSeekV4MTP  # type: ignore[assignment]
 elif current_platform.is_rocm():
@@ -36,7 +35,7 @@ elif current_platform.is_xpu():
     from .xpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .xpu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
 else:
-    # Fallback for non-{cuda,rocm,xpu} platforms.
+    # Fallback for non-{cuda,rocm,xpu} platforms (e.g. CPU).
     from .hw_agnostic.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .hw_agnostic.mtp import DeepSeekV4MTP  # type: ignore[assignment]
 

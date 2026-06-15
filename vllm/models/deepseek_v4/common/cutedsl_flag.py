@@ -10,7 +10,7 @@ is importable.
 The hw-agnostic code path does not dispatch to those NVIDIA-only kernels
 """
 
-import vllm.envs as envs
+from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_cutedsl
 
 
@@ -20,6 +20,6 @@ def cutedsl_enabled() -> bool:
     True only when (a) the hw-agnostic stream is not active and (b) the
     ``cutlass`` package is importable.
     """
-    if envs.VLLM_USE_HW_AGNOSTIC:
+    if current_platform.is_out_of_tree():
         return False
     return has_cutedsl()
