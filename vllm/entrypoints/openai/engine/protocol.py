@@ -253,6 +253,8 @@ class FunctionDefinition(OpenAIBaseModel):
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
+        if self.strict is None:
+            data.pop("strict", None)
         if self.defer_loading is None:
             data.pop("defer_loading", None)
         return data
