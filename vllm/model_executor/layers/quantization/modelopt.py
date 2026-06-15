@@ -88,11 +88,13 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (
+    BasevLLMParameter,
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
     GroupQuantScaleParameter,
     ModelWeightParameter,
     PerTensorScaleParameter,
+    RowvLLMParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
@@ -110,6 +112,17 @@ QUANT_ALGOS = [
     "FP8_PB_WO",
     # NVFP4 W4A4 (4-bit float weights AND 4-bit float activations).
     "NVFP4",
+    # NVFP4 variants that keep the standard W4A4 deployment format.
+    "NVFP4_LOCAL_HESSIAN",
+    "NVFP4_MSE_FP8_SWEEP",
+    # NVFP4 with activation-aware pre-quantization scaling.
+    "NVFP4_AWQ",
+    "NVFP4_AWQ_LITE",
+    "NVFP4_AWQ_CLIP",
+    "NVFP4_AWQ_FULL",
+    # NVFP4 with activation-aware scaling and a low-rank residual.
+    "NVFP4_SVD",
+    "NVFP4_SVDQUANT",
     # W4A16 NVFP4 (4-bit float weights, fp16/bf16 activations).
     "W4A16_NVFP4",
     # MXFP8
@@ -118,6 +131,22 @@ QUANT_ALGOS = [
     "MIXED_PRECISION",
 ]
 KV_CACHE_QUANT_ALGOS = ["FP8", "NVFP4"]
+
+NVFP4_STANDARD_ALGOS = {
+    "NVFP4",
+    "NVFP4_LOCAL_HESSIAN",
+    "NVFP4_MSE_FP8_SWEEP",
+}
+NVFP4_AWQ_ALGOS = {
+    "NVFP4_AWQ",
+    "NVFP4_AWQ_LITE",
+    "NVFP4_AWQ_CLIP",
+    "NVFP4_AWQ_FULL",
+}
+NVFP4_SVD_ALGOS = {
+    "NVFP4_SVD",
+    "NVFP4_SVDQUANT",
+}
 
 
 class ModelOptKVCacheMethod(BaseKVCacheMethod):
@@ -416,7 +445,7 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
         cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
         algo = cls._extract_modelopt_quant_algo(hf_quant_cfg)
-        if algo is not None and algo == "FP8":
+        if algo in {"FP8", "FP8_PER_CHANNEL_PER_TOKEN", "FP8_PB_WO"}:
             return "modelopt"
         return None
 
@@ -1018,12 +1047,16 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         kv_cache_quant_algo: str | None = None,
         exclude_modules: list[str] | None = None,
         group_size: int = 16,
+        svdquant_rank: int = 32,
     ) -> None:
         if exclude_modules is None:
             exclude_modules = []
         super().__init__(exclude_modules)
         self.quant_method = quant_method
         self.is_checkpoint_nvfp4_serialized = is_checkpoint_nvfp4_serialized
+        self.group_size = group_size
+        self.kv_cache_quant_algo = kv_cache_quant_algo
+        self.svdquant_rank = svdquant_rank
         if is_checkpoint_nvfp4_serialized:
             logger.warning(
                 "Detected ModelOpt NVFP4 checkpoint (quant_algo=%s). Please "
@@ -1032,20 +1065,27 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
                 quant_method,
             )
 
-            self.group_size = group_size
-            self.kv_cache_quant_algo = kv_cache_quant_algo
-
         # Select LinearMethod implementation based on quant_algo (FP8 pattern).
         # NVFP4         -> W4A4: cutlass NVFP4 GEMM with input quantization
         # W4A16_NVFP4   -> W4A16: FP4 Marlin GEMM with bf16/fp16 activations
-        if quant_method == "NVFP4":
+        if quant_method in NVFP4_STANDARD_ALGOS:
             self.LinearMethodCls = ModelOptNvFp4LinearMethod
+        elif quant_method in NVFP4_AWQ_ALGOS:
+            self.LinearMethodCls = ModelOptNvFp4AwqLinearMethod
+        elif quant_method in NVFP4_SVD_ALGOS:
+            self.LinearMethodCls = ModelOptNvFp4SvdLinearMethod
         elif quant_method == "W4A16_NVFP4":
             self.LinearMethodCls = ModelOptNvFp4W4A16LinearMethod
         else:
+            supported_algos = (
+                NVFP4_STANDARD_ALGOS
+                | NVFP4_AWQ_ALGOS
+                | NVFP4_SVD_ALGOS
+                | {"W4A16_NVFP4"}
+            )
             raise ValueError(
                 f"Unsupported ModelOpt NVFP4 quant_algo: {quant_method}. "
-                "Supported: NVFP4 / W4A16_NVFP4."
+                f"Supported: {sorted(supported_algos)}."
             )
 
     def get_name(self) -> QuantizationMethods:
@@ -1082,6 +1122,8 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
         if group_size is None:
             group_size = 16  # Default value
+        quantization = original_config.get("quantization", original_config)
+        svdquant_rank = int(quantization.get("svdquant_rank", 32))
 
         # For FP4, these fields are required
         if is_checkpoint_nvfp4_serialized and "quantization" in original_config:
@@ -1103,6 +1145,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             kv_cache_quant_method,
             exclude_modules,
             group_size,
+            svdquant_rank,
         )
 
 
@@ -1238,6 +1281,127 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
+
+
+class ModelOptNvFp4AwqLinearMethod(ModelOptNvFp4LinearMethod):
+    """ModelOpt NVFP4 with an activation-aware pre-quantization scale."""
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+        parameter_cls = (
+            RowvLLMParameter
+            if input_size_per_partition != input_size
+            else BasevLLMParameter
+        )
+        parameter_kwargs = {"input_dim": 0} if parameter_cls is RowvLLMParameter else {}
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        assert weight_loader is not None
+        pre_quant_scale = parameter_cls(
+            data=torch.empty(input_size_per_partition, dtype=params_dtype),
+            weight_loader=weight_loader,
+            **parameter_kwargs,
+        )
+        layer.register_parameter("pre_quant_scale", pre_quant_scale)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return super().apply(layer, x * layer.pre_quant_scale, bias)
+
+
+class ModelOptNvFp4SvdLinearMethod(ModelOptNvFp4AwqLinearMethod):
+    """ModelOpt NVFP4 SVDQuant with a low-rank residual.
+
+    The initial implementation intentionally supports TP=1 only. Correct TP
+    requires a collective between the row-parallel A and column-parallel B
+    projections.
+    """
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        output_size_per_partition = sum(output_partition_sizes)
+        if (
+            input_size_per_partition != input_size
+            or output_size_per_partition != output_size
+        ):
+            raise ValueError("ModelOpt NVFP4 SVDQuant currently supports TP=1 only.")
+
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+        rank = self.quant_config.svdquant_rank
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        weight_quantizer = torch.nn.Module()
+        weight_quantizer.register_parameter(
+            "_svdquant_lora_a",
+            ModelWeightParameter(
+                data=torch.empty(rank, input_size, dtype=params_dtype),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader,
+            ),
+        )
+        weight_quantizer.register_parameter(
+            "_svdquant_lora_b",
+            ModelWeightParameter(
+                data=torch.empty(output_size, rank, dtype=params_dtype),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=weight_loader,
+            ),
+        )
+        layer.add_module("weight_quantizer", weight_quantizer)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        scaled_x = x * layer.pre_quant_scale
+        output = ModelOptNvFp4LinearMethod.apply(self, layer, scaled_x, bias)
+        residual = torch.nn.functional.linear(
+            torch.nn.functional.linear(
+                scaled_x,
+                layer.weight_quantizer._svdquant_lora_a,
+            ),
+            layer.weight_quantizer._svdquant_lora_b,
+        )
+        return output + residual
 
 
 class ModelOptNvFp4W4A16LinearMethod(LinearMethodBase):
@@ -1400,6 +1564,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
+        if quant_config.quant_method in NVFP4_AWQ_ALGOS | NVFP4_SVD_ALGOS:
+            raise ValueError(
+                f"ModelOpt {quant_config.quant_method} is not supported for "
+                "FusedMoE yet."
+            )
         # W4A16 mode fires for W4A16_NVFP4 on-disk checkpoints. With
         # activation_key=None every W4A4 backend's _supports_quant_scheme
         # rejects itself (they all require (kNvfp4Static, kNvfp4Dynamic)
@@ -2281,14 +2450,24 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         exclude_modules: list[str],
         quantized_layers: dict[str, dict[str, Any]],
         fp8_config: ModelOptFp8Config,
+        fp8_pc_pt_config: ModelOptFp8Config,
+        fp8_pb_wo_config: ModelOptFp8Config,
         nvfp4_config: ModelOptNvFp4Config,
+        nvfp4_awq_config: ModelOptNvFp4Config,
+        nvfp4_svd_config: ModelOptNvFp4Config,
         w4a16_nvfp4_config: ModelOptNvFp4Config,
     ) -> None:
         super().__init__(exclude_modules)
+        self.quant_method = "MIXED_PRECISION"
+        self.is_checkpoint_mixed_precision_serialized = True
         self.kv_cache_quant_method = kv_cache_quant_method
         self.quantized_layers = quantized_layers
         self.fp8_config = fp8_config
+        self.fp8_pc_pt_config = fp8_pc_pt_config
+        self.fp8_pb_wo_config = fp8_pb_wo_config
         self.nvfp4_config = nvfp4_config
+        self.nvfp4_awq_config = nvfp4_awq_config
+        self.nvfp4_svd_config = nvfp4_svd_config
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
 
     def get_name(self) -> QuantizationMethods:
@@ -2334,14 +2513,46 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 "'quantized_layers' mapping in the quantization config."
             )
 
+        supported_layer_algos = {
+            "BF16",
+            "FP8",
+            "FP8_PB_WO",
+            "FP8_PER_CHANNEL_PER_TOKEN",
+            "W4A16_NVFP4",
+            *NVFP4_STANDARD_ALGOS,
+            *NVFP4_AWQ_ALGOS,
+            *NVFP4_SVD_ALGOS,
+        }
+        normalized_layers: dict[str, dict[str, Any]] = {}
+        for layer_name, layer_info in quantized_layers.items():
+            if not isinstance(layer_name, str) or not isinstance(layer_info, dict):
+                raise ValueError(
+                    "MIXED_PRECISION 'quantized_layers' must map layer names "
+                    "to configuration dictionaries."
+                )
+            layer_algo = str(layer_info.get("quant_algo", "")).upper()
+            if layer_algo not in supported_layer_algos:
+                raise ValueError(
+                    f"Unsupported ModelOpt mixed-precision quant_algo "
+                    f"{layer_algo!r} for layer {layer_name!r}. Supported: "
+                    f"{sorted(supported_layer_algos)}."
+                )
+            normalized_info = dict(layer_info)
+            normalized_info["quant_algo"] = layer_algo
+            normalized_layers[layer_name] = normalized_info
+        quantized_layers = normalized_layers
+
         # Determine group_size from the first NVFP4-family entry if not
         # provided. Both NVFP4 (W4A4) and W4A16_NVFP4 share the same packing
         # + group-size convention; either entry resolves the value.
         if group_size is None:
             for layer_info in quantized_layers.values():
-                if layer_info.get("quant_algo", "").upper() in (
-                    "NVFP4",
-                    "W4A16_NVFP4",
+                if (
+                    layer_info.get("quant_algo", "").upper()
+                    in NVFP4_STANDARD_ALGOS
+                    | NVFP4_AWQ_ALGOS
+                    | NVFP4_SVD_ALGOS
+                    | {"W4A16_NVFP4"}
                 ):
                     group_size = layer_info.get("group_size", 16)
                     break
@@ -2354,11 +2565,42 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             kv_cache_quant_method=kv_cache_quant_method,
             exclude_modules=[],
         )
+        fp8_pc_pt_config = ModelOptFp8Config(
+            quant_method="FP8_PER_CHANNEL_PER_TOKEN",
+            is_checkpoint_fp8_serialized=True,
+            kv_cache_quant_method=kv_cache_quant_method,
+            exclude_modules=[],
+        )
+        fp8_pb_wo_config = ModelOptFp8Config(
+            quant_method="FP8_PB_WO",
+            is_checkpoint_fp8_serialized=True,
+            kv_cache_quant_method=kv_cache_quant_method,
+            exclude_modules=[],
+        )
         nvfp4_config = ModelOptNvFp4Config(
             is_checkpoint_nvfp4_serialized=True,
             kv_cache_quant_algo=kv_cache_quant_method,
             exclude_modules=[],
             group_size=group_size,
+        )
+        nvfp4_awq_config = ModelOptNvFp4Config(
+            quant_method="NVFP4_AWQ",
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=kv_cache_quant_method,
+            exclude_modules=[],
+            group_size=group_size,
+        )
+        nvfp4_svd_config = ModelOptNvFp4Config(
+            quant_method="NVFP4_SVD",
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=kv_cache_quant_method,
+            exclude_modules=[],
+            group_size=group_size,
+            svdquant_rank=int(
+                original_config.get("quantization", original_config).get(
+                    "svdquant_rank", 32
+                )
+            ),
         )
         # Sibling config for layers that declare quant_algo: "W4A16_NVFP4".
         # ModelOptNvFp4Config.__init__ keys LinearMethodCls off quant_method,
@@ -2378,7 +2620,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             exclude_modules=exclude_modules,
             quantized_layers=quantized_layers,
             fp8_config=fp8_config,
+            fp8_pc_pt_config=fp8_pc_pt_config,
+            fp8_pb_wo_config=fp8_pb_wo_config,
             nvfp4_config=nvfp4_config,
+            nvfp4_awq_config=nvfp4_awq_config,
+            nvfp4_svd_config=nvfp4_svd_config,
             w4a16_nvfp4_config=w4a16_nvfp4_config,
         )
 
@@ -2475,8 +2721,16 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             if quant_algo == "FP8":
                 return ModelOptFp8LinearMethod(self.fp8_config)
-            if quant_algo == "NVFP4":
+            if quant_algo == "FP8_PER_CHANNEL_PER_TOKEN":
+                return ModelOptFp8PcPtLinearMethod(self.fp8_pc_pt_config)
+            if quant_algo == "FP8_PB_WO":
+                return ModelOptFp8PbWoLinearMethod(self.fp8_pb_wo_config)
+            if quant_algo in NVFP4_STANDARD_ALGOS:
                 return ModelOptNvFp4LinearMethod(self.nvfp4_config)
+            if quant_algo in NVFP4_AWQ_ALGOS:
+                return ModelOptNvFp4AwqLinearMethod(self.nvfp4_awq_config)
+            if quant_algo in NVFP4_SVD_ALGOS:
+                return ModelOptNvFp4SvdLinearMethod(self.nvfp4_svd_config)
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
             # Layer not in quantized_layers — leave unquantized
@@ -2488,10 +2742,18 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                     quant_config=self.fp8_config,
                     moe_config=layer.moe_config,
                 )
-            if quant_algo == "NVFP4":
+            if quant_algo in {"FP8_PER_CHANNEL_PER_TOKEN", "FP8_PB_WO"}:
+                raise ValueError(
+                    f"ModelOpt {quant_algo} is not supported for FusedMoE yet."
+                )
+            if quant_algo in NVFP4_STANDARD_ALGOS:
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.nvfp4_config,
                     moe_config=layer.moe_config,
+                )
+            if quant_algo in NVFP4_AWQ_ALGOS | NVFP4_SVD_ALGOS:
+                raise ValueError(
+                    f"ModelOpt {quant_algo} is not supported for FusedMoE yet."
                 )
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4FusedMoE(
