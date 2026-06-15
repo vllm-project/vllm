@@ -108,6 +108,9 @@ def _replay_precompute_kernel(
     buf_read = tl.load(cache_buf_idx_ptr + cache_batch_idx).to(tl.int32)
     buf_write = 1 - buf_read
 
+    if LAUNCH_DEPENDENT_KERNELS:
+        tl.extra.cuda.gdc_launch_dependents()
+
     offs_t = tl.arange(0, BLOCK_SIZE_T)
     offs_n = tl.arange(0, BLOCK_SIZE_DSTATE)
     t_mask = offs_t < T
@@ -238,9 +241,6 @@ def _replay_precompute_kernel(
             CB_scaled,
             mask=(offs_t[:, None] < BLOCK_SIZE_T) & (offs_t[None, :] < BLOCK_SIZE_T),
         )
-
-    if LAUNCH_DEPENDENT_KERNELS:
-        tl.extra.cuda.gdc_launch_dependents()
 
 
 @triton.heuristics({"HAS_D": lambda args: args["D_ptr"] is not None})

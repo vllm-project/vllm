@@ -558,15 +558,14 @@ replay kernel chain is launched. We moved replay cache/workspace setup and
 precompute launch use `launch_pdl=launch_with_pdl`, matching the TRTLLM-style
 external PDL dependency.
 
-The internal precompute-to-state-update PDL signal also has to mean "the
-current precompute outputs are ready." An earlier version called
-`gdc_launch_dependents()` at the beginning of `_replay_precompute_kernel()`.
-That allowed `_replay_state_update_kernel()` to pass its `gdc_wait()` before
-`cb_scaled` and `decay_vec` were produced. Under TP=4/spec=5/high concurrency,
-the client benchmark could finish but the server later reported an asynchronous
-CUDA illegal-memory-access error. The current version calls
-`gdc_launch_dependents()` at the end of precompute, after the replay precompute
-stores have completed.
+The internal precompute-to-state-update PDL signal follows the TRTLLM pattern:
+`_replay_precompute_kernel()` launches dependents near the beginning of the
+kernel, after selecting the safe double-buffer slot. That lets
+`_replay_state_update_kernel()` overlap its previous-step replay work with the
+current-step precompute. The main kernel then calls `gdc_wait()` immediately
+before reading `x`, `C`, `cb_scaled`, and `decay_vec` for the current output
+phase. With the full conv1d -> precompute -> state-update chain, that wait is
+the point that makes the current conv/precompute outputs safe to consume.
 
 The external conv1d-to-precompute PDL signal has the same rule. The dependent
 replay precompute reads `hidden_states_B_C_d` after conv1d has transformed the
@@ -608,6 +607,10 @@ out-of-range replay state indices:
 ```text
 .venv/bin/python -m pytest tests/kernels/mamba/test_replay_selective_state_update.py -q
 11 passed, 16 warnings in 10.66s
+
+job 391812 after restoring early internal PDL launch:
+tests/kernels/mamba/test_replay_selective_state_update.py::test_replay_selective_state_update_two_steps
+4 passed, 16 warnings in 7.86s
 ```
 
 The conv parent kernel's PDL signal path is also covered by a targeted CUDA
