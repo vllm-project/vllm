@@ -53,16 +53,22 @@ struct StructuredEventState {
     open_tool_call: Option<OpenToolCall>,
     /// Next OpenAI-compatible tool-call ordinal.
     next_tool_call_index: usize,
+    /// Whether more than one tool call may be surfaced northbound.
+    parallel_tool_calls: bool,
+    /// Whether the current tool-call parse is being suppressed.
+    suppressing_tool_call: bool,
 }
 
 impl StructuredEventState {
     /// Create one fresh assembly state for a new streamed response.
-    fn new() -> Self {
+    fn new(parallel_tool_calls: bool) -> Self {
         Self {
             message: AssistantMessage::default(),
             open_text_block: None,
             open_tool_call: None,
             next_tool_call_index: 0,
+            parallel_tool_calls,
+            suppressing_tool_call: false,
         }
     }
 
@@ -98,6 +104,12 @@ impl StructuredEventState {
 
         let index = self.next_tool_call_index;
         self.next_tool_call_index += 1;
+        if !self.parallel_tool_calls && index >= 1 {
+            self.suppressing_tool_call = true;
+            return Ok(events);
+        }
+
+        self.suppressing_tool_call = false;
         self.open_tool_call = Some(OpenToolCall {
             index,
             id: id.clone(),
@@ -110,6 +122,10 @@ impl StructuredEventState {
 
     /// Append one incremental tool-call arguments delta.
     fn push_tool_call_arguments(&mut self, delta: String) -> Result<Vec<ChatEvent>> {
+        if self.suppressing_tool_call {
+            return Ok(Vec::new());
+        }
+
         let mut events = Vec::new();
         let Some(open_tool_call) = self.open_tool_call.as_mut() else {
             return Err(Error::ToolCallStreamInvariant {
@@ -207,6 +223,11 @@ impl StructuredEventState {
 
     /// Finalize the currently open tool call, if present.
     fn close_open_tool_call(&mut self, events: &mut Vec<ChatEvent>) {
+        if self.suppressing_tool_call {
+            self.suppressing_tool_call = false;
+            return;
+        }
+
         let Some(open_tool_call) = self.open_tool_call.take() else {
             return;
         };
@@ -229,11 +250,12 @@ impl StructuredEventState {
 #[try_stream]
 pub(crate) async fn structured_chat_event_stream(
     stream: impl AssistantEventStream,
+    parallel_tool_calls: bool,
     mut y: TryYielder<ChatEvent, Error>,
 ) -> Result<()> {
     pin_mut!(stream);
 
-    let mut state = StructuredEventState::new();
+    let mut state = StructuredEventState::new(parallel_tool_calls);
 
     while let Some(event) = stream.next().await.transpose()? {
         match event {
@@ -315,7 +337,7 @@ mod tests {
             }),
         ]);
 
-        let events = structured_chat_event_stream(events)
+        let events = structured_chat_event_stream(events, true)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -369,7 +391,7 @@ mod tests {
             }),
         ]);
 
-        let events = structured_chat_event_stream(events)
+        let events = structured_chat_event_stream(events, true)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -420,7 +442,7 @@ mod tests {
             }),
         ]);
 
-        let events = structured_chat_event_stream(events)
+        let events = structured_chat_event_stream(events, true)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -471,7 +493,7 @@ mod tests {
             }),
         ]);
 
-        let events = structured_chat_event_stream(events)
+        let events = structured_chat_event_stream(events, true)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -499,7 +521,7 @@ mod tests {
             delta: "{}".to_string(),
         })]);
 
-        let err = structured_chat_event_stream(events)
+        let err = structured_chat_event_stream(events, true)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -508,5 +530,57 @@ mod tests {
             .expect_err("expected invariant error");
 
         assert!(matches!(err, Error::ToolCallStreamInvariant { .. }));
+    }
+
+    #[tokio::test]
+    async fn structured_stream_suppresses_later_tool_calls_when_parallel_disabled() {
+        let events = stream::iter(vec![
+            Ok(AssistantEvent::ToolCallStart {
+                id: "call_1".to_string(),
+                name: "first".to_string(),
+            }),
+            Ok(AssistantEvent::ToolCallArgumentsDelta {
+                delta: r#"{"a":1}"#.to_string(),
+            }),
+            Ok(AssistantEvent::ToolCallStart {
+                id: "call_2".to_string(),
+                name: "second".to_string(),
+            }),
+            Ok(AssistantEvent::ToolCallArgumentsDelta {
+                delta: r#"{"b":2}"#.to_string(),
+            }),
+            Ok(AssistantEvent::Done {
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 0,
+                },
+                finish_reason: FinishReason::stop_eos(),
+                kv_transfer_params: None,
+            }),
+        ]);
+
+        let events = structured_chat_event_stream(events, false)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(matches!(
+            events[0],
+            ChatEvent::ToolCallStart { index: 0, .. }
+        ));
+        assert!(matches!(
+            events[1],
+            ChatEvent::ToolCallArgumentsDelta { index: 0, .. }
+        ));
+        assert!(matches!(events[2], ChatEvent::ToolCallEnd { index: 0, .. }));
+        let ChatEvent::Done { message, .. } = &events[3] else {
+            panic!("expected done");
+        };
+        let tool_calls = message.tool_calls().collect::<Vec<_>>();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, "first");
     }
 }
