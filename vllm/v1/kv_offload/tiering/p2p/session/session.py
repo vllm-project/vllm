@@ -79,6 +79,7 @@ class _InflightXfer(NamedTuple):
 
     kv_request_id: str
     block_count: int
+    # The set of store job IDs that contributed blocks to this transfer.
     job_ids: set[int]
 
 
