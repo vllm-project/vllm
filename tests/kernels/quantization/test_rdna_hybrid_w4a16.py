@@ -3,7 +3,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the ROCm Hybrid W4A16 kernel (HIP skinny + Triton prefill).
 
-Run `pytest tests/kernels/quantization/test_hybrid_w4a16.py`.
+Run `pytest tests/kernels/quantization/test_rdna_hybrid_w4a16.py`.
 """
 
 import importlib
@@ -24,7 +24,7 @@ from vllm.platforms.rocm import on_gfx1x  # noqa: E402
 device = "cuda"
 
 hybrid_module = importlib.import_module(
-    "vllm.model_executor.kernels.linear.mixed_precision.hybrid_w4a16"
+    "vllm.model_executor.kernels.linear.mixed_precision.rdna_hybrid_w4a16"
 )
 RDNAHybridW4A16LinearKernel = hybrid_module.RDNAHybridW4A16LinearKernel
 pack_int4_exllama_shuffle = hybrid_module.pack_int4_exllama_shuffle
@@ -37,7 +37,7 @@ MAX_SKINNY_BATCH_SIZE = hybrid_module.MAX_SKINNY_BATCH_SIZE
 # ---------------------------------------------------------------------------
 
 
-def _hybrid_w4a16_reference(
+def _rdna_hybrid_w4a16_reference(
     x_mk: torch.Tensor,
     w_int4_nk: torch.Tensor,
     scales_nkg: torch.Tensor,
@@ -82,10 +82,10 @@ def _hybrid_w4a16_reference(
     [1, MAX_SKINNY_BATCH_SIZE, MAX_SKINNY_BATCH_SIZE + 1, 64],
     ids=["M=1_decode", "M=5_decode", "M=6_prefill", "M=64_prefill"],
 )
-def test_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M):
+def test_rdna_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M):
     """Smoke test the registered custom op for both decode and prefill batches.
 
-    Verifies the dispatch logic in `_hybrid_w4a16_apply_impl`:
+    Verifies the dispatch logic in `_rdna_hybrid_w4a16_apply_impl`:
       - M <= MAX_SKINNY_BATCH_SIZE: HIP wvSplitK_int4_g
       - M > MAX_SKINNY_BATCH_SIZE: Triton prefill kernel
     """
@@ -120,7 +120,7 @@ def test_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M):
 
     from vllm.utils.platform_utils import num_compute_units
 
-    out = torch.ops.vllm.hybrid_w4a16_apply(
+    out = torch.ops.vllm.rdna_hybrid_w4a16_apply(
         x_mk,
         w_q,
         scales_nkg,
@@ -130,7 +130,7 @@ def test_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M):
         group_size,
     )
 
-    ref = _hybrid_w4a16_reference(
+    ref = _rdna_hybrid_w4a16_reference(
         x_mk, w_int4_nk, scales_nkg, zp_nkg, group_size, bias=None
     )
 
@@ -140,7 +140,7 @@ def test_hybrid_w4a16_apply_matches_reference(dtype, group_size, has_zp, M):
 @pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("M", [1, MAX_SKINNY_BATCH_SIZE + 1])
-def test_hybrid_w4a16_apply_with_bias(dtype, M):
+def test_rdna_hybrid_w4a16_apply_with_bias(dtype, M):
     """Bias is added correctly on both decode and prefill paths."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
@@ -159,7 +159,7 @@ def test_hybrid_w4a16_apply_with_bias(dtype, M):
 
     from vllm.utils.platform_utils import num_compute_units
 
-    out = torch.ops.vllm.hybrid_w4a16_apply(
+    out = torch.ops.vllm.rdna_hybrid_w4a16_apply(
         x_mk,
         w_q,
         scales_nkg,
@@ -168,7 +168,7 @@ def test_hybrid_w4a16_apply_with_bias(dtype, M):
         num_compute_units(),
         G,
     )
-    ref = _hybrid_w4a16_reference(x_mk, w_int4_nk, scales_nkg, None, G, bias=bias)
+    ref = _rdna_hybrid_w4a16_reference(x_mk, w_int4_nk, scales_nkg, None, G, bias=bias)
 
     torch.testing.assert_close(out, ref, rtol=2e-2, atol=2e-2)
 
@@ -276,7 +276,7 @@ def _build_dummy_layer(
 
 
 @pytest.mark.parametrize("group_size", SUPPORTED_GROUP_SIZES)
-def test_hybrid_w4a16_process_weights_symmetric_repack(group_size, dist_init):
+def test_rdna_hybrid_w4a16_process_weights_symmetric_repack(group_size, dist_init):
     """uint4b8 (symmetric): w_q -> [N, K//8] int8 ExLlama shuffle, no zp param."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
@@ -333,7 +333,7 @@ def test_hybrid_w4a16_process_weights_symmetric_repack(group_size, dist_init):
 
 
 @pytest.mark.parametrize("group_size", SUPPORTED_GROUP_SIZES)
-def test_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_init):
+def test_rdna_hybrid_w4a16_process_weights_asymmetric_repack(group_size, dist_init):
     """uint4 (asymmetric): zero points unpacked to raw values in act dtype."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA/HIP device not available")
@@ -499,7 +499,7 @@ def test_hip_skinny_wvSplitK_int4_g(dtype, M, K, N, G):
         (64, 1024, 256, 128),
     ],
 )
-def test_hybrid_w4a16_dispatch(dtype, M, K, N, G):
+def test_rdna_hybrid_w4a16_dispatch(dtype, M, K, N, G):
     """Test the full hybrid dispatch via the custom op."""
     from vllm.utils.platform_utils import num_compute_units
 
@@ -516,7 +516,7 @@ def test_hybrid_w4a16_dispatch(dtype, M, K, N, G):
     )
 
     cu_count = num_compute_units()
-    out = torch.ops.vllm.hybrid_w4a16_apply(
+    out = torch.ops.vllm.rdna_hybrid_w4a16_apply(
         a, b_packed_i8, scales, None, None, cu_count, G
     )
 

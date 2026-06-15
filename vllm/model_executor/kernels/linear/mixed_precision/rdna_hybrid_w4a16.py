@@ -165,7 +165,7 @@ def _triton_w4a16_skinny_fmt_kernel(
 
 # Per-shape (group_size, K, N) -> (BLOCK_M, BLOCK_N, BLOCK_K, num_warps,
 # num_stages) tile-config overrides for prefill (M <= 128) on gfx1x.
-# Picked by sweeping benchmarks/kernels/benchmark_hybrid_w4a16_gemm.py + a
+# Picked by sweeping benchmarks/kernels/benchmark_rdna_hybrid_w4a16_gemm.py + a
 # per-config sweep script; only added when better than the generic heuristic
 # by > 20% at M=128. Re-run benchmarks after edits.
 _GFX1X_PREFILL_OVERRIDES: dict[tuple[int, int, int], tuple[int, int, int, int, int]] = {
@@ -273,7 +273,7 @@ def triton_w4a16_skinny_fmt_gemm(
         # using Qwen3-4B weight shapes with group_size=128.
         # Per-shape overrides for known prefill regressions live in a small
         # lookup table — see _GFX1X_PREFILL_OVERRIDES below. Re-run
-        # benchmarks/kernels/benchmark_hybrid_w4a16_gemm.py after edits.
+        # benchmarks/kernels/benchmark_rdna_hybrid_w4a16_gemm.py after edits.
         override = (
             _GFX1X_PREFILL_OVERRIDES.get((group_size, K, N)) if M <= 128 else None
         )
@@ -372,7 +372,7 @@ def pack_int4_exllama_shuffle(w_uint4: torch.Tensor) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 
-def _hybrid_w4a16_apply_impl(
+def _rdna_hybrid_w4a16_apply_impl(
     x_2d: torch.Tensor,
     w_q: torch.Tensor,
     w_s: torch.Tensor,
@@ -417,7 +417,7 @@ def _hybrid_w4a16_apply_impl(
     return output
 
 
-def _hybrid_w4a16_apply_fake(
+def _rdna_hybrid_w4a16_apply_fake(
     x_2d: torch.Tensor,
     w_q: torch.Tensor,
     w_s: torch.Tensor,
@@ -432,10 +432,10 @@ def _hybrid_w4a16_apply_fake(
 
 
 direct_register_custom_op(
-    op_name="hybrid_w4a16_apply",
-    op_func=_hybrid_w4a16_apply_impl,
+    op_name="rdna_hybrid_w4a16_apply",
+    op_func=_rdna_hybrid_w4a16_apply_impl,
     mutates_args=[],
-    fake_impl=_hybrid_w4a16_apply_fake,
+    fake_impl=_rdna_hybrid_w4a16_apply_fake,
 )
 
 
@@ -548,7 +548,7 @@ class RDNAHybridW4A16LinearKernel(MPLinearKernel):
         out_shape = x.shape[:-1] + (N,)
 
         cu_count = num_compute_units()
-        output = torch.ops.vllm.hybrid_w4a16_apply(
+        output = torch.ops.vllm.rdna_hybrid_w4a16_apply(
             x_2d,
             w_q,
             w_s,

@@ -112,9 +112,11 @@ def benchmark(batch_size, provider, N, K, group_size, weights):
             quantiles=quantiles,
         )
     elif provider in ("hybrid-w4a16", "hybrid-w4a16-zp"):
-        from vllm.model_executor.kernels.linear.mixed_precision.hybrid_w4a16 import (
-            _hybrid_w4a16_apply_impl,
+        from vllm.model_executor.kernels.linear.mixed_precision import (
+            rdna_hybrid_w4a16 as _k,
         )
+
+        _rdna_hybrid_w4a16_apply_impl = _k._rdna_hybrid_w4a16_apply_impl
         from vllm.utils.platform_utils import num_compute_units
 
         w = weights
@@ -122,7 +124,7 @@ def benchmark(batch_size, provider, N, K, group_size, weights):
         use_zp = provider == "hybrid-w4a16-zp"
 
         def run():
-            return _hybrid_w4a16_apply_impl(
+            return _rdna_hybrid_w4a16_apply_impl(
                 a,
                 w["w_q_skinny"],
                 w["w_s_skinny"],
