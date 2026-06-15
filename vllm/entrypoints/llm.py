@@ -473,7 +473,7 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
 
-        return self._run_completion(
+        result = self._run_completion(
             prompts=prompts,
             params=sampling_params,
             output_type=RequestOutput,
@@ -483,6 +483,9 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             priority=priority,
             mm_processor_kwargs=mm_processor_kwargs,
         )
+
+        print("speculative_decoding_accept_rate: ", result[0].speculative_decoding_accept_rate)
+        return result
 
     def enqueue(
         self,

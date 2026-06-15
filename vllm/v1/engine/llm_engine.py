@@ -285,6 +285,7 @@ class LLMEngine:
         return req_id
 
     def step(self) -> list[RequestOutput | PoolingRequestOutput]:
+        # print("llm engine step")
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
             self.engine_core.execute_dummy_batch()
@@ -293,6 +294,7 @@ class LLMEngine:
         # 1) Get EngineCoreOutput from the EngineCore.
         with record_function_or_nullcontext("llm_engine step: get_output"):
             outputs = self.engine_core.get_output()
+            #print("llm engine_core.outputs: ", outputs)
 
         # 2) Process EngineCoreOutputs.
         with record_function_or_nullcontext("llm_engine step: process_outputs"):
@@ -302,6 +304,7 @@ class LLMEngine:
                 engine_core_timestamp=outputs.timestamp,
                 iteration_stats=iteration_stats,
             )
+                
             self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
