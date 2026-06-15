@@ -1634,10 +1634,9 @@ def scaled_fp4_quant(
     block_size = 16
 
     assert n % block_size == 0, f"last dim has to be multiple of 16, but got {n}."
-    assert input.dtype in (
-        torch.float16,
-        torch.bfloat16,
-    ), f"input.dtype needs to be fp16 or bf16 but got {input.dtype}."
+    assert input.dtype in (torch.float16, torch.bfloat16), (
+        f"input.dtype needs to be fp16 or bf16 but got {input.dtype}."
+    )
     if padded_n is not None:
         assert padded_n >= n, f"padded_n must be >= n, got padded_n={padded_n}, n={n}."
         assert padded_n % block_size == 0, (
