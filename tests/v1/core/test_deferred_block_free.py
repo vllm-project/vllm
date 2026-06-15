@@ -13,9 +13,11 @@ the newest scheduled step's output has been processed.
 
 import os
 import time
+from unittest.mock import PropertyMock, patch
 
 import pytest
 
+from vllm.config import VllmConfig
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import RequestStatus
@@ -77,14 +79,21 @@ def _setup_request_with_inflight_step(scheduler, max_tokens: int = 5):
 
 
 def test_gate_enabled_for_async_consumer():
-    # Async scheduling + consumer-side connector: the gate is on even
-    # without mamba layers (the in-flight-write vs NIC-write race also
-    # corrupts full-attention KV, just with a smaller blast radius).
-    scheduler = create_scheduler(
-        model=MODEL,
-        async_scheduling=True,
-        use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
-    )
+    # Overlapping batches + consumer-side connector enables the gate. Async
+    # scheduling (which would give >1 concurrent batches) is force-disabled on
+    # CPU, where this test runs, and PP can't be built without GPUs, so force
+    # max_concurrent_batches to exercise the enabled path on any platform.
+    with patch.object(
+        VllmConfig,
+        "max_concurrent_batches",
+        new_callable=PropertyMock,
+        return_value=2,
+    ):
+        scheduler = create_scheduler(
+            model=MODEL,
+            async_scheduling=True,
+            use_kv_connector=mock_kv(matched_tokens=0, is_async=False),
+        )
     assert scheduler.defer_block_free
 
 
