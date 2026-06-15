@@ -351,6 +351,11 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         num_decode_tokens = swa_metadata.num_decode_tokens
         mtp_decode = num_decode_tokens != num_decodes
 
+        # Decode metadata is unconditionally populated when num_decode_tokens > 0,
+        # which is the only path that reaches the decode kernels.
+        assert swa_metadata.decode_swa_lens is not None
+        assert swa_metadata.decode_swa_indices is not None
+        assert swa_metadata.seq_lens is not None
         swa_lens = swa_metadata.decode_swa_lens[:num_decode_tokens]
         swa_indices = swa_metadata.decode_swa_indices[:num_decode_tokens]
         max_swa_len = swa_metadata.decode_swa_indices.shape[-1]
@@ -432,6 +437,11 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         num_decode_tokens = swa_metadata.num_decode_tokens
         mtp_decode = num_decode_tokens != num_decodes
 
+        # Decode metadata is unconditionally populated when num_decode_tokens > 0,
+        # which is the only path that reaches the decode kernels.
+        assert swa_metadata.decode_swa_lens is not None
+        assert swa_metadata.decode_swa_indices is not None
+        assert swa_metadata.seq_lens is not None
         max_swa_len = swa_metadata.decode_swa_indices.shape[-1]
         compressed_block_size = attn_metadata.block_size // layer.compress_ratio
         compressed_topk = topk_indices.shape[-1]
