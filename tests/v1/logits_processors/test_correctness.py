@@ -107,6 +107,14 @@ class MockReasoningConfig:
     enabled = True
 
 
+class MockReasoningMultiTokenEndConfig:
+    """Reasoning config with a multi-token end marker."""
+
+    reasoning_start_token_ids = [THINK_START_TOKEN_ID]
+    reasoning_end_token_ids = [997, THINK_END_TOKEN_ID]
+    enabled = True
+
+
 def _generate_fake_sampling_metadata(
     num_output_tokens: int,
     batch_size: int,
@@ -1194,6 +1202,73 @@ def test_thinking_budget_enforced_without_penalties():
         "Budget exceeded: in_end should be True so that apply_to_logits "
         "forces the end token"
     )
+
+
+def _make_holder_in_soft_zone(reasoning_config):
+    h = ThinkingBudgetStateHolder(
+        reasoning_config,
+        1,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    output_token_ids = [THINK_START_TOKEN_ID]
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=10),
+                    None,
+                    output_token_ids,
+                )
+            ],
+            moved=(),
+        )
+    )
+
+    for token_id in range(8):
+        output_token_ids.append(token_id)
+        h.update_state([output_token_ids], None, None)
+
+    return h, output_token_ids
+
+
+def test_thinking_budget_soft_zone_biases_before_hard_force():
+    h, _ = _make_holder_in_soft_zone(MockReasoningConfig())
+    state = h._state[0]
+    assert state["in_think"]
+    assert not state["in_end"]
+    assert state["soft_progress"] > 0.0
+
+    logits = torch.zeros((1, VOCAB_SIZE), dtype=torch.float32)
+    logits[0, 7] = 10.0
+    logits[0, THINK_END_TOKEN_ID] = 2.0
+    h.apply_to_logits(logits, predict_bonus_token=False, spec_token_ids=None)
+
+    assert 2.0 < logits[0, THINK_END_TOKEN_ID] < 1.0e8
+    assert logits[0, 7] == 10.0
+
+
+def test_thinking_budget_soft_zone_biases_only_next_close_token():
+    h, output_token_ids = _make_holder_in_soft_zone(
+        MockReasoningMultiTokenEndConfig()
+    )
+    logits = torch.zeros((1, VOCAB_SIZE), dtype=torch.float32)
+    logits[0, 7] = 10.0
+    h.apply_to_logits(logits, predict_bonus_token=False, spec_token_ids=None)
+    assert logits[0, 997] > 0.0
+    assert logits[0, THINK_END_TOKEN_ID] == 0.0
+
+    output_token_ids.append(997)
+    h.update_state([output_token_ids], None, None)
+    logits = torch.zeros((1, VOCAB_SIZE), dtype=torch.float32)
+    logits[0, 7] = 10.0
+    h.apply_to_logits(logits, predict_bonus_token=False, spec_token_ids=None)
+    assert logits[0, 997] == 0.0
+    assert logits[0, THINK_END_TOKEN_ID] > 0.0
 
 
 @pytest.mark.parametrize(
