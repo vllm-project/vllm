@@ -1092,6 +1092,13 @@ class FlashAttentionImpl(AttentionImpl):
             if _os.environ.get("PCP_DUMP") == "1" and self.pcp_rank == 0:
                 _ps = slot_mapping[prefill_start:prefill_end]
                 _bs = key_cache.shape[1]
+                _all_slots = _ps.tolist()
+                _seen: dict[int, int] = {}
+                _dups = [s for s in _all_slots if s >= 0 and _all_slots.count(s) > 1]
+                _pcp_dbg(
+                    f"[PCP r0] SLOTMAP rng=[{prefill_start},{prefill_end}] "
+                    f"slots={_all_slots} dups={sorted(set(_dups))}"
+                )
                 for _i in range(_ps.shape[0]):
                     _s = int(_ps[_i].item())
                     if _s >= 0:
@@ -1100,11 +1107,13 @@ class FlashAttentionImpl(AttentionImpl):
                             _s,
                             key_cache[_s // _bs, _s % _bs].clone(),
                             key[prefill_start + _i].clone(),
+                            value[prefill_start + _i].clone(),
                         )
                         _pcp_dbg(
                             f"[PCP r0] PROBE before i={_i} slot={_s} "
                             f"cache_before.norm={_probe[2].float().norm().item():.4f} "
-                            f"key[i].norm={_probe[3].float().norm().item():.4f}"
+                            f"key[i].norm={_probe[3].float().norm().item():.4f} "
+                            f"value[i].norm={_probe[4].float().norm().item():.4f}"
                         )
                         break
             reshape_and_cache_flash(
@@ -1183,12 +1192,13 @@ class FlashAttentionImpl(AttentionImpl):
                             )
                 _pcp_dbg(f"[PCP r0] WRITECHK checked={chk} mismatched={mism}")
                 if _probe is not None:
-                    _pi, _ps_slot, _before, _ki = _probe
+                    _pi, _ps_slot, _before, _ki, _vi = _probe
                     _after = key_cache[_ps_slot // bs, _ps_slot % bs].to(torch.float32)
                     _pcp_dbg(
                         f"[PCP r0] PROBE after slot={_ps_slot} "
                         f"after.norm={_after.norm().item():.4f} "
                         f"diff_after_vs_key={(_after - _ki.to(torch.float32)).abs().max().item():.4f} "
+                        f"diff_after_vs_value={(_after - _vi.to(torch.float32)).abs().max().item():.4f} "
                         f"diff_after_vs_before={(_after - _before.to(torch.float32)).abs().max().item():.4f}"
                     )
             return
