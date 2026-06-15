@@ -362,6 +362,10 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             device=q.device,
         )
 
+        # Q/K/V are cast to FP8 with no additional rescaling for now, which relies on
+        # activations staying within the e4m3 range. Since gfx950 uses e4m3fn, larger
+        # values clamp to 488 instead of producing inf. Accuracy has been validated on
+        # DeepSeek-V3 on GSM8k with no regressions.
         one_scale = self._get_one_scale(q.device)
         self._mla_prefill_ps_asm_fwd(
             q,
