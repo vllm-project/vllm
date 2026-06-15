@@ -140,9 +140,7 @@ _TEXT_GENERATION_MODELS = {
     "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
     "HCXVisionV2ForCausalLM": ("hyperclovax_vision_v2", "HCXVisionV2ForCausalLM"),
     "HyperCLOVAXForCausalLM": ("hyperclovax", "HyperCLOVAXForCausalLM"),
-    "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
-    "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
     "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "IQuestCoderForCausalLM": ("llama", "LlamaForCausalLM"),
     "IQuestLoopCoderForCausalLM": ("iquest_loopcoder", "IQuestLoopCoderForCausalLM"),
@@ -216,7 +214,6 @@ _TEXT_GENERATION_MODELS = {
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
-    "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
 }
 
@@ -400,6 +397,10 @@ _MULTIMODAL_MODELS = {
     "Gemma3nForConditionalGeneration": (
         "gemma3n_mm",
         "Gemma3nForConditionalGeneration",
+    ),
+    "DiffusionGemmaForBlockDiffusion": (
+        "diffusion_gemma",
+        "DiffusionGemmaForConditionalGeneration",
     ),
     "Gemma4ForConditionalGeneration": ("gemma4_mm", "Gemma4ForConditionalGeneration"),
     "Gemma4UnifiedForConditionalGeneration": (
@@ -713,12 +714,15 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "ErnieModel": "0.23.0",
     "ErnieForSequenceClassification": "0.23.0",
     "ErnieForTokenClassification": "0.23.0",
+    "InternLM2VEForCausalLM": "0.23.0",
     "QWenLMHeadModel": "0.23.0",
     "QwenVLForConditionalGeneration": "0.23.0",
+    "InternLMForCausalLM": "0.23.0",
     # encoder-decoder models except whisper
     # have been removed for V0 deprecation.
     "DonutForConditionalGeneration": "0.10.2",
     "MllamaForConditionalGeneration": "0.10.2",
+    "XverseForCausalLM": "0.23.0",
 }
 
 _OOT_SUPPORTED_MODELS = {

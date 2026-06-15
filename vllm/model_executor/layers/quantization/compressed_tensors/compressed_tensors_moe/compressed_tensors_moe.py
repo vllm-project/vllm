@@ -4,7 +4,12 @@
 
 import torch
 from compressed_tensors import CompressionFormat
+from compressed_tensors.quantization import (
+    QuantizationStrategy,
+    QuantizationType,
+)
 
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEMethodBase,
@@ -92,6 +97,29 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                         weight_quant, input_quant, layer.moe_config
                     )
 
+                    from vllm.platforms.rocm import on_gfx950
+
+                    vllm_config = get_current_vllm_config()
+                    is_lora_disabled = vllm_config.lora_config is None
+                    moe_backend = vllm_config.kernel_config.moe_backend
+                    group_size = weight_quant.group_size or -1
+                    if (
+                        weight_quant.strategy == QuantizationStrategy.GROUP
+                        and weight_quant.type == QuantizationType.INT
+                        and group_size == 32
+                        and weight_quant.num_bits == 4
+                        and is_lora_disabled
+                        and on_gfx950()
+                        and moe_backend == "flydsl"
+                    ):
+                        from .compressed_tensors_moe_w4a16_flydsl import (
+                            CompressedTensorsW4A16FlydslMoEMethod,
+                        )
+
+                        logger.info_once("Using CompressedTensorsW4A16FlydslMoEMethod")
+                        return CompressedTensorsW4A16FlydslMoEMethod(
+                            weight_quant, input_quant, layer.moe_config
+                        )
             from .compressed_tensors_moe_wna16 import (
                 CompressedTensorsWNA16MoEMethod,
             )
