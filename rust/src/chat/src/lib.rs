@@ -140,6 +140,16 @@ impl ChatLlm {
         self
     }
 
+    /// Tokenizer vocabulary size.
+    pub fn tokenizer_vocab_size(&self) -> usize {
+        self.text.tokenizer_vocab_size()
+    }
+
+    /// Model vocabulary size, else `None`.
+    pub fn model_vocab_size(&self) -> Option<usize> {
+        self.text.model_vocab_size()
+    }
+
     /// Expose the underlying text facade for raw text-generation routes such as
     /// `/v1/completions`.
     pub fn text(&self) -> &TextLlm {
@@ -225,6 +235,12 @@ impl ChatLlm {
         Ok(token_ids)
     }
 
+    /// Abort in-flight requests by their external (user-supplied) request ids.
+    pub async fn abort(&self, external_ids: &[String]) -> Result<()> {
+        self.text.abort(external_ids).await?;
+        Ok(())
+    }
+
     /// Shut down the underlying LLM client and its background tasks.
     pub async fn shutdown(self) -> Result<()> {
         self.text.shutdown().await?;
@@ -261,7 +277,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, hermes, hy_v3, internlm, kimi_k2, llama3_json, llama4_json, minimax_m2, mistral, phi4_mini_json, qwen3_coder, qwen3_xml)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, granite4, hermes, hy_v3, internlm, kimi_k2, llama3_json, llama4_json, minimax_m2, mistral, phi4_mini_json, qwen3_coder, qwen3_xml)"].assert_eq(&error.to_report_string());
     }
 
     #[test]

@@ -25,6 +25,8 @@ pub(super) struct PreparedRequest {
 pub(super) struct ResponseOptions {
     /// Whether the caller asked for the final streamed usage chunk.
     pub include_usage: bool,
+    /// Whether every streamed chunk should carry cumulative usage.
+    pub include_continuous_usage: bool,
     /// Original text prompt that should be echoed back northbound when
     /// `echo=true`.
     pub echo: Option<String>,
@@ -74,6 +76,12 @@ pub(super) fn prepare_completion_request(
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
+    let include_continuous_usage = include_usage
+        && request
+            .stream_options
+            .as_ref()
+            .and_then(|options| options.continuous_usage_stats)
+            .unwrap_or(false);
     let include_prompt_logprobs = prompt_logprobs.is_some();
     let echo = request.echo.then(|| request.prompt.as_text().cloned()).flatten();
 
@@ -129,6 +137,7 @@ pub(super) fn prepare_completion_request(
         response_model,
         options: ResponseOptions {
             include_usage,
+            include_continuous_usage,
             echo,
             requested_logprobs: request.logprobs,
             include_prompt_logprobs,
@@ -245,6 +254,55 @@ mod tests {
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
         assert!(!prepared.text_request.decode_options.skip_special_tokens);
+    }
+
+    #[test]
+    fn prepare_completion_request_maps_stream_usage_and_token_format_options() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": true,
+            "stream_options": {
+                "include_usage": true,
+                "continuous_usage_stats": true
+            },
+            "return_tokens_as_token_ids": true
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
+
+        assert!(prepared.options.include_usage);
+        assert!(prepared.options.include_continuous_usage);
+        assert!(prepared.options.return_tokens_as_token_ids);
+    }
+
+    #[test]
+    fn prepare_completion_request_gates_continuous_usage_on_include_usage() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": true,
+            "stream_options": {
+                "continuous_usage_stats": true
+            }
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
+
+        assert!(!prepared.options.include_usage);
+        assert!(!prepared.options.include_continuous_usage);
     }
 
     #[test]

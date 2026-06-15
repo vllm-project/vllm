@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import numpy as np
 import pybase64 as base64
@@ -33,10 +33,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.openai.chat_completion.stream_harmony import (
-    TokenState,
-    extract_harmony_streaming_delta,
-)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
@@ -50,18 +46,15 @@ from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
     clamp_prompt_logprobs,
+    format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.parser.harmony_utils import (
-    get_streamable_parser_for_assistant,
-    parse_chat_output,
-)
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
-from vllm.inputs import EngineInput
+from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -78,6 +71,39 @@ if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
 logger = init_logger(__name__)
+
+
+def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
+    """Sum per-modality placeholder tokens from ``mm_placeholders``.
+
+    Keyed by modality name; ``PlaceholderRange.length`` is the placeholder's
+    prompt token span, so each sum matches the placeholder tokens already
+    counted in ``usage.prompt_tokens``.
+    """
+    mm_placeholders = cast(
+        "MultiModalPlaceholders | None", engine_input.get("mm_placeholders")
+    )
+    return {
+        modality: sum(p.length for p in ranges)
+        for modality, ranges in (mm_placeholders or {}).items()
+        if ranges
+    }
+
+
+def _make_prompt_tokens_details(
+    enable_prompt_tokens_details: bool,
+    num_cached_tokens: int | None,
+    mm_token_counts: dict[str, int] | None,
+) -> PromptTokenUsageInfo | None:
+    """Build ``prompt_tokens_details`` from cached + multimodal token counts."""
+    if not enable_prompt_tokens_details:
+        return None
+    if num_cached_tokens is None and not mm_token_counts:
+        return None
+    return PromptTokenUsageInfo(
+        cached_tokens=num_cached_tokens,
+        multimodal_tokens=mm_token_counts or None,
+    )
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -135,6 +161,7 @@ class OpenAIServingChat(OpenAIServing):
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
+            is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
         )
         if (
             is_mistral_tool_parser(self.tool_parser)
@@ -155,7 +182,6 @@ class OpenAIServingChat(OpenAIServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
-        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         self.tool_call_id_type = get_tool_call_id_type(self.model_config)
 
         # NOTE(woosuk): While OpenAI's chat completion API supports browsing
@@ -271,8 +297,10 @@ class OpenAIServingChat(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
+        mm_token_counts: dict[str, int] | None = None
         for i, engine_input in enumerate(engine_inputs):
             prompt_token_ids = self._extract_prompt_components(engine_input).token_ids
+            mm_token_counts = _get_mm_token_counts(engine_input)
 
             # If we are creating sub requests for multiple prompts, ensure that they
             # have unique request ids.
@@ -359,14 +387,6 @@ class OpenAIServingChat(OpenAIServing):
         assert len(generators) == 1
         (result_generator,) = generators
 
-        parser: Parser | None = None
-        if self.parser_cls is not None:
-            parser = self.parser_cls(
-                tokenizer,
-                request.tools,
-                chat_template_kwargs=chat_template_kwargs,
-            )
-
         if request.stream:
             return self.chat_completion_stream_generator(
                 request,
@@ -377,6 +397,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request_metadata,
                 chat_template_kwargs=chat_template_kwargs,
+                mm_token_counts=mm_token_counts,
             )
 
         return await self.chat_completion_full_generator(
@@ -387,7 +408,8 @@ class OpenAIServingChat(OpenAIServing):
             conversation,
             tokenizer,
             request_metadata,
-            parser,
+            chat_template_kwargs=chat_template_kwargs,
+            mm_token_counts=mm_token_counts,
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
@@ -405,6 +427,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         chat_template_kwargs: dict[str, Any] | None = None,
+        mm_token_counts: dict[str, int] | None = None,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -416,11 +439,6 @@ class OpenAIServingChat(OpenAIServing):
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
-        if self.use_harmony:
-            harmony_parsers = [
-                get_streamable_parser_for_assistant() for _ in range(num_choices)
-            ]
-            harmony_tools_streamed = [False] * num_choices
         tools_streamed = [False] * num_choices
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
@@ -451,6 +469,7 @@ class OpenAIServingChat(OpenAIServing):
                 ]
                 for p in parsers:
                     if p is not None:
+                        # NOTE: HarmonyParser ignores _stream_state (uses its own FSM).
                         p._stream_state.tool_call_id_type = self.tool_call_id_type
                         p._stream_state.history_tool_call_cnt = history_tool_call_cnt
             else:
@@ -580,32 +599,7 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         logprobs = None
 
-                    if self.use_harmony:
-                        harmony_parser = harmony_parsers[i]
-                        prev_recipient = harmony_parser.current_recipient
-
-                        # Track accumulated content per token with their state
-                        token_states: list[TokenState] = []
-                        for token_id in output.token_ids:
-                            harmony_parser.process(token_id)
-                            token_delta = harmony_parser.last_content_delta or ""
-                            token_states.append(
-                                TokenState(
-                                    harmony_parser.current_channel,
-                                    harmony_parser.current_recipient,
-                                    token_delta,
-                                )
-                            )
-                        delta_text = "".join(delta for _, _, delta in token_states)
-                        cur_channel = harmony_parser.current_channel
-
-                        # handle the case where several tokens where generated at once
-                        # including the final token, leading to a delta in the text
-                        # but the current channel to be empty (start state)
-                        if not cur_channel and delta_text:
-                            cur_channel = "final"
-                    else:
-                        delta_text = output.text
+                    delta_text = output.text
 
                     if (
                         not delta_text
@@ -617,17 +611,7 @@ class OpenAIServingChat(OpenAIServing):
 
                     delta_message: DeltaMessage | None
 
-                    if self.use_harmony:
-                        delta_message, tools_streamed_flag = (
-                            extract_harmony_streaming_delta(
-                                harmony_parser=harmony_parser,
-                                token_states=token_states,
-                                prev_recipient=prev_recipient,
-                                include_reasoning=request.include_reasoning,
-                            )
-                        )
-                        harmony_tools_streamed[i] |= tools_streamed_flag
-                    elif parser is not None:
+                    if parser is not None:
                         delta_message = parser.parse_delta(
                             delta_text=delta_text,
                             delta_token_ids=as_list(output.token_ids),
@@ -635,8 +619,20 @@ class OpenAIServingChat(OpenAIServing):
                             prompt_token_ids=res.prompt_token_ids,
                             finished=output.finish_reason is not None,
                         )
-                        if delta_message and delta_message.tool_calls:
-                            tools_streamed[i] = True
+                        if delta_message is not None:
+                            if delta_message.tool_calls:
+                                tools_streamed[i] = True
+
+                            if (
+                                delta_message.reasoning
+                                and not request.include_reasoning
+                            ):
+                                delta_message.reasoning = None
+                                if not (
+                                    delta_message.content or delta_message.tool_calls
+                                ):
+                                    delta_message = None
+
                     # handle streaming just a content delta (no parsers)
                     else:
                         delta_message = DeltaMessage(content=delta_text)
@@ -714,9 +710,7 @@ class OpenAIServingChat(OpenAIServing):
                         # finish_reason is:
                         # "tool_calls" for "auto" or "required" tool calls,
                         # and "stop" for named tool calls.
-                        if (tools_streamed[i] and not tool_choice_function_name) or (
-                            self.use_harmony and harmony_tools_streamed[i]
-                        ):
+                        if tools_streamed[i] and not tool_choice_function_name:
                             finish_reason_ = "tool_calls"
                         else:
                             finish_reason_ = (
@@ -777,10 +771,11 @@ class OpenAIServingChat(OpenAIServing):
                     completion_tokens=completion_tokens,
                     total_tokens=num_prompt_tokens + completion_tokens,
                 )
-                if self.enable_prompt_tokens_details and num_cached_tokens:
-                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(
-                        cached_tokens=num_cached_tokens
-                    )
+                final_usage.prompt_tokens_details = _make_prompt_tokens_details(
+                    self.enable_prompt_tokens_details,
+                    num_cached_tokens,
+                    mm_token_counts,
+                )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -840,7 +835,8 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
-        parser: Parser | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+        mm_token_counts: dict[str, int] | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
@@ -871,7 +867,6 @@ class OpenAIServingChat(OpenAIServing):
             self._raise_if_error(output.finish_reason, request_id)
             token_ids = output.token_ids
             out_logprobs = output.logprobs
-            tool_call_info = None
 
             if request.logprobs and request.top_logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
@@ -885,75 +880,20 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
-            if self.use_harmony:
-                reasoning, content, _ = parse_chat_output(token_ids)
-                if not request.include_reasoning:
-                    reasoning = None
-
-                if self.tool_parser is not None:
-                    if tokenizer is None:
-                        raise ValueError(
-                            "Tokenizer not available when `skip_tokenizer_init=True`"
-                        )
-
-                    tool_parser = self.tool_parser(tokenizer, request.tools)
-                    # NOTE: We use token_ids for openai tool parser
-                    tool_call_info = tool_parser.extract_tool_calls(
-                        "",
-                        request=request,
-                        token_ids=token_ids,  # type: ignore
-                    )
-                    content = tool_call_info.content
-                    message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content=content,
-                        tool_calls=tool_call_info.tool_calls,
-                    )
-                else:
-                    message = ChatMessage(
-                        role=role,
-                        reasoning=reasoning,
-                        content=content,
-                    )
-
-                # Encode routed_experts for transport. JSON can't carry raw
-                # bytes, so we write the ndarray as a ``.npy`` byte stream
-                # and base64-encode it. ``pybase64`` is ~3x faster than the
-                # stdlib ``base64`` on large payloads thanks to SIMD.
-                routed_experts_b64 = None
-                if output.routed_experts is not None:
-                    buf = io.BytesIO()
-                    np.save(buf, output.routed_experts)
-                    routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
-                        "ascii"
-                    )
-
-                choice_data = ChatCompletionResponseChoice(
-                    index=output.index,
-                    message=message,
-                    logprobs=logprobs,
-                    finish_reason=(
-                        "tool_calls"
-                        if (tool_call_info is not None and tool_call_info.tools_called)
-                        else output.finish_reason
-                        if output.finish_reason
-                        else "stop"
-                    ),
-                    stop_reason=output.stop_reason,
-                    token_ids=(
-                        as_list(output.token_ids) if request.return_token_ids else None
-                    ),
-                    routed_experts=routed_experts_b64,
+            parser: Parser | None = None
+            if self.parser_cls is not None:
+                parser = self.parser_cls(
+                    tokenizer,
+                    request.tools,
+                    chat_template_kwargs=chat_template_kwargs,
                 )
-                choices.append(choice_data)
-                continue
 
             if parser is not None:
                 reasoning, content, tool_calls = parser.parse(
                     output.text,
                     request,
                     enable_auto_tools=self.enable_auto_tools,
+                    model_output_token_ids=token_ids,
                 )
                 if not request.include_reasoning:
                     reasoning = None
@@ -1124,10 +1064,11 @@ class OpenAIServingChat(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens
-            )
+        usage.prompt_tokens_details = _make_prompt_tokens_details(
+            self.enable_prompt_tokens_details,
+            final_res.num_cached_tokens,
+            mm_token_counts,
+        )
 
         request_metadata.final_usage_info = usage
 
@@ -1227,7 +1168,7 @@ class OpenAIServingChat(OpenAIServing):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None or step_top_logprobs.get(token_id) is None:
                 if should_return_as_token_id:
-                    token = f"token_id:{token_id}"
+                    token = format_token_id_placeholder(token_id)
                 else:
                     if tokenizer is None:
                         raise ValueError(

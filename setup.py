@@ -1086,7 +1086,8 @@ if _is_cuda() or _is_hip():
     # copying the relevant .py files from the source repository.
     ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
 
-ext_modules.append(CMakeExtension(name="vllm.spinloop"))
+if sys.version_info >= (3, 11):
+    ext_modules.append(CMakeExtension(name="vllm.spinloop"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
@@ -1228,7 +1229,7 @@ setup(
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
         #   - .buildkite/test-amd.yaml
-        "helion": ["helion==1.0.0"],
+        "helion": ["helion==1.1.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
         "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing
@@ -1238,6 +1239,8 @@ setup(
             "opentelemetry-exporter-otlp>=1.26.0",
             "opentelemetry-semantic-conventions-ai>=0.4.1",
         ],
+        # extra quantization plugin
+        "extra-quant": ["vllm-gguf-plugin>=0.0.2"],
     },
     cmdclass=cmdclass,
     package_data=package_data,
