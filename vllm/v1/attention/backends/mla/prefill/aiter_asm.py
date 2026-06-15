@@ -137,9 +137,9 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         self._new_tokens_ps: dict | None = None
         self._context_ps: list[dict] = []
 
-        # Used to size the shared KV indices buffer. It is at
+        # Used to size the shared KV indices buffer, which is at
         # most max_num_batched_tokens long
-        self._ps_max_batched_tokens = (
+        self._max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
         )
 
@@ -148,7 +148,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
 
         This avoids an arange and memcopy per layer and chunk.
         """
-        size = max(length, self._ps_max_batched_tokens)
+        size = max(length, self._max_num_batched_tokens)
         key = (str(device), size)
         buf = type(self)._KV_INDICES_BUFFERS.get(key)
         if buf is None:
