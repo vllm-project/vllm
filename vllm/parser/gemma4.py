@@ -131,6 +131,8 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
         if i >= n:
             break
         key = args_str[key_start:i].strip()
+        if key.startswith(STRING_DELIM) and key.endswith(STRING_DELIM):
+            key = key[_DELIM_LEN:-_DELIM_LEN]
         i += 1
 
         if i >= n:

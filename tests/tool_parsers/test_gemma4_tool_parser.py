@@ -185,6 +185,17 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args('items:[<|"|>a<|"|>,<|"|>b<|"|>]')
         assert result == {"items": ["a", "b"]}
 
+    def test_delimited_keys_stripped(self):
+        """Keys wrapped in <|"|> delimiters are stripped."""
+        result = _parse_gemma4_args('<|"|>location<|"|>:<|"|>Paris<|"|>')
+        assert result == {"location": "Paris"}
+
+        result = _parse_gemma4_args('outer:{<|"|>inner<|"|>:<|"|>val<|"|>}')
+        assert result == {"outer": {"inner": "val"}}
+
+        result = _parse_gemma4_args('<|"|>name<|"|>:<|"|>Alice<|"|>,count:42')
+        assert result == {"name": "Alice", "count": "42"}
+
     def test_unterminated_string(self):
         """Unterminated strings should take everything after the delimiter."""
         result = _parse_gemma4_args('key:<|"|>unterminated')
