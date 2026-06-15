@@ -177,15 +177,15 @@ class EncoderCudaGraphManager:
                 self.global_token_budgets,
                 self.local_token_budgets,
             )
-
-        logger.info(
-            "EncoderCudaGraphManager initialized with "
-            "budgets=%s, max_batch_size=%d, max_frames_per_batch=%s, use_dp=%s",
-            self.token_budgets,
-            self.max_batch_size,
-            self.max_frames_per_batch,
-            self.use_dp,
-        )
+        else:
+            logger.info(
+                "EncoderCudaGraphManager initialized with "
+                "budgets=%s, max_batch_size=%d, max_frames_per_batch=%s, use_dp=%s",
+                self.token_budgets,
+                self.max_batch_size,
+                self.max_frames_per_batch,
+                self.use_dp,
+            )
 
     @staticmethod
     def _generate_budgets(min_budget: int, max_budget: int) -> list[int]:

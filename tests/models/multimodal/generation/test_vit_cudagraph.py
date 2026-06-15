@@ -184,6 +184,9 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         modalities=["image"],
         image_prompt="<image>\nWhat is in this image?",
         marks=[pytest.mark.core_model],
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1152],
+        },
         vllm_runner_kwargs={
             "load_format": "dummy",
             "hf_overrides": partial(
