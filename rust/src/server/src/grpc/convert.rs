@@ -146,6 +146,10 @@ fn build_sampling_params(
             params.min_p = Some(s.min_p);
         }
         params.seed = s.seed;
+        // p-less is a boolean, either true or false.
+        if s.p_less {
+            params.p_less = Some(s.p_less);
+        }
     }
 
     // DecodingParameters
