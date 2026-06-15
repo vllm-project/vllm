@@ -533,11 +533,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             self.kv_cache_dtype, vllm_config.model_config
         )
-        # fp8 main-K/V cache: the fused qknorm+rope+kv-insert op is bf16-cache-only
-        # (asserts kv_cache dtype == qkv), so on the fp8 path we run it in
-        # norm+rope-only mode and write the cache via the fp8-capable
-        # reshape_and_cache_flash in _insert_kv. (index cache stays bf16.)
-        self._fp8_kv = "fp8" in self.kv_cache_dtype
 
         self.attn_backend = MiniMaxM3SparseBackend
         # Indexer and main attention are separate impls. On ROCm the SM100 gate
@@ -602,11 +597,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
     ) -> None:
         """Write main K/V (fp8-quantizing) and index-K into their paged caches.
 
-        Used only on the fp8-KV path: the fused #20 op is bf16-cache-only, so it
-        runs in norm+rope-only mode and the (already normed/roped) k/v/index_k are
-        written here via ``reshape_and_cache_flash`` (which honors kv_cache_dtype,
-        unit scale -- matching the fp8 read path added in #33). Mirrors the
-        pre-#20 unfused insert. The index cache stays bf16 (no quant).
+        Kept as a local fallback/reference for the pre-fused cache insert path.
+        The index cache stays bf16 (no quant).
         """
         key_cache, value_cache = self.kv_cache.unbind(1)
         scale = torch.ones((), device=key.device)
@@ -658,12 +650,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         q = qkv.new_empty((num_tokens, self.q_size))
         index_q = qkv.new_empty((num_tokens, self.index_q_size))
-        # On the fp8-KV path the fused op cannot write the (fp8) cache, so pass
-        # kv_cache/index_cache = None -> insert_kv=False (norm+rope only): it still
-        # de-interleaves q/index_q and rewrites the normed/roped k & index_k in
-        # place in qkv, leaving v raw (correct -- v is never normed/roped). We then
-        # write the cache via _insert_kv below.
-        insert_via_fused = not self._fp8_kv
+        insert_via_fused = "fp8" not in self.kv_cache_dtype
         ops.fused_minimax_m3_qknorm_rope_kv_insert(
             qkv,
             self.q_norm.weight,
@@ -686,18 +673,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             index_q,
         )
         if not insert_via_fused:
-            # Extract the normed/roped k, raw v, normed/roped index_k from qkv
-            # ([q | k | v | index_q | index_k], all head_dim=128) and fp8-insert.
             kv = self.num_kv_heads * self.head_dim
-            # These are strided views into qkv (row stride = full qkv width), but
-            # their last dim is contiguous, so `_insert_kv`'s `.view(-1, nkv,
-            # head_dim)` works on them and `reshape_and_cache_flash` honors the
-            # input stride -- no `.contiguous()` needed (verified bit-identical;
-            # avoids a [N, kv] copy per step on the fp8-KV path).
             k = qkv[:, self.q_size : self.q_size + kv]
             v = qkv[:, self.q_size + kv : self.q_size + 2 * kv]
             ik0 = self.q_size + 2 * kv + self.index_q_size
-            index_k = qkv[:, ik0 : ik0 + self.num_idx_heads * self.idx_head_dim]
+            index_k = qkv[:, ik0 : ik0 + self.idx_head_dim]
             self._insert_kv(k, v, index_k, main_slot_mapping, index_slot_mapping)
 
         output = torch.empty_like(q)

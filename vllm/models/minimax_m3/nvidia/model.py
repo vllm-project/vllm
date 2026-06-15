@@ -561,7 +561,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         assert isinstance(main_meta, MiniMaxM3SparseMetadata)
         assert isinstance(index_meta, MiniMaxM3IndexerMetadata)
 
-        # Identity scale: unused for the bf16 cache, required arg of the op.
         key_cache, value_cache = self.kv_cache.unbind(1)
         scale = torch.ones((), device=key.device)
         ops.reshape_and_cache_flash(
@@ -615,6 +614,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         q = qkv.new_empty((num_tokens, self.q_size))
         index_q = qkv.new_empty((num_tokens, self.index_q_size))
+        insert_via_fused = "fp8" not in self.kv_cache_dtype
         ops.fused_minimax_m3_qknorm_rope_kv_insert(
             qkv,
             self.q_norm.weight,
@@ -630,12 +630,19 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.num_idx_heads,
             main_slot_mapping,
             index_slot_mapping,
-            self.kv_cache,
-            self.indexer.index_cache.kv_cache,
+            self.kv_cache if insert_via_fused else None,
+            self.indexer.index_cache.kv_cache if insert_via_fused else None,
             self.kv_cache.size(2),  # paged-cache block size
             q,
             index_q,
         )
+        if not insert_via_fused:
+            kv = self.num_kv_heads * self.head_dim
+            k = qkv[:, self.q_size : self.q_size + kv]
+            v = qkv[:, self.q_size + kv : self.q_size + 2 * kv]
+            ik0 = self.q_size + 2 * kv + self.index_q_size
+            index_k = qkv[:, ik0 : ik0 + self.idx_head_dim]
+            self._insert_kv(k, v, index_k)
 
         output = torch.empty_like(q)
         attn_output = self._run_attention(q, index_q, output)
