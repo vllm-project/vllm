@@ -51,7 +51,11 @@ configure_push_remote() {
   fi
 
   if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
-    echo "Either BENCHMARK_REPO_GH_TOKEN or BENCHMARK_REPO_SSH_KEY is required for direct benchmark publication in GitHub Actions" >&2
+    echo "L3 benchmark repository publication is enabled, but no cross-repository write credential is available." >&2
+    echo "Configure one of the following secrets on the vllm-hust workflow repository before enabling benchmark repo publish:" >&2
+    echo "  - VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY: SSH private key with write access to ${BENCHMARK_REPO_SLUG}" >&2
+    echo "  - VLLM_HUST_BENCHMARK_GH_TOKEN: GitHub token with contents write access to ${BENCHMARK_REPO_SLUG}" >&2
+    echo "Benchmark repo publish target: ${BENCHMARK_REPO_SLUG}@${SNAPSHOT_TARGET_BRANCH}" >&2
     exit 2
   fi
 
@@ -142,15 +146,28 @@ prepare_publication_commit() {
 for attempt in $(seq 1 "$SNAPSHOT_MAX_PUSH_ATTEMPTS"); do
   if ! prepare_publication_commit; then
     echo "Benchmark publication already includes submission $run_id"
+    echo "Benchmark repo target: ${BENCHMARK_REPO_SLUG}@${SNAPSHOT_TARGET_BRANCH}"
+    echo "Submission path: $relative_submission_dir"
+    echo "Snapshot path: $relative_snapshot_dir"
     write_github_env GITHUB_SNAPSHOT_SYNC_STATUS unchanged
+    write_github_env GITHUB_SNAPSHOT_SYNC_REPO "$BENCHMARK_REPO_SLUG"
+    write_github_env GITHUB_SNAPSHOT_SYNC_BRANCH "$SNAPSHOT_TARGET_BRANCH"
+    write_github_env GITHUB_SNAPSHOT_SYNC_SUBMISSION_PATH "$relative_submission_dir"
+    write_github_env GITHUB_SNAPSHOT_SYNC_SNAPSHOT_PATH "$relative_snapshot_dir"
     exit 0
   fi
 
   snapshot_commit=$(git -C "$BENCHMARK_REPO_DIR" rev-parse HEAD)
   if git -C "$BENCHMARK_REPO_DIR" push "$BENCHMARK_REPO_REMOTE" "HEAD:$SNAPSHOT_TARGET_BRANCH"; then
     echo "Pushed benchmark publication to ${BENCHMARK_REPO_SLUG}@${SNAPSHOT_TARGET_BRANCH}: $snapshot_commit"
+    echo "Submission path: $relative_submission_dir"
+    echo "Snapshot path: $relative_snapshot_dir"
     write_github_env GITHUB_SNAPSHOT_SYNC_STATUS pushed
     write_github_env GITHUB_SNAPSHOT_SYNC_COMMIT "$snapshot_commit"
+    write_github_env GITHUB_SNAPSHOT_SYNC_REPO "$BENCHMARK_REPO_SLUG"
+    write_github_env GITHUB_SNAPSHOT_SYNC_BRANCH "$SNAPSHOT_TARGET_BRANCH"
+    write_github_env GITHUB_SNAPSHOT_SYNC_SUBMISSION_PATH "$relative_submission_dir"
+    write_github_env GITHUB_SNAPSHOT_SYNC_SNAPSHOT_PATH "$relative_snapshot_dir"
     exit 0
   fi
 
@@ -161,4 +178,7 @@ for attempt in $(seq 1 "$SNAPSHOT_MAX_PUSH_ATTEMPTS"); do
 done
 
 echo "failed to push benchmark publication after $SNAPSHOT_MAX_PUSH_ATTEMPTS attempts" >&2
+echo "Benchmark repo target: ${BENCHMARK_REPO_SLUG}@${SNAPSHOT_TARGET_BRANCH}" >&2
+echo "Submission path: $relative_submission_dir" >&2
+echo "Snapshot path: $relative_snapshot_dir" >&2
 exit 1

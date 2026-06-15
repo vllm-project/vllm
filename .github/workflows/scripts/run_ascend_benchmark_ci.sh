@@ -48,6 +48,7 @@ HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-910B3}
 CHIP_COUNT=${CHIP_COUNT:-1}
 NODE_COUNT=${NODE_COUNT:-1}
 PUBLISH_TO_HF=${PUBLISH_TO_HF:-0}
+PUBLISH_TO_BENCHMARK_REPO=${PUBLISH_TO_BENCHMARK_REPO:-0}
 HF_REPO_ID=${HF_REPO_ID:-}
 RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-$RESULT_ROOT/runtime-ready.log}
 SUDO_AUTH_EXIT_CODE=${SUDO_AUTH_EXIT_CODE:-76}
@@ -355,6 +356,7 @@ SUDO_PRESERVE_ENV_VARS=(
   PATH
   PIP_CACHE_DIR
   PORT
+  PUBLISH_TO_BENCHMARK_REPO
   PYTHON_BIN
   PYTHONPATH
   READY_TIMEOUT_SECONDS
@@ -888,7 +890,7 @@ prepare_hf_publish_cache_for_runner() {
 sync_benchmark_publication_to_github() {
   local publisher_script=${BENCHMARK_PUBLICATION_SYNC_SCRIPT:-$VLLM_HUST_REPO/.github/workflows/scripts/sync_benchmark_snapshots_to_github.sh}
 
-  if [[ "$PUBLISH_TO_HF" != "1" ]]; then
+  if [[ "$PUBLISH_TO_BENCHMARK_REPO" != "1" ]]; then
     return 0
   fi
 
@@ -1097,6 +1099,7 @@ echo "run id: $RUN_ID"
 echo "result root: $RESULT_ROOT"
 echo "benchmark port: $PORT"
 echo "benchmark scenario: $BENCH_SCENARIO"
+echo "publish to benchmark repo: $PUBLISH_TO_BENCHMARK_REPO"
 echo "publish to hf: $PUBLISH_TO_HF"
 echo "same-spec benchmark enabled: $SAME_SPEC_BENCHMARK_ENABLED"
 echo "ascend benchmark use sudo: $ASCEND_BENCHMARK_USE_SUDO"
@@ -1286,7 +1289,7 @@ PY
     --submissions-dir "$SUBMISSIONS_ROOT"
 fi
 
-if [[ "$PUBLISH_TO_HF" == "1" ]]; then
+if [[ "$PUBLISH_TO_BENCHMARK_REPO" == "1" ]]; then
   sync_benchmark_publication_to_github
 else
   "$PYTHON_BIN" -m vllm_hust_benchmark.cli publish-website \

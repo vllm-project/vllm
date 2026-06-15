@@ -129,12 +129,13 @@ jobs:
       ASCEND_BENCHMARK_ROOT_HELPER: ${{ vars.VLLM_HUST_BENCHMARK_ROOT_HELPER || '' }}
       ALLOW_RANDOM_HF_PUBLISH: ${{ vars.VLLM_HUST_ALLOW_RANDOM_HF_PUBLISH || '0' }}
       WEBSITE_LEADERBOARD_URL: ${{ vars.VLLM_HUST_LEADERBOARD_URL || '' }}
+      PUBLISH_TO_BENCHMARK_REPO: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && '1' || '0' }}
       PUBLISH_TO_HF: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && secrets.HF_TOKEN != '') && '1' || '0' }}
       TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.sha }}
       BENCHMARK_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-benchmark.git
       BENCHMARK_REPO_SLUG: vLLM-HUST/vllm-hust-benchmark
-      BENCHMARK_REPO_GH_TOKEN: ${{ secrets.VLLM_HUST_BENCHMARK_GH_TOKEN }}
+      BENCHMARK_REPO_GH_TOKEN: ${{ github.event_name != 'pull_request' && secrets.VLLM_HUST_BENCHMARK_GH_TOKEN || '' }}
       BENCHMARK_REPO_SSH_KEY: ${{ github.event_name != 'pull_request' && secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY || '' }}
       BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || 'feature/perfgate-two-stage' }}
       WEBSITE_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-website.git
@@ -788,10 +789,25 @@ jobs:
           perfgate_report = result_root / 'perfgate_report.md'
           run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
           bench_scenario = os.environ.get('BENCH_SCENARIO', 'random-online')
-          publish_mode = 'formal-publish' if os.environ.get('PUBLISH_TO_HF') == '1' else 'artifact-preview'
+          benchmark_repo_publish_enabled = os.environ.get('PUBLISH_TO_BENCHMARK_REPO') == '1'
+          hf_publish_enabled = os.environ.get('PUBLISH_TO_HF') == '1'
+          if benchmark_repo_publish_enabled:
+            publish_mode = 'benchmark-repo-publish'
+          elif hf_publish_enabled:
+            publish_mode = 'hf-publish'
+          else:
+            publish_mode = 'artifact-preview'
           model_name = os.environ.get('MODEL_NAME', 'unknown')
           hf_repo = os.environ.get('HF_REPO_ID', 'unknown')
           leaderboard_url = os.environ.get('WEBSITE_LEADERBOARD_URL', '').strip()
+          perfgate_mode = os.environ.get('PERFGATE_MODE', 'report')
+          baseline_source = os.environ.get('PERFGATE_BASELINE_SOURCE') or 'unavailable'
+          snapshot_sync_status = os.environ.get('GITHUB_SNAPSHOT_SYNC_STATUS', '').strip()
+          snapshot_sync_commit = os.environ.get('GITHUB_SNAPSHOT_SYNC_COMMIT', '').strip()
+          snapshot_sync_repo = os.environ.get('GITHUB_SNAPSHOT_SYNC_REPO', '').strip()
+          snapshot_sync_branch = os.environ.get('GITHUB_SNAPSHOT_SYNC_BRANCH', '').strip()
+          snapshot_sync_submission_path = os.environ.get('GITHUB_SNAPSHOT_SYNC_SUBMISSION_PATH', '').strip()
+          snapshot_sync_snapshot_path = os.environ.get('GITHUB_SNAPSHOT_SYNC_SNAPSHOT_PATH', '').strip()
 
           result_root.mkdir(parents=True, exist_ok=True)
 
@@ -809,6 +825,10 @@ jobs:
             f'- Scenario: `{bench_scenario}`',
             f'- Model: `{display_model_name}`',
             f'- Publish mode: `{publish_mode}`',
+            f"- Leaderboard publish: `{'enabled' if benchmark_repo_publish_enabled else 'skipped'}`",
+            f"- HF publish: `{'enabled' if hf_publish_enabled else 'skipped'}`",
+            f'- Perfgate mode: `{perfgate_mode}`',
+            f'- Baseline source: `{baseline_source}`',
             f'- Workflow run: [view run]({run_url})',
           ]
           comment_lines = [
@@ -817,6 +837,10 @@ jobs:
             f'- Scenario: `{bench_scenario}`',
             f'- Model: `{display_model_name}`',
             f'- Publish mode: `{publish_mode}`',
+            f"- Leaderboard publish: `{'enabled' if benchmark_repo_publish_enabled else 'skipped'}`",
+            f"- HF publish: `{'enabled' if hf_publish_enabled else 'skipped'}`",
+            f'- Perfgate mode: `{perfgate_mode}`',
+            f'- Baseline source: `{baseline_source}`',
             f'- Workflow run: [view run]({run_url})',
           ]
           if runner_preflight_failure.is_file():
@@ -888,7 +912,7 @@ jobs:
             lines.append(note)
             comment_lines.append(note)
 
-          if publish_mode == 'hf-sync':
+          if hf_publish_enabled:
             hf_note = f'- HF dataset repo: `{hf_repo}`'
             lines.append(hf_note)
             comment_lines.append(hf_note)
@@ -896,6 +920,22 @@ jobs:
               site_note = f'- Website leaderboard: {leaderboard_url}'
               lines.append(site_note)
               comment_lines.append(site_note)
+
+          if benchmark_repo_publish_enabled:
+            publication_lines = ['','### L3 Benchmark Repository Publication']
+            publication_lines.append(f"- Sync status: `{snapshot_sync_status or 'unknown'}`")
+            if snapshot_sync_repo or snapshot_sync_branch:
+              publication_lines.append(
+                f"- Target: `{snapshot_sync_repo or 'unknown'}@{snapshot_sync_branch or 'unknown'}`"
+              )
+            if snapshot_sync_commit:
+              publication_lines.append(f'- Commit: `{snapshot_sync_commit}`')
+            if snapshot_sync_submission_path:
+              publication_lines.append(f'- Submission path: `{snapshot_sync_submission_path}`')
+            if snapshot_sync_snapshot_path:
+              publication_lines.append(f'- Snapshot path: `{snapshot_sync_snapshot_path}`')
+            lines.extend(publication_lines)
+            comment_lines.extend(publication_lines)
 
           summary_path.write_text("\n".join(lines) + "\n", encoding='utf-8')
           comment_path.write_text("\n".join(comment_lines) + "\n", encoding='utf-8')

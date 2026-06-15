@@ -9,6 +9,13 @@ BASELINE_FILE=${PERFGATE_BASELINE_SOURCE_FILE:-$RESULT_ROOT/submissions/$RUN_ID/
 WORKTREE_DIR=${PERFGATE_BASELINE_WORKTREE:-${RUNNER_TEMP:-/tmp}/perfgate-baselines-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}}
 PUSH_REMOTE_URL=${PERFGATE_BASELINE_PUSH_REMOTE_URL:-}
 
+cleanup() {
+  if [[ -d "$WORKTREE_DIR" ]]; then
+    git worktree remove "$WORKTREE_DIR" --force >/dev/null 2>&1 || rm -rf "$WORKTREE_DIR"
+  fi
+}
+trap cleanup EXIT
+
 read_expected_spec_id() {
   if [[ -n "${PERFGATE_EXPECTED_SPEC_ID:-}" ]]; then
     printf '%s\n' "$PERFGATE_EXPECTED_SPEC_ID"
@@ -29,6 +36,8 @@ PY
 
 if [[ ! -f "$BASELINE_FILE" ]]; then
   echo "Perfgate baseline source not found: $BASELINE_FILE" >&2
+  echo "Expected benchmark artifact path: .benchmarks/ci/$RUN_ID/submissions/$RUN_ID/run_leaderboard.json" >&2
+  echo "Check that the ascend-benchmark job uploaded artifact ascend-benchmark-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1} and that download-artifact restored it under .benchmarks/ci." >&2
   exit 2
 fi
 
@@ -75,7 +84,7 @@ spec_id = str(same_spec.get("spec_id") or "").strip()
 spec_hash = str(same_spec.get("resolved_spec_hash") or "").strip()
 if not spec_hash or (expected_spec_id and spec_id != expected_spec_id):
     print(
-        f"Invalid perfgate baseline JSON: {path}: expected same_spec.spec_id={expected_spec_id!r} and non-empty resolved_spec_hash",
+        f"Invalid perfgate baseline JSON: {path}: expected same_spec.spec_id={expected_spec_id!r}, got {spec_id!r}, and non-empty resolved_spec_hash",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -112,7 +121,9 @@ else
   git -C "$WORKTREE_DIR" config user.name "vLLM-HUST Benchmark Bot"
   git -C "$WORKTREE_DIR" config user.email "benchmark-bot@vllm-hust.local"
   git -C "$WORKTREE_DIR" commit -m "chore(perfgate): store baseline for ${GITHUB_SHA:0:8}"
-  git -C "$WORKTREE_DIR" push origin "HEAD:$BASELINE_BRANCH"
+  if ! git -C "$WORKTREE_DIR" push origin "HEAD:$BASELINE_BRANCH"; then
+    echo "Failed to push perfgate baseline to branch $BASELINE_BRANCH" >&2
+    echo "Check that this job runs on push to main with contents: write permission and that branch protection allows GitHub Actions to update $BASELINE_BRANCH." >&2
+    exit 1
+  fi
 fi
-
-git worktree remove "$WORKTREE_DIR" --force

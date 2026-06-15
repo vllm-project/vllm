@@ -101,7 +101,7 @@ run_stage2_benchmark() {
   while [[ "$attempt" -le "$max_attempts" ]]; do
     echo "[perfgate-stage2] benchmark attempt ${attempt}/${max_attempts}"
     set +e
-    RUN_ID="$STAGE2_RUN_ID" RESULT_ROOT="$STAGE2_RESULT_ROOT" PUBLISH_TO_HF=0 \
+    RUN_ID="$STAGE2_RUN_ID" RESULT_ROOT="$STAGE2_RESULT_ROOT" PUBLISH_TO_HF=0 PUBLISH_TO_BENCHMARK_REPO=0 \
       bash .github/workflows/scripts/run_ascend_benchmark_ci.sh
     local rc=$?
     set -e
