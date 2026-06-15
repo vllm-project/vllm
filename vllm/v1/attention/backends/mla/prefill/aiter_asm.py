@@ -253,6 +253,7 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         # Required for correctly sizing the (partial) logits/attn_lse buffers that we
         # reduce over.
         num_partial_tiles = int(reduce_indptr[-1].item())
+        assert num_partial_tiles > 0
 
         return {
             "work_indptr": work_indptr,
