@@ -30,8 +30,10 @@ from vllm.utils.flashinfer import (
 )
 from vllm.utils.import_utils import has_deep_gemm
 
-if current_platform.get_device_capability() < (9, 0):
+if current_platform.is_cuda_alike() and current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
+
+DEVICE = "xpu" if current_platform.is_xpu() else "cuda"
 
 vllm_config = VllmConfig()
 
@@ -58,8 +60,8 @@ pytest.importorskip("torch.cuda")
 
 
 @pytest.fixture(autouse=True)
-def setup_cuda():
-    torch.set_default_device("cuda")
+def setup_device():
+    torch.set_default_device(DEVICE)
 
 
 @pytest.mark.skipif(
@@ -216,7 +218,7 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
 
     ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size, out_dtype)
 
-    out = torch.zeros((M, N), device="cuda", dtype=out_dtype)
+    out = torch.zeros((M, N), device=DEVICE, dtype=out_dtype)
 
     assert As_fp8.shape == (M, (K + 127) // 128), (
         f"{As_fp8.shape} != {(M, (K + 127) // 128)}"
