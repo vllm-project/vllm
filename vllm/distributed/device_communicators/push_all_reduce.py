@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 _FEATURE_DESCRIPTION = "Push-based AllReduce"
 _DISABLE_ENV_VAR = "VLLM_DISABLE_PUSH_ALLREDUCE"
 
-# Push threshold map: world_size -> buffer_bytes
+# Push threshold maps: world_size -> buffer_bytes
 # From SGLang's tuned thresholds for sm100 (B200)
 PUSH_THRESHOLD_SM100 = {
     2: 4 * 1024 * 1024,  # 4 MB
@@ -41,7 +41,20 @@ PUSH_THRESHOLD_SM100 = {
     8: 720 * 1024,  # 720 KB
 }
 
-# Conservative default for untuned GPUs
+# Conservative default thresholds for architectures without tuned values
+PUSH_THRESHOLD_DEFAULT = {
+    2: 512 * 1024,  # 512 KB
+    4: 512 * 1024,  # 512 KB
+    6: 512 * 1024,  # 512 KB
+    8: 512 * 1024,  # 512 KB
+}
+
+# Map GPU major compute capability -> threshold table
+_THRESHOLD_BY_ARCH: dict[int, dict[int, int]] = {
+    10: PUSH_THRESHOLD_SM100,  # Blackwell (sm_100)
+}
+
+# Conservative default for untuned GPUs / unrecognized world_size
 DEFAULT_PUSH_BUFFER = 512 * 1024  # 512 KB
 
 
@@ -88,17 +101,29 @@ class PushAllReduce:
             self.disabled = True
             return
 
-        # Get SM count for grid size
+        # Get SM count and architecture for grid size and threshold selection
         props = torch.cuda.get_device_properties(device)
         self.num_sm = props.multi_processor_count
 
-        # Determine push buffer size from threshold map
+        # Determine push buffer size from architecture-specific threshold map
         if max_size is not None:
             self.push_buffer_bytes = max_size
         else:
-            self.push_buffer_bytes = PUSH_THRESHOLD_SM100.get(
+            arch_major = props.major
+            threshold_map = _THRESHOLD_BY_ARCH.get(
+                arch_major, PUSH_THRESHOLD_DEFAULT
+            )
+            self.push_buffer_bytes = threshold_map.get(
                 self.world_size, DEFAULT_PUSH_BUFFER
             )
+            if arch_major not in _THRESHOLD_BY_ARCH:
+                logger.info(
+                    "PushAllReduce: no tuned thresholds for sm_%d%d, "
+                    "using conservative default (%d KB)",
+                    arch_major,
+                    props.minor,
+                    self.push_buffer_bytes // 1024,
+                )
 
         # Allow env var override (V1 fix: validate 128-byte alignment)
         env_override = os.environ.get("VLLM_PUSH_AR_BUFFER_BYTES")
