@@ -5,11 +5,12 @@
 The OffloadingManager identifies an offloaded chunk only by its OffloadKey,
 so its raw events carry no token ids, parent hash, or block size.
 :class:`OffloadingEventsTracker` snapshots each chunk's full ``BlockStored``
-payload while the ``Request`` is alive and publishes stores as ordinary
-per-block events; evictions fan out to the same hashes. Chunks overlapping
-a non-chunk-aligned shared prefix re-announce the shared hashes once per
-chunk; consumers are expected to deduplicate (reference-count) repeated
-store/remove announcements of the same hash. Opt-in via
+payload while the ``Request`` is alive and publishes stores as block-granular
+payloads: a chunk event may carry multiple constituent per-block hashes, and
+evictions fan out to the same hashes. Chunks overlapping a non-chunk-aligned
+shared prefix re-announce the shared hashes once per chunk; consumers are
+expected to deduplicate (reference-count) repeated store/remove announcements
+of the same hash. Opt-in via
 ``kv_connector_extra_config["self_describing_kv_events"]``; inert unless
 KV cache events are enabled. See the PR description for the full design.
 """
