@@ -256,7 +256,7 @@ def test_get_structural_tag_disables_reasoning(
         tools=sample_tools_strict,
         tool_choice="auto",
     )
-    parser = Qwen3CoderToolParser(MagicMock(), tools=sample_tools_strict)
+    parser = Qwen3EngineToolParser(MagicMock(), tools=sample_tools_strict)
 
     parser.get_structural_tag(request)
 
