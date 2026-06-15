@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-import statistics
 import torch
 
 from tests.kernels.quant_utils import FP8_DTYPE
@@ -120,72 +119,13 @@ def test_rms_norm_weightless(
 
     if residual is not None:
         opcheck(
-            torch.ops._C.fused_add_rms_norm_weightless,
-            (x, residual, layer.variance_epsilon),
+            torch.ops._C.fused_add_rms_norm,
+            (x, residual, None, layer.variance_epsilon),
         )
     else:
         opcheck(
-            torch.ops._C.rms_norm_weightless,
-            (out, x, layer.variance_epsilon),
-        )
-
-
-@pytest.mark.skipif(
-    not torch.cuda.is_available(),
-    reason="CUDA kernel accuracy test requires GPU",
-)
-@pytest.mark.skipif(
-    not hasattr(torch.ops._C, "rms_norm_weightless"),
-    reason="weightless RMSNorm ops not built",
-)
-@torch.inference_mode()
-def test_rms_norm_weightless_cuda_kernel_accuracy() -> None:
-    """10-seed kernel vs native error analysis (bf16, Llama-scale hidden size)."""
-    from vllm import _custom_ops as vllm_ops
-
-    dtype = torch.bfloat16
-    hidden_size = 4096
-    epsilon = 1e-5
-    seeds = 10
-    token_counts = [1, 16, 128, 1024]
-    tol = _rms_norm_tolerance(dtype)
-    device = "cuda"
-
-    native_rms = ir.ops.rms_norm.impls["native"].impl_fn
-    native_fused = ir.ops.fused_add_rms_norm.impls["native"].impl_fn
-
-    for num_tokens in token_counts:
-        rms_max_abs = 0.0
-        rms_mean_abs: list[float] = []
-        rms_max_rel = 0.0
-        for seed in range(seeds):
-            torch.manual_seed(seed)
-            x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
-            residual = torch.randn_like(x)
-
-            ref = native_rms(x, None, epsilon)
-            out = torch.empty_like(x)
-            vllm_ops.rms_norm_weightless(out, x.clone(), epsilon)
-            diff = (out - ref).float().abs()
-            rel = diff / ref.float().abs().clamp(min=1e-8)
-            rms_max_abs = max(rms_max_abs, diff.max().item())
-            rms_mean_abs.append(diff.mean().item())
-            rms_max_rel = max(rms_max_rel, rel.max().item())
-            torch.testing.assert_close(out, ref, **tol)
-
-            x_k = x.clone()
-            r_k = residual.clone()
-            ref_out, ref_res = native_fused(
-                x.clone(), residual.clone(), None, epsilon
-            )
-            vllm_ops.fused_add_rms_norm_weightless(x_k, r_k, epsilon)
-            torch.testing.assert_close(x_k, ref_out, **tol)
-            torch.testing.assert_close(r_k, ref_res, **tol)
-
-        print(
-            f"rms_norm_weightless vs native: tokens={num_tokens}, seeds={seeds}, "
-            f"max_abs={rms_max_abs:.6f}, mean_abs={statistics.mean(rms_mean_abs):.6f}, "
-            f"max_rel={rms_max_rel:.6f}, tol_atol={tol['atol']}, tol_rtol={tol['rtol']}"
+            torch.ops._C.rms_norm,
+            (out, x, None, layer.variance_epsilon),
         )
 
 

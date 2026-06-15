@@ -33,17 +33,11 @@ def rms_norm(
         original_shape = x.shape
         x = x.reshape(-1, original_shape[-1])
         output = torch.empty_like(x)
-        if weight is None:
-            torch.ops._C.rms_norm_weightless(output, x, epsilon)
-        else:
-            torch.ops._C.rms_norm(output, x, weight, epsilon)
+        torch.ops._C.rms_norm(output, x, weight, epsilon)
         return output.reshape(original_shape)
 
     output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
-    if weight is None:
-        torch.ops._C.rms_norm_weightless(output, x, epsilon)
-    else:
-        torch.ops._C.rms_norm(output, x, weight, epsilon)
+    torch.ops._C.rms_norm(output, x, weight, epsilon)
     return output
 
 
@@ -83,14 +77,8 @@ def fused_add_rms_norm(
         original_shape = x.shape
         x = x.view(-1, original_shape[-1])
         x_residual = x_residual.view(-1, original_shape[-1])
-        if weight is None:
-            torch.ops._C.fused_add_rms_norm_weightless(x, x_residual, epsilon)
-        else:
-            torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
+        torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
         return x.view(original_shape), x_residual.view(original_shape)
 
-    if weight is None:
-        torch.ops._C.fused_add_rms_norm_weightless(x, x_residual, epsilon)
-    else:
-        torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
+    torch.ops._C.fused_add_rms_norm(x, x_residual, weight, epsilon)
     return x, x_residual

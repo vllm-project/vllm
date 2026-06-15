@@ -369,22 +369,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
-      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
+      "rms_norm(Tensor! result, Tensor input, Tensor? weight, float epsilon) -> "
       "()");
 
   // In-place fused Add and RMS Normalization.
   ops.def(
-      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
-      "float epsilon) -> ()");
-
-  // Weightless RMS Normalization (FlashNorm-folded checkpoints).
-  ops.def(
-      "rms_norm_weightless(Tensor! result, Tensor input, float epsilon) -> "
-      "()");
-
-  // In-place fused Add and weightless RMS Normalization.
-  ops.def(
-      "fused_add_rms_norm_weightless(Tensor! input, Tensor! residual, "
+      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor? weight, "
       "float epsilon) -> ()");
 
   // Layernorm-quant
@@ -661,9 +651,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // Layernorm kernels (shared CUDA/ROCm)
   ops.impl("rms_norm", TORCH_BOX(&rms_norm));
   ops.impl("fused_add_rms_norm", TORCH_BOX(&fused_add_rms_norm));
-  ops.impl("rms_norm_weightless", TORCH_BOX(&rms_norm_weightless));
-  ops.impl("fused_add_rms_norm_weightless",
-           TORCH_BOX(&fused_add_rms_norm_weightless));
 
   // Layernorm-quant kernels (shared CUDA/ROCm)
   ops.impl("rms_norm_static_fp8_quant", TORCH_BOX(&rms_norm_static_fp8_quant));
