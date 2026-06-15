@@ -39,10 +39,9 @@ pub struct EngineCoreReadyResponse {
     /// DP coordinator stats publish address, if applicable.
     pub dp_stats_address: Option<String>,
     /// Effective model dtype after Python vLLM resolves `--dtype`.
-    // TODO: This is currently not wired up on the engine side. After it's added, remove `Option`
-    // and `serde(default)`.
-    #[serde(default)]
-    pub dtype: Option<ModelDtype>,
+    pub dtype: ModelDtype,
+    /// Python vLLM version reported by the engine process.
+    pub vllm_version: String,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
@@ -68,23 +67,4 @@ pub struct HandshakeAddresses {
 pub struct HandshakeInitMessage {
     pub addresses: HandshakeAddresses,
     pub parallel_config: BTreeMap<String, OpaqueValue>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::EngineCoreReadyResponse;
-    use crate::protocol::ModelDtype;
-
-    #[test]
-    fn ready_response_accepts_effective_dtype() {
-        let response: EngineCoreReadyResponse = serde_json::from_value(serde_json::json!({
-            "max_model_len": 4096,
-            "num_gpu_blocks": 2,
-            "dp_stats_address": null,
-            "dtype": "bfloat16"
-        }))
-        .unwrap();
-
-        assert_eq!(response.dtype, Some(ModelDtype::BFloat16));
-    }
 }

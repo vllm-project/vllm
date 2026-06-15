@@ -20,17 +20,17 @@
 #include <cuda_fp8.h>
 #include <utility>
 
-#include "cuda_vec_utils.cuh"
+#include "../../cuda_vec_utils.cuh"
 
-#if defined(NVFP4_ENABLE_ELTS16) && defined(CUDA_VERSION) && \
-    CUDA_VERSION >= 12090
+#if defined(NVFP4_ENABLE_ELTS16) && defined(CUDART_VERSION) && \
+    CUDART_VERSION >= 12090
   #define ELTS_PER_THREAD 16
+  #define CVT_FP4_PACK16 1
 constexpr int CVT_FP4_ELTS_PER_THREAD = 16;
-constexpr bool CVT_FP4_PACK16 = true;
 #else
   #define ELTS_PER_THREAD 8
+  #define CVT_FP4_PACK16 0
 constexpr int CVT_FP4_ELTS_PER_THREAD = 8;
-constexpr bool CVT_FP4_PACK16 = false;
 #endif
 
 constexpr int CVT_FP4_SF_VEC_SIZE = 16;

@@ -173,6 +173,13 @@ class RequestTracker:
     # request it includes previously-generated tokens, which are re-prefilled.
     prefill_end_tokens: int = 0
 
+    def reset(self) -> None:
+        self.token_len = 0
+        self.allocated_block_ids = ()
+        self.num_saved_tokens = 0
+        self.token_ids = None
+        self.prefill_end_tokens = 0
+
     def update(
         self,
         new_block_ids: tuple[list[int], ...] | list[int],
@@ -206,7 +213,7 @@ class ReqMeta:
     current_event: torch.cuda.Event | None = None
 
     token_ids: list[int] | None = None
-    original_block_size: int | None = None
+    num_prompt_tokens: int | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -216,24 +223,14 @@ class ReqMeta:
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
         is_last_chunk: bool | None = None,
-        discard_partial_chunks: bool = True,
-        original_block_size: int | None = None,
     ) -> "ReqMeta | None":
         """Create ReqMeta from a RequestTracker."""
         if block_hashes is None:
             block_hashes = []
         input_token_len = tracker.token_len
 
-        chunk_boundary = (
-            cdiv(tracker.num_saved_tokens + 1, block_size) * block_size
-            if discard_partial_chunks
-            else 0
-        )
-        num_tokens_to_save = (
-            (input_token_len // block_size * block_size)
-            if discard_partial_chunks
-            else input_token_len
-        )
+        chunk_boundary = cdiv(tracker.num_saved_tokens + 1, block_size) * block_size
+        num_tokens_to_save = input_token_len // block_size * block_size
 
         skip_save = skip_save or num_tokens_to_save < chunk_boundary
         # A ReqMeta must never carry both a save AND a load.
@@ -276,7 +273,7 @@ class ReqMeta:
             block_hashes=block_hashes,
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
-            original_block_size=original_block_size,
+            num_prompt_tokens=tracker.prefill_end_tokens,
         )
 
 

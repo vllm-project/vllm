@@ -113,11 +113,14 @@ def register_op(
     """
     Register a new vLLM IR op.
 
-    :param f: the native implementation of the op
-    :param name: the name of the op, defaults to the function name
-    :param activations: list of activation params, defaults to params starting with 'x'
-    :param allow_inplace: add a maybe_inplace overload that allows inplace impls
-    :return: the IrOp object if f is provided, otherwise a decorator
+    Args:
+        f: the native implementation of the op
+        name: the name of the op, defaults to the function name
+        activations: list of activation params, defaults to params starting with 'x'
+        allow_inplace: add a maybe_inplace overload that allows inplace impls
+
+    Returns:
+        the IrOp object if f is provided, otherwise a decorator
 
     Example usage:
     ```python
@@ -245,14 +248,17 @@ class IrOp:
         supported: bool = True,
         supports_args: Callable[..., bool] | None = None,
         inplace: bool = False,
-    ):
+    ) -> Callable[[Callable[..., Any]], "IrOpImpl"]:
         """
         Register an implementation for this custom op.
-        :param provider: The name of the provider, must be unique.
-        :param supported: Static support check, use this to check platform support.
-        :param supports_args: Dynamic arg support check, used for types and shapes.
-        :param inplace: Does this op reuse activation input memory for outputs
-        :return: A decorator that registers the implementation.
+        Args:
+            provider: The name of the provider, must be unique.
+            supported: Static support check, use this to check platform support.
+            supports_args: Dynamic arg support check, used for types and shapes.
+            inplace: Does this op reuse activation input memory for outputs
+
+        Returns:
+            A decorator that registers the implementation.
 
         The decorated function must have the same semantics and signature as
         the native implementation.

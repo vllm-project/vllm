@@ -65,7 +65,7 @@ class AnthropicContentBlock(BaseModel):
 class AnthropicMessage(BaseModel):
     """Message structure"""
 
-    role: Literal["user", "assistant"]
+    role: Literal["user", "assistant", "system"]
     content: str | list[AnthropicContentBlock]
 
 
@@ -100,6 +100,20 @@ class AnthropicToolChoice(BaseModel):
         return self
 
 
+class AnthropicJsonOutputFormat(BaseModel):
+    """JSON output format configuration"""
+
+    json_schema: dict[str, Any] | None = Field(default=None, alias="schema")
+    type: Literal["json_schema"] = "json_schema"
+
+
+class AnthropicOutputConfig(BaseModel):
+    """Configuration options for the model's output, such as the output format."""
+
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    format: AnthropicJsonOutputFormat | None = None
+
+
 class AnthropicMessagesRequest(BaseModel):
     """Anthropic Messages API request"""
 
@@ -107,6 +121,7 @@ class AnthropicMessagesRequest(BaseModel):
     messages: list[AnthropicMessage]
     max_tokens: int
     metadata: dict[str, Any] | None = None
+    output_config: AnthropicOutputConfig | None = None
     stop_sequences: list[str] | None = None
     stream: bool | None = False
     system: str | list[AnthropicContentBlock] | None = None

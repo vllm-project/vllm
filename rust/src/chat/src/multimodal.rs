@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
-use std::sync::{Arc, LazyLock, Once};
+use std::sync::{Arc, LazyLock};
 
 use itertools::izip;
 use llm_multimodal::{
@@ -225,7 +225,7 @@ impl MultimodalModelInfo {
     ///
     /// The HF renderer uses this token while flattening image content in string
     /// content format.
-    pub(crate) fn placeholder_token(&self) -> &str {
+    pub fn placeholder_token(&self) -> &str {
         &self.spec.placeholder_token
     }
 }
@@ -239,7 +239,7 @@ pub(crate) async fn finalize_rendered_prompt(
     request: &ChatRequest,
     rendered: RenderedPrompt,
     info: Option<&MultimodalModelInfo>,
-    model_dtype: Option<ModelDtype>,
+    model_dtype: ModelDtype,
 ) -> Result<(Prompt, Option<MmFeatures>)> {
     if !request.has_multimodal() {
         return Ok((rendered.prompt, None));
@@ -249,16 +249,6 @@ pub(crate) async fn finalize_rendered_prompt(
         bail_multimodal!("multimodal chat renderer must return a text prompt before expansion");
     };
     let media_parts = extract_media_parts(request)?;
-    let model_dtype = model_dtype.unwrap_or_else(|| {
-        static WARN_ONCE: Once = Once::new();
-        WARN_ONCE.call_once(|| {
-            warn!(
-                "engine handshake did not report model dtype; \
-                 falling back to float32 for multimodal tensor encoding"
-            );
-        });
-        ModelDtype::Float32
-    });
 
     let mut prompt_token_ids = info
         .context
@@ -392,53 +382,13 @@ impl MultimodalModelInfo {
         prompt_token_ids: &mut Vec<u32>,
         replacements: Vec<PromptReplacement>,
     ) -> Result<Vec<PlaceholderRange>> {
-        let mut cursor = 0;
-        let mut ranges = Vec::with_capacity(replacements.len());
-        for replacement in replacements {
-            if replacement.modality != Modality::Image {
-                bail_multimodal!(
-                    "unsupported prompt replacement modality `{}`",
-                    replacement.modality
-                );
-            }
-            let offset = find_next_token(
-                prompt_token_ids,
-                self.spec.placeholder_marker_token_id,
-                cursor,
-            )
-            .ok_or_else(|| {
-                multimodal!(
-                    "placeholder token `{}` was not found in tokenized prompt",
-                    self.spec.placeholder_token
-                )
-            })?;
-
-            if replacement.tokens.is_empty() {
-                bail_multimodal!(
-                    "placeholder token `{}` expanded to no tokens",
-                    self.spec.placeholder_token
-                );
-            }
-            let replacement_len = replacement.tokens.len();
-            let replacement_tokens =
-                replacement.tokens.iter().map(|&token| token as u32).collect::<Vec<_>>();
-            let is_embed = {
-                let mask = replacement_tokens
-                    .iter()
-                    .map(|&token| token == self.spec.placeholder_embed_token_id)
-                    .collect::<Vec<_>>();
-                WireTensor::from_bool(vec![replacement_len], mask).map_err(Error::Multimodal)?
-            };
-
-            prompt_token_ids.splice(offset..offset + 1, replacement_tokens);
-            ranges.push(PlaceholderRange {
-                offset,
-                length: replacement_len,
-                is_embed: Some(is_embed),
-            });
-            cursor = offset + replacement_len;
-        }
-        Ok(ranges)
+        expand_prompt_token_ids(
+            prompt_token_ids,
+            replacements,
+            self.spec.placeholder_marker_token_id,
+            self.spec.placeholder_embed_token_id,
+            &self.spec.placeholder_token,
+        )
     }
 
     /// Convert preprocessed image tensors into engine-core multimodal features.
@@ -514,6 +464,71 @@ impl MultimodalModelInfo {
 
         Ok(features)
     }
+}
+
+fn expand_prompt_token_ids(
+    prompt_token_ids: &mut Vec<u32>,
+    replacements: Vec<PromptReplacement>,
+    placeholder_marker_token_id: u32,
+    placeholder_embed_token_id: u32,
+    placeholder_token: &str,
+) -> Result<Vec<PlaceholderRange>> {
+    if replacements.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let replacement_growth = replacements.iter().fold(0usize, |total, replacement| {
+        total.saturating_add(replacement.tokens.len().saturating_sub(1))
+    });
+    let mut expanded =
+        Vec::with_capacity(prompt_token_ids.len().saturating_add(replacement_growth));
+    let mut ranges = Vec::with_capacity(replacements.len());
+    let mut cursor = 0usize;
+
+    for replacement in replacements {
+        if replacement.modality != Modality::Image {
+            bail_multimodal!(
+                "unsupported prompt replacement modality `{}`",
+                replacement.modality
+            );
+        }
+
+        let offset = find_next_token(prompt_token_ids, placeholder_marker_token_id, cursor)
+            .ok_or_else(|| {
+                multimodal!(
+                    "placeholder token `{placeholder_token}` was not found in tokenized prompt"
+                )
+            })?;
+
+        if replacement.tokens.is_empty() {
+            bail_multimodal!("placeholder token `{placeholder_token}` expanded to no tokens");
+        }
+
+        let replacement_len = replacement.tokens.len();
+        let is_embed = {
+            let mask = replacement
+                .tokens
+                .iter()
+                .map(|&token| token as u32 == placeholder_embed_token_id)
+                .collect::<Vec<_>>();
+            WireTensor::from_bool(vec![replacement_len], mask).map_err(Error::Multimodal)?
+        };
+
+        expanded.extend_from_slice(&prompt_token_ids[cursor..offset]);
+        let expanded_offset = expanded.len();
+        expanded.extend(replacement.tokens.into_iter().map(|token| token as u32));
+        ranges.push(PlaceholderRange {
+            offset: expanded_offset,
+            length: replacement_len,
+            is_embed: Some(is_embed),
+        });
+        cursor = offset + 1;
+    }
+
+    expanded.extend_from_slice(&prompt_token_ids[cursor..]);
+    *prompt_token_ids = expanded;
+
+    Ok(ranges)
 }
 
 /// Find `needle` in `haystack`, starting at `start`.
@@ -734,6 +749,53 @@ mod tests {
         let error = info.expand_prompt_tokens(&mut prompt_token_ids, replacements).unwrap_err();
 
         assert!(matches!(error, Error::Multimodal(message) if message.contains("not found")));
+    }
+
+    #[test]
+    fn expand_prompt_tokens_ignores_empty_replacements() {
+        let info = llama4_info();
+        let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2];
+        let original_prompt_token_ids = prompt_token_ids.clone();
+
+        let ranges = info.expand_prompt_tokens(&mut prompt_token_ids, Vec::new()).unwrap();
+
+        assert!(ranges.is_empty());
+        assert_eq!(prompt_token_ids, original_prompt_token_ids);
+    }
+
+    #[test]
+    fn expand_prompt_tokens_leaves_prompt_unchanged_when_later_placeholder_missing() {
+        let info = llama4_info();
+        let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2];
+        let original_prompt_token_ids = prompt_token_ids.clone();
+        let replacements = vec![
+            llama4_single_tile_replacement(),
+            llama4_single_tile_replacement(),
+        ];
+
+        let error = info.expand_prompt_tokens(&mut prompt_token_ids, replacements).unwrap_err();
+
+        assert!(matches!(error, Error::Multimodal(message) if message.contains("not found")));
+        assert_eq!(prompt_token_ids, original_prompt_token_ids);
+    }
+
+    #[test]
+    fn expand_prompt_tokens_errors_when_replacement_is_empty() {
+        let info = llama4_info();
+        let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2];
+        let original_prompt_token_ids = prompt_token_ids.clone();
+        let replacements = vec![PromptReplacement::sequence(
+            Modality::Image,
+            "<|image|>",
+            Vec::new(),
+        )];
+
+        let error = info.expand_prompt_tokens(&mut prompt_token_ids, replacements).unwrap_err();
+
+        assert!(
+            matches!(error, Error::Multimodal(message) if message.contains("expanded to no tokens"))
+        );
+        assert_eq!(prompt_token_ids, original_prompt_token_ids);
     }
 
     #[test]

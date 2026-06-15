@@ -47,6 +47,7 @@ def load_audio_pyav(
     *,
     sr: float | None = 22050,
     mono: bool = True,
+    max_duration_s: float | None = None,
 ) -> tuple[npt.NDArray, float]:
     """Load an audio file using PyAV (FFmpeg), returning float32 mono waveform.
 
@@ -57,6 +58,10 @@ def load_audio_pyav(
     Args:
         path: A :class:`~io.BytesIO` buffer, a filesystem
             :class:`~pathlib.Path`, or a string path.
+        max_duration_s: If set, abort decoding once the accumulated
+            sample count exceeds this many seconds of audio.  Prevents
+            decompression-bomb attacks where a small compressed file
+            expands into gigabytes of PCM.
 
     Returns:
         ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
@@ -71,6 +76,31 @@ def load_audio_pyav(
             stream.thread_type = "AUTO"
             native_sr = stream.rate
             sr = sr or native_sr
+
+            # Early rejection from container/stream metadata to avoid
+            # wasting resources on decoding decompression bombs.
+            if max_duration_s is not None:
+                metadata_duration_s = None
+                if stream.duration and stream.time_base:
+                    metadata_duration_s = float(stream.duration * stream.time_base)
+                elif container.duration:
+                    metadata_duration_s = container.duration / 1_000_000
+                if (
+                    metadata_duration_s is not None
+                    and metadata_duration_s > max_duration_s
+                ):
+                    raise ValueError(
+                        f"Audio exceeds maximum allowed duration of "
+                        f"{max_duration_s}s (metadata reports "
+                        f"{metadata_duration_s:.1f}s). Set "
+                        f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
+                        f"increase this limit."
+                    )
+
+            max_samples = (
+                int(sr * max_duration_s) if max_duration_s is not None else None
+            )
+            total_samples = 0
 
             chunks: list[npt.NDArray] = []
             needs_resampling = not math.isclose(
@@ -88,10 +118,23 @@ def load_audio_pyav(
                 if needs_resampling:
                     assert resampler is not None
                     for out_frame in resampler.resample(frame):
-                        chunks.append(out_frame.to_ndarray())
+                        arr = out_frame.to_ndarray()
+                        total_samples += arr.shape[-1]
+                        chunks.append(arr)
                 else:
-                    chunks.append(frame.to_ndarray())
-    except ValueError:
+                    arr = frame.to_ndarray()
+                    total_samples += arr.shape[-1]
+                    chunks.append(arr)
+
+                if max_samples is not None and total_samples > max_samples:
+                    raise ValueError(
+                        f"Audio exceeds maximum allowed duration of "
+                        f"{max_duration_s}s (decoded {total_samples} "
+                        f"samples at {sr}Hz). Set "
+                        f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
+                        f"increase this limit."
+                    )
+    except (ValueError, ImportError):
         raise
     except Exception as e:
         raise ValueError(
@@ -114,10 +157,21 @@ def load_audio_soundfile(
     *,
     sr: float | None = 22050,
     mono: bool = True,
+    max_duration_s: float | None = None,
 ) -> tuple[np.ndarray, int]:
     """Load audio via soundfile"""
     with soundfile.SoundFile(path) as f:
         native_sr = f.samplerate
+        if max_duration_s is not None:
+            file_duration_s = f.frames / native_sr
+            if file_duration_s > max_duration_s:
+                raise ValueError(
+                    f"Audio exceeds maximum allowed duration of "
+                    f"{max_duration_s}s (file contains "
+                    f"{file_duration_s:.1f}s at {native_sr}Hz). Set "
+                    f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
+                    f"increase this limit."
+                )
         y = f.read(dtype="float32", always_2d=False).T
 
     if mono and y.ndim > 1:
@@ -134,9 +188,12 @@ def load_audio(
     *,
     sr: float | None = 22050,
     mono: bool = True,
+    max_duration_s: float | None = None,
 ):
     try:
-        return load_audio_soundfile(path, sr=sr, mono=mono)
+        return load_audio_soundfile(
+            path, sr=sr, mono=mono, max_duration_s=max_duration_s
+        )
     except ImportError as exc:
         # soundfile (or resampy) is not installed — fall through to pyav.
         # NOTE: this clause must stay BEFORE ``soundfile.LibsndfileError``
@@ -153,7 +210,7 @@ def load_audio(
     if isinstance(path, BytesIO):
         path.seek(0)
     try:
-        return load_audio_pyav(path, sr=sr, mono=mono)
+        return load_audio_pyav(path, sr=sr, mono=mono, max_duration_s=max_duration_s)
     except ImportError:
         raise  # Let PlaceholderModule's message ("install vllm[audio]") propagate.
     except Exception as pyav_exc:

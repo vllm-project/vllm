@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires network access to Hugging Face and downloads the real Kimi K2.5 tokenizer"]
+    #[ignore = "too slow for CI and requires network access to Hugging Face"]
     async fn tiktoken_real_kimi_k25_tokenizer_files_load_and_handle_special_tokens() {
         let files = ResolvedModelFiles::new("moonshotai/Kimi-K2.5")
             .await

@@ -76,6 +76,15 @@ This guide will help you quickly get started with vLLM to perform:
     !!! note
         For more detailed instructions, including Docker, installing from source, and troubleshooting, please refer to the [vLLM on TPU documentation](https://docs.vllm.ai/projects/tpu/en/latest/).
 
+=== "Ascend NPU"
+
+    If you are using Ascend NPUs, you can run vLLM through [vLLM Ascend](https://github.com/vllm-project/vllm-ascend), a community-maintained hardware plugin.
+
+    Follow the installation instructions in the [vLLM Ascend quick start](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html).
+
+    !!! note
+        Ascend setup depends on your NPU hardware and CANN version. For supported versions, Docker images, and troubleshooting, please refer to the [vLLM Ascend documentation](https://docs.vllm.ai/projects/ascend/en/latest/).
+
 === "Apple Silicon (Mac)"
 
     If you are using Apple Silicon Macs, you can use vLLM-Metal for GPU-accelerated inference via Apple's Metal framework.
