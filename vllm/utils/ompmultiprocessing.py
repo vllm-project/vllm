@@ -6,6 +6,7 @@ Copyright (c) 2026 Cambridge Greys Ltd
 """
 
 import os
+import sys
 from collections.abc import Callable
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
@@ -121,6 +122,31 @@ class OMPProcessManager:
 
     def _parse_omp_threads_bind_env(self):
         vllm_mask = envs.VLLM_CPU_OMP_THREADS_BIND
+        # On macOS / Apple Silicon (arm64), the default ``auto`` mode binds
+        # threads via ``KMP_AFFINITY`` / ``OMP_PROC_BIND``. Combined with
+        # libomp's spin-then-yield barrier this hangs the CPU attention
+        # kernel (workers stuck in ``cthread_yield -> __ulock_wait``).
+        # Force ``nobind`` when the user has not explicitly set the env,
+        # and provide conservative ``OMP_NUM_THREADS`` / ``KMP_BLOCKTIME``
+        # defaults so OpenMP does not spin-wait across all cores.
+        is_macos_arm = (
+            sys.platform.startswith("darwin")
+            and current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+        )
+        if (
+            is_macos_arm
+            and "VLLM_CPU_OMP_THREADS_BIND" not in os.environ
+            and vllm_mask == "auto"
+        ):
+            logger.info(
+                "Detected macOS on Apple Silicon; defaulting "
+                "VLLM_CPU_OMP_THREADS_BIND to 'nobind' to avoid libomp "
+                "barrier deadlock. Set VLLM_CPU_OMP_THREADS_BIND "
+                "explicitly to override."
+            )
+            vllm_mask = "nobind"
+            os.environ.setdefault("OMP_NUM_THREADS", "1")
+            os.environ.setdefault("KMP_BLOCKTIME", "0")
         self.skip_setup = vllm_mask == "nobind"
         self.auto_setup = vllm_mask == "auto"
         self.reserved_cpu_list = []
