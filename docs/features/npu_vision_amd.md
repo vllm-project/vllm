@@ -38,7 +38,17 @@ export LD_LIBRARY_PATH=/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH
 source /opt/xilinx/xrt/setup.sh
 ```
 
-1. Verify the NPU is visible:
+#### Bypass `amdxdna` execution timeout (recommended)
+
+To bypass the default `amdxdna` driver execution timeout (which can interfere with
+longer NPU workloads under XRT), reload the kernel module with `timeout_in_sec=0`:
+
+```bash
+sudo rmmod amdxdna
+sudo modprobe amdxdna timeout_in_sec=0
+```
+
+#### Verify the NPU device
 
 ```bash
 xrt-smi examine
