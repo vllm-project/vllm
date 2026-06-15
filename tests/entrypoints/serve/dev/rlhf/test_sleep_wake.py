@@ -48,7 +48,7 @@ _BASE_ARGS = [
     "--max-num-seqs",
     "32",
     "--gpu-memory-utilization",
-    "0.55",
+    "0.75",
     "--enable-sleep-mode",
     "--enforce-eager",
 ]
@@ -269,8 +269,8 @@ class TestPhysicalMemory:
             free_sleeping = _gpu_free_bytes()
             freed_gib = (free_sleeping - free_awake) / 2**30
 
-            # smallest CI model (~1 GB bf16) releases weights + KV; expect ≥500 MB
-            assert freed_gib > 0.5, (
+            # 1B bf16 weights ~2 GiB + KV at 0.75 util; true unmap must free ≥1.5 GiB
+            assert freed_gib > 1.5, (
                 f"sleep(1) freed only {freed_gib:.2f} GiB — "
                 "CuMemAllocator unmap may be a no-op"
             )
@@ -282,7 +282,7 @@ class TestPhysicalMemory:
             assert _wake(url) == 200
             free_awake2 = _gpu_free_bytes()
             recovered_gib = (free_awake2 - free_sleeping) / 2**30
-            assert recovered_gib > 0.3, (
+            assert recovered_gib > 1.0, (
                 f"wake_up recovered only {recovered_gib:.2f} GiB — "
                 "remap may be incomplete"
             )
@@ -294,7 +294,7 @@ class TestPhysicalMemory:
 
             assert _sleep(url, level=2) == 200
             freed_gib = (_gpu_free_bytes() - free_awake) / 2**30
-            assert freed_gib > 0.5
+            assert freed_gib > 1.5
 
             _, _, da = _sleep_metrics(url)
             assert da == 1
