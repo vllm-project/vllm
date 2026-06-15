@@ -1939,7 +1939,7 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
 
     let (shutdown_tx_0, engine_task_0) = spawn_mock_engine_task(
         handshake_address.clone(),
-        b"engine-0".to_vec(),
+        EngineId::from_engine_index(0).into_frame().to_vec(),
         |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
@@ -1993,7 +1993,7 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let (shutdown_tx_1, engine_task_1) = spawn_mock_engine_task(
         handshake_address.clone(),
-        b"engine-1".to_vec(),
+        EngineId::from_engine_index(1).into_frame().to_vec(),
         |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
@@ -2445,6 +2445,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let inline_prompt_frames = lines.next().expect("missing inline prompt logprobs fixture line");
     let multipart_prompt_frames =
         lines.next().expect("missing multipart prompt logprobs fixture line");
+    let ready_response_hex = lines.next().expect("missing ready response fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2553,6 +2554,23 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             .new_prompt_logprobs_tensors
             .as_ref()
             .expect("multipart prompt logprobs decoded"),
+    );
+
+    let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
+        match decode_value(bytes) {
+            Value::Map(entries) => entries
+                .into_iter()
+                .filter_map(|(key, _)| key.as_str().map(str::to_owned))
+                .collect(),
+            other => panic!("ready response should encode as a map, got {other:?}"),
+        }
+    };
+    let python_ready_keys = map_keys(&hex::decode(ready_response_hex).unwrap());
+    let rust_ready_keys =
+        map_keys(&rmp_serde::to_vec_named(&crate::mock_engine::default_ready_response()).unwrap());
+    assert_eq!(
+        rust_ready_keys, python_ready_keys,
+        "EngineCoreReadyResponse drifted from the Python dataclass",
     );
 }
 
