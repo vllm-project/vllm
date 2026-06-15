@@ -6,13 +6,13 @@ from typing import TYPE_CHECKING, Literal, Union
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import envs
 from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.config.quantization import QuantizationConfigArgs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
+    RoutedExperts,
 )
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -463,74 +463,6 @@ def select_mxfp4_moe_backend(
     AVAILABLE_BACKENDS = _filter_by_activation(
         _get_priority_backends_for_gpt_oss(), requested_activation_key
     )
-
-    # Handle explicit FlashInfer MXFP4 BF16 configuration.
-    if envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16"):
-        if not envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16:
-            for _b in (
-                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-                Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
-            ):
-                if _b in AVAILABLE_BACKENDS:
-                    AVAILABLE_BACKENDS.remove(_b)
-        else:
-            if current_platform.is_device_capability(90):
-                return _return_or_raise(
-                    Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
-                    config,
-                    kMxfp4Static,
-                    None,
-                    activation_format,
-                )
-            if current_platform.is_device_capability_family(100):
-                return _return_or_raise(
-                    Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-                    config,
-                    kMxfp4Static,
-                    None,
-                    activation_format,
-                )
-            raise ValueError(
-                "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16=1 is set but the "
-                "current device capability is not supported. "
-                "Only SM90 (CUTLASS) and SM100+ (TRTLLM) are supported."
-            )
-
-    # Handle explicit FlashInfer MXFP4 MXFP8 TRTLLM configuration.
-    if (
-        envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8")
-        and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-    ):
-        return _return_or_raise(
-            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-            config,
-            kMxfp4Static,
-            kMxfp8Dynamic,
-            activation_format,
-        )
-
-    # Handle explicit FlashInfer MXFP4 MXFP8 CUTLASS configuration.
-    if (
-        envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS")
-        and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS
-    ):
-        return _return_or_raise(
-            Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
-            config,
-            kMxfp4Static,
-            kMxfp8Dynamic,
-            activation_format,
-        )
-
-    # Handle explicit Marlin MXFP4 configuration.
-    if envs.is_set("VLLM_MXFP4_USE_MARLIN") and envs.VLLM_MXFP4_USE_MARLIN:
-        return _return_or_raise(
-            Mxfp4MoeBackend.MARLIN,
-            config,
-            kMxfp4Static,
-            None,
-            activation_format,
-        )
 
     for backend in AVAILABLE_BACKENDS:
         # Use requested_activation_key if provided, otherwise use backend default
@@ -1632,12 +1564,11 @@ def make_mxfp4_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             get_humming_moe_quant_config,
         )
 
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
         return get_humming_moe_quant_config(
             layer,
             gemm1_alpha=gemm1_alpha,
@@ -1663,7 +1594,7 @@ def make_mxfp4_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     mxfp4_backend: Mxfp4MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    layer: "RoutedExperts | None" = None,
+    layer: RoutedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
