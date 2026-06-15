@@ -1,5 +1,4 @@
-use std::collections::BTreeMap;
-use std::slice;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use arc_swap::ArcSwapOption;
@@ -14,11 +13,12 @@ use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, Uti
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::record_scheduler_stats;
+use crate::metrics::{LoraInfoExporter, record_scheduler_stats};
 use crate::protocol::stats::SchedulerStats;
+use crate::protocol::utility::UtilityOutput;
 use crate::protocol::{
     ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequestType,
-    UtilityOutput, encode_msgpack,
+    encode_msgpack,
 };
 use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
@@ -58,21 +58,23 @@ impl ClientInner {
     /// per-request output channel bound to its `request_id`.
     ///
     /// When `data_parallel_rank` is provided, the request is routed to that
-    /// specific engine rank, bypassing load balancing.
+    /// specific engine rank, bypassing load balancing. `lora_name` is the
+    /// request's LoRA adapter, tracked for `vllm:lora_requests_info`.
     pub fn register_request(
         &self,
         request_id: String,
+        lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
     ) -> Result<(EngineId, OutputReceiver)> {
         let mut registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
         }
-        registry.register(request_id, data_parallel_rank)
+        registry.register(request_id, lora_name, data_parallel_rank)
     }
 
     /// Allocate the next utility `call_id` and register its waiting receiver.
-    pub fn allocate_and_register_utility_call(&self) -> Result<(i64, UtilityReceiver)> {
+    pub fn allocate_and_register_utility_call(&self) -> Result<(u64, UtilityReceiver)> {
         let mut registry = self.utility_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
@@ -83,7 +85,7 @@ impl ClientInner {
     /// Undo a batch of utility call allocations when the fan-out send fails
     /// partway through. Silently ignores unknown call ids so callers can pass
     /// the full set without first filtering successful sends.
-    pub fn unregister_utility_calls(&self, call_ids: impl IntoIterator<Item = i64>) {
+    pub fn unregister_utility_calls(&self, call_ids: impl IntoIterator<Item = u64>) {
         self.utility_reg.lock().unregister_many(call_ids);
     }
 
@@ -106,13 +108,13 @@ impl ClientInner {
         Ok(registry.abortable_request_ids(request_ids))
     }
 
-    /// Obtain the stream sender for one output. If it indicates the request is
-    /// finished, it will be removed from the registry.
-    pub fn take_sender_for_output(
+    /// Obtain stream senders for a whole engine output batch with one registry
+    /// lock acquisition.
+    pub fn take_senders_for_outputs<'a>(
         &self,
-        output: &EngineCoreOutput,
-    ) -> Option<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>> {
-        self.request_reg.lock().sender_for_output(output)
+        outputs: impl IntoIterator<Item = &'a EngineCoreOutput>,
+    ) -> Vec<Option<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>>> {
+        self.request_reg.lock().senders_for_outputs(outputs)
     }
 
     /// Remove a batch of requests that have finished or aborted, returning
@@ -129,6 +131,12 @@ impl ClientInner {
     /// client.
     pub fn apply_scheduler_stats(&self, engine_index: u32, stats: &SchedulerStats) -> bool {
         self.request_reg.lock().apply_scheduler_stats(engine_index, stats)
+    }
+
+    /// Snapshot the adapter names of tracked LoRA requests as
+    /// (running, waiting) sets.
+    pub fn lora_adapter_states(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        self.request_reg.lock().lora_adapter_states()
     }
 
     /// Close all active request streams and utility calls with the first
@@ -160,7 +168,12 @@ impl ClientInner {
     /// Resolve one utility output to the waiting caller. Returns `true` if a
     /// waiting caller existed.
     pub fn resolve_utility_output(&self, output: UtilityOutput) -> bool {
-        match self.utility_reg.lock().resolve(&output.call_id) {
+        let Some(call_id) = output.call_id.as_u64() else {
+            // Currently, all utility call issued by the client should have unsigned call IDs.
+            return false;
+        };
+
+        match self.utility_reg.lock().resolve(&call_id) {
             Some(sender) => {
                 sender.send(Ok(output)).unwrap_or_default();
                 true
@@ -247,33 +260,47 @@ pub(crate) async fn run_abort_loop(
     inner: Arc<ClientInner>,
     mut abort_rx: mpsc::UnboundedReceiver<AbortRequest>,
 ) {
-    // TODO: receive and abort requests in batch
-    while let Some(AbortRequest { request_id, cause }) = abort_rx.recv().await {
-        let Some(engine_id) = inner.take_auto_abort_target(&request_id) else {
-            debug!(request_id, "skip auto-abort for inactive request");
-            continue;
-        };
+    // Coalesce bursts of auto-aborts into a single Abort message per engine.
+    // A dropped-stream storm (e.g. many clients disconnecting at once under
+    // high concurrency) would otherwise issue one engine round-trip per
+    // request. `recv_many` returns as soon as at least one item is ready, so a
+    // lone abort is still forwarded promptly.
+    const MAX_DRAIN: usize = 1024;
+    let mut batch: Vec<AbortRequest> = Vec::new();
 
-        match cause {
-            AbortCause::DroppedStream => {
-                info!(request_id, "auto-aborting request due to dropped stream")
+    while abort_rx.recv_many(&mut batch, MAX_DRAIN).await > 0 {
+        let mut by_engine: BTreeMap<EngineId, Vec<String>> = BTreeMap::new();
+
+        for AbortRequest { request_id, cause } in batch.drain(..) {
+            let Some(engine_id) = inner.take_auto_abort_target(&request_id) else {
+                debug!(request_id, "skip auto-abort for inactive request");
+                continue;
+            };
+
+            match cause {
+                AbortCause::DroppedStream => {
+                    info!(request_id, "auto-aborting request due to dropped stream")
+                }
+                AbortCause::StopStringMatched => {
+                    debug!(
+                        request_id,
+                        "auto-aborting request due to stop string matched"
+                    )
+                }
             }
-            AbortCause::StopStringMatched => {
-                debug!(
-                    request_id,
-                    "auto-aborting request due to stop string matched"
-                )
-            }
+
+            by_engine.entry(engine_id).or_default().push(request_id);
         }
 
-        if let Err(error) = inner.do_abort_requests(&engine_id, slice::from_ref(&request_id)).await
-        {
-            warn!(
-                request_id,
-                ?engine_id,
-                error = %error.as_report(),
-                "failed to auto-abort dropped request stream"
-            );
+        for (engine_id, request_ids) in by_engine {
+            if let Err(error) = inner.do_abort_requests(&engine_id, &request_ids).await {
+                warn!(
+                    ?engine_id,
+                    ?request_ids,
+                    error = %error.as_report(),
+                    "failed to auto-abort request streams"
+                );
+            }
         }
     }
 }
@@ -284,6 +311,8 @@ pub(crate) async fn run_output_dispatcher_loop(
     inner: Arc<ClientInner>,
     mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
 ) {
+    let mut lora_info = LoraInfoExporter::default();
+
     let result: Result<()> = async {
         loop {
             let outputs = match output_rx.recv().await {
@@ -295,9 +324,10 @@ pub(crate) async fn run_output_dispatcher_loop(
 
             match outputs.classify() {
                 ClassifiedEngineCoreOutputs::RequestBatch(batch) => {
-                    for output in batch.outputs {
+                    let senders = inner.take_senders_for_outputs(&batch.outputs);
+                    for (output, sender) in batch.outputs.into_iter().zip(senders) {
                         let request_id = output.request_id.clone();
-                        let Some(sender) = inner.take_sender_for_output(&output) else {
+                        let Some(sender) = sender else {
                             debug!(request_id, "dropping output for inactive request");
                             continue;
                         };
@@ -337,18 +367,24 @@ pub(crate) async fn run_output_dispatcher_loop(
                             scheduler_stats,
                         );
                     }
+
+                    // The engine's scheduler stats never carry adapter names;
+                    // the gauge is derived from the registry's frontend-side
+                    // request tracking instead.
+                    let (running, waiting) = inner.lora_adapter_states();
+                    lora_info.update(&METRICS.scheduler, running, waiting);
                 }
                 ClassifiedEngineCoreOutputs::Utility(utility) => {
                     let call_id = utility.output.call_id;
                     if inner.resolve_utility_output(utility.output) {
                         trace!(
-                            call_id,
+                            %call_id,
                             engine_index = utility.engine_index,
                             "resolved utility output"
                         );
                     } else {
                         warn!(
-                            call_id,
+                            %call_id,
                             engine_index = utility.engine_index,
                             "dropping output for unexpected utility call"
                         );
@@ -375,6 +411,7 @@ mod tests {
     use zeromq::{RouterSocket, Socket};
 
     use super::*;
+    use crate::mock_engine::default_ready_response;
 
     async fn test_inner() -> ClientInner {
         let mut socket = RouterSocket::new();
@@ -385,7 +422,7 @@ mod tests {
             "test-model".to_string(),
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),
-                ready_response: None,
+                ready_response: default_ready_response(),
             }],
         )
     }

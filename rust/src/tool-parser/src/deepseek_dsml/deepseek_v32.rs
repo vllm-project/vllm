@@ -1,5 +1,5 @@
 use super::{DeepSeekDsmlToolParser, DsmlTokens};
-use crate::{Result, Tool, ToolParseResult, ToolParser};
+use crate::{Result, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for DeepSeek V3.2 models.
 ///
@@ -33,7 +33,6 @@ impl DeepSeekV32ToolParser {
 }
 
 impl ToolParser for DeepSeekV32ToolParser {
-    /// Create a boxed DeepSeek V3.2 tool parser.
     fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
@@ -41,19 +40,20 @@ impl ToolParser for DeepSeekV32ToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    /// Preserve DSML special tokens while decoding.
     fn preserve_special_tokens(&self) -> bool {
         true
     }
 
-    /// Push one decoded text chunk through the DSML parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
-        self.0.push(chunk)
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+        self.0.parse_into(chunk, output)
     }
 
-    /// Flush buffered text and reset parser state.
-    fn finish(&mut self) -> Result<ToolParseResult> {
+    fn finish(&mut self) -> Result<ToolParserOutput> {
         self.0.finish()
+    }
+
+    fn reset(&mut self) -> String {
+        self.0.reset()
     }
 }
 
@@ -63,8 +63,8 @@ mod tests {
     use thiserror_ext::AsReport;
 
     use super::DeepSeekV32ToolParser;
-    use crate::ToolParser;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::{ToolParser, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params
@@ -84,27 +84,27 @@ mod tests {
     #[test]
     fn deepseek_v32_parse_complete_without_tool_call_keeps_text() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        let result = parser.parse_complete("Hello, world!").unwrap();
+        let output = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(result.normal_text, "Hello, world!");
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, "Hello, world!");
+        assert!(output.calls.is_empty());
     }
 
     #[test]
     fn deepseek_v32_parse_complete_extracts_single_tool_call() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        let result = parser
+        let output = parser
             .parse_complete(&build_tool_call(
                 "get_weather",
                 &[("location", "SF"), ("date", "2024-01-16")],
             ))
             .unwrap();
 
-        assert!(result.normal_text.is_empty());
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
+        assert!(output.normal_text.is_empty());
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({
                 "location": "SF",
                 "date": "2024-01-16"
@@ -119,16 +119,16 @@ mod tests {
             "Thinking... {}",
             build_tool_call("get_weather", &[("location", "NYC")])
         );
-        let result = parser.parse_complete(&output).unwrap();
+        let output = parser.parse_complete(&output).unwrap();
 
-        assert_eq!(result.normal_text, "Thinking... ");
-        assert_eq!(result.calls.len(), 1);
+        assert_eq!(output.normal_text, "Thinking... ");
+        assert_eq!(output.calls.len(), 1);
     }
 
     #[test]
     fn deepseek_v32_parse_complete_converts_schema_types() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        let result = parser
+        let output = parser
             .parse_complete(
                 "<｜DSML｜function_calls>\n\
                  <｜DSML｜invoke name=\"convert\">\n\
@@ -142,9 +142,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(result.calls.len(), 1);
+        assert_eq!(output.calls.len(), 1);
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({
                 "whole": 5.0,
                 "flag": true,
@@ -158,7 +158,7 @@ mod tests {
     #[test]
     fn deepseek_v32_parse_complete_string_attr_overrides_schema_types() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        let result = parser
+        let output = parser
             .parse_complete(
                 "<｜DSML｜function_calls>\n\
                  <｜DSML｜invoke name=\"convert\">\n\
@@ -172,9 +172,9 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(result.calls.len(), 1);
+        assert_eq!(output.calls.len(), 1);
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({
                 "whole": "5.0",
                 "flag": "true",
@@ -186,9 +186,9 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_v32_parse_complete_unescapes_literal_closing_tags_in_parameter_value() {
+    fn deepseek_v32_parse_complete_preserves_raw_closing_tag_text_in_parameter_value() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        let result = parser
+        let output = parser
             .parse_complete(&build_tool_call(
                 "get_weather",
                 &[
@@ -202,9 +202,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({
-                "location": "Hangzhou </｜DSML｜parameter></｜DSML｜invoke></｜DSML｜function_calls>",
+                "location": "Hangzhou &lt;/｜DSML｜parameter&gt;&lt;/｜DSML｜invoke&gt;&lt;/｜DSML｜function_calls&gt;",
                 "date": "2026-05-08",
             })
         );
@@ -213,7 +213,7 @@ mod tests {
     #[test]
     fn deepseek_v32_streaming_extracts_single_tool_call() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        let result = collect_stream(
+        let output = collect_stream(
             &mut parser,
             &[
                 "<｜DSML｜function_calls>\n",
@@ -224,11 +224,11 @@ mod tests {
             ],
         );
 
-        assert!(result.normal_text.is_empty());
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
+        assert!(output.normal_text.is_empty());
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({ "location": "SF" })
         );
     }
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn deepseek_v32_streaming_preserves_prefix_text() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        let result = collect_stream(
+        let output = collect_stream(
             &mut parser,
             &[
                 "Thinking... ",
@@ -248,23 +248,23 @@ mod tests {
             ],
         );
 
-        assert_eq!(result.normal_text, "Thinking... ");
-        assert_eq!(result.calls.len(), 1);
+        assert_eq!(output.normal_text, "Thinking... ");
+        assert_eq!(output.calls.len(), 1);
     }
 
     #[test]
     fn deepseek_v32_streaming_without_tool_call_emits_text_incrementally() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        let result = collect_stream(&mut parser, &["Hello, ", "world!"]);
+        let output = collect_stream(&mut parser, &["Hello, ", "world!"]);
 
-        assert_eq!(result.normal_text, "Hello, world!");
-        assert!(result.calls.is_empty());
+        assert_eq!(output.normal_text, "Hello, world!");
+        assert!(output.calls.is_empty());
     }
 
     #[test]
     fn deepseek_v32_streaming_extracts_multiple_tool_calls_in_order() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        let result = collect_stream(
+        let output = collect_stream(
             &mut parser,
             &[&format!(
                 "{}\n{}",
@@ -274,17 +274,17 @@ mod tests {
             )],
         );
 
-        assert_eq!(result.calls.len(), 2);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[1].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[0].tool_index, 0);
-        assert_eq!(result.calls[1].tool_index, 1);
+        assert_eq!(output.calls.len(), 2);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls[1].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls[0].tool_index, 0);
+        assert_eq!(output.calls[1].tool_index, 1);
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({ "location": "SF" })
         );
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[1].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[1].arguments).unwrap(),
             json!({ "location": "NYC" })
         );
     }
@@ -294,11 +294,11 @@ mod tests {
         let text = build_tool_call("get_weather", &[("location", "SF")]);
         let chunks = split_by_chars(&text, 5);
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        let result = collect_stream(&mut parser, &chunks);
+        let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(result.calls.len(), 1);
+        assert_eq!(output.calls.len(), 1);
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({ "location": "SF" })
         );
     }
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn deepseek_v32_streaming_handles_bpe_chunked_dsml_opener() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        let result = collect_stream(
+        let output = collect_stream(
             &mut parser,
             &[
                 "<｜DSML｜",
@@ -333,11 +333,11 @@ mod tests {
             ],
         );
 
-        assert!(result.normal_text.is_empty());
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
+        assert!(output.normal_text.is_empty());
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({ "location": "Beijing" })
         );
     }
@@ -345,12 +345,12 @@ mod tests {
     #[test]
     fn deepseek_v32_streaming_truncated_parameter_does_not_leak_eos() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        parser.push("<｜DSML｜function_calls>\n").unwrap();
-        parser.push("<｜DSML｜invoke name=\"get_weather\">\n").unwrap();
+        parser.parse_chunk("<｜DSML｜function_calls>\n").unwrap();
+        parser.parse_chunk("<｜DSML｜invoke name=\"get_weather\">\n").unwrap();
         parser
-            .push("<｜DSML｜parameter name=\"location\" string=\"true\">Tokyo")
+            .parse_chunk("<｜DSML｜parameter name=\"location\" string=\"true\">Tokyo")
             .unwrap();
-        parser.push("<｜end▁of▁sentence｜>").unwrap();
+        parser.parse_chunk("<｜end▁of▁sentence｜>").unwrap();
 
         let error = parser.finish().unwrap_err();
         assert!(error.to_report_string().contains("incomplete DeepSeek DSML tool call"));
@@ -358,7 +358,7 @@ mod tests {
     #[test]
     fn deepseek_v32_streaming_drops_eos_after_complete_tool_calls() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        let result = collect_stream(
+        let output = collect_stream(
             &mut parser,
             &[
                 "<｜DSML｜function_calls>\n",
@@ -369,15 +369,15 @@ mod tests {
             ],
         );
 
-        assert!(result.normal_text.is_empty());
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
+        assert!(output.normal_text.is_empty());
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
     }
 
     #[test]
     fn deepseek_v32_streaming_ignores_text_after_complete_tool_calls() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        let result = collect_stream(
+        let output = collect_stream(
             &mut parser,
             &[
                 "<｜DSML｜function_calls>\n",
@@ -389,17 +389,19 @@ mod tests {
             ],
         );
 
-        assert!(result.normal_text.is_empty());
-        assert_eq!(result.calls.len(), 1);
+        assert!(output.normal_text.is_empty());
+        assert_eq!(output.calls.len(), 1);
     }
 
     #[test]
     fn deepseek_v32_streaming_does_not_emit_incomplete_invoke() {
         let mut parser = DeepSeekV32ToolParser::new(&test_tools());
-        parser.push("<｜DSML｜function_calls>\n").unwrap();
-        parser.push("<｜DSML｜invoke name=\"get_weather\">\n").unwrap();
+        parser.parse_chunk("<｜DSML｜function_calls>\n").unwrap();
+        parser.parse_chunk("<｜DSML｜invoke name=\"get_weather\">\n").unwrap();
         parser
-            .push("<｜DSML｜parameter name=\"location\" string=\"true\">SF</｜DSML｜parameter>\n")
+            .parse_chunk(
+                "<｜DSML｜parameter name=\"location\" string=\"true\">SF</｜DSML｜parameter>\n",
+            )
             .unwrap();
 
         let error = parser.finish().unwrap_err();
