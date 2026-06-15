@@ -193,7 +193,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         if q_dtype == "nvfp4":
             q_dtype = None
-            logger.info_once("Using NIXL EP bfloat16 dispatch for NVFP4 MoE.")
+            logger.debug_once("Using NIXL EP bfloat16 dispatch for NVFP4 MoE.")
 
         x, x_scales = moe_kernel_quantize_input(
             x,
