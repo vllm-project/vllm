@@ -42,13 +42,13 @@ NO_CONTENT: dict[str, Any] = {
     "output": "This is content",
     "reasoning": "This is content",
     "content": None,
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 NO_REASONING_STREAMING: dict[str, Any] = {
     "output": "This is a reasoning section",
     "reasoning": "This is a reasoning section",
     "content": None,
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 MULTIPLE_LINES: dict[str, Any] = {
     "output": "This\nThat</seed:think>This is the rest\nThat",
@@ -72,7 +72,7 @@ NO_TOKENS: dict[str, Any] = {
     "output": "This is just content without any reasoning tokens",
     "reasoning": "This is just content without any reasoning tokens",
     "content": None,
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 
 
@@ -195,8 +195,9 @@ def test_is_reasoning_end(seedoss_tokenizer):
     end_token_id = parser.end_token_id
     assert parser.is_reasoning_end([1, 2, end_token_id, 4]) is True
 
-    # Test without end token
-    assert parser.is_reasoning_end([1, 2, 3, 4]) is False
+    # Test without end token — no reasoning tokens means thinking was
+    # never started, so treat as already ended.
+    assert parser.is_reasoning_end([1, 2, 3, 4]) is True
 
 
 def test_extract_content_ids(seedoss_tokenizer):

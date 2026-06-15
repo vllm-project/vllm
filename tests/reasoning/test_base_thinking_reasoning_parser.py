@@ -116,7 +116,7 @@ class TestBaseThinkingReasoningParserMethods:
         # Test with end token present
         assert parser.is_reasoning_end([1, 2, end_token_id, 4]) is True
 
-        # Test without end token
+        # Test without any reasoning tokens
         assert parser.is_reasoning_end([1, 2, 3, 4]) is False
 
         # Test with empty list

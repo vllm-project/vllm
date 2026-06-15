@@ -22,13 +22,13 @@ INVALID_SIMPLE_REASONING = {
     "output": "This is a reasoning section[/THINK]This is the rest",
     "reasoning": None,
     "content": "This is a reasoning sectionThis is the rest",
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 INVALID_COMPLETE_REASONING = {
     "output": "This is a reasoning section[/THINK]",
     "reasoning": None,
     "content": "This is a reasoning section",
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 NO_CONTENT = {
     "output": "[THINK]This is reasoning",
@@ -40,31 +40,31 @@ NO_REASONING = {
     "output": "This is content",
     "reasoning": None,
     "content": "This is content",
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 NO_REASONING_STREAMING = {
     "output": "This is a reasoning section",
     "reasoning": None,
     "content": "This is a reasoning section",
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 INVALID_MULTIPLE_LINES = {
     "output": "This\nThat[/THINK]This is the rest\nThat",
     "reasoning": None,
     "content": "This\nThatThis is the rest\nThat",
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 INVALID_SHORTEST_REASONING_NO_STREAMING = {
     "output": "[/THINK]This is the rest",
     "reasoning": None,
     "content": "This is the rest",
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 INVALID_SHORTEST_REASONING = {
     "output": "[/THINK]This is the rest",
     "reasoning": None,
     "content": "This is the rest",
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 REASONING_WITH_THINK = {
     "output": "[THINK]This is a reasoning section[/THINK]This is the rest",
@@ -88,13 +88,13 @@ INVALID_SHORTEST_REASONING_NO_STREAMING_WITH_THINK = {
     "output": "[/THINK]This is the rest",
     "reasoning": None,
     "content": "This is the rest",
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 INVALID_SHORTEST_REASONING_WITH_THINK = {
     "output": "[/THINK]This is the rest",
     "reasoning": None,
     "content": "This is the rest",
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 THINK_NO_END = {
     "output": "[THINK]This is a reasoning section",
@@ -106,13 +106,13 @@ EMPTY = {
     "output": "",
     "reasoning": None,
     "content": "",
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 EMPTY_STREAMING = {
     "output": "",
     "reasoning": None,
     "content": None,
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 NEW_LINE = {
     "output": "Before\n[THINK]This is a reasoning section[/THINK]\nThis is the rest",
