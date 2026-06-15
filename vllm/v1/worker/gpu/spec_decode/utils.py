@@ -29,9 +29,8 @@ class DraftTokensHandler:
         self.num_draft_tokens = draft_tokens.shape[1]
 
         needs_draft_copy = input_batch.has_structured_output_reqs
-        needs_valid_copy = num_valid_draft_tokens is not None
 
-        if not needs_draft_copy and not needs_valid_copy:
+        if not needs_draft_copy and num_valid_draft_tokens is None:
             self.draft_tokens_np = None
             self.num_valid_draft_tokens_np = None
             return
@@ -41,14 +40,20 @@ class DraftTokensHandler:
         current_stream = torch.cuda.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
+            # draft_tokens / num_valid_draft_tokens are temporary allocations on
+            # the main stream and read here on copy_stream; without record_stream,
+            # the caching allocator may reuse their memory before the async copy
+            # executes.
             if needs_draft_copy:
                 self.draft_tokens_np = async_copy_to_np(draft_tokens)
+                draft_tokens.record_stream(self.copy_stream)
             else:
                 self.draft_tokens_np = None
-            if needs_valid_copy:
+            if num_valid_draft_tokens is not None:
                 self.num_valid_draft_tokens_np = async_copy_to_np(
                     num_valid_draft_tokens
                 )
+                num_valid_draft_tokens.record_stream(self.copy_stream)
             else:
                 self.num_valid_draft_tokens_np = None
             self.copy_event.record()
