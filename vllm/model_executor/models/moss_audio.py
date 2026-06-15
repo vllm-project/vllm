@@ -60,10 +60,12 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
     _require_is_multimodal,
 )
+from .module_mapping import MultiModelKeys
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
 from .utils import (
     AutoWeightsLoader,
@@ -1452,7 +1454,7 @@ class MossAudioMultiModalProcessor(BaseMultiModalProcessor[MossAudioProcessingIn
     info=MossAudioProcessingInfo,
     dummy_inputs=MossAudioDummyInputsBuilder,
 )
-class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP):
+class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1478,6 +1480,11 @@ class MossAudioModel(nn.Module, SupportsMultiModal, SupportsPP):
             "language_model.norm.": "language_model.model.norm.",
         }
     )
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        return MultiModelKeys.from_string_field(
+            language_model="language_model.",
+        )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

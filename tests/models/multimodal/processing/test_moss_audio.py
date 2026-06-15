@@ -8,6 +8,7 @@ import pytest
 import torch
 from transformers import Qwen3Config
 
+from vllm.model_executor.models.interfaces import SupportsLoRA, supports_lora
 from vllm.model_executor.models.moss_audio import (
     MOSS_AUDIO_BOS_TOKEN,
     MOSS_AUDIO_BOS_TOKEN_ID,
@@ -288,6 +289,18 @@ def test_moss_audio_multimodal_processor_handles_token_and_cache_paths():
     _assert_mm_inputs_equal(baseline_text, cached_text_miss)
     _assert_mm_inputs_equal(baseline_text, cached_text_hit)
     _assert_mm_inputs_equal(baseline_text, cached_token_hit)
+
+
+def test_moss_audio_supports_language_model_lora_only():
+    assert supports_lora(MossAudioModel)
+
+    model = object.__new__(MossAudioModel)
+    assert isinstance(model, SupportsLoRA)
+
+    mapping = model.get_mm_mapping()
+    assert mapping.language_model == ["language_model."]
+    assert mapping.tower_model == []
+    assert mapping.connector == []
 
 
 def test_moss_audio_error_paths():
