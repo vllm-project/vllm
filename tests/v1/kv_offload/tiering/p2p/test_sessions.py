@@ -696,7 +696,7 @@ class TestFinishRequestServerSide:
         session, conn, transport = _make_session()
         _activate(session, conn)
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
-        # finish_request first — client_id is None -> defer.
+        # finish_request first — no demand received yet -> defer.
         session.finish_request("req-1")
         assert "req-1" in session._outbound
         # Fetch arrives now: demand fully satisfied by available.

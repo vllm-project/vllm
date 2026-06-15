@@ -93,10 +93,13 @@ class _MatchResult(NamedTuple):
 
 @dataclass
 class _OutboundRequestState:
-    """Server-role state for a single peer fetch request."""
+    """Server-role state for a single peer fetch request.
 
-    kv_request_id: str
-    client_id: str | None = None
+    The owning ``kv_request_id`` is the dict key in
+    ``P2PSession._outbound`` and is not duplicated on the value.
+    """
+
+    demand_received: bool = False
     available: dict[OffloadKey, tuple[int, int]] = field(
         default_factory=dict
     )  # key → (job_id, local_block_idx): blocks we have, awaiting demand
@@ -130,12 +133,11 @@ class _OutboundRequestState:
 
     def add_fetch_demand(
         self,
-        client_id: str,
         block_hashes: Sequence[OffloadKey],
         block_indexes: Sequence[int],
     ) -> _MatchResult:
         """Register the peer's fetch demand. Returns matched pairs."""
-        self.client_id = client_id
+        self.demand_received = True
         self.remaining = len(block_hashes)
 
         local_idxs: list[int] = []
@@ -302,7 +304,7 @@ class P2PSession:
         peer to stop waiting (TransferDoneMsg success=False) instead of
         letting it hit _LOAD_TIMEOUT_S.
 
-        If the decoder hasn't sent fetch yet (client_id is None),
+        If the decoder hasn't sent fetch yet (no demand received),
         defer — _on_fetch will finalize once demand arrives.
 
         If inflight transfers exist for this id, defer — the last
@@ -313,7 +315,7 @@ class P2PSession:
         if req is None:
             return
         req.finishing = True
-        if req.client_id is None:
+        if not req.demand_received:
             return
         if self._has_inflight_for(kv_request_id):
             return
@@ -342,11 +344,9 @@ class P2PSession:
     ) -> None:
         """New blocks stored locally — match against pending fetch demand."""
         self._store_jobs[job_id] = time.monotonic()
-        req = self._outbound.setdefault(
-            kv_request_id, _OutboundRequestState(kv_request_id=kv_request_id)
-        )
+        req = self._outbound.setdefault(kv_request_id, _OutboundRequestState())
         result = req.add_stored_blocks(keys, block_ids, job_id)
-        if result.local_idxs and req.client_id is not None:
+        if result.local_idxs and req.demand_received:
             self._submit_transfer(kv_request_id, result)
 
     # ------------------------------------------------------------------
@@ -447,7 +447,7 @@ class P2PSession:
                 self._store_jobs.pop(job_id, None)
                 results.append(StoreResult(job_id=job_id, success=True))
             req = self._outbound.get(xfer.kv_request_id)
-            if req is not None and req.client_id is not None:
+            if req is not None and req.demand_received:
                 req.remaining -= xfer.block_count
                 assert req.remaining >= 0, (
                     f"remaining went negative for kv_request_id={xfer.kv_request_id}"
@@ -483,7 +483,7 @@ class P2PSession:
                 self._store_jobs.pop(job_id, None)
                 results.append(StoreResult(job_id=job_id, success=False))
             req = self._outbound.pop(xfer.kv_request_id, None)
-            if req is not None and req.client_id is not None:
+            if req is not None and req.demand_received:
                 self._send(
                     {
                         TYPE_KEY: TransferDoneMsg.TYPE,
@@ -631,10 +631,8 @@ class P2PSession:
             kv_request_id,
             len(block_hashes),
         )
-        req = self._outbound.setdefault(
-            kv_request_id, _OutboundRequestState(kv_request_id=kv_request_id)
-        )
-        result = req.add_fetch_demand(self.peer_id, block_hashes, block_indexes)
+        req = self._outbound.setdefault(kv_request_id, _OutboundRequestState())
+        result = req.add_fetch_demand(block_hashes, block_indexes)
         if result.local_idxs:
             self._submit_transfer(kv_request_id, result)
         # Prefiller-first mode: finish_request may have run before
