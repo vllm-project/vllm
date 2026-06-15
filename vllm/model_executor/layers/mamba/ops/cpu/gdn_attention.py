@@ -371,19 +371,21 @@ def cpu_gdn_attention_core_zen(
         g = g.unsqueeze(0)
         beta = beta.unsqueeze(0)
 
-        # Rebase chunk_indices / chunk_offsets onto the prefill-only slice;
-        # vLLM computes them against the full non-spec batch.
-        if num_decodes > 0:
-            prefill_chunk_offsets = (
-                attn_metadata_i.chunk_offsets[num_decodes:] - num_decodes
-            )
-            prefill_chunk_indices = attn_metadata_i.chunk_indices[
-                num_decodes:
-            ].clone()
-            prefill_chunk_indices[:, 0] -= num_decodes
-        else:
-            prefill_chunk_indices = attn_metadata_i.chunk_indices
-            prefill_chunk_offsets = attn_metadata_i.chunk_offsets
+        # Recompute the FLA chunk metadata from the prefill-only cu_seqlens
+        # (prefill_query_start_loc) using the same helpers vLLM uses. The
+        # attn_metadata chunk_indices/chunk_offsets are ALREADY rebased to the
+        # prefill-only slice by GDNAttentionMetadataBuilder.build(), so peeling
+        # them again by num_decodes double-applies and produces a size mismatch
+        # (chunk_offsets.size(0) == cu_seqlens.size(0) - 1), which trips the
+        # ZENTORCH_CHECK at ChunkGatedDeltaRuleFwd.cpp:373. Building them here
+        # is self-consistent with the cu_seqlens passed to the kernel.
+        from vllm.model_executor.layers.fla.ops.index import (
+            prepare_chunk_indices,
+            prepare_chunk_offsets,
+        )
+
+        prefill_chunk_indices = prepare_chunk_indices(prefill_query_start_loc, 64)
+        prefill_chunk_offsets = prepare_chunk_offsets(prefill_query_start_loc, 64)
 
         initial_state = ssm_state[prefill_state_indices].contiguous()
         initial_state[~prefill_has_initial_state, ...] = 0
