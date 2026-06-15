@@ -12,6 +12,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     get_conv_copy_spec,
     get_temporal_copy_spec,
+    is_conv_state_dim_first,
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -43,6 +44,9 @@ def postprocess_mamba_fused_kernel(
     state_inner_sizes_ptr,  # number of elements in inner dimensions
     state_conv_widths_ptr,  # conv width for conv states (0 for temporal)
     state_group_indices_ptr,  # maps state_idx to group index in block table
+    # DS conv row metadata. Zero keeps the single-region copy path.
+    state_dim_row_count_ptr,  # int32: per-block dim row count for DS conv
+    state_dim_row_stride_ptr,  # int64: bytes between rows for DS conv
     # Output: num_accepted_tokens update (for src==dst case)
     num_accepted_tokens_out_ptr,
     # Runtime parameter (varies per batch - NOT constexpr to avoid recompilation)
@@ -121,8 +125,38 @@ def postprocess_mamba_fused_kernel(
     # conv_width == 0 means this is a temporal state (get_temporal_copy_spec logic)
     is_conv_state = conv_width > 0
 
+    # Update accepted-token count before early exits.
+    if src_block_idx == dest_block_idx and state_idx == 0:
+        tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
+
+    # Skip no-op self-copy.
+    if src_block_idx == dest_block_idx and accept_token_bias == 0:
+        return
+
+    # DS conv tails are strided across dim rows, so copy each row here.
+    dim_rows = tl.load(state_dim_row_count_ptr + state_idx)
+    is_ds_conv = is_conv_state and dim_rows > 0
+
+    if is_ds_conv:
+        row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
+        per_row_bytes = (conv_width - accept_token_bias).to(tl.int64) * state_elem_size
+        bias_bytes = accept_token_bias.to(tl.int64) * state_elem_size
+        src_block_addr = state_base_addr + src_block_id * state_block_stride
+        dst_block_addr = state_base_addr + dest_block_id * state_block_stride
+        offsets = tl.arange(0, COPY_BLOCK_SIZE)
+        for d in range(0, dim_rows):
+            row_src = src_block_addr + d * row_stride + bias_bytes
+            row_dst = dst_block_addr + d * row_stride
+            for i in range(0, per_row_bytes, COPY_BLOCK_SIZE):
+                mask = (i + offsets) < per_row_bytes
+                curr_src = (row_src + i + offsets).to(tl.pointer_type(tl.uint8))
+                curr_dst = (row_dst + i + offsets).to(tl.pointer_type(tl.uint8))
+                data = tl.load(curr_src, mask=mask)
+                tl.store(curr_dst, data, mask=mask)
+        return
+
     if is_conv_state:
-        # Conv state: copy
+        # SD conv: copy
         #   state[block_table[req_idx, src_block_idx],  accept_token_bias:]
         # to
         #   state[block_table[req_idx, dest_block_idx], :conv_width - accept_token_bias]
@@ -150,19 +184,6 @@ def postprocess_mamba_fused_kernel(
         # state_block_stride which is the page stride and can exceed the
         # actual data when the state tensor uses as_strided page padding.
         copy_size = state_inner_size * state_elem_size
-
-    # Mirror postprocess_mamba's trailing
-    #     if src_block_idx == dest_block_idx: num_accepted_tokens_cpu[i] = 1
-    # This runs whether or not the copy below is skipped (it's per-request, so
-    # only state_idx == 0 writes).
-    if src_block_idx == dest_block_idx and state_idx == 0:
-        tl.store(num_accepted_tokens_out_ptr + req_idx, 1)
-
-    # Mirror collect_mamba_copy_meta's early return: src==dst with no token
-    # bias means source and destination ranges coincide, so the copy is a
-    # no-op.
-    if src_block_idx == dest_block_idx and accept_token_bias == 0:
-        return
 
     offsets = tl.arange(0, COPY_BLOCK_SIZE)
     for i in range(0, copy_size, COPY_BLOCK_SIZE):
@@ -200,79 +221,6 @@ def batch_memcpy(src_ptrs, dst_ptrs, sizes):
     grid = (batch,)
     BLOCK_SIZE = 1024
     batch_memcpy_kernel[grid](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=BLOCK_SIZE)
-
-
-@triton.jit
-def ds_conv_tail_copy_kernel(
-    state,
-    src_block_id,
-    dst_block_id,
-    dim: tl.constexpr,
-    state_len: tl.constexpr,
-    offset,
-    stride_block: tl.constexpr,
-    stride_dim: tl.constexpr,
-    stride_state: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-    BLOCK_T: tl.constexpr,
-):
-    pid_d = tl.program_id(0)
-    pid_t = tl.program_id(1)
-    rows = (pid_d * BLOCK_D + tl.arange(0, BLOCK_D)).to(tl.int64)
-    cols = (pid_t * BLOCK_T + tl.arange(0, BLOCK_T)).to(tl.int64)
-    # Large block offsets can exceed int32; keep pointer math in int64.
-    src_block_i64 = tl.full((), src_block_id, tl.int64)
-    dst_block_i64 = tl.full((), dst_block_id, tl.int64)
-    offset_i64 = tl.full((), offset, tl.int64)
-    stride_block_i64 = tl.full((), stride_block, tl.int64)
-    stride_dim_i64 = tl.full((), stride_dim, tl.int64)
-    stride_state_i64 = tl.full((), stride_state, tl.int64)
-    tail_len = state_len - offset
-    mask = (rows[:, None] < dim) & (cols[None, :] < tail_len)
-    src_offsets = (
-        src_block_i64 * stride_block_i64
-        + rows[:, None] * stride_dim_i64
-        + (cols[None, :] + offset_i64) * stride_state_i64
-    )
-    dst_offsets = (
-        dst_block_i64 * stride_block_i64
-        + rows[:, None] * stride_dim_i64
-        + cols[None, :] * stride_state_i64
-    )
-    src = state + src_offsets
-    dst = state + dst_offsets
-    values = tl.load(src, mask=mask, other=0)
-    tl.store(dst, values, mask=mask)
-
-
-def ds_conv_tail_copy(
-    state: torch.Tensor, src_block_id: int, dst_block_id: int, offset: int
-) -> None:
-    """Copy DS-layout conv tail from source block into destination prefix."""
-    if offset <= 0:
-        raise ValueError("ds_conv_tail_copy expects offset > 0")
-    if state.dim() != 3:
-        raise ValueError(f"expected 3D Mamba conv state, got {tuple(state.shape)}")
-    _, dim, state_len = state.shape
-    if offset >= state_len:
-        return
-    stride_block, stride_dim, stride_state = state.stride()
-    block_d = 16
-    block_t = 8
-    grid = (triton.cdiv(dim, block_d), triton.cdiv(state_len - offset, block_t))
-    ds_conv_tail_copy_kernel[grid](
-        state,
-        int(src_block_id),
-        int(dst_block_id),
-        int(dim),
-        int(state_len),
-        int(offset),
-        int(stride_block),
-        int(stride_dim),
-        int(stride_state),
-        BLOCK_D=block_d,
-        BLOCK_T=block_t,
-    )
 
 
 def get_mamba_groups(kv_cache_config: KVCacheConfig) -> tuple[list[int], MambaSpec]:
@@ -344,6 +292,9 @@ class MambaSpecDecodeGPUContext:
     state_inner_sizes: torch.Tensor  # int64: elements in inner dimensions
     state_conv_widths: torch.Tensor  # int32: conv width (0 for temporal states)
     state_group_indices: torch.Tensor  # int32: maps state_idx to group index
+    # DS conv row metadata. Zero keeps the single-region copy path.
+    state_dim_row_count: torch.Tensor  # int32: per-block dim row count
+    state_dim_row_stride: torch.Tensor  # int64: bytes between rows
 
     # Configuration
     block_size: int
@@ -410,6 +361,12 @@ class MambaSpecDecodeGPUContext:
             ),
             state_group_indices=torch.zeros(
                 total_states, dtype=torch.int32, device=device
+            ),
+            state_dim_row_count=torch.zeros(
+                total_states, dtype=torch.int32, device=device
+            ),
+            state_dim_row_stride=torch.zeros(
+                total_states, dtype=torch.int64, device=device
             ),
             block_size=mamba_spec.block_size,
             num_layers=num_layers,
@@ -503,17 +460,22 @@ class MambaSpecDecodeGPUContext:
                         or copy_func is get_temporal_copy_spec
                     ), f"unexpected copy func: {copy_func}"
                     if copy_func is get_conv_copy_spec:
-                        # Conv state: conv_width is state.size(1)
-                        # inner_size is stride(1) = elements per conv position,
-                        # used to compute byte offset for state[block, offset:]
-                        conv_w = state.size(1) if state.dim() > 1 else 0
-                        self.state_conv_widths[idx] = conv_w
-                        if state.dim() > 2:
-                            # stride(1) = product of dims[2:] for contiguous tensor
-                            self.state_inner_sizes[idx] = state.stride(1)
-                        else:
-                            # 2D tensor: [num_blocks, conv_dim], no inner dims
+                        if is_conv_state_dim_first() and state.dim() > 2:
+                            # DS layout: state_len is the slide axis.
+                            self.state_conv_widths[idx] = state.size(2)
                             self.state_inner_sizes[idx] = 1
+                            self.state_dim_row_count[idx] = state.size(1)
+                            self.state_dim_row_stride[idx] = (
+                                state.stride(1) * state.element_size()
+                            )
+                        else:
+                            # SD layout (num_blocks, state_len, dim) or 2D.
+                            conv_w = state.size(1) if state.dim() > 1 else 0
+                            self.state_conv_widths[idx] = conv_w
+                            if state.dim() > 2:
+                                self.state_inner_sizes[idx] = state.stride(1)
+                            else:
+                                self.state_inner_sizes[idx] = 1
                     else:
                         # Temporal state: inner_size = natural elements per
                         # block (prod of inner dims).  The kernel uses this
@@ -594,6 +556,8 @@ class MambaSpecDecodeGPUContext:
             self.state_inner_sizes,
             self.state_conv_widths,
             self.state_group_indices,
+            self.state_dim_row_count,
+            self.state_dim_row_stride,
             self.num_accepted_tokens_out,
             num_reqs,
             block_size=self.block_size,
@@ -672,15 +636,6 @@ def collect_mamba_copy_meta(
                 copy_spec = state_copy_func(
                     state, block_ids, src_block_idx, accept_token_bias + 1
                 )
-
-                if copy_spec.ds_conv_tail:
-                    ds_conv_tail_copy(
-                        state,
-                        copy_spec.src_block_id,
-                        dest_block_id,
-                        copy_spec.offset,
-                    )
-                    continue
 
                 src_ptrs_np[offset] = copy_spec.start_addr
                 dst_ptrs_np[offset] = state[dest_block_id].data_ptr()

@@ -494,8 +494,15 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(mamba_utils, "do_mamba_copy_block", fake_copy_fn)
 
 
+@pytest.mark.parametrize("conv_layout", ["SD", "DS"])
 @create_new_process_for_each_test()
-def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
+def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch, conv_layout: str):
+    # Set the env before spawning the ref-state subprocess so both processes
+    # use the same conv state layout (issue #38898).
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", conv_layout)
+    from vllm.model_executor.layers.mamba import mamba_utils as model_mamba_utils
+
+    model_mamba_utils.get_conv_state_layout.cache_clear()
     run_ref_mamba_state_in_subprocess()
     apply_patch(monkeypatch)
     prompt_dataset = datasets.load_dataset("heheda/a_long_article")

@@ -9,8 +9,6 @@ import numpy as np
 import pytest
 import torch
 
-import vllm.envs as envs
-import vllm.model_executor.layers.mamba.mamba_utils as mamba_layer_utils
 from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     get_temporal_copy_spec,
@@ -22,7 +20,6 @@ from vllm.v1.worker.mamba_utils import (
     MambaSpecDecodeGPUContext,
     collect_mamba_copy_meta,
     do_mamba_copy_block,
-    ds_conv_tail_copy,
     preprocess_mamba,
 )
 
@@ -33,141 +30,6 @@ _COPY_FUNCS: tuple[MambaStateCopyFunc, ...] = (
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
-
-
-@pytest.fixture
-def set_conv_state_layout(monkeypatch):
-    def _set(layout: str | None):
-        monkeypatch.setattr(envs, "VLLM_SSM_CONV_STATE_LAYOUT", layout)
-        mamba_layer_utils.get_conv_state_layout.cache_clear()
-
-    yield _set
-    mamba_layer_utils.get_conv_state_layout.cache_clear()
-
-
-def test_get_conv_copy_spec_sd_layout_tail_is_contiguous(set_conv_state_layout):
-    set_conv_state_layout("SD")
-    state = torch.arange(3 * 5 * 7, dtype=torch.float32).reshape(3, 5, 7)
-    spec = get_conv_copy_spec(
-        state=state,
-        block_ids=[0, 1, 2],
-        cur_block_idx=1,
-        num_accepted_tokens=3,
-    )
-
-    expected = state[1, 2:]
-    assert not spec.ds_conv_tail
-    assert spec.start_addr == expected.data_ptr()
-    assert spec.num_elements == expected.numel()
-
-
-def test_get_conv_copy_spec_ds_layout_zero_offset_is_contiguous(
-    set_conv_state_layout,
-):
-    set_conv_state_layout("DS")
-    state = torch.arange(3 * 7 * 5, dtype=torch.float32).reshape(3, 7, 5)
-    spec = get_conv_copy_spec(
-        state=state,
-        block_ids=[0, 1, 2],
-        cur_block_idx=1,
-        num_accepted_tokens=1,
-    )
-
-    expected = state[1]
-    assert not spec.ds_conv_tail
-    assert spec.start_addr == expected.data_ptr()
-    assert spec.num_elements == expected.numel()
-
-
-def test_get_conv_copy_spec_ds_layout_tail_returns_strided_copy_spec(
-    set_conv_state_layout,
-):
-    set_conv_state_layout("DS")
-    state = torch.arange(3 * 7 * 5, dtype=torch.float32).reshape(3, 7, 5)
-    spec = get_conv_copy_spec(
-        state=state,
-        block_ids=[0, 1, 2],
-        cur_block_idx=1,
-        num_accepted_tokens=3,
-    )
-
-    assert spec.ds_conv_tail
-    assert spec.start_addr == 0
-    assert spec.num_elements == 0
-    assert spec.src_block_id == 1
-    assert spec.offset == 2
-
-
-def test_collect_mamba_copy_meta_uses_ds_tail_copy_for_ds_layout(
-    set_conv_state_layout,
-):
-    set_conv_state_layout("DS")
-    copy_bufs = MagicMock()
-    copy_bufs.src_ptrs.np = np.zeros(4, dtype=np.int64)
-    copy_bufs.dst_ptrs.np = np.zeros(4, dtype=np.int64)
-    copy_bufs.sizes.np = np.zeros(4, dtype=np.int32)
-    copy_bufs.offset = 0
-
-    kv_cache_config = MagicMock()
-    kv_cache_config.kv_cache_groups = [MagicMock(layer_names=["layer_0"])]
-    req_state = MagicMock()
-    req_state.block_ids = {0: [10, 11, 12]}
-    state = torch.empty(3, 7, 5)
-    forward_context = {"layer_0": MagicMock(kv_cache=[state])}
-
-    with patch("vllm.v1.worker.mamba_utils.ds_conv_tail_copy") as copy_mock:
-        collect_mamba_copy_meta(
-            copy_bufs=copy_bufs,
-            kv_cache_config=kv_cache_config,
-            mamba_state_copy_funcs=(get_conv_copy_spec,),
-            mamba_group_ids=[0],
-            src_block_idx=0,
-            dest_block_idx=2,
-            accept_token_bias=1,
-            req_state=req_state,
-            forward_context=forward_context,
-        )
-
-    copy_mock.assert_called_once_with(state, 10, 12, 1)
-    assert copy_bufs.offset == 0
-
-
-def test_ds_conv_tail_copy_rejects_nonpositive_offset():
-    with pytest.raises(ValueError, match="expects offset > 0"):
-        ds_conv_tail_copy(torch.empty(1, 2, 3), 0, 0, 0)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("offset", [1, 2, 4])
-def test_ds_conv_tail_copy_matches_torch_reference(offset):
-    device = torch.device("cuda:0")
-    num_blocks, dim, state_len = 5, 7, 5
-    state = torch.arange(
-        num_blocks * dim * state_len,
-        dtype=torch.float32,
-        device=device,
-    ).reshape(num_blocks, dim, state_len)
-    src_block_id = 3
-    dst_block_id = 1
-    expected = state.clone()
-    expected[dst_block_id, :, : state_len - offset] = state[src_block_id, :, offset:]
-
-    ds_conv_tail_copy(state, src_block_id, dst_block_id, offset)
-    torch.accelerator.synchronize()
-
-    torch.testing.assert_close(state, expected)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_ds_conv_tail_copy_offset_at_state_len_is_noop():
-    device = torch.device("cuda:0")
-    state = torch.arange(3 * 4 * 5, dtype=torch.float32, device=device).reshape(3, 4, 5)
-    expected = state.clone()
-
-    ds_conv_tail_copy(state, src_block_id=2, dst_block_id=1, offset=5)
-    torch.accelerator.synchronize()
-
-    torch.testing.assert_close(state, expected)
 
 
 def postprocess_mamba(
@@ -2269,4 +2131,119 @@ class TestPostprocessMambaFusedKernel:
             gpu_ctx.num_accepted_tokens_out[:num_reqs],
             expected_accepted,
             msg="num_accepted_tokens mismatch at accept_token_bias=2",
+        )
+
+    def test_ds_conv_layout_bias_gt_0_byte_equal_to_sd(
+        self, device, test_config, monkeypatch
+    ):
+        """DS conv postprocess should match SD when accept_token_bias > 0."""
+        from vllm.model_executor.layers.mamba import mamba_utils as model_mamba_utils
+
+        cfg = test_config
+        torch.manual_seed(38898)
+
+        req_ids = ["req_0"]
+        num_computed_tokens = [30]
+        num_scheduled_tokens = {"req_0": 1}
+        num_draft_tokens: dict[str, int] = {}
+        num_accepted_tokens = [2]  # Results in accept_token_bias = 1
+        mamba_state_idx = [1]  # src_block_idx = 1 = dest_block_idx
+        block_ids_per_req = [list(range(8))]
+
+        layer_names = ["layer_0"]
+        kv_cache_config = _make_kv_cache_config(cfg, layer_names)
+
+        num_reqs = len(req_ids)
+        block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
+        block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
+
+        # Same logical conv state in SD and DS layouts.
+        sd_source_conv = torch.randn(
+            cfg.num_blocks,
+            cfg.conv_width,
+            cfg.conv_inner_dim,
+            dtype=cfg.dtype,
+            device=device,
+        )
+        ds_source_conv = sd_source_conv.permute(0, 2, 1).contiguous()
+        sd_source_temporal = torch.randn(
+            cfg.num_blocks, cfg.temporal_state_dim, dtype=cfg.dtype, device=device
+        )
+
+        # SD GPU path. Default layout is SD.
+        model_mamba_utils.get_conv_state_layout.cache_clear()
+        sd_conv = sd_source_conv.clone()
+        sd_temporal = sd_source_temporal.clone()
+        forward_context_sd = {
+            "layer_0": _make_mock_attention(sd_conv, sd_temporal),
+        }
+        gpu_ctx_sd = _make_gpu_ctx(cfg, kv_cache_config, device)
+        _run_gpu_postprocess(
+            gpu_ctx_sd,
+            kv_cache_config=kv_cache_config,
+            forward_context=forward_context_sd,
+            copy_funcs=_COPY_FUNCS,
+            block_table=block_table_gpu,
+            req_ids=req_ids,
+            num_accepted_tokens=num_accepted_tokens,
+            mamba_state_idx=mamba_state_idx,
+            num_scheduled_tokens=num_scheduled_tokens,
+            num_computed_tokens=num_computed_tokens,
+            num_draft_tokens=num_draft_tokens,
+            device=device,
+        )
+        torch.accelerator.synchronize()
+
+        # Sanity: SD path actually modified the state (copy was performed).
+        assert not torch.equal(sd_conv, sd_source_conv), (
+            "SD baseline did not modify conv state; test setup is wrong"
+        )
+
+        # DS GPU path on the DS twin.
+        monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", "DS")
+        model_mamba_utils.get_conv_state_layout.cache_clear()
+        try:
+            ds_conv = ds_source_conv.clone()
+            ds_temporal = sd_source_temporal.clone()
+            forward_context_ds = {
+                "layer_0": _make_mock_attention(ds_conv, ds_temporal),
+            }
+            gpu_ctx_ds = _make_gpu_ctx(cfg, kv_cache_config, device)
+            _run_gpu_postprocess(
+                gpu_ctx_ds,
+                kv_cache_config=kv_cache_config,
+                forward_context=forward_context_ds,
+                copy_funcs=_COPY_FUNCS,
+                block_table=block_table_gpu,
+                req_ids=req_ids,
+                num_accepted_tokens=num_accepted_tokens,
+                mamba_state_idx=mamba_state_idx,
+                num_scheduled_tokens=num_scheduled_tokens,
+                num_computed_tokens=num_computed_tokens,
+                num_draft_tokens=num_draft_tokens,
+                device=device,
+            )
+            torch.accelerator.synchronize()
+        finally:
+            # Reset the lru cache so other tests see the default layout again.
+            model_mamba_utils.get_conv_state_layout.cache_clear()
+
+        # DS bytes, un-permuted, should match the SD result.
+        torch.testing.assert_close(
+            ds_conv.permute(0, 2, 1).contiguous(),
+            sd_conv,
+            msg=(
+                "DS conv post-kernel does not match SD baseline; the DS "
+                "row-loop in postprocess_mamba_fused_kernel is wrong."
+            ),
+        )
+        torch.testing.assert_close(
+            ds_temporal,
+            sd_temporal,
+            msg="DS temporal state diverged from SD",
+        )
+        torch.testing.assert_close(
+            gpu_ctx_ds.num_accepted_tokens_out[:num_reqs],
+            gpu_ctx_sd.num_accepted_tokens_out[:num_reqs],
+            msg="DS num_accepted_tokens diverged from SD",
         )
