@@ -194,9 +194,7 @@ def test_sm120_mqa_direct_topk_uses_triton_logits_when_logits_fit(
     kv_fp8 = (kv * kv_scale.reciprocal()[:, None]).to(torch.float8_e4m3fn)
     weights = torch.randn(num_q, num_heads, device="cuda", dtype=torch.float32)
     cu_seqlen_ks = torch.arange(num_q, device="cuda", dtype=torch.int32) % 3
-    cu_seqlen_ke = torch.full(
-        (num_q,), seq_len_kv, device="cuda", dtype=torch.int32
-    )
+    cu_seqlen_ke = torch.full((num_q,), seq_len_kv, device="cuda", dtype=torch.int32)
     out = torch.empty(num_q, topk_tokens, device="cuda", dtype=torch.int32)
 
     original_triton = sm12x_mqa.fp8_mqa_logits_triton
@@ -274,9 +272,7 @@ def test_sm120_mqa_direct_topk_uses_triton_chunks_when_logits_do_not_fit(
     kv_fp8 = (kv * kv_scale.reciprocal()[:, None]).to(torch.float8_e4m3fn)
     weights = torch.randn(num_q, num_heads, device="cuda", dtype=torch.float32)
     cu_seqlen_ks = torch.arange(num_q, device="cuda", dtype=torch.int32) % 4
-    cu_seqlen_ke = torch.full(
-        (num_q,), seq_len_kv, device="cuda", dtype=torch.int32
-    )
+    cu_seqlen_ke = torch.full((num_q,), seq_len_kv, device="cuda", dtype=torch.int32)
     out = torch.empty(num_q, topk_tokens, device="cuda", dtype=torch.int32)
 
     original_triton = sm12x_mqa.fp8_mqa_logits_triton

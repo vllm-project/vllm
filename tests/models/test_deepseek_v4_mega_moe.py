@@ -125,7 +125,7 @@ def test_deepseek_v4_mega_moe_finalize_uses_deep_gemm_wrapper(monkeypatch):
     )
 
     transformed = (object(), object())
-    calls = []
+    calls: list[object] = []
 
     def fake_runtime_check(self):
         calls.append("runtime_check")

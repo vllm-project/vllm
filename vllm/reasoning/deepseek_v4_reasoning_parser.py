@@ -21,9 +21,7 @@ if TYPE_CHECKING:
 # invoke a tool. The reasoning parser treats these as an implicit
 # end-of-reasoning when the explicit </think> token is missing, which the
 # model occasionally fails to emit at long context.
-_DSV4_TOOL_CALL_IMPLICIT_END_MARKERS: tuple[str, ...] = (
-    "<｜DSML｜tool_calls>",
-)
+_DSV4_TOOL_CALL_IMPLICIT_END_MARKERS: tuple[str, ...] = ("<｜DSML｜tool_calls>",)
 
 
 class DeepSeekV4ThinkingReasoningParser(DeepSeekR1ReasoningParser):
@@ -259,9 +257,7 @@ class DeepSeekV4ReasoningParser(ReasoningParser):
 
         self._parser: ReasoningParser
         if thinking:
-            self._parser = DeepSeekV4ThinkingReasoningParser(
-                tokenizer, *args, **kwargs
-            )
+            self._parser = DeepSeekV4ThinkingReasoningParser(tokenizer, *args, **kwargs)
         else:
             self._parser = IdentityReasoningParser(tokenizer, *args, **kwargs)
 

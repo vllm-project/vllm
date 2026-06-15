@@ -45,15 +45,11 @@ class FixFunctionalizationPass(VllmInductorPass):
             rope_targets.append(
                 torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
             )
-        if hasattr(
-            torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert"
-        ):
+        if hasattr(torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert"):
             fused_deepseek_v4_mla_targets.append(
                 torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert.default
             )
-        if hasattr(
-            torch.ops.vllm, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert"
-        ):
+        if hasattr(torch.ops.vllm, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert"):
             fused_deepseek_v4_mla_targets.append(
                 torch.ops.vllm.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert.default
             )

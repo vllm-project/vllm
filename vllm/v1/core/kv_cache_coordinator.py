@@ -627,9 +627,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # Attention-group indices (into ``self.attention_groups``) that
         # contain at least one EAGLE/MTP KV cache group.
         self.eagle_attn_group_indices: set[int] = {
-            i
-            for i, group in enumerate(self.attention_groups)
-            if group.use_eagle
+            i for i, group in enumerate(self.attention_groups) if group.use_eagle
         }
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:

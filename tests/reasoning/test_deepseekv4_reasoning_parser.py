@@ -83,12 +83,8 @@ def test_registration_resolves_to_v4_class():
         ({}, IdentityReasoningParser),
     ],
 )
-def test_dispatch_based_on_thinking_kwarg(
-    tokenizer, thinking_kwargs, expected_inner
-):
-    parser = DeepSeekV4ReasoningParser(
-        tokenizer, chat_template_kwargs=thinking_kwargs
-    )
+def test_dispatch_based_on_thinking_kwarg(tokenizer, thinking_kwargs, expected_inner):
+    parser = DeepSeekV4ReasoningParser(tokenizer, chat_template_kwargs=thinking_kwargs)
     assert isinstance(parser._parser, expected_inner)
 
 
@@ -195,7 +191,7 @@ def test_implicit_end_marker_in_isolated_delta(parser):
 
 def test_implicit_end_marker_within_delta_split(parser):
     """Marker appears partway through a delta — split it at the boundary."""
-    delta_text = f"tail of reasoning{DSML_MARKER}\n<｜DSML｜invoke name=\"w\""
+    delta_text = f'tail of reasoning{DSML_MARKER}\n<｜DSML｜invoke name="w"'
     delta = parser.extract_reasoning_streaming(
         previous_text="head ",
         current_text=f"head {delta_text}",
@@ -206,7 +202,7 @@ def test_implicit_end_marker_within_delta_split(parser):
     )
     assert delta is not None
     assert delta.reasoning == "tail of reasoning"
-    assert delta.content == f"{DSML_MARKER}\n<｜DSML｜invoke name=\"w\""
+    assert delta.content == f'{DSML_MARKER}\n<｜DSML｜invoke name="w"'
     assert parser._implicit_end_seen is True
 
 

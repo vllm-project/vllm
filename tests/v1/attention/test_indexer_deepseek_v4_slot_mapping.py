@@ -36,9 +36,7 @@ def test_indexer_builder_keeps_short_prefill_continuations_as_prefills(
         require_uniform=False,
         treat_short_extends_as_decodes=True,
     ):
-        captured["treat_short_extends_as_decodes"] = (
-            treat_short_extends_as_decodes
-        )
+        captured["treat_short_extends_as_decodes"] = treat_short_extends_as_decodes
         raise RuntimeError("stop after split_decodes_and_prefills")
 
     monkeypatch.setattr(

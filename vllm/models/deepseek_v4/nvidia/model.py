@@ -687,8 +687,7 @@ class DeepseekV4MoE(nn.Module):
             or self.n_local_physical_experts is None
         ):
             raise AttributeError(
-                "DeepseekV4MoE FusedMoE metadata is incomplete after "
-                "construction."
+                "DeepseekV4MoE FusedMoE metadata is incomplete after construction."
             )
         self.n_local_experts = self.n_local_physical_experts
         self.n_redundant_experts = self.n_physical_experts - self.n_logical_experts

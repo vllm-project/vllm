@@ -1798,6 +1798,7 @@ def compute_probs_and_sample_next_token(
         sampling_metadata.temperature,
         num_tokens,
     )
+    assert temperature is not None
     # Avoid division by zero if there are greedy requests.
     if not sampling_metadata.all_random:
         is_greedy = temperature < _SAMPLING_EPS

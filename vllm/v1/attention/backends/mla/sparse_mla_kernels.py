@@ -661,6 +661,7 @@ def finish_materialized_sparse_mla_scores_with_sink(
 
     num_tokens, _, num_candidates = scores.shape
     head_dim = kv.shape[2]
+
     # Clamp BLOCK_D to the smallest power-of-2 >= head_dim (among the allowed
     # {64, 128, 256, 512}). Without this, a caller-supplied value_block_size
     # larger than head_dim wastes work on masked-off positions — e.g. DSv4
@@ -1256,7 +1257,6 @@ def accumulate_indexed_sparse_mla_attention_chunk(
         )
 
 
-
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=4, num_stages=2),
@@ -1677,7 +1677,6 @@ def accumulate_fp8ds_global_slots_sparse_mla_attention_chunk_multihead(
     )
 
 
-
 @triton.jit
 def _indexed_d512_split_score_kernel(
     q_ptr,
@@ -1827,9 +1826,7 @@ def _indexed_d512_split_value_kernel(
     dim_mask = dim_offsets < head_dim
     valid_len = tl.load(lens_ptr + token_idx)
     max_score = tl.load(
-        max_score_ptr
-        + token_idx * stride_state_t
-        + head_offsets * stride_state_h,
+        max_score_ptr + token_idx * stride_state_t + head_offsets * stride_state_h,
         mask=head_mask,
         other=0.0,
     ).to(tl.float32)
@@ -2064,9 +2061,7 @@ def _indexed_d512_chunked_merge_acc_kernel(
         mask=head_mask[:, None] & dim_mask[None, :],
         other=0.0,
     ).to(tl.float32)
-    merged_acc = (
-        running_acc * running_scale[:, None] + chunk_acc * chunk_scale[:, None]
-    )
+    merged_acc = running_acc * running_scale[:, None] + chunk_acc * chunk_scale[:, None]
     tl.store(
         acc_ptr
         + token_idx * stride_acc_t

@@ -701,9 +701,9 @@ class MLAAttentionManager(FullAttentionManager):
         # 3. ``compress_ratio > 1``: any compressed MLA cache (today
         #    only DSv4 sets ``compress_ratio > 1``; V3.2 keeps it at 1).
         return (
-            self.kv_cache_spec.model_version == "deepseek_v4"
-            or self.kv_cache_spec.cache_dtype_str == "fp8_ds_mla"
-            or self.kv_cache_spec.compress_ratio > 1
+            getattr(self.kv_cache_spec, "model_version", None) == "deepseek_v4"
+            or getattr(self.kv_cache_spec, "cache_dtype_str", None) == "fp8_ds_mla"
+            or getattr(self.kv_cache_spec, "compress_ratio", 1) > 1
         )
 
     def _max_protected_prompt_blocks(self) -> int | None:

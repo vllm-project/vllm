@@ -1074,7 +1074,7 @@ def get_moe_configs(
     block_shape = [block_n, block_k] if block_n and block_k else None
     json_file_names = _get_config_file_names(E, N, dtype, block_shape)
 
-    config_file_paths = []
+    config_file_paths: list[str] = []
 
     # note that we prioritize user defined config
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER

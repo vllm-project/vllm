@@ -457,9 +457,7 @@ class Scheduler(SchedulerInterface):
         has_decode_pressure = (
             self._has_scheduled_decode(scheduled_running_reqs) or has_pending_decode
         )
-        has_prefill_competition = (
-            has_waiting_requests or prefill_budget_partitions > 1
-        )
+        has_prefill_competition = has_waiting_requests or prefill_budget_partitions > 1
         if not has_decode_pressure and not has_prefill_competition:
             return num_new_tokens
 
@@ -479,8 +477,7 @@ class Scheduler(SchedulerInterface):
         elif remaining_prefill > very_long_prefill_threshold:
             mixed_prefill_budget = max(
                 1,
-                self.max_num_scheduled_tokens
-                // max(2, prefill_budget_partitions),
+                self.max_num_scheduled_tokens // max(2, prefill_budget_partitions),
             )
         else:
             mixed_prefill_budget = max(1, (self.max_num_scheduled_tokens * 3) // 4)

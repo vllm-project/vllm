@@ -262,9 +262,7 @@ def _fp8_mqa_logits_topk_triton(
             select_k,
         )
         selected.add_(cu_seqlen_ks[:, None])
-        valid = (selected >= cu_seqlen_ks[:, None]) & (
-            selected < cu_seqlen_ke[:, None]
-        )
+        valid = (selected >= cu_seqlen_ks[:, None]) & (selected < cu_seqlen_ke[:, None])
         selected.masked_fill_(~valid, -1)
     else:
         values, indices = torch.topk(logits, select_k, dim=1)

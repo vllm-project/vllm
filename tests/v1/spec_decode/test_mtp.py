@@ -318,9 +318,7 @@ def test_mtp_propose_random_sampling_records_draft_probs():
     assert torch.allclose(proposer._last_draft_probs, expected_probs)
     # ``take_last_draft_probs`` is the upstream-side accessor that
     # ``GPUModelRunner`` uses to plumb probs into the rejection sampler.
-    assert torch.equal(
-        proposer.take_last_draft_probs(), proposer._last_draft_probs
-    )
+    assert torch.equal(proposer.take_last_draft_probs(), proposer._last_draft_probs)
 
 
 def test_mtp_sequential_drafting_passes_spec_step_indices():
@@ -395,8 +393,7 @@ def test_mtp_sequential_drafting_passes_spec_step_indices():
         for call in model_mock.compute_logits.call_args_list
     ] == [0, 1]
     assert [
-        call.kwargs.get("spec_step_idx", 0)
-        for call in model_mock.call_args_list
+        call.kwargs.get("spec_step_idx", 0) for call in model_mock.call_args_list
     ] == [0, 1]
 
 
@@ -492,13 +489,9 @@ def test_mtp_parallel_drafting_random_sampling_records_draft_probs():
 
     assert result.shape == (batch_size, num_spec_tokens)
     assert proposer._last_draft_probs is not None
-    assert proposer._last_draft_probs.shape == (
-        batch_size, num_spec_tokens, vocab_size
-    )
+    assert proposer._last_draft_probs.shape == (batch_size, num_spec_tokens, vocab_size)
     assert torch.allclose(
         proposer._last_draft_probs,
         torch.softmax(logits, dim=-1).view(batch_size, num_spec_tokens, vocab_size),
     )
-    assert torch.equal(
-        proposer.take_last_draft_probs(), proposer._last_draft_probs
-    )
+    assert torch.equal(proposer.take_last_draft_probs(), proposer._last_draft_probs)

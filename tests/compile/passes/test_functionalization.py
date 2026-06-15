@@ -289,9 +289,7 @@ class TestFusedDeepseekV4QnormRopeKvInsert(torch.nn.Module):
     def forward(
         self, q: torch.Tensor, kv: torch.Tensor, k_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        torch.ops.vllm.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            q, kv, k_cache
-        )
+        torch.ops.vllm.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(q, kv, k_cache)
         return q, k_cache
 
     def example_inputs(self, num_tokens=32, hidden_size=128):

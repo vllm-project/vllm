@@ -111,8 +111,7 @@ def _deepseek_v4_mtp_uniform_decode_warmup_requests(
         _DEEPSEEK_V4_MTP_UNIFORM_DECODE_MAX_WARMUP_REQUESTS,
     )
     candidates = sorted(
-        set(_DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS)
-        | {max_warmup_reqs}
+        set(_DEEPSEEK_V4_MTP_UNIFORM_DECODE_WARMUP_REQUESTS) | {max_warmup_reqs}
     )
     return tuple(reqs for reqs in candidates if reqs <= max_warmup_reqs)
 
@@ -149,9 +148,9 @@ def _deepseek_v4_slot_mapping_warmup(runner: "GPUModelRunner") -> None:
                 )
 
             if hasattr(runner, "positions"):
-                saved_positions: torch.Tensor | None = (
-                    runner.positions[:num_tokens].clone()
-                )
+                saved_positions: torch.Tensor | None = runner.positions[
+                    :num_tokens
+                ].clone()
                 runner.positions[:num_tokens].copy_(positions_source)
                 positions = runner.positions[:num_tokens]
             else:
@@ -197,7 +196,10 @@ def _deepseek_v4_structured_output_bitmask_warmup(
             )
             input_batch = SimpleNamespace(req_ids=req_ids)
             apply_grammar_bitmask(
-                SchedulerOutput.make_empty(), grammar_output, input_batch, logits
+                SchedulerOutput.make_empty(),
+                grammar_output,
+                input_batch,  # type: ignore[arg-type]
+                logits,
             )
 
 
@@ -489,15 +491,7 @@ def kernel_warmup(worker: "Worker"):
 
     minimax_m3_msa_warmup(worker)
 
-    if envs.VLLM_DEEPSEEK_V4_SPARSE_MLA_STATS_PATH:
-        from vllm.models.deepseek_v4.nvidia.flashmla import (
-            _disable_sparse_mla_prefill_stats,
-        )
-
-        with _disable_sparse_mla_prefill_stats():
-            _deepseek_v4_sparse_mla_attention_warmup(worker)
-    else:
-        _deepseek_v4_sparse_mla_attention_warmup(worker)
+    _deepseek_v4_sparse_mla_attention_warmup(worker)
     _deepseek_v4_request_prep_warmup(worker)
 
     enable_flashinfer_autotune = (

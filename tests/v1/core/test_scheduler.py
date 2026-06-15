@@ -1339,10 +1339,14 @@ def test_running_very_long_prefill_defers_to_later_running_decode():
         req_id_to_index = {}
         for index, req_id in enumerate(mixed_output.num_scheduled_tokens):
             req_id_to_index[req_id] = index
-            if req_id == short_req.request_id and (
-                short_req.num_computed_tokens
-                + mixed_output.num_scheduled_tokens[req_id]
-            ) >= short_req.num_prompt_tokens:
+            if (
+                req_id == short_req.request_id
+                and (
+                    short_req.num_computed_tokens
+                    + mixed_output.num_scheduled_tokens[req_id]
+                )
+                >= short_req.num_prompt_tokens
+            ):
                 sampled_token_ids.append([0])
             else:
                 sampled_token_ids.append([])

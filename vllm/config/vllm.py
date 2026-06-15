@@ -1104,9 +1104,7 @@ class VllmConfig:
             self.model_config is not None
             and "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
             and (
-                _should_auto_enable_deepseek_v4_breakable_cudagraph(
-                    self.model_config
-                )
+                _should_auto_enable_deepseek_v4_breakable_cudagraph(self.model_config)
                 or any(
                     a
                     in (

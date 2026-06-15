@@ -49,9 +49,7 @@ def test_swa_decode_uses_triton_path_without_flashmla_tile_sched(monkeypatch):
         swa_metadata,
         output,
     ):
-        calls.append(
-            (layer, q.shape, swa_k_cache.shape, swa_metadata, output.shape)
-        )
+        calls.append((layer, q.shape, swa_k_cache.shape, swa_metadata, output.shape))
 
     monkeypatch.setattr(flashmla_mod, "is_triton_sparse_mla_enabled", lambda _: True)
     monkeypatch.setattr(

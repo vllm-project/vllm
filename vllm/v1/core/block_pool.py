@@ -391,8 +391,7 @@ class BlockPool:
             return False
 
         evicted = (
-            self.cached_block_hash_to_block.pop(block_hash, block.block_id)
-            is not None
+            self.cached_block_hash_to_block.pop(block_hash, block.block_id) is not None
         )
 
         block.reset_hash()
