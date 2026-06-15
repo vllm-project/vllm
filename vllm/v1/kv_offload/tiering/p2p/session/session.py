@@ -21,7 +21,6 @@ import contextlib
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, NamedTuple
 
 from vllm.logger import init_logger
@@ -49,13 +48,6 @@ _ABORT_ACK_TIMEOUT_S = 10.0
 _STORE_TIMEOUT_S = 30.0
 
 
-class _LoadPhase(Enum):
-    """Client-role load request lifecycle phases."""
-
-    ACTIVE = "active"
-    ABORTING = "aborting"
-
-
 @dataclass
 class _InboundRequestState:
     """Client-role state for a single load request."""
@@ -63,7 +55,6 @@ class _InboundRequestState:
     job_id: int
     kv_request_id: str
     submitted_at: float
-    phase: _LoadPhase = _LoadPhase.ACTIVE
     aborted_at: float | None = None
 
 
@@ -292,7 +283,7 @@ class P2PSession:
     def _cancel_inbound(self, kv_request_id: str) -> None:
         """Cancel a pending load request. Sends abort if active."""
         req = self._inbound.pop(kv_request_id, None)
-        if req is not None and req.phase == _LoadPhase.ACTIVE:
+        if req is not None and req.aborted_at is None:
             self._send(
                 {
                     TYPE_KEY: AbortFetchMsg.TYPE,
@@ -407,9 +398,8 @@ class P2PSession:
         results: list[LoadResult] = []
         now = time.monotonic()
         for req_id, req in list(self._inbound.items()):
-            if req.phase == _LoadPhase.ACTIVE:
+            if req.aborted_at is None:
                 if now - req.submitted_at >= _LOAD_TIMEOUT_S:
-                    req.phase = _LoadPhase.ABORTING
                     req.aborted_at = now
                     logger.warning(
                         "P2PSession %s: %s timed out, sending abort",
@@ -422,8 +412,7 @@ class P2PSession:
                             AbortFetchMsg.KV_REQUEST_ID: req_id,
                         }
                     )
-            elif req.phase == _LoadPhase.ABORTING:
-                assert req.aborted_at is not None
+            else:
                 if now - req.aborted_at >= _ABORT_ACK_TIMEOUT_S:
                     self._inbound.pop(req_id)
                     results.append(
