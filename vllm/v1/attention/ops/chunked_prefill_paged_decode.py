@@ -25,15 +25,22 @@ def has_native_kv_cache_layout(
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
 ) -> bool:
-    """Return whether KV cache blocks can use the native ROCm pairing.
+    """Return whether KV cache blocks use ROCm's packed inner layout.
 
-    The native reshape_and_cache writer assumes packed blocks. If cache update
-    needs reshape_and_cache_flash for a stride-padded hybrid layout, decode
-    should use the matching Triton path too.
+    The native ROCm writer/decoder can handle padded or K/V-gapped block and
+    head strides, but it assumes each K/V block is packed as
+    K [head, head_size/x, block_size, x] and V [head, head_size, block_size].
     """
+    if key_cache.ndim != 5 or value_cache.ndim != 4:
+        return False
+    block_size = key_cache.shape[3]
+    x = key_cache.shape[4]
     return (
-        key_cache.stride(0) == key_cache.shape[1:].numel()
-        and value_cache.stride(0) == value_cache.shape[1:].numel()
+        key_cache.stride(2) == block_size * x
+        and key_cache.stride(3) == x
+        and key_cache.stride(4) == 1
+        and value_cache.stride(2) == block_size
+        and value_cache.stride(3) == 1
     )
 
 
@@ -405,10 +412,12 @@ def chunked_prefill_paged_decode(
             block_size=block_size,
             max_seq_len=max_seq_len,
             alibi_slopes=alibi_slopes,
+            sinks=sinks,
             kv_cache_dtype=kv_cache_dtype,
             k_scale=k_scale,
             v_scale=v_scale,
             fp8_out_scale=output_scale,
+            sliding_window=sliding_window,
         )
     else:
         logger.warning_once(

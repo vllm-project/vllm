@@ -257,7 +257,14 @@ __global__ void reshape_and_cache_kernel(
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int key_stride, const int value_stride, const int num_heads,
     const int head_size, const int block_size, const int x,
-    const float* k_scale, const float* v_scale) {
+    const int64_t key_cache_block_stride, const int64_t key_cache_head_stride,
+    const int64_t key_cache_hblock_stride,
+    const int64_t key_cache_block_offset_stride,
+    const int64_t value_cache_block_stride,
+    const int64_t value_cache_head_stride,
+    const int64_t value_cache_head_size_stride,
+    const int64_t value_cache_block_offset_stride, const float* k_scale,
+    const float* v_scale) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   if (slot_idx < 0) {
@@ -282,13 +289,14 @@ __global__ void reshape_and_cache_kernel(
       token_idx * value_stride + head_idx * head_size + h_block * x;
 
   cache_t* __restrict__ key_dst =
-      key_cache + block_idx * num_heads * h_block_count * block_size * x +
-      head_idx * h_block_count * block_size * x + h_block * block_size * x +
-      block_offset * x;
+      key_cache + block_idx * key_cache_block_stride +
+      head_idx * key_cache_head_stride + h_block * key_cache_hblock_stride +
+      block_offset * key_cache_block_offset_stride;
   const int64_t tgt_value_start =
-      block_idx * num_heads * h_block_count * x * block_size +
-      head_idx * h_block_count * x * block_size + h_block * x * block_size +
-      block_offset;
+      block_idx * value_cache_block_stride +
+      head_idx * value_cache_head_stride +
+      h_block * x * value_cache_head_size_stride +
+      block_offset * value_cache_block_offset_stride;
 
   constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
   float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
@@ -302,7 +310,7 @@ __global__ void reshape_and_cache_kernel(
   cache_t* __restrict__ value_dst = value_cache + tgt_value_start;
 #pragma unroll
   for (int i = 0; i < x; i++) {
-    v_op(value_dst[i * block_size], value_src[i]);
+    v_op(value_dst[i * value_cache_head_size_stride], value_src[i]);
   }
 }
 
@@ -681,16 +689,19 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
 // KV_T is the data type of key and value tensors.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)                     \
-  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>                   \
-      <<<grid, block, 0, stream>>>(                                         \
-          reinterpret_cast<KV_T*>(key.data_ptr()),                          \
-          reinterpret_cast<KV_T*>(value.data_ptr()),                        \
-          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                 \
-          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),               \
-          slot_mapping.const_data_ptr<int64_t>(), key_stride, value_stride, \
-          num_heads, head_size, block_size, x,                              \
-          reinterpret_cast<const float*>(k_scale.data_ptr()),               \
+#define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)                        \
+  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>                      \
+      <<<grid, block, 0, stream>>>(                                            \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                             \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                           \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),                    \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),                  \
+          slot_mapping.const_data_ptr<int64_t>(), key_stride, value_stride,    \
+          num_heads, head_size, block_size, x, key_cache.stride(0),            \
+          key_cache.stride(1), key_cache.stride(2), key_cache.stride(3),       \
+          value_cache.stride(0), value_cache.stride(1), value_cache.stride(2), \
+          value_cache.stride(3),                                               \
+          reinterpret_cast<const float*>(k_scale.data_ptr()),                  \
           reinterpret_cast<const float*>(v_scale.data_ptr()));
 
 void reshape_and_cache(

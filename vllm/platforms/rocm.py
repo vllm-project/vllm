@@ -336,17 +336,15 @@ def use_rocm_custom_paged_attention(
     alibi_slopes: torch.Tensor | None = None,
     sinks: torch.Tensor | None = None,
 ) -> bool:
-    # custom paged attn always supported on V0. On V1, requires sliding window
-    # disabled due to observed numerical discrepancy.
+    # custom paged attn always supported on V0. On V1, gfx9 supports
+    # sliding-window decode in the native paged-attention kernel.
     if _ON_GFX9:
         return (
-            (sliding_window == 0 or sliding_window == (-1, -1))
-            and (qtype == torch.half or qtype == torch.bfloat16)
+            (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
-            and sinks is None
         )
 
     else:
@@ -390,6 +388,7 @@ def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
     use_kv_connector: bool = False,
+    has_sink: bool = False,
 ) -> list[AttentionBackendEnum]:
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 
@@ -408,14 +407,17 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_MLA,
             ]
 
+    aiter_unified_available = is_aiter_found_and_supported()
     backends = []
-    # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
-    # incompatible with KV connectors that require blocks-first layout.
-    if not use_kv_connector:
-        backends.append(AttentionBackendEnum.ROCM_ATTN)
+    if has_sink and aiter_unified_available:
+        # AITER unified already has an optimized sink path. Keep ROCM_ATTN
+        # available for explicit selection and systems without AITER, but avoid
+        # regressing automatic selection for sink-heavy models such as GPT-OSS.
+        backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+    backends.append(AttentionBackendEnum.ROCM_ATTN)
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
-    if is_aiter_found_and_supported():
+    if aiter_unified_available and not has_sink:
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
@@ -491,6 +493,7 @@ class RocmPlatform(Platform):
             attn_selector_config.use_mla,
             attn_selector_config.use_sparse,
             attn_selector_config.use_kv_connector,
+            attn_selector_config.has_sink,
         )
         for priority, backend in enumerate(backend_priorities):
             try:

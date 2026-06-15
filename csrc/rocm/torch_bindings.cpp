@@ -75,10 +75,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                int block_size,"
       "                int max_seq_len,"
       "                Tensor? alibi_slopes,"
+      "                Tensor? sinks,"
       "                str kv_cache_dtype,"
       "                Tensor k_scale, Tensor v_scale,"
       "                Tensor? fp8_out_scale,"
-      "                str mfma_type) -> ()");
+      "                str mfma_type,"
+      "                int sliding_window) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
 }
 
