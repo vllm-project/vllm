@@ -560,7 +560,7 @@ async fn shutdown_children(args: &ServeArgs, children: &[ChildServer]) -> Result
                 "child did not exit before shutdown deadline; sending SIGKILL"
             );
             if let Some(pid) = child_pid(child).await {
-                process_group::kill(pid)
+                process_group::kill_tree(pid)
                     .with_context(|| format!("failed to kill child {}", child.name))?;
             }
             let _ = wait_for_child_exit(child).await?;

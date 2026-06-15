@@ -186,6 +186,16 @@ pub mod process_group {
         signal(pid, libc::SIGKILL)
     }
 
+    /// Send SIGKILL to the whole descendant process tree rooted at `pid`.
+    pub fn kill_tree(pid: u32) -> Result<()> {
+        let mut descendants = Vec::new();
+        collect_descendants(pid, &mut descendants)?;
+        for child in descendants {
+            signal_pid(child, libc::SIGKILL)?;
+        }
+        signal_pid(pid, libc::SIGKILL).context("failed to kill managed engine process tree")
+    }
+
     /// Deliver one signal to the managed Python process group.
     fn signal(pid: u32, signal: i32) -> Result<()> {
         let rc = unsafe { libc::kill(-(pid as i32), signal) };
@@ -198,6 +208,37 @@ pub mod process_group {
             return Ok(());
         }
         Err(error).context("failed to signal managed engine process group")
+    }
+
+    fn collect_descendants(pid: u32, descendants: &mut Vec<u32>) -> Result<()> {
+        let children_path = format!("/proc/{pid}/task/{pid}/children");
+        let children = match std::fs::read_to_string(&children_path) {
+            Ok(children) => children,
+            Err(error) if matches!(error.kind(), io::ErrorKind::NotFound) => return Ok(()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to read process children from {children_path}"));
+            }
+        };
+
+        for child in children.split_whitespace().filter_map(|pid| pid.parse::<u32>().ok()) {
+            collect_descendants(child, descendants)?;
+            descendants.push(child);
+        }
+        Ok(())
+    }
+
+    fn signal_pid(pid: u32, signal: i32) -> Result<()> {
+        let rc = unsafe { libc::kill(pid as i32, signal) };
+        if rc == 0 {
+            return Ok(());
+        }
+
+        let error = io::Error::last_os_error();
+        if matches!(error.raw_os_error(), Some(code) if code == libc::ESRCH) {
+            return Ok(());
+        }
+        Err(error).context("failed to signal managed engine process")
     }
 }
 
