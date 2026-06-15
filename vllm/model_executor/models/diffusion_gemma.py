@@ -28,6 +28,10 @@ from transformers import AutoModel
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -46,6 +50,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.transformers.utils import recursive_replace_linear
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, async_copy_to_gpu
@@ -850,7 +855,7 @@ class DiffusionGemmaModelState(ModelState):
             t_max=gen["t_max"],
             entropy_bound=entropy_bound,
             confidence_threshold=gen["confidence_threshold"],
-            embed_weight=self.model.model.embed_tokens.weight,
+            embed_weight=_get_full_embed_weight(self.model.model.embed_tokens),
             normalizer=self.model.model.normalizer,
         ), None
 
@@ -1033,6 +1038,22 @@ class DiffusionGemmaModelState(ModelState):
 _NO_PENALTIES_STATE = SimpleNamespace(output_bin_counts=None)
 
 
+def _get_full_embed_weight(embed_tokens: nn.Module) -> torch.Tensor:
+    """Materialize the full (unsharded) embedding weight for the sampler.
+
+    The self-conditioning soft embedding is ``probs @ embed_weight`` where
+    ``probs`` spans the full vocab, so under TP the sharded
+    VocabParallelEmbedding weight cannot be used directly. All TP ranks run
+    the sampler, so each keeps a gathered copy (collective: every rank must
+    reach this call).
+    """
+    if get_tensor_model_parallel_world_size() == 1:
+        return embed_tokens.weight
+    full = tensor_model_parallel_all_gather(embed_tokens.weight, dim=0)
+    # Shards are padded; org vocab occupies the leading rows.
+    return full[: embed_tokens.org_vocab_size]
+
+
 class DiffusionSampler:
     """Batched accept/renoise sampler for DiffusionGemma.
 
@@ -1180,15 +1201,23 @@ class DiffusionSampler:
         """Compute num_rejected and build SamplerOutput."""
         num_reqs = input_batch.num_reqs
 
-        self._query_lens.np[:num_reqs] = np.diff(
-            input_batch.query_start_loc_np[: num_reqs + 1]
-        )
-        self._num_logits.np[:num_reqs] = per_req_nlogits_np
-        self._query_lens.copy_to_uva()
-        self._num_logits.copy_to_uva()
+        if current_platform.is_xpu():
+            # triton-xpu's launcher rejects UVA (host-USM) pointers inside
+            # compiled regions; use a real device copy.
+            num_logits = async_copy_to_gpu(
+                per_req_nlogits_np.astype(np.int32), device=num_sampled.device
+            )
+        else:
+            self._query_lens.np[:num_reqs] = np.diff(
+                input_batch.query_start_loc_np[: num_reqs + 1]
+            )
+            self._num_logits.np[:num_reqs] = per_req_nlogits_np
+            self._query_lens.copy_to_uva()
+            self._num_logits.copy_to_uva()
+            num_logits = self._num_logits.gpu[:num_reqs]
 
         num_rejected = _compute_num_rejected(
-            self._num_logits.gpu[:num_reqs],
+            num_logits,
             num_sampled,
             input_batch.query_start_loc[: num_reqs + 1],
         )
@@ -1232,12 +1261,22 @@ class DiffusionSampler:
             self._finish_prefills(input_batch, prefill_indices_np)
 
         num_decode = len(decode_indices_np)
-        self._decode_slots.np[:num_decode] = decode_slots_np
-        self._decode_idx.np[:num_decode] = decode_indices_np
-        self._decode_slots.copy_to_uva()
-        self._decode_idx.copy_to_uva()
-        decode_slots = self._decode_slots.gpu[:num_decode]
-        decode_idx = self._decode_idx.gpu[:num_decode]
+        if current_platform.is_xpu():
+            # triton-xpu's launcher rejects UVA (host-USM) pointers inside
+            # the inductor-compiled sample step; use real device copies.
+            decode_slots = async_copy_to_gpu(
+                decode_slots_np.astype(np.int64), device=device
+            )
+            decode_idx = async_copy_to_gpu(
+                decode_indices_np.astype(np.int64), device=device
+            )
+        else:
+            self._decode_slots.np[:num_decode] = decode_slots_np
+            self._decode_idx.np[:num_decode] = decode_indices_np
+            self._decode_slots.copy_to_uva()
+            self._decode_idx.copy_to_uva()
+            decode_slots = self._decode_slots.gpu[:num_decode]
+            decode_idx = self._decode_idx.gpu[:num_decode]
 
         # Real canvas length per decode request. Equals CL except when a canvas
         # was truncated near max_model_len, in which case the scheduler gave us
