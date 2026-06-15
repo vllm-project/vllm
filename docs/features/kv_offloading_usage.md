@@ -183,10 +183,7 @@ PYTHONHASHSEED=0 vllm serve ...
 
 The OBJ tier (`type: "obj"`) transfers blocks between the CPU primary tier and
 an object backend through NIXL. The CPU primary tier can be backed by hugetlbfs
-without changing the OBJ tier configuration. See
-`examples/features/kv_offloading/doca_memos/kv_transfer_config.doca_memos_hugepages.json`
-for a DOCA MEMOS example that sets `cpu_memory_backend="hugetlbfs"` and keeps
-the object secondary tier unchanged.
+without changing the OBJ tier configuration. 
 
 When several vLLM processes share the same object tier prefix, set
 `PYTHONHASHSEED` to the same fixed value on every process so identical token
