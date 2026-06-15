@@ -1255,6 +1255,9 @@ setup(
             "mistral_common[audio]",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
+        # NVIDIA DeepStream (NVDEC) GPU video-decode backend. Linux x86-64
+        # only; also needs system GStreamer + libv4l (see docs).
+        "deepstream": ["nvidia-deepstream-videodecode-cu13>=9.0.2"],
         "flashinfer": [],  # Kept for backwards compatibility
         # Optional deps for Helion kernel development
         # NOTE: When updating helion version, also update CI files:
