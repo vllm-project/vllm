@@ -438,12 +438,27 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         assert kwargs["activation_key"] is kNvfp4Dynamic
 
 
-def _make_nvfp4_moe(quant_method: str):
-    """Build a ``ModelOptNvFp4FusedMoE`` with mocked backend selection."""
+def _make_nvfp4_moe(quant_method: str, backend=None):
+    """Build a ``ModelOptNvFp4FusedMoE`` with mocked backend selection.
+
+    ``backend`` defaults to what the real selector would pick: Marlin for
+    W4A16 (it always falls back to Marlin), a native W4A4 backend otherwise.
+    Pass it explicitly to exercise the W4A4-on-Marlin fallback, which drops
+    activation scales.
+    """
+    from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+        NvFp4MoeBackend,
+    )
     from vllm.model_executor.layers.quantization.modelopt import (
         ModelOptNvFp4FusedMoE,
     )
 
+    if backend is None:
+        backend = (
+            NvFp4MoeBackend.MARLIN
+            if quant_method == "W4A16_NVFP4"
+            else NvFp4MoeBackend.FLASHINFER_CUTLASS
+        )
     config = ModelOptNvFp4Config(
         quant_method=quant_method,
         is_checkpoint_nvfp4_serialized=True,
@@ -454,7 +469,7 @@ def _make_nvfp4_moe(quant_method: str):
     with (
         patch(
             "vllm.model_executor.layers.quantization.modelopt.select_nvfp4_moe_backend",
-            MagicMock(return_value=(MagicMock(), MagicMock())),
+            MagicMock(return_value=(backend, MagicMock())),
         ),
         patch(
             "vllm.model_executor.layers.quantization.modelopt."
@@ -523,6 +538,32 @@ class TestModelOptNvFp4MoEScaleValidation:
 
     def test_w4a16_still_validates_weight_scales(self):
         moe = _make_nvfp4_moe("W4A16_NVFP4")
+        layer = _mock_nvfp4_moe_layer()
+        layer.w2_weight_scale_2[0] = 0.0
+        with pytest.raises(ValueError, match=r"w2_weight_scale_2.*\[0\]"):
+            moe._validate_loaded_expert_scales(layer)
+
+    def test_w4a4_on_marlin_skips_input_scale_validation(self):
+        """A W4A4 checkpoint can run on the Marlin fallback (no Blackwell /
+        no FlashInfer); Marlin drops activation scales, so missing/zero
+        input scales there are harmless and must NOT be rejected (#45320)."""
+        from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+            NvFp4MoeBackend,
+        )
+
+        moe = _make_nvfp4_moe("NVFP4", backend=NvFp4MoeBackend.MARLIN)
+        layer = _mock_nvfp4_moe_layer()
+        layer.w13_input_scale = torch.zeros(8)
+        layer.w2_input_scale = torch.zeros(8)
+        moe._validate_loaded_expert_scales(layer)
+
+    def test_w4a4_on_marlin_still_validates_weight_scales(self):
+        """Weight-scale-2 is always required, even on the Marlin fallback."""
+        from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+            NvFp4MoeBackend,
+        )
+
+        moe = _make_nvfp4_moe("NVFP4", backend=NvFp4MoeBackend.MARLIN)
         layer = _mock_nvfp4_moe_layer()
         layer.w2_weight_scale_2[0] = 0.0
         with pytest.raises(ValueError, match=r"w2_weight_scale_2.*\[0\]"):
