@@ -1088,6 +1088,25 @@ class FlashAttentionImpl(AttentionImpl):
             key, value = kv.split([key.shape[-1], value.shape[-1]], dim=-1)
             prefill_start = num_decode_tokens * self.pcp_world_size
             prefill_end = pcp_metadata.num_actual_tokens_pcp_padded
+            _probe = None
+            if _os.environ.get("PCP_DUMP") == "1" and self.pcp_rank == 0:
+                _ps = slot_mapping[prefill_start:prefill_end]
+                _bs = key_cache.shape[1]
+                for _i in range(_ps.shape[0]):
+                    _s = int(_ps[_i].item())
+                    if _s >= 0:
+                        _probe = (
+                            _i,
+                            _s,
+                            key_cache[_s // _bs, _s % _bs].clone(),
+                            key[prefill_start + _i].clone(),
+                        )
+                        _pcp_dbg(
+                            f"[PCP r0] PROBE before i={_i} slot={_s} "
+                            f"cache_before.norm={_probe[2].float().norm().item():.4f} "
+                            f"key[i].norm={_probe[3].float().norm().item():.4f}"
+                        )
+                        break
             reshape_and_cache_flash(
                 key[prefill_start:prefill_end],
                 value[prefill_start:prefill_end],
@@ -1163,6 +1182,15 @@ class FlashAttentionImpl(AttentionImpl):
                                 f"its_maxdiff={flat[best].item():.4f}"
                             )
                 _pcp_dbg(f"[PCP r0] WRITECHK checked={chk} mismatched={mism}")
+                if _probe is not None:
+                    _pi, _ps_slot, _before, _ki = _probe
+                    _after = key_cache[_ps_slot // bs, _ps_slot % bs].to(torch.float32)
+                    _pcp_dbg(
+                        f"[PCP r0] PROBE after slot={_ps_slot} "
+                        f"after.norm={_after.norm().item():.4f} "
+                        f"diff_after_vs_key={(_after - _ki.to(torch.float32)).abs().max().item():.4f} "
+                        f"diff_after_vs_before={(_after - _before.to(torch.float32)).abs().max().item():.4f}"
+                    )
             return
 
         # Scatter write into the KV cache using slot_mapping indices.
