@@ -567,7 +567,10 @@ mod tests {
             .collect::<crate::Result<Vec<_>>>()
             .unwrap();
 
-        assert!(matches!(events[0], ChatEvent::ToolCallStart { index: 0, .. }));
+        assert!(matches!(
+            events[0],
+            ChatEvent::ToolCallStart { index: 0, .. }
+        ));
         assert!(matches!(
             events[1],
             ChatEvent::ToolCallArgumentsDelta { index: 0, .. }
