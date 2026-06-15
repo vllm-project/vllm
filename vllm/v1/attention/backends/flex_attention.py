@@ -808,6 +808,13 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.persistent_physical_to_logical = None
         self.persistent_kv_indices = None
 
+        self.custom_logical_mask_mod: _mask_mod_signature | None = None
+        if self._uses_full_cudagraphs():
+            layers = get_layers_from_vllm_config(
+                vllm_config, Attention, self.layer_names
+            )
+            self.custom_logical_mask_mod = self._maybe_get_custom_mask_mod(layers)
+
     @staticmethod
     def _get_block_sizes(
         attn_cfg,
@@ -855,17 +862,15 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         )
 
     def _maybe_get_custom_mask_mod(self, layers) -> _mask_mod_signature | None:
-        mask_mod = None
-        for layer in layers.values():
-            layer_mask_mod = getattr(layer, "logical_mask_mod", None)
-            if mask_mod is None:
-                mask_mod = layer_mask_mod
-            elif layer_mask_mod is not mask_mod:
-                raise ValueError(
-                    f"{layer_mask_mod} != {mask_mod}, \
-                    cannot use alternating mask mods w/ full CUDA graphs"
-                )
-        return mask_mod
+        mask_mods = {
+            getattr(layer, "logical_mask_mod", None) for layer in layers.values()
+        }
+        if len(mask_mods) > 1:
+            raise ValueError(
+                f"Found differing mask mods {mask_mods}, "
+                "cannot use alternating mask mods w/ full CUDA graphs"
+            )
+        return next(iter(mask_mods), None)
 
     def _uses_full_cudagraphs(self) -> bool:
         mode = self.vllm_config.compilation_config.cudagraph_mode
@@ -944,12 +949,8 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
 
         sliding_window = None
         if self._uses_full_cudagraphs():
-            layers = get_layers_from_vllm_config(
-                self.vllm_config, Attention, self.layer_names
-            )
-            custom_logical_mask_mod = self._maybe_get_custom_mask_mod(layers)
-            if custom_logical_mask_mod is not None:
-                logical_mask_mod = custom_logical_mask_mod
+            if self.custom_logical_mask_mod is not None:
+                logical_mask_mod = self.custom_logical_mask_mod
             sliding_window = getattr(self.kv_cache_spec, "sliding_window", None)
 
         out = FlexAttentionMetadata(
