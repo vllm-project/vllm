@@ -2,13 +2,31 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import os
 
 import pytest
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.parser.abstract_parser import DelegatingParser
-from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
-from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
+_STRICT_TOOL_CALLING_ENV = "VLLM_ENFORCE_STRICT_TOOL_CALLING"
+_STRICT_TOOL_CALLING_ENV_VALUE = os.environ.get(_STRICT_TOOL_CALLING_ENV)
+os.environ[_STRICT_TOOL_CALLING_ENV] = "0"
+
+from vllm.entrypoints.openai.chat_completion.protocol import (  # noqa: E402
+    ChatCompletionRequest,
+)
+from vllm.parser.abstract_parser import DelegatingParser  # noqa: E402
+from vllm.reasoning.basic_parsers import (  # noqa: E402
+    BaseThinkingReasoningParser,
+)
+from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser  # noqa: E402
+
+
+@pytest.fixture(scope="module", autouse=True)
+def restore_strict_tool_calling_env():
+    yield
+    if _STRICT_TOOL_CALLING_ENV_VALUE is None:
+        os.environ.pop(_STRICT_TOOL_CALLING_ENV, None)
+    else:
+        os.environ[_STRICT_TOOL_CALLING_ENV] = _STRICT_TOOL_CALLING_ENV_VALUE
 
 
 class ThinkReasoningParser(BaseThinkingReasoningParser):

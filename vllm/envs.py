@@ -8,7 +8,6 @@ import os
 import sys
 import tempfile
 import uuid
-import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -78,6 +77,8 @@ if TYPE_CHECKING:
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
+    VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
+    VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
@@ -166,7 +167,6 @@ if TYPE_CHECKING:
     VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
     VLLM_HUMMING_MOE_GEMM_TYPE: Literal["indexed", "grouped", "auto"] | None = None
-    VLLM_MXFP4_USE_MARLIN: bool | None = None
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
@@ -183,17 +183,12 @@ if TYPE_CHECKING:
     ] = "relax"
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
-    VLLM_USE_FLASHINFER_MOE_FP16: bool = False
-    VLLM_USE_FLASHINFER_MOE_FP8: bool = False
-    VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
-    VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "masked_gemm"] = (
-        "latency"
-    )
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
+    VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
@@ -206,12 +201,13 @@ if TYPE_CHECKING:
     MOONCAKE_REQUESTER_LOCAL_HOSTNAME: str | None = None
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
+    VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
+    VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
-    VLLM_USE_NVFP4_CT_EMULATIONS: bool = False
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal[
         "FP", "INT8", "INT6", "INT4", "NONE"
     ] = "NONE"
@@ -224,12 +220,8 @@ if TYPE_CHECKING:
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
-    VLLM_NVFP4_GEMM_BACKEND: str | None = None
     VLLM_HAS_FLASHINFER_CUBIN: bool = False
-    VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
-    VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
-    VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
@@ -238,7 +230,6 @@ if TYPE_CHECKING:
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_SYSTEM_START_DATE: str | None = None
     VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
-    VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
@@ -256,7 +247,6 @@ if TYPE_CHECKING:
     VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING: bool = True
     VLLM_USE_NCCL_SYMM_MEM: bool = False
     VLLM_NCCL_INCLUDE_PATH: str | None = None
-    VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
@@ -347,27 +337,6 @@ def use_mega_aot_artifact():
     )
 
     return os.environ.get("VLLM_USE_MEGA_AOT_ARTIFACT", default_value) == "1"
-
-
-def deprecated_env(
-    env_name: str,
-    removal_version: str,
-    replacement: str,
-    getter: Callable[[], Any],
-) -> Callable[[], Any]:
-    """Wrap an env-var getter to emit a FutureWarning when the var is set."""
-
-    def _read() -> Any:
-        if env_name in os.environ:
-            warnings.warn(
-                f"{env_name} is deprecated and will be removed in "
-                f"{removal_version}. {replacement}",
-                FutureWarning,
-                stacklevel=2,
-            )
-        return getter()
-
-    return _read
 
 
 def env_with_choices(
@@ -685,7 +654,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If true, replace the Rust BPE backend that powers HF fast tokenizers
     # with the `fastokens` (https://github.com/crusoecloud/fastokens) shim.
     # Applies to any tokenizer mode that loads an HF fast tokenizer
-    # (`hf`, `deepseek_v32`, `deepseek_v4`, `qwen_vl`, …). The `fastokens`
+    # (`hf`, `deepseek_v32`, `deepseek_v4`, …). The `fastokens`
     # Python package must be installed.
     "VLLM_USE_FASTOKENS": lambda: bool(int(os.getenv("VLLM_USE_FASTOKENS", "0"))),
     # Interval in seconds to log a warning message when the ring buffer is full
@@ -954,6 +923,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Default is 25 MB
     "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", "25")
+    ),
+    # Maximum decoded audio duration in seconds.  Compressed audio files
+    # (e.g. OPUS at very low bitrate) can expand into gigabytes of float32
+    # PCM.  This limit is enforced *during* decoding so the memory is never
+    # allocated.  Default is 600s (10 minutes).
+    "VLLM_MAX_AUDIO_DECODE_DURATION_S": lambda: int(
+        os.getenv("VLLM_MAX_AUDIO_DECODE_DURATION_S", "600")
+    ),
+    # Maximum number of worker threads used for STT preprocessing. The default
+    # intentionally caps at 2 because that performed best in profiling.
+    # https://github.com/vllm-project/vllm/pull/44612#issuecomment-4662757781
+    "VLLM_MAX_AUDIO_PREPROCESS_WORKERS": lambda: int(
+        os.getenv(
+            "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
+            str(max(1, min(os.cpu_count() or 1, 2))),
+        )
     ),
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
@@ -1363,15 +1348,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MARLIN_USE_ATOMIC_ADD": lambda: (
         os.environ.get("VLLM_MARLIN_USE_ATOMIC_ADD", "0") == "1"
     ),
-    # Whether to use marlin kernel in mxfp4 quantization method
-    # Deprecated: use --moe-backend marlin (MoE) or --linear-backend marlin
-    # (linear) instead.
-    "VLLM_MXFP4_USE_MARLIN": deprecated_env(
-        "VLLM_MXFP4_USE_MARLIN",
-        "v0.23",
-        "Use --moe-backend marlin or --linear-backend marlin.",
-        lambda: maybe_convert_bool(os.environ.get("VLLM_MXFP4_USE_MARLIN", None)),
-    ),
     # The activation dtype for marlin kernel
     "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(
         "VLLM_MARLIN_INPUT_DTYPE", None, ["int8", "fp8"]
@@ -1464,72 +1440,21 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER", "1"))
     ),
-    # Allow use of FlashInfer BF16 MoE kernels for fused moe ops.
-    # Deprecated: use --moe-backend to select a kernel explicitly.
-    "VLLM_USE_FLASHINFER_MOE_FP16": deprecated_env(
-        "VLLM_USE_FLASHINFER_MOE_FP16",
-        "v0.23",
-        "Use --moe-backend (e.g. flashinfer_trtllm, flashinfer_cutlass).",
-        lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP16", "0"))),
-    ),
-    # Allow use of FlashInfer FP8 MoE kernels for fused moe ops.
-    # Deprecated: use --moe-backend to select a kernel explicitly.
-    "VLLM_USE_FLASHINFER_MOE_FP8": deprecated_env(
-        "VLLM_USE_FLASHINFER_MOE_FP8",
-        "v0.23",
-        "Use --moe-backend (e.g. flashinfer_trtllm, flashinfer_cutlass).",
-        lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))),
-    ),
-    # Allow use of FlashInfer NVFP4 MoE kernels for fused moe ops.
-    # Deprecated: use --moe-backend to select a kernel explicitly.
-    "VLLM_USE_FLASHINFER_MOE_FP4": deprecated_env(
-        "VLLM_USE_FLASHINFER_MOE_FP4",
-        "v0.23",
-        "Use --moe-backend (e.g. flashinfer_trtllm, flashinfer_cutlass, "
-        "flashinfer_cutedsl).",
-        lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))),
-    ),
     # Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_INT4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_INT4", "0"))
-    ),
-    # If set to 1, use the FlashInfer
-    # MXFP8 (activation) x MXFP4 (weight) MoE backend.
-    # Deprecated: use --moe-backend flashinfer_trtllm combined with
-    # --quantization_config.moe.activation mxfp8.
-    "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8": deprecated_env(
-        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
-        "v0.23",
-        "Use --moe-backend flashinfer_trtllm with "
-        "--quantization_config.moe.activation mxfp8.",
-        lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0"))),
-    ),
-    # If set to 1, use the FlashInfer CUTLASS backend for
-    # MXFP8 (activation) x MXFP4 (weight) MoE.
-    # Deprecated: use --moe-backend flashinfer_cutlass combined with
-    # --quantization_config.moe.activation mxfp8.
-    "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS": deprecated_env(
-        "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
-        "v0.23",
-        "Use --moe-backend flashinfer_cutlass with "
-        "--quantization_config.moe.activation mxfp8.",
-        lambda: bool(
-            int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "0"))
-        ),
-    ),
-    # If set to 1, use the FlashInfer
-    # BF16 (activation) x MXFP4 (weight) MoE backend.
-    # Deprecated: use --moe-backend to select a kernel explicitly.
-    "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16": deprecated_env(
-        "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
-        "v0.23",
-        "Use --moe-backend (e.g. flashinfer_trtllm, flashinfer_cutlass).",
-        lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0"))),
     ),
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
     # It can be changed with this variable if needed for some reason.
     "VLLM_XGRAMMAR_CACHE_MB": lambda: int(os.getenv("VLLM_XGRAMMAR_CACHE_MB", "512")),
+    # Maximum time in seconds allowed for regex compilation in structured
+    # output backends (xgrammar, outlines). Prevents ReDoS attacks where
+    # adversarial patterns cause exponential DFA state-space explosion.
+    # Set to 0 to disable the timeout (not recommended in production).
+    "VLLM_REGEX_COMPILATION_TIMEOUT_S": lambda: int(
+        os.getenv("VLLM_REGEX_COMPILATION_TIMEOUT_S", "5")
+    ),
     # Control the threshold for msgspec to use 'zero copy' for
     # serialization/deserialization of tensors. Tensors below
     # this limit will be encoded into the msgpack buffer, and
@@ -1577,25 +1502,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "MOONCAKE_REQUESTER_LOCAL_HOSTNAME": lambda: os.getenv(
         "MOONCAKE_REQUESTER_LOCAL_HOSTNAME"
     ),
-    # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
-    # Both require compute capability 10.0 or above.
-    # Available options:
-    # - "throughput":  [default]
-    #     Uses CUTLASS kernels optimized for high-throughput batch inference.
-    # - "latency":
-    #     Uses TensorRT-LLM kernels optimized for low-latency inference.
-    # Deprecated: pass --moe-backend flashinfer_{trtllm,cutlass,cutedsl} directly.
-    "VLLM_FLASHINFER_MOE_BACKEND": deprecated_env(
-        "VLLM_FLASHINFER_MOE_BACKEND",
-        "v0.23",
-        "Use --moe-backend flashinfer_trtllm, flashinfer_cutlass, or "
-        "flashinfer_cutedsl.",
-        env_with_choices(
-            "VLLM_FLASHINFER_MOE_BACKEND",
-            "latency",
-            ["throughput", "latency", "masked_gemm"],
-        ),
-    ),
     # Override the directory for the FlashInfer autotune config cache.
     "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", None
@@ -1639,6 +1545,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS", "1")
     ),
+    # Enforce function parameter schemas in structural-tag based tool calling.
+    "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: os.getenv(
+        "VLLM_ENFORCE_STRICT_TOOL_CALLING", "True"
+    ).lower()
+    in ("true", "1"),
     # Control the max chunk bytes (in MB) for the rpc message queue.
     # Object larger than this threshold will be broadcast to worker
     # processes via zmq.
@@ -1649,6 +1560,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # executor (only applies when TP > 1).
     "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS": lambda: int(
         os.getenv("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS", "300")
+    ),
+    # Timeout in seconds for engine and worker process shutdown
+    "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS": lambda: int(
+        os.getenv("VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS", "5")
     ),
     # KV Cache layout used throughout vllm.
     # Some common values are:
@@ -1673,16 +1588,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPUTE_NANS_IN_LOGITS": lambda: bool(
         int(os.getenv("VLLM_COMPUTE_NANS_IN_LOGITS", "0"))
     ),
-    # Controls whether or not emulations are used for NVFP4
-    # generations on machines < 100 for compressed-tensors
-    # models
-    # Deprecated: use --linear-backend emulation instead.
-    "VLLM_USE_NVFP4_CT_EMULATIONS": deprecated_env(
-        "VLLM_USE_NVFP4_CT_EMULATIONS",
-        "v0.23",
-        "Use --linear-backend emulation.",
-        lambda: bool(int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))),
-    ),
     # Timeout (in seconds) for MooncakeConnector in PD disaggregated setup.
     "VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT": lambda: int(
         os.getenv("VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT", "480")
@@ -1691,35 +1596,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # read the cubin files directly.
     "VLLM_HAS_FLASHINFER_CUBIN": lambda: bool(
         int(os.getenv("VLLM_HAS_FLASHINFER_CUBIN", "0"))
-    ),
-    # Supported options:
-    # - "flashinfer-cudnn": use flashinfer cudnn GEMM backend
-    # - "flashinfer-trtllm": use flashinfer trtllm GEMM backend
-    # - "flashinfer-cutlass": use flashinfer cutlass GEMM backend
-    # - "marlin": use marlin GEMM backend (for GPUs without native FP4 support)
-    # - "emulation":
-    #     use BF16/FP16 GEMM, dequantizing weights and running QDQ on activations.
-    #     This is only meant for research purposes to run on devices where NVFP4
-    #     GEMM kernels are not available.
-    # - <none>: automatically pick an available backend
-    # Deprecated: use --linear-backend instead.
-    "VLLM_NVFP4_GEMM_BACKEND": deprecated_env(
-        "VLLM_NVFP4_GEMM_BACKEND",
-        "v0.23",
-        "Use --linear-backend.",
-        env_with_choices(
-            "VLLM_NVFP4_GEMM_BACKEND",
-            None,
-            [
-                "flashinfer-b12x",
-                "flashinfer-cudnn",
-                "flashinfer-trtllm",
-                "flashinfer-cutlass",
-                "cutlass",
-                "marlin",
-                "emulation",
-            ],
-        ),
     ),
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
@@ -1801,12 +1677,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY": lambda: bool(
         int(os.getenv("VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY", "0"))
     ),
-    # When 1,the model structural tags will be used to enforce the model
-    # output conforming to the model's tool-calling format and schema.
-    # Default 0 (off).
-    "VLLM_ENFORCE_STRICT_TOOL_CALLING": lambda: bool(
-        int(os.getenv("VLLM_ENFORCE_STRICT_TOOL_CALLING", "0"))
-    ),
     # Add optional custom scopes for profiling, disable to avoid overheads
     "VLLM_CUSTOM_SCOPES_FOR_PROFILING": lambda: bool(
         int(os.getenv("VLLM_CUSTOM_SCOPES_FOR_PROFILING", "0"))
@@ -1884,14 +1754,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # NCCL header path
     "VLLM_NCCL_INCLUDE_PATH": lambda: os.environ.get("VLLM_NCCL_INCLUDE_PATH", None),
-    # Flag to enable FBGemm kernels on model execution
-    # Deprecated: use --linear-backend fbgemm instead.
-    "VLLM_USE_FBGEMM": deprecated_env(
-        "VLLM_USE_FBGEMM",
-        "v0.23",
-        "Use --linear-backend fbgemm.",
-        lambda: bool(int(os.getenv("VLLM_USE_FBGEMM", "0"))),
-    ),
     # GC debug config
     # - VLLM_GC_DEBUG=0: disable GC debugger
     # - VLLM_GC_DEBUG=1: enable GC debugger with gc.collect elpased times
@@ -2145,6 +2007,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+        "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
         "VLLM_IMAGE_FETCH_TIMEOUT",
         "VLLM_VIDEO_FETCH_TIMEOUT",
@@ -2156,6 +2019,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
+        "VLLM_MAX_AUDIO_DECODE_DURATION_S",
+        "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",

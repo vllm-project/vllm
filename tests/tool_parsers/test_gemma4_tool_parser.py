@@ -702,6 +702,88 @@ class TestStreamingExtraction:
             '    <meta name="viewport" content="width=device-width">\n'
         )
 
+    def _collect_tool_calls_by_index(self, results):
+        """Group streamed tool-call fragments by their ``index``.
+
+        Returns ``{index: {"name": str | None, "arguments": str}}`` where
+        ``arguments`` is the concatenation of every streamed argument
+        fragment for that index (which should form valid JSON once complete).
+        """
+        by_index: dict[int, dict[str, Any]] = {}
+        for delta, _ in results:
+            if not (delta and delta.tool_calls):
+                continue
+            for tc in delta.tool_calls:
+                entry = by_index.setdefault(tc.index, {"name": None, "arguments": ""})
+                func = tc.function
+                if isinstance(func, dict):
+                    name = func.get("name")
+                    arg = func.get("arguments", "")
+                else:
+                    name = getattr(func, "name", None)
+                    arg = getattr(func, "arguments", "") or ""
+                if name:
+                    entry["name"] = name
+                if arg:
+                    entry["arguments"] += arg
+        return by_index
+
+    def test_streaming_single_chunk_complete_tool_call(self, parser, mock_request):
+        """A backend may deliver a whole tool call in one streaming delta.
+
+        The start token, ``call:name{...}`` payload and the end token all
+        arrive in a single chunk. The parser must still emit one
+        ``DeltaToolCall`` with the correct name + complete arguments JSON
+        (rather than swallowing it and finishing with finish_reason="stop").
+        """
+        chunks = [
+            '<|tool_call>call:name_a_color{color_hex:<|"|>00ff11<|"|>}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        # Exactly one delta should carry tool_calls, and it must not be
+        # emitted as plain content (which would yield finish_reason="stop").
+        tool_call_deltas = [
+            delta for delta, _ in results if delta is not None and delta.tool_calls
+        ]
+        assert len(tool_call_deltas) == 1, (
+            "Expected exactly one delta carrying the batched tool call"
+        )
+        assert all(
+            delta.content is None for delta, _ in results if delta is not None
+        ), "Complete tool call must not leak as content"
+
+        by_index = self._collect_tool_calls_by_index(results)
+        assert set(by_index) == {0}
+        assert by_index[0]["name"] == "name_a_color"
+        assert json.loads(by_index[0]["arguments"]) == {"color_hex": "00ff11"}
+
+    def test_streaming_multi_chunk_batched_tool_calls(self, parser, mock_request):
+        """A single delta may batch MULTIPLE complete tool calls.
+
+        ``<|tool_call>...<tool_call|><|tool_call>...<tool_call|>`` arriving in
+        one chunk must emit BOTH calls (one DeltaToolCall each, with distinct
+        indices), not just the first.
+        """
+        chunks = [
+            '<|tool_call>call:get_weather{location:<|"|>London<|"|>}<tool_call|>'
+            '<|tool_call>call:get_time{timezone:<|"|>GMT<|"|>}<tool_call|>',
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+
+        by_index = self._collect_tool_calls_by_index(results)
+        assert set(by_index) == {0, 1}, (
+            f"Expected two tool calls (indices 0 and 1), got {sorted(by_index)}"
+        )
+
+        assert by_index[0]["name"] == "get_weather"
+        assert json.loads(by_index[0]["arguments"]) == {"location": "London"}
+
+        assert by_index[1]["name"] == "get_time"
+        assert json.loads(by_index[1]["arguments"]) == {"timezone": "GMT"}
+
     def test_streaming_trailing_bare_bool_not_duplicated(self, parser, mock_request):
         """Trailing bare boolean must not be streamed twice."""
         chunks = [

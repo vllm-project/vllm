@@ -91,6 +91,18 @@ impl TextLlm {
         self.backend.tokenizer()
     }
 
+    /// Tokenizer vocabulary size (the number of tokens the tokenizer knows),
+    /// used to bound `allowed_token_ids` like the Python frontend `len(tokenizer)`.
+    pub fn tokenizer_vocab_size(&self) -> usize {
+        self.backend.tokenizer_vocab_size()
+    }
+
+    /// Model vocabulary size from the model config, used to bound `logit_bias`
+    /// keys and token-id prompts against the engine embedding table.
+    pub fn model_vocab_size(&self) -> Option<usize> {
+        self.backend.model_vocab_size()
+    }
+
     /// Tokenize if needed, lower to a generate request, and return the raw
     /// token stream.
     pub async fn generate_raw(&self, request: TextRequest) -> Result<GenerateOutputStream> {
