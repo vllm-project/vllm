@@ -48,6 +48,25 @@ if envs.VLLM_USE_MODELSCOPE:
 else:
     from transformers import AutoConfig
 
+# Compatibility shim: is_torch_fx_available was removed in transformers v5.
+# Some remote model code (e.g., openbmb/MiniCPM4.1-8B) still imports it.
+# The function always returns True in modern PyTorch (2.0+) where torch.fx
+# is a core module. Re-providing it avoids ImportError when loading remote
+# code with trust_remote_code=True.
+import transformers.utils.import_utils as _hf_import_utils
+
+if not hasattr(_hf_import_utils, "is_torch_fx_available"):
+
+    def _is_torch_fx_available() -> bool:
+        try:
+            import torch.fx  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
+
+    _hf_import_utils.is_torch_fx_available = _is_torch_fx_available
+
 MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
