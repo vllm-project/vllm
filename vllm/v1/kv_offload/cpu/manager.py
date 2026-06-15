@@ -6,6 +6,9 @@ from typing import Literal
 
 from typing_extensions import override
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+)
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     OffloadingEvent,
@@ -15,7 +18,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import METRIC_STORES_SKIPPED, CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
@@ -58,6 +61,7 @@ class CPUOffloadingManager(OffloadingManager):
         self._policy: CachePolicy = policy_cls(cache_capacity=num_blocks)
         self.store_threshold: int = store_threshold
         self.max_tracker_size: int = max_tracker_size
+        self.stores_skipped_in_current_batch: int = 0
 
         # Number of block references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -154,7 +158,9 @@ class CPUOffloadingManager(OffloadingManager):
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
         if self.counts is not None:
+            num_keys = len(keys)
             keys = [k for k in keys if self.counts.get(k, 0) >= self.store_threshold]
+            self.stores_skipped_in_current_batch += num_keys - len(keys)
         # filter out blocks that are already stored
         keys_to_store = [k for k in keys if self._policy.get(k) is None]
 
@@ -253,3 +259,15 @@ class CPUOffloadingManager(OffloadingManager):
         if self.events is not None:
             yield from self.events
             self.events.clear()
+
+    def get_stats(self) -> OffloadingConnectorStats | None:
+        if self.store_threshold < 2:
+            return None
+
+        stats = OffloadingConnectorStats()
+        stats.increase_counter(
+            METRIC_STORES_SKIPPED,
+            self.stores_skipped_in_current_batch,
+        )
+        self.stores_skipped_in_current_batch = 0
+        return stats
