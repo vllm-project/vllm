@@ -636,10 +636,10 @@ class TestStreamingExtraction:
 
         results = self._simulate_streaming(parser, mock_request, chunks)
         args_text = self._collect_arguments(results)
-        if args_text:
-            parsed_args = json.loads(args_text)
-            assert parsed_args["count"] == 42
-            assert parsed_args["active"] is True
+        assert args_text is not None
+        parsed_args = json.loads(args_text)
+        assert parsed_args["count"] == 42
+        assert parsed_args["active"] is True
 
     def test_streaming_boolean_split_across_chunks(self, parser, mock_request):
         """Boolean value split across token boundaries must not corrupt JSON."""

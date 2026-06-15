@@ -533,6 +533,8 @@ class Gemma4Parser(ParserEngine):
             return None
 
         if _GEMMA4_THOUGHT_PREFIX.startswith(self._reasoning_text):
+            if finished:
+                self._prefix_stripped = True
             return None
 
         self._prefix_stripped = True

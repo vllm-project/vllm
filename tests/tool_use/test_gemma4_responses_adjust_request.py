@@ -61,10 +61,16 @@ def _build_responses_request(*, tool_choice: str) -> ResponsesRequest:
 
 
 class _StubTokenizer:
-    """Minimal tokenizer stub to satisfy ``Gemma4ToolParser.__init__``."""
+    """Minimal tokenizer stub to satisfy ``Gemma4EngineToolParser.__init__``."""
 
     def get_vocab(self) -> dict[str, int]:
-        return {"<|tool_call>": 256_000, "<tool_call|>": 256_001, '<|"|>': 52}
+        return {
+            "<|tool_call>": 256_000,
+            "<tool_call|>": 256_001,
+            '<|"|>': 52,
+            "<|channel>": 256_002,
+            "<channel|>": 256_003,
+        }
 
 
 def test_gemma4_adjust_request_sets_skip_special_tokens_on_responses() -> None:

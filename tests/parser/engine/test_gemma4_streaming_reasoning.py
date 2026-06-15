@@ -131,8 +131,9 @@ def _stream_tokens_batched(
     """Feed tokens in batches through parse_delta."""
     token_ids = tokenizer.encode("", add_special_tokens=False)
     results: list[DeltaMessage | None] = []
+    n = len(token_ids)
 
-    for start in range(0, len(token_ids), batch_size):
+    for start in range(0, n, batch_size):
         batch_ids = token_ids[start : start + batch_size]
         delta_text = tokenizer.decode(batch_ids)
         result = parser.parse_delta(
@@ -140,7 +141,7 @@ def _stream_tokens_batched(
             batch_ids,
             request,
             prompt_token_ids=prompt_token_ids,
-            finished=False,
+            finished=(start + batch_size >= n),
         )
         prompt_token_ids = None
         results.append(result)
@@ -1174,4 +1175,27 @@ class TestBareThoughtWithoutChannelOpener:
 
         assert reasoning == ""
         assert content == "The answer is 42."
+        assert len(tool_calls) == 0
+
+    def test_bare_thought_token_at_end_of_stream(self, request_obj):
+        """When the stream ends with just "thought" (no \\n), the parser
+        should treat it as the thought prefix token, not real reasoning."""
+        seq: list[tuple[int, str]] = [
+            (CHANNEL_START_ID, "<|channel>"),
+            (3000, "thought"),
+        ]
+        tokenizer = _make_tokenizer(seq)
+        parser = Gemma4Parser(tokenizer)
+
+        results = _stream_tokens_batched(
+            parser,
+            tokenizer,
+            request_obj,
+            batch_size=1,
+            prompt_token_ids=[],
+        )
+        reasoning, content, tool_calls = _collect_fields(results)
+
+        assert reasoning == ""
+        assert content == ""
         assert len(tool_calls) == 0
