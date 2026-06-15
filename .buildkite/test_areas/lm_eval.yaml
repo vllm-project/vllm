@@ -56,7 +56,7 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-kimi-k2-thinking.txt
 
-- label: LM Eval MiniMax M2.7 (4xMI300)
+- label: LM Eval MiniMax M2-7 (4xMI300)
   key: lm-eval-minimax-m27-mi300
   depends_on:
   - image-build-amd
