@@ -491,6 +491,10 @@ run_performance() {
         # Run benchmark with descriptive model name for results
         BENCHMARK_NAME="${SAFE_MODEL_NAME}_tp${TP_SIZE}_out${BENCHMARK_OUTPUT_LEN}"
         bash tests/cohere/scripts/run-performance-benchmarks.sh "$BENCHMARK_NAME" "$MODEL_PATH"
+        if [[ $? -ne 0 ]]; then
+            echo "ERROR: Performance benchmark failed for model ${MODEL_NAME}"
+            exit 1
+        fi
     done
 
     cat benchmarks/results/benchmark_results.md

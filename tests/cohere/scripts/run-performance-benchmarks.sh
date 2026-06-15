@@ -253,7 +253,12 @@ run_serving_tests() {
           echo "vLLM server is up and running."
         else
           echo ""
-          echo "vLLM failed to start within the timeout period."
+          echo "ERROR: vLLM failed to start within the timeout period."
+          echo "Server log tail:"
+          tail -n 30 "$server_log" 2>/dev/null || true
+          kill -9 $server_pid 2>/dev/null
+          kill_gpu_processes
+          return 1
         fi
 
         # Extract KV cache info from server startup logs
@@ -375,6 +380,20 @@ main() {
 
   # benchmarking
   run_serving_tests ../tests/cohere/configs/"${SERVING_JSON:-serving-cohere-tests$ARCH.json}"
+  local bench_exit=$?
+  if [[ $bench_exit -ne 0 ]]; then
+    echo "ERROR: run_serving_tests failed with exit code $bench_exit"
+    exit $bench_exit
+  fi
+
+  # Validate that at least one serving result JSON was produced
+  local serving_results
+  serving_results=$(find "$RESULTS_FOLDER" -maxdepth 1 -name 'serving_*.json' -newer "$RESULTS_FOLDER/vllm_env.txt" | head -1)
+  if [[ -z "$serving_results" ]]; then
+    echo "ERROR: No serving benchmark results were produced in $RESULTS_FOLDER"
+    exit 1
+  fi
+
   # we're not currently using the data from latency/throughput so skip them for now to save time
   # run_latency_tests $QUICK_BENCHMARK_ROOT/tests/"${LATENCY_JSON:-latency-cohere-tests$ARCH.json}"
   # run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/"${THROUGHPUT_JSON:-throughput-cohere-tests$ARCH.json}"
