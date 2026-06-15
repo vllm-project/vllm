@@ -57,53 +57,106 @@ class Gemma3TextModelConfig(VerifyAndUpdateConfig):
 class Gemma4Config(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        """Force unified attention backend for models with heterogeneous
-        head dimensions.
+        """Configure attention for heterogeneous head dimensions.
 
-        Some Gemma4 variants use different head dimensions for
-        sliding window (head_dim) vs full attention (global_head_dim) layers.
-        When global_head_dim > 256, FlashAttention rejects those layers
-        (head_size <= 256 kernel limit), causing vLLM to select a different
-        backend for each layer type. This mixed-backend execution produces
-        numerical divergence and output corruption.
+        Gemma4 uses different head dimensions for sliding window
+        (head_dim) vs full attention (global_head_dim) layers. The
+        default FA3 on Hopper cannot handle head_dim > 256, which
+        causes mixed backend selection and numerical divergence.
 
-        The fix detects heterogeneous head dimensions from the model config
-        and forces TRITON_ATTN (which has no head_size ceiling) for all
-        layers when the user hasn't explicitly chosen a backend.
-
-        TODO: Heterogeneous head_sizes (head_dim != global_head_dim)
-        require NixlConnector changes to support per-layer KV transfer
-        with different head dimensions for prefill-decode disaggregation.
+        When FA4 is available we force it for ALL layers, giving a
+        uniform kernel path and avoiding the mixed FA3+FA4 penalty.
+        When FA4 is not available we fall back to Triton.
         """
         hf_text_config = vllm_config.model_config.hf_text_config
         head_dim = getattr(hf_text_config, "head_dim", None)
         global_head_dim = getattr(hf_text_config, "global_head_dim", None)
 
-        # Only force Triton when head dimensions actually differ AND the
-        # larger one exceeds FlashAttention's kernel limit (head_size <= 256).
-        # This avoids unnecessary backend forcing on smaller models where
-        # the config carries global_head_dim but all layers can still use
-        # the same FA backend.
-        max_head_dim = max(head_dim or 0, global_head_dim or 0)
-        if (
-            head_dim is not None
-            and global_head_dim is not None
-            and head_dim != global_head_dim
-            and max_head_dim > 256
-            and vllm_config.attention_config.backend is None
-        ):
-            from vllm.v1.attention.backends.registry import (
-                AttentionBackendEnum,
-            )
+        if head_dim is None or global_head_dim is None or head_dim == global_head_dim:
+            return
 
+        from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        max_head_dim = max(head_dim, global_head_dim)
+
+        if is_fa_version_supported(4) and max_head_dim <= 512:
+            if (
+                vllm_config.attention_config.flash_attn_version is None
+                and vllm_config.attention_config.backend
+                in (None, AttentionBackendEnum.FLASH_ATTN)
+            ):
+                vllm_config.attention_config.flash_attn_version = 4
+                logger.info(
+                    "Gemma4 model has heterogeneous head dimensions "
+                    "(head_dim=%d, global_head_dim=%d). Using FA4 for "
+                    "all layers to avoid mixed FA3/FA4 penalty.",
+                    head_dim,
+                    global_head_dim,
+                )
+        elif vllm_config.attention_config.backend is None:
             vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
                 "Gemma4 model has heterogeneous head dimensions "
-                "(head_dim=%d, global_head_dim=%d). Forcing TRITON_ATTN "
-                "backend to prevent mixed-backend numerical divergence.",
+                "(head_dim=%d, global_head_dim=%d). FA4 not available, "
+                "forcing TRITON_ATTN backend.",
                 head_dim,
                 global_head_dim,
             )
+
+
+class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """Set up the diffusion config and defaults for DiffusionGemma.
+
+        Auto-creates DiffusionConfig from the HF config when the user
+        didn't pass ``--diffusion-config``. Diffusion sampling params are
+        read straight from generation_config.json at sampler-build time
+        (see DiffusionGemma's custom_sampler), not injected here.
+        """
+        # Inherit Gemma4's attention backend selection (FA4 on Hopper,
+        # TRITON_ATTN fallback for heterogeneous head dims).
+        Gemma4Config.verify_and_update_config(vllm_config)
+
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attention_config = vllm_config.attention_config
+        if attention_config.backend == AttentionBackendEnum.FLASHINFER:
+            raise ValueError(
+                "FlashInfer does not support DiffusionGemma's mixed "
+                "causal/bidirectional attention. Use --attention-backend "
+                "FLASH_ATTN or TRITON_ATTN instead."
+            )
+        if attention_config.backend is None and not attention_config.use_non_causal:
+            attention_config.use_non_causal = True
+            logger.info(
+                "DiffusionGemma uses mixed causal/bidirectional attention "
+                "within a batch; setting use_non_causal=True to exclude "
+                "FlashInfer from auto-selection."
+            )
+
+        # Auto-create DiffusionConfig from HF config if not provided.
+        if vllm_config.diffusion_config is None:
+            from vllm.config.diffusion import DiffusionConfig
+
+            hf_config = vllm_config.model_config.hf_config
+            canvas_length = getattr(hf_config, "canvas_length", 256)
+            vllm_config.diffusion_config = DiffusionConfig(
+                canvas_length=canvas_length,
+            )
+
+        # The diffusion sampler materializes [num_seqs, canvas_length, vocab]
+        # fp32 transients, so concurrency is memory-bound (>8 OOMs a single H200).
+        # Default to 8 when the user didn't pass --max-num-seqs.
+        # We can't see the original None here (the engine already filled a generic
+        # default), so use >= DEFAULT_MAX_NUM_SEQS as a proxy, (the default is much
+        # larger than any deliberate value for this model)
+        from vllm.config.scheduler import SchedulerConfig
+
+        sc = vllm_config.scheduler_config
+        if sc is not None and sc.max_num_seqs >= SchedulerConfig.DEFAULT_MAX_NUM_SEQS:
+            sc.max_num_seqs = 8
 
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
@@ -592,6 +645,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColQwen3_5": Qwen3_5ForConditionalGenerationConfig,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
+    "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
     "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,

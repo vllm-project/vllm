@@ -26,7 +26,6 @@ _VLLM_RENDERERS = {
     "hf": ("hf", "HfRenderer"),
     "kimi_audio": ("hf", "HfRenderer"),
     "mistral": ("mistral", "MistralRenderer"),
-    "qwen_vl": ("hf", "HfRenderer"),
     "terratorch": ("terratorch", "TerratorchRenderer"),
 }
 

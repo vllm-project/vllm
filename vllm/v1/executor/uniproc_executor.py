@@ -90,6 +90,8 @@ class UniProcExecutor(Executor):
 
         if not non_block:
             result = run_method(self.driver_worker, method, args, kwargs)
+            if isinstance(result, AsyncModelRunnerOutput):
+                result = result.get_output()
             return result if single_value else [result]
 
         try:
