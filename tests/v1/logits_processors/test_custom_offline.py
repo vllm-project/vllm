@@ -269,7 +269,7 @@ def test_rejects_custom_logitsprocs(
         llm = LLM(**llm_kwargs)
         # Require that no custom logitsprocs have been loaded
         # (built-in processors may exist: MinTokensLogitsProcessor,
-        # LogitBiasLogitsProcessor, MinPLogitsProcessor)
+        # LogitBiasLogitsProcessor, MinPLogitsProcessor, PLessLogitsProcessor)
         worker = llm.llm_engine.model_executor.driver_worker.worker
         for proc in worker.model_runner.input_batch.logitsprocs.all:
             assert not isinstance(proc, DummyLogitsProcessor)
