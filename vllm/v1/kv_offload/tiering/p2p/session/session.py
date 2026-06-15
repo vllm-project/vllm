@@ -30,11 +30,11 @@ from vllm.v1.kv_offload.tiering.p2p.control.base import ControlConnection
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
     AbortAckMsg,
-    AbortLookupFetchMsg,
+    AbortFetchMsg,
     ConnectAckMsg,
     ConnectMsg,
     DisconnectMsg,
-    LookupFetchMsg,
+    FetchMsg,
     TransferDoneMsg,
 )
 
@@ -255,7 +255,7 @@ class P2PSession:
         keys: Sequence[bytes],
         block_ids: Sequence[int],
     ) -> None:
-        """Send lookup_fetch to the peer."""
+        """Send fetch to the peer."""
         logger.debug(
             "P2PSession %s: request_blocks job_id=%d kv_request_id=%s "
             "blocks=%d ready=%s",
@@ -272,10 +272,10 @@ class P2PSession:
         )
         self._send(
             {
-                TYPE_KEY: LookupFetchMsg.TYPE,
-                LookupFetchMsg.KV_REQUEST_ID: kv_request_id,
-                LookupFetchMsg.BLOCK_HASHES: list(keys),
-                LookupFetchMsg.BLOCK_INDEXES: [int(idx) for idx in block_ids],
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: kv_request_id,
+                FetchMsg.BLOCK_HASHES: list(keys),
+                FetchMsg.BLOCK_INDEXES: [int(idx) for idx in block_ids],
             }
         )
 
@@ -295,8 +295,8 @@ class P2PSession:
         if req is not None and req.phase == _LoadPhase.ACTIVE:
             self._send(
                 {
-                    TYPE_KEY: AbortLookupFetchMsg.TYPE,
-                    AbortLookupFetchMsg.KV_REQUEST_ID: kv_request_id,
+                    TYPE_KEY: AbortFetchMsg.TYPE,
+                    AbortFetchMsg.KV_REQUEST_ID: kv_request_id,
                 }
             )
 
@@ -308,8 +308,8 @@ class P2PSession:
         peer to stop waiting (TransferDoneMsg success=False) instead of
         letting it hit _LOAD_TIMEOUT_S.
 
-        If the decoder hasn't sent lookup_fetch yet (client_id is None),
-        defer — _on_lookup_fetch will finalize once demand arrives.
+        If the decoder hasn't sent fetch yet (client_id is None),
+        defer — _on_fetch will finalize once demand arrives.
 
         If inflight transfers exist for this id, defer — the last
         completing transfer in _collect_store_results will fire the
@@ -418,8 +418,8 @@ class P2PSession:
                     )
                     self._send(
                         {
-                            TYPE_KEY: AbortLookupFetchMsg.TYPE,
-                            AbortLookupFetchMsg.KV_REQUEST_ID: req_id,
+                            TYPE_KEY: AbortFetchMsg.TYPE,
+                            AbortFetchMsg.KV_REQUEST_ID: req_id,
                         }
                     )
             elif req.phase == _LoadPhase.ABORTING:
@@ -546,10 +546,10 @@ class P2PSession:
         elif msg_type == ConnectAckMsg.TYPE:
             ConnectAckMsg.validate(msg)
             self._on_connect_ack()
-        elif msg_type == LookupFetchMsg.TYPE:
-            self._on_lookup_fetch(msg)
-        elif msg_type == AbortLookupFetchMsg.TYPE:
-            self._on_abort_lookup_fetch(msg)
+        elif msg_type == FetchMsg.TYPE:
+            self._on_fetch(msg)
+        elif msg_type == AbortFetchMsg.TYPE:
+            self._on_abort_fetch(msg)
         elif msg_type == TransferDoneMsg.TYPE:
             TransferDoneMsg.validate(msg)
             self._on_transfer_done(msg)
@@ -617,16 +617,16 @@ class P2PSession:
             self._do_send(queued)
         self._queued.clear()
 
-    def _on_lookup_fetch(self, msg: dict) -> None:
-        LookupFetchMsg.validate(msg)
-        kv_request_id = msg[LookupFetchMsg.KV_REQUEST_ID]
+    def _on_fetch(self, msg: dict) -> None:
+        FetchMsg.validate(msg)
+        kv_request_id = msg[FetchMsg.KV_REQUEST_ID]
         block_hashes = [
             OffloadKey(bh if isinstance(bh, bytes) else bytes(bh))
-            for bh in msg[LookupFetchMsg.BLOCK_HASHES]
+            for bh in msg[FetchMsg.BLOCK_HASHES]
         ]
-        block_indexes = msg[LookupFetchMsg.BLOCK_INDEXES]
+        block_indexes = msg[FetchMsg.BLOCK_INDEXES]
         logger.debug(
-            "P2PSession %s: lookup_fetch RECEIVED kv_request_id=%s blocks=%d",
+            "P2PSession %s: fetch RECEIVED kv_request_id=%s blocks=%d",
             self.peer_id,
             kv_request_id,
             len(block_hashes),
@@ -638,7 +638,7 @@ class P2PSession:
         if result.local_idxs:
             self._submit_transfer(kv_request_id, result)
         # Prefiller-first mode: finish_request may have run before
-        # lookup_fetch arrived. If so, finalize once we know what was
+        # fetch arrived. If so, finalize once we know what was
         # demanded — fully satisfied → success, else early-fail.
         if req.finishing and not self._has_inflight_for(kv_request_id):
             del self._outbound[kv_request_id]
@@ -650,9 +650,9 @@ class P2PSession:
                 }
             )
 
-    def _on_abort_lookup_fetch(self, msg: dict) -> None:
-        AbortLookupFetchMsg.validate(msg)
-        kv_request_id = msg[AbortLookupFetchMsg.KV_REQUEST_ID]
+    def _on_abort_fetch(self, msg: dict) -> None:
+        AbortFetchMsg.validate(msg)
+        kv_request_id = msg[AbortFetchMsg.KV_REQUEST_ID]
         self._outbound.pop(kv_request_id, None)
         ids_to_cancel = [
             tid

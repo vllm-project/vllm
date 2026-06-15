@@ -3,8 +3,8 @@
 """Unit tests for the unified bidirectional P2PSession.
 
 A P2PSession owns a single ControlConnection and dispatches every message
-type — both client-role (LookupFetchMsg / TransferDoneMsg / AbortAck) and
-server-role (LookupFetchMsg / TransferDoneMsg / AbortAck from the peer's
+type — both client-role (FetchMsg / TransferDoneMsg / AbortAck) and
+server-role (FetchMsg / TransferDoneMsg / AbortAck from the peer's
 perspective). These tests exercise both flows independently and the
 bidirectional case where one session simultaneously serves a fetch and
 completes its own load.
@@ -24,11 +24,11 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
     AbortAckMsg,
-    AbortLookupFetchMsg,
+    AbortFetchMsg,
     ConnectAckMsg,
     ConnectMsg,
     DisconnectMsg,
-    LookupFetchMsg,
+    FetchMsg,
     TransferDoneMsg,
 )
 
@@ -238,8 +238,8 @@ class TestConnectHandshake:
         # Ack arrives.
         conn.enqueue({TYPE_KEY: ConnectAckMsg.TYPE, ConnectAckMsg.PEER_ID: "peer:8000"})
         session.poll()
-        # Queued lookup_fetch is now sent.
-        assert any(m[TYPE_KEY] == LookupFetchMsg.TYPE for m in conn._sent)
+        # Queued fetch is now sent.
+        assert any(m[TYPE_KEY] == FetchMsg.TYPE for m in conn._sent)
 
     def test_block_len_mismatch_marks_dead(self):
         """Mismatched block_len rejects peer and marks connection dead."""
@@ -282,17 +282,17 @@ class TestConnectHandshake:
 
 
 class TestClientFlows:
-    def test_request_blocks_sends_lookup_fetch(self):
+    def test_request_blocks_sends_fetch(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
             job_id=1, kv_request_id="req-1", keys=[b"k1", b"k2"], block_ids=[0, 1]
         )
         lookup = conn._sent[-1]
-        assert lookup[TYPE_KEY] == LookupFetchMsg.TYPE
-        assert lookup[LookupFetchMsg.KV_REQUEST_ID] == "req-1"
-        assert lookup[LookupFetchMsg.BLOCK_HASHES] == [b"k1", b"k2"]
-        assert lookup[LookupFetchMsg.BLOCK_INDEXES] == [0, 1]
+        assert lookup[TYPE_KEY] == FetchMsg.TYPE
+        assert lookup[FetchMsg.KV_REQUEST_ID] == "req-1"
+        assert lookup[FetchMsg.BLOCK_HASHES] == [b"k1", b"k2"]
+        assert lookup[FetchMsg.BLOCK_INDEXES] == [0, 1]
 
     def test_transfer_done_success(self):
         session, conn, _ = _make_session()
@@ -334,8 +334,8 @@ class TestClientFlows:
         )
         session.finish_request("req-1")
         abort = conn._sent[-1]
-        assert abort[TYPE_KEY] == AbortLookupFetchMsg.TYPE
-        assert abort[AbortLookupFetchMsg.KV_REQUEST_ID] == "req-1"
+        assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
+        assert abort[AbortFetchMsg.KV_REQUEST_ID] == "req-1"
 
     def test_load_timeout_sends_abort(self):
         session, conn, _ = _make_session()
@@ -346,7 +346,7 @@ class TestClientFlows:
         session._inbound["req-1"].submitted_at = time.monotonic() - 60.0
         session.poll()
         abort = conn._sent[-1]
-        assert abort[TYPE_KEY] == AbortLookupFetchMsg.TYPE
+        assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
 
 
 # ---------------------------------------------------------------------------
@@ -362,10 +362,10 @@ class TestServerFlows:
         session.add_stored_blocks("req-1", [b"k1", b"k2"], [0, 1], job_id=1)
         conn.enqueue(
             {
-                TYPE_KEY: LookupFetchMsg.TYPE,
-                LookupFetchMsg.KV_REQUEST_ID: "req-1",
-                LookupFetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
-                LookupFetchMsg.BLOCK_INDEXES: [10, 11],
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.BLOCK_INDEXES: [10, 11],
             }
         )
         session.poll()
@@ -380,10 +380,10 @@ class TestServerFlows:
         _activate(session, conn)
         conn.enqueue(
             {
-                TYPE_KEY: LookupFetchMsg.TYPE,
-                LookupFetchMsg.KV_REQUEST_ID: "req-1",
-                LookupFetchMsg.BLOCK_HASHES: [b"k1"],
-                LookupFetchMsg.BLOCK_INDEXES: [5],
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [5],
             }
         )
         session.poll()
@@ -398,10 +398,10 @@ class TestServerFlows:
         session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
         conn.enqueue(
             {
-                TYPE_KEY: LookupFetchMsg.TYPE,
-                LookupFetchMsg.KV_REQUEST_ID: "req-1",
-                LookupFetchMsg.BLOCK_HASHES: [b"k1"],
-                LookupFetchMsg.BLOCK_INDEXES: [5],
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [5],
             }
         )
         session.poll()
@@ -411,13 +411,13 @@ class TestServerFlows:
         assert StoreResult(job_id=1, success=True) in stores
         assert any(m[TYPE_KEY] == TransferDoneMsg.TYPE for m in conn._sent)
 
-    def test_abort_lookup_fetch_replies_with_ack(self):
+    def test_abort_fetch_replies_with_ack(self):
         session, conn, _ = _make_session()
         _activate(session, conn)
         conn.enqueue(
             {
-                TYPE_KEY: AbortLookupFetchMsg.TYPE,
-                AbortLookupFetchMsg.KV_REQUEST_ID: "req-1",
+                TYPE_KEY: AbortFetchMsg.TYPE,
+                AbortFetchMsg.KV_REQUEST_ID: "req-1",
             }
         )
         session.poll()
@@ -454,10 +454,10 @@ class TestFinishRequestServerSide:
         # Decoder demanded a block we never stored.
         conn.enqueue(
             {
-                TYPE_KEY: LookupFetchMsg.TYPE,
-                LookupFetchMsg.KV_REQUEST_ID: "req-1",
-                LookupFetchMsg.BLOCK_HASHES: [b"k1"],
-                LookupFetchMsg.BLOCK_INDEXES: [5],
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [5],
             }
         )
         session.poll()
@@ -479,10 +479,10 @@ class TestFinishRequestServerSide:
         # Demand 2 blocks; we store 1 (kicks one inflight transfer).
         conn.enqueue(
             {
-                TYPE_KEY: LookupFetchMsg.TYPE,
-                LookupFetchMsg.KV_REQUEST_ID: "req-1",
-                LookupFetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
-                LookupFetchMsg.BLOCK_INDEXES: [10, 11],
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.BLOCK_INDEXES: [10, 11],
             }
         )
         session.poll()
@@ -514,10 +514,10 @@ class TestFinishRequestServerSide:
         _activate(session, conn)
         conn.enqueue(
             {
-                TYPE_KEY: LookupFetchMsg.TYPE,
-                LookupFetchMsg.KV_REQUEST_ID: "req-1",
-                LookupFetchMsg.BLOCK_HASHES: [b"k1"],
-                LookupFetchMsg.BLOCK_INDEXES: [10],
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [10],
             }
         )
         session.poll()
@@ -533,9 +533,9 @@ class TestFinishRequestServerSide:
         msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
         assert msg[TransferDoneMsg.SUCCESS] is True
 
-    def test_prefiller_first_finish_before_lookup_fetch(self):
+    def test_prefiller_first_finish_before_fetch(self):
         """Prefiller-first: finish_request runs before the decoder's
-        lookup_fetch arrives. State is held until lookup_fetch, then
+        fetch arrives. State is held until fetch, then
         finalized — success=True if all demand was matched against
         available blocks, else success=False."""
         # Case A: all demand satisfied by available blocks.
@@ -545,13 +545,13 @@ class TestFinishRequestServerSide:
         # finish_request first — client_id is None -> defer.
         session.finish_request("req-1")
         assert "req-1" in session._outbound
-        # Lookup_fetch arrives now: demand fully satisfied by available.
+        # Fetch arrives now: demand fully satisfied by available.
         conn.enqueue(
             {
-                TYPE_KEY: LookupFetchMsg.TYPE,
-                LookupFetchMsg.KV_REQUEST_ID: "req-1",
-                LookupFetchMsg.BLOCK_HASHES: [b"k1"],
-                LookupFetchMsg.BLOCK_INDEXES: [10],
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [10],
             }
         )
         session.poll()
@@ -562,17 +562,17 @@ class TestFinishRequestServerSide:
         msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
         assert msg[TransferDoneMsg.SUCCESS] is True
 
-        # Case B: demand exceeds available -> early-fail fires from lookup_fetch.
+        # Case B: demand exceeds available -> early-fail fires from fetch.
         session, conn, transport = _make_session()
         _activate(session, conn)
         session.add_stored_blocks("req-2", [b"k1"], [0], job_id=2)
         session.finish_request("req-2")
         conn.enqueue(
             {
-                TYPE_KEY: LookupFetchMsg.TYPE,
-                LookupFetchMsg.KV_REQUEST_ID: "req-2",
-                LookupFetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
-                LookupFetchMsg.BLOCK_INDEXES: [10, 11],
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-2",
+                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.BLOCK_INDEXES: [10, 11],
             }
         )
         session.poll()
@@ -603,7 +603,7 @@ class TestBidirectional:
         """Single session simultaneously serves a fetch and completes a load.
 
         This is the regression test for the unification: with the old
-        split design the inbound LookupFetchMsg would be dispatched to a
+        split design the inbound FetchMsg would be dispatched to a
         client-only session and dropped (or a server-only session would
         miss the TransferDoneMsg). One unified session handles both.
         """
@@ -614,10 +614,10 @@ class TestBidirectional:
         session.add_stored_blocks("req-srv", [b"served"], [0], job_id=100)
         conn.enqueue(
             {
-                TYPE_KEY: LookupFetchMsg.TYPE,
-                LookupFetchMsg.KV_REQUEST_ID: "req-srv",
-                LookupFetchMsg.BLOCK_HASHES: [b"served"],
-                LookupFetchMsg.BLOCK_INDEXES: [7],
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-srv",
+                FetchMsg.BLOCK_HASHES: [b"served"],
+                FetchMsg.BLOCK_INDEXES: [7],
             }
         )
 
@@ -633,8 +633,7 @@ class TestBidirectional:
         assert len(transport._transfers) == 1
         # Client side: the lookup was sent.
         assert any(
-            m[TYPE_KEY] == LookupFetchMsg.TYPE
-            and m[LookupFetchMsg.KV_REQUEST_ID] == "req-cli"
+            m[TYPE_KEY] == FetchMsg.TYPE and m[FetchMsg.KV_REQUEST_ID] == "req-cli"
             for m in conn._sent
         )
 
@@ -771,15 +770,15 @@ class TestAdversarial:
         assert loads == []
         assert stores == []
 
-    def test_lookup_fetch_mismatched_lengths(self):
+    def test_fetch_mismatched_lengths(self):
         session, conn, transport = _make_session()
         _activate(session, conn)
         conn.enqueue(
             {
-                TYPE_KEY: LookupFetchMsg.TYPE,
-                LookupFetchMsg.KV_REQUEST_ID: "req-bad",
-                LookupFetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
-                LookupFetchMsg.BLOCK_INDEXES: [1],
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-bad",
+                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.BLOCK_INDEXES: [1],
             }
         )
         session.poll()
@@ -856,29 +855,29 @@ class TestConnectMsgValidation:
             ConnectMsg.validate(msg)
 
 
-class TestLookupFetchMsgValidation:
+class TestFetchMsgValidation:
     def _valid_msg(self) -> dict:
         return {
-            TYPE_KEY: LookupFetchMsg.TYPE,
-            LookupFetchMsg.KV_REQUEST_ID: "req-1",
-            LookupFetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
-            LookupFetchMsg.BLOCK_INDEXES: [0, 1],
+            TYPE_KEY: FetchMsg.TYPE,
+            FetchMsg.KV_REQUEST_ID: "req-1",
+            FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+            FetchMsg.BLOCK_INDEXES: [0, 1],
         }
 
     def test_valid_message_passes(self):
-        LookupFetchMsg.validate(self._valid_msg())
+        FetchMsg.validate(self._valid_msg())
 
     def test_length_mismatch(self):
         msg = self._valid_msg()
-        msg[LookupFetchMsg.BLOCK_INDEXES] = [0]
+        msg[FetchMsg.BLOCK_INDEXES] = [0]
         with pytest.raises(ValueError, match="length mismatch"):
-            LookupFetchMsg.validate(msg)
+            FetchMsg.validate(msg)
 
     def test_negative_index(self):
         msg = self._valid_msg()
-        msg[LookupFetchMsg.BLOCK_INDEXES] = [0, -1]
+        msg[FetchMsg.BLOCK_INDEXES] = [0, -1]
         with pytest.raises(ValueError, match="invalid index"):
-            LookupFetchMsg.validate(msg)
+            FetchMsg.validate(msg)
 
 
 class TestTransferDoneMsgValidation:

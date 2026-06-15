@@ -24,7 +24,7 @@ Connection Lifecycle
 Block Transfer Flow (happy path)
 ---------------------------------
 
-1. Client sends LookupFetchMsg with a kv_request_id and lists of
+1. Client sends FetchMsg with a kv_request_id and lists of
    block keys + remote indexes where it wants the data written.
 2. Server matches requested blocks against locally stored blocks:
    - Blocks already available are transferred immediately via RDMA.
@@ -38,7 +38,7 @@ Abort Flow (timeout path)
 --------------------------
 
 1. If the client times out waiting for TransferDoneMsg, it sends
-   AbortLookupFetchMsg to cancel the request.
+   AbortFetchMsg to cancel the request.
 2. Server cancels inflight transfers for that kv_request_id and
    replies with AbortAckMsg.
 3. Client receives AbortAckMsg and reports the load job as failed.
@@ -164,7 +164,7 @@ class DisconnectMsg:
     TYPE = "disconnect"
 
 
-class LookupFetchMsg:
+class FetchMsg:
     """Client → Server: request blocks by key.
 
     Fields:
@@ -173,7 +173,7 @@ class LookupFetchMsg:
         BLOCK_INDEXES: List of remote block indexes (same length as BLOCK_HASHES).
     """
 
-    TYPE = "lookup_fetch"
+    TYPE = "fetch"
     KV_REQUEST_ID = "kv_request_id"
     BLOCK_HASHES = "block_hashes"
     BLOCK_INDEXES = "block_indexes"
@@ -181,11 +181,11 @@ class LookupFetchMsg:
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
-        _require(msg, LookupFetchMsg.KV_REQUEST_ID, str)
-        _require_list(msg, LookupFetchMsg.BLOCK_HASHES)
-        _require_list(msg, LookupFetchMsg.BLOCK_INDEXES)
-        hashes = msg[LookupFetchMsg.BLOCK_HASHES]
-        indexes = msg[LookupFetchMsg.BLOCK_INDEXES]
+        _require(msg, FetchMsg.KV_REQUEST_ID, str)
+        _require_list(msg, FetchMsg.BLOCK_HASHES)
+        _require_list(msg, FetchMsg.BLOCK_INDEXES)
+        hashes = msg[FetchMsg.BLOCK_HASHES]
+        indexes = msg[FetchMsg.BLOCK_INDEXES]
         if len(hashes) != len(indexes):
             raise ValueError(
                 f"block_hashes/block_indexes length mismatch: "
@@ -215,20 +215,20 @@ class TransferDoneMsg:
         _require(msg, TransferDoneMsg.SUCCESS, bool)
 
 
-class AbortLookupFetchMsg:
+class AbortFetchMsg:
     """Client → Server: cancel a pending request.
 
     Fields:
         KV_REQUEST_ID: The request to cancel.
     """
 
-    TYPE = "abort_lookup_fetch"
+    TYPE = "abort_fetch"
     KV_REQUEST_ID = "kv_request_id"
 
     @staticmethod
     def validate(msg: dict) -> None:
         """Raise ValueError if any field has an invalid type or value."""
-        _require(msg, AbortLookupFetchMsg.KV_REQUEST_ID, str)
+        _require(msg, AbortFetchMsg.KV_REQUEST_ID, str)
 
 
 class AbortAckMsg:
