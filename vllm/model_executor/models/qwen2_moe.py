@@ -111,13 +111,62 @@ class Qwen2MoeMLP(nn.Module):
         self.act_fn = SiluAndMul()
         self.expert_gate = expert_gate
 
+    def _try_fused_expert_gate(self, x: torch.Tensor, out: torch.Tensor) -> bool:
+        """Env-gated fused shared-expert-gate sigmoid-mul.
+
+        Returns True if ``out`` was scaled in place by the fused Triton path
+        (caller must NOT run the baseline chain), False to fall through to the
+        eager ``F.sigmoid(self.expert_gate(x)[0]) * out`` baseline.
+
+        This runs inside the opaque ``vllm::moe_forward_shared`` custom op, so
+        the Python ``if M <= threshold`` branch and the in-place mutation of the
+        local intermediate ``out`` are both invisible to torch.compile/Inductor.
+        """
+        import vllm.envs as envs
+
+        if not envs.VLLM_FUSE_EXPERT_GATE:
+            return False
+
+        from vllm.model_executor.layers.fused_moe.fused_expert_gate import (
+            _decode_supported,
+            fused_expert_gate_decode,
+            fused_sigmoid_bcast_mul,
+        )
+
+        weight = getattr(self.expert_gate, "weight", None)
+        if weight is None:
+            return False
+
+        M = x.shape[0]
+        threshold = envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
+        if M <= threshold:
+            # decode / small-M: one kernel does dot + sigmoid + in-place scale.
+            if not _decode_supported(out, x, weight):
+                return False
+            fused_expert_gate_decode(out, x, weight)
+            return True
+
+        # prefill / large-M: keep the library GEMV (native vendor tile), fuse
+        # only sigmoid + broadcast-mul. Fall through if K is not a clean
+        # multiple of the vectorized block (kernel precondition).
+        if out.dtype != torch.bfloat16 or out.dim() != 2:
+            return False
+        if not out.is_contiguous():
+            return False
+        if out.shape[1] % 1024 != 0:
+            return False
+        gate = self.expert_gate(x)[0]
+        fused_sigmoid_bcast_mul(out, gate)
+        return True
+
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         out = self.act_fn(gate_up)
         out, _ = self.down_proj(out)
 
         if self.expert_gate is not None:
-            out = F.sigmoid(self.expert_gate(x)[0]) * out
+            if not self._try_fused_expert_gate(x, out):
+                out = F.sigmoid(self.expert_gate(x)[0]) * out
 
         return out
 
