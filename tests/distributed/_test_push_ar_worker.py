@@ -19,7 +19,7 @@ import torch.distributed as dist
 def find_free_port() -> int:
     """Find a free TCP port for distributed init."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
+        s.bind(("localhost", 0))
         return s.getsockname()[1]
 
 
