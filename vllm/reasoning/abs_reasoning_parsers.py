@@ -31,6 +31,8 @@ class ReasoningParser:
     It is used to extract reasoning content from the model output.
     """
 
+    engine_based_streaming: bool = False
+
     def __init__(self, tokenizer: "TokenizerLike", *args, **kwargs):
         self.model_tokenizer = tokenizer
         # Optional vLLM ModelConfig from the server. Use get (not pop) so composite
@@ -56,6 +58,17 @@ class ReasoningParser:
         the reasoning block (e.g. `""</seed:think>""` and `"</think>"`).
         """
         return None
+
+    def has_engine_confirmed_reasoning_end(self) -> bool:
+        """Whether the engine has confirmed the reasoning end transition.
+
+        Engine-based parsers may defer terminal processing when the
+        detokenizer holds back text.  This method returns the engine's
+        *processed* state, not a raw token-ID check.
+
+        Only called for parsers with ``engine_based_streaming = True``.
+        """
+        return False
 
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
@@ -285,8 +298,8 @@ class ReasoningParserManager:
         Example:
             ReasoningParserManager.register_lazy_module(
                 name="qwen3",
-                module_path="vllm.reasoning.parsers.qwen3_reasoning_parser",
-                class_name="Qwen3ReasoningParser",
+                module_path="vllm.reasoning.qwen3_engine_reasoning_parser",
+                class_name="Qwen3ParserReasoningAdapter",
             )
         """
         cls.lazy_parsers[name] = (module_path, class_name)

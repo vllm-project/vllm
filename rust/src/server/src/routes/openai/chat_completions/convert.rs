@@ -142,6 +142,7 @@ pub(super) fn prepare_chat_request(
         },
         tools: convert_tools(request.tools)?,
         tool_choice: convert_tool_choice(request.tool_choice.as_ref())?,
+        parallel_tool_calls: request.parallel_tool_calls.unwrap_or(true),
         decode_options: vllm_text::output::TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
             include_stop_str_in_output: request.include_stop_str_in_output,
@@ -410,6 +411,33 @@ mod tests {
             stream: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_parallel_tool_calls() {
+        let mut request = base_request();
+        request.parallel_tool_calls = Some(false);
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(!prepared.chat_request.parallel_tool_calls);
+    }
+
+    #[test]
+    fn prepare_chat_request_defaults_parallel_tool_calls_to_true() {
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(prepared.chat_request.parallel_tool_calls);
     }
 
     #[test]

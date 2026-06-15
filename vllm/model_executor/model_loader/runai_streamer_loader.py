@@ -31,12 +31,38 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         if load_config.model_loader_extra_config:
             extra_config = load_config.model_loader_extra_config
 
-            if isinstance(distributed := extra_config.get("distributed"), bool):
+            allowed_keys = {"distributed", "concurrency", "memory_limit"}
+            if unexpected_keys := set(extra_config) - allowed_keys:
+                raise ValueError(
+                    "Unexpected extra config keys for runai_streamer: "
+                    f"{unexpected_keys}"
+                )
+
+            if "distributed" in extra_config:
+                distributed = extra_config["distributed"]
+                if not isinstance(distributed, bool):
+                    raise ValueError(f"distributed must be a bool, got {distributed!r}")
                 self._is_distributed = distributed
-            if isinstance(concurrency := extra_config.get("concurrency"), int):
-                os.environ["RUNAI_STREAMER_CONCURRENCY"] = str(concurrency)
-            if isinstance(memory_limit := extra_config.get("memory_limit"), int):
-                os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] = str(memory_limit)
+
+            # Validate every value before mutating os.environ, so a later
+            # invalid key cannot leave an earlier one partially applied.
+            env_updates: dict[str, str] = {}
+            for key, env_var in (
+                ("concurrency", "RUNAI_STREAMER_CONCURRENCY"),
+                ("memory_limit", "RUNAI_STREAMER_MEMORY_LIMIT"),
+            ):
+                if key in extra_config:
+                    value = extra_config[key]
+                    if (
+                        isinstance(value, bool)
+                        or not isinstance(value, int)
+                        or value <= 0
+                    ):
+                        raise ValueError(
+                            f"{key} must be a positive integer, got {value!r}"
+                        )
+                    env_updates[env_var] = str(value)
+            os.environ.update(env_updates)
 
             runai_streamer_s3_endpoint = os.getenv("RUNAI_STREAMER_S3_ENDPOINT")
             aws_endpoint_url = os.getenv("AWS_ENDPOINT_URL")

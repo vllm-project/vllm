@@ -564,16 +564,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),
-    "XverseForCausalLM": _HfExamplesInfo(
-        "xverse/XVERSE-7B-Chat",
-        tokenizer="meta-llama/Llama-2-7b",
-        trust_remote_code=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": "XVERSE tokenizer is incompatible with transformers v5 "
-            "(add_prefix_space / prepend_scheme mismatch).",
-        },
-    ),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
     "MiMoV2FlashForCausalLM": _HfExamplesInfo(

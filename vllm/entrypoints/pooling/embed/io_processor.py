@@ -36,6 +36,9 @@ from .protocol import (
     CohereEmbedContent,
     CohereEmbedInput,
     CohereEmbedRequest,
+    EmbeddingBatchChatInputRequest,
+    EmbeddingBatchChatRequest,
+    EmbeddingChatInputRequest,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
 )
@@ -66,6 +69,16 @@ class EmbedIOProcessor(PoolingIOProcessor):
     def pre_process_online(self, ctx: PoolingServeContext):
         if isinstance(ctx.request, CohereEmbedRequest):
             self._pre_process_cohere_online(ctx)
+        elif isinstance(
+            ctx.request,
+            (
+                EmbeddingChatRequest,
+                EmbeddingBatchChatRequest,
+                EmbeddingChatInputRequest,
+                EmbeddingBatchChatInputRequest,
+            ),
+        ):
+            self._pre_process_openai_chat_online(ctx)
         else:
             super().pre_process_online(ctx)
 
@@ -366,6 +379,70 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 dimensions=request.output_dimension,
             )
         return super().create_pooling_params(request)
+
+    def _pre_process_openai_chat_online(
+        self,
+        ctx: PoolingServeContext[
+            EmbeddingChatRequest
+            | EmbeddingBatchChatRequest
+            | EmbeddingChatInputRequest
+            | EmbeddingBatchChatInputRequest
+        ],
+    ) -> None:
+        request = ctx.request
+        self._validate_chat_template(
+            request_chat_template=request.chat_template,
+            chat_template_kwargs=request.chat_template_kwargs,
+            trust_request_chat_template=self.trust_request_chat_template,
+        )
+
+        if isinstance(
+            request, (EmbeddingBatchChatRequest, EmbeddingBatchChatInputRequest)
+        ):
+            all_messages = request.messages
+        else:
+            all_messages = [request.messages]
+        ctx.engine_inputs = self._batch_render_openai_chat(request, all_messages)
+
+    def _batch_render_openai_chat(
+        self,
+        request: (
+            EmbeddingChatRequest
+            | EmbeddingBatchChatRequest
+            | EmbeddingChatInputRequest
+            | EmbeddingBatchChatInputRequest
+        ),
+        all_messages: Sequence[list[ChatCompletionMessageParam]],
+    ) -> list[EngineInput]:
+        renderer = self.renderer
+        mm_config = self.model_config.multimodal_config
+
+        tok_params = request.build_tok_params(self.model_config)
+        chat_params = request.build_chat_params(
+            self.chat_template,
+            self.chat_template_content_format,
+        ).with_defaults(
+            merge_kwargs(
+                None,
+                dict(
+                    tools=None,
+                    tokenize=is_mistral_tokenizer(renderer.tokenizer),
+                ),
+            ),
+            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+        )
+
+        _, engine_inputs = renderer.render_chat(
+            all_messages,
+            chat_params,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
+        )
+        return engine_inputs
 
     def _pre_process_cohere_online(self, ctx: PoolingServeContext) -> None:
         """Convert a ``CohereEmbedRequest`` into engine prompts.

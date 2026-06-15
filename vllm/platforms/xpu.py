@@ -208,7 +208,6 @@ class XPUPlatform(Platform):
 
         pass_config = compilation_config.pass_config
         fusion_passes_to_disable = {
-            "enable_sp": "Sequence parallelism",
             "fuse_gemm_comms": "Async TP",
             "fuse_allreduce_rms": "AllReduce + RMSNorm fusion",
             "fuse_attn_quant": "Attention + quant fusion",

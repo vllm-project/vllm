@@ -235,6 +235,12 @@ impl ChatLlm {
         Ok(token_ids)
     }
 
+    /// Abort in-flight requests by their external (user-supplied) request ids.
+    pub async fn abort(&self, external_ids: &[String]) -> Result<()> {
+        self.text.abort(external_ids).await?;
+        Ok(())
+    }
+
     /// Shut down the underlying LLM client and its background tasks.
     pub async fn shutdown(self) -> Result<()> {
         self.text.shutdown().await?;

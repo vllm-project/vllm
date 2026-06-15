@@ -184,7 +184,7 @@ Our online Server provides endpoints that correspond to the offline APIs:
 - Corresponding to `LLM.classify`:
     - [Classification API](classify.md#online-serving)(`/classify`)
 - Corresponding to `LLM.score`:
-    - [Score API](scoring.md#score-api)(`/score`)
+    - [Score API](scoring.md#score-api) (`/score`, `/v1/score`)
     - [Cohere Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 - Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
 

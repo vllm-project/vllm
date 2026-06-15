@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import numpy as np
 import pybase64 as base64
@@ -54,7 +54,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
-from vllm.inputs import EngineInput
+from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -71,6 +71,39 @@ if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
 logger = init_logger(__name__)
+
+
+def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
+    """Sum per-modality placeholder tokens from ``mm_placeholders``.
+
+    Keyed by modality name; ``PlaceholderRange.length`` is the placeholder's
+    prompt token span, so each sum matches the placeholder tokens already
+    counted in ``usage.prompt_tokens``.
+    """
+    mm_placeholders = cast(
+        "MultiModalPlaceholders | None", engine_input.get("mm_placeholders")
+    )
+    return {
+        modality: sum(p.length for p in ranges)
+        for modality, ranges in (mm_placeholders or {}).items()
+        if ranges
+    }
+
+
+def _make_prompt_tokens_details(
+    enable_prompt_tokens_details: bool,
+    num_cached_tokens: int | None,
+    mm_token_counts: dict[str, int] | None,
+) -> PromptTokenUsageInfo | None:
+    """Build ``prompt_tokens_details`` from cached + multimodal token counts."""
+    if not enable_prompt_tokens_details:
+        return None
+    if num_cached_tokens is None and not mm_token_counts:
+        return None
+    return PromptTokenUsageInfo(
+        cached_tokens=num_cached_tokens,
+        multimodal_tokens=mm_token_counts or None,
+    )
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -264,8 +297,10 @@ class OpenAIServingChat(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
+        mm_token_counts: dict[str, int] | None = None
         for i, engine_input in enumerate(engine_inputs):
             prompt_token_ids = self._extract_prompt_components(engine_input).token_ids
+            mm_token_counts = _get_mm_token_counts(engine_input)
 
             # If we are creating sub requests for multiple prompts, ensure that they
             # have unique request ids.
@@ -362,6 +397,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request_metadata,
                 chat_template_kwargs=chat_template_kwargs,
+                mm_token_counts=mm_token_counts,
             )
 
         return await self.chat_completion_full_generator(
@@ -373,6 +409,7 @@ class OpenAIServingChat(OpenAIServing):
             tokenizer,
             request_metadata,
             chat_template_kwargs=chat_template_kwargs,
+            mm_token_counts=mm_token_counts,
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
@@ -390,6 +427,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         chat_template_kwargs: dict[str, Any] | None = None,
+        mm_token_counts: dict[str, int] | None = None,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -733,10 +771,11 @@ class OpenAIServingChat(OpenAIServing):
                     completion_tokens=completion_tokens,
                     total_tokens=num_prompt_tokens + completion_tokens,
                 )
-                if self.enable_prompt_tokens_details and num_cached_tokens is not None:
-                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(
-                        cached_tokens=num_cached_tokens
-                    )
+                final_usage.prompt_tokens_details = _make_prompt_tokens_details(
+                    self.enable_prompt_tokens_details,
+                    num_cached_tokens,
+                    mm_token_counts,
+                )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -797,6 +836,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         chat_template_kwargs: dict[str, Any] | None = None,
+        mm_token_counts: dict[str, int] | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
@@ -1024,13 +1064,11 @@ class OpenAIServingChat(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-        if (
-            self.enable_prompt_tokens_details
-            and final_res.num_cached_tokens is not None
-        ):
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens
-            )
+        usage.prompt_tokens_details = _make_prompt_tokens_details(
+            self.enable_prompt_tokens_details,
+            final_res.num_cached_tokens,
+            mm_token_counts,
+        )
 
         request_metadata.final_usage_info = usage
 
