@@ -362,7 +362,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
 
-        if sizes is not None and sizes.count(sizes[0]) != len(sizes):
+        if sizes is not None and (
+            sizes.count(sizes[0]) != len(sizes) or envs.VLLM_BATCH_INVARIANT
+        ):
+            # Note: force to use `reduce_scatterv` under BATCH_INVARIANT mode.
             pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
         else:
             pynccl_comm.reduce_scatter(output, input_tensor)
