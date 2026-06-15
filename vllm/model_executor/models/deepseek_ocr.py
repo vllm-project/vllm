@@ -958,7 +958,8 @@ class DeepseekOCRForCausalLM(
         # Split local output into per-patch groups.
         local_flat = None
         if total_patches > 0 and local_output is not None:
-            local_flat = local_output.reshape(
+            local_flat = local_output[: total_patches * self.single_patch_output_token]
+            local_flat = local_flat.reshape(
                 total_patches, self.single_patch_output_token, n_embed
             )
 
