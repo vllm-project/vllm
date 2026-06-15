@@ -971,7 +971,7 @@ class OffloadingConnectorScheduler:
 
     def has_pending_push_work(self) -> bool:
         """True while a GPU->CPU or secondary-tier transfer is in flight."""
-        return bool(self._jobs) or self.manager.has_pending_push_work()
+        return bool(self._jobs) or self.manager.has_pending_work()
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """

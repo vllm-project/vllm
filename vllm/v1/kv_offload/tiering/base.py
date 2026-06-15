@@ -153,6 +153,13 @@ class SecondaryTierManager(ABC):
         """
         pass
 
+    def has_pending_work(self) -> bool:
+        """Whether this tier has in-flight work (transfers or lookups).
+
+        Default: no pending work. Tiers with async I/O override this.
+        """
+        return False
+
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Mark blocks as recently used for eviction policy.

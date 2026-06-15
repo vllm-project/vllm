@@ -288,7 +288,7 @@ class OffloadingManager(ABC):
         """
         return
 
-    def has_pending_push_work(self) -> bool:
+    def has_pending_work(self) -> bool:
         """Whether any asynchronous transfer is still in flight."""
         return False
 
