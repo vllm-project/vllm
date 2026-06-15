@@ -812,6 +812,27 @@ mod tests {
     }
 
     #[test]
+    fn lower_sampling_params_rejects_out_of_vocab_stop_token_ids() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                stop_token_ids: Some(vec![999, 1000]),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::OutOfVocab(OutOfVocabError {
+                parameter: "stop_token_ids",
+                token_ids,
+                vocab_size: 1000,
+            }) if token_ids == vec![1000]
+        ));
+    }
+
+    #[test]
     fn lower_sampling_params_rejects_out_of_vocab_allowed_token_ids() {
         let error = lower_sampling_params_with_limits(
             SamplingParams {

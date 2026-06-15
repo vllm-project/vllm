@@ -51,6 +51,11 @@ impl SamplingLimits {
         self.model_vocab_size.unwrap_or(self.tokenizer_vocab_size)
     }
 
+    /// Return the vocabulary size used to validate generated stop token IDs.
+    pub fn stop_token_vocab_size(&self) -> usize {
+        self.model_vocab_size.unwrap_or(self.tokenizer_vocab_size)
+    }
+
     /// Return the union bound used to validate token-ID prompts.
     pub fn prompt_token_vocab_size(&self) -> usize {
         self.tokenizer_vocab_size.max(self.model_vocab_size.unwrap_or(0))

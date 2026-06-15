@@ -55,6 +55,12 @@ pub(crate) fn validate_vocab_range(
     params: &EngineCoreSamplingParams,
     limits: &SamplingLimits,
 ) -> Result<(), OutOfVocabError> {
+    validate_param(
+        "stop_token_ids",
+        params.stop_token_ids.iter().copied(),
+        limits.stop_token_vocab_size(),
+    )?;
+
     if let Some(token_ids) = params.allowed_token_ids.as_deref() {
         validate_param(
             "allowed_token_ids",
