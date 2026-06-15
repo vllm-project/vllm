@@ -4179,9 +4179,9 @@ class GPUModelRunner(
 
             if self.cache_config.kv_sharing_fast_prefill:
                 assert not self.num_prompt_logprobs, (
-                    "--kv-sharing-fast-prefill produces incorrect "
-                    "logprobs for prompt tokens, tokens, please disable "
-                    "it when the requests need prompt logprobs"
+                    "--kv-sharing-fast-prefill produces incorrect logprobs for "
+                    "prompt tokens, please disable it when the requests need "
+                    "prompt logprobs"
                 )
 
             num_reqs = self.input_batch.num_reqs
