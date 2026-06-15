@@ -113,6 +113,7 @@ class XPUPlatform(Platform):
     supported_quantization: list[str] = [
         "awq",
         "gptq",
+        "inc",
         "fp8",
         "mxfp4",
         "mxfp8",
