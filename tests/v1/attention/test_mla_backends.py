@@ -798,9 +798,7 @@ def test_backend_correctness(
         )
 
     # AITER_ASM MLA prefill backend currently hardcodes q/k/v dequant scales
-    # to 1.0 (see vllm/v1/attention/backends/mla/prefill/aiter_asm.py). Skip
-    # any parameterization with non-unit Q or K scales until the kernel-side
-    # scale plumbing is added.
+    # to 1.0.
     if prefill_backend == MLAPrefillBackendEnum.AITER_ASM and (
         q_scale != 1.0 or k_scale != 1.0
     ):
