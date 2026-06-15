@@ -77,6 +77,7 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         self.query_cudagraph_manager: DFlashCudaGraphManager | None = None
         self.draft_kv_cache_group_id: int = -1
+        self.draft_sliding_window: int = 0
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         # PIECEWISE cudagraphs are not supported for dflash
@@ -137,6 +138,12 @@ class DFlashSpeculator(DraftModelSpeculator):
         self.draft_block_size = self.block_tables.block_sizes[
             self.draft_kv_cache_group_id
         ]
+        draft_kv_spec = kv_cache_config.kv_cache_groups[
+            self.draft_kv_cache_group_id
+        ].kv_cache_spec
+        self.draft_sliding_window = int(
+            getattr(draft_kv_spec, "sliding_window", 0) or 0
+        )
 
     @torch.inference_mode()
     def _run_model(
@@ -309,6 +316,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             next_prefill_tokens,
             self.block_tables.input_block_tables[self.draft_kv_cache_group_id],
             self.draft_block_size,
+            self.draft_sliding_window,
             self.parallel_drafting_token_id,
             self.num_query_per_req,
             self.num_speculative_steps,
@@ -397,6 +405,7 @@ def _prepare_dflash_inputs_kernel(
     # Scalars
     parallel_drafting_token_id,
     block_size,
+    sliding_window,
     num_query_per_req,
     num_speculative_steps,
     max_num_reqs,
@@ -415,6 +424,7 @@ def _prepare_dflash_inputs_kernel(
 
     num_rejected = tl.load(num_rejected_ptr + req_idx)
     valid_ctx_end = ctx_end - num_rejected
+    num_valid_ctx = valid_ctx_end - ctx_start
 
     num_sampled = tl.load(num_sampled_ptr + req_idx)
     if num_sampled > 0:
@@ -424,10 +434,12 @@ def _prepare_dflash_inputs_kernel(
         bonus_token = tl.load(next_prefill_tokens_ptr + req_state_idx).to(tl.int32)
 
     last_valid_pos = tl.load(target_positions_ptr + valid_ctx_end - 1)
+    visible_context_start = last_valid_pos + 2 - sliding_window
+    visible_context_start = tl.maximum(visible_context_start, 0)
     query_base = req_idx * num_query_per_req
 
     j = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    is_ctx = j < num_ctx
+    is_ctx = j < num_valid_ctx
     is_query = (j >= num_ctx) & (j < num_ctx + num_query_per_req)
     query_off = j - num_ctx
 
@@ -435,13 +447,16 @@ def _prepare_dflash_inputs_kernel(
     ctx_pos_idx = ctx_start + tl.where(is_ctx, j, 0)
     ctx_pos = tl.load(target_positions_ptr + ctx_pos_idx, mask=is_ctx, other=0)
     ctx_block_num = ctx_pos // block_size
-    ctx_block_num = tl.minimum(ctx_block_num, block_table_stride - 1)
+    has_context_slot = is_ctx & (ctx_block_num < block_table_stride)
+    context_in_window = (sliding_window <= 0) | (ctx_pos >= visible_context_start)
+    has_context_slot = has_context_slot & context_in_window
     ctx_block_id = tl.load(
         block_table_ptr + req_idx * block_table_stride + ctx_block_num,
-        mask=is_ctx,
+        mask=has_context_slot,
         other=0,
     ).to(tl.int64)
     ctx_slot = ctx_block_id * block_size + (ctx_pos % block_size)
+    ctx_slot = tl.where(has_context_slot, ctx_slot, PAD_SLOT_ID)
     tl.store(out_context_positions_ptr + ctx_start + j, ctx_pos, mask=is_ctx)
     tl.store(out_context_slot_mapping_ptr + ctx_start + j, ctx_slot, mask=is_ctx)
 
@@ -452,13 +467,14 @@ def _prepare_dflash_inputs_kernel(
     input_id = tl.where(is_bonus, bonus_token, parallel_drafting_token_id)
 
     q_block_num = query_pos // block_size
-    q_block_num = tl.minimum(q_block_num, block_table_stride - 1)
+    has_query_slot = is_query & (q_block_num < block_table_stride)
     q_block_id = tl.load(
         block_table_ptr + req_idx * block_table_stride + q_block_num,
-        mask=is_query,
+        mask=has_query_slot,
         other=0,
     ).to(tl.int64)
     q_slot = q_block_id * block_size + (query_pos % block_size)
+    q_slot = tl.where(has_query_slot, q_slot, PAD_SLOT_ID)
 
     tl.store(out_input_ids_ptr + query_idx, input_id, mask=is_query)
     tl.store(out_query_positions_ptr + query_idx, query_pos, mask=is_query)
@@ -528,6 +544,7 @@ def prepare_dflash_inputs(
     # [max_num_reqs, max_num_blocks]
     block_table: torch.Tensor,
     block_size: int,
+    sliding_window: int,
     parallel_drafting_token_id: int,
     num_query_per_req: int,
     num_speculative_steps: int,
@@ -564,6 +581,7 @@ def prepare_dflash_inputs(
         block_table.stride(0),
         parallel_drafting_token_id,
         block_size,
+        sliding_window,
         num_query_per_req,
         num_speculative_steps,
         max_num_reqs,

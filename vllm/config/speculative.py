@@ -530,6 +530,25 @@ class SpeculativeConfig:
 
         return hf_config
 
+    @staticmethod
+    def _get_dflash_block_size(hf_config: PretrainedConfig) -> int | None:
+        """Return DFlash's configured query block size, if present."""
+        dflash_config = getattr(hf_config, "dflash_config", None) or {}
+        if not isinstance(dflash_config, dict):
+            return None
+
+        block_size = dflash_config.get("block_size")
+        if block_size is None:
+            return None
+
+        block_size = int(block_size)
+        if block_size <= 1:
+            raise ValueError(
+                "DFlash draft config `dflash_config.block_size` must be greater "
+                f"than 1, got {block_size}."
+            )
+        return block_size
+
     def __post_init__(self):
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
@@ -762,6 +781,34 @@ class SpeculativeConfig:
 
                 if self.method == "dflash":
                     self.parallel_drafting = True
+                    dflash_block_size = SpeculativeConfig._get_dflash_block_size(
+                        self.draft_model_config.hf_config
+                    )
+                    if dflash_block_size is not None:
+                        # DFlash's block_size counts the current/bonus token plus
+                        # mask tokens. vLLM's num_speculative_tokens counts only
+                        # the speculative mask tokens.
+                        dflash_num_speculative_tokens = dflash_block_size - 1
+                        if self.num_speculative_tokens is None:
+                            self.num_speculative_tokens = dflash_num_speculative_tokens
+                            logger.info(
+                                "Defaulted num_speculative_tokens to %s from "
+                                "DFlash draft block_size=%s.",
+                                self.num_speculative_tokens,
+                                dflash_block_size,
+                            )
+                        elif (
+                            self.num_speculative_tokens != dflash_num_speculative_tokens
+                        ):
+                            raise ValueError(
+                                "DFlash draft config block_size does not match "
+                                "num_speculative_tokens. DFlash block_size includes "
+                                "the current/bonus token, so vLLM requires "
+                                "num_speculative_tokens == block_size - 1. "
+                                f"Got num_speculative_tokens="
+                                f"{self.num_speculative_tokens}, "
+                                f"dflash_config.block_size={dflash_block_size}."
+                            )
 
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"

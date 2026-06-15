@@ -33,7 +33,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
             pass_hidden_states_to_model=True,
             runner=runner,
         )
-
         # Only next_token_ids and mask tokens are query tokens, all other context is K/V
         self.max_query_tokens = self.max_batch_size * (1 + self.num_speculative_tokens)
         # Positions covers both context states + query states
@@ -69,6 +68,15 @@ class DFlashProposer(SpecDecodeBaseProposer):
         self.parallel_drafting_hidden_state_tensor = None
 
         self.dflash_causal = self.dflash_config.get("causal", False)
+        self.draft_sliding_window = 0
+        if self.dflash_config.get("use_swa", False):
+            self.draft_sliding_window = int(
+                self.dflash_config.get(
+                    "swa_window_size",
+                    getattr(self.draft_model_config.hf_config, "sliding_window", 0)
+                    or 0,
+                )
+            )
 
     @override
     def _create_draft_vllm_config(self) -> VllmConfig:
@@ -153,6 +161,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
             # Scalars
             parallel_drafting_token_id=self.parallel_drafting_token_id,
             block_size=self.block_size,
+            sliding_window=self.draft_sliding_window,
             num_query_per_req=num_query_per_req,
             num_speculative_tokens=self.num_speculative_tokens,
             total_input_tokens=num_context,
@@ -193,7 +202,6 @@ class DFlashProposer(SpecDecodeBaseProposer):
             slot_mapping=query_slot_mapping,
             causal=self.dflash_causal,
         )
-
         return num_query_total, token_indices_to_sample, new_cad
 
     @override
@@ -267,11 +275,24 @@ class DFlashProposer(SpecDecodeBaseProposer):
         num_context = self._dflash_num_context
 
         # Pre-insert context KVs directly into cache
-        self.model.precompute_and_store_context_kv(
-            self._dflash_hidden_states,  # Shape is already [num_context, hidden_size]
-            self._context_positions_buffer[:num_context],
-            self._context_slot_mapping_buffer[:num_context],
-        )
+        context_slot_mapping = self._context_slot_mapping_buffer[:num_context]
+        valid_context = context_slot_mapping >= 0
+        if valid_context.all():
+            context_states = self._dflash_hidden_states
+            context_positions = self._context_positions_buffer[:num_context]
+        else:
+            context_states = self._dflash_hidden_states[valid_context]
+            context_positions = self._context_positions_buffer[:num_context][
+                valid_context
+            ]
+            context_slot_mapping = context_slot_mapping[valid_context]
+
+        if context_states.shape[0] > 0:
+            self.model.precompute_and_store_context_kv(
+                context_states,
+                context_positions,
+                context_slot_mapping,
+            )
         return (
             dict(
                 input_ids=self.input_ids[:num_input_tokens],

@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from tests.v1.core.utils import create_requests
@@ -20,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
+from vllm.v1.spec_decode.utils import copy_and_expand_dflash_inputs_kernel
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -152,3 +154,84 @@ def test_dflash_drafter_window_reserves_bonus_token():
         speculative_config=SimpleNamespace(use_dflash=lambda: False),
     )
     assert input_fits_in_drafter(plain_runner, SimpleNamespace(max_seq_len=97))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize(
+    ("sliding_window", "expected_context_slots"),
+    [
+        (0, [40, 41, 42, 43, 44, 45]),
+        (3, [-1, -1, -1, -1, 44, 45]),
+    ],
+)
+def test_dflash_input_copy_filters_context_by_sliding_window(
+    sliding_window: int,
+    expected_context_slots: list[int],
+):
+    device = "cuda"
+    num_reqs = 1
+    block_size = 4
+    num_speculative_tokens = 2
+    num_query_per_req = num_speculative_tokens + 1
+    total_input_tokens = 6
+    kernel_block_size = 16
+
+    next_token_ids = torch.tensor([99], dtype=torch.int64, device=device)
+    target_positions = torch.arange(
+        total_input_tokens, dtype=torch.int64, device=device
+    )
+    block_table = torch.tensor([[10, 11, 12]], dtype=torch.int64, device=device)
+    query_start_loc = torch.tensor(
+        [0, total_input_tokens], dtype=torch.int32, device=device
+    )
+    empty_rejected_tokens = torch.empty(0, dtype=torch.int32, device=device)
+
+    out_input_ids = torch.full(
+        (num_reqs * num_query_per_req,), -1, dtype=torch.int64, device=device
+    )
+    out_context_positions = torch.full(
+        (total_input_tokens,), -1, dtype=torch.int64, device=device
+    )
+    out_query_positions = torch.full(
+        (num_reqs * num_query_per_req,), -1, dtype=torch.int64, device=device
+    )
+    out_context_slot_mapping = torch.full(
+        (total_input_tokens,), -9, dtype=torch.int64, device=device
+    )
+    out_query_slot_mapping = torch.full(
+        (num_reqs * num_query_per_req,), -9, dtype=torch.int64, device=device
+    )
+    out_token_indices = torch.full(
+        (num_reqs * num_speculative_tokens,), -1, dtype=torch.int64, device=device
+    )
+
+    copy_and_expand_dflash_inputs_kernel[(num_reqs, 1)](
+        next_token_ids,
+        target_positions,
+        out_input_ids,
+        out_context_positions,
+        out_query_positions,
+        out_context_slot_mapping,
+        out_query_slot_mapping,
+        out_token_indices,
+        block_table,
+        block_table.stride(0),
+        query_start_loc,
+        empty_rejected_tokens,
+        32000,
+        block_size,
+        sliding_window,
+        num_query_per_req,
+        num_speculative_tokens,
+        total_input_tokens,
+        BLOCK_SIZE=kernel_block_size,
+        HAS_NUM_REJECTED=False,
+    )
+    torch.cuda.synchronize()
+
+    assert out_context_positions.cpu().tolist() == list(range(total_input_tokens))
+    assert out_query_positions.cpu().tolist() == [6, 7, 8]
+    assert out_input_ids.cpu().tolist() == [99, 32000, 32000]
+    assert out_token_indices.cpu().tolist() == [1, 2]
+    assert out_context_slot_mapping.cpu().tolist() == expected_context_slots
+    assert out_query_slot_mapping.cpu().tolist() == [46, 47, 48]
