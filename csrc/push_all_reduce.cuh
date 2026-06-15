@@ -14,10 +14,23 @@
 #include <cassert>
 #include <cstring>
 #include <numeric>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace vllm {
 namespace push_ar {
+
+#define PUSH_AR_CUDACHECK(cmd)                                          \
+  do {                                                                  \
+    cudaError_t e = cmd;                                                \
+    if (e != cudaSuccess) {                                             \
+      throw std::runtime_error(                                         \
+          std::string("push_all_reduce CUDA error at ") + __FILE__ +    \
+          ":" + std::to_string(__LINE__) + " '" +                       \
+          cudaGetErrorString(e) + "'");                                 \
+    }                                                                   \
+  } while (0)
 
 class PushAllReduceManager {
  public:
@@ -34,18 +47,18 @@ class PushAllReduceManager {
 
     // Determine PDL support from device capability
     int device_id;
-    cudaGetDevice(&device_id);
+    PUSH_AR_CUDACHECK(cudaGetDevice(&device_id));
     int major;
-    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor,
-                           device_id);
+    PUSH_AR_CUDACHECK(cudaDeviceGetAttribute(
+        &major, cudaDevAttrComputeCapabilityMajor, device_id));
     use_pdl_ = (major >= 9);  // Hopper (sm90) or newer
 
     // Allocate storage
     storage_bytes_ = push_signal_bytes() + push_buffer_total_bytes();
-    cudaMalloc(&storage_, storage_bytes_);
+    PUSH_AR_CUDACHECK(cudaMalloc(&storage_, storage_bytes_));
     // Zeros signals (epoch=0 for all CTAs) AND push buffer
     // (0x0000 = IEEE 754 positive-zero = "empty" sentinel)
-    cudaMemset(storage_, 0, storage_bytes_);
+    PUSH_AR_CUDACHECK(cudaMemset(storage_, 0, storage_bytes_));
 
     peer_storage_.resize(world_size_, nullptr);
   }
@@ -64,7 +77,7 @@ class PushAllReduceManager {
   // Phase 1: Return IPC handle for local storage
   cudaIpcMemHandle_t get_ipc_handle() {
     cudaIpcMemHandle_t handle;
-    cudaIpcGetMemHandle(&handle, storage_);
+    PUSH_AR_CUDACHECK(cudaIpcGetMemHandle(&handle, storage_));
     return handle;
   }
 
@@ -75,8 +88,9 @@ class PushAllReduceManager {
       if (i == rank_) {
         peer_storage_[i] = storage_;
       } else {
-        cudaIpcOpenMemHandle(&peer_storage_[i], peer_handles[i],
-                             cudaIpcMemLazyEnablePeerAccess);
+        PUSH_AR_CUDACHECK(cudaIpcOpenMemHandle(&peer_storage_[i],
+                                                peer_handles[i],
+                                                cudaIpcMemLazyEnablePeerAccess));
       }
     }
     // Create PushController pointing to local signal region
@@ -93,10 +107,15 @@ class PushAllReduceManager {
     const uint32_t num_items = static_cast<uint32_t>(num_elements);
     const int num_threads = select_num_threads<T>(num_items);
 
-    // Verify input fits in push buffer
+    // Verify input fits in push buffer (runtime check, not compiled out)
     const int64_t input_bytes =
         static_cast<int64_t>(sizeof(T)) * num_elements;
-    assert(input_bytes <= push_buffer_bytes_);
+    if (input_bytes > push_buffer_bytes_) {
+      throw std::runtime_error(
+          "push_all_reduce: input (" + std::to_string(input_bytes) +
+          " bytes) exceeds push buffer capacity (" +
+          std::to_string(push_buffer_bytes_) + " bytes)");
+    }
 
     // Build kernel params
     AllReducePushData params;
