@@ -65,6 +65,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.flashinfer_all_reduce import (
             FlashInferAllReduce,
         )
+        from vllm.distributed.device_communicators.push_all_reduce import (
+            PushAllReduce,
+        )
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
         from vllm.distributed.device_communicators.quick_all_reduce import (
             QuickAllReduce,
@@ -81,7 +84,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 register_nccl_symmetric_ops(self.pynccl_comm)
 
         self.ca_comm: CustomAllreduce | None = None
-        self.push_ar_comm = None
+        self.push_ar_comm: PushAllReduce | None = None
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
@@ -441,6 +444,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.pynccl_comm is not None:
             self.pynccl_comm.destroy()
             self.pynccl_comm = None
+        if self.push_ar_comm is not None:
+            self.push_ar_comm.close()
+            self.push_ar_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
         if self.fi_ar_comm is not None:
