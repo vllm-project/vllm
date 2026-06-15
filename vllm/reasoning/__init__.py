@@ -13,8 +13,8 @@ Register a lazy module mapping.
 Example:
     ReasoningParserManager.register_lazy_module(
         name="qwen3",
-        module_path="vllm.reasoning.qwen3_reasoning_parser",
-        class_name="Qwen3ReasoningParser",
+        module_path="vllm.reasoning.qwen3_engine_reasoning_parser",
+        class_name="Qwen3ParserReasoningAdapter",
     )
 """
 
@@ -81,8 +81,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "KimiK2ReasoningParser",
     ),
     "mimo": (
-        "qwen3_reasoning_parser",
-        "Qwen3ReasoningParser",
+        "qwen3_engine_reasoning_parser",
+        "Qwen3ParserReasoningAdapter",
     ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",
@@ -105,8 +105,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Olmo3ReasoningParser",
     ),
     "qwen3": (
-        "qwen3_reasoning_parser",
-        "Qwen3ReasoningParser",
+        "qwen3_engine_reasoning_parser",
+        "Qwen3ParserReasoningAdapter",
     ),
     "seed_oss": (
         "seedoss_reasoning_parser",
