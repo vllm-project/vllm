@@ -100,6 +100,37 @@ impl ServeArgs {
         if self.dp_supervisor_probe_failure_threshold == 0 {
             return Err("Error: --dp-supervisor-probe-failure-threshold must be >= 1".to_string());
         }
+        let devices_per_rank = python_arg_value(
+            &self.managed_engine.python_args,
+            &["--tensor-parallel-size", "-tp"],
+        )
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1)
+            * python_arg_value(
+                &self.managed_engine.python_args,
+                &["--pipeline-parallel-size", "-pp"],
+            )
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1);
+        let required_visible_devices = local_size.saturating_mul(devices_per_rank);
+        for key in ["CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"] {
+            let Some(current) = std::env::var_os(key) else {
+                continue;
+            };
+            let ids = current
+                .to_string_lossy()
+                .split(',')
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>();
+            if ids.len() < required_visible_devices {
+                return Err(format!(
+                    "Error: {key} exposes {} device(s), but --data-parallel-size-local={local_size} with tp*pp={devices_per_rank} requires {required_visible_devices}",
+                    ids.len()
+                ));
+            }
+            break;
+        }
         Ok(())
     }
 
@@ -116,7 +147,6 @@ impl ServeArgs {
             )
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(1);
-
         let start = local_rank.saturating_mul(devices_per_rank);
         let stop = start + devices_per_rank;
         let candidates = [
