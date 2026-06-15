@@ -7,7 +7,7 @@ from unittest.mock import Mock
 import pytest
 
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, FinishReason
 
 from .utils import (
     create_model_runner_output,
@@ -30,7 +30,7 @@ def _make_get_num_new_matched_tokens(
 
 @pytest.fixture
 def scheduler():
-    vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
+    vllm_config = create_vllm_config(kv_load_failure_policy="fail")
     return create_scheduler(vllm_config)
 
 
@@ -72,6 +72,7 @@ def test_async_load_failure(
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=True)
     )
+    scheduler.connector.request_finished.return_value = (False, None)
     scheduler.connector.take_events.return_value = ()
 
     scheduler_output = scheduler.schedule()
@@ -95,19 +96,17 @@ def test_async_load_failure(
 
     scheduler.update_from_output(scheduler_output, model_runner_output)
 
-    min_invalid_block_idx = min(invalid_block_idxs)
-
     assert len(scheduler.waiting) == 0
-    assert len(scheduler.skipped_waiting) == 3
+    assert len(scheduler.skipped_waiting) == 2
+    assert len(scheduler.finished_req_ids) == 1
+    assert scheduler.finished_req_ids == {request2.request_id}
+    assert request2.status == RequestStatus.FINISHED_ERROR
+    assert request2.get_finished_reason() == FinishReason.ERROR
+    assert request2.num_computed_tokens == 0
     for request in scheduler.skipped_waiting:
-        if request.request_id == request2.request_id:
-            assert request.num_computed_tokens == (
-                min_invalid_block_idx * scheduler.block_size
-            )
-        else:
-            assert request.num_computed_tokens == num_external_computed_tokens
+        assert request.num_computed_tokens == num_external_computed_tokens
         assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-    assert scheduler.failed_recving_kv_req_ids == {request2.request_id}
+
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
 
 
@@ -178,13 +177,12 @@ def test_sync_load_failure(
 
     scheduler.update_from_output(scheduler_output, model_runner_output)
 
-    assert len(scheduler.running) == 1
-    assert scheduler.running[0].request_id == request2.request_id
-    assert scheduler.running[0].num_computed_tokens == (
-        min(invalid_block_idxs) * scheduler.block_size
-    )
+    assert len(scheduler.finished_req_ids) == 3
+    assert request2.num_computed_tokens == 0
+    assert request2.status == RequestStatus.FINISHED_ERROR
+    assert request2.get_finished_reason() == FinishReason.ERROR
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 3
-    assert scheduler.connector.request_finished.call_count == 2
+    assert scheduler.connector.request_finished.call_count == 3
 
 
 @pytest.mark.parametrize(
@@ -231,6 +229,7 @@ def test_sync_load_failure_with_shared_blocks(
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=False)
     )
     scheduler.connector.take_events.return_value = ()
+    scheduler.connector.request_finished.return_value = (False, None)
 
     scheduler_output = scheduler.schedule()
 
@@ -256,17 +255,23 @@ def test_sync_load_failure_with_shared_blocks(
     scheduler.update_from_output(scheduler_output, model_runner_output)
 
     # req_id -> num_computed_tokens
-    # all the common prefix blocks will be computed by request1
+    # expected_computed_tokens after failure: both requests should have 0 computed tokens since the failure happens in the shared blocks.
     expected_computed_tokens = {
-        request1.request_id: min(invalid_block_idxs) * scheduler.block_size,
-        request2.request_id: common_prefix_len,
+        request1.request_id: 0,
+        request2.request_id: 0,
     }
 
-    assert len(scheduler.running) == 2
-    for request in scheduler.running:
-        assert (
-            request.num_computed_tokens == expected_computed_tokens[request.request_id]
-        )
+    assert len(scheduler.finished_req_ids) == 2
+    assert len(scheduler.running) == 0
+
+    assert request1.num_computed_tokens == expected_computed_tokens[request1.request_id]
+    assert request1.status == RequestStatus.FINISHED_ERROR
+    assert request1.get_finished_reason() == FinishReason.ERROR
+
+    assert request2.num_computed_tokens == expected_computed_tokens[request2.request_id]
+    assert request2.status == RequestStatus.FINISHED_ERROR
+    assert request2.get_finished_reason() == FinishReason.ERROR
+
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 2
 
 
@@ -302,6 +307,7 @@ def test_async_progressive_load_failure(
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens, async_load=True)
     )
     scheduler.connector.take_events.return_value = ()
+    scheduler.connector.request_finished.return_value = (False, None)
 
     scheduler_output = scheduler.schedule()
 
@@ -312,7 +318,6 @@ def test_async_progressive_load_failure(
     assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
     assert scheduler.connector.get_num_new_matched_tokens.call_count == 1
 
-    min_invalid_block_idx = max(invalid_block_idxs) + 1
     # Simulate failures when progressively loading request blocks.
     for invalid_block_idx in invalid_block_idxs:
         (req_block_ids,) = scheduler.kv_cache_manager.get_block_ids(request.request_id)
@@ -326,14 +331,11 @@ def test_async_progressive_load_failure(
 
         scheduler.update_from_output(scheduler_output, model_runner_output)
 
-        min_invalid_block_idx = min(min_invalid_block_idx, invalid_block_idx)
-
         assert len(scheduler.waiting) == 0
-        assert len(scheduler.skipped_waiting) == 1
-        assert scheduler.skipped_waiting.peek_request().request_id == request.request_id
-        assert request.num_computed_tokens == (
-            min_invalid_block_idx * scheduler.block_size
-        )
-        assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
-        assert scheduler.failed_recving_kv_req_ids == {request.request_id}
+        assert len(scheduler.skipped_waiting) == 0
+        assert len(scheduler.finished_req_ids) == 1
+        assert request.status == RequestStatus.FINISHED_ERROR
+        assert request.get_finished_reason() == FinishReason.ERROR
+
+        assert request.num_computed_tokens == 0
         assert scheduler.connector.get_num_new_matched_tokens.call_count == 1
