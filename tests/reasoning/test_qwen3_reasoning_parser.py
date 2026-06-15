@@ -59,14 +59,11 @@ WITH_THINK_STREAM = {
     "content": "This is the rest",
 }
 
-# --- No think tokens at all (thinking enabled, truncated) ---
-
-# With thinking enabled (default), no think tokens means the output was
-# truncated before </think> could be generated. All output is reasoning.
+# --- No </think> in output ---
 WITHOUT_THINK = {
     "output": "This is the rest",
-    "reasoning": "This is the rest",
-    "content": None,
+    "reasoning": None,
+    "content": "This is the rest",
 }
 # In streaming, the parser cannot distinguish "thinking disabled" from
 # "reasoning in progress" when no think tokens have appeared yet.
@@ -109,12 +106,10 @@ MULTILINE_REASONING = {
     "reasoning": "This is a reasoning\nsection",
     "content": "This is the rest\nThat",
 }
-# Truncated output: <think> present but no </think> (thinking enabled).
-# Everything is reasoning because the output was cut off mid-thought.
 ONLY_OPEN_TAG = {
     "output": "<think>This is a reasoning section",
-    "reasoning": "This is a reasoning section",
-    "content": None,
+    "reasoning": None,
+    "content": "This is a reasoning section",
 }
 
 ONLY_OPEN_TAG_STREAM = {
@@ -123,15 +118,13 @@ ONLY_OPEN_TAG_STREAM = {
     "content": None,
 }
 
-# Truncated output without <think> prefix (Qwen3.5 style where <think>
-# is in the prompt). No </think> means truncation — all is reasoning.
-TRUNCATED_NO_START_TOKEN = {
+NO_THINK_CLOSE_NO_START_TOKEN = {
     "output": "This is a reasoning section",
-    "reasoning": "This is a reasoning section",
-    "content": None,
+    "reasoning": None,
+    "content": "This is a reasoning section",
 }
 
-TRUNCATED_NO_START_TOKEN_STREAM = {
+NO_THINK_CLOSE_NO_START_TOKEN_STREAM = {
     "output": "This is a reasoning section",
     "reasoning": "This is a reasoning section",
     "content": None,
@@ -210,13 +203,13 @@ TEST_CASES = [
     ),
     pytest.param(
         False,
-        TRUNCATED_NO_START_TOKEN,
-        id="truncated_no_start_token",
+        NO_THINK_CLOSE_NO_START_TOKEN,
+        id="no_think_close_no_start_token",
     ),
     pytest.param(
         True,
-        TRUNCATED_NO_START_TOKEN_STREAM,
-        id="truncated_no_start_token_stream",
+        NO_THINK_CLOSE_NO_START_TOKEN_STREAM,
+        id="no_think_close_no_start_token_stream",
     ),
     pytest.param(
         False,
