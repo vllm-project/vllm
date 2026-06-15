@@ -8,7 +8,10 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
+    StreamingState,
     _StateType,
+    emit_reasoning_delta_events,
+    emit_text_delta_events,
     split_delta,
 )
 
@@ -124,3 +127,30 @@ class TestProcessorCompoundDeltas:
         types = [e.type for e in events]
         assert "response.reasoning_text.delta" in types
         assert "response.output_text.delta" in types
+
+
+def _first_content_index(events: list) -> int:
+    for event in events:
+        content_index = getattr(event, "content_index", None)
+        if content_index is not None:
+            return content_index
+    raise AssertionError("no event carried a content_index")
+
+
+class TestHarmonyContentIndexPerItem:
+    def test_content_index_resets_for_each_output_item(self):
+        """content_index is the part index within an output item, so the first
+        part of every new item must be 0. Regression: reset_for_new_item() did
+        not reset current_content_index, so item N's first part was labeled N,
+        which crashes the OpenAI SDK responses stream accumulator."""
+        state = StreamingState()
+
+        reasoning = emit_reasoning_delta_events("r", state)
+        state.reset_for_new_item()
+        message = emit_text_delta_events("c", state)
+        state.reset_for_new_item()
+        message_2 = emit_text_delta_events("c", state)
+
+        assert _first_content_index(reasoning) == 0
+        assert _first_content_index(message) == 0
+        assert _first_content_index(message_2) == 0
