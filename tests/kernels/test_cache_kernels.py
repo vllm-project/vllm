@@ -78,8 +78,13 @@ def test_cp_gather_upconvert_negative_offset():
     dst = torch.empty((total_tokens, 576), dtype=torch.bfloat16, device="cuda")
     block_table = torch.tensor([[1, 2]], dtype=torch.int32, device="cuda")
     seq_lens = torch.tensor([total_tokens], dtype=torch.int32, device="cuda")
-    # Nonzero first entry: tokens 0..3 get token_offset < 0.
-    workspace_starts = torch.tensor([4], dtype=torch.int32, device="cuda")
+    # Nonzero first entry: the binary search clamps req_id to 0, so
+    # token_offset = flat_warp_id - workspace_starts[0] goes negative. CUDA
+    # integer division truncates toward zero, so a small offset like -4 gives
+    # cache_block_idx = -4 / 64 = 0 (still in bounds) and does NOT reproduce
+    # the bug. Use >= block_size (64) so flat_warp_id 0 -> token_offset -64 ->
+    # cache_block_idx -1 -> block_table[-1] OOB read on the unfixed kernel.
+    workspace_starts = torch.tensor([64], dtype=torch.int32, device="cuda")
 
     ops.cp_gather_and_upconvert_fp8_kv_cache(
         src_cache,
