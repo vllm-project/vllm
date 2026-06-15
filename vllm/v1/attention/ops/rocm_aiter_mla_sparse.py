@@ -1531,7 +1531,7 @@ def _sparse_attn_decode_partial_kernel(
     # `main_cache` is the SWA K-cache (written by the C++ encoder, FNUZ on
     # gfx942 / OCP on gfx950). `extra_cache` is the compressed K-cache
     # (Triton encoder, OCP on every platform). Reading both with the same
-    # `IS_FNUZ` would mis-decode one of them by the FNUZ/OCP scale ratio.
+    # `IS_FNUZ` would decode one of them with the wrong FNUZ/OCP scale ratio.
     IS_FNUZ_MAIN: tl.constexpr,
     IS_FNUZ_EXTRA: tl.constexpr,
     BLOCK_H: tl.constexpr,
@@ -2204,8 +2204,8 @@ def _rocm_sparse_attn_decode_ragged_triton(
         ROPE_DIM=rope_head_dim,
         # main_cache = swa_k_cache (C++ encoder, FNUZ on gfx942 / OCP on gfx950).
         # extra_cache = compressed kv_cache (Triton encoder, OCP everywhere).
-        # Reading both with a single IS_FNUZ would mis-decode one of them by
-        # the FNUZ/OCP scale ratio (~1.87×).
+        # Reading both with a single IS_FNUZ would decode one of them with the
+        # wrong FNUZ/OCP scale ratio (~1.87×).
         IS_FNUZ_MAIN=is_fnuz,
         IS_FNUZ_EXTRA=False,
         BLOCK_H=block_h,
