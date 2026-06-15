@@ -121,6 +121,29 @@ class AnthropicServingMessages(OpenAIServingChat):
         data = source.get("data", "")
         return f"data:{media_type};base64,{data}"
 
+    @staticmethod
+    def _convert_search_result_to_text(
+        block: AnthropicContentBlock | dict[str, Any],
+    ) -> str:
+        if isinstance(block, AnthropicContentBlock):
+            content = block.content
+        else:
+            content = block.get("content")
+
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return ""
+
+        text_parts: list[str] = []
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "text":
+                continue
+            text = item.get("text")
+            if isinstance(text, str):
+                text_parts.append(text)
+        return "\n".join(text_parts)
+
     @classmethod
     def _convert_anthropic_to_openai_request(
         cls, anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest
@@ -243,9 +266,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         """Convert individual content block"""
         if block.type == "text" and block.text:
             content_parts.append({"type": "text", "text": block.text})
-        elif block.type == "image" and block.source:
+        elif block.type == "image" and isinstance(block.source, dict):
             image_url = cls._convert_image_source_to_url(block.source)
             content_parts.append({"type": "image_url", "image_url": {"url": image_url}})
+        elif block.type == "search_result":
+            text = cls._convert_search_result_to_text(block)
+            if text:
+                content_parts.append({"type": "text", "text": text})
         elif block.type == "thinking" and block.thinking is not None:
             reasoning_parts.append(block.thinking)
         elif block.type == "redacted_thinking":
@@ -312,6 +339,10 @@ class AnthropicServingMessages(OpenAIServingChat):
                 item_type = item.get("type")
                 if item_type == "text":
                     text_parts.append(item.get("text", ""))
+                elif item_type == "search_result":
+                    search_text = cls._convert_search_result_to_text(item)
+                    if search_text:
+                        text_parts.append(search_text)
                 elif item_type == "image":
                     source = item.get("source", {})
                     url = cls._convert_image_source_to_url(source)
