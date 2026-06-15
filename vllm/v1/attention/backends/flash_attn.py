@@ -1115,24 +1115,52 @@ class FlashAttentionImpl(AttentionImpl):
             if _os.environ.get("PCP_DUMP") == "1" and self.pcp_rank == 0:
                 # Read back the just-written cache slots and compare to the K/V
                 # that were written, to verify the prefill cache write.
+                torch.cuda.synchronize()
                 prefill_slots = slot_mapping[prefill_start:prefill_end]
-                kc_flat = key_cache.reshape(-1, *key_cache.shape[-2:])
+                bs = key_cache.shape[1]
+                _pcp_dbg(
+                    f"[PCP r0] WRITECHK kv_dtype={self.kv_cache_dtype} "
+                    f"kc.dtype={key_cache.dtype} kc.shape={tuple(key_cache.shape)} "
+                    f"kc.stride={key_cache.stride()} key.dtype={key.dtype} bs={bs}"
+                )
                 mism = 0
                 chk = 0
                 n_check = min(prefill_end - prefill_start, 24)
+                ref_all = key[prefill_start:prefill_end].to(torch.float32)
+                did_bestmatch = False
                 for i in range(n_check):
                     s = int(prefill_slots[i].item())
                     if s >= 0:
                         chk += 1
-                        got = kc_flat[s].float()
-                        exp = key[prefill_start + i].float()
+                        block_id = s // bs
+                        offset = s % bs
+                        got = key_cache[block_id, offset].to(torch.float32)
+                        exp = ref_all[i]
                         d = (got - exp).abs().max().item()
-                        if d > 1e-2:
+                        if d > 1.0:
                             mism += 1
                         if chk <= 4:
                             _pcp_dbg(
                                 f"[PCP r0] WRITECHK canon_pos={prefill_start + i} "
-                                f"slot={s} maxdiff={d:.4f}"
+                                f"slot={s} block={block_id} off={offset} "
+                                f"maxdiff={d:.4f}"
+                            )
+                        # For the first valid slot, find which written key
+                        # position actually matches what is in the cache.
+                        if not did_bestmatch and d > 1.0:
+                            did_bestmatch = True
+                            flat = (
+                                (ref_all - got)
+                                .abs()
+                                .reshape(ref_all.shape[0], -1)
+                                .max(dim=1)
+                                .values
+                            )
+                            best = int(flat.argmin().item())
+                            _pcp_dbg(
+                                f"[PCP r0] WRITECHK slot{s} actually_holds_"
+                                f"key_pos={best} (expected {prefill_start + i}) "
+                                f"its_maxdiff={flat[best].item():.4f}"
                             )
                 _pcp_dbg(f"[PCP r0] WRITECHK checked={chk} mismatched={mism}")
             return
