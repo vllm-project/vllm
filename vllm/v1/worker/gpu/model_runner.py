@@ -147,6 +147,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.is_encoder_decoder = self.model_config.is_encoder_decoder
+        self.supports_prompt_logprobs = True
+        self.supports_sampler_warmup = True
 
         self.output_copy_stream = torch.cuda.Stream(self.device)
 
@@ -282,6 +284,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             self.model = model_loader.load_model(
                 vllm_config=self.vllm_config, model_config=self.vllm_config.model_config
+            )
+            self.supports_prompt_logprobs = getattr(
+                self.model, "supports_prompt_logprobs", True
+            )
+            self.supports_sampler_warmup = getattr(
+                self.model, "supports_sampler_warmup", True
             )
             if self.lora_config:
                 self.model = self.load_lora_model(
@@ -780,6 +788,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             prompt_len = len(new_req_data.prompt_token_ids)
             sampling_params = new_req_data.sampling_params
+            if (
+                sampling_params is not None
+                and sampling_params.prompt_logprobs is not None
+                and not self.supports_prompt_logprobs
+            ):
+                raise ValueError(
+                    f"{type(self.model).__name__} does not support prompt_logprobs."
+                )
             self.req_states.add_request(
                 req_id=req_id,
                 prompt_len=prompt_len,

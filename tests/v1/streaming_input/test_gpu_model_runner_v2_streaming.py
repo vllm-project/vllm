@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from vllm import SamplingParams
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     NewRequestData,
@@ -31,8 +32,6 @@ def mock_model_runner_with_req_states():
         num_speculative_steps=0,
         vocab_size=32000,
         device=torch.device("cpu"),
-        model_dtype=torch.float32,
-        cache_draft_logits=False,
     )
     runner.encoder_cache = None
     runner.model_state = Mock()
@@ -41,6 +40,9 @@ def mock_model_runner_with_req_states():
     runner.sampler = None
     runner.prompt_logprobs_worker = None
     runner.is_last_pp_rank = False
+    runner.supports_prompt_logprobs = True
+    runner.model = Mock()
+    runner.pp_handler = None
 
     # Mock staged writes — they use Triton kernels that require GPU
     runner.req_states.apply_staged_writes = Mock()
@@ -205,3 +207,33 @@ def test_e2e_streaming_with_multimodal_features(
 
     # Verify updated prefill length
     assert req_states.prefill_len.np[new_idx] == 21
+
+
+def test_add_requests_rejects_prompt_logprobs_when_model_disables_support(
+    mock_model_runner_with_req_states,
+):
+    runner = mock_model_runner_with_req_states
+    runner.supports_prompt_logprobs = False
+    runner.is_last_pp_rank = True
+    runner.sampler = Mock()
+    runner.prompt_logprobs_worker = Mock()
+
+    req_data = NewRequestData(
+        req_id="prompt_logprobs_req",
+        prompt_token_ids=[1, 2, 3],
+        prefill_token_ids=[1, 2, 3],
+        mm_features=[],
+        sampling_params=SamplingParams(prompt_logprobs=1),
+        pooling_params=None,
+        block_ids=([0],),
+        num_computed_tokens=0,
+        lora_request=None,
+    )
+
+    with pytest.raises(ValueError, match="prompt_logprobs"):
+        runner.add_requests(_make_scheduler_output([req_data]))
+
+    assert "prompt_logprobs_req" not in runner.req_states.req_id_to_index
+    runner.model_state.add_request.assert_not_called()
+    runner.sampler.add_request.assert_not_called()
+    runner.prompt_logprobs_worker.add_request.assert_not_called()

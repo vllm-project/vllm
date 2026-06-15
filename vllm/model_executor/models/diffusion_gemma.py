@@ -17,6 +17,7 @@ via Gemma4MultimodalEmbedder.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from copy import copy
 from types import SimpleNamespace
 from typing import Any
 
@@ -28,6 +29,7 @@ from transformers import AutoModel
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -61,6 +63,70 @@ from .interfaces import (
 )
 
 logger = init_logger(__name__)
+
+_DIFFUSION_GEMMA_DEFAULT_GENERATION_CONFIG: dict[str, Any] = {
+    "confidence_threshold": 0.005,
+    "max_denoising_steps": 48,
+    "sampler_config": {
+        "_cls_name": "EntropyBoundSamplerConfig",
+        "entropy_bound": 0.1,
+    },
+    "stability_threshold": 1,
+    "t_max": 0.8,
+    "t_min": 0.4,
+}
+
+
+def _get_diffusion_gemma_generation_config(model_config: Any) -> dict[str, Any]:
+    gen_config = copy(_DIFFUSION_GEMMA_DEFAULT_GENERATION_CONFIG)
+    sampler_config = copy(_DIFFUSION_GEMMA_DEFAULT_GENERATION_CONFIG["sampler_config"])
+
+    for update in (
+        model_config.try_get_generation_config(),
+        model_config.override_generation_config,
+    ):
+        if not update:
+            continue
+
+        gen_config.update(update)
+        if "sampler_config" in update:
+            update_sampler_config = update["sampler_config"]
+            if update_sampler_config is None:
+                sampler_config = None
+            elif isinstance(update_sampler_config, Mapping):
+                if sampler_config is None:
+                    sampler_config = {}
+                sampler_config.update(update_sampler_config)
+            else:
+                sampler_config = update_sampler_config
+
+    gen_config["sampler_config"] = sampler_config
+    return gen_config
+
+
+def _get_diffusion_gemma_embedding_weight(embed_tokens: nn.Module) -> torch.Tensor:
+    weight = getattr(embed_tokens, "weight", None)
+    if weight is None:
+        quant_method = getattr(embed_tokens, "quant_method", None)
+        get_embedding_weight = getattr(quant_method, "get_embedding_weight", None)
+        if callable(get_embedding_weight):
+            weight = get_embedding_weight(embed_tokens)
+
+    if weight is None:
+        raise AttributeError(
+            "DiffusionGemma requires a dense embedding weight for self-conditioning, "
+            f"but {type(embed_tokens).__name__} exposes neither weight nor "
+            "quant_method.get_embedding_weight()."
+        )
+
+    if getattr(embed_tokens, "tp_size", 1) > 1:
+        weight = tensor_model_parallel_all_gather(weight, dim=0)
+
+    org_vocab_size = getattr(embed_tokens, "org_vocab_size", None)
+    if org_vocab_size is not None:
+        weight = weight[:org_vocab_size]
+
+    return weight.contiguous()
 
 
 class DiffusionGemmaSelfConditioning(nn.Module):
@@ -153,6 +219,13 @@ class DiffusionGemmaForConditionalGeneration(
     set by DiffusionGemmaModelState.prepare_inputs().
     """
 
+    # Diffusion sampling reports generated-token logprobs from its custom
+    # sampler; generic AR prompt-logprobs are not supported.
+    supports_prompt_logprobs = False
+    # DiffusionGemma has its own iterative sampler. The generic AR sampler
+    # warmup materializes full-vocab logits and can exceed startup memory.
+    supports_sampler_warmup = False
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.decoder.": "model.",
@@ -235,6 +308,8 @@ class DiffusionGemmaForConditionalGeneration(
         self.lm_head = ParallelLMHead(
             num_embeddings=text_config.vocab_size,
             embedding_dim=text_config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
 
         if text_config.tie_word_embeddings:
@@ -270,7 +345,7 @@ class DiffusionGemmaForConditionalGeneration(
         inputs_embeds: torch.Tensor,
         probs: torch.Tensor,
     ) -> torch.Tensor:
-        embed_weight = self.model.embed_tokens.weight
+        embed_weight = _get_diffusion_gemma_embedding_weight(self.model.embed_tokens)
         soft_embeds = torch.matmul(
             probs.to(embed_weight.dtype), embed_weight
         ) * self.model.normalizer.to(inputs_embeds.dtype)
@@ -795,7 +870,7 @@ class DiffusionGemmaModelState(ModelState):
         canvas_length = diffusion_config.canvas_length if diffusion_config else 32
 
         text_config = self.model_config.hf_text_config
-        self.gen_config = self.model_config.try_get_generation_config()
+        self.gen_config = _get_diffusion_gemma_generation_config(self.model_config)
         max_denoising_steps = (
             diffusion_config.max_denoising_steps if diffusion_config else None
         ) or self.gen_config.get("max_denoising_steps", 48)
@@ -850,7 +925,9 @@ class DiffusionGemmaModelState(ModelState):
             t_max=gen["t_max"],
             entropy_bound=entropy_bound,
             confidence_threshold=gen["confidence_threshold"],
-            embed_weight=self.model.model.embed_tokens.weight,
+            embed_weight=_get_diffusion_gemma_embedding_weight(
+                self.model.model.embed_tokens
+            ),
             normalizer=self.model.model.normalizer,
         ), None
 

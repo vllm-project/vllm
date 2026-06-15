@@ -70,7 +70,9 @@ def warmup_kernels(
         sampling_params = None
         pooling_params = PoolingParams()
     else:
-        sampling_params = SamplingParams.for_sampler_warmup()
+        sampling_params = SamplingParams.for_sampler_warmup(
+            prompt_logprobs=getattr(model_runner, "supports_prompt_logprobs", True)
+        )
         pooling_params = None
 
     # Assign distinct block IDs per request per group. 0 null block, start from 1.
@@ -100,7 +102,9 @@ def warmup_kernels(
     model_runner.kv_connector.set_disabled(True)
     worker_execute_model(prefill_output)
 
-    if not model_runner.is_pooling_model:
+    if not model_runner.is_pooling_model and getattr(
+        model_runner, "supports_sampler_warmup", True
+    ):
         # Warm up sampler and perform a decode step for non-pooling models.
 
         grammar_output = None
