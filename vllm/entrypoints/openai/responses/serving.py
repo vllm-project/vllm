@@ -1038,7 +1038,7 @@ class OpenAIServingResponses(OpenAIServing):
                 request,
                 enable_auto_tools=self.enable_auto_tools,
             )
-            if not getattr(request, "include_reasoning", True):
+            if not request.include_reasoning:
                 reasoning = None
                 logprobs = None
             return build_response_output_items(
@@ -1363,9 +1363,7 @@ class OpenAIServingResponses(OpenAIServing):
             else None
         )
 
-        hide_stream_metadata = (
-            not getattr(request, "include_reasoning", True) and self.parser is not None
-        )
+        hide_stream_metadata = not request.include_reasoning and self.parser is not None
 
         def _get_logprobs(
             output: CompletionOutput,

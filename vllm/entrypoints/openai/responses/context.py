@@ -340,7 +340,7 @@ class ParsableContext(ConversationContext):
                 self.request,
                 enable_auto_tools=self.enable_auto_tools,
             )
-            if not getattr(self.request, "include_reasoning", True):
+            if not self.request.include_reasoning:
                 reasoning = None
             self.response_messages.extend(
                 build_response_output_items(

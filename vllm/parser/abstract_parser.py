@@ -791,7 +791,7 @@ class DelegatingParser(Parser):
             delta_message = self.finalize_generation(delta_message, request, state)
 
         # Suppress reasoning deltas if not requested
-        if delta_message and not getattr(request, "include_reasoning", True):
+        if delta_message and not request.include_reasoning:
             delta_message.reasoning = None
 
             # If only reasoning was in the message (no content, no tool_calls)

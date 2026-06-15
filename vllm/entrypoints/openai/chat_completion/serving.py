@@ -581,19 +581,8 @@ class OpenAIServingChat(OpenAIServing):
                             prompt_token_ids=res.prompt_token_ids,
                             finished=output.finish_reason is not None,
                         )
-                        if delta_message is not None:
-                            if delta_message.tool_calls:
-                                tools_streamed[i] = True
-
-                            if (
-                                delta_message.reasoning
-                                and not request.include_reasoning
-                            ):
-                                delta_message.reasoning = None
-                                if not (
-                                    delta_message.content or delta_message.tool_calls
-                                ):
-                                    delta_message = None
+                        if delta_message is not None and delta_message.tool_calls:
+                            tools_streamed[i] = True
 
                     # handle streaming just a content delta (no parsers)
                     else:
@@ -612,8 +601,8 @@ class OpenAIServingChat(OpenAIServing):
                     # metadata (logprobs, token_ids) on every chunk to
                     # prevent leaking reasoning tokens through decoded
                     # token text in logprob entries or raw token IDs.
-                    hide_stream_metadata = not request.include_reasoning and (
-                        reasoning_parser is not None or parser is not None
+                    hide_stream_metadata = (
+                        not request.include_reasoning and parser is not None
                     )
                     if hide_stream_metadata:
                         logprobs = None
@@ -864,16 +853,18 @@ class OpenAIServingChat(OpenAIServing):
                     enable_auto_tools=self.enable_auto_tools,
                     model_output_token_ids=token_ids,
                 )
-                hide_reasoning = not request.include_reasoning and reasoning is not None
+                suppress_metadata = (
+                    not request.include_reasoning and reasoning is not None
+                )
                 if not request.include_reasoning:
                     reasoning = None
-                if hide_reasoning:
+                if suppress_metadata:
                     logprobs = None
             else:
                 reasoning = None
                 content = output.text
                 tool_calls = []
-                hide_reasoning = False
+                suppress_metadata = False
 
             auto_tools_called = False
 
@@ -1003,7 +994,7 @@ class OpenAIServingChat(OpenAIServing):
                 stop_reason=output.stop_reason,
                 token_ids=(
                     as_list(output.token_ids)
-                    if request.return_token_ids and not hide_reasoning
+                    if request.return_token_ids and not suppress_metadata
                     else None
                 ),
                 routed_experts=routed_experts_b64,

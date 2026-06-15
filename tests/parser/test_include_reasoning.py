@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for include_reasoning suppression in the unified Parser interface.
 
-Covers both non-streaming (extract_response_outputs) and streaming
-(parse_delta) paths, plus the legacy ResponsesParser.process() path.
+Covers non-streaming (parser.parse() + build_response_output_items),
+streaming (parse_delta), and ParsableContext.append_output() paths.
 """
 
 import json
@@ -77,8 +77,8 @@ def make_parser(tokenizer, reasoning=False, tool=False):
 
 
 def parse_and_build(parser, request, model_output, enable_auto_tools=False):
-    """Mirrors the non-streaming path in ResponsesParser.process():
-    parser.parse() → include_reasoning check → build_response_output_items().
+    """Mirrors the non-streaming path in _make_response_output_items /
+    ParsableContext.append_output(): parse → suppress reasoning → build items.
     """
     from vllm.entrypoints.openai.responses.utils import (
         build_response_output_items,
@@ -87,7 +87,7 @@ def parse_and_build(parser, request, model_output, enable_auto_tools=False):
     reasoning, content, tool_calls = parser.parse(
         model_output, request, enable_auto_tools=enable_auto_tools
     )
-    if not getattr(request, "include_reasoning", True):
+    if not request.include_reasoning:
         reasoning = None
     return build_response_output_items(
         reasoning=reasoning,
@@ -352,7 +352,7 @@ class TestParseDeltaIncludeReasoning:
                 assert r.reasoning is None
 
 
-# ── ParsableContext.process() ─────────────────────────────────────────
+# ── ParsableContext.append_output() ───────────────────────────────────
 
 
 class TestParsableContextIncludeReasoning:
