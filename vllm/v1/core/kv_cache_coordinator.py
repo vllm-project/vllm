@@ -201,17 +201,12 @@ class KVCacheCoordinator(ABC):
             num_local_computed_tokens: The number of local computed tokens.
             num_external_computed_tokens: The number of external computed tokens.
         """
-        # A request is being allocated for the first time iff no group has
-        # registered it yet. Key this on `num_cached_block` (the same signal the
-        # pre-split code used for its fast path), which gated external
-        # allocation on exactly this condition. A running request won't have any
-        # new prefix-cache hits and never allocates external blocks, so it is a
-        # no-op here.
-        is_new_request = all(
-            request_id not in manager.num_cached_block
+        # A running request is already tracked in num_cached_block and won't
+        # have new prefix-cache hits, so this is a no-op for it.
+        if any(
+            request_id in manager.num_cached_block
             for manager in self.single_type_managers
-        )
-        if not is_new_request:
+        ):
             assert all(len(blocks) == 0 for blocks in new_computed_blocks)
             return
 
