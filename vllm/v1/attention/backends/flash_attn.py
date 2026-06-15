@@ -48,7 +48,8 @@ from vllm.config import (
     get_layers_from_vllm_config,
 )
 from vllm.config.cache import CacheDType
-from vllm.distributed.parallel_state import get_dcp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, round_up
@@ -56,6 +57,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    PrefillContextParallelMetadata,
 )
 from vllm.v1.attention.backends.utils import (
     get_kv_cache_layout,
@@ -273,6 +275,14 @@ class FlashAttentionMetadata:
     # Shape: (num_seqs, max_ranges, 2) int32, [start, end] per range.
     mm_prefix_range_tensor: torch.Tensor | None = None
 
+    # For PCP (Prefill Context Parallelism).
+    pcp_metadata: PrefillContextParallelMetadata | None = None
+    pcp_query_start_loc: torch.Tensor | None = None
+    pcp_num_decodes: int = 0
+    pcp_num_decode_tokens: int = 0
+    pcp_decode_context_kv_lens: torch.Tensor | None = None
+    pcp_max_decode_context_kv_len: int = 0
+
 
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
@@ -359,6 +369,15 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+
+        try:
+            from vllm.distributed.parallel_state import get_pcp_group
+
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
 
         self.cp_kv_cache_interleave_size = (
             self.parallel_config.cp_kv_cache_interleave_size
@@ -594,6 +613,60 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             causal=causal,
         )
 
+        long_seq_metadata = common_attn_metadata.prefill_context_parallel_metadata
+        if long_seq_metadata is not None and self.pcp_world_size > 1:
+            query_lens_full_cpu = long_seq_metadata.query_lens_pcp_full_cpu
+            assert query_lens_full_cpu is not None
+            query_lens_full_cpu = query_lens_full_cpu[:num_reqs]
+            pcp_query_start_loc_cpu = torch.zeros(
+                num_reqs + 1, dtype=torch.int32, device="cpu"
+            )
+            torch.cumsum(
+                query_lens_full_cpu.to(torch.int32),
+                dim=0,
+                out=pcp_query_start_loc_cpu[1:],
+            )
+            attn_metadata.pcp_metadata = long_seq_metadata
+            attn_metadata.pcp_query_start_loc = pcp_query_start_loc_cpu.to(
+                self.device, non_blocking=True
+            )
+            attn_metadata.max_query_len = max(
+                attn_metadata.max_query_len,
+                int(long_seq_metadata.max_query_len_pcp_full),
+            )
+
+            num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
+            if num_computed_tokens_cpu is None:
+                num_computed_tokens_cpu = (
+                    common_attn_metadata.seq_lens_cpu_upper_bound[:num_reqs]
+                    - query_lens_full_cpu
+                    if common_attn_metadata.seq_lens_cpu_upper_bound is not None
+                    else None
+                )
+            if num_computed_tokens_cpu is not None:
+                decode_mask = (query_lens_full_cpu <= 1) & (
+                    num_computed_tokens_cpu[:num_reqs] > 0
+                )
+                pcp_num_decodes = int(decode_mask.to(torch.int32).sum().item())
+            else:
+                pcp_num_decodes = 0
+            attn_metadata.pcp_num_decodes = pcp_num_decodes
+            attn_metadata.pcp_num_decode_tokens = int(
+                query_lens_full_cpu[:pcp_num_decodes].sum().item()
+            )
+
+            cp_lens = long_seq_metadata.num_computed_tokens_of_pcp_dcp
+            if cp_lens is not None and pcp_num_decodes > 0:
+                decode_context_lens = torch.tensor(
+                    cp_lens[:pcp_num_decodes, self.pcp_rank, self.dcp_rank],
+                    dtype=torch.int32,
+                    device=self.device,
+                )
+                attn_metadata.pcp_decode_context_kv_lens = decode_context_lens
+                attn_metadata.pcp_max_decode_context_kv_len = int(
+                    decode_context_lens.max().item()
+                )
+
         # Compute mm_prefix range tensor if the batch contains
         # multimodal tokens with bidirectional ranges.
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
@@ -625,6 +698,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
 class FlashAttentionImpl(AttentionImpl):
     can_return_lse_for_decode: bool = True
+    supports_pcp: bool = True
 
     def __init__(
         self,
@@ -807,7 +881,21 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale = layer._k_scale.expand(descale_shape)
             v_descale = layer._v_scale.expand(descale_shape)
 
-            if self.dcp_world_size > 1:
+            if self.pcp_world_size > 1 and attn_metadata.pcp_metadata is not None:
+                self._forward_with_pcp(
+                    query[:num_actual_tokens],
+                    key[:num_actual_tokens],
+                    value[:num_actual_tokens],
+                    key_cache,
+                    value_cache,
+                    output[:num_actual_tokens],
+                    attn_metadata,
+                    q_descale=q_descale,
+                    k_descale=k_descale,
+                    v_descale=v_descale,
+                )
+                return output
+            elif self.dcp_world_size > 1:
                 self._forward_with_dcp(
                     query[:num_actual_tokens],
                     key[:num_actual_tokens],
@@ -937,6 +1025,28 @@ class FlashAttentionImpl(AttentionImpl):
             # we use direct Q, K, V tensors without caching
             return
 
+        pcp_metadata = self._get_pcp_metadata_for_layer(layer)
+        if pcp_metadata is not None and self.pcp_world_size > 1:
+            assert not pcp_metadata.pcp_use_hybrid_attn, (
+                "FlashAttention PCP for hybrid-attention models should use the "
+                "hybrid PCP backend."
+            )
+            local_padded_tokens = (
+                pcp_metadata.num_actual_tokens_pcp_padded // self.pcp_world_size
+            )
+            kv = torch.cat(
+                [
+                    key[:local_padded_tokens],
+                    value[:local_padded_tokens],
+                ],
+                dim=-1,
+            )
+            kv = get_pcp_group().all_gather(kv.contiguous(), dim=0)
+            restore_idx = pcp_metadata.pcp_allgather_restore_idx
+            assert restore_idx is not None
+            kv = torch.index_select(kv, 0, restore_idx[: kv.shape[0]])
+            key, value = kv.split([key.shape[-1], value.shape[-1]], dim=-1)
+
         # Scatter write into the KV cache using slot_mapping indices.
         # No TMA kernel is invoked here, so stride canonicalization is not needed.
         key_cache, value_cache = kv_cache.unbind(1)
@@ -958,6 +1068,192 @@ class FlashAttentionImpl(AttentionImpl):
             layer._k_scale,
             layer._v_scale,
         )
+
+    def _get_pcp_metadata_for_layer(
+        self, layer: torch.nn.Module
+    ) -> PrefillContextParallelMetadata | None:
+        if self.pcp_world_size <= 1 or not is_forward_context_available():
+            return None
+        attn_metadata_raw = get_forward_context().attn_metadata
+        layer_name = getattr(layer, "layer_name", None)
+        attn_metadata: object | None
+        if isinstance(attn_metadata_raw, dict) and layer_name in attn_metadata_raw:
+            attn_metadata = attn_metadata_raw[layer_name]
+        elif isinstance(attn_metadata_raw, list) and layer_name is not None:
+            attn_metadata = attn_metadata_raw[0].get(layer_name)
+        else:
+            attn_metadata = None
+        if not isinstance(attn_metadata, FlashAttentionMetadata):
+            return None
+        return attn_metadata.pcp_metadata
+
+    def _merge_pcp_attn_states(
+        self,
+        attn_out: torch.Tensor,
+        attn_lse: torch.Tensor,
+    ) -> torch.Tensor:
+        out_lse = torch.cat([attn_out, attn_lse.unsqueeze(-1)], dim=-1)
+        out_lse = get_pcp_group().all_gather(out_lse.contiguous(), dim=0)
+        num_tokens = attn_out.shape[0]
+        out_lse = out_lse.view(
+            self.pcp_world_size,
+            num_tokens,
+            self.num_heads,
+            self.head_size + 1,
+        )
+        out_all, lse_all = torch.split(out_lse, [self.head_size, 1], dim=-1)
+        lse = torch.logsumexp(lse_all, dim=0)
+        return torch.sum(torch.exp(lse_all - lse.unsqueeze(0)) * out_all, dim=0)
+
+    def _forward_with_pcp(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        q_descale: torch.Tensor | None = None,
+        k_descale: torch.Tensor | None = None,
+        v_descale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert self.vllm_flash_attn_version is not None, (
+            "FlashAttention version not detected."
+        )
+        assert self.dcp_world_size == 1, (
+            "The first FlashAttention PCP path supports PCP-only GQA. "
+            "PCP+DCP should use a dedicated CP backend."
+        )
+        pcp_metadata = attn_metadata.pcp_metadata
+        assert pcp_metadata is not None
+        assert not pcp_metadata.pcp_use_hybrid_attn, (
+            "Hybrid-attention PCP should use the hybrid PCP backend."
+        )
+        assert attn_metadata.pcp_query_start_loc is not None
+        output.zero_()
+
+        sliding_window_size = (
+            list(self.sliding_window) if self.sliding_window is not None else None
+        )
+        num_decode_tokens = attn_metadata.pcp_num_decode_tokens
+        num_decodes = attn_metadata.pcp_num_decodes
+
+        if num_decode_tokens > 0:
+            assert attn_metadata.pcp_decode_context_kv_lens is not None
+            decode_out = torch.empty_like(output[:num_decode_tokens])
+            decode_attn_out, decode_lse = flash_attn_varlen_func(
+                q=query[:num_decode_tokens],
+                k=key_cache,
+                v=value_cache,
+                out=decode_out,
+                cu_seqlens_q=attn_metadata.query_start_loc[: num_decodes + 1],
+                max_seqlen_q=max(1, num_decode_tokens // max(num_decodes, 1)),
+                seqused_k=attn_metadata.pcp_decode_context_kv_lens,
+                max_seqlen_k=attn_metadata.pcp_max_decode_context_kv_len,
+                softmax_scale=self.scale,
+                causal=False,
+                alibi_slopes=self.alibi_slopes,
+                window_size=sliding_window_size,
+                block_table=attn_metadata.block_table[:num_decodes],
+                softcap=self.logits_soft_cap,
+                return_softmax_lse=True,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=q_descale[:num_decodes] if q_descale is not None else None,
+                k_descale=k_descale[:num_decodes] if k_descale is not None else None,
+                v_descale=v_descale[:num_decodes] if v_descale is not None else None,
+                num_splits=attn_metadata.max_num_splits,
+            )
+            output[:num_decode_tokens] = self._merge_pcp_attn_states(
+                decode_attn_out,
+                decode_lse.transpose(0, 1),
+            )
+
+        if num_decode_tokens == attn_metadata.num_actual_tokens:
+            return output
+
+        local_padded_tokens = (
+            pcp_metadata.num_actual_tokens_pcp_padded // self.pcp_world_size
+        )
+        qkv = torch.cat(
+            [
+                query[:local_padded_tokens].reshape(local_padded_tokens, -1),
+                key[:local_padded_tokens].reshape(local_padded_tokens, -1),
+                value[:local_padded_tokens].reshape(local_padded_tokens, -1),
+            ],
+            dim=-1,
+        )
+        qkv = get_pcp_group().all_gather(qkv.contiguous(), dim=0)
+        restore_idx = pcp_metadata.pcp_allgather_restore_idx
+        assert restore_idx is not None
+        qkv = torch.index_select(qkv, 0, restore_idx[: qkv.shape[0]])
+
+        q_flat, k_flat, v_flat = qkv.split(
+            [
+                self.num_heads * self.head_size,
+                self.num_kv_heads * self.head_size,
+                self.num_kv_heads * value.shape[-1],
+            ],
+            dim=-1,
+        )
+        q_full_padded = q_flat.reshape(-1, self.num_heads, self.head_size)
+        k_full_padded = k_flat.reshape(-1, self.num_kv_heads, self.head_size)
+        v_full_padded = v_flat.reshape(-1, self.num_kv_heads, value.shape[-1])
+
+        unpad_mask = pcp_metadata.pcp_unpad_mask
+        assert unpad_mask is not None
+        unpad_mask = unpad_mask[: q_full_padded.shape[0]].to(q_full_padded.device)
+        q_full = q_full_padded[unpad_mask]
+        k_full = k_full_padded[unpad_mask]
+        v_full = v_full_padded[unpad_mask]
+
+        qsl = attn_metadata.pcp_query_start_loc
+        prefill_qsl = qsl[num_decodes:] - qsl[num_decodes]
+        prefill_q = q_full[num_decode_tokens:]
+        prefill_k = k_full[num_decode_tokens:]
+        prefill_v = v_full[num_decode_tokens:]
+        prefill_out = torch.empty_like(prefill_q)
+        if prefill_q.shape[0] > 0:
+            flash_attn_varlen_func(
+                q=prefill_q,
+                k=prefill_k,
+                v=prefill_v,
+                out=prefill_out,
+                cu_seqlens_q=prefill_qsl,
+                cu_seqlens_k=prefill_qsl,
+                max_seqlen_q=attn_metadata.max_query_len,
+                max_seqlen_k=attn_metadata.max_query_len,
+                softmax_scale=self.scale,
+                causal=attn_metadata.causal
+                if not isinstance(attn_metadata.causal, torch.Tensor)
+                else True,
+                alibi_slopes=self.alibi_slopes,
+                window_size=sliding_window_size,
+                softcap=self.logits_soft_cap,
+                fa_version=self.vllm_flash_attn_version,
+                q_descale=q_descale[num_decodes:] if q_descale is not None else None,
+                k_descale=k_descale[num_decodes:] if k_descale is not None else None,
+                v_descale=v_descale[num_decodes:] if v_descale is not None else None,
+                num_splits=attn_metadata.max_num_splits,
+            )
+
+        inverse_restore = torch.empty_like(restore_idx[: qkv.shape[0]])
+        inverse_restore[restore_idx[: qkv.shape[0]]] = torch.arange(
+            qkv.shape[0], device=restore_idx.device, dtype=restore_idx.dtype
+        )
+        local_concat_start = self.pcp_rank * local_padded_tokens
+        local_concat_end = local_concat_start + local_padded_tokens
+        local_padded_positions = inverse_restore[local_concat_start:local_concat_end]
+        local_real_mask = unpad_mask[local_padded_positions]
+        padded_to_unpadded = torch.cumsum(unpad_mask.to(torch.int64), dim=0) - 1
+        local_unpadded_idx = padded_to_unpadded[local_padded_positions[local_real_mask]]
+        local_real_positions = torch.nonzero(local_real_mask, as_tuple=False).flatten()
+        local_prefill_mask = local_unpadded_idx >= num_decode_tokens
+        if local_prefill_mask.any():
+            output[local_real_positions[local_prefill_mask]] = prefill_out[
+                local_unpadded_idx[local_prefill_mask] - num_decode_tokens
+            ]
+        return output
 
     def _forward_with_dcp(
         self,
