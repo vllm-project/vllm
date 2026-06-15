@@ -55,9 +55,9 @@ class Fp8MoeBackend(Enum):
     # Dequantize-to-BF16 emulation for MXFP8 on devices without a native
     # MXFP8 MoE kernel (e.g. ROCm). Weights pass through unchanged here.
     EMULATION = "EMULATION"
-    # MXFP8 MoE via a Triton ``dot_scaled`` kernel that lowers to CDNA4
-    # (gfx950) native MX matrix-core ops. Weights stay in MXFP8 (no load-time
-    # format conversion); the FP8 values + E8M0 scales are consumed directly.
+    # Fused ROCm MXFP8 MoE. CDNA4 (gfx95x) uses native ``dot_scaled`` MX ops;
+    # CDNA3 (gfx94x) uses E4M3FNUZ FP8 partial dots with in-register E8M0 scale
+    # application. Both consume compressed weights directly.
     NATIVE_MXFP8 = "NATIVE_MXFP8"
 
 
@@ -463,6 +463,13 @@ def convert_to_fp8_moe_kernel_format(
         )
 
         w13, w2 = prepare_fp8_moe_layer_for_cpu(w13, w2)
+    elif fp8_backend == Fp8MoeBackend.NATIVE_MXFP8 and current_platform.is_fp8_fnuz():
+        from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+            normalize_mxfp8_e4m3fn_to_e4m3fnuz,
+        )
+
+        w13, w13_scale = normalize_mxfp8_e4m3fn_to_e4m3fnuz(w13, w13_scale)
+        w2, w2_scale = normalize_mxfp8_e4m3fn_to_e4m3fnuz(w2, w2_scale)
     else:
         if fp8_backend not in [
             Fp8MoeBackend.TRITON,
@@ -470,8 +477,8 @@ def convert_to_fp8_moe_kernel_format(
             Fp8MoeBackend.VLLM_CUTLASS,
             Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
             Fp8MoeBackend.XPU,
-            # EMULATION dequantizes weights at runtime; NATIVE_MXFP8 consumes
-            # the MXFP8 weights as-is — neither needs a load-time layout change.
+            # EMULATION consumes checkpoint layout directly. CDNA4 NATIVE_MXFP8
+            # also needs no layout change; CDNA3 normalization is handled above.
             Fp8MoeBackend.EMULATION,
             Fp8MoeBackend.NATIVE_MXFP8,
         ]:

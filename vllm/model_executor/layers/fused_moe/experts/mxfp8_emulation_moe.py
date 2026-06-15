@@ -4,7 +4,7 @@
 
 ``Mxfp8TritonExpertsBase`` stashes E8M0 weight scales for checkpoint layout.
 ``Mxfp8EmulationTritonExperts`` dequantizes to BF16 and runs ``TritonExperts``
-for devices without a native MXFP8 MoE kernel (e.g. ROCm gfx942 / MI300).
+for devices without a fused MXFP8 MoE kernel.
 """
 
 import torch

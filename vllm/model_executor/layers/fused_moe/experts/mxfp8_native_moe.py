@@ -1,28 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Native MXFP8 (1x32 block, E8M0 scale) MoE for AMD CDNA4 (gfx950) via Triton
-``tl.dot_scaled`` (hardware microscaling matmul).
+"""Fused MXFP8 (1x32 block, E8M0 scale) MoE for AMD CDNA3/CDNA4.
 
 The expert GEMMs consume the FP8 E4M3 weights and their E8M0 block scales
 directly (no dequant-to-BF16), and activations are MXFP8-quantized per token.
-On CDNA4 ``dot_scaled`` maps to the native MX matrix-core ops; on other archs
-Triton upcasts to BF16 (so this stays correct, just not faster) — but the
-oracle only selects this path on gfx950 and routes everything else to the
-BF16 ``Mxfp8EmulationTritonExperts`` fallback.
+CDNA4 uses ``tl.dot_scaled`` and native MX matrix-core ops. CDNA3 stores the
+weights as E4M3FNUZ, runs one native FP8 ``tl.dot`` per 32-value MX block, and
+applies the E8M0 scale products in-register. Both paths keep weights compressed
+in HBM instead of expanding them to persistent BF16.
 
 Structure mirrors vLLM's ``fused_moe_kernel``: tokens are sorted by expert
 (``moe_align_block_size``); each program computes a ``[BLOCK_M, BLOCK_N]`` tile
-for one expert, accumulating over K with ``dot_scaled``. SwiGLU-OAI activation
-and the top-k weighted reduction run in PyTorch between/after the two GEMMs.
+for one expert, accumulating over K with the architecture-specific fused path.
+SwiGLU-OAI activation and the top-k weighted reduction run between/after the
+two GEMMs.
 """
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+    biased_moe_quant_config,
+)
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
     Mxfp8TritonExpertsBase,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -34,9 +41,46 @@ from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 
+_BF16_DECODE_TOKEN_THRESHOLD = 8
+# MiniMax-M3 eager refill shapes cross over to the retained BF16 experts
+# between 827 and 843 tokens on MI300X. Keep the cutoff tile-aligned.
+_BF16_PREFILL_TOKEN_THRESHOLD = 832
+_LONG_CONTEXT_BF16_ONLY_LAYER_STRIDE = 5
+
+
+def _should_use_bf16_decode_fallback(moe_config: FusedMoEConfig) -> bool:
+    """Limit BF16 fallback weights to the exact MiniMax-M3 TP shape."""
+    return (
+        current_platform.is_fp8_fnuz()
+        and moe_config.ep_size == 1
+        and moe_config.has_shared_experts
+        and moe_config.num_experts == 128
+        and moe_config.experts_per_token == 4
+        and moe_config.hidden_dim == 6144
+        and moe_config.intermediate_size == 3072
+        and moe_config.max_model_len > 0
+    )
+
+
+def _should_store_bf16_only(max_model_len: int, layer_index: int) -> bool:
+    return (
+        max_model_len > 4096 and layer_index % _LONG_CONTEXT_BF16_ONLY_LAYER_STRIDE == 0
+    )
+
+
+def _should_use_bf16_experts(
+    num_tokens: int,
+    native_weights_available: bool,
+) -> bool:
+    return (
+        not native_weights_available
+        or num_tokens >= _BF16_PREFILL_TOKEN_THRESHOLD
+        or num_tokens <= _BF16_DECODE_TOKEN_THRESHOLD
+    )
+
 
 @triton.jit
-def _mxfp8_grouped_gemm_kernel(
+def _mxfp8_grouped_gemm_dot_scaled_kernel(
     a_ptr,
     a_scale_ptr,
     b_ptr,
@@ -125,6 +169,148 @@ def _mxfp8_grouped_gemm_kernel(
     )
 
 
+@triton.jit
+def _mxfp8_grouped_gemm_fnuz_kernel(
+    a_ptr,
+    a_scale_ptr,
+    b_ptr,
+    b_scale_ptr,
+    c_ptr,
+    topk_weights_ptr,
+    sorted_token_ids_ptr,
+    expert_ids_ptr,
+    num_tokens_post_padded_ptr,
+    N,
+    K,
+    num_valid_tokens,
+    top_k,
+    stride_am,
+    stride_ak,
+    stride_asm,
+    stride_ask,
+    stride_be,
+    stride_bn,
+    stride_bk,
+    stride_bse,
+    stride_bsn,
+    stride_bsk,
+    stride_cm,
+    stride_cn,
+    A_DIV: tl.constexpr,
+    MUL_WEIGHT: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    num_post = tl.load(num_tokens_post_padded_ptr)
+    if pid_m * BLOCK_M >= num_post:
+        return
+
+    offs_tid = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_token = tl.load(sorted_token_ids_ptr + offs_tid).to(tl.int64)
+    token_mask = offs_token < num_valid_tokens
+    off_e = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
+
+    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    offs_k = tl.arange(0, 32)
+    a_row = offs_token // A_DIV
+
+    a_ptrs = a_ptr + a_row[:, None] * stride_am + offs_k[None, :] * stride_ak
+    as_ptrs = a_scale_ptr + a_row * stride_asm
+    b_ptrs = (
+        b_ptr
+        + off_e * stride_be
+        + offs_n[:, None] * stride_bn
+        + offs_k[None, :] * stride_bk
+    )
+    bs_ptrs = b_scale_ptr + off_e * stride_bse + offs_n * stride_bsn
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    n_mask = offs_n < N
+    for _ in range(0, tl.cdiv(K, BLOCK_K)):
+        for k_offset in tl.static_range(0, BLOCK_K, 32):
+            a = tl.load(
+                a_ptrs + k_offset * stride_ak,
+                mask=token_mask[:, None],
+                other=0.0,
+            )
+            b = tl.load(
+                b_ptrs + k_offset * stride_bk,
+                mask=n_mask[:, None],
+                other=0.0,
+            )
+            asc = tl.load(
+                as_ptrs + (k_offset // 32) * stride_ask,
+                mask=token_mask,
+                other=0,
+            ).to(tl.uint16)
+            bsc = tl.load(
+                bs_ptrs + (k_offset // 32) * stride_bsk,
+                mask=n_mask,
+                other=0,
+            ).to(tl.uint16)
+
+            # E8M0 and BF16 use the same eight-bit biased exponent. Shift each
+            # scale byte into a BF16 exponent field, as Marlin does, then form
+            # the per-token/per-output scale product around the FP8 dot.
+            asc_scale = (asc << 7).to(tl.bfloat16, bitcast=True)
+            bsc_scale = (bsc << 7).to(tl.bfloat16, bitcast=True)
+            block_scale = asc_scale[:, None].to(tl.float32) * bsc_scale[None, :].to(
+                tl.float32
+            )
+            acc += tl.dot(a, b.T) * block_scale
+
+        a_ptrs += BLOCK_K * stride_ak
+        b_ptrs += BLOCK_K * stride_bk
+        as_ptrs += (BLOCK_K // 32) * stride_ask
+        bs_ptrs += (BLOCK_K // 32) * stride_bsk
+
+    if MUL_WEIGHT:
+        w = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
+        acc = acc * w[:, None]
+
+    c_ptrs = c_ptr + offs_token[:, None] * stride_cm + offs_n[None, :] * stride_cn
+    tl.store(
+        c_ptrs,
+        acc.to(c_ptr.dtype.element_ty),
+        mask=token_mask[:, None] & n_mask[None, :],
+    )
+
+
+def _gfx94x_grouped_gemm_config(
+    m_routed: int,
+    n: int,
+    k: int,
+    block_m: int,
+    is_gemm2: bool,
+) -> tuple[int, int, int]:
+    short_k_gemm2 = is_gemm2 and block_m <= 16 and k <= 512 and k % 64 == 0
+    if short_k_gemm2:
+        # MiniMax-M3 TP GEMM2 has a wide N=6144 and short K=384. Pairing two
+        # waves over 64 columns amortizes indexing while a 64-wide K tile
+        # exposes enough independent work for the short reduction.
+        return 64, 64, 2
+
+    block_k = 128 if k % 128 == 0 and block_m <= 16 else 64 if k % 64 == 0 else 32
+    if block_m <= 16:
+        # One wave per 32 output columns avoids the register pressure of the
+        # original 128-column tile. At the very smallest routed batch, pairing
+        # two waves in a 64-column program amortizes launch/indexing overhead.
+        block_n = 64 if m_routed < 32 else 32
+        num_warps = 2 if m_routed < 32 else 1
+    elif block_m >= 64 and n >= 2048 and k >= 2048:
+        # EP prefill GEMMs remain register-bound at a 128-column tile even with
+        # 64 rows. Two-wave 64-column programs expose more independent work.
+        block_n = 64
+        num_warps = 2
+    else:
+        block_n = 128
+        num_warps = 4 if block_m <= 32 else 8
+    return block_n, block_k, num_warps
+
+
 def _grouped_gemm_mxfp8(
     a_q: torch.Tensor,  # [M, K] fp8 e4m3
     a_scale: torch.Tensor,  # [M, K//32] uint8 (E8M0)
@@ -140,19 +326,81 @@ def _grouped_gemm_mxfp8(
     a_div: int,
     mul_weight_by: torch.Tensor | None = None,
     expert_map: torch.Tensor | None = None,
+    is_gemm2: bool = False,
+    block_n_override: int = 0,
+    block_k_override: int = 0,
+    num_warps_override: int = 0,
 ) -> torch.Tensor:
     M_routed = num_valid_tokens
     E, N, K = w.shape
-    assert K % 128 == 0, f"MXFP8 native MoE requires K%128==0, got K={K}"
+    k_alignment = 32 if current_platform.is_fp8_fnuz() else 128
+    assert K % k_alignment == 0, (
+        f"MXFP8 native MoE requires K%{k_alignment}==0, got K={K}"
+    )
+    if w_scale.shape == (E, N, K // 32):
+        scale_stride_e = w_scale.stride(0)
+        scale_stride_n = w_scale.stride(1)
+        scale_stride_k = w_scale.stride(2)
+    elif w_scale.shape == (E, K // 32, N):
+        scale_stride_e = w_scale.stride(0)
+        scale_stride_n = w_scale.stride(2)
+        scale_stride_k = w_scale.stride(1)
+    else:
+        raise ValueError(
+            "MXFP8 weight scales must use [E, N, K/32] or packed "
+            f"[E, K/32, N] layout, got {tuple(w_scale.shape)}."
+        )
+    is_fnuz = current_platform.is_fp8_fnuz()
+    if is_fnuz:
+        BLOCK_N, BLOCK_K, num_warps = _gfx94x_grouped_gemm_config(
+            M_routed,
+            N,
+            K,
+            block_m,
+            is_gemm2,
+        )
+    else:
+        BLOCK_N = 128
+        BLOCK_K = 128
+        num_warps = 8
+    # moe_align_block_size allocates for the worst case where every expert is
+    # active. At small batches that can be much larger than the number of
+    # blocks that can contain valid assignments. Limit the launch to the
+    # tighter static upper bound; the device-side num_post check handles the
+    # remaining tail.
+    max_post_padded = min(sorted_token_ids.shape[0], M_routed * block_m)
+    if block_n_override:
+        BLOCK_N = block_n_override
+    if block_k_override:
+        BLOCK_K = block_k_override
+    if num_warps_override:
+        num_warps = num_warps_override
+    if BLOCK_K % 32 != 0 or K % BLOCK_K != 0:
+        raise ValueError(
+            f"MXFP8 grouped GEMM requires BLOCK_K to divide K in 32-value "
+            f"units, got BLOCK_K={BLOCK_K}, K={K}."
+        )
+    if num_warps not in (1, 2, 4, 8):
+        raise ValueError(f"Unsupported num_warps={num_warps}.")
+    m_blocks = triton.cdiv(max_post_padded, block_m)
+    n_blocks = triton.cdiv(N, BLOCK_N)
+
     # Under expert parallelism (expert_map set) tokens routed to non-local
     # experts are dropped from sorted_token_ids, so their output rows are never
-    # written — zero them so the downstream reduction ignores their garbage.
+    # written.
     alloc = torch.zeros if expert_map is not None else torch.empty
     out = alloc((M_routed, N), dtype=out_dtype, device=a_q.device)
-    BLOCK_N = 128
-    BLOCK_K = 128
-    grid = (triton.cdiv(sorted_token_ids.shape[0], block_m), triton.cdiv(N, BLOCK_N))
-    _mxfp8_grouped_gemm_kernel[grid](
+    grid = (m_blocks, n_blocks)
+    kernel = (
+        _mxfp8_grouped_gemm_fnuz_kernel
+        if current_platform.is_fp8_fnuz()
+        else _mxfp8_grouped_gemm_dot_scaled_kernel
+    )
+    if current_platform.is_fp8_fnuz() and (
+        a_q.dtype != torch.float8_e4m3fnuz or w.dtype != torch.float8_e4m3fnuz
+    ):
+        raise ValueError("gfx94x MXFP8 MoE requires E4M3FNUZ inputs.")
+    kernel[grid](
         a_q,
         a_scale,
         w,
@@ -173,9 +421,9 @@ def _grouped_gemm_mxfp8(
         w.stride(0),
         w.stride(1),
         w.stride(2),
-        w_scale.stride(0),
-        w_scale.stride(1),
-        w_scale.stride(2),
+        scale_stride_e,
+        scale_stride_n,
+        scale_stride_k,
         out.stride(0),
         out.stride(1),
         A_DIV=a_div,
@@ -183,7 +431,7 @@ def _grouped_gemm_mxfp8(
         BLOCK_M=block_m,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
-        num_warps=8,
+        num_warps=num_warps,
     )
     return out
 
@@ -202,12 +450,26 @@ def fused_moe_mxfp8_native(
     limit: float | None,
     global_num_experts: int,
     expert_map: torch.Tensor | None,
+    output: torch.Tensor | None = None,
+    g1_block_n: int = 0,
+    g1_block_k: int = 0,
+    g1_num_warps: int = 0,
+    g2_block_n: int = 0,
+    g2_block_k: int = 0,
+    g2_num_warps: int = 0,
 ) -> torch.Tensor:
     T, H = hidden_states.shape
     top_k = topk_ids.shape[1]
     M = T * top_k
 
-    block_m = 64
+    if current_platform.is_fp8_fnuz():
+        # Padding is per expert, so tile from the average expert occupancy
+        # rather than the total routed-token count. MiniMax-M3 has 128 experts;
+        # a 64-row tile wastes most of both GEMMs at low occupancy.
+        tokens_per_expert = max(1, M // global_num_experts)
+        block_m = max(16, min(1 << (tokens_per_expert - 1).bit_length(), 64))
+    else:
+        block_m = 64
     sorted_ids, expert_ids, num_post = moe_align_block_size(
         topk_ids,
         block_m,
@@ -232,6 +494,9 @@ def fused_moe_mxfp8_native(
         hidden_states.dtype,
         a_div=top_k,
         expert_map=expert_map,
+        block_n_override=g1_block_n,
+        block_k_override=g1_block_k,
+        num_warps_override=g1_num_warps,
     )  # [M, 2I]
 
     # SwiGLU-OAI (split layout: gate=g1[:, :I], up=g1[:, I:]) FUSED with the
@@ -256,17 +521,78 @@ def fused_moe_mxfp8_native(
         M,
         top_k,
         block_m,
-        torch.float32,
+        hidden_states.dtype if current_platform.is_fp8_fnuz() else torch.float32,
         a_div=1,
         mul_weight_by=topk_weights.reshape(-1).to(torch.float32),
         expert_map=expert_map,
+        is_gemm2=True,
+        block_n_override=g2_block_n,
+        block_k_override=g2_block_k,
+        num_warps_override=g2_num_warps,
     )  # [M, H] == [T*top_k, H]
 
-    return g2.view(T, top_k, H).sum(dim=1).to(hidden_states.dtype)
+    if current_platform.is_fp8_fnuz():
+        if output is None:
+            output = torch.empty_like(hidden_states)
+        ops.moe_sum(g2.view(T, top_k, H), output)
+        return output
+
+    result = g2.view(T, top_k, H).sum(dim=1).to(hidden_states.dtype)
+    if output is not None:
+        output.copy_(result)
+        return output
+    return result
 
 
 class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
-    """Native MXFP8 MoE (CDNA4 ``dot_scaled``) on gfx950."""
+    """Fused MXFP8 MoE on gfx94x/gfx95x."""
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(moe_config, quant_config)
+        self.w1_bf16: torch.Tensor | None = None
+        self.w2_bf16: torch.Tensor | None = None
+        self.native_weights_available = True
+        self.bf16_experts: TritonExperts | None = None
+        if _should_use_bf16_decode_fallback(moe_config):
+            bf16_config = biased_moe_quant_config(
+                None,
+                None,
+                gemm1_alpha=quant_config.gemm1_alpha,
+                gemm1_beta=quant_config.gemm1_beta,
+                gemm1_clamp_limit=quant_config.gemm1_clamp_limit,
+            )
+            self.bf16_experts = TritonExperts(moe_config, bf16_config)
+
+    @property
+    def requires_bf16_fallback_weights(self) -> bool:
+        return self.bf16_experts is not None
+
+    def bind_bf16_weights(
+        self,
+        w1_bf16: torch.Tensor,
+        w2_bf16: torch.Tensor,
+        *,
+        native_weights_available: bool,
+    ) -> None:
+        if self.bf16_experts is None:
+            raise RuntimeError("BF16 decode experts are not enabled for this config.")
+        self.w1_bf16 = w1_bf16
+        self.w2_bf16 = w2_bf16
+        self.native_weights_available = native_weights_available
+
+    def bind_packed_weight_scales(
+        self,
+        w1_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+    ) -> None:
+        if not current_platform.is_fp8_fnuz():
+            raise RuntimeError("Packed MXFP8 scales are specific to gfx94x.")
+        self.w1_scale_val = w1_scale
+        self.w2_scale_val = w2_scale
 
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
@@ -283,7 +609,9 @@ class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return current_platform.is_rocm() and current_platform.supports_mx()
+        return current_platform.is_rocm() and (
+            current_platform.supports_mx() or current_platform.is_fp8_fnuz()
+        )
 
     def apply(
         self,
@@ -303,6 +631,35 @@ class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        num_tokens = hidden_states.shape[0]
+        bf16_experts = self.bf16_experts
+        if bf16_experts is not None and _should_use_bf16_experts(
+            num_tokens,
+            self.native_weights_available,
+        ):
+            if self.w1_bf16 is None or self.w2_bf16 is None:
+                raise RuntimeError(
+                    "BF16 fallback weights were not bound after loading."
+                )
+            bf16_experts.apply(
+                output=output,
+                hidden_states=hidden_states,
+                w1=self.w1_bf16,
+                w2=self.w2_bf16,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                a1q_scale=None,
+                a2_scale=None,
+                workspace13=workspace13,
+                workspace2=workspace2,
+                expert_tokens_meta=expert_tokens_meta,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+            return
+
         alpha = self.quant_config.gemm1_alpha
         alpha = 1.702 if alpha is None else float(alpha)
         beta = self.quant_config.gemm1_beta
@@ -322,5 +679,6 @@ class Mxfp8NativeTritonExperts(Mxfp8TritonExpertsBase):
             limit=limit,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
+            output=output,
         )
-        output.copy_(out)
+        assert out is output

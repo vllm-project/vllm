@@ -95,8 +95,12 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+        Mxfp8NativeTritonExperts,
+    )
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
@@ -2092,7 +2096,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
     def _dequant_mxfp8_weights_to_bf16(self, layer: RoutedExperts) -> None:
         """One-time MXFP8->BF16 weight dequant for the emulation path.
 
-        On devices without a native MXFP8 MoE kernel (e.g. gfx942 / MI300),
+        On devices without a fused MXFP8 MoE kernel,
         ``Mxfp8EmulationTritonExperts`` otherwise dequantizes every expert
         weight to BF16 on *every* forward step -- the dominant cost (conc1
         ~1.3 tok/s). Doing the dequant once here and replacing the MXFP8
@@ -2126,6 +2130,92 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             "now runs in BF16 with no per-step dequant.",
             num_experts,
         )
+
+    def _retain_bf16_fallback_weights(self, layer: RoutedExperts) -> None:
+        """Keep the BF16 weights selected by the gfx94x TP dispatch policy."""
+        from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+            Mxfp8NativeTritonExperts,
+            _should_store_bf16_only,
+        )
+        from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+            dequant_mxfp8_to_bf16,
+        )
+        from vllm.model_executor.models.utils import extract_layer_index
+
+        if self.moe_kernel is None:
+            raise RuntimeError("MXFP8 MoE kernel was not initialized.")
+        experts = self.moe_kernel.fused_experts
+        if not isinstance(experts, Mxfp8NativeTritonExperts):
+            raise TypeError(
+                "Expected Mxfp8NativeTritonExperts for the gfx94x native backend."
+            )
+
+        target_dtype = getattr(layer, "orig_dtype", torch.bfloat16)
+        w13_bf16 = dequant_mxfp8_to_bf16(layer.w13_weight, layer.w13_weight_scale).to(
+            target_dtype
+        )
+        w2_bf16 = dequant_mxfp8_to_bf16(layer.w2_weight, layer.w2_weight_scale).to(
+            target_dtype
+        )
+        layer_index = extract_layer_index(layer.layer_name)
+        store_bf16_only = _should_store_bf16_only(
+            self.moe.max_model_len,
+            layer_index,
+        )
+
+        if store_bf16_only:
+            replace_parameter(layer, "w13_weight", w13_bf16)
+            replace_parameter(layer, "w2_weight", w2_bf16)
+        else:
+            layer.register_buffer("_mxfp8_w13_bf16", w13_bf16, persistent=False)
+            layer.register_buffer("_mxfp8_w2_bf16", w2_bf16, persistent=False)
+        experts.bind_bf16_weights(
+            w13_bf16,
+            w2_bf16,
+            native_weights_available=not store_bf16_only,
+        )
+
+        if self.moe.max_model_len <= 4096:
+            logger.info_once(
+                "Retaining BF16 MXFP8 MoE weights for gfx94x TP decode and "
+                "prefill dispatch."
+            )
+        else:
+            logger.info_once(
+                "Using BF16-only storage for one-fifth of gfx94x TP MoE "
+                "layers and retaining both MXFP8 and BF16 weights for the "
+                "remaining layers."
+            )
+
+    def _pack_mxfp8_weight_scales(
+        self,
+        layer: RoutedExperts,
+        experts: "Mxfp8NativeTritonExperts",
+    ) -> None:
+        """Pack gfx94x E8M0 scales so consecutive output columns are contiguous."""
+        if not experts.native_weights_available:
+            return
+
+        def pack(scale: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+            E, N, K = weight.shape
+            if scale.shape == (E, K // 32, N):
+                return scale
+            if scale.shape != (E, N, K // 32):
+                raise ValueError(
+                    "Unexpected MXFP8 weight-scale shape "
+                    f"{tuple(scale.shape)} for weight {tuple(weight.shape)}."
+                )
+            return scale.transpose(1, 2).contiguous()
+
+        w13_scale = pack(layer.w13_weight_scale, layer.w13_weight)
+        w2_scale = pack(layer.w2_weight_scale, layer.w2_weight)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
+        experts.bind_packed_weight_scales(
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
+        )
+        logger.info_once("Packed gfx94x MXFP8 MoE weight scales as [expert, K/32, N].")
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # TODO(bnell): why is this required only for mxfp8?
@@ -2164,7 +2254,21 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             routing_tables=layer._expert_routing_tables(),
         )
 
-        # No native MXFP8 MoE kernel on this device (e.g. gfx942): the emulation
+        from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+            Mxfp8NativeTritonExperts,
+        )
+
+        experts = self.moe_kernel.fused_experts
+        if (
+            self.mxfp8_backend == Fp8MoeBackend.NATIVE_MXFP8
+            and current_platform.is_fp8_fnuz()
+            and isinstance(experts, Mxfp8NativeTritonExperts)
+        ):
+            if experts.requires_bf16_fallback_weights:
+                self._retain_bf16_fallback_weights(layer)
+            self._pack_mxfp8_weight_scales(layer, experts)
+
+        # No fused MXFP8 MoE kernel on this device: the emulation
         # experts would dequant MXFP8->BF16 every forward step. Convert the
         # weights to BF16 once, here, so the MoE runs like a BF16 checkpoint.
         # Opt out (VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0) to keep the 1-byte
