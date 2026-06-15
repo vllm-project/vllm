@@ -766,6 +766,7 @@ class Scheduler(SchedulerInterface):
                         self.num_spec_tokens > 0
                         and num_new_tokens == 1
                         and num_computed_tokens == request.num_tokens - 1
+                        and num_computed_tokens > 0
                         and token_budget >= 1 + self.num_spec_tokens
                     ):
                         scheduled_spec_decode_tokens[request_id] = [
