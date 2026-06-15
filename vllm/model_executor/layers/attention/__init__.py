@@ -13,6 +13,7 @@ from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
 from vllm.model_executor.layers.attention.static_sink_attention import (
     StaticSinkAttention,
+    StaticSinkMLAAttention,
 )
 
 __all__ = [
@@ -23,4 +24,5 @@ __all__ = [
     "MLAAttention",
     "MMEncoderAttention",
     "StaticSinkAttention",
+    "StaticSinkMLAAttention",
 ]
