@@ -87,7 +87,6 @@ if TYPE_CHECKING:
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
-    VLLM_DEBUG_TRITON_RECOMPILE: bool = False
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -578,10 +577,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
     "VLLM_TRITON_ATTN_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_ATTN_USE_TD", "").strip()
-    ),
-    # If set, log every Triton JIT compile with specialization details.
-    "VLLM_DEBUG_TRITON_RECOMPILE": lambda: bool(
-        int(os.getenv("VLLM_DEBUG_TRITON_RECOMPILE", "0"))
     ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs

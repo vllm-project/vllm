@@ -15,14 +15,10 @@ from vllm.triton_utils import jit_monitor
 def _reset_monitor():
     """Reset global monitor state between tests."""
     jit_monitor._active = False
+    jit_monitor._verbose = False
     yield
     jit_monitor._active = False
-
-
-@pytest.fixture
-def enable_debug_recompile():
-    with mock.patch.object(jit_monitor.envs, "VLLM_DEBUG_TRITON_RECOMPILE", True):
-        yield
+    jit_monitor._verbose = False
 
 
 # ------------------------------------------------------------------
@@ -255,10 +251,10 @@ class TestTritonJitHookIntegration:
         msg = w.call_args[0][0] % w.call_args[0][1:]
         assert "_add_kernel" in msg
 
-    def test_debug_warning_on_each_new_pointer_alignment(self, enable_debug_recompile):
+    def test_verbose_warning_on_each_new_pointer_alignment(self):
         _run_add_kernel(1024)
 
-        jit_monitor.activate()
+        jit_monitor.activate(verbose=True)
         with (
             mock.patch.object(jit_monitor.logger, "warning") as w,
             mock.patch.object(jit_monitor.logger, "warning_once") as w_once,
