@@ -969,9 +969,9 @@ class OffloadingConnectorScheduler:
         self._current_batch_allocated_block_ids = set()
         return meta
 
-    def has_pending_work(self) -> bool:
+    def has_pending_push_work(self) -> bool:
         """True while a GPU->CPU or secondary-tier transfer is in flight."""
-        return bool(self._jobs) or self.manager.has_pending_work()
+        return bool(self._jobs) or self.manager.has_pending_push_work()
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """

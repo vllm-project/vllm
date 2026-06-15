@@ -560,10 +560,6 @@ class KVConnectorBase_V1(ABC):
         """
         return False, None
 
-    def has_pending_work(self) -> bool:
-        """Whether the connector has in-flight work to keep stepping for."""
-        return False
-
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """
         Take the KV cache events from the connector.
