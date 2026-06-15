@@ -1086,6 +1086,14 @@ class FlashAttentionImpl(AttentionImpl):
             assert restore_idx is not None
             kv = torch.index_select(kv, 0, restore_idx[: kv.shape[0]])
             key, value = kv.split([key.shape[-1], value.shape[-1]], dim=-1)
+            # `key`/`value` are non-contiguous views into `kv` (which packs
+            # [key|value] on the last dim), so their head stride is
+            # 2*head_size, not head_size. The reshape_and_cache kernel reads
+            # key/value assuming head stride == head_size (contiguous heads),
+            # so passing these views makes it read across the key/value
+            # boundary and corrupt the cache. Materialize contiguous tensors.
+            key = key.contiguous()
+            value = value.contiguous()
             prefill_start = num_decode_tokens * self.pcp_world_size
             prefill_end = pcp_metadata.num_actual_tokens_pcp_padded
             _probe = None
