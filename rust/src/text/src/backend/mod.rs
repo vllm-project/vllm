@@ -29,10 +29,12 @@ pub struct SamplingLimits {
     ///
     /// `-1` means allowing requests up to the model vocabulary size.
     pub max_logprobs: i32,
-    /// Model vocabulary size from the model config.
+
+    /// Model vocabulary size from the model config, used to bound
+    /// `logit_bias` keys when available.
     pub model_vocab_size: Option<usize>,
-    /// Tokenizer vocabulary size, used as a fallback when the model config does
-    /// not expose a vocabulary size.
+    /// Tokenizer vocabulary size, used to bound `allowed_token_ids` and
+    /// token-ID prompts.
     pub tokenizer_vocab_size: usize,
 }
 
@@ -47,6 +49,11 @@ impl SamplingLimits {
     /// Return the vocabulary size used to expand `logprobs=-1`.
     pub fn logprobs_vocab_size(&self) -> usize {
         self.model_vocab_size.unwrap_or(self.tokenizer_vocab_size)
+    }
+
+    /// Return the union bound used to validate token-ID prompts.
+    pub fn prompt_token_vocab_size(&self) -> usize {
+        self.tokenizer_vocab_size.max(self.model_vocab_size.unwrap_or(0))
     }
 }
 

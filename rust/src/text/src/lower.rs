@@ -11,7 +11,7 @@ use crate::backend::{SamplingHints, SamplingLimits};
 use crate::error::{Error, Result};
 use crate::request::{SamplingParams, TextRequest};
 use logprobs::validate_logprobs;
-use token_ids::validate_vocab_range;
+use token_ids::{validate_prompt_token_ids, validate_vocab_range};
 
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
@@ -33,6 +33,8 @@ pub fn lower_text_request(
     tokenizer: &dyn Tokenizer,
 ) -> Result<PreparedTextRequest> {
     let prompt_len = prompt_token_ids.len() as u32;
+    validate_prompt_token_ids(&prompt_token_ids, &sampling_limits)?;
+
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
         prompt_token_ids,
@@ -108,13 +110,6 @@ pub fn lower_sampling_params(
         logprob_token_ids.as_deref(),
         sampling_limits,
     )?;
-    if let Some(token_ids) = logprob_token_ids.as_deref() {
-        validate_vocab_range(
-            "logprob_token_ids",
-            token_ids.iter().copied(),
-            sampling_limits.logprobs_vocab_size(),
-        )?;
-    }
 
     // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat
     // path: https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/openai/chat_completion/protocol.py#L424-L450
@@ -147,7 +142,7 @@ pub fn lower_sampling_params(
         merge_unique_token_ids(&mut stop_token_ids, extra_eos_token_ids.iter().copied());
     }
 
-    Ok(EngineCoreSamplingParams {
+    let params = EngineCoreSamplingParams {
         temperature,
         top_p,
         top_k,
@@ -170,7 +165,9 @@ pub fn lower_sampling_params(
         logprob_token_ids,
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
-    })
+    };
+    validate_vocab_range(&params, &sampling_limits)?;
+    Ok(params)
 }
 
 /// Convert bad-word strings into token-ID sequences, following the Python vLLM
@@ -251,7 +248,7 @@ fn merge_unique_token_ids(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap};
 
     use serial_test::file_serial;
 
@@ -436,6 +433,57 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn lower_text_request_uses_union_vocab_for_prompt_token_ids() {
+        lower_text_request(
+            sample_request(),
+            vec![1500],
+            sample_sampling_hints(),
+            SamplingLimits {
+                model_vocab_size: Some(2000),
+                tokenizer_vocab_size: 1000,
+                ..sample_sampling_limits()
+            },
+            &stub_tokenizer(),
+        )
+        .expect("model vocab extends prompt token range");
+
+        lower_text_request(
+            sample_request(),
+            vec![1500],
+            sample_sampling_hints(),
+            SamplingLimits {
+                model_vocab_size: Some(1000),
+                tokenizer_vocab_size: 2000,
+                ..sample_sampling_limits()
+            },
+            &stub_tokenizer(),
+        )
+        .expect("tokenizer vocab extends prompt token range");
+
+        let error = lower_text_request(
+            sample_request(),
+            vec![2000],
+            sample_sampling_hints(),
+            SamplingLimits {
+                model_vocab_size: Some(1000),
+                tokenizer_vocab_size: 2000,
+                ..sample_sampling_limits()
+            },
+            &stub_tokenizer(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::OutOfVocab(OutOfVocabError {
+                parameter: "prompt",
+                token_ids,
+                vocab_size: 2000,
+            }) if token_ids == vec![2000]
+        ));
     }
 
     #[tokio::test]
@@ -761,6 +809,63 @@ mod tests {
                 vocab_size: 1000,
             }) if token_ids == vec![1000]
         ));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_out_of_vocab_allowed_token_ids() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                allowed_token_ids: Some(vec![1999, 2000]),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::OutOfVocab(OutOfVocabError {
+                parameter: "allowed_token_ids",
+                token_ids,
+                vocab_size: 2000,
+            }) if token_ids == vec![2000]
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_out_of_vocab_logit_bias() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                logit_bias: Some(HashMap::from([(1000, 1.0)])),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::OutOfVocab(OutOfVocabError {
+                parameter: "logit_bias",
+                token_ids,
+                vocab_size: 1000,
+            }) if token_ids == vec![1000]
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_skips_logit_bias_range_when_model_vocab_is_unknown() {
+        lower_sampling_params_with_limits(
+            SamplingParams {
+                logit_bias: Some(HashMap::from([(1_000_000, 1.0)])),
+                ..Default::default()
+            },
+            SamplingLimits {
+                model_vocab_size: None,
+                ..sample_sampling_limits()
+            },
+        )
+        .expect("logit_bias range check is skipped without model vocab size");
     }
 
     #[test]

@@ -1,4 +1,9 @@
+use std::result::Result;
+
 use thiserror::Error;
+use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
+
+use crate::SamplingLimits;
 
 #[derive(Debug, Error)]
 #[error(
@@ -11,11 +16,11 @@ pub struct OutOfVocabError {
     pub vocab_size: usize,
 }
 
-pub(crate) fn validate_vocab_range(
+fn validate_param(
     parameter: &'static str,
     token_ids: impl IntoIterator<Item = u32>,
     vocab_size: usize,
-) -> std::result::Result<(), OutOfVocabError> {
+) -> Result<(), OutOfVocabError> {
     let invalid_token_ids: Vec<_> = token_ids
         .into_iter()
         .filter(|&token_id| token_id as usize >= vocab_size)
@@ -31,14 +36,57 @@ pub(crate) fn validate_vocab_range(
     })
 }
 
+/// Validate that pre-tokenized prompt IDs are within the engine-visible prompt
+/// vocabulary range.
+pub(crate) fn validate_prompt_token_ids(
+    prompt_token_ids: &[u32],
+    limits: &SamplingLimits,
+) -> Result<(), OutOfVocabError> {
+    validate_param(
+        "prompt",
+        prompt_token_ids.iter().copied(),
+        limits.prompt_token_vocab_size(),
+    )
+}
+
+/// Validate that token IDs in text sampling parameters are within their
+/// parameter-specific vocabulary ranges.
+pub(crate) fn validate_vocab_range(
+    params: &EngineCoreSamplingParams,
+    limits: &SamplingLimits,
+) -> Result<(), OutOfVocabError> {
+    if let Some(token_ids) = params.allowed_token_ids.as_deref() {
+        validate_param(
+            "allowed_token_ids",
+            token_ids.iter().copied(),
+            limits.tokenizer_vocab_size,
+        )?;
+    }
+
+    if let (Some(logit_bias), Some(vocab_size)) =
+        (params.logit_bias.as_ref(), limits.model_vocab_size)
+    {
+        validate_param("logit_bias", logit_bias.keys().copied(), vocab_size)?;
+    }
+
+    if let Some(token_ids) = params.logprob_token_ids.as_deref() {
+        validate_param(
+            "logprob_token_ids",
+            token_ids.iter().copied(),
+            limits.logprobs_vocab_size(),
+        )?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn validate_vocab_range_rejects_out_of_vocab_ids() {
-        let error =
-            validate_vocab_range("logprob_token_ids", [5_u32, 1000, 1001], 1000).unwrap_err();
+        let error = validate_param("logprob_token_ids", [5_u32, 1000, 1001], 1000).unwrap_err();
 
         assert_eq!(error.parameter, "logprob_token_ids");
         assert_eq!(error.token_ids, vec![1000, 1001]);
