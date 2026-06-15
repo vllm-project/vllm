@@ -850,8 +850,9 @@ class EplbState:
         """
         All-reduce a list of tensors.
         """
+        ep_group = get_ep_group().device_group
         if len(tensor_list) == 1:
-            all_reduce(tensor_list[0], group=get_ep_group().device_group)
+            all_reduce(tensor_list[0], group=ep_group)
             return tensor_list
         assert all(t.dim() == 2 for t in tensor_list), "All tensors must be 2D."
         assert all(t.shape[1] == tensor_list[0].shape[1] for t in tensor_list), (
@@ -863,7 +864,6 @@ class EplbState:
         shapes = [t.shape for t in tensor_list]
         concat_tensor = torch.cat(tensor_list, dim=0)
 
-        ep_group = get_ep_group().device_group
         all_reduce(concat_tensor, group=ep_group)
 
         all_reduce_list = []

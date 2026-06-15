@@ -51,6 +51,7 @@ from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.distributed.eplb.eplb_state import EplbState
     from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
         FusedMoEMethodBase,
     )
@@ -138,6 +139,40 @@ def broadcast_expert_mapping(
     num_logical_experts = int(metadata_tensor[1].item())
 
     return physical_to_logical, num_local_physical_experts, num_logical_experts
+
+
+def _drain_async_eplb(eplb_state: "EplbState") -> None:
+    """Drain the async EPLB worker by consuming remaining layers.
+
+    Uses _all_ranks_result_ready (cross-rank all_reduce) to keep all ranks
+    synchronized — the same mechanism as normal inference. This prevents
+    ranks from getting out of sync during the drain.
+
+    If no cycle is in progress (rebalanced=False), this is a no-op.
+    """
+    from vllm.distributed.eplb.eplb_state import EplbState
+
+    assert isinstance(eplb_state, EplbState)
+    for model_key, ms in eplb_state.model_states.items():
+        needs_drain = ms.rebalanced
+        if needs_drain:
+            logger.info(
+                "[Elastic EP] Draining async EPLB worker for model %s...",
+                model_key,
+            )
+        while ms.rebalanced:
+            if eplb_state._all_ranks_result_ready(ms):
+                result = ms.pending_result
+                assert result is not None
+                if result.layer_idx == ms.model.num_moe_layers - 1:
+                    ms.rebalanced = False
+                ms.pending_result = None
+                result.consumed_event.record()
+        if needs_drain:
+            logger.info(
+                "[Elastic EP] Async EPLB worker drained for model %s",
+                model_key,
+            )
 
 
 class ElasticEPScalingExecutor:
@@ -352,6 +387,13 @@ class ElasticEPScalingExecutor:
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
 
+        # Drain the async worker BEFORE replacing groups/communicator.
+        # The worker uses the current (old) EPLB group for cross-rank
+        # barriers, so it must finish while that group is still active.
+        eplb_state = self.worker.model_runner.eplb_state
+        if eplb_state is not None and eplb_state.is_async:
+            _drain_async_eplb(eplb_state)
+
         self._release_cuda_graphs()
         _replace_active_groups(**pop_standby_groups())
 
@@ -527,6 +569,11 @@ class ElasticEPScalingExecutor:
         model_config = self.worker.model_runner.model_config
         eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
         is_async_enabled = eplb_state.is_async
+        if is_async_enabled:
+            # Drain is idempotent: for scale-down, this is the first drain
+            # (groups are still old, so it works). For scale-up, the worker
+            # was already drained in switch_and_prepare — this is a no-op.
+            _drain_async_eplb(eplb_state)
         eplb_state.is_async = False
         if rank_mapping is None:
             eplb_state.rearrange()
@@ -540,6 +587,11 @@ class ElasticEPScalingExecutor:
             eplb_model_state.physical_to_logical_map.shape[1]
         )
         eplb_state.is_async = is_async_enabled
+        # Start the async worker thread if it doesn't exist yet (idempotent).
+        # This is needed for new workers after scale-up: they create EplbState
+        # in setup_eplb_from_mapping() but don't start the thread there because
+        # groups aren't ready yet.
+        eplb_state.start_async_loop()
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 
