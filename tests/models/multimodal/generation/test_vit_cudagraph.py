@@ -184,6 +184,13 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         modalities=["image"],
         image_prompt="<image>\nWhat is in this image?",
         marks=[pytest.mark.core_model],
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="DeepseekOCRForCausalLM",
+            ),
+        },
     ),
 }
 
