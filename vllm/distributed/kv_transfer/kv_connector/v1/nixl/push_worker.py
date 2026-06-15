@@ -51,7 +51,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     TransferHandle,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import ReadSpec
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_request_id
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -335,35 +334,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     # --- Matching helpers --------------------------------------------- #
 
     def _pop_matching_registration(self, request_id: str) -> dict[str, Any] | None:
-        """Pop the D-side registration matching *request_id*.
-
-        Exact key first, then a match after stripping the random suffix from
-        both sides. No match leaves the request unmatched (push not started).
-        """
-        data = self._pending_d_registrations.pop(request_id, None)
-        if data is not None:
-            return data
-        base_id = get_base_request_id(request_id)
-        for reg_id in list(self._pending_d_registrations):
-            if get_base_request_id(reg_id) == base_id:
-                return self._pending_d_registrations.pop(reg_id)
-        return None
+        """Pop the D-side registration matching *request_id*."""
+        return self._pending_d_registrations.pop(request_id, None)
 
     def _pop_matching_finished_blocks(
         self, request_id: str
     ) -> tuple[str, BlockIds] | None:
-        """Pop the P-side finished blocks matching *request_id*.
-
-        Same lookup as ``_pop_matching_registration``: exact key, then a
-        match after stripping the random suffix from both sides.
-        """
+        """Pop the P-side finished blocks matching *request_id*."""
         blocks = self._push_finished_blocks.pop(request_id, None)
         if blocks is not None:
             return request_id, blocks
-        base_id = get_base_request_id(request_id)
-        for fin_id in list(self._push_finished_blocks):
-            if get_base_request_id(fin_id) == base_id:
-                return fin_id, self._push_finished_blocks.pop(fin_id)
         return None
 
     # --- WRITE transfer logic (writer thread) ------------------------- #
