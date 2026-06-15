@@ -11,12 +11,14 @@ from vllm.config import (
     CacheConfig,
     ECTransferConfig,
     KVTransferConfig,
+    LoRAConfig,
     ModelConfig,
     SchedulerConfig,
     SpeculativeConfig,
     VllmConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -2202,6 +2204,7 @@ def create_scheduler_with_priority(
     use_ec_connector: bool = False,
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
+    lora_config: LoRAConfig | None = None,
 ) -> Scheduler:
     """Create scheduler with priority policy enabled.
 
@@ -2276,6 +2279,7 @@ def create_scheduler_with_priority(
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
+        lora_config=lora_config,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
@@ -3087,6 +3091,185 @@ def test_priority_no_kv_preemption_for_equal_priority():
     # eq1 must still be waiting; lo1 must keep running.
     assert "eq1" not in {r.request_id for r in scheduler.running}
     assert scheduler.requests["lo1"].status == RequestStatus.RUNNING
+
+
+def test_priority_no_capacity_preemption_equal_priority_earlier_arrival():
+    """An equal-priority waiting request that arrived *earlier* than a
+    runner must NOT trigger a max_num_seqs preemption.
+
+    Comparing with ``Request.__lt__`` would preempt here because the
+    tiebreaker falls back to ``arrival_time``.  Since a preempted request
+    keeps its earlier arrival time, it would immediately reclaim the slot
+    on the next step — ping-pong.  Preemption must key on ``priority``
+    only.
+    """
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=512,
+        num_blocks=10000,
+    )
+
+    lo1, lo2 = create_requests_with_priority(
+        num_requests=2,
+        priorities=[2, 2],
+        arrival_times=[2.0, 3.0],
+        num_tokens=10,
+        req_ids=["lo1", "lo2"],
+    )
+    scheduler.add_request(lo1)
+    scheduler.add_request(lo2)
+
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["lo1", "lo2"],
+            req_id_to_index={"lo1": 0, "lo2": 1},
+            sampled_token_ids=[[100], [100]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # Same priority as the runners but an EARLIER arrival time (1.0).
+    eq = create_requests_with_priority(
+        num_requests=1,
+        priorities=[2],
+        arrival_times=[1.0],
+        num_tokens=10,
+        req_ids=["eq1"],
+    )[0]
+    scheduler.add_request(eq)
+
+    scheduler.schedule()
+
+    # No preemption: equal priority must never displace a runner.
+    assert "eq1" not in {r.request_id for r in scheduler.running}
+    assert scheduler.requests["lo1"].status == RequestStatus.RUNNING
+    assert scheduler.requests["lo2"].status == RequestStatus.RUNNING
+    assert scheduler.requests["eq1"].status == RequestStatus.WAITING
+
+
+def test_priority_no_kv_preemption_equal_priority_earlier_arrival():
+    """KV-cache preemption must also key on priority only: an equal-priority
+    waiting request arriving earlier than the runner must not evict it."""
+    block_size = 16
+    num_blocks = 5  # 1 null block → 4 usable
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=3,
+        max_num_batched_tokens=200,
+        num_blocks=num_blocks,
+        block_size=block_size,
+    )
+
+    lo1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        num_tokens=block_size * 3,
+        req_ids=["lo1"],
+    )[0]
+    scheduler.add_request(lo1)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["lo1"],
+            req_id_to_index={"lo1": 0},
+            sampled_token_ids=[[100]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # Same priority as lo1 but an EARLIER arrival time (0.5 < 1.0).
+    eq1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[0.5],
+        num_tokens=block_size * 2,
+        req_ids=["eq1"],
+    )[0]
+    scheduler.add_request(eq1)
+
+    scheduler.schedule()
+
+    assert "eq1" not in {r.request_id for r in scheduler.running}
+    assert scheduler.requests["lo1"].status == RequestStatus.RUNNING
+
+
+def test_priority_capacity_preemption_skips_lora_limited_waiter():
+    """A higher-priority waiting request that would exceed ``max_loras``
+    must not cause a wasted eviction at ``max_num_seqs``.
+
+    Both runners share a single LoRA (``max_loras=1``).  A higher-priority
+    waiter needs a *different* LoRA, so it cannot be admitted this step.
+    Preemption must be skipped rather than evicting a runner for a request
+    that the LoRA limit rejects anyway.
+    """
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=512,
+        num_blocks=10000,
+        lora_config=LoRAConfig(max_loras=1, max_cpu_loras=2),
+    )
+
+    lora_a = LoRARequest("lora-a", 1, "/tmp/lora-a")
+    lora_b = LoRARequest("lora-b", 2, "/tmp/lora-b")
+
+    lo1, lo2 = create_requests_with_priority(
+        num_requests=2,
+        priorities=[5, 5],
+        arrival_times=[1.0, 2.0],
+        num_tokens=10,
+        req_ids=["lo1", "lo2"],
+    )
+    lo1.lora_request = lora_a
+    lo2.lora_request = lora_a
+    scheduler.add_request(lo1)
+    scheduler.add_request(lo2)
+
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["lo1", "lo2"],
+            req_id_to_index={"lo1": 0, "lo2": 1},
+            sampled_token_ids=[[100], [100]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # Higher priority, but needs a new LoRA that exceeds max_loras=1.
+    hi1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],
+        arrival_times=[3.0],
+        num_tokens=10,
+        req_ids=["hi1"],
+    )[0]
+    hi1.lora_request = lora_b
+    scheduler.add_request(hi1)
+
+    scheduler.schedule()
+
+    # No runner was evicted: hi1 could not be admitted anyway.
+    assert "hi1" not in {r.request_id for r in scheduler.running}
+    assert scheduler.requests["lo1"].status == RequestStatus.RUNNING
+    assert scheduler.requests["lo2"].status == RequestStatus.RUNNING
+    assert scheduler.requests["hi1"].status == RequestStatus.WAITING
+    assert len(scheduler.running) == 2
 
 
 def test_priority_scheduling_fcfs_fallback():

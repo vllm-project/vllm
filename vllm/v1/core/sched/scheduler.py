@@ -719,6 +719,19 @@ class Scheduler(SchedulerInterface):
                             top_waiting
                         ):
                             break
+                        # Don't evict a runner for a waiting request that
+                        # max_loras would itself reject this step; skip it
+                        # so the eviction is not wasted.
+                        if (
+                            self.lora_config
+                            and top_waiting.lora_request
+                            and len(scheduled_loras) == self.lora_config.max_loras
+                            and top_waiting.lora_request.lora_int_id
+                            not in scheduled_loras
+                        ):
+                            candidate_queue.pop_request()
+                            step_skipped_waiting.prepend_request(top_waiting)
+                            continue
                         lowest_running = max(
                             self.running,
                             key=lambda r: (
@@ -727,7 +740,11 @@ class Scheduler(SchedulerInterface):
                                 r.request_id,
                             ),
                         )
-                        if top_waiting < lowest_running:
+                        # Preempt only for strictly higher priority (lower
+                        # numeric value). Equal priority must not preempt:
+                        # a preempted request keeps its arrival time and
+                        # would reclaim the slot next step, causing churn.
+                        if top_waiting.priority < lowest_running.priority:
                             _evict_running_for_waiting(lowest_running)
                             continue
                     break
@@ -985,11 +1002,6 @@ class Scheduler(SchedulerInterface):
                 # Mirrors the Phase 1 preempt-one-and-retry loop at
                 # `scheduler.py:423-468` so admit-time KV pressure is
                 # handled symmetrically to in-flight KV pressure.
-                request_key = (
-                    request.priority,
-                    request.arrival_time,
-                    request.request_id,
-                )
                 reserved_blocks = 0
                 if load_kv_async:
                     # An async load holds its blocks for the whole transfer with
@@ -1016,10 +1028,12 @@ class Scheduler(SchedulerInterface):
                         break
                     if self.policy != SchedulingPolicy.PRIORITY:
                         break
+                    # Only strictly-higher-priority requests may evict a
+                    # runner. Equal priority must not preempt to avoid
+                    # ping-pong (a preempted request keeps its arrival
+                    # time and would reclaim the blocks next step).
                     candidates = [
-                        r
-                        for r in self.running
-                        if request_key < (r.priority, r.arrival_time, r.request_id)
+                        r for r in self.running if request.priority < r.priority
                     ]
                     if not candidates:
                         break
