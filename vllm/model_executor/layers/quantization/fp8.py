@@ -106,6 +106,7 @@ class Fp8Config(QuantizationConfig):
         activation_scheme: str = "dynamic",
         ignored_layers: list[str] | None = None,
         weight_block_size: list[int] | None = None,
+        store_dtype: str | None = None,
     ) -> None:
         super().__init__()
 
@@ -115,6 +116,7 @@ class Fp8Config(QuantizationConfig):
             raise ValueError(f"Unsupported activation scheme {activation_scheme}")
         self.activation_scheme = activation_scheme
         self.ignored_layers = ignored_layers or []
+        self.store_dtype = store_dtype
         if weight_block_size is not None:
             if not is_checkpoint_fp8_serialized:
                 raise ValueError(
@@ -162,6 +164,7 @@ class Fp8Config(QuantizationConfig):
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"], None)
+        store_dtype = cls.get_from_keys_or(config, ["store_dtype"], None)
         if not ignored_layers:
             ignored_layers = cls.get_from_keys_or(
                 config, ["modules_to_not_convert"], None
@@ -171,6 +174,7 @@ class Fp8Config(QuantizationConfig):
             activation_scheme=activation_scheme,
             ignored_layers=ignored_layers,
             weight_block_size=weight_block_size,
+            store_dtype=store_dtype,
         )
 
     def get_quant_method(
@@ -198,6 +202,12 @@ class Fp8Config(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
+            if self.store_dtype == "mxfp4":
+                from vllm.model_executor.layers.quantization.mxfp4 import (
+                    Mxfp4MoEMethod,
+                )
+
+                return Mxfp4MoEMethod(layer.moe_config)
             if self.is_checkpoint_fp8_serialized:
                 moe_quant_method = Fp8MoEMethod(self, layer)
             else:
@@ -384,6 +394,9 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if self.use_marlin:
+            if not self.block_quant:
+                # Canonicalize to (K, N) for the kernel.
+                replace_parameter(layer, "weight", layer.weight.t())
             # Only Marlin kernels support `marlin_input_dtype`; guard to avoid
             # AttributeError if backend selection changes.
             if hasattr(self.fp8_linear, "marlin_input_dtype"):
@@ -537,20 +550,15 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         layer.input_scale = None
         qweight, weight_scale = ops.scaled_fp8_quant(layer.weight, scale=None)
 
-        # Update layer with new values.
-        replace_parameter(layer, "weight", qweight.data)
+        # Update layer with new values. Canonicalize to (K, N) for the kernel.
+        replace_parameter(layer, "weight", qweight.t().data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
-        if self.use_marlin:
+        if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
             # Only Marlin kernels support `marlin_input_dtype`; guard to avoid
             # AttributeError if backend selection changes.
-            if hasattr(self.fp8_linear, "marlin_input_dtype"):
-                self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
-            self.fp8_linear.process_weights_after_loading(layer)
-        else:
-            weight = qweight.t()
-            replace_parameter(layer, "weight", weight.data)
-            self.fp8_linear.process_weights_after_loading(layer)
+            self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
+        self.fp8_linear.process_weights_after_loading(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
