@@ -220,9 +220,12 @@ class WPIWeightTransferEngine(
     update_info_cls = WPIWeightTransferUpdateInfo
 
     def __init__(
-        self, config: WeightTransferConfig, parallel_config: ParallelConfig
+        self,
+        config: WeightTransferConfig,
+        parallel_config: ParallelConfig,
+        model: torch.nn.Module,
     ) -> None:
-        super().__init__(config, parallel_config)
+        super().__init__(config, parallel_config, model)
         self._client = None  # WPIClient, created during init_transfer_engine
         self._vram_buffer: torch.Tensor | None = None
         self._buffer_id: str = ""
