@@ -55,6 +55,37 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         num_threads: int = 4,
         **kwargs,
     ) -> None:
+        """Initialize the P2P secondary tier manager.
+
+        All keyword arguments after ``primary_kv_view`` come from the
+        ``secondary_tiers`` entry in ``kv_connector_extra_config``. See
+        ``docs/features/kv_offloading_usage.md`` for the user-facing
+        configuration reference.
+
+        Args:
+            offloading_spec: Owning ``OffloadingSpec`` (provides
+                ``vllm_config`` and the offloaded block layout).
+            primary_kv_view: Memoryview over the CPU primary tier; the
+                NIXL agent registers this region for RDMA transfers.
+            tier_type: Tier identifier (defaults to ``"p2p"``).
+            host: Address the ZMQ control socket binds to.
+            port: Port for the ZMQ control socket. Must be reachable
+                from peers.
+            backends: NIXL transport backends (e.g. ``["UCX"]``,
+                ``["MOONCAKE"]``, ``["LIBFABRIC"]``). Defaults to
+                ``["UCX"]``. When any non-UCX backend is requested, the
+                NIXL agent is initialized with ``backends=...``;
+                otherwise it falls back to a UCX-only agent with
+                ``num_threads`` threads.
+            num_threads: NIXL agent worker threads for the UCX-only
+                branch. Ignored when ``backends`` contains a non-UCX
+                entry.
+            **kwargs: Additional tier-specific options:
+                ``start_poller`` (bool, default ``True``) — spawn a
+                background thread that polls inflight transfers;
+                ``poll_interval`` (float, default ``0.001``) — poller
+                sleep interval in seconds.
+        """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
         port = int(port)
         self._local_id = f"{host}:{port}"
