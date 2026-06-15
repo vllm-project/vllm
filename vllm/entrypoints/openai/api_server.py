@@ -179,8 +179,9 @@ def build_app(
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
 
-    init_api_router(app, supported_tasks, model_config)
+    router = init_api_router(app, supported_tasks, model_config)
 
+    app.include_router(router)
     app.root_path = args.root_path
     app.add_middleware(
         CORSMiddleware,

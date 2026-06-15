@@ -20,7 +20,7 @@ def init_api_router(
     app: FastAPI,
     supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
-):
+) -> APIRouter:
     router = APIRouter()
 
     #############################################################
@@ -287,28 +287,28 @@ def init_api_router(
     #############################################################
     ## Instrumentator APIs
 
-    ### basic
+    ### Basic APIs
     from .instrumentator.basic import get_server_load_metrics, show_version
 
     router.get("/load")(get_server_load_metrics)
     router.get("/version")(show_version)
 
-    ### models
+    ### Models API
     from vllm.entrypoints.openai.models.api_router import models
 
     router.get("/v1/models")(models)
 
-    ### health
+    ### Health API
     from .instrumentator.health import health
 
     router.get("/health", response_class=Response)(health)
 
-    ### metrics
+    ### Metrics APIs
     from .instrumentator.metrics import attach_router as metrics_attach_router
 
     metrics_attach_router(app)
 
-    ### offline_docs
+    ### Offline docs
     from .instrumentator.offline_docs import attach_router as offline_docs_attach_router
 
     offline_docs_attach_router(app)
@@ -348,7 +348,7 @@ def init_api_router(
         router.post("/stop_profile")(stop_profile)
 
     #############################################################
-    ## SageMaker
+    ## SageMaker APIs
 
     from .sagemaker.api_router import invocations, ping
 
@@ -448,7 +448,7 @@ def init_api_router(
         )(derender_completion)
 
     #############################################################
-    ## tokenize APIs
+    ## Tokenize APIs
 
     from .tokenize.api_router import detokenize, get_tokenizer_info, tokenize
 
@@ -552,3 +552,5 @@ def init_api_router(
         router.post("/sleep")(sleep)
         router.post("/wake_up")(wake_up)
         router.get("/is_sleeping")(is_sleeping)
+
+    return router
