@@ -4,6 +4,7 @@
 import math
 import time
 
+import numpy as np
 import pytest
 
 from tests.v1.engine.utils import (
@@ -22,12 +23,14 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
 )
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.outputs import LogprobsLists
 
 
 def _ref_convert_id_to_token(
@@ -44,6 +47,48 @@ def _ref_convert_id_to_token(
       String representation of input token id
     """
     return tokenizer.decode([token_id]) or ""
+
+
+def _make_generation_request(
+    request_id: str,
+    external_req_id: str,
+    prompt_token_ids: list[int],
+    *,
+    output_kind: RequestOutputKind = RequestOutputKind.DELTA,
+    logprobs: int | None = None,
+    prompt_logprobs: int | None = None,
+    stop: list[str] | None = None,
+) -> EngineCoreRequest:
+    return EngineCoreRequest(
+        request_id=request_id,
+        external_req_id=external_req_id,
+        prompt_token_ids=prompt_token_ids,
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            skip_special_tokens=False,
+            spaces_between_special_tokens=False,
+            output_kind=output_kind,
+            stop=[] if stop is None else stop,
+            include_stop_str_in_output=False,
+            logprobs=logprobs,
+            prompt_logprobs=prompt_logprobs,
+        ),
+        pooling_params=None,
+    )
+
+
+def _make_sample_logprobs(
+    raw_logprobs: list[tuple[list[int], list[float], int]],
+) -> LogprobsLists:
+    return LogprobsLists(
+        np.array([entry[0] for entry in raw_logprobs]),
+        np.array([entry[1] for entry in raw_logprobs]),
+        np.array([entry[2] for entry in raw_logprobs]),
+    )
 
 
 @pytest.mark.parametrize(
@@ -139,6 +184,232 @@ def test_incremental_detokenization(
 
     assert output_processor.get_num_unfinished_requests() == 0
     assert not output_processor.has_unfinished_requests()
+
+
+def test_stream_output_token_by_token_splits_multi_token_delta(dummy_test_vectors):
+    prompt_tokens = dummy_test_vectors.prompt_tokens[0]
+    prompt_string = dummy_test_vectors.prompt_strings[0]
+    generation_tokens = dummy_test_vectors.generation_tokens[0][:4]
+    request_id = "request-0-int"
+    external_req_id = "request-0"
+
+    baseline_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_interval=1,
+    )
+    strict_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_interval=1,
+        stream_output_token_by_token=True,
+    )
+
+    for processor in (baseline_processor, strict_processor):
+        processor.add_request(
+            _make_generation_request(request_id, external_req_id, prompt_tokens),
+            prompt_string,
+        )
+
+    engine_output = EngineCoreOutput(
+        request_id=request_id,
+        new_token_ids=generation_tokens,
+        finish_reason=FinishReason.LENGTH,
+    )
+
+    baseline_outputs = baseline_processor.process_outputs(
+        [engine_output]
+    ).request_outputs
+    strict_outputs = strict_processor.process_outputs([engine_output]).request_outputs
+
+    assert len(baseline_outputs) == 1
+    assert len(strict_outputs) == len(generation_tokens)
+
+    strict_completion_outputs = [output.outputs[0] for output in strict_outputs]
+    assert [list(output.token_ids) for output in strict_completion_outputs] == [
+        [token_id] for token_id in generation_tokens
+    ]
+    assert [output.finished for output in strict_outputs[:-1]] == [False] * (
+        len(generation_tokens) - 1
+    )
+    assert strict_outputs[-1].finished
+    assert strict_completion_outputs[-1].finish_reason == "length"
+
+    baseline_completion = baseline_outputs[0].outputs[0]
+    assert "".join(output.text for output in strict_completion_outputs) == (
+        baseline_completion.text
+    )
+    assert [
+        token_id
+        for output in strict_completion_outputs
+        for token_id in output.token_ids
+    ] == list(baseline_completion.token_ids)
+
+
+def test_stream_output_token_by_token_overrides_stream_interval(dummy_test_vectors):
+    prompt_tokens = dummy_test_vectors.prompt_tokens[0]
+    generation_tokens = dummy_test_vectors.generation_tokens[0][:3]
+    request_id = "request-0-int"
+
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_interval=10,
+        stream_output_token_by_token=True,
+    )
+    output_processor.add_request(
+        _make_generation_request(request_id, "request-0", prompt_tokens),
+        dummy_test_vectors.prompt_strings[0],
+    )
+
+    processed_outputs = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request_id,
+                new_token_ids=generation_tokens,
+            )
+        ]
+    ).request_outputs
+
+    assert len(processed_outputs) == len(generation_tokens)
+    assert [list(output.outputs[0].token_ids) for output in processed_outputs] == [
+        [token_id] for token_id in generation_tokens
+    ]
+    assert not any(output.finished for output in processed_outputs)
+
+
+def test_stream_output_token_by_token_empty_final_is_not_duplicated(
+    dummy_test_vectors,
+):
+    prompt_tokens = dummy_test_vectors.prompt_tokens[0]
+    generation_tokens = dummy_test_vectors.generation_tokens[0][:3]
+    request_id = "request-0-int"
+
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_interval=10,
+        stream_output_token_by_token=True,
+    )
+    output_processor.add_request(
+        _make_generation_request(request_id, "request-0", prompt_tokens),
+        dummy_test_vectors.prompt_strings[0],
+    )
+
+    token_outputs = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request_id,
+                new_token_ids=generation_tokens,
+            )
+        ]
+    ).request_outputs
+    final_outputs = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request_id,
+                new_token_ids=[],
+                finish_reason=FinishReason.ABORT,
+            )
+        ]
+    ).request_outputs
+
+    assert len(token_outputs) == len(generation_tokens)
+    assert len(final_outputs) == 1
+    assert final_outputs[0].finished
+    assert final_outputs[0].outputs[0].token_ids == []
+    assert final_outputs[0].outputs[0].text == ""
+    assert final_outputs[0].outputs[0].finish_reason == "abort"
+
+
+def test_stream_output_token_by_token_splits_logprobs(dummy_test_vectors):
+    prompt_tokens = dummy_test_vectors.prompt_tokens[0]
+    generation_tokens = dummy_test_vectors.generation_tokens[0][:3]
+    raw_logprobs = dummy_test_vectors.generation_logprobs[0][: len(generation_tokens)]
+    request_id = "request-0-int"
+
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_output_token_by_token=True,
+    )
+    output_processor.add_request(
+        _make_generation_request(
+            request_id,
+            "request-0",
+            prompt_tokens,
+            logprobs=NUM_SAMPLE_LOGPROBS_UNDER_TEST,
+            prompt_logprobs=NUM_PROMPT_LOGPROBS_UNDER_TEST,
+        ),
+        dummy_test_vectors.prompt_strings[0],
+    )
+
+    processed_outputs = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request_id,
+                new_token_ids=generation_tokens,
+                new_logprobs=_make_sample_logprobs(raw_logprobs),
+                new_prompt_logprobs_tensors=dummy_test_vectors.prompt_logprobs[0],
+                finish_reason=FinishReason.LENGTH,
+            )
+        ]
+    ).request_outputs
+
+    assert len(processed_outputs) == len(generation_tokens)
+    assert processed_outputs[0].prompt_logprobs is not None
+
+    cumulative_logprobs = []
+    for request_output, token_id in zip(processed_outputs, generation_tokens):
+        completion = request_output.outputs[0]
+        assert list(completion.token_ids) == [token_id]
+        assert completion.logprobs is not None
+        assert len(completion.logprobs) == 1
+        cumulative_logprobs.append(completion.cumulative_logprob)
+
+    assert all(logprob is not None for logprob in cumulative_logprobs)
+    assert processed_outputs[-1].finished
+    assert processed_outputs[-1].outputs[0].finish_reason == "length"
+
+
+def test_stream_output_token_by_token_stop_string_aborts(dummy_test_vectors):
+    prompt_tokens = dummy_test_vectors.prompt_tokens[0]
+    generation_tokens = dummy_test_vectors.generation_tokens[0]
+    request_id = "request-0-int"
+    stop_string = STOP_STRINGS[0]
+
+    output_processor = OutputProcessor(
+        dummy_test_vectors.tokenizer,
+        log_stats=False,
+        stream_output_token_by_token=True,
+    )
+    output_processor.add_request(
+        _make_generation_request(
+            request_id,
+            "request-0",
+            prompt_tokens,
+            stop=[stop_string],
+        ),
+        dummy_test_vectors.prompt_strings[0],
+    )
+
+    processed = output_processor.process_outputs(
+        [
+            EngineCoreOutput(
+                request_id=request_id,
+                new_token_ids=generation_tokens,
+            )
+        ]
+    )
+
+    assert processed.reqs_to_abort == [request_id]
+    assert processed.request_outputs[-1].finished
+    assert processed.request_outputs[-1].outputs[0].finish_reason == "stop"
+    assert processed.request_outputs[-1].outputs[0].stop_reason == stop_string
+    assert "".join(
+        request_output.outputs[0].text
+        for request_output in processed.request_outputs
+    ) == dummy_test_vectors.generation_strings[0].split(stop_string)[0]
 
 
 def _validate_logprobs(
@@ -1222,6 +1493,48 @@ async def test_request_output_collector():
     # Cumulative logprobs should be the last one.
     cumulative_logprob_expected = 1.0 * num_to_put
     assert output.outputs[0].cumulative_logprob == cumulative_logprob_expected
+
+
+@pytest.mark.asyncio
+async def test_request_output_collector_preserves_token_by_token_outputs():
+    outputs = [
+        RequestOutput(
+            request_id="my-request-id",
+            prompt=None,
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text=str(idx),
+                    token_ids=[idx],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason=None,
+                )
+            ],
+            finished=False,
+        )
+        for idx in range(3)
+    ]
+
+    collector = RequestOutputCollector(
+        RequestOutputKind.DELTA,
+        request_id="my-request-id-int",
+        stream_output_token_by_token=True,
+    )
+
+    for output in outputs:
+        collector.put(output)
+
+    for expected_idx in range(3):
+        output = await collector.get()
+        assert output.outputs[0].text == str(expected_idx)
+        assert output.outputs[0].token_ids == [expected_idx]
+
+    assert not collector.ready.is_set()
+    assert collector.output is None
+    assert not collector.output_queue
 
 
 @pytest.mark.asyncio

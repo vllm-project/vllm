@@ -139,6 +139,9 @@ class AsyncLLM(EngineClient):
             renderer.tokenizer,
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
+            stream_output_token_by_token=(
+                self.vllm_config.scheduler_config.stream_output_token_by_token
+            ),
             tracing_enabled=tracing_endpoint is not None,
         )
 
@@ -373,7 +376,11 @@ class AsyncLLM(EngineClient):
         self._run_output_handler()
 
         # Create a new output collector for the request.
-        queue = RequestOutputCollector(params.output_kind, request.request_id)
+        queue = RequestOutputCollector(
+            params.output_kind,
+            request.request_id,
+            self.vllm_config.scheduler_config.stream_output_token_by_token,
+        )
 
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
@@ -453,7 +460,11 @@ class AsyncLLM(EngineClient):
         self.input_processor.assign_request_id(final_req)
         internal_req_id = final_req.request_id
 
-        queue = RequestOutputCollector(sampling_params.output_kind, internal_req_id)
+        queue = RequestOutputCollector(
+            sampling_params.output_kind,
+            internal_req_id,
+            self.vllm_config.scheduler_config.stream_output_token_by_token,
+        )
 
         async def handle_inputs():
             cancelled = False

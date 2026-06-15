@@ -345,8 +345,15 @@ class LogprobsProcessor:
 
         return decoded_tokens_list
 
+    def update(
+        self,
+        new_logprobs: LogprobsLists | None,
+        new_prompt_logprobs_tensors: LogprobsTensors | None,
+    ) -> None:
+        if new_logprobs is not None:
+            self._update_sample_logprobs(new_logprobs)
+        if new_prompt_logprobs_tensors is not None:
+            self._update_prompt_logprobs(new_prompt_logprobs_tensors)
+
     def update_from_output(self, output: EngineCoreOutput) -> None:
-        if output.new_logprobs is not None:
-            self._update_sample_logprobs(output.new_logprobs)
-        if output.new_prompt_logprobs_tensors is not None:
-            self._update_prompt_logprobs(output.new_prompt_logprobs_tensors)
+        self.update(output.new_logprobs, output.new_prompt_logprobs_tensors)

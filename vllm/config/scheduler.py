@@ -161,6 +161,11 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    stream_output_token_by_token: bool = False
+    """If True, split DELTA streaming outputs so each chunk contains at most
+    one generated token. This avoids exposing speculative decoding acceptance
+    length through multi-token stream chunks."""
+
     @staticmethod
     def default_factory(**kwargs):
         """

@@ -37,6 +37,7 @@ from vllm.v1.metrics.stats import (
     RequestStateStats,
     SchedulerStats,
 )
+from vllm.v1.outputs import LogprobsLists
 
 # shared empty CPU tensor used as a placeholder pooling output
 EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
@@ -47,20 +48,40 @@ class RequestOutputCollector:
     Collects streamed RequestOutputs per individual request,
     for hand-off to the consuming asyncio generate task.
 
-    When streaming deltas, RequestOutputs are merged if the
-    producer gets ahead of the consumer.
+    When streaming deltas, RequestOutputs are merged if the producer gets ahead
+    of the consumer, unless token-by-token streaming is enabled.
     """
 
-    def __init__(self, output_kind: RequestOutputKind, request_id: str):
-        self.aggregate = output_kind == RequestOutputKind.DELTA
+    def __init__(
+        self,
+        output_kind: RequestOutputKind,
+        request_id: str,
+        stream_output_token_by_token: bool = False,
+    ):
+        self.preserve_output_order = (
+            output_kind == RequestOutputKind.DELTA and stream_output_token_by_token
+        )
+        self.aggregate = (
+            output_kind == RequestOutputKind.DELTA and not self.preserve_output_order
+        )
         self.request_id = request_id
         self.output: RequestOutput | PoolingRequestOutput | Exception | None = None
+        self.output_queue: deque[
+            RequestOutput | PoolingRequestOutput | Exception
+        ] = deque()
         self.ready = asyncio.Event()
 
         self._input_stream_task: asyncio.Task | None = None
 
     def put(self, output: RequestOutput | PoolingRequestOutput | Exception) -> None:
         """Non-blocking put operation."""
+        if self.preserve_output_order:
+            if isinstance(output, Exception):
+                self.output_queue.clear()
+            self.output_queue.append(output)
+            self.ready.set()
+            return
+
         if self.output is None or isinstance(output, Exception):
             self.output = output
             self.ready.set()
@@ -77,6 +98,16 @@ class RequestOutputCollector:
 
     async def get(self) -> RequestOutput | PoolingRequestOutput:
         """Get operation blocks on put event."""
+        if self.preserve_output_order:
+            while not self.output_queue:
+                await self.ready.wait()
+            output = self.output_queue.popleft()
+            if not self.output_queue:
+                self.ready.clear()
+            if isinstance(output, Exception):
+                raise output
+            return output
+
         while (output := self.output) is None:
             await self.ready.wait()
         self.output = None
@@ -87,6 +118,16 @@ class RequestOutputCollector:
 
     def get_nowait(self) -> RequestOutput | PoolingRequestOutput | None:
         """Non-blocking get operation."""
+        if self.preserve_output_order:
+            if not self.output_queue:
+                return None
+            output = self.output_queue.popleft()
+            if not self.output_queue:
+                self.ready.clear()
+            if isinstance(output, Exception):
+                raise output
+            return output
+
         output = self.output
         if output is not None:
             self.output = None
@@ -276,6 +317,7 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
+        apply_stream_interval: bool = True,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -284,7 +326,7 @@ class RequestState:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
-        if self.stream_interval > 1:
+        if apply_stream_interval and self.stream_interval > 1:
             assert self.detokenizer is not None
 
             # Send output request only when
@@ -423,11 +465,13 @@ class OutputProcessor:
         *,
         log_stats: bool,
         stream_interval: int = 1,
+        stream_output_token_by_token: bool = False,
         tracing_enabled: bool = False,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.stream_interval = stream_interval
+        self.stream_output_token_by_token = stream_output_token_by_token
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
@@ -573,6 +617,110 @@ class OutputProcessor:
             # Queue the streaming update otherwise.
             req_state.input_chunk_queue.append(update)
 
+    def _should_stream_token_by_token(
+        self,
+        req_state: RequestState,
+        engine_core_output: EngineCoreOutput,
+        pooling_output: torch.Tensor | None,
+    ) -> bool:
+        return (
+            self.stream_output_token_by_token
+            and pooling_output is None
+            and req_state.output_kind == RequestOutputKind.DELTA
+            and bool(engine_core_output.new_token_ids)
+        )
+
+    @staticmethod
+    def _slice_sample_logprobs(
+        logprobs: LogprobsLists | None,
+        token_index: int,
+    ) -> LogprobsLists | None:
+        if logprobs is None:
+            return None
+        return LogprobsLists(
+            logprobs.logprob_token_ids[token_index : token_index + 1],
+            logprobs.logprobs[token_index : token_index + 1],
+            logprobs.sampled_token_ranks[token_index : token_index + 1],
+            None,
+        )
+
+    def _dispatch_request_output(
+        self,
+        req_state: RequestState,
+        request_output: RequestOutput | PoolingRequestOutput,
+        request_outputs: list[RequestOutput | PoolingRequestOutput],
+    ) -> None:
+        if req_state.streaming_input:
+            request_output.finished = False
+
+        if req_state.queue is not None:
+            # AsyncLLM: put into queue for handling by generate().
+            req_state.queue.put(request_output)
+        else:
+            # LLMEngine: return list of RequestOutputs.
+            request_outputs.append(request_output)
+
+    def _process_token_by_token_output(
+        self,
+        req_state: RequestState,
+        engine_core_output: EngineCoreOutput,
+        request_outputs: list[RequestOutput | PoolingRequestOutput],
+    ) -> tuple[FinishReason | None, int | str | None]:
+        assert req_state.detokenizer is not None
+        assert req_state.logprobs_processor is not None
+
+        final_finish_reason = engine_core_output.finish_reason
+        final_stop_reason = engine_core_output.stop_reason
+        kv_transfer_params = engine_core_output.kv_transfer_params
+        emitted_finish_reason: FinishReason | None = None
+        emitted_stop_reason: int | str | None = None
+        last_token_index = len(engine_core_output.new_token_ids) - 1
+
+        for token_index, token_id in enumerate(engine_core_output.new_token_ids):
+            is_last_token = token_index == last_token_index
+            token_ids = [token_id]
+            token_finish_reason = final_finish_reason if is_last_token else None
+            token_stop_reason = final_stop_reason if is_last_token else None
+            token_kv_transfer_params = kv_transfer_params if is_last_token else None
+
+            stop_string = req_state.detokenizer.update(
+                token_ids, token_finish_reason == FinishReason.STOP
+            )
+            if stop_string:
+                token_finish_reason = FinishReason.STOP
+                token_stop_reason = stop_string
+                token_kv_transfer_params = None
+
+            req_state.logprobs_processor.update(
+                self._slice_sample_logprobs(
+                    engine_core_output.new_logprobs, token_index
+                ),
+                engine_core_output.new_prompt_logprobs_tensors
+                if token_index == 0
+                else None,
+            )
+
+            if request_output := req_state.make_request_output(
+                token_ids,
+                pooling_output=None,
+                finish_reason=token_finish_reason,
+                stop_reason=token_stop_reason,
+                kv_transfer_params=token_kv_transfer_params,
+                apply_stream_interval=False,
+            ):
+                self._dispatch_request_output(
+                    req_state, request_output, request_outputs
+                )
+
+            req_state.sent_tokens_offset = req_state.detokenizer.num_output_tokens()
+
+            if token_finish_reason is not None:
+                emitted_finish_reason = token_finish_reason
+                emitted_stop_reason = token_stop_reason
+                break
+
+        return emitted_finish_reason, emitted_stop_reason
+
     def process_outputs(
         self,
         engine_core_outputs: list[EngineCoreOutput],
@@ -632,7 +780,13 @@ class OutputProcessor:
                     )
                 req_state.is_prefilling = False
 
-            if pooling_output is None:
+            if self._should_stream_token_by_token(
+                req_state, engine_core_output, pooling_output
+            ):
+                finish_reason, stop_reason = self._process_token_by_token_output(
+                    req_state, engine_core_output, request_outputs
+                )
+            elif pooling_output is None:
                 assert req_state.detokenizer is not None
                 assert req_state.logprobs_processor is not None
                 # 2) Detokenize the token ids into text and perform stop checks.
@@ -647,23 +801,29 @@ class OutputProcessor:
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
-            # 4) Create and handle RequestOutput objects.
-            if request_output := req_state.make_request_output(
-                new_token_ids,
-                pooling_output,
-                finish_reason,
-                stop_reason,
-                kv_transfer_params,
-            ):
-                if req_state.streaming_input:
-                    request_output.finished = False
-
-                if req_state.queue is not None:
-                    # AsyncLLM: put into queue for handling by generate().
-                    req_state.queue.put(request_output)
-                else:
-                    # LLMEngine: return list of RequestOutputs.
-                    request_outputs.append(request_output)
+                # 4) Create and handle RequestOutput objects.
+                if request_output := req_state.make_request_output(
+                    new_token_ids,
+                    pooling_output,
+                    finish_reason,
+                    stop_reason,
+                    kv_transfer_params,
+                ):
+                    self._dispatch_request_output(
+                        req_state, request_output, request_outputs
+                    )
+            else:
+                # 4) Create and handle RequestOutput objects.
+                if request_output := req_state.make_request_output(
+                    new_token_ids,
+                    pooling_output,
+                    finish_reason,
+                    stop_reason,
+                    kv_transfer_params,
+                ):
+                    self._dispatch_request_output(
+                        req_state, request_output, request_outputs
+                    )
 
             # Free completed requests.
             if finish_reason is not None:
