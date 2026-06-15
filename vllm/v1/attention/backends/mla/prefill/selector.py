@@ -33,6 +33,7 @@ class MLAPrefillSelectorConfig(NamedTuple):
     dtype: torch.dtype
     is_r1_compatible: bool
     cache_dtype: str = "auto"
+    dcp_world_size: int = 1
 
 
 def is_deepseek_r1_mla_compatible(vllm_config: "VllmConfig") -> bool:
@@ -113,6 +114,7 @@ def get_mla_prefill_backend(
         dtype=vllm_config.model_config.dtype,
         is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
         cache_dtype=getattr(vllm_config.cache_config, "cache_dtype", "auto"),
+        dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
     )
 
     if attention_config.mla_prefill_backend is not None:

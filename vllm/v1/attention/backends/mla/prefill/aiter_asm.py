@@ -92,6 +92,12 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
                 f"cache_dtype {selector_config.cache_dtype!r} is not FP8 "
                 "(requires fp8/fp8_e4m3/fp8_e5m2)"
             )
+        if selector_config.dcp_world_size > 1:
+            # Decode context parallel does not support scaled/fp8 KV
+            invalid_reasons.append(
+                "decode context parallelism (DCP) is not supported with the "
+                "FP8 KV cache required by AITER_ASM"
+            )
         return invalid_reasons
 
     def __init__(
