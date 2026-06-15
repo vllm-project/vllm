@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import numpy as np
 import pybase64 as base64
@@ -54,13 +54,12 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
-from vllm.inputs import EngineInput
+from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
-from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
@@ -71,6 +70,39 @@ if TYPE_CHECKING:
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
 logger = init_logger(__name__)
+
+
+def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
+    """Sum per-modality placeholder tokens from ``mm_placeholders``.
+
+    Keyed by modality name; ``PlaceholderRange.length`` is the placeholder's
+    prompt token span, so each sum matches the placeholder tokens already
+    counted in ``usage.prompt_tokens``.
+    """
+    mm_placeholders = cast(
+        "MultiModalPlaceholders | None", engine_input.get("mm_placeholders")
+    )
+    return {
+        modality: sum(p.length for p in ranges)
+        for modality, ranges in (mm_placeholders or {}).items()
+        if ranges
+    }
+
+
+def _make_prompt_tokens_details(
+    enable_prompt_tokens_details: bool,
+    num_cached_tokens: int | None,
+    mm_token_counts: dict[str, int] | None,
+) -> PromptTokenUsageInfo | None:
+    """Build ``prompt_tokens_details`` from cached + multimodal token counts."""
+    if not enable_prompt_tokens_details:
+        return None
+    if num_cached_tokens is None and not mm_token_counts:
+        return None
+    return PromptTokenUsageInfo(
+        cached_tokens=num_cached_tokens,
+        multimodal_tokens=mm_token_counts or None,
+    )
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -112,17 +144,7 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_log_outputs = enable_log_outputs
         self.enable_log_deltas = enable_log_deltas
 
-        # set up reasoning parser
-        self.reasoning_parser_cls = ParserManager.get_reasoning_parser(
-            reasoning_parser_name=reasoning_parser
-        )
-        # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
-        self.tool_parser = ParserManager.get_tool_parser(
-            tool_parser_name=tool_parser,
-            enable_auto_tools=enable_auto_tools,
-            model_name=self.model_config.model,
-        )
         self.parser_cls = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
@@ -131,8 +153,9 @@ class OpenAIServingChat(OpenAIServing):
             is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
         )
         if (
-            is_mistral_tool_parser(self.tool_parser)
-            and self.reasoning_parser_cls is not None
+            self.parser_cls is not None
+            and is_mistral_tool_parser(self.parser_cls.tool_parser_cls)
+            and self.parser_cls.reasoning_parser_cls is not None
         ):
             from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 
@@ -234,11 +257,12 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
         chat_template_kwargs = self._effective_chat_template_kwargs(request)
-        reasoning_parser: ReasoningParser | None = None
-        if self.reasoning_parser_cls:
-            reasoning_parser = self.reasoning_parser_cls(
+        parser: Parser | None = None
+        if self.parser_cls is not None:
+            parser = self.parser_cls(
                 tokenizer,
-                chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
+                request.tools,
+                chat_template_kwargs=chat_template_kwargs,
             )
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
@@ -264,8 +288,10 @@ class OpenAIServingChat(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
+        mm_token_counts: dict[str, int] | None = None
         for i, engine_input in enumerate(engine_inputs):
             prompt_token_ids = self._extract_prompt_components(engine_input).token_ids
+            mm_token_counts = _get_mm_token_counts(engine_input)
 
             # If we are creating sub requests for multiple prompts, ensure that they
             # have unique request ids.
@@ -324,10 +350,8 @@ class OpenAIServingChat(OpenAIServing):
                     # `think?` rule that handles both reasoning and
                     # non-reasoning outputs.
                     reasoning_ended = True
-                elif reasoning_parser:
-                    reasoning_ended = reasoning_parser.is_reasoning_end(
-                        prompt_token_ids or []
-                    )
+                elif parser is not None and parser.reasoning_parser is not None:
+                    reasoning_ended = parser.is_reasoning_end(prompt_token_ids or [])
                 else:
                     reasoning_ended = None
 
@@ -343,7 +367,7 @@ class OpenAIServingChat(OpenAIServing):
                     reasoning_parser_kwargs={
                         "chat_template_kwargs": chat_template_kwargs,
                     }
-                    if reasoning_parser
+                    if parser is not None and parser.reasoning_parser is not None
                     else None,
                 )
 
@@ -362,6 +386,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request_metadata,
                 chat_template_kwargs=chat_template_kwargs,
+                mm_token_counts=mm_token_counts,
             )
 
         return await self.chat_completion_full_generator(
@@ -372,7 +397,8 @@ class OpenAIServingChat(OpenAIServing):
             conversation,
             tokenizer,
             request_metadata,
-            chat_template_kwargs=chat_template_kwargs,
+            parser=parser,
+            mm_token_counts=mm_token_counts,
         )
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
@@ -390,6 +416,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         chat_template_kwargs: dict[str, Any] | None = None,
+        mm_token_counts: dict[str, int] | None = None,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -733,10 +760,11 @@ class OpenAIServingChat(OpenAIServing):
                     completion_tokens=completion_tokens,
                     total_tokens=num_prompt_tokens + completion_tokens,
                 )
-                if self.enable_prompt_tokens_details and num_cached_tokens is not None:
-                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(
-                        cached_tokens=num_cached_tokens
-                    )
+                final_usage.prompt_tokens_details = _make_prompt_tokens_details(
+                    self.enable_prompt_tokens_details,
+                    num_cached_tokens,
+                    mm_token_counts,
+                )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -796,7 +824,8 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
-        chat_template_kwargs: dict[str, Any] | None = None,
+        parser: Parser | None = None,
+        mm_token_counts: dict[str, int] | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
         final_res: RequestOutput | None = None
@@ -821,6 +850,9 @@ class OpenAIServingChat(OpenAIServing):
             history_tool_call_cnt = 0
 
         role = self.get_chat_request_role(request)
+        tool_parser_cls = (
+            self.parser_cls.tool_parser_cls if self.parser_cls is not None else None
+        )
         for output in final_res.outputs:
             # check for error finish reason and raise GenerationError
             # finish_reason='error' indicates a retryable request-level internal error
@@ -840,14 +872,6 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
-            parser: Parser | None = None
-            if self.parser_cls is not None:
-                parser = self.parser_cls(
-                    tokenizer,
-                    request.tools,
-                    chat_template_kwargs=chat_template_kwargs,
-                )
-
             if parser is not None:
                 reasoning, content, tool_calls = parser.parse(
                     output.text,
@@ -864,7 +888,7 @@ class OpenAIServingChat(OpenAIServing):
 
             auto_tools_called = False
 
-            if (not self.enable_auto_tools or not self.tool_parser) and (
+            if (not self.enable_auto_tools or not tool_parser_cls) and (
                 not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
                 and request.tool_choice != "required"
             ):
@@ -923,7 +947,7 @@ class OpenAIServingChat(OpenAIServing):
                 request.tools
                 and (request.tool_choice == "auto" or request.tool_choice is None)
                 and self.enable_auto_tools
-                and self.tool_parser
+                and tool_parser_cls
             ):
                 auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
@@ -1024,13 +1048,11 @@ class OpenAIServingChat(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-        if (
-            self.enable_prompt_tokens_details
-            and final_res.num_cached_tokens is not None
-        ):
-            usage.prompt_tokens_details = PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens
-            )
+        usage.prompt_tokens_details = _make_prompt_tokens_details(
+            self.enable_prompt_tokens_details,
+            final_res.num_cached_tokens,
+            mm_token_counts,
+        )
 
         request_metadata.final_usage_info = usage
 

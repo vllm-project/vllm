@@ -201,13 +201,33 @@ class KVCacheCoordinator(ABC):
             num_local_computed_tokens: The number of local computed tokens.
             num_external_computed_tokens: The number of external computed tokens.
         """
+        # A running request is already tracked in num_cached_block and won't
+        # have new prefix-cache hits, so this is a no-op for it.
+        if any(
+            request_id in manager.num_cached_block
+            for manager in self.single_type_managers
+        ):
+            assert all(len(blocks) == 0 for blocks in new_computed_blocks)
+            return
+
+        # Two-phase allocation (issue #33775): first touch every group's local
+        # cache-hit blocks, then allocate external blocks for every group. This
+        # ensures an earlier group's external `get_new_blocks` cannot evict a
+        # later group's not-yet-touched cache-hit blocks.
         for i, manager in enumerate(self.single_type_managers):
-            manager.allocate_new_computed_blocks(
+            manager.add_local_computed_blocks(
                 request_id,
                 new_computed_blocks[i],
                 num_local_computed_tokens,
                 num_external_computed_tokens,
             )
+        if num_external_computed_tokens > 0:
+            for manager in self.single_type_managers:
+                manager.allocate_external_computed_blocks(
+                    request_id,
+                    num_local_computed_tokens,
+                    num_external_computed_tokens,
+                )
 
     def allocate_new_blocks(
         self,
