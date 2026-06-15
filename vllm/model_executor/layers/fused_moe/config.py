@@ -1067,6 +1067,13 @@ class FusedMoEParallelConfig:
         )
 
     @property
+    def use_flydsl_ep_kernels(self):
+        return (
+            self.use_all2all_kernels
+            and self.all2all_backend == "flydsl_intranode"
+        )
+
+    @property
     def use_nixl_ep_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "nixl_ep"
 
@@ -1306,12 +1313,12 @@ class FusedMoEConfig:
                 rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
             )
 
-        if self.use_mori_kernels:
+        if self.use_mori_kernels or self.use_flydsl_ep_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
-                "Mori needs to be used with aiter fused_moe for now."
+                "Mori/FlyDSL EP needs to be used with aiter fused_moe for now."
             )
             assert not self.aiter_fmoe_shared_expert_enabled, (
-                "Mori does not support fusion shared expert now. "
+                "Mori/FlyDSL EP does not support fusion shared expert now. "
                 "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
             )
 
@@ -1381,6 +1388,10 @@ class FusedMoEConfig:
     @property
     def use_mori_kernels(self):
         return self.moe_parallel_config.use_mori_kernels
+
+    @property
+    def use_flydsl_ep_kernels(self):
+        return self.moe_parallel_config.use_flydsl_ep_kernels
 
     @property
     def use_fi_nvl_two_sided_kernels(self):

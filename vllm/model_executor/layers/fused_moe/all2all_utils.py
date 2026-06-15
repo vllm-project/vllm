@@ -32,6 +32,7 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import (
     has_deep_ep,
     has_deep_ep_v2,
+    has_flydsl_ep,
     has_mori,
     has_nixl_ep,
 )
@@ -49,6 +50,8 @@ if current_platform.is_cuda_alike():
         from .prepare_finalize.deepep_v2 import DeepEPV2PrepareAndFinalize
     if has_mori():
         from .prepare_finalize.mori import MoriPrepareAndFinalize
+    if has_flydsl_ep():
+        from .prepare_finalize.flydsl_ep import FlydslEpPrepareAndFinalize
     if has_nixl_ep():
         from .prepare_finalize.nixl_ep import (
             NIXL_EP_QUANT_BLOCK_SHAPE,
@@ -235,22 +238,17 @@ def maybe_make_prepare_finalize(
             use_cudagraph=use_cudagraph,
         )
 
-    elif moe.use_mori_kernels:
+    elif moe.use_mori_kernels or moe.use_flydsl_ep_kernels:
         assert quant_config is not None
 
-        # Note: We may want to use FP8 dispatch just to reduce
-        # data movement.
+        # Note: We may want to use FP8 dispatch just to reduce data movement.
         use_fp8_dispatch = (
             quant_config.is_per_act_token or quant_config.is_block_quantized
         )
         if use_fp8_dispatch:
-            # For PTPC (per token per channel) quant, scale dim is 1
-            # For 1x128 quant, scale dim is hidden_dim // 128
             quant_dtype = quant_config.quant_dtype
             scale_dim = 1 if quant_config.is_per_act_token else moe.hidden_dim // 128
         else:
-            # Unquantized dispatch (e.g. AITER with defer_input_quant):
-            # dispatch raw BF16/FP16 data, no scales needed.
             quant_dtype = moe.in_dtype
             scale_dim = 0
         all_to_all_args = dict(
@@ -267,12 +265,20 @@ def maybe_make_prepare_finalize(
         )
         handle = all2all_manager.get_handle(all_to_all_args)
 
-        prepare_finalize = MoriPrepareAndFinalize(
-            handle,
-            max_tokens_per_rank=moe.max_num_tokens,
-            num_dispatchers=all2all_manager.world_size,
-            use_fp8_dispatch=use_fp8_dispatch,
-        )
+        if moe.use_mori_kernels:
+            prepare_finalize = MoriPrepareAndFinalize(
+                handle,
+                max_tokens_per_rank=moe.max_num_tokens,
+                num_dispatchers=all2all_manager.world_size,
+                use_fp8_dispatch=use_fp8_dispatch,
+            )
+        else:
+            prepare_finalize = FlydslEpPrepareAndFinalize(
+                handle,
+                max_tokens_per_rank=moe.max_num_tokens,
+                num_dispatchers=all2all_manager.world_size,
+                use_fp8_dispatch=use_fp8_dispatch,
+            )
 
     elif moe.use_fi_nvl_two_sided_kernels:
         assert quant_config is not None

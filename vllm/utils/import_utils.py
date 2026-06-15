@@ -534,6 +534,23 @@ def has_mori() -> bool:
     return _has_module("mori")
 
 
+def has_flydsl_ep() -> bool:
+    """Whether FlyDSL intranode EP dispatch/combine kernels are available."""
+    if not has_mori():
+        return False
+    try:
+        import mori.ir.flydsl  # noqa: F401
+    except ImportError:
+        return False
+    import importlib.util
+
+    if importlib.util.find_spec("flydsl") is None and not os.environ.get(
+        "FLYDSL_REPO"
+    ):
+        return False
+    return True
+
+
 def has_fbgemm_gpu() -> bool:
     """Whether the optional `fbgemm_gpu` package is available."""
     return _has_module("fbgemm_gpu")

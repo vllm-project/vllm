@@ -399,7 +399,10 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # so we should not defer input quantization.
         # Otherwise, AITER fused MoE kernels handle input quantization
         # internally via a single fused kernel.
-        return not self.moe_config.use_mori_kernels
+        return not (
+            self.moe_config.use_mori_kernels
+            or self.moe_config.use_flydsl_ep_kernels
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
