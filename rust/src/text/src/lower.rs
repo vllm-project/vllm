@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 pub(crate) mod logprobs;
+pub(crate) mod token_ids;
 
 use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
 use vllm_llm::GenerateRequest;
@@ -10,6 +11,7 @@ use crate::backend::{SamplingHints, SamplingLimits};
 use crate::error::{Error, Result};
 use crate::request::{SamplingParams, TextRequest};
 use logprobs::validate_logprobs;
+use token_ids::validate_vocab_range;
 
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
@@ -100,13 +102,19 @@ pub fn lower_sampling_params(
         vllm_xargs,
     } = sampling_params;
 
-    // Validate logprobs-related fields first with runtime sampling limits first.
     validate_logprobs(
         logprobs,
         prompt_logprobs,
         logprob_token_ids.as_deref(),
         sampling_limits,
     )?;
+    if let Some(token_ids) = logprob_token_ids.as_deref() {
+        validate_vocab_range(
+            "logprob_token_ids",
+            token_ids.iter().copied(),
+            sampling_limits.logprobs_vocab_size(),
+        )?;
+    }
 
     // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat
     // path: https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/openai/chat_completion/protocol.py#L424-L450
@@ -250,7 +258,7 @@ mod tests {
     use super::*;
     use crate::backend::hf::HfTextBackend;
     use crate::backend::{SamplingHints, TextBackend as _};
-    use crate::error::LogprobsError;
+    use crate::error::{LogprobsError, OutOfVocabError};
     use crate::request::{Prompt, TextRequest};
 
     /// Stub tokenizer that returns empty token IDs — sufficient for tests that
@@ -747,7 +755,8 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::Logprobs(LogprobsError::InvalidTokenIds {
+            Error::OutOfVocab(OutOfVocabError {
+                parameter: "logprob_token_ids",
                 token_ids,
                 vocab_size: 1000,
             }) if token_ids == vec![1000]
