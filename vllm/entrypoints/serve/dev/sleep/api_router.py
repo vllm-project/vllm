@@ -49,6 +49,13 @@ def required_int_list(payload: dict, key: str) -> list[int]:
     return value
 
 
+def optional_level(payload: dict, default: int = 1) -> int:
+    value = payload.get("level", default)
+    if value not in (1, 2):
+        raise HTTPException(status_code=400, detail="level must be 1 or 2")
+    return value
+
+
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
@@ -91,12 +98,14 @@ async def sleep_ep_ranks_by_tags(raw_request: Request):
     payload = await raw_request.json()
     sleeping_ep_ranks = required_int_list(payload, "sleeping_ep_ranks")
     tags = required_tags(payload, "tags")
+    level = optional_level(payload)
 
     await engine_client(raw_request).collective_rpc(
         "sleep_ep_ranks_by_tags",
         kwargs={
             "sleeping_ep_ranks": sleeping_ep_ranks,
             "tags": tags,
+            "level": level,
         },
     )
     return JSONResponse(
@@ -104,6 +113,7 @@ async def sleep_ep_ranks_by_tags(raw_request: Request):
             "ok": True,
             "sleeping_ep_ranks": sleeping_ep_ranks,
             "tags": tags,
+            "level": level,
         }
     )
 
@@ -113,12 +123,14 @@ async def wake_up_ep_ranks_by_tags(raw_request: Request):
     payload = await raw_request.json()
     sleeping_ep_ranks = required_int_list(payload, "sleeping_ep_ranks")
     tags = required_tags(payload, "tags")
+    level = optional_level(payload)
 
     await engine_client(raw_request).collective_rpc(
         "wake_up_ep_ranks",
         kwargs={
             "sleeping_ep_ranks": sleeping_ep_ranks,
             "tags": tags,
+            "level": level,
         },
     )
     return JSONResponse(
@@ -126,6 +138,7 @@ async def wake_up_ep_ranks_by_tags(raw_request: Request):
             "ok": True,
             "sleeping_ep_ranks": sleeping_ep_ranks,
             "tags": tags,
+            "level": level,
         }
     )
 

@@ -90,6 +90,13 @@ class EplbCommunicator(ABC):
     def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
         self._cuda_stream = cuda_stream
 
+    def on_l2_wake(self) -> None:
+        """Hook for backends that pin physical pages (e.g. NIXL).
+
+        Called on a waking rank after CuMem remap. Default no-op; backends
+        that need to re-pin against the new physical pages override this.
+        """
+
     def _log_initialized(self) -> None:
         if is_local_first_rank():
             logger.info("Initialized EPLB communicator: %s.", self.__class__.__name__)
@@ -423,6 +430,19 @@ class NixlEplbCommunicator(EplbCommunicator):
         descs = self._nixl_wrapper.get_reg_descs(all_tensors)
         self._nixl_wrapper.register_memory(descs)
         self._registered_descs.append(descs)
+
+    def on_l2_wake(self) -> None:
+        """Re-pin expert_weights / expert_buffer after L2 sleep+wake.
+
+        cuMem keeps the virtual addresses but allocates new physical pages,
+        so the previous NIXL pin is stale. vaddrs unchanged means peers'
+        cached send_meta is still valid; only the local pin needs refresh.
+        """
+        for descs in self._registered_descs:
+            with contextlib.suppress(Exception):
+                self._nixl_wrapper.deregister_memory(descs)
+        self._registered_descs.clear()
+        self._init_registered_buffers()
 
     def _exchange_remote_send_meta(self) -> None:
         """Exchange per-layer per-tensor metadata so receivers can compute

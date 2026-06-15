@@ -134,6 +134,9 @@ async def flash_epscale(raw_request: Request):
         raise HTTPException(status_code=400, detail="ep_size must be an integer")
     tags = optional_tags(payload, "tags") or DEFAULT_TAGS
     drain_timeout = _optional_timeout(payload, "drain_timeout", 300)
+    level = payload.get("level", 1)
+    if level not in (1, 2):
+        raise HTTPException(status_code=400, detail="level must be 1 or 2")
     client = _engine_client(raw_request)
 
     timing: dict[str, float] = {}
@@ -182,6 +185,7 @@ async def flash_epscale(raw_request: Request):
                 tags=tags,
                 drain_timeout=drain_timeout,
                 timing=timing,
+                level=level,
             )
         else:
             action = "scale_up"
@@ -192,6 +196,7 @@ async def flash_epscale(raw_request: Request):
                 current_sleeping=current_sleeping,
                 tags=tags,
                 timing=timing,
+                level=level,
             )
 
         async with _timed(timing, "final_state"):
@@ -237,6 +242,7 @@ async def _scale_down(
     tags: list[str],
     drain_timeout: float,
     timing: dict[str, float],
+    level: int = 1,
 ) -> None:
     """Shrink the active EP set.
 
@@ -274,6 +280,7 @@ async def _scale_down(
                             kwargs={
                                 "sleeping_ep_ranks": current_sleeping,
                                 "tags": tags,
+                                "level": level,
                             },
                         )
                 async with _timed(timing, "resize"):
@@ -285,7 +292,11 @@ async def _scale_down(
                     sleep_started = True
                     await client.collective_rpc(
                         "sleep_ep_ranks_by_tags",
-                        kwargs={"sleeping_ep_ranks": target_sleeping, "tags": tags},
+                        kwargs={
+                            "sleeping_ep_ranks": target_sleeping,
+                            "tags": tags,
+                            "level": level,
+                        },
                     )
                 transition_completed = True
             except Exception:
@@ -296,6 +307,7 @@ async def _scale_down(
                     tags=tags,
                     timing=timing,
                     wake_target_sleeping=sleep_started,
+                    level=level,
                 )
                 raise
     except Exception as e:
@@ -319,6 +331,7 @@ async def _restore_scale_down_sleep_state(
     tags: list[str],
     timing: dict[str, float],
     wake_target_sleeping: bool,
+    level: int = 1,
 ) -> None:
     """Best-effort rollback for failures after scale_down routing shrinks."""
     try:
@@ -326,7 +339,11 @@ async def _restore_scale_down_sleep_state(
             async with _timed(timing, "rollback_wake"):
                 await client.collective_rpc(
                     "wake_up_ep_ranks",
-                    kwargs={"sleeping_ep_ranks": target_sleeping, "tags": tags},
+                    kwargs={
+                        "sleeping_ep_ranks": target_sleeping,
+                        "tags": tags,
+                        "level": level,
+                    },
                 )
         async with _timed(timing, "rollback_resize"):
             await client.collective_rpc(
@@ -337,7 +354,11 @@ async def _restore_scale_down_sleep_state(
             async with _timed(timing, "rollback_sleep"):
                 await client.collective_rpc(
                     "sleep_ep_ranks_by_tags",
-                    kwargs={"sleeping_ep_ranks": current_sleeping, "tags": tags},
+                    kwargs={
+                        "sleeping_ep_ranks": current_sleeping,
+                        "tags": tags,
+                        "level": level,
+                    },
                 )
     except Exception:
         logger.exception("flash_epscale scale_down rollback failed")
@@ -351,6 +372,7 @@ async def _scale_up(
     current_sleeping: list[int],
     tags: list[str],
     timing: dict[str, float],
+    level: int = 1,
 ) -> None:
     """Grow the active EP set.
 
@@ -370,6 +392,7 @@ async def _scale_up(
                             kwargs={
                                 "sleeping_ep_ranks": current_sleeping,
                                 "tags": tags,
+                                "level": level,
                             },
                         )
                     wake_completed = True
@@ -384,7 +407,11 @@ async def _scale_up(
                         sleep_started = True
                         await client.collective_rpc(
                             "sleep_ep_ranks_by_tags",
-                            kwargs={"sleeping_ep_ranks": target_sleeping, "tags": tags},
+                            kwargs={
+                                "sleeping_ep_ranks": target_sleeping,
+                                "tags": tags,
+                                "level": level,
+                            },
                         )
             except Exception:
                 await _restore_scale_up_sleep_state(
@@ -396,6 +423,7 @@ async def _scale_up(
                     wake_completed=wake_completed,
                     resize_completed=resize_completed,
                     sleep_started=sleep_started,
+                    level=level,
                 )
                 raise
     except Exception as e:
@@ -420,6 +448,7 @@ async def _restore_scale_up_sleep_state(
     wake_completed: bool,
     resize_completed: bool,
     sleep_started: bool,
+    level: int = 1,
 ) -> None:
     """Best-effort rollback for failures before scale_up routing opens."""
     try:
@@ -427,7 +456,11 @@ async def _restore_scale_up_sleep_state(
             async with _timed(timing, "rollback_wake"):
                 await client.collective_rpc(
                     "wake_up_ep_ranks",
-                    kwargs={"sleeping_ep_ranks": target_sleeping, "tags": tags},
+                    kwargs={
+                        "sleeping_ep_ranks": target_sleeping,
+                        "tags": tags,
+                        "level": level,
+                    },
                 )
         if resize_completed:
             async with _timed(timing, "rollback_resize"):
@@ -439,7 +472,11 @@ async def _restore_scale_up_sleep_state(
             async with _timed(timing, "rollback_sleep"):
                 await client.collective_rpc(
                     "sleep_ep_ranks_by_tags",
-                    kwargs={"sleeping_ep_ranks": current_sleeping, "tags": tags},
+                    kwargs={
+                        "sleeping_ep_ranks": current_sleeping,
+                        "tags": tags,
+                        "level": level,
+                    },
                 )
     except Exception:
         logger.exception("flash_epscale scale_up rollback failed")

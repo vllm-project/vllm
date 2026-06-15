@@ -392,17 +392,99 @@ class Worker(WorkerBase):
         if not selected_tags:
             raise ValueError("tags must not be empty")
 
+        if level == 2:
+            eplb = self.model_runner.eplb_state
+            if eplb is None or not eplb.is_logical_sleep_active():
+                raise RuntimeError(
+                    "level=2 sleep requires logical_sleep to be active "
+                    "(experts must have been migrated away first)"
+                )
+            if "weights" in selected_tags:
+                raise ValueError(
+                    "level=2 sleep must not include the 'weights' tag — "
+                    "it would re-enable CPU backup and defeat the purpose"
+                )
+
         self.sleep(level=level, tags=selected_tags)
 
     def wake_up_ep_ranks(
         self,
         sleeping_ep_ranks: list[int],
         tags: list[str] | None = None,
+        level: int = 1,
     ) -> None:
         from vllm.distributed.parallel_state import get_ep_group
 
-        if get_ep_group().rank in sleeping_ep_ranks:
+        is_waking = get_ep_group().rank in sleeping_ep_ranks
+        if is_waking:
             self.wake_up(tags=tags)
+        print("Woke up EP ranks %s with tags %s at level %d", sleeping_ep_ranks, tags, level, flush=True)
+        if level != 2:
+            return
+
+        # L2 wake: vaddrs are preserved by CuMem; refill dense weights
+        # from an active peer in the same DP group. Experts are filled
+        # later by resize_sleep_ep_ranks -> EPLB rearrange.
+        from vllm.distributed.elastic_ep.peer_weight_transfer import (
+            get_max_dp_group,
+            transfer_dense_to_waking_ranks,
+        )
+
+        # Refill EPLB GPU maps on waking ranks (collective, all EP ranks).
+        # L2 sleep wiped their physical pages with no CPU backup, so the
+        # values came back as garbage. Must run before any downstream
+        # collective consumes them (resize_sleep_ep_ranks -> NCCL P2P).
+        eplb = self.model_runner.eplb_state
+        if eplb is not None:
+            eplb.broadcast_eplb_maps_from_active()
+            if is_waking:
+                eplb.reset_load_history_after_l2_wake()
+
+        # Use the always-preserved max DP communicator directly instead of
+        # get_dp_group(): a prior scale_down may have NCCL-split _DP down
+        # to active_ep_size, so the current _DP cannot reach the waking
+        # peers. Reading _DP_MAX avoids mutating any global DP state, so
+        # the subsequent resize_sleep_ep_ranks can manage _DP as usual.
+        dp_group = get_max_dp_group()
+
+        waking_dp_ranks = self._ep_ranks_to_dp_ranks(sleeping_ep_ranks)
+        model = self.model_runner.get_model()
+        transfer_dense_to_waking_ranks(
+            model=model,
+            expert_weights=model.expert_weights,
+            dp_group=dp_group,
+            waking_dp_ranks=waking_dp_ranks,
+        )
+        print("Transferred dense weights to waking EP ranks %s (DP ranks %s)",
+              sleeping_ep_ranks, waking_dp_ranks, flush=True)
+        if is_waking:
+            self._maybe_nixl_eplb_on_l2_wake()
+            print("[L2 wake] done _maybe_nixl_eplb_on_l2_wake", flush=True)
+        print("[L2 wake] wake_up_ep_ranks returning", flush=True)
+
+    def _ep_ranks_to_dp_ranks(self, ep_ranks: list[int]) -> list[int]:
+        """Translate EP ranks into DP-local indices for the current DP group.
+
+        Assumes the standard layout `ep_rank = dp_rank * tp_size + tp_rank`
+        and that logical sleep enforces whole-DP-slice suffixes (i.e.,
+        `len(ep_ranks) % tp_size == 0`).
+        """
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        return sorted({ep // tp_size for ep in ep_ranks})
+
+    def _maybe_nixl_eplb_on_l2_wake(self) -> None:
+        """Re-pin EPLB communicator memory after L2 wake. No-op unless
+        the active backend is NIXL."""
+        eplb = self.model_runner.eplb_state
+        if eplb is None:
+            return
+        for ms in eplb.model_states.values():
+            comm = getattr(ms, "communicator", None)
+            if comm is None:
+                continue
+            on_wake = getattr(comm, "on_l2_wake", None)
+            if on_wake is not None:
+                on_wake()
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)

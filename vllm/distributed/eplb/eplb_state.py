@@ -825,6 +825,7 @@ class EplbState:
                     state.physical_to_logical_map,
                     saved_physical_to_logical_map,
                     state.model.expert_weights,
+                    state.expert_buffer,
                     ep_group,
                     state.communicator,
                     False,
@@ -845,6 +846,68 @@ class EplbState:
             self.logical_sleep_state = None
         finally:
             self.is_async = is_async_enabled
+
+    def broadcast_eplb_maps_from_active(self) -> None:
+        """Refill EPLB GPU maps on waking ranks from EP rank 0 (collective).
+
+        L2 sleep unmaps every cumem-tracked GPU allocation without writing
+        a CPU backup; on wake the vaddrs are remapped but the contents are
+        garbage. The maps (``physical_to_logical_map``,
+        ``logical_to_physical_map``, ``logical_replica_count``) are global
+        and identical across EP ranks by construction, so the cheapest
+        repair is a broadcast from the lowest active EP rank.
+
+        Sleep is suffix-only, so EP local rank 0 is always active. Active
+        ranks broadcast their (already correct) tensor, waking ranks
+        overwrite their garbage tensor — both arms of the collective
+        converge on the same content.
+
+        Uses the EP group's PyNCCL communicator directly. vLLM's EP
+        ``device_group`` is created via the stateless DP-style path and
+        is *not* registered in torch.distributed's world-group map, so
+        ``torch.distributed.broadcast`` / ``GroupCoordinator.broadcast``
+        cannot drive it; ``pynccl_comm.broadcast`` works because it
+        bypasses c10d and issues ``ncclBroadcast`` directly.
+
+        Must be invoked on every EP rank under the same conditions, or
+        NCCL deadlocks.
+        """
+        if self.logical_sleep_state is None:
+            return
+        ep_group = get_ep_group()
+        device_comm = ep_group.device_communicator
+        pynccl_comm = (
+            getattr(device_comm, "pynccl_comm", None)
+            if device_comm is not None
+            else None
+        )
+        if pynccl_comm is None or pynccl_comm.disabled:
+            raise RuntimeError(
+                "broadcast_eplb_maps_from_active requires an enabled PyNCCL "
+                "communicator on the EP group"
+            )
+        # src is rank-within-comm; EP local rank 0 is the always-active
+        # peer under the suffix-sleep convention.
+        for state in self.model_states.values():
+            pynccl_comm.broadcast(state.physical_to_logical_map, src=0)
+            pynccl_comm.broadcast(state.logical_to_physical_map, src=0)
+            pynccl_comm.broadcast(state.logical_replica_count, src=0)
+
+    def reset_load_history_after_l2_wake(self) -> None:
+        """Zero load buffers that came back as garbage after L2 wake.
+
+        Called only on a rank that actually slept. Unlike the maps, load
+        history is per-rank: an active rank's expert_load_pass /
+        expert_load_window represent its own forward passes, so we do not
+        want to overwrite them with the waking rank's path. Zeroing on the
+        waker is the correct reset — it just hasn't run any forwards yet.
+        """
+        for state in self.model_states.values():
+            state.expert_load_pass.zero_()
+            state.expert_load_window.zero_()
+        if self.should_record_tensor is not None:
+            # Scalar bool; EPLB rewrites it on the next step.
+            self.should_record_tensor.fill_(True)
 
     def rearrange(
         self,
