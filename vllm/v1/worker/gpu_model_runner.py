@@ -1044,6 +1044,51 @@ class GPUModelRunner(
                 if preserve_replay_state is not None:
                     preserve_replay_state(state_indices, num_accepted_tokens)
 
+    def _collect_mamba_mtp_replay_block_ids(
+        self,
+        block_ids: Sequence[Sequence[int]] | None,
+        mamba_group_ids: Sequence[int],
+        block_ids_by_group: dict[int, list[int]],
+    ) -> None:
+        if block_ids is None:
+            return
+        for kv_cache_group_id in mamba_group_ids:
+            if kv_cache_group_id >= len(block_ids):
+                continue
+            group_block_ids = block_ids[kv_cache_group_id]
+            if group_block_ids:
+                block_ids_by_group[kv_cache_group_id].extend(group_block_ids)
+
+    def _invalidate_mamba_mtp_replay_cache(
+        self,
+        block_ids_by_group: dict[int, list[int]],
+    ) -> None:
+        if (
+            self.cache_config.mamba_cache_mode != "none"
+            or self.speculative_config is None
+            or not self.model_config.is_hybrid
+            or not envs.VLLM_MAMBA_MTP_REPLAY
+        ):
+            return
+
+        for kv_cache_group_id, block_ids in block_ids_by_group.items():
+            if not block_ids:
+                continue
+            state_indices = torch.as_tensor(
+                block_ids,
+                dtype=torch.long,
+                device=self.device,
+            )
+            for layer_name in self.kv_cache_config.kv_cache_groups[
+                kv_cache_group_id
+            ].layer_names:
+                layer = self.compilation_config.static_forward_context.get(layer_name)
+                invalidate_replay_cache = getattr(
+                    layer, "invalidate_mtp_replay_cache", None
+                )
+                if invalidate_replay_cache is not None:
+                    invalidate_replay_cache(state_indices)
+
     def _init_model_kwargs(self):
         model_kwargs = dict[str, Any]()
 
@@ -1213,6 +1258,18 @@ class GPUModelRunner(
 
         reqs_to_add: list[CachedRequestState] = []
         deferred_spec_decode_corrections = []
+        mtp_replay_new_block_ids: dict[int, list[int]] | None = None
+        mtp_replay_mamba_group_ids: Sequence[int] = ()
+        if (
+            self.cache_config.mamba_cache_mode == "none"
+            and self.speculative_config is not None
+            and self.model_config.is_hybrid
+            and envs.VLLM_MAMBA_MTP_REPLAY
+        ):
+            mamba_group_ids, _ = mamba_utils.get_mamba_groups(self.kv_cache_config)
+            if mamba_group_ids:
+                mtp_replay_mamba_group_ids = mamba_group_ids
+                mtp_replay_new_block_ids = defaultdict(list)
 
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -1260,6 +1317,12 @@ class GPUModelRunner(
             )
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
+            if mtp_replay_new_block_ids is not None:
+                self._collect_mamba_mtp_replay_block_ids(
+                    req_state.block_ids,
+                    mtp_replay_mamba_group_ids,
+                    mtp_replay_new_block_ids,
+                )
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[req_id] = (
@@ -1393,12 +1456,24 @@ class GPUModelRunner(
             # Update the block IDs.
             if not resumed_from_preemption:
                 if new_block_ids is not None:
+                    if mtp_replay_new_block_ids is not None:
+                        self._collect_mamba_mtp_replay_block_ids(
+                            new_block_ids,
+                            mtp_replay_mamba_group_ids,
+                            mtp_replay_new_block_ids,
+                        )
                     # Append the new blocks to the existing block IDs.
                     for block_ids, new_ids in zip(req_state.block_ids, new_block_ids):
                         block_ids.extend(new_ids)
             else:
                 assert req_index is None
                 assert new_block_ids is not None
+                if mtp_replay_new_block_ids is not None:
+                    self._collect_mamba_mtp_replay_block_ids(
+                        new_block_ids,
+                        mtp_replay_mamba_group_ids,
+                        mtp_replay_new_block_ids,
+                    )
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
@@ -1470,6 +1545,9 @@ class GPUModelRunner(
         self._may_reorder_batch(scheduler_output)
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
+
+        if mtp_replay_new_block_ids:
+            self._invalidate_mamba_mtp_replay_cache(mtp_replay_new_block_ids)
 
         # Incrementally update ngram_gpu tensors after batch is stable
         if is_ngram_gpu:

@@ -797,8 +797,6 @@ def _causal_conv1d_update_kernel(
     idx_seq = tl.program_id(0)
     if idx_seq >= batch:
         return
-    if LAUNCH_DEPENDENT_KERNELS:
-        tl.extra.cuda.gdc_launch_dependents()
 
     # [BLOCK_N,] elements along the feature-dimension (channel)
     idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
@@ -1069,6 +1067,9 @@ def _causal_conv1d_update_kernel(
         )
 
         tl.store(o_ptrs, acc, mask=mask_1d)
+
+    if LAUNCH_DEPENDENT_KERNELS:
+        tl.extra.cuda.gdc_launch_dependents()
 
 
 def causal_conv1d_update(

@@ -65,6 +65,81 @@ logger = init_logger(__name__)
 # Added by the IBM Team, 2024
 
 
+def _filter_mtp_replay_preserve_indices(
+    state_indices: torch.Tensor,
+    num_accepted_tokens: torch.Tensor,
+    num_steps: int,
+    cache_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    batch = min(state_indices.size(0), num_accepted_tokens.size(0))
+    if batch == 0 or num_steps <= 1:
+        empty = state_indices.new_empty((0,), dtype=torch.long)
+        return empty, empty
+
+    state_indices = state_indices[:batch, :num_steps]
+    num_accepted_tokens = num_accepted_tokens[:batch].to(
+        device=state_indices.device, dtype=torch.long
+    )
+    accepted_idx = torch.clamp(num_accepted_tokens, min=1, max=num_steps) - 1
+
+    src_indices = state_indices[:, 0].to(torch.long)
+    dst_indices = state_indices.gather(
+        1, accepted_idx.unsqueeze(1)
+    ).squeeze(1).to(torch.long)
+    valid_mask = (
+        (src_indices != NULL_BLOCK_ID)
+        & (dst_indices != NULL_BLOCK_ID)
+        & (src_indices != dst_indices)
+        & (src_indices >= 0)
+        & (dst_indices >= 0)
+        & (src_indices < cache_size)
+        & (dst_indices < cache_size)
+    )
+    return src_indices[valid_mask].contiguous(), dst_indices[valid_mask].contiguous()
+
+
+def _copy_mtp_replay_rows(
+    dst: torch.Tensor,
+    src_indices: torch.Tensor,
+    dst_indices: torch.Tensor,
+) -> None:
+    dst[dst_indices] = dst.index_select(0, src_indices)
+
+
+def _move_mtp_replay_valid_rows(
+    replay_valid: torch.Tensor,
+    src_indices: torch.Tensor,
+    dst_indices: torch.Tensor,
+) -> None:
+    valid_values = replay_valid.index_select(0, src_indices)
+    replay_valid.index_fill_(0, src_indices, 0)
+    replay_valid[dst_indices] = valid_values
+
+
+def _filter_mtp_replay_cache_indices(
+    state_indices: torch.Tensor,
+    cache_size: int,
+) -> torch.Tensor:
+    state_indices = state_indices.reshape(-1).to(torch.long)
+    valid_mask = (
+        (state_indices != NULL_BLOCK_ID)
+        & (state_indices >= 0)
+        & (state_indices < cache_size)
+    )
+    return state_indices[valid_mask].contiguous()
+
+
+def _new_mtp_replay_tied_dt_buffer(
+    src: torch.Tensor,
+    num_decodes: int,
+    num_steps: int,
+    num_heads: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    dt_storage = src.new_zeros(num_decodes, num_steps, num_heads, 1)
+    return dt_storage, dt_storage.expand(-1, -1, -1, head_dim)
+
+
 # Adapted from transformers.models.mamba2.modeling_mamba2.MambaRMSNormGated
 # --8<-- [start:mixer2_gated_rms_norm]
 @CustomOp.register("mixer2_gated_rms_norm")
@@ -702,18 +777,20 @@ class MambaMixer2(MambaBase, PluggableLayer):
     ) -> None:
         if self._mtp_replay_valid is None or state_indices is None:
             return
-        state_indices = state_indices.reshape(-1)
-        valid_indices = state_indices[state_indices != NULL_BLOCK_ID]
-        if valid_indices.numel() == 0:
-            return
         cache_size = self._mtp_replay_valid.shape[0]
-        valid_indices = valid_indices[valid_indices < cache_size]
+        valid_indices = _filter_mtp_replay_cache_indices(state_indices, cache_size)
         if valid_indices.numel() == 0:
             return
         valid_indices = valid_indices.to(
             device=self._mtp_replay_valid.device, dtype=torch.long
         )
         self._mtp_replay_valid.index_fill_(0, valid_indices, 0)
+
+    def invalidate_mtp_replay_cache(
+        self,
+        state_indices: torch.Tensor | None,
+    ) -> None:
+        self._invalidate_mtp_replay_cache(state_indices)
 
     def preserve_mtp_replay_accepted_state(
         self,
@@ -739,45 +816,31 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # The no-cache Mamba block table can promote an accepted draft slot to
         # the next step's base slot. Keep replay's base state and compact trace
         # available under that accepted physical block.
-        batch = min(state_indices.size(0), num_accepted_tokens.size(0))
-        state_indices = state_indices[:batch, :num_steps]
-        num_accepted_tokens = num_accepted_tokens[:batch].to(
-            device=state_indices.device
-        )
-        accepted_idx = torch.clamp(
-            num_accepted_tokens.to(torch.long), min=1, max=num_steps
-        ) - 1
-
-        src_indices = state_indices[:, 0].to(torch.long)
-        dst_indices = state_indices.gather(
-            1, accepted_idx.unsqueeze(1)
-        ).squeeze(1).to(torch.long)
         cache_size = self._mtp_replay_valid.shape[0]
-        valid_mask = (
-            (src_indices != NULL_BLOCK_ID)
-            & (dst_indices != NULL_BLOCK_ID)
-            & (src_indices != dst_indices)
-            & (src_indices >= 0)
-            & (dst_indices >= 0)
-            & (src_indices < cache_size)
-            & (dst_indices < cache_size)
+        src_indices, dst_indices = _filter_mtp_replay_preserve_indices(
+            state_indices,
+            num_accepted_tokens,
+            num_steps,
+            cache_size,
         )
-        zero_indices = torch.zeros_like(src_indices)
-        src_indices = torch.where(valid_mask, src_indices, zero_indices)
-        dst_indices = torch.where(valid_mask, dst_indices, src_indices)
+        if src_indices.numel() == 0:
+            return
+
         ssm_state = self.kv_cache[1]
 
-        ssm_state[dst_indices] = ssm_state[src_indices]
-        self._mtp_replay_old_x[dst_indices] = self._mtp_replay_old_x[src_indices]
-        self._mtp_replay_old_B[dst_indices] = self._mtp_replay_old_B[src_indices]
-        self._mtp_replay_old_dt[dst_indices] = self._mtp_replay_old_dt[src_indices]
-        self._mtp_replay_old_dA_cumsum[dst_indices] = (
-            self._mtp_replay_old_dA_cumsum[src_indices]
+        _copy_mtp_replay_rows(ssm_state, src_indices, dst_indices)
+        _copy_mtp_replay_rows(self._mtp_replay_old_x, src_indices, dst_indices)
+        _copy_mtp_replay_rows(self._mtp_replay_old_B, src_indices, dst_indices)
+        _copy_mtp_replay_rows(self._mtp_replay_old_dt, src_indices, dst_indices)
+        _copy_mtp_replay_rows(
+            self._mtp_replay_old_dA_cumsum, src_indices, dst_indices
         )
-        self._mtp_replay_cache_buf_idx[dst_indices] = (
-            self._mtp_replay_cache_buf_idx[src_indices]
+        _copy_mtp_replay_rows(
+            self._mtp_replay_cache_buf_idx, src_indices, dst_indices
         )
-        self._mtp_replay_valid[dst_indices] = self._mtp_replay_valid[src_indices]
+        _move_mtp_replay_valid_rows(
+            self._mtp_replay_valid, src_indices, dst_indices
+        )
 
     def forward(
         self,
@@ -1380,7 +1443,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         num_heads,
                         self.head_dim,
                     )
-                    replay_dt = dt_d.new_zeros(
+                    replay_dt_storage, replay_dt = _new_mtp_replay_tied_dt_buffer(
+                        dt_d,
                         num_decodes,
                         num_steps,
                         num_heads,
@@ -1411,7 +1475,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         replay_hidden_states[decode_idx, :seq_len] = hidden_states_d[
                             start:end
                         ]
-                        replay_dt[decode_idx, :seq_len] = dt_d[start:end]
+                        replay_dt_storage[decode_idx, :seq_len] = dt_d[
+                            start:end, :, :1
+                        ]
                         replay_B[decode_idx, :seq_len] = B_d[start:end]
                         replay_C[decode_idx, :seq_len] = C_d[start:end]
 

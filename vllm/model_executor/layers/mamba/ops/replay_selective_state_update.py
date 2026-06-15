@@ -37,6 +37,7 @@ def _replay_precompute_kernel(
     cache_buf_idx_ptr,
     state_batch_indices_ptr,
     null_block_id,
+    cache_size: tl.constexpr,
     T: tl.constexpr,
     dstate: tl.constexpr,
     nheads_ngroups_ratio: tl.constexpr,
@@ -93,13 +94,16 @@ def _replay_precompute_kernel(
 
     if HAS_CACHE_BATCH_INDICES:
         cache_batch_idx = tl.load(state_batch_indices_ptr + pid_b).to(tl.int64)
-        if cache_batch_idx == null_block_id:
+        if (
+            cache_batch_idx == null_block_id
+            or cache_batch_idx < 0
+            or cache_batch_idx >= cache_size
+        ):
             return
     else:
         cache_batch_idx = pid_b.to(tl.int64)
-
-    if LAUNCH_DEPENDENT_KERNELS:
-        tl.extra.cuda.gdc_launch_dependents()
+        if cache_batch_idx >= cache_size:
+            return
 
     buf_read = tl.load(cache_buf_idx_ptr + cache_batch_idx).to(tl.int32)
     buf_write = 1 - buf_read
@@ -175,8 +179,8 @@ def _replay_precompute_kernel(
     )
 
     raw_CB = tl.dot(
-        C_all.to(tl.float32),
-        tl.trans(B_all.to(tl.float32)),
+        C_all,
+        tl.trans(B_all),
         input_precision="ieee",
     )
 
@@ -235,6 +239,9 @@ def _replay_precompute_kernel(
             mask=(offs_t[:, None] < BLOCK_SIZE_T) & (offs_t[None, :] < BLOCK_SIZE_T),
         )
 
+    if LAUNCH_DEPENDENT_KERNELS:
+        tl.extra.cuda.gdc_launch_dependents()
+
 
 @triton.heuristics({"HAS_D": lambda args: args["D_ptr"] is not None})
 @triton.heuristics(
@@ -270,6 +277,7 @@ def _replay_state_update_kernel(
     state_batch_indices_ptr,
     rand_seed_ptr,
     null_block_id,
+    cache_size: tl.constexpr,
     T: tl.constexpr,
     dim: tl.constexpr,
     dstate: tl.constexpr,
@@ -332,10 +340,16 @@ def _replay_state_update_kernel(
 
     if HAS_CACHE_BATCH_INDICES:
         cache_batch_idx = tl.load(state_batch_indices_ptr + pid_b).to(tl.int64)
-        if cache_batch_idx == null_block_id:
+        if (
+            cache_batch_idx == null_block_id
+            or cache_batch_idx < 0
+            or cache_batch_idx >= cache_size
+        ):
             return
     else:
         cache_batch_idx = pid_b.to(tl.int64)
+        if cache_batch_idx >= cache_size:
+            return
 
     buf_read = tl.load(cache_buf_idx_ptr + cache_batch_idx).to(tl.int32)
 
@@ -422,9 +436,9 @@ def _replay_state_update_kernel(
         + offs_n[None, :] * stride_old_B_dstate,
         mask=accepted_mask[:, None] & n_mask[None, :],
         other=0.0,
-    ).to(tl.float32)
+    )
 
-    dB_scaled = coeff[:, None] * old_B_all
+    dB_scaled = (coeff[:, None] * old_B_all).to(old_B_ptr.dtype.element_ty)
     total_decay = tl.where(
         prev_num_accepted_tokens > 0,
         tl.exp(total_dA_cumsum),
@@ -432,8 +446,8 @@ def _replay_state_update_kernel(
     )
     state *= total_decay
     state += tl.dot(
-        tl.trans(old_x_all.to(tl.float32)),
-        dB_scaled.to(tl.float32),
+        tl.trans(old_x_all),
+        dB_scaled,
         input_precision="ieee",
     )
 
@@ -481,7 +495,7 @@ def _replay_state_update_kernel(
         x_all,
         mask=t_mask[:, None] & m_mask[None, :],
     )
-    x_all = x_all.to(tl.float32)
+    x_all_f32 = x_all.to(tl.float32)
 
     cb_scaled_base = cb_scaled_ptr + pid_b * stride_cb_batch + pid_h * stride_cb_head
     CB_scaled = tl.load(
@@ -499,15 +513,15 @@ def _replay_state_update_kernel(
 
     init_out = (
         tl.dot(
-            C_all.to(tl.float32),
-            tl.trans(state.to(tl.float32)),
+            C_all,
+            tl.trans(state.to(C_ptr.dtype.element_ty)),
             input_precision="ieee",
         )
         * decay_vec[:, None]
     )
     cb_out = tl.dot(
-        CB_scaled.to(tl.float32),
-        x_all.to(tl.float32),
+        CB_scaled.to(x_ptr.dtype.element_ty),
+        x_all,
         input_precision="ieee",
     )
     out_all = init_out + cb_out
@@ -518,7 +532,7 @@ def _replay_state_update_kernel(
             mask=m_mask,
             other=0.0,
         ).to(tl.float32)
-        out_all = out_all + x_all * D[None, :]
+        out_all = out_all + x_all_f32 * D[None, :]
 
     out_ptrs = (
         out_base + offs_t[:, None] * stride_out_T + offs_m[None, :] * stride_out_dim
@@ -532,10 +546,15 @@ def _commit_replay_cache_kernel(
     replay_valid_ptr,
     state_batch_indices_ptr,
     null_block_id,
+    cache_size: tl.constexpr,
 ):
     pid_b = tl.program_id(axis=0)
     cache_batch_idx = tl.load(state_batch_indices_ptr + pid_b).to(tl.int64)
-    if cache_batch_idx == null_block_id:
+    if (
+        cache_batch_idx == null_block_id
+        or cache_batch_idx < 0
+        or cache_batch_idx >= cache_size
+    ):
         return
     buf_read = tl.load(cache_buf_idx_ptr + cache_batch_idx).to(tl.int32)
     tl.store(cache_buf_idx_ptr + cache_batch_idx, 1 - buf_read)
@@ -686,7 +705,12 @@ def replay_selective_state_update(
         and dt.stride(-1) == 0
         and (dt_bias is None or dt_bias.stride(-1) == 0)
     )
-    assert tie_hdim
+    assert tie_hdim, (
+        "replay_selective_state_update requires A, dt, and dt_bias to be "
+        "tied across head_dim; got "
+        f"A.stride={A.stride()}, dt.stride={dt.stride()}, "
+        f"dt_bias.stride={dt_bias.stride() if dt_bias is not None else None}"
+    )
 
     pdl_supported = (
         current_platform.is_cuda() and current_platform.has_device_capability(90)
@@ -773,6 +797,7 @@ def replay_selective_state_update(
             cache_buf_idx,
             state_batch_indices,
             null_block_id,
+            cache_size,
             T,
             dstate,
             nheads // ngroups,
@@ -843,6 +868,7 @@ def replay_selective_state_update(
             state_batch_indices,
             rand_seed,
             null_block_id,
+            cache_size,
             T,
             dim,
             dstate,
@@ -901,6 +927,7 @@ def replay_selective_state_update(
                 replay_valid,
                 state_batch_indices,
                 null_block_id,
+                cache_size,
             )
         else:
             cache_buf_idx[:batch] = 1 - cache_buf_idx[:batch]
