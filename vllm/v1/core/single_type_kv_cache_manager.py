@@ -200,14 +200,8 @@ class SingleTypeKVCacheManager(ABC):
             num_local_computed_tokens: The number of local computed tokens.
             num_external_computed_tokens: The number of external computed tokens.
         """
-
-        if request_id in self.num_cached_block:
-            # Fast-path: a running request won't have any new prefix-cache hits.
-            # It should not have any new computed blocks.
-            assert len(new_computed_blocks) == 0
-            return
-
-        # A new request.
+        # The coordinator only calls this for first-time allocations (running
+        # requests are short-circuited there), so the request has no blocks yet.
         req_blocks = self.req_to_blocks[request_id]
         assert len(req_blocks) == 0
         num_total_computed_tokens = (

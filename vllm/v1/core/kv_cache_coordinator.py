@@ -201,14 +201,19 @@ class KVCacheCoordinator(ABC):
             num_local_computed_tokens: The number of local computed tokens.
             num_external_computed_tokens: The number of external computed tokens.
         """
-        # A request is being allocated for the first time iff no group holds any
-        # blocks for it yet. Running requests hit the per-manager fast path and
-        # never allocate external blocks (matching the previous single-pass
-        # behavior), so external allocation is gated on this.
+        # A request is being allocated for the first time iff no group has
+        # registered it yet. Key this on `num_cached_block` (the same signal the
+        # pre-split code used for its fast path), which gated external
+        # allocation on exactly this condition. A running request won't have any
+        # new prefix-cache hits and never allocates external blocks, so it is a
+        # no-op here.
         is_new_request = all(
-            len(manager.req_to_blocks.get(request_id, ())) == 0
+            request_id not in manager.num_cached_block
             for manager in self.single_type_managers
         )
+        if not is_new_request:
+            assert all(len(blocks) == 0 for blocks in new_computed_blocks)
+            return
 
         # Two-phase allocation (issue #33775): first touch every group's local
         # cache-hit blocks, then allocate external blocks for every group. This
@@ -221,7 +226,7 @@ class KVCacheCoordinator(ABC):
                 num_local_computed_tokens,
                 num_external_computed_tokens,
             )
-        if is_new_request and num_external_computed_tokens > 0:
+        if num_external_computed_tokens > 0:
             for manager in self.single_type_managers:
                 manager.allocate_external_computed_blocks(
                     request_id,
