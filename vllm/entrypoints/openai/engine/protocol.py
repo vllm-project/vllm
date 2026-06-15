@@ -101,6 +101,11 @@ class ModelList(OpenAIBaseModel):
 
 class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: int | None = None
+    multimodal_tokens: dict[str, int] | None = None
+    """Prompt tokens contributed by each input modality, keyed by modality name
+    (e.g. `image`, `audio`, `video`). A breakdown of the multimodal
+    placeholder tokens already counted in `prompt_tokens`; `None` when the
+    request has no multimodal input."""
 
 
 class UsageInfo(OpenAIBaseModel):
