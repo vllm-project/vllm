@@ -869,7 +869,8 @@ class NixlBaseConnectorWorker:
             is_mamba=self._has_mamba,
         )
         self.compat_hash = compute_nixl_compatibility_hash(
-            self.vllm_config, self.backend_name,
+            self.vllm_config,
+            self.backend_name,
             self.transfer_topo.cross_layers_blocks,
         )
 
@@ -878,36 +879,29 @@ class NixlBaseConnectorWorker:
         logger.info(
             "Registering packed KV cache: total_size=%s, block_stride=%s, "
             "num_blocks=%s, num_regions=1",
-            total_size, block_stride, self.num_blocks,
+            total_size,
+            block_stride,
+            self.num_blocks,
         )
 
         self.device_id = max(kv_cache.get_device(), 0)
-        caches_data = [
-            (kv_cache.data_ptr(), total_size, self.device_id, "")
-        ]
+        caches_data = [(kv_cache.data_ptr(), total_size, self.device_id, "")]
 
         self.block_len_per_layer = [block_stride]
         self.num_regions = 1
         self.num_descs = self.num_blocks
-        self.kv_caches_base_addr[self.engine_id][self.tp_rank] = [
-            kv_cache.data_ptr()
-        ]
+        self.kv_caches_base_addr[self.engine_id][self.tp_rank] = [kv_cache.data_ptr()]
 
-        descs = self.nixl_wrapper.get_reg_descs(
-            caches_data, self.nixl_memory_type
-        )
+        descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
         self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
         self._registered_descs.append(descs)
 
-        self.device_kv_caches = {
-            layer: kv_cache for layer in self._layer_specs
-        }
+        self.device_kv_caches = {layer: kv_cache for layer in self._layer_specs}
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
-        self.src_xfer_handles_by_block_size[self.block_size], \
-            self.src_blocks_data = (
-                self.register_local_xfer_handler(self.block_size)
-            )
+        self.src_xfer_handles_by_block_size[self.block_size], self.src_blocks_data = (
+            self.register_local_xfer_handler(self.block_size)
+        )
 
         agent_metadata = NixlAgentMetadata(
             engine_id=self.engine_id,

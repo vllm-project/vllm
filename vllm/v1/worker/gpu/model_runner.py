@@ -489,7 +489,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if t.block_stride > 0
             )
         self.kv_connector = get_kv_connector(
-            self.vllm_config, kv_caches_dict,
+            self.vllm_config,
+            kv_caches_dict,
             cross_layers_kv_cache=packed_backing,
             packed_block_stride=packed_block_stride,
         )
