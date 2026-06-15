@@ -1,6 +1,6 @@
 name: vllm_ci
 job_dirs:
-  - ".buildkite/mi300_workload"
+  - ".buildkite/amd_workload"
 run_all_patterns:
   - "docker/Dockerfile"
   - "CMakeLists.txt"

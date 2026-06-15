@@ -1,4 +1,4 @@
-group: AMD MI300_1 workload prerequisites
+group: AMD workload prerequisites
 steps:
 - label: "AMD: :docker: build image"
   key: image-build-amd
