@@ -547,11 +547,13 @@ class MoERunner(MoERunnerInterface):
         )
 
         if self.routed_experts.quant_method.is_monolithic:
-            # Monolithic kernels: pass router_logits to routed_experts
+            # Monolithic kernels route internally (select_experts is skipped),
+            # so forward the router's hash table for DSv4 hash-layer routing.
             fused_out = self.routed_experts.forward_monolithic(
                 x=hidden_states,
                 router_logits=router_logits,
                 input_ids=input_ids,
+                hash_indices_table=self.router.hash_indices_table,
             )
         else:
             # Modular kernels: select experts first, then call routed_experts

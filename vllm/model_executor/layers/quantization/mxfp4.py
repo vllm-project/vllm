@@ -36,6 +36,8 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
 logger = init_logger(__name__)
 
+_PRECISION_CONFIG_BACKENDS = (*TRITON_BACKENDS, Mxfp4MoeBackend.AITER_MXFP4_MXFP8)
+
 
 class Mxfp4Config(QuantizationConfig):
     """Canonical base config for MXFP4 quantization.
@@ -343,7 +345,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
-        if self.mxfp4_backend not in TRITON_BACKENDS:
+        if self.mxfp4_backend not in _PRECISION_CONFIG_BACKENDS:
             replace_parameter(layer, "w13_weight", w13)
             replace_parameter(layer, "w2_weight", w2)
             replace_parameter(layer, "w13_weight_scale", w13_scale)
@@ -398,7 +400,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         w1_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
 
-        if self.mxfp4_backend in TRITON_BACKENDS:
+        if self.mxfp4_backend in _PRECISION_CONFIG_BACKENDS:
             assert self.w13_precision_config is not None
             assert self.w2_precision_config is not None
             w1_scale = self.w13_precision_config
@@ -457,6 +459,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -469,6 +472,8 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            input_ids=input_ids,
+            hash_indices_table=hash_indices_table,
         )
 
 
@@ -687,7 +692,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
-        if self.mxfp4_backend not in TRITON_BACKENDS:
+        if self.mxfp4_backend not in _PRECISION_CONFIG_BACKENDS:
             replace_parameter(layer, "w13_weight", w13)
             replace_parameter(layer, "w2_weight", w2)
             replace_parameter(layer, "w13_weight_scale", w13_scale)
@@ -744,7 +749,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w2_bias = getattr(layer, "w2_bias", None)
         swiglu_limit = getattr(layer, "swiglu_limit", None)
 
-        if self.mxfp4_backend in TRITON_BACKENDS:
+        if self.mxfp4_backend in _PRECISION_CONFIG_BACKENDS:
             assert self.w13_precision_config is not None
             assert self.w2_precision_config is not None
             w1_scale = self.w13_precision_config
@@ -801,6 +806,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
@@ -813,4 +819,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            # Monolithic routes internally, so pass the routing config the router
+            # would use (routed_scaling_factor is already output-scale-adjusted).
+            num_expert_group=layer.num_expert_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
+            topk_group=layer.topk_group,
+            input_ids=input_ids,
+            hash_indices_table=hash_indices_table,
         )

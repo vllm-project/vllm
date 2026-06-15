@@ -76,6 +76,7 @@ class Mxfp4MoeBackend(Enum):
     AITER = "AITER_MXFP4_BF16"
     AITER_MXFP4_FP8 = "AITER_MXFP4_FP8"  # W4A8: triton kernel
     AITER_MXFP4_MXFP4 = "AITER_MXFP4_MXFP4"  # W4A4: CK kernel
+    AITER_MXFP4_MXFP8 = "AITER_MXFP4_MXFP8"  # W4A8: triton kernel
     # Triton
     TRITON = "TRITON"
     TRITON_UNFUSED = "TRITON_UNFUSED"
@@ -94,6 +95,7 @@ AITER_BACKENDS = (
     Mxfp4MoeBackend.AITER_MXFP4_BF16,
     Mxfp4MoeBackend.AITER_MXFP4_FP8,
     Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
+    Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
 )
 
 
@@ -205,6 +207,13 @@ def backend_to_kernel_cls(
 
         return [AiterExperts]
 
+    elif backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP8:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp4_w4a8_moe import (
+            AiterMxfp4Mxfp8ExpertsMonolithic,
+        )
+
+        return [AiterMxfp4Mxfp8ExpertsMonolithic]
+
     elif backend == Mxfp4MoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsMxFp4
 
@@ -255,6 +264,7 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         ],
         "aiter_mxfp4_fp8": [Mxfp4MoeBackend.AITER_MXFP4_FP8],
         "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
+        "aiter_mxfp4_mxfp8": [Mxfp4MoeBackend.AITER_MXFP4_MXFP8],
         "xpu": [Mxfp4MoeBackend.XPU],
         "cpu": [Mxfp4MoeBackend.CPU],
         "emulation": [Mxfp4MoeBackend.EMULATION],
@@ -554,13 +564,14 @@ def select_deepseek_v4_mxfp4_moe_backend(
         assert last_error is not None
         raise last_error
 
-    # DeepSeek-V4 on ROCm: prefer AITER FlyDSL MoE (better perf + accuracy
-    # after shuffle/TP-offset fixes), with Triton-unfused as fallback.
+    # DeepSeek-V4 on ROCm: try the AITER W4A8 path (gfx950 + aiter, self-gated)
+    # first, then BF16-activation AITER, then Triton-unfused.
     if (
         current_platform.is_rocm()
         and config.routing_method == RoutingMethodType.DeepseekV4
     ):
         priority_backends = [
+            Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
             Mxfp4MoeBackend.AITER_MXFP4_BF16,
             Mxfp4MoeBackend.TRITON_UNFUSED,
         ]
@@ -1395,6 +1406,47 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
 
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP8:
+        from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+
+        if w13_bias is not None:
+            w13_bias = w13_bias.to(torch.float32)
+        if w2_bias is not None:
+            w2_bias = w2_bias.to(torch.float32)
+
+        e, n, k = w13_weight.shape
+        w13_weight = (
+            w13_weight.view(e, 2, n // 2, k)
+            .permute(0, 2, 1, 3)
+            .reshape(e, n, k)
+            .contiguous()
+        )
+        w13_weight_scale = (
+            w13_weight_scale.view(e, 2, n // 2, -1)
+            .permute(0, 2, 1, 3)
+            .reshape(e, n, -1)
+            .contiguous()
+        )
+
+        w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(w13_weight, w13_weight_scale)
+        w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(w2_weight, w2_weight_scale)
+        w13_precision_config = PrecisionConfig(
+            weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
+        )
+        w2_precision_config = PrecisionConfig(
+            weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
+        )
+        del layer.w13_weight
+        del layer.w2_weight
+        return (
+            w13_weight,
+            w2_weight,
+            w13_precision_config,
+            w2_precision_config,
+            w13_bias,
+            w2_bias,
+        )
+
     elif mxfp4_backend in TRITON_BACKENDS:
         from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
@@ -1521,8 +1573,12 @@ def make_mxfp4_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
             is_scale_swizzled=True,
         )
-    elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_FP8:
-        # W4A8: MXFP4 weights + static FP8 activations
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.AITER_MXFP4_FP8,
+        Mxfp4MoeBackend.AITER_MXFP4_MXFP8,
+    ):
+        # W4A8: MXFP4 weights + FP8 activations (static for AITER_MXFP4_FP8;
+        # dynamic per-1x32 mxfp8, quantized in-kernel, for AITER_MXFP4_MXFP8).
         return mxfp4_w4a8_moe_quant_config(
             w1_scale=w1_scale,
             w2_scale=w2_scale,

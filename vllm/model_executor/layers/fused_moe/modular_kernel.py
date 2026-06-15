@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -1452,6 +1453,9 @@ class FusedMoEKernelMonolithicImpl:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        # DeepSeek-V4 hash-layer routing
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """
         Same as forward(), except uses router_logits as opposed
@@ -1465,6 +1469,14 @@ class FusedMoEKernelMonolithicImpl:
             quant_config=self.fused_experts.quant_config,
             defer_input_quant=self.fused_experts.expects_unquantized_inputs,
         )
+
+        # Only pass hash-routing inputs to backends that declare them.
+        extra_kwargs: dict = {}
+        _apply_params = inspect.signature(self.fused_experts.apply).parameters
+        if "input_ids" in _apply_params:
+            extra_kwargs["input_ids"] = input_ids
+        if "hash_indices_table" in _apply_params:
+            extra_kwargs["hash_indices_table"] = hash_indices_table
 
         fused_out = self.fused_experts.apply(
             hidden_states=a1q,
@@ -1481,6 +1493,7 @@ class FusedMoEKernelMonolithicImpl:
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
+            **extra_kwargs,
         )
 
         output = self.prepare_finalize.finalize(fused_out)
@@ -1583,6 +1596,9 @@ class FusedMoEKernel:
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        # DeepSeek-V4 hash-layer routing
+        input_ids: torch.Tensor | None = None,
+        hash_indices_table: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
         return self.impl.apply(
@@ -1598,6 +1614,8 @@ class FusedMoEKernel:
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,
             topk_group=topk_group,
+            input_ids=input_ids,
+            hash_indices_table=hash_indices_table,
         )
 
     def apply(
