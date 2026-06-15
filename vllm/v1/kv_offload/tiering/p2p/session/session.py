@@ -466,11 +466,13 @@ class P2PSession:
                         }
                     )
 
-        failed_kv_request_ids: set[str] = set()
+        failed_kv_request_ids: set[str] | None = None
         for tid in poll_result.failed:
             xfer = self._inflight.pop(tid, None)
             if xfer is None:
                 continue
+            if failed_kv_request_ids is None:
+                failed_kv_request_ids = set()
             failed_kv_request_ids.add(xfer.kv_request_id)
             for job_id in xfer.job_ids:
                 self._store_jobs.pop(job_id, None)
