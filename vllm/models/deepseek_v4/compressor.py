@@ -368,7 +368,7 @@ class DeepseekCompressor(nn.Module):
                 fp8_scale=fp8_scale,
             )
         else:
-            # Indexer path (head_dim == 128) or AMD: triton, legacy UE8M0 only.
+            # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
             extra_kwargs = {}
 

@@ -38,6 +38,7 @@ from vllm.config import (
     CompilationConfig,
     ConfigType,
     DeviceConfig,
+    DiffusionConfig,
     ECTransferConfig,
     EPLBConfig,
     KernelConfig,
@@ -102,7 +103,6 @@ from vllm.transformers_utils.config import (
     is_interleaved,
     maybe_override_with_speculators,
 )
-from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import (
@@ -601,6 +601,8 @@ class EngineArgs:
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
     prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
 
+    watermark: float = SchedulerConfig.watermark
+
     disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
     )
@@ -615,6 +617,7 @@ class EngineArgs:
     spec_method: str | None = None
     spec_model: str | None = None
     spec_tokens: int | None = None
+    diffusion_config: dict[str, Any] | None = None
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -1409,6 +1412,7 @@ class EngineArgs:
             "--scheduler-reserve-full-isl",
             **scheduler_kwargs["scheduler_reserve_full_isl"],
         )
+        scheduler_group.add_argument("--watermark", **scheduler_kwargs["watermark"])
         scheduler_group.add_argument(
             "--prefill-schedule-interval",
             **scheduler_kwargs["prefill_schedule_interval"],
@@ -1474,6 +1478,10 @@ class EngineArgs:
         vllm_group.add_argument("--spec-model", **speculative_kwargs["model"])
         vllm_group.add_argument(
             "--spec-tokens", **speculative_kwargs["num_speculative_tokens"]
+        )
+        vllm_kwargs["diffusion_config"]["type"] = optional_type(json.loads)
+        vllm_group.add_argument(
+            "--diffusion-config", "-dc", **vllm_kwargs["diffusion_config"]
         )
         vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
@@ -1554,10 +1562,6 @@ class EngineArgs:
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
-        # gguf file needs a specific model loader
-        if is_gguf(self.model):
-            self.quantization = self.load_format = "gguf"
-
         if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.warning(
                 "The global random seed is set to %d. Since "
@@ -1703,6 +1707,14 @@ class EngineArgs:
             }
         )
         return SpeculativeConfig(**self.speculative_config)
+
+    def create_diffusion_config(self) -> DiffusionConfig | None:
+        if self.diffusion_config is None:
+            return None
+        cfg = self.diffusion_config
+        if isinstance(cfg, str):
+            cfg = json.loads(cfg)
+        return DiffusionConfig(**cfg)
 
     def create_engine_config(
         self,
@@ -2018,6 +2030,7 @@ class EngineArgs:
             target_model_config=model_config,
             target_parallel_config=parallel_config,
         )
+        diffusion_config = self.create_diffusion_config()
 
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context,
@@ -2050,6 +2063,7 @@ class EngineArgs:
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
+            watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
@@ -2245,6 +2259,7 @@ class EngineArgs:
             kernel_config=kernel_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
+            diffusion_config=diffusion_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
             compilation_config=compilation_config,
