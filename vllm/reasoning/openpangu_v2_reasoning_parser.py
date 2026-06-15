@@ -13,10 +13,10 @@ from .identity_reasoning_parser import IdentityReasoningParser
 logger = init_logger(__name__)
 
 
-class PanguReasoningParser(DeepSeekV3ReasoningParser):
+class OpenPanguV2ReasoningParser(DeepSeekV3ReasoningParser):
     """
-    V3 parser that delegates to either DeepSeekR1ReasoningParser or
-    IdentityReasoningParser based on `thinking` and `separate_reasoning`.
+    OpenPanguV2 reasoning parser that delegates to either DeepSeekR1ReasoningParser
+    or IdentityReasoningParser based on `think`.
     """
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):

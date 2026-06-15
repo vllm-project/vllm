@@ -12,9 +12,7 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils.torch_utils import (
-    kv_cache_dtype_str_to_dtype,
-)
+from vllm.utils.torch_utils import kv_cache_dtype_str_to_dtype
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionType,

@@ -104,9 +104,9 @@ _REASONING_PARSERS_TO_REGISTER = {
         "olmo3_reasoning_parser",
         "Olmo3ReasoningParser",
     ),
-    "pangu": (
-        "pangu_reasoning_parser",
-        "PanguReasoningParser",
+    "openpangu_v2": (
+        "openpangu_v2_reasoning_parser",
+        "OpenPanguV2ReasoningParser",
     ),
     "qwen3": (
         "qwen3_reasoning_parser",
