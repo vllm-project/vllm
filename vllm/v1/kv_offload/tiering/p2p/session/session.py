@@ -106,7 +106,8 @@ class _OutboundRequestState:
     demanded: dict[OffloadKey, int] = field(
         default_factory=dict
     )  # key → remote_block_idx: blocks peer wants, awaiting supply
-    remaining: int = 0
+    remaining: int = 0  # remaining blocks that still need to be transferred to
+    # client (including inflight blocks)
     finishing: bool = False
 
     def add_stored_blocks(
