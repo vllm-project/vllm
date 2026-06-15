@@ -515,7 +515,7 @@ class TestStoreDecodeRoundTrip:
     """End-to-end: store KV into TQ cache, decode, compare vs fp16 ref."""
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-    @pytest.mark.parametrize("D", [127, 128])
+    @pytest.mark.parametrize("D", [127, 128, 256])
     @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
     def test_native_fp8_v4_store_matches_triton(self, dtype, D):
         """Native CUDA FP8-key/V4 store should match the Triton store bytes."""
@@ -527,15 +527,14 @@ class TestStoreDecodeRoundTrip:
             triton_turboquant_store,
         )
 
-        if not hasattr(torch.ops, "_C") or not hasattr(
-            torch.ops._C, "turboquant_store_fp8_v4"
-        ):
-            pytest.skip("native TurboQuant store op is not built")
         if _use_fp8_e4b15(0):
             pytest.skip("native TurboQuant store currently covers Hopper+ e4nv")
+        assert hasattr(torch.ops, "_C") and hasattr(
+            torch.ops._C, "turboquant_store_fp8_v4"
+        ), "native TurboQuant store op must be built on SM >= 8.9"
 
         cfg = TurboQuantConfig.from_cache_dtype("turboquant_k8v4", head_dim=D)
-        N = 3
+        N = 4
         Hk = 2
         block_size = 4
         num_blocks = 2
@@ -546,7 +545,7 @@ class TestStoreDecodeRoundTrip:
         value = torch.randn(N, Hk, D, device=device, dtype=dtype)
         key[0, 0, 0] = 1024.0
         key[0, 0, 1] = -1024.0
-        slot_mapping = torch.tensor([0, 3, 5], device=device, dtype=torch.int32)
+        slot_mapping = torch.tensor([0, -1, 3, 5], device=device, dtype=torch.int32)
 
         kv_triton = torch.zeros(
             num_blocks,

@@ -15,6 +15,7 @@ import math
 import torch
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_turboquant_decode import _use_fp8_e4b15
 
@@ -389,6 +390,7 @@ def triton_turboquant_store(
 
         if (
             use_native_store
+            and not envs.VLLM_DISABLE_TURBOQUANT_NATIVE_STORE
             and value_quant_bits == 4
             and fp8_e4b15 == 0
             and key.device.type == "cuda"

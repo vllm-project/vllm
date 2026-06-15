@@ -21,6 +21,22 @@ steps:
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
+- label: TurboQuant Native Store Test (H100)
+  key: turboquant-native-store-test-h100
+  timeout_in_minutes: 15
+  device: h100
+  source_file_dependencies:
+  - CMakeLists.txt
+  - csrc/libtorch_stable/quantization/turboquant/turboquant_store.cu
+  - csrc/libtorch_stable/ops.h
+  - csrc/libtorch_stable/torch_bindings.cpp
+  - vllm/_custom_ops.py
+  - vllm/envs.py
+  - vllm/v1/attention/ops/triton_turboquant_store.py
+  - tests/quantization/test_turboquant.py
+  commands:
+  - pytest -v -s quantization/test_turboquant.py::TestStoreDecodeRoundTrip::test_native_fp8_v4_store_matches_triton
+
 - label: Quantized Fusions
   key: quantized-fusions
   timeout_in_minutes: 30

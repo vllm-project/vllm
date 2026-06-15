@@ -164,11 +164,19 @@ void turboquant_store_fp8_v4(
                   "slot_mapping must be int32");
   STD_TORCH_CHECK(key.scalar_type() == value.scalar_type(),
                   "key and value must have the same dtype");
+  STD_TORCH_CHECK(key.scalar_type() == torch::headeronly::ScalarType::Half ||
+                      key.scalar_type() ==
+                          torch::headeronly::ScalarType::BFloat16,
+                  "key and value must be float16 or bfloat16");
   STD_TORCH_CHECK(num_heads > 0, "num_heads must be positive");
   STD_TORCH_CHECK(block_size > 0, "block_size must be positive");
 
   const int64_t num_token_heads = key.size(0);
   const int64_t D = key.size(1);
+  STD_TORCH_CHECK(num_token_heads > 0, "key must have at least one row");
+  STD_TORCH_CHECK(num_token_heads <= INT_MAX,
+                  "number of token/head rows exceeds int range");
+  STD_TORCH_CHECK(D > 0, "head dimension must be positive");
   STD_TORCH_CHECK(num_token_heads % num_heads == 0,
                   "key rows must be divisible by num_heads");
   STD_TORCH_CHECK(slot_mapping.size(0) == num_token_heads / num_heads,
@@ -183,13 +191,17 @@ void turboquant_store_fp8_v4(
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       key.get_device_index());
+  cudaDeviceProp* device_prop = get_device_prop();
+  int device_capability = device_prop->major * 10 + device_prop->minor;
+  STD_TORCH_CHECK(device_capability >= 89,
+                  "turboquant_store_fp8_v4 requires CUDA SM >= 8.9");
   const cudaStream_t stream = get_current_cuda_stream(key.get_device_index());
 
   constexpr int threads = 128;
   dim3 grid(num_token_heads);
   dim3 block(threads);
 
-  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+  VLLM_STABLE_DISPATCH_HALF_TYPES(
       key.scalar_type(), "turboquant_store_fp8_v4", ([&] {
         vllm::turboquant_store_fp8_v4_kernel<scalar_t>
             <<<grid, block, 0, stream>>>(
@@ -202,4 +214,8 @@ void turboquant_store_fp8_v4(
                 static_cast<int>(key_packed_size),
                 static_cast<int>(value_data_bytes));
       }));
+  cudaError_t err = cudaGetLastError();
+  STD_TORCH_CHECK(err == cudaSuccess,
+                  "turboquant_store_fp8_v4 kernel launch failed: ",
+                  cudaGetErrorString(err));
 }
