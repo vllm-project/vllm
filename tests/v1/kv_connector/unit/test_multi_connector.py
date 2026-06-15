@@ -58,6 +58,7 @@ class MockConnector(KVConnectorBase_V1):
         mock = MagicMock(spec_set=KVConnectorBase_V1)
         # Override just build_kv_connector_stats
         mock.build_kv_connector_stats = cls.build_kv_connector_stats
+        mock.get_kv_connector_stats.return_value = None
         return mock
 
     @classmethod
@@ -93,6 +94,7 @@ class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
 
     def __new__(cls, *args, **kwargs):
         mock = MagicMock(spec_set=cls)
+        mock.get_kv_connector_stats.return_value = None
         return mock
 
     def start_load_kv(self, forward_context, **kwargs):
@@ -130,17 +132,14 @@ KVConnectorFactory.register_connector(
 @pytest.fixture
 def mc() -> MultiConnector:
     """MultiConnector using two mocked connectors"""
-    vllm_config = create_vllm_config()
-
     mock_connector_config = {
         "kv_connector": "MockConnector",
         "kv_role": "kv_both",
         "kv_connector_module_path": "tests.v1.kv_connector.unit.test_multi_connector",
     }
 
-    vllm_config.kv_transfer_config = KVTransferConfig(
+    vllm_config = create_vllm_config(
         kv_connector="MultiConnector",
-        kv_role="kv_both",
         kv_connector_extra_config={
             "connectors": [mock_connector_config, mock_connector_config],
         },
@@ -261,10 +260,16 @@ def test_multi_example_connector_consistency():
         )
 
     events = get_connector_events()
-    # First event is set_xfer_handshake_metadata from initialization, then
-    # get_num_new_matched_tokens and update_state_after_alloc from generate().
-    assert events["storage1-SCHEDULER"][:4] == [
-        "set_xfer_handshake_metadata",
+    storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
+    storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
+    # First event is bind_gpu_block_pool from initialization, then
+    # set_xfer_handshake_metadata_pp_aware, then on_new_request when the request is
+    # enqueued, then get_num_new_matched_tokens and update_state_after_alloc from
+    # generate().
+    assert storage1_scheduler_events[:6] == [
+        "bind_gpu_block_pool",
+        "set_xfer_handshake_metadata_pp_aware",
+        "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
@@ -281,8 +286,10 @@ def test_multi_example_connector_consistency():
         "wait_for_layer_load",
         "save_kv_layer",
     ]
-    assert events["storage2-SCHEDULER"][:4] == [
-        "set_xfer_handshake_metadata",
+    assert storage2_scheduler_events[:6] == [
+        "bind_gpu_block_pool",
+        "set_xfer_handshake_metadata_pp_aware",
+        "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
@@ -310,12 +317,16 @@ def test_multi_example_connector_consistency():
     # connector so update_state_after_alloc will be with allocated blocks
     # on that one but with zero blocks for others (first nonzero match is
     # chosen).
-    assert events["storage1-SCHEDULER"][:3] == [
+    storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
+    storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
+    assert storage1_scheduler_events[:4] == [
+        "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[7] 96",
         "build_connector_meta",
     ]
-    assert events["storage2-SCHEDULER"][:3] == [
+    assert storage2_scheduler_events[:4] == [
+        "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
@@ -336,12 +347,16 @@ def test_multi_example_connector_consistency():
     # return 0 from the first connector, but the second connector should have
     # a hit, so update_state_after_alloc will only be called with allocated
     # blocks for the second connector.
-    assert events["storage1-SCHEDULER"][:3] == [
+    storage1_scheduler_events = _ignore_event_collection(events["storage1-SCHEDULER"])
+    storage2_scheduler_events = _ignore_event_collection(events["storage2-SCHEDULER"])
+    assert storage1_scheduler_events[:4] == [
+        "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
     ]
-    assert events["storage2-SCHEDULER"][:3] == [
+    assert storage2_scheduler_events[:4] == [
+        "on_new_request",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[7] 96",
         "build_connector_meta",
@@ -350,6 +365,13 @@ def test_multi_example_connector_consistency():
     # Clean up
     shutil.rmtree(storage_1_path)
     shutil.rmtree(storage_2_path)
+
+
+def _ignore_event_collection(events: list[str]) -> list[str]:
+    # Filter out per-step polling hooks that the scheduler calls repeatedly
+    # and which are not meaningful state transitions for these assertions.
+    ignored = {"get_kv_connector_stats", "has_pending_push_work", "take_events"}
+    return [event for event in events if event not in ignored]
 
 
 def get_connector_events() -> dict[str, list[str]]:
@@ -396,39 +418,35 @@ def test_multi_connector_handle_preemptions_integration():
 
     try:
         # Configure MultiConnector with two TestExampleConnectors
-        kv_transfer_config = KVTransferConfig(
-            kv_connector="MultiConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={
-                "connectors": [
-                    {
-                        "kv_connector": "TestExampleConnector",
-                        "kv_role": "kv_both",
-                        "kv_connector_extra_config": {
-                            "shared_storage_path": str(storage_path / "s1"),
-                            "name": "preempt1",
-                        },
-                        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+        connectors_extra_config = {
+            "connectors": [
+                {
+                    "kv_connector": "TestExampleConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "shared_storage_path": str(storage_path / "s1"),
+                        "name": "preempt1",
                     },
-                    {
-                        "kv_connector": "TestExampleConnector",
-                        "kv_role": "kv_both",
-                        "kv_connector_extra_config": {
-                            "shared_storage_path": str(storage_path / "s2"),
-                            "name": "preempt2",
-                        },
-                        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                    "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                },
+                {
+                    "kv_connector": "TestExampleConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_extra_config": {
+                        "shared_storage_path": str(storage_path / "s2"),
+                        "name": "preempt2",
                     },
-                ]
-            },
-        )
+                    "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                },
+            ]
+        }
 
         vllm_config = create_vllm_config(
             block_size=16,
             max_num_batched_tokens=100,
-            kv_connector_extra_config=kv_transfer_config.kv_connector_extra_config,
+            kv_connector="MultiConnector",
+            kv_connector_extra_config=connectors_extra_config,
         )
-        vllm_config.kv_transfer_config = kv_transfer_config
 
         # Create scheduler - this initializes the MultiConnector with SCHEDULER role
         scheduler = create_scheduler(vllm_config, num_blocks=10)
@@ -964,7 +982,6 @@ def test_multi_connector_worker_metadata(mc):
 
 def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
     """Build a MultiConnector wrapping the given registered connectors."""
-    vllm_config = create_vllm_config()
     connectors = [
         {
             "kv_connector": name,
@@ -973,9 +990,8 @@ def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
         }
         for name in connector_names
     ]
-    vllm_config.kv_transfer_config = KVTransferConfig(
+    vllm_config = create_vllm_config(
         kv_connector="MultiConnector",
-        kv_role="kv_both",
         kv_connector_extra_config={"connectors": connectors},
     )
     kv_cache_config = KVCacheConfig(
@@ -990,11 +1006,8 @@ def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
     )
 
 
-def test_multi_connector_hma_opt_in():
+def test_multi_connector_hma_support_detection():
     """
-    MultiConnector currently assumes HMA is opt-in: it needs
-    --no-disable-hybrid-kv-cache-manager to be enabled.
-
     At runtime, _all_support_hma is True only when every sub-connector
     implements SupportsHMA. Test all combinations of HMA / non-HMA
     sub-connectors.
@@ -1050,7 +1063,7 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
             "connectors": [
                 {
                     "kv_connector": "NixlConnector",
-                    "kv_role": "kv_both",
+                    "kv_role": "kv_consumer",
                 },
                 {
                     "kv_connector": "MockConnector",
@@ -1064,7 +1077,7 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
     )
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     ):
         llm = LLM(

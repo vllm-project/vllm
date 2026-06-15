@@ -131,6 +131,12 @@ def get_flash_attn_version(
                 and head_size != head_size_v
             ):
                 upgrade_reason = "Diff-KV with sinks"
+            elif (
+                vllm_config is not None
+                and vllm_config.model_config is not None
+                and vllm_config.model_config.is_diffusion
+            ):
+                upgrade_reason = "Per-sequence causal (dynamic_causal) requires FA4"
             if upgrade_reason:
                 logger.info_once(
                     "%s: upgrading FlashAttention 3 -> 4",
@@ -189,15 +195,6 @@ def is_fa_version_supported(fa_version: int) -> bool:
         return _is_fa_version_supported(fa_version)
     except ImportError:
         return False
-
-
-def flash_attn_supports_fp8() -> bool:
-    if current_platform.is_xpu():
-        return True
-    return (
-        get_flash_attn_version() == 3
-        and current_platform.is_device_capability_family(90)
-    )
 
 
 def flash_attn_supports_quant_query_input() -> bool:

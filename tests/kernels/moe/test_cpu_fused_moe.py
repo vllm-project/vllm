@@ -20,7 +20,12 @@ EXPERT_NUM = [
 HIDDEN_DIM = [128, 2880]
 INTERMEDIATE_DIM = [128, 2880]
 BATCH_SIZE = [1, 64, 256]
-ACT = [MoEActivation.SILU, MoEActivation.SWIGLUOAI, MoEActivation.GELU]
+ACT = [
+    MoEActivation.SILU,
+    MoEActivation.SWIGLUOAI,
+    MoEActivation.GELU,
+    MoEActivation.GELU_TANH,
+]
 USE_BIAS = [True, False]
 ISA = ["amx", "vec"] if torch.cpu._is_amx_tile_supported() else ["vec"]
 DTYPE = [torch.bfloat16]
