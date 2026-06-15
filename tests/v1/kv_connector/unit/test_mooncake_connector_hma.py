@@ -510,6 +510,93 @@ def test_align_transfer_regions_fans_out_shared_alias_groups():
     ]
 
 
+def test_align_transfer_regions_rejects_unbound_alias_index_match():
+    local_region = TransferRegion(
+        layer_name="model.layers.10.attn",
+        layer_index=10,
+        base_addr=0x1000,
+        block_len=100,
+        kv_block_len=100,
+        layer_aliases=(
+            "model.layers.10.attn",
+            "model.layers.11.attn.swa_cache",
+        ),
+        layer_indices=(10, 11),
+        group_indices=(0, 1),
+        alias_group_indices=((0,), (1,)),
+    )
+    remote_region = TransferRegion(
+        layer_name="model.layers.12.attn",
+        layer_index=12,
+        base_addr=0x2000,
+        block_len=100,
+        kv_block_len=100,
+        layer_aliases=(
+            "model.layers.10.attn",
+            "model.layers.12.attn.swa_cache",
+        ),
+        layer_indices=(12, 11),
+        group_indices=(0, 1),
+        alias_group_indices=((0,), (1,)),
+    )
+
+    local_regions, remote_regions, err = _align_transfer_regions(
+        [local_region],
+        [remote_region],
+    )
+
+    assert local_regions == []
+    assert remote_regions == []
+    assert err is not None
+    assert "index mismatch" in err
+
+
+def test_align_transfer_regions_rejects_duplicate_remote_alias_group():
+    local_region_a = TransferRegion(
+        layer_name="model.layers.4.attn",
+        layer_index=4,
+        base_addr=0x1000,
+        block_len=100,
+        kv_block_len=100,
+        layer_aliases=("model.layers.4.attn",),
+        layer_indices=(4,),
+        group_indices=(0,),
+        alias_group_indices=((0,),),
+    )
+    local_region_b = TransferRegion(
+        layer_name="model.layers.4.attn.swa_cache",
+        layer_index=4,
+        base_addr=0x2000,
+        block_len=100,
+        kv_block_len=100,
+        layer_aliases=("model.layers.4.attn",),
+        layer_indices=(4,),
+        group_indices=(0,),
+        alias_group_indices=((0,),),
+    )
+    remote_region = TransferRegion(
+        layer_name="model.layers.4.attn",
+        layer_index=4,
+        base_addr=0x3000,
+        block_len=100,
+        kv_block_len=100,
+        layer_aliases=("model.layers.4.attn",),
+        layer_indices=(4,),
+        group_indices=(0,),
+        alias_group_indices=((0,),),
+    )
+
+    local_regions, remote_regions, err = _align_transfer_regions(
+        [local_region_a, local_region_b],
+        [remote_region],
+    )
+
+    assert local_regions == []
+    assert remote_regions == []
+    assert err is not None
+    assert "duplicate alias group" in err
+
+
 @pytest.mark.asyncio
 async def test_build_transfer_params_filters_groups_per_shared_alias():
     worker = make_transfer_worker()

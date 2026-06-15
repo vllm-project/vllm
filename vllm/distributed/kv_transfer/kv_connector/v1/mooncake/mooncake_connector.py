@@ -2055,14 +2055,19 @@ class MooncakeConnectorWorker:
         region_alias_groups_by_key: dict[
             tuple[int, int, int, int, int], list[list[int]]
         ] = defaultdict(list)
-        is_mtp_speculative = self.vllm_config.speculative_config is not None
+        speculative_config = self.vllm_config.speculative_config
+        speculative_method = getattr(speculative_config, "method", None)
+        is_mtp_speculative = speculative_method == "mtp" or (
+            isinstance(speculative_method, str)
+            and speculative_method.endswith("_mtp")
+        )
         total_num_hidden_layers = self.model_config.get_total_num_hidden_layers()
 
         for layer_name, cache_or_caches in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
             if is_mtp_speculative and layer_index >= total_num_hidden_layers:
                 logger.debug(
-                    "Skipping speculative KV cache layer %s outside the "
+                    "Skipping MTP speculative KV cache layer %s outside the "
                     "base model layer range [0, %d)",
                     layer_name,
                     total_num_hidden_layers,
