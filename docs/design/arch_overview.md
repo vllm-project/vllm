@@ -174,15 +174,21 @@ When the KV cache is exhausted and a request cannot be allocated new blocks,
 the scheduler **preempts** a lower-priority running request:
 
 1.  Its KV cache blocks are freed immediately.
-2.  `num_computed_tokens` is reset to `0` — the request must recompute from
-    scratch when re-admitted.
-3.  The request is prepended to the front of the waiting queue with
-    `PREEMPTED` status, so it is re-admitted before any new requests.
+2.  `num_computed_tokens` is reset to `0`. When the request is re-admitted, it
+    recomputes only the missing tokens (no KV swap to CPU), and the scheduler
+    may immediately restore progress via prefix caching or externally matched
+    KV tokens.
+3.  The request is re-queued with `PREEMPTED` status:
+    - Under **FCFS**, it is prepended to the front of the waiting queue, so it
+      is re-admitted before any later-arriving requests.
+    - Under **Priority**, it is reinserted into the priority queue ordered by
+      `(priority, arrival_time)`, so newly arrived higher-priority requests
+      may still be scheduled first.
 
 !!! note
-    vLLM V1 does not swap KV cache to CPU memory. Preempted requests always
-    recompute. Prefix caching makes this inexpensive for requests that share
-    a common prompt prefix.
+    vLLM V1 does not swap KV cache to CPU memory. Preempted requests
+    recompute missing tokens but may skip cached prefixes. Prefix caching
+    makes this inexpensive for requests that share a common prompt prefix.
 
 ### Async Scheduling
 
@@ -192,18 +198,21 @@ is a thin subclass of `Scheduler` that overlaps CPU scheduling with GPU
 execution: while the GPU executes step *N*, the CPU speculatively schedules
 step *N+1*.
 
-Each scheduled decode step adds an **output placeholder**
-(`num_output_placeholders`) to the request — a token slot for a result the
-GPU is producing but has not yet returned. If `update_from_output` receives
-output for a request that has `discard_latest_async_tokens = True`, the
-speculative output is silently dropped rather than appended to the token
-sequence, preventing a spurious duplicate output token.
+Each scheduled decode step adds one or more **output placeholders**
+(`num_output_placeholders`) to the request — one for the main token plus any
+speculative (draft/spec) tokens the GPU is producing but has not yet
+returned. When a request is preempted while async scheduling is active,
+`AsyncScheduler` may additionally reset these fields to prevent spurious
+duplicate output tokens if the GPU has speculative output in flight. If
+`update_from_output` receives output for a request that has
+`discard_latest_async_tokens = True`, the speculative output is silently
+dropped rather than appended to the token sequence.
 
-This flag is currently set during a forced prefix-cache reset
-(`reset_prefix_cache` with `reset_running_requests=True`), which preempts all
-running requests and additionally resets `num_output_placeholders` to `0`
-and sets `discard_latest_async_tokens = True` before returning them to the
-waiting queue.
+Currently, `num_output_placeholders` is reset to `0` and
+`discard_latest_async_tokens` is set to `True` during a forced prefix-cache
+reset (`reset_prefix_cache` with `reset_running_requests=True`), which
+preempts all running requests before returning them to the waiting queue.
+Regular KV-exhaustion preemption does not modify these fields.
 
 ## LLM Engine
 
