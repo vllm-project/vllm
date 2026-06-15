@@ -50,13 +50,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
-from vllm.utils.humming import GemmType as HummingGemmType
-from vllm.utils.humming import HummingLayerMeta, HummingMethod, dtypes
 from vllm.utils.import_utils import has_humming
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.utils.humming import GemmType as HummingGemmType
 
 
 logger = init_logger(__name__)
@@ -104,6 +103,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self._permute_scratch: MoEPermuteScratch | None = None
 
     def init_humming_moe(self):
+        from vllm.utils.humming import HummingMethod
+
         self.compute_config = {
             "use_batch_invariant": envs.VLLM_BATCH_INVARIANT,
             "use_f16_accum": envs.VLLM_HUMMING_USE_F16_ACCUM,
@@ -245,6 +246,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         w2: torch.Tensor,
         topk_ids: torch.Tensor,
     ) -> tuple[int, int, int, int, int]:
+        from vllm.utils.humming import HummingLayerMeta
+
         meta1: HummingLayerMeta = self.layer.humming_metas["w13"]
         meta2: HummingLayerMeta = self.layer.humming_metas["w2"]
 
@@ -266,6 +269,9 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         return meta1.num_experts, num_tokens, meta1.shape_n // 2, meta1.shape_k, top_k
 
     def get_buffer_metas(self, M: int, topk: int, activation: MoEActivation):
+        from vllm.utils.humming import GemmType as HummingGemmType
+        from vllm.utils.humming import dtypes
+
         num_experts = self.num_experts
         N = self.layer.intermediate_size_per_partition
         K = self.layer.hidden_size
@@ -562,6 +568,8 @@ class HummingIndexedExperts(HummingExpertsBase):
         the layer object, so w1, w2, a1q_scale, a2_scale parameters are not used.
         The output is written into workspace13 via the buffer management.
         """
+        from vllm.utils.humming import HummingMethod
+
         assert not apply_router_weight_on_input
 
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
@@ -666,6 +674,8 @@ class HummingGroupedExperts(HummingExpertsBase):
         the layer object, so w1, w2, a1q_scale, a2_scale parameters are not used.
         The output is written into workspace13 via the buffer management.
         """
+        from vllm.utils.humming import HummingMethod
+
         assert not apply_router_weight_on_input
 
         valid_shape_m = self.estimate_local_valid_shape_m(topk_ids)
@@ -781,6 +791,8 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         the layer object, so w1, w2, a1q_scale, a2_scale parameters are not used.
         The output is written into workspace13 via the buffer management.
         """
+        from vllm.utils.humming import HummingMethod
+
         assert not apply_router_weight_on_input
         assert expert_tokens_meta is not None
 
