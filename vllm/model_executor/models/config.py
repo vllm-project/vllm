@@ -105,6 +105,74 @@ class Gemma4Config(VerifyAndUpdateConfig):
             )
 
 
+class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """Set up the diffusion config and defaults for DiffusionGemma.
+
+        Auto-creates DiffusionConfig from the HF config when the user
+        didn't pass ``--diffusion-config``. Diffusion sampling params are
+        read straight from generation_config.json at sampler-build time
+        (see DiffusionGemma's custom_sampler), not injected here.
+        """
+        # Inherit Gemma4's attention backend selection (FA4 on Hopper,
+        # TRITON_ATTN fallback for heterogeneous head dims).
+        Gemma4Config.verify_and_update_config(vllm_config)
+
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attention_config = vllm_config.attention_config
+        if attention_config.backend == AttentionBackendEnum.FLASHINFER:
+            raise ValueError(
+                "FlashInfer does not support DiffusionGemma's mixed "
+                "causal/bidirectional attention. Use --attention-backend "
+                "FLASH_ATTN or TRITON_ATTN instead."
+            )
+        if attention_config.backend is None and not attention_config.use_non_causal:
+            attention_config.use_non_causal = True
+            logger.info(
+                "DiffusionGemma uses mixed causal/bidirectional attention "
+                "within a batch; setting use_non_causal=True to exclude "
+                "FlashInfer from auto-selection."
+            )
+
+        # Auto-create DiffusionConfig from HF config if not provided.
+        if vllm_config.diffusion_config is None:
+            from vllm.config.diffusion import DiffusionConfig
+
+            hf_config = vllm_config.model_config.hf_config
+            canvas_length = getattr(hf_config, "canvas_length", 256)
+            vllm_config.diffusion_config = DiffusionConfig(
+                canvas_length=canvas_length,
+            )
+
+        # The diffusion sampler materializes [num_seqs, canvas_length, vocab]
+        # fp32 transients, so concurrency is memory-bound (>8 OOMs a single H200).
+        # Default to 8 when the user didn't pass --max-num-seqs.
+        # We can't see the original None here (the engine already filled a generic
+        # default), so use >= DEFAULT_MAX_NUM_SEQS as a proxy, (the default is much
+        # larger than any deliberate value for this model)
+        from vllm.config.scheduler import SchedulerConfig
+
+        sc = vllm_config.scheduler_config
+        if sc is not None and sc.max_num_seqs >= SchedulerConfig.DEFAULT_MAX_NUM_SEQS:
+            sc.max_num_seqs = 8
+
+        # Remove the model's generation_config.json cap on max_new_tokens
+        # (256) so DiffusionGemma behaves like every other model: no
+        # server-wide limit, each request controls its own output length
+        # via max_tokens.  Setting to None causes get_diff_sampling_param
+        # to skip this key entirely.
+        model_config = vllm_config.model_config
+        if "max_new_tokens" not in model_config.override_generation_config:
+            model_config.override_generation_config["max_new_tokens"] = None
+            logger.info(
+                "DiffusionGemma: removing server-wide max_new_tokens cap "
+                "from generation_config.json (use "
+                "--override-generation-config to set a custom limit).",
+            )
+
+
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -591,6 +659,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColQwen3_5": Qwen3_5ForConditionalGenerationConfig,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
+    "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
     "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
