@@ -167,7 +167,7 @@ def main():
     print("Propagating weights via WPI...")
     param_iter = ((n, p) for n, p in train_model.named_parameters())
     args = WPITrainerSendWeightsArgs(
-        mode="http",
+        send_mode="http",
         url=BASE_URL,
         trainer_ctx=ctx,
     )

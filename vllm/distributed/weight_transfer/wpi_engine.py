@@ -68,7 +68,7 @@ class WPITrainerContext:
 class WPITrainerSendWeightsArgs:
     """Arguments for WPI trainer_send_weights method."""
 
-    mode: str
+    send_mode: str
     """Transport mode: 'http' or 'ray'."""
 
     buffer_id: str = "vllm-weights"
@@ -98,18 +98,18 @@ class WPITrainerSendWeightsArgs:
 
     # Transport-specific fields
     llm_handle: Any = None
-    """Ray ObjectRef to LLM handle (required for 'ray' mode)."""
+    """Ray ObjectRef to LLM handle (required for 'ray' send_mode)."""
 
     url: str | None = None
-    """Base URL for HTTP endpoint (required for 'http' mode)."""
+    """Base URL for HTTP endpoint (required for 'http' send_mode)."""
 
     def __post_init__(self):
-        if self.mode == "ray" and self.llm_handle is None:
-            raise ValueError("llm_handle is required for 'ray' mode")
-        if self.mode == "http" and self.url is None:
-            raise ValueError("url is required for 'http' mode")
-        if self.mode not in ("ray", "http"):
-            raise ValueError(f"mode must be 'ray' or 'http', got {self.mode}")
+        if self.send_mode == "ray" and self.llm_handle is None:
+            raise ValueError("llm_handle is required for 'ray' send_mode")
+        if self.send_mode == "http" and self.url is None:
+            raise ValueError("url is required for 'http' send_mode")
+        if self.send_mode not in ("ray", "http"):
+            raise ValueError(f"send_mode must be 'ray' or 'http', got {self.send_mode}")
 
 
 @dataclass
@@ -484,7 +484,7 @@ class WPIWeightTransferEngine(
             >>> # Per-step weight sync
             >>> param_iter = ((n, p) for n, p in model.named_parameters())
             >>> args = WPITrainerSendWeightsArgs(
-            ...     mode="http",
+            ...     send_mode="http",
             ...     url="http://vllm-server:8000",
             ...     trainer_ctx=ctx,
             ... )
@@ -570,14 +570,14 @@ class WPIWeightTransferEngine(
             total_bytes=total_bytes,
         ))
 
-        if args.mode == "ray":
+        if args.send_mode == "ray":
             import ray
             ray.get(
                 args.llm_handle.update_weights.remote(
                     dict(update_info=update_info)
                 )
             )
-        elif args.mode == "http":
+        elif args.send_mode == "http":
             import requests
             url = f"{args.url}/update_weights"
             payload = {"update_info": update_info}
