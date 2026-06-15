@@ -482,6 +482,12 @@ class SamplingParams(
                 parameter="temperature",
                 value=self.temperature,
             )
+        if self.temperature > 2.0:
+            raise VLLMValidationError(
+                f"temperature must be in [0, 2], got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
+            )
         if not 0.0 < self.top_p <= 1.0:
             raise VLLMValidationError(
                 f"top_p must be in (0, 1], got {self.top_p}.",
