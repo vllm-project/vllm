@@ -453,6 +453,16 @@ class SpecDecodeBaseProposer:
         | None = None,
     ) -> torch.Tensor:
         self.num_speculative_tokens = num_speculative_tokens
+        # Dynamic SD may use a runtime K below the init-time max; keep slot
+        # layout fields in sync for parallel drafting.
+        if self.parallel_drafting:
+            self.extra_slots_per_request = num_speculative_tokens
+            self.net_num_new_slots_per_request = self.extra_slots_per_request - (
+                1
+                if (self.pass_hidden_states_to_model and self.method != "dflash")
+                else 0
+            )
+            self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
 
