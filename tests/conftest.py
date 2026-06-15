@@ -924,7 +924,7 @@ class VllmRunner:
                 kwargs["compilation_config"]["cudagraph_capture_sizes"].append(
                     num_speculative_tokens + 1
                 )
-        
+
         from vllm.platforms import current_platform
 
         if current_platform.is_rocm():
