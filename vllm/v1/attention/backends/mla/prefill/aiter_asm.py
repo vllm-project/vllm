@@ -425,5 +425,9 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert 0 <= chunk_idx < len(self._context_ps), (
+            f"context chunk {chunk_idx} requested but prepare_metadata built "
+            f"{len(self._context_ps)} chunk(s). Call prepare_metadata first."
+        )
         ps = self._context_ps[chunk_idx]
         return self._run_kernel(q, k, v, ps, is_causal=False)
