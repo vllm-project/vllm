@@ -39,11 +39,9 @@ def init_groups(rank: int, world_size: int, port: int):
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(port)
 
-    torch.cuda.set_device(rank)
+    torch.accelerator.set_device_index(rank)
 
-    dist.init_process_group(
-        backend="gloo", rank=rank, world_size=world_size
-    )
+    dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
     _cpu_group = dist.group.WORLD
 
     # Create a separate NCCL group for reference allreduce

@@ -113,9 +113,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
             # Initialize push-based allreduce (faster for small messages)
             # Only available on NVIDIA CUDA GPUs with NVLink
-            if (current_platform.is_cuda()
-                    and self.ca_comm is not None
-                    and not self.ca_comm.disabled):
+            if (
+                current_platform.is_cuda()
+                and self.ca_comm is not None
+                and not self.ca_comm.disabled
+            ):
                 try:
                     from vllm.distributed.device_communicators.push_all_reduce import (
                         PushAllReduce,
@@ -306,10 +308,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             assert out is not None
             return out
         push_ar_comm = self.push_ar_comm
-        if (
-            push_ar_comm is not None
-            and push_ar_comm.should_use(input_)
-        ):
+        if push_ar_comm is not None and push_ar_comm.should_use(input_):
             out = push_ar_comm.all_reduce(input_)
             if out is not None:
                 return out

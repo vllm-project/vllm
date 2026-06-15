@@ -590,8 +590,7 @@ class GroupCoordinator:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
 
             # Enter push allreduce capture context
-            push_ar_comm = getattr(
-                self.device_communicator, 'push_ar_comm', None)
+            push_ar_comm = getattr(self.device_communicator, "push_ar_comm", None)
             if push_ar_comm is not None:
                 maybe_push_ar_context = push_ar_comm.capture()  # type: ignore
 
@@ -608,7 +607,12 @@ class GroupCoordinator:
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        with torch.cuda.stream(stream), maybe_ca_context, maybe_push_ar_context, maybe_aiter_context:
+        with (
+            torch.cuda.stream(stream),
+            maybe_ca_context,
+            maybe_push_ar_context,
+            maybe_aiter_context,
+        ):
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:

@@ -38,7 +38,7 @@ def _init_groups(rank: int, world_size: int, port: int):
     """Initialize gloo (CPU) and nccl process groups."""
     os.environ["MASTER_ADDR"] = "localhost"
     os.environ["MASTER_PORT"] = str(port)
-    torch.cuda.set_device(rank)
+    torch.accelerator.set_device_index(rank)
     dist.init_process_group(backend="gloo", rank=rank, world_size=world_size)
     return dist.group.WORLD, dist.new_group(backend="nccl")
 
@@ -94,7 +94,7 @@ def _push_ar_init_worker(rank, world_size, port):
 
 @pytest.mark.parametrize("world_size", [2])
 def test_push_ar_initialization(world_size):
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need {world_size} GPUs")
     mp.spawn(
         _push_ar_init_worker,
@@ -159,7 +159,7 @@ def _push_ar_should_use_worker(rank, world_size, port):
 
 
 def test_push_ar_should_use():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _push_ar_should_use_worker,
@@ -204,7 +204,7 @@ def _push_ar_correctness_int_worker(rank, world_size, port):
 
 @pytest.mark.parametrize("world_size", [2])
 def test_push_ar_correctness_integer(world_size):
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need {world_size} GPUs")
     mp.spawn(
         _push_ar_correctness_int_worker,
@@ -253,7 +253,7 @@ def _push_ar_correctness_float_worker(rank, world_size, port):
 
 @pytest.mark.parametrize("world_size", [2])
 def test_push_ar_correctness_float(world_size):
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need {world_size} GPUs")
     mp.spawn(
         _push_ar_correctness_float_worker,
@@ -302,9 +302,7 @@ def _push_ar_zero_handling_worker(rank, world_size, port):
     assert torch.all(out_pz == 0.0), "Positive zero handling failed"
 
     # Case 4: Negative zeros
-    inp_nz = torch.tensor(
-        [-0.0] * 1024, dtype=torch.bfloat16, device=device
-    )
+    inp_nz = torch.tensor([-0.0] * 1024, dtype=torch.bfloat16, device=device)
     out_nz = push_ar.all_reduce(inp_nz)
     assert torch.all(out_nz == 0.0)
 
@@ -319,7 +317,7 @@ def _push_ar_zero_handling_worker(rank, world_size, port):
 
 @pytest.mark.timeout(120)
 def test_push_ar_zero_handling():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _push_ar_zero_handling_worker,
@@ -345,24 +343,20 @@ def _push_ar_epoch_worker(rank, world_size, port):
     NUM_ITERATIONS = 1000
 
     for i in range(NUM_ITERATIONS):
-        inp = torch.randint(
-            0, 16, (7168,), dtype=torch.bfloat16, device=device
-        )
+        inp = torch.randint(0, 16, (7168,), dtype=torch.bfloat16, device=device)
         out_push = push_ar.all_reduce(inp)
 
         out_nccl = inp.clone()
         dist.all_reduce(out_nccl, group=nccl_group)
 
-        assert torch.all(out_push == out_nccl), (
-            f"Epoch mismatch at iteration {i}"
-        )
+        assert torch.all(out_push == out_nccl), f"Epoch mismatch at iteration {i}"
 
     push_ar.close()
     _teardown()
 
 
 def test_push_ar_epoch_alternation():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _push_ar_epoch_worker,
@@ -403,22 +397,18 @@ def _push_ar_thread_count_worker(rank, world_size, port):
     for size in test_sizes_tc:
         if size * 2 > push_ar.max_message_bytes:
             continue
-        inp = torch.randint(
-            0, 8, (size,), dtype=torch.bfloat16, device=device
-        )
+        inp = torch.randint(0, 8, (size,), dtype=torch.bfloat16, device=device)
         out = push_ar.all_reduce(inp)
         ref = inp.clone()
         dist.all_reduce(ref, group=nccl_group)
-        assert torch.all(out == ref), (
-            f"Failed at size={size} (sm_count={sm_count})"
-        )
+        assert torch.all(out == ref), f"Failed at size={size} (sm_count={sm_count})"
 
     push_ar.close()
     _teardown()
 
 
 def test_push_ar_thread_count():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _push_ar_thread_count_worker,
@@ -446,9 +436,7 @@ def _push_ar_threshold_worker(rank, world_size, port):
     # Case 1: Exactly at threshold (BF16)
     max_elems = max_bytes // 2
     max_elems = (max_elems // 8) * 8  # align to 16 bytes
-    inp_exact = torch.randint(
-        0, 8, (max_elems,), dtype=torch.bfloat16, device=device
-    )
+    inp_exact = torch.randint(0, 8, (max_elems,), dtype=torch.bfloat16, device=device)
     assert push_ar.should_use(inp_exact) is True
     out_exact = push_ar.all_reduce(inp_exact)
     ref_exact = inp_exact.clone()
@@ -476,7 +464,7 @@ def _push_ar_threshold_worker(rank, world_size, port):
 
 
 def test_push_ar_threshold():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _push_ar_threshold_worker,
@@ -499,9 +487,7 @@ def _push_ar_outofplace_worker(rank, world_size, port):
 
     push_ar = PushAllReduce(group=cpu_group, device=device)
 
-    inp = torch.randint(
-        1, 16, (7168,), dtype=torch.bfloat16, device=device
-    )
+    inp = torch.randint(1, 16, (7168,), dtype=torch.bfloat16, device=device)
     inp_original = inp.clone()
 
     out = push_ar.all_reduce(inp)
@@ -522,7 +508,7 @@ def _push_ar_outofplace_worker(rank, world_size, port):
 
 
 def test_push_ar_outofplace():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _push_ar_outofplace_worker,
@@ -562,7 +548,7 @@ def _push_ar_dtype_worker(rank, world_size, port):
 
 
 def test_push_ar_dtype():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _push_ar_dtype_worker,
@@ -590,23 +576,19 @@ def _push_ar_multilayer_worker(rank, world_size, port):
 
     for step in range(NUM_STEPS):
         for layer in range(NUM_LAYERS):
-            inp = torch.randint(
-                0, 16, (7168,), dtype=torch.bfloat16, device=device
-            )
+            inp = torch.randint(0, 16, (7168,), dtype=torch.bfloat16, device=device)
             out = push_ar.all_reduce(inp)
             ref = inp.clone()
             dist.all_reduce(ref, group=nccl_group)
             if not torch.all(out == ref):
-                raise RuntimeError(
-                    f"Mismatch at step={step}, layer={layer}"
-                )
+                raise RuntimeError(f"Mismatch at step={step}, layer={layer}")
 
     push_ar.close()
     _teardown()
 
 
 def test_push_ar_multilayer():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _push_ar_multilayer_worker,
@@ -630,9 +612,7 @@ def _push_ar_lifecycle_worker(rank, world_size, port):
     push_ar = PushAllReduce(group=cpu_group, device=device)
 
     # Normal allreduce works
-    inp = torch.randint(
-        0, 16, (1024,), dtype=torch.bfloat16, device=device
-    )
+    inp = torch.randint(0, 16, (1024,), dtype=torch.bfloat16, device=device)
     out = push_ar.all_reduce(inp)
     assert out is not None
 
@@ -650,7 +630,7 @@ def _push_ar_lifecycle_worker(rank, world_size, port):
 
 
 def test_push_ar_lifecycle():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _push_ar_lifecycle_worker,
@@ -696,7 +676,7 @@ def _push_ar_warmup_worker(rank, world_size, port):
 
 
 def test_push_ar_warmup():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _push_ar_warmup_worker,
@@ -740,16 +720,14 @@ def _push_ar_asymmetric_worker(rank, world_size, port):
     all_inputs = [torch.empty_like(inp) for _ in range(world_size)]
     dist.all_gather(all_inputs, inp, group=nccl_group)
     expected_sum = torch.stack(all_inputs).float().sum(dim=0).to(inp.dtype)
-    torch.testing.assert_close(
-        out_push, expected_sum, atol=5e-2, rtol=5e-2
-    )
+    torch.testing.assert_close(out_push, expected_sum, atol=5e-2, rtol=5e-2)
 
     push_ar.close()
     _teardown()
 
 
 def test_push_ar_asymmetric():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _push_ar_asymmetric_worker,
@@ -782,7 +760,7 @@ def _push_ar_identical_worker(rank, world_size, port):
 
 
 def test_push_ar_identical_values():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _push_ar_identical_worker,
@@ -823,16 +801,14 @@ def _dispatch_priority_worker(rank, world_size, port):
     out_small = push_ar.all_reduce(small_inp)
     ref_small = small_inp.clone()
     dist.all_reduce(ref_small, group=nccl_group)
-    torch.testing.assert_close(
-        out_small, ref_small, atol=1e-2, rtol=1e-2
-    )
+    torch.testing.assert_close(out_small, ref_small, atol=1e-2, rtol=1e-2)
 
     push_ar.close()
     _teardown()
 
 
 def test_dispatch_priority():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _dispatch_priority_worker,
@@ -857,9 +833,7 @@ def _coexistence_worker(rank, world_size, port):
 
     for _ in range(50):
         # Small message -> push allreduce
-        small = torch.randint(
-            0, 16, (7168,), dtype=torch.bfloat16, device=device
-        )
+        small = torch.randint(0, 16, (7168,), dtype=torch.bfloat16, device=device)
         out_small = push_ar.all_reduce(small)
         ref_small = small.clone()
         dist.all_reduce(ref_small, group=nccl_group)
@@ -870,7 +844,7 @@ def _coexistence_worker(rank, world_size, port):
 
 
 def test_coexistence():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _coexistence_worker,
@@ -895,12 +869,8 @@ def _interleaved_ar_worker(rank, world_size, port):
 
     for sz in [7168, 1024, 4096]:
         for dtype in [torch.bfloat16, torch.float16]:
-            inp1 = torch.randint(
-                1, 16, (sz,), dtype=dtype, device=device
-            )
-            inp2 = torch.randint(
-                1, 16, (sz,), dtype=dtype, device=device
-            )
+            inp1 = torch.randint(1, 16, (sz,), dtype=dtype, device=device)
+            inp2 = torch.randint(1, 16, (sz,), dtype=dtype, device=device)
 
             out1 = push_ar.all_reduce(inp1)
             ref1 = inp1.clone()
@@ -910,19 +880,15 @@ def _interleaved_ar_worker(rank, world_size, port):
             ref2 = inp2.clone()
             dist.all_reduce(ref2, group=nccl_group)
 
-            torch.testing.assert_close(
-                out1, ref1, atol=1e-2, rtol=1e-2
-            )
-            torch.testing.assert_close(
-                out2, ref2, atol=1e-2, rtol=1e-2
-            )
+            torch.testing.assert_close(out1, ref1, atol=1e-2, rtol=1e-2)
+            torch.testing.assert_close(out2, ref2, atol=1e-2, rtol=1e-2)
 
     push_ar.close()
     _teardown()
 
 
 def test_interleaved_ar():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _interleaved_ar_worker,
@@ -949,15 +915,13 @@ def _graph_capture_worker(rank, world_size, port):
     sz = 7168
 
     # Allocate graph input in graph memory pool
-    graph_inp = torch.randint(
-        1, 16, (sz,), dtype=torch.bfloat16, device=device
-    )
+    graph_inp = torch.randint(1, 16, (sz,), dtype=torch.bfloat16, device=device)
 
     # Warmup
     with push_ar.capture():
         for _ in range(NUM_AR):
             push_ar.all_reduce(graph_inp)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         # Capture graph
         graph = torch.cuda.CUDAGraph()
@@ -973,7 +937,7 @@ def _graph_capture_worker(rank, world_size, port):
             torch.randint(1, 16, (sz,), dtype=torch.bfloat16, device=device)
         )
         graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         # Verify last output is correct
         ref = graph_inp.clone()
@@ -982,8 +946,11 @@ def _graph_capture_worker(rank, world_size, port):
         # of graph_inp.
         dist.all_reduce(ref, group=nccl_group)
         torch.testing.assert_close(
-            outs[-1], ref, atol=1e-2, rtol=1e-2,
-            msg=f"Graph replay {replay_iter} failed"
+            outs[-1],
+            ref,
+            atol=1e-2,
+            rtol=1e-2,
+            msg=f"Graph replay {replay_iter} failed",
         )
 
     push_ar.close()
@@ -991,7 +958,7 @@ def _graph_capture_worker(rank, world_size, port):
 
 
 def test_graph_capture():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _graph_capture_worker,
@@ -1021,9 +988,7 @@ def _push_ar_transformer_sim_worker(rank, world_size, port):
     for step in range(NUM_STEPS):
         for block in range(NUM_BLOCKS):
             # AR 1: attention wo_b output
-            attn_out = torch.randn(
-                1, hidden_size, dtype=torch.bfloat16, device=device
-            )
+            attn_out = torch.randn(1, hidden_size, dtype=torch.bfloat16, device=device)
             attn_reduced = push_ar.all_reduce(attn_out)
             attn_ref = attn_out.clone()
             dist.all_reduce(attn_ref, group=nccl_group)
@@ -1036,9 +1001,7 @@ def _push_ar_transformer_sim_worker(rank, world_size, port):
             )
 
             # AR 2: MoE output
-            moe_out = torch.randn(
-                1, hidden_size, dtype=torch.bfloat16, device=device
-            )
+            moe_out = torch.randn(1, hidden_size, dtype=torch.bfloat16, device=device)
             moe_reduced = push_ar.all_reduce(moe_out)
             moe_ref = moe_out.clone()
             dist.all_reduce(moe_ref, group=nccl_group)
@@ -1055,7 +1018,7 @@ def _push_ar_transformer_sim_worker(rank, world_size, port):
 
 
 def test_push_ar_transformer_sim():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _push_ar_transformer_sim_worker,
@@ -1076,9 +1039,9 @@ def _feature_toggle_enabled_worker(rank, world_size, port):
     os.environ.pop("VLLM_DISABLE_PUSH_ALLREDUCE", None)
 
     from vllm.distributed.device_communicators.push_all_reduce import (
-        PushAllReduce,
-        _FEATURE_DESCRIPTION,
         _DISABLE_ENV_VAR,
+        _FEATURE_DESCRIPTION,
+        PushAllReduce,
     )
 
     push_ar = PushAllReduce(group=cpu_group, device=device)
@@ -1099,7 +1062,7 @@ def _feature_toggle_enabled_worker(rank, world_size, port):
 
 
 def test_feature_toggle_enabled():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _feature_toggle_enabled_worker,
@@ -1139,7 +1102,7 @@ def _feature_toggle_disabled_worker(rank, world_size, port):
 
 
 def test_feature_toggle_disabled():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _feature_toggle_disabled_worker,
@@ -1166,9 +1129,7 @@ def _feature_toggle_not_disabled_worker(rank, world_size, port):
     push_ar = PushAllReduce(group=cpu_group, device=device)
 
     # Feature should still be enabled (only "1" disables)
-    assert not push_ar.disabled, (
-        "PushAllReduce should be enabled when env var != '1'"
-    )
+    assert not push_ar.disabled, "PushAllReduce should be enabled when env var != '1'"
 
     # Clean up
     os.environ.pop("VLLM_DISABLE_PUSH_ALLREDUCE", None)
@@ -1177,7 +1138,7 @@ def _feature_toggle_not_disabled_worker(rank, world_size, port):
 
 
 def test_feature_toggle_not_disabled():
-    if torch.cuda.device_count() < 2:
+    if torch.accelerator.device_count() < 2:
         pytest.skip("Need 2 GPUs")
     mp.spawn(
         _feature_toggle_not_disabled_worker,

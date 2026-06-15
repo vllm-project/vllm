@@ -21,15 +21,14 @@
 namespace vllm {
 namespace push_ar {
 
-#define PUSH_AR_CUDACHECK(cmd)                                          \
-  do {                                                                  \
-    cudaError_t e = cmd;                                                \
-    if (e != cudaSuccess) {                                             \
-      throw std::runtime_error(                                         \
-          std::string("push_all_reduce CUDA error at ") + __FILE__ +    \
-          ":" + std::to_string(__LINE__) + " '" +                       \
-          cudaGetErrorString(e) + "'");                                 \
-    }                                                                   \
+#define PUSH_AR_CUDACHECK(cmd)                                                 \
+  do {                                                                         \
+    cudaError_t e = cmd;                                                       \
+    if (e != cudaSuccess) {                                                    \
+      throw std::runtime_error(std::string("push_all_reduce CUDA error at ") + \
+                               __FILE__ + ":" + std::to_string(__LINE__) +     \
+                               " '" + cudaGetErrorString(e) + "'");            \
+    }                                                                          \
   } while (0)
 
 class PushAllReduceManager {
@@ -89,8 +88,8 @@ class PushAllReduceManager {
         peer_storage_[i] = storage_;
       } else {
         PUSH_AR_CUDACHECK(cudaIpcOpenMemHandle(&peer_storage_[i],
-                                                peer_handles[i],
-                                                cudaIpcMemLazyEnablePeerAccess));
+                                               peer_handles[i],
+                                               cudaIpcMemLazyEnablePeerAccess));
       }
     }
     // Create PushController pointing to local signal region
@@ -108,13 +107,12 @@ class PushAllReduceManager {
     const int num_threads = select_num_threads<T>(num_items);
 
     // Verify input fits in push buffer (runtime check, not compiled out)
-    const int64_t input_bytes =
-        static_cast<int64_t>(sizeof(T)) * num_elements;
+    const int64_t input_bytes = static_cast<int64_t>(sizeof(T)) * num_elements;
     if (input_bytes > push_buffer_bytes_) {
-      throw std::runtime_error(
-          "push_all_reduce: input (" + std::to_string(input_bytes) +
-          " bytes) exceeds push buffer capacity (" +
-          std::to_string(push_buffer_bytes_) + " bytes)");
+      throw std::runtime_error("push_all_reduce: input (" +
+                               std::to_string(input_bytes) +
+                               " bytes) exceeds push buffer capacity (" +
+                               std::to_string(push_buffer_bytes_) + " bytes)");
     }
 
     // Build kernel params
@@ -225,9 +223,7 @@ class PushAllReduceManager {
     return static_cast<char*>(base) + push_signal_bytes();
   }
 
-  static int64_t align128(int64_t size) {
-    return ((size + 127) / 128) * 128;
-  }
+  static int64_t align128(int64_t size) { return ((size + 127) / 128) * 128; }
 
   // Members
   int rank_;

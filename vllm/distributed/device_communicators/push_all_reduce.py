@@ -16,7 +16,6 @@ Protocol:
 import logging
 import os
 from contextlib import contextmanager
-from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -71,7 +70,7 @@ class PushAllReduce:
         self,
         group: dist.ProcessGroup,
         device: torch.device,
-        max_size: Optional[int] = None,
+        max_size: int | None = None,
     ):
         self.group = group
         self.device = device
@@ -111,9 +110,7 @@ class PushAllReduce:
             self.push_buffer_bytes = max_size
         else:
             arch_major = props.major
-            threshold_map = _THRESHOLD_BY_ARCH.get(
-                arch_major, PUSH_THRESHOLD_DEFAULT
-            )
+            threshold_map = _THRESHOLD_BY_ARCH.get(arch_major, PUSH_THRESHOLD_DEFAULT)
             self.push_buffer_bytes = threshold_map.get(
                 self.world_size, DEFAULT_PUSH_BUFFER
             )
@@ -131,9 +128,7 @@ class PushAllReduce:
         if env_override:
             val = int(env_override)
             if val == 0:
-                logger.info(
-                    "PushAllReduce disabled via VLLM_PUSH_AR_BUFFER_BYTES=0"
-                )
+                logger.info("PushAllReduce disabled via VLLM_PUSH_AR_BUFFER_BYTES=0")
                 self.disabled = True
                 return
             # Round up to 128-byte alignment for kernel volatile stores
@@ -154,8 +149,7 @@ class PushAllReduce:
             self._exchange_ipc_handles()
 
             logger.info(
-                "PushAllReduce initialized: rank=%d, ws=%d, "
-                "buffer=%d KB, sm=%d",
+                "PushAllReduce initialized: rank=%d, ws=%d, buffer=%d KB, sm=%d",
                 self.rank,
                 self.world_size,
                 self.push_buffer_bytes // 1024,
@@ -186,9 +180,7 @@ class PushAllReduce:
         local_handle = ops.get_push_ar_ipc_handle(self._ptr)  # shape (64,)
 
         # All-gather handles: each rank broadcasts its handle
-        handle_list = [
-            torch.empty_like(local_handle) for _ in range(self.world_size)
-        ]
+        handle_list = [torch.empty_like(local_handle) for _ in range(self.world_size)]
         dist.all_gather(handle_list, local_handle, group=self.group)
         all_handles = torch.stack(handle_list)  # shape (world_size, 64)
 
@@ -208,7 +200,7 @@ class PushAllReduce:
             return False
         return inp_size <= self.max_message_bytes
 
-    def all_reduce(self, input_: torch.Tensor) -> Optional[torch.Tensor]:
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor | None:
         """Perform push-based allreduce. Returns new output tensor."""
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():

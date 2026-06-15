@@ -235,9 +235,8 @@ struct alignas(sizeof(T) * N) AlignedStorage {
 template <typename T, std::size_t N>
 struct AlignedVector {
  private:
-  static_assert(
-      (N > 0 && (N & (N - 1)) == 0) && sizeof(T) * N <= kMaxVecBytes,
-      "CUDA vector size exceeds arch limit (max 16 bytes)");
+  static_assert((N > 0 && (N & (N - 1)) == 0) && sizeof(T) * N <= kMaxVecBytes,
+                "CUDA vector size exceeds arch limit (max 16 bytes)");
   using element_t = typename detail::sized_int<T>;
   using storage_t = AlignedStorage<element_t, N>;
 
@@ -394,8 +393,7 @@ __device__ __forceinline__ void st_global_volatile_16B(const T& x, void* addr,
   static_assert(alignof(T) == 16 && sizeof(T) == 16);
   const uint4 val = *reinterpret_cast<const uint4*>(&x);
   addr = ptr_typed_offset<T>(addr, offset);
-  asm volatile("st.volatile.global.v4.b32 [%4], {%0, %1, %2, %3};" ::"r"(
-                   val.x),
+  asm volatile("st.volatile.global.v4.b32 [%4], {%0, %1, %2, %3};" ::"r"(val.x),
                "r"(val.y), "r"(val.z), "r"(val.w), "l"(addr));
 }
 

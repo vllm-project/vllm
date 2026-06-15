@@ -14,12 +14,11 @@ using fptr_t = int64_t;
 using namespace vllm::push_ar;
 
 // Initialize the manager; returns opaque pointer as int64_t
-fptr_t init_push_ar(int64_t rank, int64_t world_size,
-                    int64_t push_buffer_bytes, int64_t max_num_cta) {
-  auto* mgr = new PushAllReduceManager(static_cast<int>(rank),
-                                       static_cast<int>(world_size),
-                                       push_buffer_bytes,
-                                       static_cast<int>(max_num_cta));
+fptr_t init_push_ar(int64_t rank, int64_t world_size, int64_t push_buffer_bytes,
+                    int64_t max_num_cta) {
+  auto* mgr = new PushAllReduceManager(
+      static_cast<int>(rank), static_cast<int>(world_size), push_buffer_bytes,
+      static_cast<int>(max_num_cta));
   return reinterpret_cast<fptr_t>(mgr);
 }
 
@@ -27,8 +26,7 @@ fptr_t init_push_ar(int64_t rank, int64_t world_size,
 torch::Tensor get_push_ar_ipc_handle(fptr_t _mgr) {
   auto* mgr = reinterpret_cast<PushAllReduceManager*>(_mgr);
   cudaIpcMemHandle_t handle = mgr->get_ipc_handle();
-  auto t = torch::from_blob(&handle,
-                            {static_cast<int64_t>(sizeof(handle))},
+  auto t = torch::from_blob(&handle, {static_cast<int64_t>(sizeof(handle))},
                             torch::kUInt8)
                .clone();
   return t;
@@ -40,8 +38,7 @@ void post_init_push_ar(fptr_t _mgr, torch::Tensor all_handles) {
   int world_size = all_handles.size(0);
   std::vector<cudaIpcMemHandle_t> handles(world_size);
   for (int i = 0; i < world_size; i++) {
-    memcpy(&handles[i], all_handles[i].data_ptr(),
-           sizeof(cudaIpcMemHandle_t));
+    memcpy(&handles[i], all_handles[i].data_ptr(), sizeof(cudaIpcMemHandle_t));
   }
   mgr->post_init(handles);
 }
@@ -54,8 +51,7 @@ static bool _is_weak_contiguous(const torch::Tensor& t) {
 }
 
 // Perform allreduce
-void push_ar_all_reduce(fptr_t _mgr, torch::Tensor& inp,
-                        torch::Tensor& out) {
+void push_ar_all_reduce(fptr_t _mgr, torch::Tensor& inp, torch::Tensor& out) {
   auto* mgr = reinterpret_cast<PushAllReduceManager*>(_mgr);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(inp));
   auto stream = c10::cuda::getCurrentCUDAStream().stream();
@@ -77,15 +73,13 @@ void push_ar_all_reduce(fptr_t _mgr, torch::Tensor& inp,
                            out.numel());
       break;
     case at::ScalarType::Float:
-      mgr->allreduce<float>(stream,
-                            reinterpret_cast<float*>(inp.data_ptr()),
+      mgr->allreduce<float>(stream, reinterpret_cast<float*>(inp.data_ptr()),
                             reinterpret_cast<float*>(out.data_ptr()),
                             out.numel());
       break;
     default:
-      TORCH_CHECK(
-          false,
-          "push allreduce: unsupported dtype (need bf16/fp16/fp32)");
+      TORCH_CHECK(false,
+                  "push allreduce: unsupported dtype (need bf16/fp16/fp32)");
   }
 }
 
