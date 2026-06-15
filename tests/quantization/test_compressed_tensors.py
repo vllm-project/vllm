@@ -36,6 +36,9 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    dequant_mxfp4_to_bf16,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
@@ -708,3 +711,17 @@ def test_compressed_tensors_mxfp4(vllm_runner):
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
         assert output
+
+
+def test_dequant_mxfp4_to_bf16_scales_per_group() -> None:
+    # Packed fp4 bytes: [0x21, 0x87] -> [0.5, 1.0, 6.0, -0.0]
+    packed = torch.tensor([[0x21, 0x87]], dtype=torch.uint8)
+    # E8M0 scales: 127 -> 1.0, 128 -> 2.0
+    scales = torch.tensor([[127, 128]], dtype=torch.uint8)
+
+    out = dequant_mxfp4_to_bf16(packed, scales)
+
+    assert out.dtype == torch.bfloat16
+    assert out.shape == (1, 4)
+    expected = torch.tensor([[0.5, 1.0, 12.0, 0.0]], dtype=torch.bfloat16)
+    torch.testing.assert_close(out, expected, atol=0, rtol=0)

@@ -41,6 +41,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+    CompressedTensorsConfig,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -1282,6 +1285,24 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV4MixtureOfExperts):
 
         self.set_moe_parameters()
 
+        # Only for compressed-tensors MXFP format.
+        # Set self.wo_a_using_ct_mxfp_quant = True for later usage in load_weights()
+        quant_config = vllm_config.quant_config
+        self.wo_a_using_ct_mxfp_quant = False
+        if isinstance(quant_config, CompressedTensorsConfig):
+            # Only care about wo_a because _materialize_mxfp_wo_a_bf16 only
+            # dequantizes wo_a for the BF16 fallback path.
+            for module_name, module in self.model.named_modules():
+                if not module_name.endswith("attn.wo_a"):
+                    continue
+                scheme_dict = quant_config.get_scheme_dict(module, module_name)
+                weight_quant = scheme_dict.get("weights") if scheme_dict else None
+                if quant_config._is_mxfp4(weight_quant) or quant_config._is_mxfp8(
+                    weight_quant
+                ):
+                    self.wo_a_using_ct_mxfp_quant = True
+                    break
+
     def set_moe_parameters(self) -> None:
         self.expert_weights: MutableSequence[Sequence[torch.Tensor]] = []
         self.num_expert_groups = getattr(self.config, "n_group", 1)
@@ -1334,6 +1355,16 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV4MixtureOfExperts):
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self.model.finalize_mega_moe_weights()
+
+        # Only for compressed-tensors MXFP format.
+        # Dequantized wo_a weight to reuse the BF16 reference wo_a path
+        # since mxfp4/8 kernel is not ready yet. Only run the one-time
+        # materialization when MXFP4/8 quant_config is detected.
+        if self.wo_a_using_ct_mxfp_quant:
+            from .flashmla import _materialize_mxfp_wo_a_bf16
+
+            _materialize_mxfp_wo_a_bf16(self.model)
+
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
