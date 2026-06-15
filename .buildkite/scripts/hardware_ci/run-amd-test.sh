@@ -28,8 +28,10 @@
 ###############################################################################
 set -o pipefail
 
-# Export Python path
-export PYTHONPATH=".."
+# Export Python path for commands that run directly on the host. Containerized
+# tests set this to /vllm-workspace below so spawned Python processes do not
+# depend on their current working directory.
+export PYTHONPATH="${PYTHONPATH:-..}"
 
 ###############################################################################
 # Helper Functions
