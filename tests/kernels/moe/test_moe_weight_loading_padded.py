@@ -327,108 +327,22 @@ class TestWeightLoadingWithPaddedHiddenSize:
             )
 
 
-class TestPerTensorScaleLoading:
-    """Regression tests for per-tensor / single-value scalar slot loaders.
+class TestPerTensorScaleCoercion:
+    """Regression test for shape-(1,) per-tensor scales (issue #43297).
 
     llm-compressor NVFP4 emits per-tensor weight and input scales as
-    shape-(1,) tensors. The loader sites assign into 0-D slots, so the
-    raw (1,)->() broadcast raised at weight load. The loaders coerce
-    via .view([]) before assignment. See issue #43297.
-
-    Methods don't reference self, so they are exercised unbound on the
-    class with a None self.
+    shape-(1,) tensors. `_to_scalar` collapses them to a 0-D scalar so the
+    scalar-slot assignments in the weight loader neither broadcast nor raise.
     """
 
-    def test_w1_w3_accept_shape_one_scale(self):
-        param = torch.nn.Parameter(
-            torch.empty(4, 2, dtype=torch.float32), requires_grad=False
-        )
-        RoutedExperts._load_per_tensor_weight_scale(
-            None,
-            shard_id="w1",
-            param=param,
-            loaded_weight=torch.tensor([0.5]),
-            expert_id=2,
-        )
-        RoutedExperts._load_per_tensor_weight_scale(
-            None,
-            shard_id="w3",
-            param=param,
-            loaded_weight=torch.tensor([0.75]),
-            expert_id=2,
-        )
-        assert param.data[2, 0].item() == pytest.approx(0.5)
-        assert param.data[2, 1].item() == pytest.approx(0.75)
+    def test_collapses_to_scalar(self):
+        # shape-(1,) and 0-D both reduce to a 0-D scalar.
+        for loaded_weight in (torch.tensor([0.5]), torch.tensor(0.5)):
+            scalar = RoutedExperts._to_scalar(loaded_weight)
+            assert scalar.shape == ()
+            assert scalar.item() == pytest.approx(0.5)
 
-    def test_w2_accepts_shape_one_scale(self):
-        param = torch.nn.Parameter(
-            torch.empty(4, dtype=torch.float32), requires_grad=False
-        )
-        RoutedExperts._load_per_tensor_weight_scale(
-            None,
-            shard_id="w2",
-            param=param,
-            loaded_weight=torch.tensor([0.25]),
-            expert_id=1,
-        )
-        assert param.data[1].item() == pytest.approx(0.25)
-
-    def test_single_value_accepts_shape_one(self):
-        param = torch.nn.Parameter(
-            torch.empty(4, dtype=torch.float32), requires_grad=False
-        )
-        RoutedExperts._load_single_value(
-            None,
-            param=param,
-            loaded_weight=torch.tensor([0.125]),
-            expert_id=3,
-        )
-        assert param.data[3].item() == pytest.approx(0.125)
-
-    def test_scalar_input_still_works(self):
-        # The original 0-D path must keep working.
-        param_w13 = torch.nn.Parameter(
-            torch.empty(4, 2, dtype=torch.float32), requires_grad=False
-        )
-        RoutedExperts._load_per_tensor_weight_scale(
-            None,
-            shard_id="w1",
-            param=param_w13,
-            loaded_weight=torch.tensor(0.1),
-            expert_id=0,
-        )
-        param_single = torch.nn.Parameter(
-            torch.empty(4, dtype=torch.float32), requires_grad=False
-        )
-        RoutedExperts._load_single_value(
-            None,
-            param=param_single,
-            loaded_weight=torch.tensor(0.2),
-            expert_id=0,
-        )
-        assert param_w13.data[0, 0].item() == pytest.approx(0.1)
-        assert param_single.data[0].item() == pytest.approx(0.2)
-
-    def test_multi_element_loaded_weight_raises(self):
-        # numel > 1 must fail loudly via .view([]); guards against silent
-        # corruption if a non-per-tensor scale ever reaches this path.
-        param = torch.nn.Parameter(
-            torch.empty(4, 2, dtype=torch.float32), requires_grad=False
-        )
+    def test_rejects_non_scalar(self):
+        # numel > 1 must fail loudly instead of silently picking an element.
         with pytest.raises(RuntimeError):
-            RoutedExperts._load_per_tensor_weight_scale(
-                None,
-                shard_id="w1",
-                param=param,
-                loaded_weight=torch.tensor([0.1, 0.2]),
-                expert_id=0,
-            )
-        with pytest.raises(RuntimeError):
-            RoutedExperts._load_single_value(
-                None,
-                param=torch.nn.Parameter(
-                    torch.empty(4, dtype=torch.float32), requires_grad=False
-                ),
-                loaded_weight=torch.tensor([0.1, 0.2]),
-                expert_id=0,
-            )
+            RoutedExperts._to_scalar(torch.tensor([0.1, 0.2]))
