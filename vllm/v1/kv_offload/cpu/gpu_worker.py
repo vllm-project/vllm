@@ -135,8 +135,9 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
 
     rank = region.rank
 
+    assert region._base is not None
     base_ptr = region._base.data_ptr()
-    result = torch.cuda.cudart().cudaHostRegister(base_ptr, region.total_size_bytes, 0)
+    result = torch.cuda.cudart().cudaHostRegister(base_ptr, region.mapped_size_bytes, 0)
     if result.value != 0:
         logger.warning(
             "cudaHostRegister failed for rank=%d (code=%d) — "
@@ -148,7 +149,7 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
         logger.debug(
             "cudaHostRegister rank=%d %.2f GB",
             rank,
-            region.total_size_bytes / 1e9,
+            region.mapped_size_bytes / 1e9,
         )
         region.is_pinned = True
 

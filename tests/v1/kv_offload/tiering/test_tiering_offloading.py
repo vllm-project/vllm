@@ -11,6 +11,8 @@ These tests verify:
 5. Eviction coordination between tiers
 """
 
+import mmap
+import uuid
 from collections.abc import Iterable
 from unittest.mock import MagicMock
 
@@ -24,6 +26,8 @@ from vllm.v1.kv_offload.base import (
     RequestOffloadingContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.memory import CPUOffloadMemoryConfig
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
@@ -94,6 +98,57 @@ class TestExampleSecondaryTierManager:
 
 class TestTieringOffloadingManager:
     """Tests for TieringOffloadingManager."""
+
+    def test_real_mmap_primary_view_and_secondary_store_load(self, tmp_path):
+        instance_id = str(uuid.uuid4())
+        memory_config = CPUOffloadMemoryConfig.from_extra_config(
+            {"cpu_memory_backend": "shm", "cpu_memory_path": str(tmp_path)}
+        )
+        mmap_region = SharedOffloadRegion(
+            instance_id=instance_id,
+            num_blocks=5,
+            rank=None,
+            kv_bytes_per_block=mmap.PAGESIZE,
+            cpu_page_size=mmap.PAGESIZE,
+            memory_config=memory_config,
+        )
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=5, mmap_region=mmap_region
+        )
+        primary_kv_view = primary_tier.get_kv_memoryview()
+        secondary_tier = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=primary_kv_view,
+            tier_type="example",
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[secondary_tier],
+        )
+
+        try:
+            assert mmap_region.mmap_path == str(
+                tmp_path / f"vllm_offload_{instance_id}.mmap"
+            )
+            assert primary_kv_view.shape == (5, mmap.PAGESIZE)
+            assert primary_kv_view.obj.ctypes.data == mmap_region._base.data_ptr()
+            assert secondary_tier._primary_kv_view is primary_kv_view
+
+            blocks = to_keys(range(2))
+            result = manager.prepare_store(blocks, _CTX)
+            assert result is not None
+            manager.complete_store(blocks, _CTX, success=True)
+            assert secondary_tier.get_num_blocks() == 2
+            manager.on_schedule_end()
+            manager.on_schedule_end()
+
+            primary_tier.reset_cache()
+            assert manager.lookup(blocks[0], _CTX) is None
+            manager.on_schedule_end()
+            manager.on_schedule_end()
+            assert manager.lookup(blocks[0], _CTX) is True
+        finally:
+            manager.shutdown()
 
     @pytest.fixture
     def manager_setup(self):

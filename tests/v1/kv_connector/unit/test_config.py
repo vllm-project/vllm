@@ -5,8 +5,15 @@
 
 import pytest
 
-from vllm.config import CacheConfig, KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    KVTransferConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.v1.kv_offload.cpu.memory import CPUOffloadMemoryConfig
 
 pytestmark = pytest.mark.cpu_test
 
@@ -33,11 +40,21 @@ def stub_lmcache_mp_connector(monkeypatch):
     )
 
 
+def _parallel_config(tp: int, pp: int) -> ParallelConfig:
+    # These unit tests only exercise config translation. Set the backend
+    # explicitly so synthetic multi-rank cases do not depend on local GPU count.
+    return ParallelConfig(
+        tensor_parallel_size=tp,
+        pipeline_parallel_size=pp,
+        distributed_executor_backend="mp",
+    )
+
+
 @pytest.mark.parametrize(
     "kv_offloading_backend,kv_offloading_size,tp,pp,expected_backend,expected_bytes",
     [
         ("native", 4.0, 1, 1, "OffloadingConnector", 4.0 * (1 << 30)),
-        # bytes per rank: 8.0 GiB / (2 * 2) = 2.0 GiB
+        # cpu_bytes_to_use remains server-wide at this config layer.
         ("native", 8.0, 2, 2, "OffloadingConnector", 8.0 * (1 << 30)),
         # ``lmcache`` backend now defaults to LMCacheMPConnector. The KV
         # storage capacity is owned by the standalone LMCache server, so
@@ -68,10 +85,9 @@ def test_kv_connector(
             kv_offloading_backend=kv_offloading_backend,
             kv_offloading_size=kv_offloading_size,
         ),
+        device_config=DeviceConfig(device="cpu"),
         kv_transfer_config=kv_transfer_config,
-        parallel_config=ParallelConfig(
-            tensor_parallel_size=tp, pipeline_parallel_size=pp
-        ),
+        parallel_config=_parallel_config(tp, pp),
     )
 
     # No KV transfer config expected
@@ -174,6 +190,7 @@ def test_kv_offloading_size_only_uses_native_default():
             kv_offloading_size=4.0,
             # kv_offloading_backend not set, should default to "native"
         ),
+        device_config=DeviceConfig(device="cpu"),
     )
 
     kv_transfer_config = vllm_config.kv_transfer_config
@@ -181,3 +198,47 @@ def test_kv_offloading_size_only_uses_native_default():
     assert kv_transfer_config.kv_connector == "OffloadingConnector"
     assert kv_transfer_config.kv_role == "kv_both"
     assert kv_connector_extra_config["cpu_bytes_to_use"] == 4.0 * (1 << 30)
+
+
+def test_kv_offloading_preserves_cpu_memory_backend_extra_config():
+    kv_transfer_config = KVTransferConfig(
+        kv_connector_extra_config={
+            "spec_name": "TieringOffloadingSpec",
+            "cpu_memory_backend": "hugetlbfs",
+            "cpu_memory_path": "/dev/hugepages/vllm",
+            "cpu_hugepage_block_size": "1GB",
+        }
+    )
+
+    vllm_config = VllmConfig(
+        cache_config=CacheConfig(kv_offloading_size=4.0),
+        device_config=DeviceConfig(device="cpu"),
+        kv_transfer_config=kv_transfer_config,
+    )
+
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+    assert vllm_config.kv_transfer_config.kv_connector == "OffloadingConnector"
+    assert vllm_config.kv_transfer_config.kv_role == "kv_both"
+    assert extra_config["cpu_bytes_to_use"] == 4.0 * (1 << 30)
+    assert extra_config["spec_name"] == "TieringOffloadingSpec"
+    assert extra_config["cpu_memory_backend"] == "hugetlbfs"
+    assert extra_config["cpu_memory_path"] == "/dev/hugepages/vllm"
+    assert extra_config["cpu_hugepage_block_size"] == "1GB"
+
+
+@pytest.mark.parametrize(
+    ("extra_config", "match"),
+    [
+        (
+            {"cpu_memory_backend": "invalid"},
+            "Invalid cpu_memory_backend",
+        ),
+        (
+            {"cpu_memory_backend": "hugetlbfs"},
+            "cpu_memory_path is required",
+        ),
+    ],
+)
+def test_cpu_memory_backend_config_errors_are_clear(extra_config, match):
+    with pytest.raises(ValueError, match=match):
+        CPUOffloadMemoryConfig.from_extra_config(extra_config)
