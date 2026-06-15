@@ -6,7 +6,6 @@ from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
 import torch
-from torch.nn.parameter import UninitializedParameter
 
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
@@ -198,6 +197,7 @@ class RoutedExperts(PluggableLayer):
             "AutoGPTQMoEMethod",
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
+            "CompressedTensorsW4A16FlydslMoEMethod",
         )
 
     def _ensure_moe_quant_config_init(self):
@@ -611,6 +611,7 @@ class RoutedExperts(PluggableLayer):
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
             "CompressedTensorsWNA16RDNA3MoEMethod",
+            "CompressedTensorsW4A16FlydslMoEMethod",
         ):
             if is_transposed:
                 loaded_weight = loaded_weight.t().contiguous()
@@ -624,13 +625,6 @@ class RoutedExperts(PluggableLayer):
         # based on the shard id. This will be whatever
         # dimension intermediate_size_per_partition is used.
         SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
-
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
-            param.weight_type = loaded_weight.item()
-            param.data.copy_(loaded_weight)
-            return True if return_success else None
 
         # Case for BitsAndBytes
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
@@ -676,18 +670,6 @@ class RoutedExperts(PluggableLayer):
         full_load = len(loaded_weight.shape) == 3
         if full_load:
             shard_dim += 1
-
-        # Materialize GGUF UninitializedParameter accounting merged weights
-        if is_gguf_weight and isinstance(param, UninitializedParameter):
-            # To materialize a tensor, we must have full shape including
-            # number of experts, making this portion to require `full_load`.
-            assert full_load
-            final_shape = list(loaded_weight.shape)
-            # w1 and w3 are merged per expert.
-            if shard_id in {"w1", "w3"}:
-                final_shape[1] *= 2
-            final_shape[shard_dim] = final_shape[shard_dim] // self.moe_config.tp_size
-            param.materialize(final_shape, dtype=loaded_weight.dtype)
 
         expert_data = param.data if full_load else param.data[expert_id]
 
