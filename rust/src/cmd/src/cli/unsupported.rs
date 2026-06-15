@@ -585,10 +585,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub ssl_ciphers: Option<Unsupported>,
 
-    /// FastAPI root_path when app is behind a path based routing proxy.
-    #[arg(long)]
-    pub root_path: Option<Unsupported>,
-
     /// Additional ASGI middleware to apply to the app. We accept multiple
     /// --middleware arguments. The value should be an import path. If a
     /// function is provided, vLLM will add it to the server using

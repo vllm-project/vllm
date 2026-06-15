@@ -198,6 +198,13 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub api_key: Vec<String>,
 
+    /// URL path prefix for reverse-proxy deployments (e.g., `/api`). When set,
+    /// all routes are also served under this prefix so the server responds on
+    /// both the bare and prefixed paths.
+    #[arg(long)]
+    #[serde(default)]
+    pub root_path: Option<String>,
+
     /// Disable periodic logging of engine statistics (throughput, queue depth,
     /// cache usage).
     #[arg(long)]
@@ -283,6 +290,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             api_server_options,
             api_keys: self.api_key,
+            root_path: self.root_path,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
@@ -326,6 +334,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             api_server_options,
             api_keys: self.api_key,
+            root_path: self.root_path,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
             shutdown_timeout,
