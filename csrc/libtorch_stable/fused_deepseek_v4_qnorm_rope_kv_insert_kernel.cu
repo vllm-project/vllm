@@ -18,7 +18,7 @@
  *   ROPE_DIM  = 64   (RoPE applied to dims [NOPE_DIM, HEAD_DIM))
  *   NOPE_DIM  = 448
  *   QUANT_BLOCK = 64 (UE8M0 FP8 quant block)
- *   FP8_MAX   = 448.0f
+ *   FP8_MAX   = 224.0f on ROCm FNUZ / 448.0f on OCP
  *   is_neox=false (GPT-J interleaved pairs)
  *   cos_sin_cache layout [max_pos, rope_dim] = cos || sin (cos first, sin
  *     second along last dim; each half is rope_dim/2 = 32 values)
@@ -64,15 +64,11 @@ __device__ __forceinline__ uint8_t rocm_cvt_float_to_fp8_e4m3(float val) {
   // HIP defines HIP_FP8_TYPE_OCP based on HIP version, not GPU arch. On gfx942
   // MFMA only supports FNUZ FP8, and the rest of vLLM's gfx942 path uses FNUZ.
   #if defined(HIP_FP8_TYPE_OCP) && defined(__gfx950__)
-  auto fp8_val = __hip_cvt_float_to_fp8(
-      val, __hip_fp8_e4m3::__default_saturation,
-      __hip_fp8_e4m3::__default_interpret);
+  __hip_fp8_e4m3 fp8_val(val);
   #else
-  auto fp8_val = __hip_cvt_float_to_fp8(
-      val, __hip_fp8_e4m3_fnuz::__default_saturation,
-      __hip_fp8_e4m3_fnuz::__default_interpret);
+  __hip_fp8_e4m3_fnuz fp8_val(val);
   #endif
-  return static_cast<uint8_t>(fp8_val);
+  return reinterpret_cast<uint8_t&>(fp8_val);
 }
 #endif
 
