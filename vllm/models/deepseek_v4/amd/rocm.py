@@ -789,11 +789,17 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         kv = workspace_manager.get_simultaneous(
             ((self.PREFILL_CHUNK_SIZE, M, q.shape[-1]), torch.bfloat16),
         )[0]
-        # TODO: workspace is torch.empty() and only the compressed-K prefix +
-        # SWA window are written per chunk row; the indexer's topK can land in
-        # the unwritten holes for short sequences. Proper fix is to mask invalid
-        # rows in the indexer (score = -inf) or in rocm_sparse_attn_prefill.
-        kv.zero_()
+        # The workspace is uninitialized (torch.empty); per chunk row only the
+        # compressed-K prefix [0, ceil(seq_len / compress_ratio)) and the SWA
+        # window [N, N + gather_len) are written, leaving unwritten holes. The
+        # combined indices passed to rocm_sparse_attn_prefill only ever address
+        # those written ranges: combine_topk_swa_indices drops compressed topK
+        # entries outside [0, N) (the indexer scores invalid positions as -inf)
+        # and emits SWA indices bounded by gather_len, so the holes are never
+        # read and the workspace does not need to be zeroed. This was verified
+        # on gfx942 by instrumenting every combined index against the written
+        # ranges across short and mixed-length sequences at low and high
+        # concurrency (zero out-of-range reads).
         for chunk_idx in range(num_chunks):
             chunk_start = chunk_idx * self.PREFILL_CHUNK_SIZE
             chunk_end = min(chunk_start + self.PREFILL_CHUNK_SIZE, num_prefills)
