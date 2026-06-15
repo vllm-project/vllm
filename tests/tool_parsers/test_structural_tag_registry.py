@@ -24,7 +24,7 @@ from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 from vllm.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 from vllm.tool_parsers.llama_tool_parser import Llama3JsonToolParser
 from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
-from vllm.tool_parsers.qwen3coder_tool_parser import Qwen3CoderToolParser
+from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
     VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
@@ -183,7 +183,7 @@ def test_get_model_structural_tag_supports_named_tool_choice(
         (KimiK2ToolParser, "kimi"),
         (Llama3JsonToolParser, "llama"),
         (MinimaxM2ToolParser, "minimax"),
-        (Qwen3CoderToolParser, "qwen_3_coder"),
+        (Qwen3EngineToolParser, "qwen_3_coder"),
     ],
 )
 def test_tool_parsers_declare_matching_xgrammar_builtin_model(parser_cls, model):
@@ -238,7 +238,7 @@ def test_get_structural_tag_disables_reasoning(
         tools=sample_tools,
         tool_choice="auto",
     )
-    parser = Qwen3CoderToolParser(MagicMock(), tools=sample_tools)
+    parser = Qwen3EngineToolParser(MagicMock(), tools=sample_tools)
 
     parser.get_structural_tag(request)
 
@@ -261,7 +261,7 @@ def test_unified_parser_get_structural_tag_disables_reasoning(
     )
 
     class TestParser(DelegatingParser):
-        tool_parser_cls = Qwen3CoderToolParser
+        tool_parser_cls = Qwen3EngineToolParser
 
     request = ChatCompletionRequest(
         messages=[],
