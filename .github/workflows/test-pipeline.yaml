@@ -52,6 +52,11 @@ on:
         type: string
         default: ''
         description: 'YAML content to override hardware_profiles.yaml (optional, replaces entire file)'
+      enable_profiling:
+        required: false
+        type: boolean
+        default: false
+        description: 'Enable Kineto (torch) profiling during benchmarks'
       docker_commit:
         required: false
         type: string
@@ -164,6 +169,7 @@ jobs:
           -e TP_SIZE=${{ inputs.tp_size }} \
           -e MODELS=${{ inputs.models }} \
           -e BENCHMARK_OUTPUT_LEN=${{ inputs.benchmark_output_len }} \
+          -e BENCHMARK_ENABLE_PROFILING=${{ inputs.enable_profiling && 'true' || '' }} \
           -e GPU_TYPE=${{ inputs.device }} \
           -e MODEL_PATH_PREFIX=${{ inputs.model_path }} \
           -e BEE_DIR=/vllm-workspace/apiary/bee \
@@ -200,6 +206,7 @@ jobs:
           -e TP_SIZE=${{ inputs.tp_size }} \
           -e MODELS=${{ inputs.models }} \
           -e BENCHMARK_OUTPUT_LEN=${{ inputs.benchmark_output_len }} \
+          -e BENCHMARK_ENABLE_PROFILING=${{ inputs.enable_profiling && 'true' || '' }} \
           -e GPU_TYPE=${{ inputs.device }} \
           -e MODEL_PATH_PREFIX=${{ inputs.model_path }} \
           -e BEE_DIR=/vllm-workspace/apiary/bee \
@@ -269,6 +276,15 @@ jobs:
         gpu: ${{ inputs.device }}
         annotate: true
         target_branch: ${{ inputs.result_upload_branch }}
+
+    - name: Upload profiler traces
+      if: ${{ inputs.test_group == 'performance' && inputs.enable_profiling }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: "profiler-traces-${{ inputs.device }}-tp${{ inputs.tp_size }}"
+        path: "${{ runner.temp }}/traces/"
+        if-no-files-found: warn
+        retention-days: 14
 
     - name: Upload model architecture results
       if: ${{ inputs.test_group == 'quantization_32bit_logits' && inputs.result_upload_branch != 'None' }}

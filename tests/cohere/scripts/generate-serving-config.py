@@ -122,11 +122,30 @@ def generate_eval_configs(
     return configs
 
 
+PROFILER_TRACE_DIR = "/root/output/traces"
+
+
+def _profiler_config_json() -> str:
+    """Return a JSON string for --profiler-config that enables Kineto tracing."""
+    cfg = {
+        "profiler": "torch",
+        "torch_profiler_dir": PROFILER_TRACE_DIR,
+        "torch_profiler_with_stack": True,
+        "torch_profiler_with_memory": True,
+        "torch_profiler_with_flops": True,
+        "ignore_frontend": True,
+        "delay_iterations": 1,
+        "max_iterations": 3,
+    }
+    return json.dumps(cfg, separators=(",", ":"))
+
+
 def generate_benchmark_configs(
     models: dict[str, str],
     benchmarks: list[dict[str, Any]],
     tp_size: int,
     output_len: int,
+    enable_profiling: bool = False,
 ) -> list[dict[str, Any]]:
     configs: list[dict[str, Any]] = []
     for model_name, model_path in models.items():
@@ -152,6 +171,11 @@ def generate_benchmark_configs(
                             # prefix caching affects benchmark results,
                             # even for random dataset
                             "no_enable_prefix_caching": "",
+                            **(
+                                {"profiler-config": f"'{_profiler_config_json()}'"}
+                                if enable_profiling
+                                else {}
+                            ),
                         },
                         "client_parameters": {
                             **CLIENT_DEFAULTS,
@@ -161,6 +185,7 @@ def generate_benchmark_configs(
                             "num_warmups": warmup,
                             "num_prompts": requests * mc,
                             "max_concurrency": mc,
+                            **({"profile": ""} if enable_profiling else {}),
                         },
                     }
                 )
@@ -194,8 +219,13 @@ def main(mode: str):
         output_len = int(benchmark_output_len)
         if output_len <= 0:
             raise ValueError("BENCHMARK_OUTPUT_LEN must be a positive integer")
+        enable_profiling = os.environ.get("BENCHMARK_ENABLE_PROFILING", "") == "true"
         configs = generate_benchmark_configs(
-            models, benchmark_config["benchmarks"], tp_size, output_len
+            models,
+            benchmark_config["benchmarks"],
+            tp_size,
+            output_len,
+            enable_profiling=enable_profiling,
         )
 
     with open(CFG_PATH, "w") as fp:

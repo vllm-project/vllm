@@ -59,6 +59,11 @@ on:
         type: string
         default: ''
         description: 'YAML content to override hardware_profiles.yaml (optional, replaces entire file)'
+      enable_profiling:
+        required: false
+        type: boolean
+        default: false
+        description: 'Enable Kineto (torch) profiling during benchmarks'
       result_upload_branch:
         required: false
         default: ci_dump
@@ -100,6 +105,11 @@ on:
         required: true
         type: string
         description: 'YAML content to override hardware_profiles.yaml (optional, replaces entire file)'
+      enable_profiling:
+        required: false
+        type: boolean
+        default: false
+        description: 'Enable Kineto (torch) profiling during benchmarks'
       result_upload_branch:
         required: true
         type: string
@@ -164,5 +174,6 @@ jobs:
       models: ${{ matrix.models }}
       benchmark_output_len: ${{ matrix.benchmark_output_len || '' }}
       hardware_profiles_override: ${{ matrix.hardware_profiles_override }}
+      enable_profiling: ${{ inputs.enable_profiling || false }}
       docker_commit: ${{ inputs.docker_commit }}
       model_path: ${{ inputs.model_path }}

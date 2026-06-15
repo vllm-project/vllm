@@ -375,6 +375,13 @@ main() {
   echo "$env_output" >"$RESULTS_FOLDER/vllm_env.txt"
 
   # COHERE START
+  # Ensure the profiler traces directory exists when profiling is enabled.
+  # The torch profiler writes traces here; they get volume-mounted to the host.
+  if [[ "${BENCHMARK_ENABLE_PROFILING:-}" == "true" ]]; then
+    mkdir -p /root/output/traces
+    echo "Profiling enabled — traces will be written to /root/output/traces"
+  fi
+
   # generate configs for serving test sweep
   MODEL_NAME=$1 MODEL_PATH=$2 python3 ../tests/cohere/scripts/generate-serving-config.py
 
