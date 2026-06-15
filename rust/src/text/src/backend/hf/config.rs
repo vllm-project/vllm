@@ -181,11 +181,15 @@ impl ModelConfig {
     /// Return the effective model vocabulary size, following the same
     /// simplified text-config selection as `model_type`.
     pub fn vocab_size(&self) -> Result<u32> {
-        self.vocab_size
-            .or_else(|| self.text_config.as_deref()?.vocab_size)
-            .ok_or_else(|| {
-                Error::Tokenizer("the model config does not define `vocab_size`".to_string())
-            })
+        if let Some(vocab_size) = self.vocab_size {
+            Ok(vocab_size)
+        } else if let Some(text_config) = self.text_config.as_deref() {
+            text_config.vocab_size()
+        } else {
+            Err(Error::Tokenizer(
+                "the model config does not define `vocab_size`".to_string(),
+            ))
+        }
     }
 
     /// Match Python's current expert-count priority on the selected text
