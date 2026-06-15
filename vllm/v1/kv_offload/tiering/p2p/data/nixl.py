@@ -17,6 +17,11 @@ from vllm.v1.kv_offload.tiering.p2p.data.base import DataTransport, PollResult
 
 logger = init_logger(__name__)
 
+# Shared sentinel returned by poll() in the steady state (no inflight, or
+# no transfer changed state since the last poll). Callers must not mutate
+# its lists — current callers only iterate / membership-test / equality-check.
+_EMPTY_POLL_RESULT: PollResult = PollResult(done=[], failed=[])
+
 
 class NixlTransport(DataTransport):
     """Manages a NIXL agent, memory registration, and block transfers.
@@ -152,10 +157,10 @@ class NixlTransport(DataTransport):
         Completed handles are released automatically.
         """
         if not self._inflight:
-            return PollResult(done=[], failed=[])
+            return _EMPTY_POLL_RESULT
 
-        done_ids: list[int] = []
-        failed_ids: list[int] = []
+        done_ids: list[int] | None = None
+        failed_ids: list[int] | None = None
 
         for transfer_id, handle in list(self._inflight.items()):
             try:
@@ -169,16 +174,28 @@ class NixlTransport(DataTransport):
                 )
                 continue
             if state == "DONE":
+                if done_ids is None:
+                    done_ids = []
                 done_ids.append(transfer_id)
             elif state not in ("PROC", "PEND"):
+                if failed_ids is None:
+                    failed_ids = []
                 failed_ids.append(transfer_id)
 
+        if done_ids is None and failed_ids is None:
+            return _EMPTY_POLL_RESULT
+
         handles_to_release = []
-        for tid in done_ids + failed_ids:
+        for tid in done_ids or ():
+            handles_to_release.append(self._inflight.pop(tid))
+        for tid in failed_ids or ():
             handles_to_release.append(self._inflight.pop(tid))
         self._release_handles(handles_to_release)
 
-        return PollResult(done=done_ids, failed=failed_ids)
+        return PollResult(
+            done=done_ids if done_ids is not None else _EMPTY_POLL_RESULT.done,
+            failed=failed_ids if failed_ids is not None else _EMPTY_POLL_RESULT.failed,
+        )
 
     def cancel(self, transfer_ids: Iterable[int]) -> None:
         """Cancel inflight transfers by their IDs."""
