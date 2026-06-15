@@ -1049,8 +1049,8 @@ class MiniMaxM3SparseForConditionalGeneration(
             "patch_merge_mlp.": "vision_tower.patch_merge_mlp.",
         },
         orig_to_new_substr={
-            ".mlp.fc1.": ".fc1.",
-            ".mlp.fc2.": ".fc2.",
+            ".mlp.fc1.": ".fc1",
+            ".mlp.fc2.": ".fc2",
         },
     )
 
