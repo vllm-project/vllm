@@ -285,7 +285,11 @@ class ModelConfig:
     """Overrides or sets generation config. e.g. `{"temperature": 0.5}`. If
     used with `--generation-config auto`, the override parameters will be
     merged with the default config from the model. If used with
-    `--generation-config vllm`, only the override parameters are used."""
+    `--generation-config vllm`, only the override parameters are used.
+
+    The override applies to the full generation config, including special
+    tokens such as `eos_token_id` and `stop_token_ids`, not only sampling
+    parameters."""
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
@@ -1398,11 +1402,17 @@ class ModelConfig:
     def try_get_generation_config(self) -> dict[str, Any]:
         """
         This method attempts to retrieve the non-default values of the
-        generation config for this model.
+        generation config for this model, with `override_generation_config`
+        applied.
 
         The generation config can contain information about special tokens, as
         well as sampling parameters. Which is why this method exists separately
         to `get_diff_sampling_param`.
+
+        `override_generation_config` is applied here so that every consumer of
+        the merged generation config (special tokens such as `eos_token_id` /
+        `stop_token_ids` as well as the sampling parameters surfaced by
+        `get_diff_sampling_param`) observes a single, consistent override.
 
         Returns:
             A dictionary containing the non-default generation config.
@@ -1423,10 +1433,21 @@ class ModelConfig:
                 hf_token=self.hf_token,
             )
 
-        if config is None:
-            return {}
+        config_dict = {} if config is None else config.to_diff_dict()
 
-        return config.to_diff_dict()
+        # Apply the user override to the full generation config so that special
+        # tokens (e.g. eos_token_id / stop_token_ids) honor the override too,
+        # not only the sampling allow-list in get_diff_sampling_param().
+        if self.override_generation_config:
+            logger.info_once(
+                "Generation config has been overridden by "
+                "`--override-generation-config`: `%s`.",
+                str(self.override_generation_config),
+                scope="local",
+            )
+            config_dict.update(self.override_generation_config)
+
+        return config_dict
 
     def get_diff_sampling_param(self) -> dict[str, Any]:
         """
@@ -1445,10 +1466,14 @@ class ModelConfig:
         """
         src = self.generation_config
 
-        config = {} if src == "vllm" else self.try_get_generation_config()
-
-        # Overriding with given generation config
-        config.update(self.override_generation_config)
+        if src == "vllm":
+            # The "vllm" source loads no generation config, so the override is
+            # the only source of sampling parameters here.
+            config = dict(self.override_generation_config)
+        else:
+            # try_get_generation_config() already merges
+            # override_generation_config, so no second update is needed.
+            config = self.try_get_generation_config()
 
         available_params = [
             "repetition_penalty",
