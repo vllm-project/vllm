@@ -21,6 +21,7 @@ from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
 from vllm.distributed.parallel_state import (
+    get_node_count,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
@@ -917,6 +918,16 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         self.tp_size = get_tensor_model_parallel_world_size()
         if self.tp_size <= 1:
             logger.warning_once("AllReduce fusion pass is disabled for tp_size <= 1.")
+            return
+        # Multi-node requires the MNNVL backend (trtllm is single-node only).
+        # MNNVL fused allreduce has known correctness issues when the TP group
+        # spans multiple NVLink domains (e.g. GB200 NVL72 node boundaries).
+        # Fall back to NCCL allreduce + separate RMSNorm which is safe.
+        if get_node_count() > 1:
+            logger.warning_once(
+                "AllReduce fusion pass is disabled for multi-node setups "
+                "due to known MNNVL fused allreduce correctness issues."
+            )
             return
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="all_reduce_fusion_pass"
