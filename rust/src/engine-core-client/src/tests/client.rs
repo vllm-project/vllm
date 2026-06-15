@@ -2463,6 +2463,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             logprobs: None,
             prompt_logprobs: None,
             min_p: 0.0,
+            p_less: false,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             repetition_penalty: 1.0,

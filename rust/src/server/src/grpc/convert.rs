@@ -145,6 +145,10 @@ fn build_sampling_params(
         if s.min_p != 0.0 {
             params.min_p = Some(s.min_p);
         }
+        // p-less is a boolean, either true or false.
+        if s.p_less {
+            params.p_less = Some(s.p_less);
+        }
         params.seed = s.seed;
     }
 
