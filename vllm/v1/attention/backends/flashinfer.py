@@ -15,7 +15,10 @@ from flashinfer import (
     MultiLevelCascadeAttentionWrapper,
 )
 from flashinfer.decode import fast_decode_plan, trtllm_batch_decode_with_kv_cache
-from flashinfer.prefill import trtllm_batch_context_with_kv_cache
+from flashinfer.prefill import (
+    trtllm_batch_context_with_kv_cache,
+    trtllm_fmha_v2_prefill,
+)
 from flashinfer.utils import FP4Tensor
 from typing_extensions import override
 
@@ -38,6 +41,7 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
+    supports_fmha_v2_sm120_attention,
     use_trtllm_attention,
 )
 from vllm.utils.math_utils import cdiv
@@ -411,9 +415,10 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
-        """FlashInfer supports sinks when TRTLLM attention is available (SM100)."""
+        """FlashInfer supports sinks on SM100 (trtllm-gen) and SM120 (fmha_v2 HMMA)."""
         from vllm.utils.flashinfer import (
             force_use_trtllm_attention,
+            supports_fmha_v2_sm120_attention,
             supports_trtllm_attention,
         )
 
@@ -422,8 +427,7 @@ class FlashInferBackend(AttentionBackend):
         if force_use_trtllm_attention() is False:
             return False
 
-        # Check if TRTLLM is supported on this platform
-        return supports_trtllm_attention()
+        return supports_trtllm_attention() or supports_fmha_v2_sm120_attention()
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
@@ -647,10 +651,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # if TRTLLM attention kernel is not used when building attn metadata
         can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
 
-        if (
+        # SM120 fmha_v2 does not support FP8 Q quantization
+        can_quantize_q = (
             can_use_trtllm
+            and not supports_fmha_v2_sm120_attention()
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
-        ):
+        )
+        if can_quantize_q:
             if self.is_kvcache_nvfp4:
                 # NVFP4 KV cache uses FP8 quantized queries
                 self.q_data_type = FlashInferBackend.get_dtype_for_flashinfer(
@@ -663,7 +670,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Prefer TRTLLM attention for decoding in all cases.
         # This allows us to use AttentionCGSupport.UNIFORM_BATCH mode.
-        self.use_trtllm_decode_attention = can_use_trtllm
+        # SM120 fmha_v2 only supports prefill — decode uses standard flashinfer.
+        self.use_trtllm_decode_attention = (
+            can_use_trtllm and not supports_fmha_v2_sm120_attention()
+        )
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=can_use_trtllm)
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
@@ -929,6 +939,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             force_use_trtllm=self.attention_config.use_trtllm_attention,
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
+            has_sliding_window=self.window_left != -1,
         )
         decode_use_trtllm = (
             self.use_trtllm_decode_attention and self.dcp_world_size <= 1
@@ -939,7 +950,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
 
         if not all_uses_trtllm:
-            if self.has_sinks:
+            # SM120 uses fmha_v2 for prefill (with sinks) but standard
+            # flashinfer for decode, so all_uses_trtllm is False even
+            # though sinks are supported via the fmha_v2 prefill path.
+            if self.has_sinks and not supports_fmha_v2_sm120_attention():
                 raise NotImplementedError(
                     "FlashInfer backend currently does not support attention "
                     "sinks, please use trtllm on blackwell or flash attention "
@@ -1596,96 +1610,176 @@ class FlashInferImpl(AttentionImpl):
                 # degenerate strides on size=1 dims for TMA alignment.
                 prefill_query = prefill_query.contiguous()
                 prefill_query = canonicalize_singleton_dim_strides(prefill_query)
-                workspace_buffer = _get_trtllm_gen_workspace_buffer()
-                block_tables_prefill = attn_metadata.prefill.block_tables
                 seq_lens_prefill = attn_metadata.prefill.seq_lens
 
-                # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
-                assert get_kv_cache_layout() == "HND"
-                assert is_strictly_contiguous(prefill_query)
-                assert is_strictly_contiguous(workspace_buffer)
-                assert is_strictly_contiguous(block_tables_prefill)
-                assert is_strictly_contiguous(seq_lens_prefill)
+                # needs_fp8_out is only set in the trtllm-gen branch below;
+                # initialize here so the post-block dequantize check is
+                # always defined (the SM120 fmha_v2 branch does not produce
+                # FP8 output requiring dequantize).
+                needs_fp8_out = False
 
-                if output.dtype == FP4_DTYPE:
-                    assert self.o_sf_scale is not None
-                    out = FP4Tensor(
-                        data=output[num_decode_tokens:],
-                        scale=output_block_scale,
-                        scale_start_index=num_decode_tokens,
-                        original_shape=prefill_query.shape,
-                    )
-                else:
-                    assert self.o_sf_scale is None
-                    out = output[num_decode_tokens:]
-
-                # NVFP4 trtllm kernel only supports FP8 output.
-                # Use a pre-allocated FP8 buffer and dequantize afterwards.
-                needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
-                if needs_fp8_out:
-                    out = self._nvfp4_fp8_out[:num_prefill_tokens]
-
-                prefill_kv_block_scales = None
-                if self.is_kvcache_nvfp4:
-                    # NVFP4 trtllm-gen kernel requires FP8 query.
-                    assert attn_metadata.q_data_type == FP8_DTYPE, (
-                        "NVFP4 KV cache requires FP8 quantized queries for "
-                        "trtllm-gen prefill. Set "
-                        "disable_flashinfer_q_quantization=False."
-                    )
-                    mock_kv_cache = nvfp4_kv_data
-                    mock_block_table = block_tables_prefill
-                    prefill_kv_block_scales = nvfp4_kv_block_scales
-                elif (
-                    attn_metadata.q_data_type != FP8_DTYPE
-                    and self.kv_cache_dtype.startswith("fp8")
-                ):
-                    # TRTLLM prefill attention does not support BF16 Q
-                    # and fp8 kv cache. So to enable prefill attention
-                    # with fp8 kv cache, we can construct a mock block
-                    # and mock kv cache with BF16 KV involved in the prefill
+                if supports_fmha_v2_sm120_attention():
+                    # SM120: use fmha_v2 HMMA kernels with paged KV cache.
+                    # trtllm-gen cubins don't exist for SM120, but fmha_v2
+                    # HMMA supports sinks natively via JIT compilation.
                     #
-                    kv_cache_permute = canonicalize_singleton_dim_strides(
-                        kv_cache_permute
+                    # Use Q_PAGED_KV_NHD to read from the paged KV cache.
+                    # The raw key/value tensors only contain the current
+                    # step's tokens, but seq_lens may include additional
+                    # tokens that vLLM already wrote to the paged cache
+                    # (via do_kv_cache_update, called before forward).
+                    # FlashInfer allocates kv_cache in
+                    #   [num_pages, 2, page_size, num_kv_heads, D] format,
+                    # which is already the Q_PAGED_KV_NHD layout.
+                    #
+                    # trtllm_fmha_v2_prefill expects cum_seq_lens_kv to be
+                    # cumulative TOKEN lengths starting from 0. The
+                    # TRTLLMPrefill metadata stores PAGE indptrs in that
+                    # field (used differently by trtllm-gen), so rebuild
+                    # the proper token cumsum from seq_lens.
+                    cum_kv_tokens = torch.cat(
+                        [
+                            torch.zeros(
+                                1,
+                                dtype=seq_lens_prefill.dtype,
+                                device=seq_lens_prefill.device,
+                            ),
+                            torch.cumsum(
+                                seq_lens_prefill,
+                                dim=0,
+                                dtype=seq_lens_prefill.dtype,
+                            ),
+                        ]
                     )
-                    kv_strides = kv_cache_permute.stride()
-                    assert (
-                        kv_strides[-1] == 1
-                        and kv_strides[-2] == kv_cache_permute.shape[-1]
-                    ), (
-                        "KV cache inner dims (block_size, head_size) must be "
-                        f"contiguous, got strides {kv_strides}"
+                    # fmha_v2 SM120 path does not yet support sliding
+                    # window (the kernel raises "Sliding window attention
+                    # is not yet supported for FMHAv2 on SM120"), so the
+                    # batch must have been disqualified from the trtllm
+                    # path upstream when any layer has window_left != -1.
+                    assert self.window_left == -1, (
+                        "SM120 fmha_v2 does not support sliding window; "
+                        "expected use_trtllm_attention() to disqualify this "
+                        "path when window_left != -1"
                     )
-                    mock_kv_cache, mock_block_table = trtllm_prefill_attn_kvfp8_dequant(
-                        kv_cache_permute,
-                        block_tables_prefill,
-                        layer._k_scale,
-                        layer._v_scale,
-                        attn_metadata.q_data_type,
+                    fmha_v2_workspace = _get_trtllm_gen_workspace_buffer()
+                    fmha_v2_kwargs: dict = {}
+                    if self.sinks is not None:
+                        fmha_v2_kwargs["sinks"] = self.sinks
+                    trtllm_fmha_v2_prefill(
+                        (prefill_query, kv_cache_permute),
+                        input_layout="Q_PAGED_KV_NHD",
+                        workspace_buffer=fmha_v2_workspace,
+                        block_tables=attn_metadata.prefill.block_tables,
+                        seq_lens=seq_lens_prefill,
+                        max_q_len=attn_metadata.prefill.max_q_len,
+                        max_kv_len=attn_metadata.prefill.max_seq_len,
+                        bmm1_scale=self.bmm1_scale,
+                        bmm2_scale=self.bmm2_scale,
+                        batch_size=attn_metadata.num_prefills,
+                        cum_seq_lens_q=attn_metadata.prefill.cum_seq_lens_q,
+                        cum_seq_lens_kv=cum_kv_tokens,
+                        out=output[num_decode_tokens:],
+                        mask_mode="causal",
+                        save_softmax_stats=False,
+                        **fmha_v2_kwargs,
                     )
                 else:
-                    mock_kv_cache = kv_cache_permute
-                    mock_block_table = block_tables_prefill
+                    workspace_buffer = _get_trtllm_gen_workspace_buffer()
+                    block_tables_prefill = attn_metadata.prefill.block_tables
 
-                trtllm_batch_context_with_kv_cache(
-                    query=prefill_query,
-                    kv_cache=mock_kv_cache,
-                    workspace_buffer=workspace_buffer,
-                    block_tables=mock_block_table,
-                    seq_lens=seq_lens_prefill,
-                    max_q_len=attn_metadata.prefill.max_q_len,
-                    max_kv_len=attn_metadata.prefill.max_seq_len,
-                    bmm1_scale=self.bmm1_scale,
-                    bmm2_scale=self.bmm2_scale,
-                    batch_size=attn_metadata.num_prefills,
-                    cum_seq_lens_q=attn_metadata.prefill.cum_seq_lens_q,
-                    cum_seq_lens_kv=attn_metadata.prefill.cum_seq_lens_kv,
-                    window_left=self.window_left,
-                    sinks=self.sinks,
-                    o_sf_scale=self.o_sf_scale,
-                    out=out,
-                    kv_cache_sf=prefill_kv_block_scales,
-                )
+                    # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
+                    assert get_kv_cache_layout() == "HND"
+                    assert is_strictly_contiguous(prefill_query)
+                    assert is_strictly_contiguous(workspace_buffer)
+                    assert is_strictly_contiguous(block_tables_prefill)
+                    assert is_strictly_contiguous(seq_lens_prefill)
+
+                    if output.dtype == FP4_DTYPE:
+                        assert self.o_sf_scale is not None
+                        out = FP4Tensor(
+                            data=output[num_decode_tokens:],
+                            scale=output_block_scale,
+                            scale_start_index=num_decode_tokens,
+                            original_shape=prefill_query.shape,
+                        )
+                    else:
+                        assert self.o_sf_scale is None
+                        out = output[num_decode_tokens:]
+
+                    # NVFP4 trtllm kernel only supports FP8 output.
+                    # Use a pre-allocated FP8 buffer and dequantize afterwards.
+                    needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
+                    if needs_fp8_out:
+                        out = self._nvfp4_fp8_out[:num_prefill_tokens]
+
+                    prefill_kv_block_scales = None
+                    if self.is_kvcache_nvfp4:
+                        # NVFP4 trtllm-gen kernel requires FP8 query.
+                        assert attn_metadata.q_data_type == FP8_DTYPE, (
+                            "NVFP4 KV cache requires FP8 quantized queries for "
+                            "trtllm-gen prefill. Set "
+                            "disable_flashinfer_q_quantization=False."
+                        )
+                        mock_kv_cache = nvfp4_kv_data
+                        mock_block_table = block_tables_prefill
+                        prefill_kv_block_scales = nvfp4_kv_block_scales
+                    elif (
+                        attn_metadata.q_data_type != FP8_DTYPE
+                        and self.kv_cache_dtype.startswith("fp8")
+                    ):
+                        # TRTLLM prefill attention does not support BF16 Q
+                        # and fp8 kv cache. So to enable prefill attention
+                        # with fp8 kv cache, we can construct a mock block
+                        # and mock kv cache with BF16 KV involved in the prefill
+                        #
+                        # The inner (block_size, head_size) dims must be
+                        # contiguous; outer dims may have non-canonical strides
+                        # (e.g. cross-layer unified allocation).
+                        # Degenerate strides on outer dims break TMA descriptors
+                        # (see flashinfer-ai/flashinfer#2232).
+                        kv_cache_permute = canonicalize_singleton_dim_strides(
+                            kv_cache_permute
+                        )
+                        kv_strides = kv_cache_permute.stride()
+                        assert (
+                            kv_strides[-1] == 1
+                            and kv_strides[-2] == kv_cache_permute.shape[-1]
+                        ), (
+                            "KV cache inner dims (block_size, head_size) must be "
+                            f"contiguous, got strides {kv_strides}"
+                        )
+                        mock_kv_cache, mock_block_table = (
+                            trtllm_prefill_attn_kvfp8_dequant(
+                                kv_cache_permute,
+                                block_tables_prefill,
+                                layer._k_scale,
+                                layer._v_scale,
+                                attn_metadata.q_data_type,
+                            )
+                        )
+                    else:
+                        mock_kv_cache = kv_cache_permute
+                        mock_block_table = block_tables_prefill
+
+                    trtllm_batch_context_with_kv_cache(
+                        query=prefill_query,
+                        kv_cache=mock_kv_cache,
+                        workspace_buffer=workspace_buffer,
+                        block_tables=mock_block_table,
+                        seq_lens=seq_lens_prefill,
+                        max_q_len=attn_metadata.prefill.max_q_len,
+                        max_kv_len=attn_metadata.prefill.max_seq_len,
+                        bmm1_scale=self.bmm1_scale,
+                        bmm2_scale=self.bmm2_scale,
+                        batch_size=attn_metadata.num_prefills,
+                        cum_seq_lens_q=attn_metadata.prefill.cum_seq_lens_q,
+                        cum_seq_lens_kv=attn_metadata.prefill.cum_seq_lens_kv,
+                        window_left=self.window_left,
+                        sinks=self.sinks,
+                        o_sf_scale=self.o_sf_scale,
+                        out=out,
+                        kv_cache_sf=prefill_kv_block_scales,
+                    )
 
                 if needs_fp8_out:
                     output[
