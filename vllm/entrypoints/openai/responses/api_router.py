@@ -3,9 +3,8 @@
 
 
 from collections.abc import AsyncGenerator
-from http import HTTPStatus
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
@@ -17,14 +16,11 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
-    validate_json_request,
     with_cancellation,
 )
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-router = APIRouter()
 
 
 def responses(request: Request) -> OpenAIServingResponses | None:
@@ -45,16 +41,6 @@ async def _convert_stream_to_sse_events(
         yield event_data
 
 
-@router.post(
-    "/v1/responses",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
 @with_cancellation
 @load_aware_call
 async def create_responses(request: ResponsesRequest, raw_request: Request):
@@ -77,7 +63,6 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
     )
 
 
-@router.get("/v1/responses/{response_id}")
 @load_aware_call
 async def retrieve_responses(
     response_id: str,
@@ -107,7 +92,6 @@ async def retrieve_responses(
     )
 
 
-@router.post("/v1/responses/{response_id}/cancel")
 @load_aware_call
 async def cancel_responses(response_id: str, raw_request: Request):
     handler = responses(raw_request)
@@ -122,7 +106,3 @@ async def cancel_responses(response_id: str, raw_request: Request):
             status_code=response.error.code,
         )
     return JSONResponse(content=response.model_dump(mode="json", by_alias=True))
-
-
-def attach_router(app: FastAPI):
-    app.include_router(router)

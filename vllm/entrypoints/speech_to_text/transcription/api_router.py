@@ -2,10 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from http import HTTPStatus
 from typing import Annotated
 
-from fastapi import APIRouter, Form, Request
+from fastapi import Form, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
@@ -20,22 +19,11 @@ from .serving import OpenAIServingTranscription
 
 logger = init_logger(__name__)
 
-router = APIRouter()
-
 
 def transcription(request: Request) -> OpenAIServingTranscription:
     return request.app.state.openai_serving_transcription
 
 
-@router.post(
-    "/v1/audio/transcriptions",
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.UNPROCESSABLE_ENTITY.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
 @with_cancellation
 @load_aware_call
 async def create_transcriptions(

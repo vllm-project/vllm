@@ -18,25 +18,6 @@ else:
     RequestLogger = object
 
 
-def register_speech_to_text_api_routers(
-    app: FastAPI,
-    supported_tasks: tuple["SupportedTask", ...],
-):
-    if "realtime" in supported_tasks:
-        from .realtime.api_router import router as realtime_router
-
-        app.include_router(realtime_router)
-
-    if "transcription" in supported_tasks:
-        from .transcription.api_router import router as transcription_router
-
-        app.include_router(transcription_router)
-
-        from .translation.api_router import router as translation_router
-
-        app.include_router(translation_router)
-
-
 def add_websocket_metrics_middleware(app: FastAPI):
     from .realtime.metrics import WebSocketMetricsMiddleware
 

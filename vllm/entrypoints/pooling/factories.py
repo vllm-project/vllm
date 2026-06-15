@@ -3,8 +3,6 @@
 
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI
-
 from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.logger import init_logger
@@ -99,39 +97,6 @@ def init_pooling_io_processors(
         )
         for task, processor_cls in processors.items()
     }
-
-
-def register_pooling_api_routers(
-    app: FastAPI,
-    supported_tasks: tuple["SupportedTask", ...],
-    model_config: ModelConfig | None = None,
-):
-    if model_config is None:
-        return
-
-    pooling_task = model_config.get_pooling_task(supported_tasks)
-
-    if pooling_task is not None:
-        from .pooling.api_router import router as pooling_router
-
-        app.include_router(pooling_router)
-
-    if "classify" in supported_tasks:
-        from .classify.api_router import (
-            router as classify_router,
-        )
-
-        app.include_router(classify_router)
-
-    if "embed" in supported_tasks:
-        from .embed.api_router import router as embed_router
-
-        app.include_router(embed_router)
-
-    if enable_scoring_api(supported_tasks, model_config):
-        from .scoring.api_router import router as score_router
-
-        app.include_router(score_router)
 
 
 def init_pooling_state(

@@ -33,6 +33,7 @@ from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+from vllm.entrypoints.serve.router import init_api_router
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -178,64 +179,7 @@ def build_app(
         app = FastAPI(lifespan=lifespan)
     app.state.args = args
 
-    from vllm.entrypoints.serve import register_vllm_serve_api_routers
-
-    register_vllm_serve_api_routers(app)
-
-    from vllm.entrypoints.openai.models.api_router import (
-        attach_router as register_models_api_router,
-    )
-
-    register_models_api_router(app)
-
-    from vllm.entrypoints.serve.sagemaker.api_router import (
-        attach_router as register_sagemaker_api_router,
-    )
-
-    register_sagemaker_api_router(app, supported_tasks, model_config)
-
-    if envs.VLLM_SERVER_DEV_MODE:
-        from vllm.entrypoints.serve import register_vllm_dev_api_routers
-
-        register_vllm_dev_api_routers(app)
-
-    if "generate" in supported_tasks:
-        from vllm.entrypoints.generate.api_router import (
-            register_generate_api_routers,
-        )
-
-        register_generate_api_routers(app)
-
-        from vllm.entrypoints.serve.disagg.api_router import (
-            attach_router as attach_disagg_router,
-        )
-
-        attach_disagg_router(app)
-
-        from vllm.entrypoints.serve.elastic_ep.api_router import (
-            attach_router as elastic_ep_attach_router,
-        )
-
-        elastic_ep_attach_router(app)
-
-    if "generate" in supported_tasks or "render" in supported_tasks:
-        from vllm.entrypoints.serve.render.api_router import (
-            attach_router as attach_render_router,
-        )
-
-        attach_render_router(app)
-
-    if "transcription" in supported_tasks or "realtime" in supported_tasks:
-        from vllm.entrypoints.speech_to_text.factories import (
-            register_speech_to_text_api_routers,
-        )
-
-        register_speech_to_text_api_routers(app, supported_tasks)
-
-    if any(task in POOLING_TASKS for task in supported_tasks):
-        from vllm.entrypoints.pooling.factories import register_pooling_api_routers
-
-        register_pooling_api_routers(app, supported_tasks, model_config)
+    init_api_router(app, supported_tasks, model_config)
 
     app.root_path = args.root_path
     app.add_middleware(
@@ -388,7 +332,7 @@ async def init_app_state(
     )
 
     if "generate" in supported_tasks:
-        from vllm.entrypoints.generate.api_router import init_generate_state
+        from vllm.entrypoints.generate.factories import init_generate_state
 
         await init_generate_state(
             engine_client, state, args, request_logger, supported_tasks

@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from http import HTTPStatus
-
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.chat_completion.batch_serving import OpenAIServingChatBatch
@@ -17,7 +15,6 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
-    validate_json_request,
     with_cancellation,
 )
 from vllm.entrypoints.serve.utils.orca_metrics import metrics_header
@@ -25,7 +22,7 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-router = APIRouter()
+
 ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL = "endpoint-load-metrics-format"
 
 
@@ -37,17 +34,6 @@ def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
     return request.app.state.openai_serving_chat_batch
 
 
-@router.post(
-    "/v1/chat/completions",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
-    },
-)
 @with_cancellation
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
@@ -74,17 +60,6 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post(
-    "/v1/chat/completions/batch",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {},
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
-    },
-)
 @with_cancellation
 @load_aware_call
 async def create_batch_chat_completion(
@@ -100,7 +75,3 @@ async def create_batch_chat_completion(
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)
 
     return JSONResponse(content=result.model_dump())
-
-
-def attach_router(app: FastAPI):
-    app.include_router(router)

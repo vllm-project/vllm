@@ -4,12 +4,11 @@
 
 from http import HTTPStatus
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicCountTokensRequest,
-    AnthropicCountTokensResponse,
     AnthropicError,
     AnthropicErrorResponse,
     AnthropicMessagesRequest,
@@ -20,14 +19,11 @@ from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
     sanitize_message,
-    validate_json_request,
     with_cancellation,
 )
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-router = APIRouter()
 
 
 def messages(request: Request) -> AnthropicServingMessages:
@@ -46,16 +42,6 @@ def translate_error_response(response: ErrorResponse) -> JSONResponse:
     )
 
 
-@router.post(
-    "/v1/messages",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
-        HTTPStatus.BAD_REQUEST.value: {"model": AnthropicErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": AnthropicErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": AnthropicErrorResponse},
-    },
-)
 @with_cancellation
 @load_aware_call
 async def create_messages(request: AnthropicMessagesRequest, raw_request: Request):
@@ -92,16 +78,6 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
-@router.post(
-    "/v1/messages/count_tokens",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.OK.value: {"model": AnthropicCountTokensResponse},
-        HTTPStatus.BAD_REQUEST.value: {"model": AnthropicErrorResponse},
-        HTTPStatus.NOT_FOUND.value: {"model": AnthropicErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": AnthropicErrorResponse},
-    },
-)
 @load_aware_call
 @with_cancellation
 async def count_tokens(request: AnthropicCountTokensRequest, raw_request: Request):
@@ -131,7 +107,3 @@ async def count_tokens(request: AnthropicCountTokensRequest, raw_request: Reques
         return translate_error_response(response)
 
     return JSONResponse(content=response.model_dump(exclude_none=True))
-
-
-def attach_router(app: FastAPI):
-    app.include_router(router)

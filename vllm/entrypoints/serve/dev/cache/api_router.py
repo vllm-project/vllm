@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from fastapi import APIRouter, FastAPI, Query, Request
+from fastapi import Query, Request
 from fastapi.responses import Response
 
 from vllm.engine.protocol import EngineClient
@@ -10,14 +10,11 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-router = APIRouter()
-
 
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
-@router.post("/reset_prefix_cache")
 async def reset_prefix_cache(
     raw_request: Request,
     reset_running_requests: bool = Query(default=False),
@@ -43,7 +40,6 @@ async def reset_prefix_cache(
     return Response(status_code=200)
 
 
-@router.post("/reset_mm_cache")
 async def reset_mm_cache(raw_request: Request):
     """
     Reset the multi-modal cache. Note that we currently do not check if the
@@ -54,7 +50,6 @@ async def reset_mm_cache(raw_request: Request):
     return Response(status_code=200)
 
 
-@router.post("/reset_encoder_cache")
 async def reset_encoder_cache(raw_request: Request):
     """
     Reset the encoder cache. Note that we currently do not check if the
@@ -63,7 +58,3 @@ async def reset_encoder_cache(raw_request: Request):
     logger.info("Resetting encoder cache...")
     await engine_client(raw_request).reset_encoder_cache()
     return Response(status_code=200)
-
-
-def attach_router(app: FastAPI):
-    app.include_router(router)

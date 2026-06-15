@@ -9,12 +9,12 @@ We currently support the following OpenAI APIs:
 - [Completions API](./openai_compatible_server.md#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md).
     - *Note: `suffix` parameter is not supported.*
-- [Responses API](./openai_compatible_server.md#responses-api) (`/v1/responses`)
-    - Only applicable to [text generation models](../../models/generative_models.md).
 - [Chat Completions API](./openai_compatible_server.md#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md) with a [chat template](./openai_compatible_server.md#chat-template).
     - *Note: `user` parameter is ignored.*
     - *Note:* Setting the `parallel_tool_calls` parameter to `false` ensures vLLM only returns zero or one tool call per request. Setting it to `true` (the default) allows returning more than one tool call per request. There is no guarantee more than one tool call will be returned if this is set to `true`, as that behavior is model dependent and not all models are designed to support parallel tool calls.
+- [Responses API](./openai_compatible_server.md#responses-api) (`/v1/responses`)
+    - Only applicable to [text generation models](../../models/generative_models.md).
 - [Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
 - [Transcriptions API](./speech_to_text.md#transcriptions-api) (`/v1/audio/transcriptions`)
@@ -51,7 +51,7 @@ For further details on pooling models, please refer to [this page](../../models/
     - [OpenAI-compatible Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
 - [Scoring Usages](../../models/pooling_models/scoring.md)
-    - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`)
+    - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`, `/v1/score`)
     - [Cohere Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
 - [Pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from fastapi import APIRouter, WebSocket
+from fastapi import WebSocket
 
 from vllm.logger import init_logger
 
@@ -11,10 +11,6 @@ from .connection import RealtimeConnection
 logger = init_logger(__name__)
 
 
-router = APIRouter()
-
-
-@router.websocket("/v1/realtime")
 async def realtime_endpoint(websocket: WebSocket):
     """WebSocket endpoint for realtime audio transcription.
 

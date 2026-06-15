@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm.engine.protocol import EngineClient
@@ -15,10 +15,6 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
-router = APIRouter()
-
-
-@router.post("/sleep")
 async def sleep(raw_request: Request):
     # get POST params
     level = raw_request.query_params.get("level", "1")
@@ -29,7 +25,6 @@ async def sleep(raw_request: Request):
     return Response(status_code=200)
 
 
-@router.post("/wake_up")
 async def wake_up(raw_request: Request):
     tags = raw_request.query_params.getlist("tags")
     if tags == []:
@@ -42,11 +37,6 @@ async def wake_up(raw_request: Request):
     return Response(status_code=200)
 
 
-@router.get("/is_sleeping")
 async def is_sleeping(raw_request: Request):
     is_sleeping = await engine_client(raw_request).is_sleeping()
     return JSONResponse(content={"is_sleeping": is_sleeping})
-
-
-def attach_router(app: FastAPI):
-    app.include_router(router)

@@ -5,7 +5,7 @@ import json
 from http import HTTPStatus
 from typing import Annotated
 
-from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
+from fastapi import HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from vllm.distributed.weight_transfer.base import (
@@ -23,10 +23,6 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
-router = APIRouter()
-
-
-@router.post("/pause")
 async def pause_generation(
     raw_request: Request,
     mode: Annotated[PauseMode, Query()] = "abort",
@@ -71,7 +67,6 @@ async def pause_generation(
         )
 
 
-@router.post("/resume")
 async def resume_generation(raw_request: Request) -> JSONResponse:
     """Resume generation after a pause."""
 
@@ -91,7 +86,6 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
         )
 
 
-@router.get("/is_paused")
 async def is_paused(raw_request: Request) -> JSONResponse:
     """Return the current pause status."""
 
@@ -109,7 +103,6 @@ async def is_paused(raw_request: Request) -> JSONResponse:
     return JSONResponse(content={"is_paused": paused})
 
 
-@router.post("/init_weight_transfer_engine")
 async def init_weight_transfer_engine(raw_request: Request):
     try:
         body = await raw_request.json()
@@ -127,7 +120,6 @@ async def init_weight_transfer_engine(raw_request: Request):
     return JSONResponse(content={"message": "Weight transfer initialized"})
 
 
-@router.post("/start_weight_update")
 async def start_weight_update(raw_request: Request):
     try:
         body = await raw_request.json()
@@ -140,7 +132,6 @@ async def start_weight_update(raw_request: Request):
     return JSONResponse(content={"message": "Weight update started"})
 
 
-@router.post("/update_weights")
 async def update_weights(raw_request: Request):
     try:
         body = await raw_request.json()
@@ -158,13 +149,11 @@ async def update_weights(raw_request: Request):
     return JSONResponse(content={"message": "Weights updated"})
 
 
-@router.post("/finish_weight_update")
 async def finish_weight_update(raw_request: Request):
     await engine_client(raw_request).finish_weight_update()
     return JSONResponse(content={"message": "Weight update finished"})
 
 
-@router.get("/get_world_size")
 async def get_world_size(
     raw_request: Request,
     include_dp: bool = Query(True),
@@ -182,7 +171,3 @@ async def get_world_size(
     else:
         world_size = parallel_config.world_size
     return JSONResponse(content={"world_size": world_size})
-
-
-def attach_router(app: FastAPI):
-    app.include_router(router)

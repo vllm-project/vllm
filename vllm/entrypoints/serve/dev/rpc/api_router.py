@@ -5,7 +5,7 @@ import json
 from http import HTTPStatus
 from typing import Any
 
-from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm.engine.protocol import EngineClient
@@ -13,14 +13,11 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-router = APIRouter()
-
 
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
-@router.post("/collective_rpc")
 async def collective_rpc(raw_request: Request):
     try:
         body = await raw_request.json()
@@ -52,7 +49,3 @@ async def collective_rpc(raw_request: Request):
         else:
             response.append(str(result))
     return JSONResponse(content={"results": response})
-
-
-def attach_router(app: FastAPI):
-    app.include_router(router)

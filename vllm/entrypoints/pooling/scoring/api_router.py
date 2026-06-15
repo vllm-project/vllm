@@ -1,21 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from http import HTTPStatus
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import Request
 
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
-    validate_json_request,
     with_cancellation,
 )
 from vllm.logger import init_logger
 
 from .protocol import RerankRequest, ScoreRequest
 from .serving import ServingScores
-
-router = APIRouter()
 
 logger = init_logger(__name__)
 
@@ -28,14 +23,6 @@ def rerank(request: Request) -> ServingScores | None:
     return request.app.state.serving_scores
 
 
-@router.post(
-    "/score",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
 @with_cancellation
 @load_aware_call
 async def create_score(request: ScoreRequest, raw_request: Request):
@@ -46,14 +33,6 @@ async def create_score(request: ScoreRequest, raw_request: Request):
     return await handler(request, raw_request)
 
 
-@router.post(
-    "/v1/score",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
 @with_cancellation
 @load_aware_call
 async def create_score_v1(request: ScoreRequest, raw_request: Request):
@@ -65,14 +44,6 @@ async def create_score_v1(request: ScoreRequest, raw_request: Request):
     return await create_score(request, raw_request)
 
 
-@router.post(
-    "/rerank",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
 @with_cancellation
 @load_aware_call
 async def do_rerank(request: RerankRequest, raw_request: Request):
@@ -83,14 +54,6 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
     return await handler(request, raw_request)
 
 
-@router.post(
-    "/v1/rerank",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
 @with_cancellation
 async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     logger.warning_once(
@@ -102,14 +65,6 @@ async def do_rerank_v1(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
 
 
-@router.post(
-    "/v2/rerank",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
 @with_cancellation
 async def do_rerank_v2(request: RerankRequest, raw_request: Request):
     return await do_rerank(request, raw_request)
