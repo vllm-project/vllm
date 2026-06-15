@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
+import mmap
 import random
 import time
 import uuid
 from unittest.mock import MagicMock
+from typing import Any
 
 import pytest
 import torch
@@ -23,6 +25,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu import gpu_worker
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
+from vllm.v1.kv_offload.cpu.memory import CPUOffloadMemoryConfig
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 NUM_GPU_BLOCKS = [64]
@@ -35,6 +38,277 @@ DEVICE_TYPE = current_platform.device_type
 DEVICES = [f"{DEVICE_TYPE}:0"]
 NUM_MAPPINGS = [3]
 NUM_MAPPINGS_PER_GROUP = [2]
+requires_accelerator = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="GPU offload transfer tests require CUDA/ROCm/XPU",
+)
+
+
+def test_handlers_consume_shared_region_selected_by_memory_config(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(gpu_worker, "PIN_MEMORY", False)
+    created_handlers: list[Any] = []
+
+    class FakeSingleDirectionOffloadingHandler:
+        def __init__(
+            self,
+            gpu_tensors: list[torch.Tensor],
+            cpu_tensors: list[torch.Tensor],
+            blocks_per_chunk: int,
+            layer_refs_per_group: list[list[CanonicalKVCacheRef]],
+            gpu_to_cpu: bool,
+            canonical_layout: bool = False,
+        ) -> None:
+            self.gpu_tensors = gpu_tensors
+            self.cpu_tensors = cpu_tensors
+            self.blocks_per_chunk = blocks_per_chunk
+            self.layer_refs_per_group = layer_refs_per_group
+            self.gpu_to_cpu = gpu_to_cpu
+            created_handlers.append(self)
+
+    monkeypatch.setattr(
+        gpu_worker,
+        "SingleDirectionOffloadingHandler",
+        FakeSingleDirectionOffloadingHandler,
+    )
+
+    gpu_page_size_bytes = mmap.PAGESIZE
+    blocks_per_chunk = 2
+    num_cpu_blocks = 3
+    kv_caches = CanonicalKVCaches(
+        tensors=[
+            CanonicalKVCacheTensor(
+                tensor=torch.zeros((4, gpu_page_size_bytes), dtype=torch.int8),
+                page_size_bytes=gpu_page_size_bytes,
+            )
+        ],
+        group_data_refs=[
+            [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=gpu_page_size_bytes)]
+        ],
+    )
+    memory_config = CPUOffloadMemoryConfig.from_extra_config(
+        {"cpu_memory_backend": "shm", "cpu_memory_path": str(tmp_path)}
+    )
+    mmap_region = SharedOffloadRegion(
+        engine_id=str(uuid.uuid4()),
+        num_blocks=num_cpu_blocks,
+        rank=0,
+        kv_bytes_per_block=gpu_page_size_bytes * blocks_per_chunk,
+        cpu_page_size=gpu_page_size_bytes * blocks_per_chunk,
+        memory_config=memory_config,
+    )
+
+    cpu_tensor: torch.Tensor | None = None
+    try:
+        worker = CPUOffloadingWorker(
+            kv_caches=kv_caches,
+            blocks_per_chunk=blocks_per_chunk,
+            num_cpu_blocks=num_cpu_blocks,
+            mmap_region=mmap_region,
+        )
+
+        assert worker._mmap_region is mmap_region
+        assert len(created_handlers) == 2
+        cpu_tensor = created_handlers[0].cpu_tensors[0]
+        assert cpu_tensor is not None
+        assert created_handlers[1].cpu_tensors[0] is cpu_tensor
+        assert mmap_region.mmap_path.startswith(str(tmp_path))
+        assert cpu_tensor.shape == (
+            num_cpu_blocks,
+            gpu_page_size_bytes * blocks_per_chunk,
+        )
+        assert cpu_tensor.data_ptr() == mmap_region._base.data_ptr()
+    finally:
+        for handler in created_handlers:
+            handler.cpu_tensors.clear()
+            handler.gpu_tensors.clear()
+        cpu_tensor = None
+        mmap_region.cleanup()
+
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
+def test_rocm_cpu_to_gpu_uses_dma(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", True)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_xpu", lambda: False)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_rocm", lambda: True)
+
+    refs = [[CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=512)]]
+    assert gpu_worker._select_swap_blocks_fn(refs, gpu_to_cpu=False) is (
+        ops.swap_blocks_batch
+    )
+
+
+def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
+    """Both directions drain before the worker releases its shared region."""
+    worker = CPUOffloadingWorker.__new__(CPUOffloadingWorker)
+    calls: list[str] = []
+
+    def record_store_shutdown() -> bool:
+        calls.append("store")
+        return True
+
+    def record_load_shutdown() -> bool:
+        calls.append("load")
+        return True
+
+    store_handler = MagicMock()
+    load_handler = MagicMock()
+    store_handler.shutdown.side_effect = record_store_shutdown
+    load_handler.shutdown.side_effect = record_load_shutdown
+
+    def record_region_cleanup(**_: bool) -> bool:
+        calls.append("region")
+        return True
+
+    mmap_region = MagicMock()
+    mmap_region.cleanup.side_effect = record_region_cleanup
+    worker._store_handler = store_handler
+    worker._load_handler = load_handler
+    worker._mmap_region = mmap_region
+
+    worker.shutdown()
+
+    assert calls == ["store", "load", "region"]
+    store_handler.shutdown.assert_called_once_with()
+    load_handler.shutdown.assert_called_once_with()
+    mmap_region.cleanup.assert_called_once_with()
+    assert worker._mmap_region is None
+
+
+@pytest.mark.parametrize("failing_handler", ["store", "load"])
+def test_worker_logs_handler_error_and_cleans_region(
+    caplog_vllm, monkeypatch: pytest.MonkeyPatch, failing_handler
+) -> None:
+    worker = CPUOffloadingWorker.__new__(CPUOffloadingWorker)
+    calls: list[str] = []
+    store_handler = MagicMock()
+    load_handler = MagicMock()
+    if failing_handler == "store":
+
+        def fail_store_shutdown() -> bool:
+            calls.append("store")
+            raise RuntimeError("transfer did not drain")
+
+        store_handler.shutdown.side_effect = fail_store_shutdown
+    else:
+
+        def fail_load_shutdown() -> bool:
+            calls.append("load")
+            raise RuntimeError("transfer did not drain")
+
+        load_handler.shutdown.side_effect = fail_load_shutdown
+
+    def record_other_shutdown() -> bool:
+        calls.append("load" if failing_handler == "store" else "store")
+        return True
+
+    if failing_handler == "store":
+        load_handler.shutdown.side_effect = record_other_shutdown
+    else:
+        store_handler.shutdown.side_effect = record_other_shutdown
+
+    def record_device_sync() -> None:
+        calls.append("sync")
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", record_device_sync)
+
+    def record_region_cleanup() -> None:
+        calls.append("region")
+
+    mmap_region = MagicMock()
+    mmap_region.cleanup.side_effect = record_region_cleanup
+    worker._store_handler = store_handler
+    worker._load_handler = load_handler
+    worker._mmap_region = mmap_region
+
+    with caplog_vllm.at_level(
+        logging.ERROR, logger="vllm.v1.kv_offload.cpu.gpu_worker"
+    ):
+        worker.shutdown()
+
+    other = "load" if failing_handler == "store" else "store"
+    getattr(worker, f"_{other}_handler").shutdown.assert_called_once_with()
+    mmap_region.cleanup.assert_called_once_with()
+    assert worker._mmap_region is None
+    assert (
+        f"Failed to shut down {failing_handler} offloading handler" in caplog_vllm.text
+    )
+    assert calls[-2:] == ["sync", "region"]
+
+
+def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
+    handler = gpu_worker.SingleDirectionOffloadingHandler.__new__(
+        gpu_worker.SingleDirectionOffloadingHandler
+    )
+    failed_event = MagicMock()
+    failed_event.synchronize.side_effect = RuntimeError("device lost")
+    skipped_event = MagicMock()
+    handler._transfers = gpu_worker.deque(
+        [
+            MagicMock(end_event=failed_event),
+            MagicMock(end_event=skipped_event),
+        ]
+    )
+    handler._transfer_events = {1: failed_event, 2: skipped_event}
+    handler._stream_pool = [MagicMock()]
+    handler._event_pool = [MagicMock()]
+    handler._buffer_pool = [(MagicMock(), MagicMock(), MagicMock())]
+    handler.src_tensors = [MagicMock()]
+    handler.dst_tensors = [MagicMock()]
+
+    with pytest.raises(RuntimeError, match="device lost"):
+        handler.shutdown()
+    failed_event.synchronize.assert_called_once_with()
+    skipped_event.synchronize.assert_not_called()
+    assert not handler._transfers
+    assert not handler._transfer_events
+    assert not handler._stream_pool
+    assert not handler._event_pool
+    assert not handler._buffer_pool
+    assert not handler.src_tensors
+    assert not handler.dst_tensors
+
+
+@pytest.mark.parametrize("device_sync_fails", [False, True])
+def test_worker_syncs_before_cleanup_after_handler_failure(
+    caplog_vllm, monkeypatch: pytest.MonkeyPatch, device_sync_fails: bool
+) -> None:
+    worker = CPUOffloadingWorker.__new__(CPUOffloadingWorker)
+    calls: list[str] = []
+    store_handler = MagicMock()
+
+    def fail_store_shutdown() -> None:
+        raise RuntimeError("device lost")
+
+    store_handler.shutdown.side_effect = fail_store_shutdown
+    load_handler = MagicMock()
+
+    def record_device_sync() -> None:
+        calls.append("sync")
+        if device_sync_fails:
+            raise RuntimeError("device lost")
+
+    def record_region_cleanup() -> None:
+        calls.append("region")
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", record_device_sync)
+    mmap_region = MagicMock()
+    mmap_region.cleanup.side_effect = record_region_cleanup
+    worker._store_handler = store_handler
+    worker._load_handler = load_handler
+    worker._mmap_region = mmap_region
+
+    with caplog_vllm.at_level(
+        logging.WARNING, logger="vllm.v1.kv_offload.cpu.gpu_worker"
+    ):
+        worker.shutdown()
+
+    assert calls == ["sync", "region"]
+    mmap_region.cleanup.assert_called_once_with()
+    if device_sync_fails:
+        assert "Device sync before mmap cleanup failed" in caplog_vllm.text
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-specific test")
@@ -233,6 +507,7 @@ def test_worker_syncs_before_cleanup_after_handler_failure(
     ("use_shared_memory", "replicated_layout"),
     [(False, False), (True, False), (True, True)],
 )
+@requires_accelerator
 @torch.inference_mode()
 def test_transfer(
     default_vllm_config,
@@ -413,6 +688,7 @@ def test_transfer(
 @pytest.mark.parametrize("num_cpu_blocks", NUM_CPU_BLOCKS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
+@requires_accelerator
 @torch.inference_mode()
 def test_transfer_multi_group(
     default_vllm_config,

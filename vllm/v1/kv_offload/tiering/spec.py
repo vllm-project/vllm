@@ -95,6 +95,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     """
 
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    SUPPORTS_SHARED_MEMORY_BACKENDS = True
 
     @classmethod
     @override
@@ -304,6 +305,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     rank=None,
                     kv_bytes_per_block=self.kv_bytes_per_chunk,
                     cpu_page_size=self.cpu_page_size_per_worker,
+                memory_config=self.cpu_memory_config,
                 )
                 self._scheduler_mmap = scheduler_mmap
 
@@ -397,6 +399,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             rank=rank,
             kv_bytes_per_block=self.kv_bytes_per_chunk,
             cpu_page_size=self.cpu_page_size_per_worker,
+            memory_config=self.cpu_memory_config,
         )
         try:
             if self.config.canonical_layout:

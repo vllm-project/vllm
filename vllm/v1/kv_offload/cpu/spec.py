@@ -22,10 +22,15 @@ from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.memory import (
+    CPUOffloadMemoryBackend,
+    CPUOffloadMemoryConfig,
+)
 
 
 class CPUOffloadingSpec(OffloadingSpec):
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+    SUPPORTS_SHARED_MEMORY_BACKENDS = False
 
     @classmethod
     def build_metric_definitions(
@@ -76,6 +81,27 @@ class CPUOffloadingSpec(OffloadingSpec):
 
     def __init__(self, config: OffloadingConfig):
         super().__init__(config)
+
+        raw_memory_backend = self.extra_config.get("cpu_memory_backend")
+        if isinstance(raw_memory_backend, CPUOffloadMemoryBackend):
+            raw_memory_backend = raw_memory_backend.value
+        if (
+            not self.SUPPORTS_SHARED_MEMORY_BACKENDS
+            and str(raw_memory_backend).lower()
+            in (
+                CPUOffloadMemoryBackend.SHM.value,
+                CPUOffloadMemoryBackend.HUGETLBFS.value,
+            )
+        ):
+            raise ValueError(
+                "cpu_memory_backend is only supported by TieringOffloadingSpec; "
+                "CPUOffloadingSpec uses torch CPU tensors for single-tier CPU "
+                "offload. Use spec_name='TieringOffloadingSpec' for shared mmap "
+                "or hugetlbfs CPU primary tiering."
+            )
+        self.cpu_memory_config = CPUOffloadMemoryConfig.from_extra_config(
+            self.extra_config
+        )
 
         cpu_bytes_to_use = self.extra_config.get("cpu_bytes_to_use")
         if not cpu_bytes_to_use:
