@@ -119,6 +119,7 @@ pub(super) fn prepare_chat_request(
             logprobs: request.logprobs.then_some(top_logprobs),
             prompt_logprobs,
             min_p: request.min_p,
+            p_less: request.p_less,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
             repetition_penalty: request.repetition_penalty,
@@ -598,6 +599,7 @@ mod tests {
         let request = ChatCompletionRequest {
             seed: Some(42),
             min_p: Some(0.2),
+            p_less: Some(true),
             frequency_penalty: Some(0.3),
             presence_penalty: Some(0.4),
             repetition_penalty: Some(1.1),
@@ -613,6 +615,7 @@ mod tests {
         let expected = VllmSamplingParams {
             seed: Some(42),
             min_p: Some(0.2),
+            p_less: Some(true),
             frequency_penalty: Some(0.3),
             presence_penalty: Some(0.4),
             repetition_penalty: Some(1.1),

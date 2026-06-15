@@ -136,6 +136,9 @@ fn build_sampling_params(
         if s.min_p != 0.0 {
             params.min_p = Some(s.min_p);
         }
+        if s.p_less {
+            params.p_less = Some(true);
+        }
         params.seed = s.seed;
     }
 

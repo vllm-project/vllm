@@ -97,6 +97,9 @@ pub struct CompletionRequest {
     /// Min-p nucleus sampling parameter
     pub min_p: Option<f32>,
 
+    /// Whether to use p-less sampling. p-less sampling is hyperparameter free.
+    pub p_less: Option<bool>,
+
     /// Repetition penalty for reducing repetitive text
     pub repetition_penalty: Option<f32>,
 

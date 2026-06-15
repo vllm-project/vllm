@@ -122,6 +122,9 @@ pub struct ChatCompletionRequest {
     #[validate(range(min = 0.0, max = 1.0))]
     pub min_p: Option<f32>,
 
+    /// Whether to use p-less sampling. p-less sampling is hyperparameter free.
+    pub p_less: Option<bool>,
+
     /// Repetition penalty for reducing repetitive text
     #[validate(range(min = 0.0, max = 2.0))]
     pub repetition_penalty: Option<f32>,
@@ -270,6 +273,7 @@ impl Default for ChatCompletionRequest {
             use_beam_search: false,
             top_k: None,
             min_p: None,
+            p_less: None,
             repetition_penalty: None,
             length_penalty: None,
             stop_token_ids: None,
