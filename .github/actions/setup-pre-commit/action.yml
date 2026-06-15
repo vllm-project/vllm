@@ -1,0 +1,27 @@
+name: Setup pre-commit
+description: Restore pre-commit hook environments and install pre-commit.
+
+inputs:
+  python-version:
+    description: Python version used to run pre-commit.
+    default: "3.12"
+    required: false
+
+runs:
+  using: composite
+  steps:
+  - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
+    with:
+      python-version: ${{ inputs.python-version }}
+
+  - name: Restore pre-commit environments
+    uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+    with:
+      path: ~/.cache/pre-commit
+      key: pre-commit-3|${{ env.pythonLocation }}|${{ hashFiles('.pre-commit-config.yaml') }}
+      restore-keys: |
+        pre-commit-3|${{ env.pythonLocation }}|
+
+  - name: Install pre-commit
+    shell: bash
+    run: python -m pip install "pre-commit>=4.5.1"

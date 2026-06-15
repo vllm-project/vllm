@@ -43,18 +43,67 @@ jobs:
             core.setFailed(`PR must have the 'verified' or 'ready' (which also triggers tests) label or the author must have at least 4 merged PRs (found ${mergedCount}).`);
           }
 
-  pre-commit:
+  pre-commit-hooks:
+    name: pre-commit hooks
     needs: pre-run-check
     if: always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-    - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
-      with:
-        python-version: "3.12"
+    - uses: ./.github/actions/setup-pre-commit
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
-    - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
-      with:
-        extra_args: --all-files --hook-stage manual
+    - name: Run non-mypy hooks
+      env:
+        SKIP: mypy-3.10,mypy-3.11,mypy-3.12,mypy-3.13
+      run: pre-commit run --show-diff-on-failure --color=always --all-files --hook-stage manual
+
+  mypy:
+    name: ${{ matrix.hook }}
+    needs: pre-run-check
+    if: always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        hook:
+        - mypy-3.10
+        - mypy-3.11
+        - mypy-3.12
+        - mypy-3.13
+    steps:
+    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+    - uses: ./.github/actions/setup-pre-commit
+    - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
+    - name: Run ${{ matrix.hook }}
+      run: pre-commit run ${{ matrix.hook }} --show-diff-on-failure --color=always --all-files --hook-stage manual
+
+  pre-commit:
+    name: pre-commit
+    needs:
+    - pre-run-check
+    - pre-commit-hooks
+    - mypy
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check pre-commit result
+      env:
+        PRE_RUN_RESULT: ${{ needs.pre-run-check.result }}
+        HOOKS_RESULT: ${{ needs.pre-commit-hooks.result }}
+        MYPY_RESULT: ${{ needs.mypy.result }}
+      run: |
+        echo "pre-run-check: ${PRE_RUN_RESULT}"
+        echo "pre-commit hooks: ${HOOKS_RESULT}"
+        echo "mypy: ${MYPY_RESULT}"
+
+        if [[ "${PRE_RUN_RESULT}" == "failure" || "${PRE_RUN_RESULT}" == "cancelled" ]]; then
+          exit 1
+        fi
+        if [[ "${HOOKS_RESULT}" != "success" ]]; then
+          exit 1
+        fi
+        if [[ "${MYPY_RESULT}" != "success" ]]; then
+          exit 1
+        fi

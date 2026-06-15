@@ -203,6 +203,8 @@ repos:
     entry: python tools/pre_commit/check_init_lazy_imports.py
     language: python
     types: [python]
+    files: ^(vllm/__init__\.py|tools/pre_commit/check_init_lazy_imports\.py)$
+    pass_filenames: false
   - id: check-filenames
     name: Check for spaces in all filenames
     entry: bash
@@ -216,6 +218,7 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/pre_commit/update-dockerfile-graph.sh
     language: script
+    files: ^docker/Dockerfile$
   - id: test-nonroot-entrypoint
     name: Test non-root entrypoint wrapper
     entry: bash docker/entrypoints/test_vllm_nonroot_entrypoint.sh
@@ -239,6 +242,7 @@ repos:
     name: Validate configuration has default values and that each field has a docstring
     entry: python tools/pre_commit/validate_config.py
     language: python
+    files: ^(vllm|tests)/.*\.py$
     additional_dependencies: [regex]
   - id: validate-docker-versions
     name: Validate docker/versions.json matches Dockerfile
@@ -251,6 +255,7 @@ repos:
     name: Check attention backend documentation is up to date
     entry: python tools/pre_commit/generate_attention_backend_docs.py --check
     language: python
+    files: ^(vllm/v1/attention/backends/.*\.py|vllm/models/minimax_m3/common/sparse_attention\.py|vllm/model_executor/layers/attention/mla_attention\.py|vllm/platforms/cuda\.py|tools/pre_commit/generate_attention_backend_docs\.py|docs/design/attention_backends\.md)$
   - id: check-boolean-context-manager
     name: Check for boolean ops in with-statements
     entry: python tools/pre_commit/check_boolean_context_manager.py
