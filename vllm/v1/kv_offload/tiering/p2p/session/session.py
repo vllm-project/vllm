@@ -499,13 +499,18 @@ class P2PSession:
         return results
 
     def _timeout_pending_store_jobs(self) -> list[StoreResult]:
+        if not self._store_jobs:
+            return []
+        deadline = time.monotonic() - _STORE_TIMEOUT_S
+        timed_out: list[int] | None = None
+        for jid, submitted_at in self._store_jobs.items():
+            if submitted_at <= deadline:
+                if timed_out is None:
+                    timed_out = []
+                timed_out.append(jid)
+        if timed_out is None:
+            return []
         results: list[StoreResult] = []
-        now = time.monotonic()
-        timed_out = [
-            jid
-            for jid, submitted_at in self._store_jobs.items()
-            if now - submitted_at >= _STORE_TIMEOUT_S
-        ]
         for jid in timed_out:
             del self._store_jobs[jid]
             results.append(StoreResult(job_id=jid, success=False))
