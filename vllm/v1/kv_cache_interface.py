@@ -163,6 +163,12 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
+    # Whether this layer's attention backend can read a physically padded KV
+    # page through a strided view (AttentionBackend.supports_padded_kv_pages).
+    # Set at spec creation from the layer's backend; gates page-size padding in
+    # unify_kv_cache_spec_page_size. Defaults False so a layer is only padded
+    # when its backend has opted in.
+    supports_padded_kv_pages: bool = False
 
     @property
     def page_size_bytes(self) -> int:
@@ -283,6 +289,7 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            supports_padded_kv_pages=specs[0].supports_padded_kv_pages,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             # If any layer in the group is non-causal, treat the group as
@@ -711,6 +718,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            supports_padded_kv_pages=specs[0].supports_padded_kv_pages,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             non_causal=any(spec.non_causal for spec in specs),

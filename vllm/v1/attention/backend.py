@@ -65,6 +65,13 @@ class AttentionBackend(ABC):
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
 
+    # Whether this backend correctly reads a KV cache whose physical pages are
+    # padded to a larger page size via a strided view (see
+    # ``unify_kv_cache_spec_page_size``). Only safe for backends that index KV
+    # blocks through the cache tensor's actual stride. Conservatively False;
+    # enable per-backend once validated.
+    supports_padded_kv_pages: ClassVar[bool] = False
+
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(1)]
