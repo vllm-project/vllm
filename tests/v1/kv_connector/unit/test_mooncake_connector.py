@@ -358,6 +358,150 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
         prefill_worker.shutdown()
 
 
+def test_align_transfer_regions_matches_shared_aliases():
+    """Shared physical regions should align by alias overlap."""
+
+    local_regions = [
+        TransferRegion(
+            layer_name="model.layers.4.self_attn",
+            layer_index=4,
+            base_addr=0x1000,
+            block_len=4096,
+            kv_block_len=4096,
+            layer_aliases=(
+                "model.layers.4.self_attn",
+                "model.layers.4.swa_attn",
+            ),
+            layer_indices=(4, 4),
+            group_indices=(0, 1),
+        ),
+    ]
+    remote_regions = [
+        TransferRegion(
+            layer_name="model.layers.4.swa_attn",
+            layer_index=4,
+            base_addr=0x2000,
+            block_len=4096,
+            kv_block_len=4096,
+            layer_aliases=(
+                "model.layers.4.swa_attn",
+                "model.layers.4.self_attn",
+            ),
+            layer_indices=(4, 4),
+            group_indices=(1, 0),
+        ),
+    ]
+
+    aligned_local, aligned_remote, err = _align_transfer_regions(
+        local_regions,
+        remote_regions,
+    )
+
+    assert err is None
+    assert aligned_local == local_regions
+    assert aligned_remote == remote_regions
+
+
+def test_align_transfer_regions_fans_out_split_alias_regions():
+    """Shared producer regions can feed consumer regions split by alias."""
+
+    local_regions = [
+        TransferRegion(
+            layer_name="model.layers.4.self_attn",
+            layer_index=4,
+            base_addr=0x1000,
+            block_len=4096,
+            kv_block_len=4096,
+            layer_aliases=(
+                "model.layers.4.self_attn",
+                "model.layers.4.swa_attn",
+            ),
+            layer_indices=(4, 4),
+            group_indices=(0, 1),
+        ),
+    ]
+    remote_regions = [
+        TransferRegion(
+            layer_name="model.layers.4.self_attn",
+            layer_index=4,
+            base_addr=0x2000,
+            block_len=4096,
+            kv_block_len=4096,
+            layer_aliases=("model.layers.4.self_attn",),
+            layer_indices=(4,),
+            group_indices=(0,),
+        ),
+        TransferRegion(
+            layer_name="model.layers.4.swa_attn",
+            layer_index=4,
+            base_addr=0x3000,
+            block_len=4096,
+            kv_block_len=4096,
+            layer_aliases=("model.layers.4.swa_attn",),
+            layer_indices=(4,),
+            group_indices=(1,),
+        ),
+    ]
+
+    aligned_local, aligned_remote, err = _align_transfer_regions(
+        local_regions,
+        remote_regions,
+    )
+
+    assert err is None
+    assert aligned_local == [local_regions[0], local_regions[0]]
+    assert aligned_remote == remote_regions
+
+
+def test_align_transfer_regions_rejects_single_alias_occurrence_mismatch():
+    """Single-alias regions should still preserve occurrence counts."""
+
+    local_regions = [
+        TransferRegion(
+            layer_name="model.layers.4.self_attn",
+            layer_index=4,
+            base_addr=0x1000,
+            block_len=4096,
+            kv_block_len=4096,
+            layer_aliases=("model.layers.4.self_attn",),
+            layer_indices=(4,),
+            group_indices=(0,),
+        ),
+    ]
+    remote_regions = [
+        TransferRegion(
+            layer_name="model.layers.4.self_attn",
+            layer_index=4,
+            base_addr=0x2000,
+            block_len=4096,
+            kv_block_len=4096,
+            layer_aliases=("model.layers.4.self_attn",),
+            layer_indices=(4,),
+            group_indices=(0,),
+        ),
+        TransferRegion(
+            layer_name="model.layers.4.self_attn",
+            layer_index=4,
+            base_addr=0x3000,
+            block_len=4096,
+            kv_block_len=4096,
+            layer_aliases=("model.layers.4.self_attn",),
+            layer_indices=(4,),
+            group_indices=(0,),
+        ),
+    ]
+
+    aligned_local, aligned_remote, err = _align_transfer_regions(
+        local_regions,
+        remote_regions,
+    )
+
+    assert aligned_local == []
+    assert aligned_remote == []
+    assert err is not None
+    assert "alias occurrence mismatch" in err
+
+
 def test_basic_interface():
     """Unit test for basic MooncakeConnector interface functionality."""
 
@@ -647,8 +791,17 @@ def test_scheduler_request_finished():
 
     # Case: Capped length (Successful prefill, need to send to decoder)
     request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-    delay_free, _ = scheduler_connector.request_finished(request, block_ids=([10, 11],))
+    delay_free, kv_transfer_params = scheduler_connector.request_finished(
+        request, block_ids=([10, 11],)
+    )
     assert delay_free is True
+    assert kv_transfer_params == {
+        "do_remote_prefill": True,
+        "do_remote_decode": False,
+        "remote_engine_id": scheduler_connector.engine_id,
+        "remote_bootstrap_addr": "http://127.0.0.1:8998",
+        "transfer_id": request.request_id,
+    }
     assert "id-1" in scheduler_connector._reqs_need_send
     assert scheduler_connector._reqs_need_send["id-1"][1] == [[10, 11]]
 
@@ -1159,6 +1312,48 @@ def test_register_kv_caches():
                 assert bl == tensor1.nbytes // tensor1.shape[0]
             assert worker.registered_layer_names == list(kv_caches)
             assert worker.registered_layer_indices == [0, 1]
+
+
+def test_register_kv_caches_skips_speculative_layers_outside_base_model():
+    """Speculative MTP KV caches should not be exported as Mooncake regions."""
+
+    num_hidden_layers = 32
+    worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker.use_mla = False
+    worker.model_config = SimpleNamespace(
+        get_total_num_hidden_layers=lambda: num_hidden_layers,
+    )
+    worker.vllm_config = SimpleNamespace(
+        speculative_config=SimpleNamespace(method="mtp"),
+    )
+    worker.kv_cache_config = _make_test_kv_cache_config()
+    worker.transfer_topo = SimpleNamespace(split_k_and_v=False)
+    worker.engine = MagicMock()
+    worker.engine.batch_register_memory.return_value = 0
+    worker.async_zmq_ctx = MagicMock()
+    worker.is_kv_consumer = True
+    worker.is_kv_producer = False
+    worker.receiver_loop = MagicMock()
+    worker.receiver_loop.is_running.return_value = False
+
+    kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    )
+    normal_cache = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    mtp_cache = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    kv_caches = {
+        "model.layers.0.self_attn": normal_cache,
+        f"model.layers.{num_hidden_layers}.attn.swa_cache": mtp_cache,
+    }
+
+    worker.register_kv_caches(kv_caches)
+
+    worker.engine.batch_register_memory.assert_called_once()
+    registered_ptrs, registered_lens = worker.engine.batch_register_memory.call_args[0]
+    assert registered_ptrs == [normal_cache.data_ptr()]
+    assert registered_lens == [normal_cache.nbytes]
+    assert worker.registered_layer_names == ["model.layers.0.self_attn"]
+    assert worker.registered_layer_indices == [0]
 
 
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
