@@ -19,9 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
-    get_flashinfer_moe_backend,
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
@@ -229,49 +227,6 @@ def select_unquantized_moe_backend(
             requested_backend = UnquantizedMoeBackend.BATCHED_TRITON
 
         return _return_or_raise(requested_backend, moe_config, activation_format)
-
-    # Handle explicit FlashInfer FP16 configuration.
-    if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP16"):
-        if not envs.VLLM_USE_FLASHINFER_MOE_FP16:
-            if UnquantizedMoeBackend.FLASHINFER_TRTLLM in AVAILABLE_BACKENDS:
-                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.FLASHINFER_TRTLLM)
-            if UnquantizedMoeBackend.FLASHINFER_CUTLASS in AVAILABLE_BACKENDS:
-                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.FLASHINFER_CUTLASS)
-
-        elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
-            # If user is explicit about backend, validate it.
-            fi_backend = get_flashinfer_moe_backend()
-            if fi_backend == FlashinferMoeBackend.CUTLASS:
-                backend = UnquantizedMoeBackend.FLASHINFER_CUTLASS
-            elif fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
-                backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
-            else:
-                raise ValueError(
-                    f"FlashInfer MOE backend {fi_backend} "
-                    "does not support unquantized MoE."
-                )
-            k_cls = backend_to_kernel_cls(backend)
-            return _return_or_raise(backend, moe_config, activation_format)
-        else:
-            # If the user is not explicit about the backend, try both.
-            for backend in [
-                UnquantizedMoeBackend.FLASHINFER_TRTLLM,
-                UnquantizedMoeBackend.FLASHINFER_CUTLASS,
-            ]:
-                k_cls = backend_to_kernel_cls(backend)
-                supported, reason = k_cls.is_supported_config(
-                    k_cls, moe_config, None, None, activation_format
-                )
-                if supported:
-                    logger.info_once(_make_log_backend(backend))
-                    return backend, k_cls
-                else:
-                    logger.debug_once(_make_log_unsupported(backend, reason))
-
-            raise NotImplementedError(
-                "Found VLLM_USE_FLASHINFER_MOE_FP16=1, but no "
-                "FlashInfer unquantized MoE backend supports the configuration."
-            )
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
