@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+"""
+Note:
+    Don’t forget to update the online serving docs!
+    docs/serving/online_serving/README.md
+"""
+
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI
