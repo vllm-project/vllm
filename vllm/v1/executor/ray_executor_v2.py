@@ -381,6 +381,20 @@ class RayExecutorV2(MultiprocExecutor):
         # Step 7: Initialize workers with correct local_rank and
         # CUDA_VISIBLE_DEVICES. Each worker sees all GPUs assigned to
         # this executor on its node; local_rank indexes into that set.
+        #
+        # With the DeepGEMM mega-MoE backend, each data-parallel worker is
+        # masked to one GPU and reports it as cuda:0, so the symmetric-memory
+        # rendezvous across the EP group sees every rank on the same device
+        # and aborts. The ranks are on distinct physical GPUs, so allow the
+        # overlap. The variable is set here rather than in the launcher
+        # environment because CUDA_VISIBLE_DEVICES-class vars are not carried
+        # over to actors (WORKER_SPECIFIC_ENV_VARS).
+        # See https://github.com/vllm-project/vllm/issues/44556.
+        megamoe = (
+            self.vllm_config.kernel_config is not None
+            and getattr(self.vllm_config.kernel_config, "moe_backend", None)
+            == "deep_gemm_mega_moe"
+        )
         init_worker_refs = []
         for i, (node_id, _) in enumerate(worker_node_and_gpu_ids):
             local_rank = node_workers[node_id].index(i)
@@ -389,6 +403,8 @@ class RayExecutorV2(MultiprocExecutor):
                     map(str, node_gpus[node_id])
                 ),
             }
+            if megamoe:
+                worker_env_vars["TORCH_SYMM_MEM_ALLOW_OVERLAPPING_DEVICES"] = "1"
             self.ray_worker_handles[i].local_rank = local_rank
             init_worker_refs.append(
                 self.ray_worker_handles[i].actor.initialize_worker.remote(
