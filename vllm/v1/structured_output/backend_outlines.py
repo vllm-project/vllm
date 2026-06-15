@@ -23,6 +23,7 @@ from vllm.v1.structured_output.backend_types import (
 )
 from vllm.v1.structured_output.utils import (
     OutlinesVocabulary,
+    compile_regex_with_timeout,
     get_outlines_cache,
     get_outlines_vocabulary,
 )
@@ -61,7 +62,10 @@ class OutlinesBackend(StructuredOutputBackend):
         if cache_key in self.cache:
             return self.cache[cache_key]
 
-        index = oc.Index(regex_string, vocabulary.inner)
+        index = compile_regex_with_timeout(
+            lambda pat: oc.Index(pat, vocabulary.inner),
+            regex_string,
+        )
         self.cache[cache_key] = index
 
         return index
