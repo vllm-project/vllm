@@ -27,9 +27,10 @@ _HEARTBEAT_IVL_MS = 2000
 _HEARTBEAT_TIMEOUT_MS = 10000
 _HEARTBEAT_TTL_MS = 10000
 
-# Shared sentinel returned by recv() when the inbox is empty. Callers must
-# not mutate it (all current callers only iterate / index).
+# Shared sentinels returned when there is nothing to report. Callers must
+# not mutate them (all current callers only iterate / index / len / compare).
 _EMPTY_INBOX: list[dict] = []
+_EMPTY_NEW_CONNECTIONS: list[ControlConnection] = []
 
 
 def _tcp_addr(host: str, port: int | str) -> str:
@@ -149,7 +150,7 @@ class ZmqTransport(ControlTransport):
         self._check_monitors()
 
         # Create connections for new inbound peers
-        new_connections: list[ControlConnection] = []
+        new_connections: list[ControlConnection] | None = None
         for sender_id, msg in self._pending_inbound:
             conn = self._connections.get(sender_id)
             if conn is None:
@@ -159,6 +160,8 @@ class ZmqTransport(ControlTransport):
                     sender_id,
                 )
                 conn = self._open_connection(sender_id, direction="inbound")
+                if new_connections is None:
+                    new_connections = []
                 new_connections.append(conn)
             conn.enqueue(msg)
         self._pending_inbound.clear()
@@ -167,7 +170,9 @@ class ZmqTransport(ControlTransport):
         for pid in [p for p, c in self._connections.items() if not c.alive]:
             self._connections.pop(pid).close()
 
-        return new_connections
+        return (
+            new_connections if new_connections is not None else _EMPTY_NEW_CONNECTIONS
+        )
 
     def close(self) -> None:
         if self._closed:
