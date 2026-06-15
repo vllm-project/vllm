@@ -40,9 +40,13 @@ class NixlTransport(DataTransport):
         local_id: str,
         view: memoryview,
         config_fields: dict | None = None,
+        backends: list[str] | None = None,
+        num_threads: int = 4,
     ) -> None:
         super().__init__(view, config_fields=config_fields)
         self._local_id = local_id
+        self._backends = list(backends) if backends else ["UCX"]
+        self._num_threads = num_threads
         self._agent: Any = None
         self._reg: Any = None
         self._local_dlist: Any = None
@@ -61,7 +65,24 @@ class NixlTransport(DataTransport):
         if _NixlAgent is None:
             return
 
-        self._agent = _NixlAgent(self._local_id, _NixlAgentConfig(backends=["UCX"]))
+        non_ucx_backends = [b for b in self._backends if b != "UCX"]
+        if non_ucx_backends:
+            cfg = _NixlAgentConfig(backends=self._backends, capture_telemetry=True)
+            logger.info(
+                "NixlTransport %s: NIXL backends=%s",
+                self._local_id,
+                self._backends,
+            )
+        else:
+            cfg = _NixlAgentConfig(
+                num_threads=self._num_threads, capture_telemetry=True
+            )
+            logger.info(
+                "NixlTransport %s: NIXL backends=[UCX] num_threads=%d",
+                self._local_id,
+                self._num_threads,
+            )
+        self._agent = _NixlAgent(self._local_id, cfg)
 
         total_size = self._num_blocks * self._block_len
         reg_descs = [(self._base_addr, total_size, 0, "")]

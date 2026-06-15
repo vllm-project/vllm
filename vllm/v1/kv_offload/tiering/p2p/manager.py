@@ -51,6 +51,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         tier_type: str = "p2p",
         host: str = "0.0.0.0",
         port: int = 7777,
+        backends: list[str] | None = None,
+        num_threads: int = 4,
         **kwargs,
     ) -> None:
         super().__init__(offloading_spec, primary_kv_view, tier_type)
@@ -63,7 +65,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
         config_fields = self._build_config_fields(offloading_spec)
         self._data: DataTransport = NixlTransport(
-            self._local_id, primary_kv_view, config_fields=config_fields
+            self._local_id,
+            primary_kv_view,
+            config_fields=config_fields,
+            backends=backends,
+            num_threads=int(num_threads),
         )
         self._control: ControlTransport = ZmqTransport(self._local_id, host, port)
 

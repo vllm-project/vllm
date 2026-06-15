@@ -266,3 +266,65 @@ class TestNixlTransportWithMockedAgent:
         assert transport._agent is None
         assert transport._inflight == {}
         assert transport._remote_dlists == {}
+
+
+# ---------------------------------------------------------------------------
+# NIXL agent-config selection
+# ---------------------------------------------------------------------------
+
+
+class TestNixlAgentConfigSelection:
+    """Tests that backends/num_threads pick the right nixl_agent_config call.
+
+    Mirrors the conditional in
+    vllm/distributed/kv_transfer/kv_connector/v1/nixl/base_worker.py:325-329.
+    """
+
+    def _make_view(self) -> memoryview:
+        return memoryview(np.zeros((4, 512), dtype=np.uint8))
+
+    def test_non_ucx_backends_passes_backends_kwarg(self):
+        """When any non-UCX backend is requested, pass backends + telemetry."""
+        agent_cls = MagicMock()
+        config_fn = MagicMock(return_value=MagicMock(name="cfg"))
+        with (
+            patch("vllm.v1.kv_offload.tiering.p2p.data.nixl._NixlAgent", agent_cls),
+            patch(
+                "vllm.v1.kv_offload.tiering.p2p.data.nixl._NixlAgentConfig", config_fn
+            ),
+        ):
+            NixlTransport("test:1", self._make_view(), backends=["MOONCAKE"])
+
+        config_fn.assert_called_once_with(backends=["MOONCAKE"], capture_telemetry=True)
+        # num_threads must NOT be passed on the non-UCX branch.
+        assert "num_threads" not in config_fn.call_args.kwargs
+
+    def test_ucx_only_passes_num_threads(self):
+        """UCX-only configuration passes num_threads + telemetry, no backends."""
+        agent_cls = MagicMock()
+        config_fn = MagicMock(return_value=MagicMock(name="cfg"))
+        with (
+            patch("vllm.v1.kv_offload.tiering.p2p.data.nixl._NixlAgent", agent_cls),
+            patch(
+                "vllm.v1.kv_offload.tiering.p2p.data.nixl._NixlAgentConfig", config_fn
+            ),
+        ):
+            NixlTransport("test:1", self._make_view(), num_threads=8)
+
+        config_fn.assert_called_once_with(num_threads=8, capture_telemetry=True)
+        assert "backends" not in config_fn.call_args.kwargs
+
+    def test_default_backends_is_ucx_only(self):
+        """No backends arg → defaults to UCX-only branch."""
+        agent_cls = MagicMock()
+        config_fn = MagicMock(return_value=MagicMock(name="cfg"))
+        with (
+            patch("vllm.v1.kv_offload.tiering.p2p.data.nixl._NixlAgent", agent_cls),
+            patch(
+                "vllm.v1.kv_offload.tiering.p2p.data.nixl._NixlAgentConfig", config_fn
+            ),
+        ):
+            NixlTransport("test:1", self._make_view())
+
+        # Default num_threads=4, no backends kwarg.
+        config_fn.assert_called_once_with(num_threads=4, capture_telemetry=True)
