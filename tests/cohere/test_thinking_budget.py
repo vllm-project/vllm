@@ -29,8 +29,22 @@ class TestMode(Enum):
 
 
 # Define the test cases
-thinking_budgets_reasoning = [300, 400, -1, 0, 0, -1, 5000, 6000, -1, -1, -1, 45, 652]
-continue_thinking_budgets_reasoning = [0, 300, 400, 500, 600, -1, 700]
+thinking_budgets_reasoning = [
+    300,
+    400,
+    None,
+    0,
+    0,
+    None,
+    5000,
+    6000,
+    None,
+    None,
+    None,
+    45,
+    652,
+]
+continue_thinking_budgets_reasoning = [0, 300, 400, 500, 600, None, 700]
 
 
 def validate_logprobs(batch_results):
@@ -70,7 +84,7 @@ def validate_outputs(
                 END_THINKING_TOKEN, add_special_tokens=True
             )[1]
 
-            if thinking_token_budgets[request_id] == -1:
+            if thinking_token_budgets[request_id] is None:
                 continue
             else:
                 index_et = output.index(end_thinking_token_id)
