@@ -265,12 +265,9 @@ class TorchProfilerWrapper(WorkerProfiler):
         export_format = self.profiler_config.torch_profiler_table_format
         profiler_dir = self.profiler_config.torch_profiler_dir
 
-        # Skip file write for URI paths (gs://, s3://, etc.)
-        # as standard file I/O doesn't work with URI schemes
         if _is_uri_path(profiler_dir):
             return
 
-        # Extract every public, non-callable metric from each event.
         rows: list[dict[str, object]] = []
         for event in self.profiler.key_averages():
             row: dict[str, object] = {}
@@ -285,16 +282,14 @@ class TorchProfilerWrapper(WorkerProfiler):
                     row[attr] = value
             rows.append(row)
 
-        # Stable, sorted superset of every metric seen across the events.
         fieldnames = sorted({key for row in rows for key in row})
 
         out_file = f"{profiler_dir}/profiler_out_{rank}.{export_format}"
         if export_format == "json":
             with open(out_file, "w") as f:
                 json.dump(rows, f, indent=2, default=str)
-        else:  # csv
+        elif export_format == "csv":
             for row in rows:
-                # Flatten non-primitive values (lists, tensors, etc.) for CSV.
                 for key, value in row.items():
                     if value is not None and not isinstance(
                         value, (int, float, bool, str)
@@ -304,6 +299,8 @@ class TorchProfilerWrapper(WorkerProfiler):
                 writer = csv.DictWriter(f, fieldnames=fieldnames, restval="")
                 writer.writeheader()
                 writer.writerows(rows)
+        else:
+            raise ValueError(f"Unsupported export format: {export_format}")
 
     @override
     def _start(self) -> None:
@@ -336,7 +333,6 @@ class TorchProfilerWrapper(WorkerProfiler):
             if rank == 0:
                 print(table)
 
-        # Structured formats replace the .txt file and are written once.
         if export_format in ("csv", "json"):
             self._export_profiler_table(rank)
 

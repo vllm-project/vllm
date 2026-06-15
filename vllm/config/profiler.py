@@ -61,10 +61,9 @@ class ProfilerConfig:
     """If `True`, dumps total CUDA time in torch profiler traces. Enabled by default."""
 
     torch_profiler_table_format: ProfilerTableFormat = "txt"
-    """Format used to save the profiler key-averages table. Defaults to 'txt'
-    (the human-readable torch table). Set to 'csv' or 'json' to instead export
-    a structured file with per-event metrics. Only applicable when profiler is
-    'torch'."""
+    """Format used to save the profiler key-averages table. Defaults to 'txt'. 
+    Set to 'csv' or 'json' to instead export a structured file with per-event metrics. 
+    Only applicable when profiler is'torch'."""
 
     torch_profiler_record_shapes: bool = False
     """If `True`, records tensor shapes in the torch profiler. Disabled by default."""
