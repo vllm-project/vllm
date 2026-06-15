@@ -171,9 +171,9 @@ For further details on Weight Transfer, please refer to [this page](../../traini
 - `/resume` - Resume generation
 - `/is_paused` - Check if generation is paused
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
-- `/start_weight_update` - Initialize weight transfer engine for RLHF
+- `/start_weight_update` - Prepares the inference engine for a weight update.
 - `/update_weights` - Update model weights (can alter model behavior)
-- `/finish_weight_update` - Update model weights (can alter model behavior)
+- `/finish_weight_update` - Finalizes the weight update
 - `/get_world_size` - Get distributed world size
 
 ### Collective RPC
