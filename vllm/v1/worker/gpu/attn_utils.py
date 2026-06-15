@@ -158,6 +158,7 @@ def _allocate_kv_cache(
     packed_backing: torch.Tensor | None = None
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         if kv_cache_tensor.block_stride > 0:
+            # Allocate once; all packed tensors alias the same backing.
             if packed_backing is None:
                 packed_backing = torch.zeros(
                     kv_cache_tensor.size, dtype=torch.int8, device=device
