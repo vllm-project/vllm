@@ -174,14 +174,15 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
         is_dynamic_casual = isinstance(common_attn_metadata.causal, torch.Tensor)
+        dynamic_casual = None
+        if is_dynamic_casual:
+            dynamic_casual = common_attn_metadata.causal
+
         causal = (
             False
             if self.is_cross_attention or is_dynamic_casual
             else common_attn_metadata.causal
         )
-        dynamic_casual = None
-        if is_dynamic_casual:
-            dynamic_casual = causal
 
         encoder_cache_tensor = None
         if self.is_encoder_only_attention:
