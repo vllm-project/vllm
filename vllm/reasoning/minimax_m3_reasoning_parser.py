@@ -19,10 +19,12 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
 
         <mm:think>reasoning text</mm:think>assistant content
 
-    The M3 tokenizer exposes both markers as complete vocabulary tokens. The
-    chat template may also prefill the start marker when
-    ``thinking_mode="enabled"``, so generated text can begin directly inside a
-    reasoning block without emitting ``<mm:think>`` again.
+    The M3 tokenizer exposes both markers as complete vocabulary entries, but
+    generated marker text may be tokenized into smaller pieces. The streaming
+    parser therefore uses text markers for extraction instead of relying on the
+    single vocabulary IDs. The chat template may also prefill the start marker
+    when ``thinking_mode="enabled"``, so generated text can begin directly
+    inside a reasoning block without emitting ``<mm:think>`` again.
     """
 
     @property
@@ -35,9 +37,104 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
 
     def __init__(self, tokenizer, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
+        self._start_token_ids = self._encode_marker(self.start_token)
+        self._end_token_ids = self._encode_marker(self.end_token)
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         self._initial_in_reasoning = chat_kwargs.get("thinking_mode") == "enabled"
-        self._at_response_start = True
+        self._reasoning_ended_streaming = False
+
+    def _encode_marker(self, marker: str) -> tuple[int, ...]:
+        try:
+            token_ids = self.model_tokenizer.encode(marker, add_special_tokens=False)
+        except TypeError:
+            token_ids = self.model_tokenizer.encode(marker)
+        return tuple(token_ids)
+
+    @staticmethod
+    def _contains_token_sequence(
+        token_ids: Sequence[int], marker_ids: Sequence[int]
+    ) -> bool:
+        if not marker_ids or len(marker_ids) > len(token_ids):
+            return False
+        marker_len = len(marker_ids)
+        return any(
+            tuple(token_ids[i : i + marker_len]) == tuple(marker_ids)
+            for i in range(len(token_ids) - marker_len + 1)
+        )
+
+    @staticmethod
+    def _rfind_token_sequence(
+        token_ids: Sequence[int], marker_ids: Sequence[int]
+    ) -> int:
+        if not marker_ids or len(marker_ids) > len(token_ids):
+            return -1
+        marker_len = len(marker_ids)
+        for i in range(len(token_ids) - marker_len, -1, -1):
+            if tuple(token_ids[i : i + marker_len]) == tuple(marker_ids):
+                return i
+        return -1
+
+    @staticmethod
+    def _ends_with_token_sequence_prefix(
+        token_ids: Sequence[int], marker_ids: Sequence[int]
+    ) -> bool:
+        if not marker_ids:
+            return False
+        max_len = min(len(token_ids), len(marker_ids) - 1)
+        for prefix_len in range(max_len, 0, -1):
+            if tuple(token_ids[-prefix_len:]) == tuple(marker_ids[:prefix_len]):
+                return True
+        return False
+
+    @staticmethod
+    def _strip_partial_marker_suffix(text: str, marker: str) -> str:
+        max_len = min(len(text), len(marker) - 1)
+        for suffix_len in range(max_len, 0, -1):
+            if marker.startswith(text[-suffix_len:]):
+                return text[:-suffix_len]
+        return text
+
+    @staticmethod
+    def _visible_delta(previous: str | None, current: str | None) -> str | None:
+        if not current:
+            return None
+        if not previous:
+            return current
+        if current.startswith(previous):
+            delta = current[len(previous) :]
+            return delta or None
+        return current
+
+    def _visible_segments(self, text: str) -> tuple[str | None, str | None]:
+        if not text:
+            return None, None
+
+        if not self._initial_in_reasoning:
+            if self.end_token.startswith(text) and len(text) < len(self.end_token):
+                return None, None
+            if text.startswith(self.end_token):
+                text = text[len(self.end_token) :]
+                if not text:
+                    return None, None
+
+        if self._initial_in_reasoning and self.start_token not in text:
+            reasoning, end, content = text.partition(self.end_token)
+            if end:
+                return reasoning or None, content or None
+            reasoning = self._strip_partial_marker_suffix(reasoning, self.end_token)
+            return reasoning or None, None
+
+        if self.start_token not in text:
+            content = self._strip_partial_marker_suffix(text, self.start_token)
+            return None, content or None
+
+        content_before, _, after_start = text.partition(self.start_token)
+        reasoning, end, content_after = after_start.partition(self.end_token)
+        if end:
+            return reasoning or None, (content_before + content_after) or None
+
+        reasoning = self._strip_partial_marker_suffix(reasoning, self.end_token)
+        return reasoning or None, content_before or None
 
     def extract_reasoning(
         self,
@@ -69,26 +166,34 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
-        delta_ids = tuple(delta_ids)
-        if self.end_token_id in delta_ids:
+        if self._reasoning_ended_streaming:
             return True
-        if self.end_token_id in input_ids:
+
+        delta_ids = tuple(delta_ids)
+        if self._contains_token_sequence(delta_ids, self._end_token_ids):
+            return True
+        if self._contains_token_sequence(input_ids, self._end_token_ids):
             return True
         if self._initial_in_reasoning:
             return False
-        if self.start_token_id not in input_ids:
+        if self._ends_with_token_sequence_prefix(input_ids, self._start_token_ids):
+            return False
+        if self._ends_with_token_sequence_prefix(input_ids, self._end_token_ids):
+            return False
+        if not self._contains_token_sequence(input_ids, self._start_token_ids):
             return bool(input_ids)
         return False
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
-        if self.end_token_id in input_ids:
-            end_index = len(input_ids) - 1 - input_ids[::-1].index(self.end_token_id)
-            return input_ids[end_index + 1 :]
+        end_index = self._rfind_token_sequence(input_ids, self._end_token_ids)
+        if end_index >= 0:
+            return input_ids[end_index + len(self._end_token_ids) :]
 
-        if self._initial_in_reasoning and self.start_token_id not in input_ids:
+        has_start = self._contains_token_sequence(input_ids, self._start_token_ids)
+        if self._initial_in_reasoning and not has_start:
             return []
 
-        if self.start_token_id not in input_ids:
+        if not has_start:
             return input_ids
         return []
 
@@ -104,68 +209,46 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         if not delta_text:
             return None
 
-        if self._at_response_start and not self._initial_in_reasoning:
-            # Apply the leading-closer tolerance once. Later unmatched closers
-            # stay visible as content.
-            self._at_response_start = False
-            if delta_text.startswith(self.end_token):
-                delta_text = delta_text[len(self.end_token) :]
-                if not delta_text:
-                    return None
-                if delta_token_ids and delta_token_ids[0] == self.end_token_id:
-                    delta_token_ids = delta_token_ids[1:]
-
-        if self.end_token_id in previous_token_ids:
-            return DeltaMessage(content=delta_text)
-
-        if (
-            self._initial_in_reasoning
-            and self.start_token_id not in previous_token_ids
-            and self.start_token_id not in delta_token_ids
-        ):
-            if self.end_token_id in delta_token_ids:
-                reasoning, _, content = delta_text.partition(self.end_token)
-                return DeltaMessage(
-                    reasoning=reasoning or None,
-                    content=content or None,
-                )
-            return DeltaMessage(reasoning=delta_text)
-
-        if (
-            self.start_token_id not in previous_token_ids
-            and self.start_token_id not in delta_token_ids
-        ):
-            return DeltaMessage(content=delta_text)
-
-        if self.end_token_id in delta_token_ids:
-            reasoning_text, _, content = delta_text.partition(self.end_token)
-            if self.start_token_id in delta_token_ids:
-                _, _, reasoning_text = reasoning_text.partition(self.start_token)
-            return DeltaMessage(
-                reasoning=reasoning_text or None,
-                content=content or None,
-            )
-
-        if self.start_token_id in delta_token_ids:
-            _, _, reasoning = delta_text.partition(self.start_token)
-            return DeltaMessage(reasoning=reasoning) if reasoning else None
-
-        return DeltaMessage(reasoning=delta_text)
+        if not previous_text:
+            self._reasoning_ended_streaming = False
+        previous_reasoning, previous_content = self._visible_segments(previous_text)
+        current_reasoning, current_content = self._visible_segments(current_text)
+        if self.end_token in current_text or current_content is not None:
+            self._reasoning_ended_streaming = True
+        reasoning = self._visible_delta(previous_reasoning, current_reasoning)
+        content = self._visible_delta(previous_content, current_content)
+        if reasoning is None and content is None:
+            return None
+        return DeltaMessage(reasoning=reasoning, content=content)
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
-        if not self._initial_in_reasoning:
-            return super().count_reasoning_tokens(token_ids)
-
         count = 0
-        depth = 1
-        for token_id in token_ids:
-            if token_id == self.start_token_id:
+        depth = 1 if self._initial_in_reasoning else 0
+        i = 0
+        while i < len(token_ids):
+            if tuple(token_ids[i : i + len(self._start_token_ids)]) == (
+                self._start_token_ids
+            ):
                 depth += 1
+                i += len(self._start_token_ids)
                 continue
-            if token_id == self.end_token_id:
+            if tuple(token_ids[i : i + len(self._end_token_ids)]) == (
+                self._end_token_ids
+            ):
                 if depth > 0:
                     depth -= 1
+                i += len(self._end_token_ids)
                 continue
             if depth > 0:
                 count += 1
+            i += 1
         return count
+
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        start_index = self._rfind_token_sequence(input_ids, self._start_token_ids)
+        end_index = self._rfind_token_sequence(input_ids, self._end_token_ids)
+        if end_index < 0:
+            return False
+        if start_index < 0:
+            return True
+        return end_index > start_index
