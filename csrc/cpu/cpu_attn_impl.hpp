@@ -822,8 +822,8 @@ struct AttentionInput {
       logits_buffer_t *__restrict__ logits_buffer,                          \
       float *__restrict__ partial_q_buffer, float *__restrict__ max_buffer, \
       float *__restrict__ sum_buffer, int32_t *__restrict__ block_table,    \
-      const int32_t kv_tile_start_pos, const int32_t kv_tile_end_pos,       \
-      const int32_t kv_tile_token_num,                                      \
+      const int32_t kv_end_pos, const int32_t kv_tile_start_pos,            \
+      const int32_t kv_tile_end_pos, const int32_t kv_tile_token_num,       \
       const int64_t kv_cache_num_blocks_stride, const int32_t q_head_num,   \
       const int32_t q_token_num, const int32_t q_tile_start_pos,            \
       const int32_t q_heads_per_kv, const int32_t block_size,               \
@@ -834,7 +834,7 @@ struct AttentionInput {
 
 #define CPU_ATTENTION_PARAMS                                                  \
   q_heads_buffer, k_head_cache_ptr, v_head_cache_ptr, logits_buffer,          \
-      partial_q_buffer, max_buffer, sum_buffer, block_table,                  \
+      partial_q_buffer, max_buffer, sum_buffer, block_table, kv_end_pos,      \
       kv_tile_start_pos, kv_tile_end_pos, kv_tile_token_num,                  \
       kv_cache_num_blocks_stride, q_head_num, q_token_num, q_tile_start_pos,  \
       q_heads_per_kv, block_size, left_window_size, right_window_size, scale, \
@@ -917,6 +917,7 @@ class AttentionMainLoop {
     //  - max_buffer: [MaxQHeadNumPerIteration, 1], store max logits
     //  - sum_buffer: [MaxQHeadNumPerIteration, 1], store sum of exp
     //  - block_table
+    //  - kv_end_pos: un-aligned end position of KV cache
     //  - kv_tile_start_pos: start position of KV cache, aligned to
     //  BlockSizeAlignment
     //  - kv_tile_end_pos: end position of KV cache, aligned to
@@ -1043,7 +1044,7 @@ class AttentionMainLoop {
         }
 
         apply_mask(logits_buffer, kv_tile_token_num, q_tile_start_pos,
-                   kv_tile_start_pos, kv_tile_end_pos, q_token_num,
+                   kv_end_pos, kv_tile_start_pos, kv_tile_end_pos, q_token_num,
                    q_heads_per_kv, left_window_size, right_window_size);
 
         // if (debug_info){
@@ -1126,7 +1127,7 @@ class AttentionMainLoop {
 
     void apply_mask(logits_buffer_t* __restrict__ logits_buffer,
                     const int64_t logits_buffer_stride,
-                    const int32_t q_tile_start_pos,
+                    const int32_t q_tile_start_pos, const int32_t kv_end_pos,
                     const int32_t kv_tile_start_pos,
                     const int32_t kv_tile_end_pos, const int32_t q_token_num,
                     const int32_t q_heads_per_kv,
@@ -1154,7 +1155,7 @@ class AttentionMainLoop {
                            std::max(kv_tile_start_pos,
                                     curr_token_pos + sliding_window_right + 1));
           }
-          return pos;
+          return std::min(pos, kv_end_pos);
         }();
 
         int32_t left_invalid_token_num = left_kv_pos - kv_tile_start_pos;
@@ -1789,7 +1790,7 @@ class AttentionMainLoop {
                   attn_impl.template execute_attention<Attention>(
                       curr_q_heads_buffer, curr_k_cache, curr_v_cache,
                       logits_buffer, curr_partial_q_buffer, curr_max_buffer,
-                      curr_sum_buffer, curr_block_table,
+                      curr_sum_buffer, curr_block_table, kv_end_pos,
                       aligned_actual_kv_tile_pos_left,
                       aligned_actual_kv_tile_pos_right, actual_kv_token_num,
                       kv_cache_block_num_stride, q_tile_head_num,

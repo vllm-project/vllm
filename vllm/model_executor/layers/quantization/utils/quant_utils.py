@@ -520,7 +520,15 @@ def is_layer_skipped(
     # in the safetensors checkpoint. So, we convert the name
     # from the fused version to unfused + check to make sure that
     # each shard of the fused layer has the same scheme.
-    if proj_name in fused_mapping:
+    #
+    # Some checkpoints (e.g. block-FP8 Step-3.5-Flash) already list the
+    # fused name (e.g. ``self_attn.qkv_proj``) directly in
+    # ``modules_to_not_convert``. Honor that fused-name match first so
+    # those layers are still correctly skipped even when a
+    # ``packed_modules_mapping`` is registered on the model.
+    if proj_name in fused_mapping and match_func(prefix, ignored_layers):
+        is_skipped = True
+    elif proj_name in fused_mapping:
         shard_prefixes = [
             prefix.replace(proj_name, shard_proj_name)
             for shard_proj_name in fused_mapping[proj_name]

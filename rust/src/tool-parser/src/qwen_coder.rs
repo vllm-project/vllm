@@ -5,7 +5,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{parse_buffered_event, safe_text_len, xml_unescape};
+use super::utils::{parse_buffered_event, safe_text_len};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
 use crate::Tool;
 
@@ -201,12 +201,12 @@ fn parameter(input: &mut &str) -> ModalResult<(String, String)> {
         _: literal(PARAMETER_START),
         take_until(1.., ">"),
         _: ">",
-        take_until(0.., PARAMETER_END).map(trim_one_wrapping_newline).map(xml_unescape),
+        take_until(0.., PARAMETER_END).map(trim_one_wrapping_newline),
         _: literal(PARAMETER_END),
     )
     .parse_next(input)?;
 
-    Ok((name.to_string(), value.into_owned()))
+    Ok((name.to_string(), value.to_string()))
 }
 
 /// Parse a Qwen Coder tool-call body.
@@ -414,7 +414,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen_coder_parse_complete_unescapes_literal_closing_tags_in_parameter_value() {
+    fn qwen_coder_parse_complete_preserves_raw_closing_tag_text_in_parameter_value() {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
         let output = parser
             .parse_complete(&build_tool_call(
@@ -433,7 +433,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({
-                "location": "杭州 </parameter></function></tool_call>",
+                "location": "杭州 &lt;/parameter&gt;&lt;/function&gt;&lt;/tool_call&gt;",
                 "date": "2026-05-08",
             })
         );
