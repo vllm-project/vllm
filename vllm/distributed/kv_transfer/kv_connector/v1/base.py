@@ -259,28 +259,19 @@ class KVConnectorBase_V1(ABC):
         return
 
     def register_cross_layers_kv_cache(
-        self,
-        kv_cache: torch.Tensor,
-        attn_backend: type["AttentionBackend"] | None,
-        block_stride: int | None = None,
+        self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
     ):
         """
         Initialize with a single KV cache tensor used by all layers.
-
-        For uniform-layer models, the first dimension is num_layers and
-        attn_backend identifies the shared backend.
-
-        For non-uniform models (e.g. DSv4), block_stride gives the byte
-        stride between contiguous blocks in a packed allocation.  In this
-        case attn_backend may be None.
-
-        Only one of {register_kv_caches, register_cross_layers_kv_cache}
-        will be called.
+        The first dimension should be num_layers.
+        This function will only be called for models with uniform layers,
+        and only if the prefers_cross_layer_blocks is set to True.
+        Only one of the functions
+        {register_kv_caches, register_cross_layers_kv_cache} will be called.
 
         Args:
             kv_cache: a cross-layers kv cache tensor
-            attn_backend: The attention backend (None for packed non-uniform)
-            block_stride: bytes per block in a packed layout (None = uniform)
+            attn_backend: The attention backend that corresponds to all layers
         """
         return
 

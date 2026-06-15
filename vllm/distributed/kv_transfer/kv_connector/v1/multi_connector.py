@@ -236,15 +236,11 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         return ret
 
     def register_cross_layers_kv_cache(
-        self,
-        kv_cache: torch.Tensor,
-        attn_backend: type[AttentionBackend] | None,
-        block_stride: int | None = None,
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
     ):
+        # Register on all connectors
         for c in self._connectors:
-            c.register_cross_layers_kv_cache(
-                kv_cache, attn_backend, block_stride=block_stride
-            )
+            c.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:

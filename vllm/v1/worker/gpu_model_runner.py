@@ -526,7 +526,6 @@ class GPUModelRunner(
         # Initialize in initialize_kv_cache_tensors
         self.cross_layers_kv_cache: torch.Tensor | None = None
         self.cross_layers_attn_backend: type[AttentionBackend] | None = None
-        self._packed_block_stride: int | None = None
         # indexes: [kv_cache_group_id][attn_group]
         self.attn_groups: list[list[AttentionGroup]] = []
         # self.kv_cache_config: KVCacheConfig
@@ -7014,7 +7013,7 @@ class GPUModelRunner(
 
     def _allocate_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor | None]:
+    ) -> dict[str, torch.Tensor]:
         """
         Initializes the KV cache buffer with the correct size. The buffer needs
         to be reshaped to the desired shape before being used by the models.
@@ -7022,9 +7021,8 @@ class GPUModelRunner(
         Args:
             kv_cache_config: The KV cache config
         Returns:
-            A tuple (raw_tensors, packed_backing) where raw_tensors maps layer
-            names to their memory buffers, and packed_backing is a single
-            contiguous tensor when all layers share a backing allocation.
+            dict[str, torch.Tensor]: A map between layer names to their
+            corresponding memory buffer for KV cache.
         """
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
         packed_backing: torch.Tensor | None = None
@@ -7054,7 +7052,7 @@ class GPUModelRunner(
         assert layer_names == set(kv_cache_raw_tensors.keys()), (
             "Some layers are not correctly initialized"
         )
-        return kv_cache_raw_tensors, packed_backing
+        return kv_cache_raw_tensors
 
     def _attn_group_iterator(self) -> Iterator[AttentionGroup]:
         return itertools.chain.from_iterable(self.attn_groups)
@@ -7283,17 +7281,7 @@ class GPUModelRunner(
         else:
             # Fallback to the general case
             # Initialize the memory buffer for KV cache
-            kv_cache_raw_tensors, packed_backing = self._allocate_kv_cache_tensors(
-                kv_cache_config
-            )
-            if packed_backing is not None:
-                block_stride = next(
-                    t.block_stride
-                    for t in kv_cache_config.kv_cache_tensors
-                    if t.block_stride > 0
-                )
-                self.cross_layers_kv_cache = packed_backing
-                self._packed_block_stride = block_stride
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
 
             # Change the memory buffer to the desired shape
             kv_caches = self._reshape_kv_cache_tensors(
@@ -7395,11 +7383,9 @@ class GPUModelRunner(
         if has_kv_transfer_group() and not is_profiling:
             kv_transfer_group = get_kv_transfer_group()
             if self.cross_layers_kv_cache is not None:
-                block_stride = self._packed_block_stride
+                assert self.cross_layers_attn_backend is not None
                 kv_transfer_group.register_cross_layers_kv_cache(
-                    self.cross_layers_kv_cache,
-                    self.cross_layers_attn_backend,
-                    block_stride=block_stride,
+                    self.cross_layers_kv_cache, self.cross_layers_attn_backend
                 )
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)

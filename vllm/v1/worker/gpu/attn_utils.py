@@ -176,7 +176,7 @@ def _allocate_kv_cache(
     assert layer_names == (kv_cache_raw_tensors.keys() | shared_layers.keys()), (
         "Some layers are not correctly initialized"
     )
-    return kv_cache_raw_tensors, packed_backing
+    return kv_cache_raw_tensors
 
 
 def _reshape_kv_cache(
@@ -268,6 +268,13 @@ def _reshape_kv_cache(
                         storage_offset=layer_offset // dtype_size,
                     )
                 elif kv_cache_spec.page_size_padded is not None:
+                    # Use strided view to handle page_size_bytes that
+                    # include padding. This follows the same pattern as
+                    # MambaSpec handling in gpu_model_runner.py.
+                    # NOTE: This assumes kv_cache_shape[0] == num_blocks
+                    # (i.e. the first physical dimension is the block
+                    # index), which holds for all current backends
+                    # (MLA, FlashAttention, TritonAttention, etc.).
                     dtype_size = get_dtype_size(dtype)
                     page_stride = kv_cache_spec.page_size_bytes // dtype_size
                     strides = list(torch.empty(kv_cache_shape).stride())
@@ -278,6 +285,7 @@ def _reshape_kv_cache(
                         stride=tuple(strides),
                     )
                 else:
+                    # No padding — safe to use a contiguous view.
                     kv_cache = kv_tensor.view(kv_cache_shape)
                 kv_caches[layer_name] = kv_cache.permute(*inv_order)
 
@@ -379,9 +387,9 @@ def init_kv_cache(
     cache_dtype: str,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
-) -> tuple[dict[str, Any], torch.Tensor | None]:
+) -> dict[str, Any]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
-    kv_cache_raw_tensors, packed_backing = _allocate_kv_cache(
+    kv_cache_raw_tensors = _allocate_kv_cache(
         kv_cache_config, shared_kv_cache_layers, device
     )
     flattened_attn_groups = list(group for groups in attn_groups for group in groups)
@@ -394,7 +402,7 @@ def init_kv_cache(
         kv_cache_config=kv_cache_config,
     )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
-    return kv_caches, packed_backing
+    return kv_caches
 
 
 def build_slot_mappings_by_layer(

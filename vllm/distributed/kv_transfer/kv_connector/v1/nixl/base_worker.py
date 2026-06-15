@@ -829,24 +829,16 @@ class NixlBaseConnectorWorker:
 
         fut.add_done_callback(request_ready)
 
-    def register_cross_layers_kv_caches(
-        self,
-        kv_cache: torch.Tensor,
-        block_stride: int | None = None,
-    ) -> None:
+    def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
         """Register a cross-layers KV cache tensor with NIXL.
 
-        When block_stride is provided, the tensor is a packed allocation
-        where each block_stride-sized chunk contains all layers' data for
-        one block.  We register it as a single NIXL region.
-
-        When block_stride is None, falls back to the uniform-layer path.
+        `use_uniform_kv_cache()` guarantees a single KV cache group whose
+        layers all share the same `AttentionSpec`, so any layer name from
+        `_layer_specs` yields the correct per-layer spec for `page_size_bytes`.
         """
-        if block_stride is not None:
-            self._register_packed_kv_cache(kv_cache, block_stride)
-        else:
-            first_layer = next(iter(self._layer_specs))
-            self.register_kv_caches({first_layer: kv_cache})
+        first_layer = next(iter(self._layer_specs))
+        # Forwarding a real layer name rather than a synthetic key
+        self.register_kv_caches({first_layer: kv_cache})
 
     def _register_packed_kv_cache(
         self, kv_cache: torch.Tensor, block_stride: int
@@ -899,7 +891,7 @@ class NixlBaseConnectorWorker:
         self.device_kv_caches = {layer: kv_cache for layer in self._layer_specs}
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
-        self.src_xfer_handles_by_block_size[self.block_size], self.src_blocks_data = (
+        self.src_xfer_handles_by_block_size[self.block_size], (self.src_blocks_data) = (
             self.register_local_xfer_handler(self.block_size)
         )
 
@@ -929,6 +921,27 @@ class NixlBaseConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
+
+        # Detect packed allocation: all tensors are strided views into the
+        # same backing storage (different data_ptr but same storage).
+        # This happens with DSv4-style contiguous per-block packing.
+        if len(kv_caches) > 1:
+            storage_ptrs: dict[int, torch.Tensor] = {}
+            data_ptrs: set[int] = set()
+            for cache in kv_caches.values():
+                if isinstance(cache, torch.Tensor):
+                    storage_ptrs[cache.untyped_storage().data_ptr()] = cache
+                    data_ptrs.add(cache.data_ptr())
+            if len(storage_ptrs) == 1 and len(data_ptrs) > 1:
+                any_cache = next(iter(storage_ptrs.values()))
+                total_bytes = any_cache.untyped_storage().nbytes()
+                block_stride = total_bytes // self.num_blocks
+                flat = torch.tensor(
+                    [], dtype=torch.uint8, device=any_cache.device
+                ).set_(any_cache.untyped_storage())
+                self._register_packed_kv_cache(flat, block_stride)
+                return
+
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,

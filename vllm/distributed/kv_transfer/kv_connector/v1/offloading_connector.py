@@ -76,10 +76,7 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def register_cross_layers_kv_cache(
-        self,
-        kv_cache: torch.Tensor,
-        attn_backend: type[AttentionBackend] | None,
-        block_stride: int | None = None,
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
     ):
         assert self.connector_worker is not None
         self.connector_worker.register_cross_layers_kv_cache(kv_cache, attn_backend)

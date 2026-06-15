@@ -227,15 +227,10 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         self.connector_worker.register_kv_caches(kv_caches)
 
     def register_cross_layers_kv_cache(
-        self,
-        kv_cache: torch.Tensor,
-        attn_backend: type[AttentionBackend] | None,
-        block_stride: int | None = None,
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
     ):
         assert self.connector_worker is not None
-        self.connector_worker.register_cross_layers_kv_caches(
-            kv_cache, block_stride=block_stride
-        )
+        self.connector_worker.register_cross_layers_kv_caches(kv_cache)
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         assert self.connector_worker is not None
