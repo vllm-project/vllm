@@ -1112,6 +1112,29 @@ class FlashAttentionImpl(AttentionImpl):
                         f"prefill_valid_slots={n_valid} "
                         f"key.sh={tuple(key.shape)}"
                     )
+            if _os.environ.get("PCP_DUMP") == "1" and self.pcp_rank == 0:
+                # Read back the just-written cache slots and compare to the K/V
+                # that were written, to verify the prefill cache write.
+                prefill_slots = slot_mapping[prefill_start:prefill_end]
+                kc_flat = key_cache.reshape(-1, *key_cache.shape[-2:])
+                mism = 0
+                chk = 0
+                n_check = min(prefill_end - prefill_start, 24)
+                for i in range(n_check):
+                    s = int(prefill_slots[i].item())
+                    if s >= 0:
+                        chk += 1
+                        got = kc_flat[s].float()
+                        exp = key[prefill_start + i].float()
+                        d = (got - exp).abs().max().item()
+                        if d > 1e-2:
+                            mism += 1
+                        if chk <= 4:
+                            _pcp_dbg(
+                                f"[PCP r0] WRITECHK canon_pos={prefill_start + i} "
+                                f"slot={s} maxdiff={d:.4f}"
+                            )
+                _pcp_dbg(f"[PCP r0] WRITECHK checked={chk} mismatched={mism}")
             return
 
         # Scatter write into the KV cache using slot_mapping indices.
@@ -1250,6 +1273,29 @@ class FlashAttentionImpl(AttentionImpl):
                         f"maxkv={attn_metadata.pcp_max_decode_context_kv_len} "
                         f"qsl={attn_metadata.query_start_loc[: num_decodes + 1].tolist()}"
                     )
+            if _os.environ.get("PCP_DUMP") == "1" and self.pcp_rank == 0:
+                bt0 = attn_metadata.block_table[0]
+                sk = int(attn_metadata.pcp_decode_context_kv_lens[0].item())
+                bs = key_cache.shape[1]
+                nblk = (sk + bs - 1) // bs
+                blocks = bt0[:nblk].long()
+                k_read = key_cache[blocks].reshape(-1, *key_cache.shape[-2:])[:sk]
+                _pcp_dbg(
+                    f"[PCP r0] DECADEREAD sk={sk} bs={bs} nblk={nblk} "
+                    f"blocks={blocks.tolist()} "
+                    f"k_read.norm={k_read.norm().item():.4f} "
+                    f"k0.norm={k_read[0].norm().item():.4f} "
+                    f"k_read_nan={torch.isnan(k_read).any().item()}"
+                )
+                torch.save(
+                    {
+                        "k_read": k_read.cpu(),
+                        "q": query[0].cpu(),
+                        "sk": sk,
+                        "blocks": blocks.tolist(),
+                    },
+                    "/tmp/pcp2_decode_read_r0.pt",
+                )
             output[:num_decode_tokens] = self._merge_pcp_attn_states(
                 decode_attn_out,
                 decode_lse.transpose(0, 1),
