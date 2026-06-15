@@ -7,7 +7,7 @@
 use std::mem::take;
 
 pub use backend::{DynTextBackend, SamplingHints, SamplingLimits, TextBackend};
-pub use error::{Error, Result};
+pub use error::{Error, LogprobsError, Result};
 use futures::Stream;
 pub use lower::{
     PreparedTextRequest, lower_sampling_params, lower_text_request, resolve_max_tokens,
@@ -68,8 +68,10 @@ impl TextLlm {
     }
 
     /// Override the maximum accepted logprobs count.
-    pub fn with_max_logprobs(mut self, max_logprobs: i32) -> Self {
-        self.max_logprobs = max_logprobs;
+    pub fn with_max_logprobs(mut self, max_logprobs: Option<i32>) -> Self {
+        if let Some(max_logprobs) = max_logprobs {
+            self.max_logprobs = max_logprobs;
+        }
         self
     }
 
