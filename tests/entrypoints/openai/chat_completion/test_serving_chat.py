@@ -23,7 +23,11 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.chat_completion.serving import (
+    OpenAIServingChat,
+    _get_mm_token_counts,
+    _make_prompt_tokens_details,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
@@ -37,6 +41,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import TokensPrompt
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import HarmonyParser
 from vllm.renderers.hf import HfRenderer
@@ -633,6 +638,37 @@ async def _async_serving_chat_init():
 def test_async_serving_chat_init():
     serving_completion = asyncio.run(_async_serving_chat_init())
     assert serving_completion.chat_template == CHAT_TEMPLATE
+
+
+def test_mm_prompt_tokens_details():
+    # Text-only input has no multimodal placeholders.
+    assert _get_mm_token_counts({"type": "tokens"}) == {}
+
+    # Per-modality counts sum each modality's placeholder ranges.
+    counts = _get_mm_token_counts(
+        {
+            "mm_placeholders": {
+                "image": [
+                    PlaceholderRange(offset=0, length=576),
+                    PlaceholderRange(offset=600, length=24),
+                ],
+                "video": [PlaceholderRange(offset=700, length=1200)],
+            }
+        }
+    )
+    assert counts == {"image": 600, "video": 1200}
+
+    # Gated off, or nothing to report -> no details.
+    assert _make_prompt_tokens_details(False, 5, counts) is None
+    assert _make_prompt_tokens_details(True, None, None) is None
+
+    # Zero cached_tokens is still reported (not None), matching the cached-only
+    # behavior; multimodal counts ride alongside even when cached_tokens is None.
+    assert _make_prompt_tokens_details(True, 0, None).cached_tokens == 0
+    details = _make_prompt_tokens_details(True, None, counts)
+    assert details.cached_tokens is None
+    assert details.multimodal_tokens == {"image": 600, "video": 1200}
+    assert _make_prompt_tokens_details(True, 3, counts).cached_tokens == 3
 
 
 @pytest.mark.asyncio
