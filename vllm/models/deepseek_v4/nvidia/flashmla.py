@@ -904,24 +904,24 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 assert attn_metadata is not None
                 topk_indices = attn_metadata.c128a_prefill_topk_indices
             top_k = topk_indices.shape[-1]
-            # Compressed region must fit the full compressed pool (seq_len //
-            # compress_ratio), not just top_k. top_k bounds how many indices
-            # the indexer selects, not the pool size it indexes into.
-            N = int((seq_lens_cpu // self.compress_ratio).max().item())
         else:
             # NOTE(woosuk): topk_indices will not be used for SWA-only layers.
             assert self.topk_indices_buffer is not None
             topk_indices = self.topk_indices_buffer[num_decode_tokens:]
             top_k = 0
-            N = 0
 
-        M = N + int(gather_lens_cpu.max().item())
-        chunk_size_const = self.PREFILL_CHUNK_SIZE
-        num_chunks = (num_prefills + chunk_size_const - 1) // chunk_size_const
+        # Adaptive prefill chunk plan (#45061): pack as many requests as fit the
+        # workspace-area bound into each chunk, with per-chunk compressed (chunk_N)
+        # and total (chunk_M) widths. Replaces the fixed PREFILL_CHUNK_SIZE
+        # chunking with batch-wide M/N.
+        chunk_plan = swa_metadata.get_prefill_chunk_plan(
+            compress_ratio=int(self.compress_ratio),
+            prefill_chunk_size=self.PREFILL_CHUNK_SIZE,
+        )
+        assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
+
         max_query_chunk_tokens = 0
-        for chunk_idx in range(num_chunks):
-            chunk_start = chunk_idx * chunk_size_const
-            chunk_end = min(chunk_start + chunk_size_const, num_prefills)
+        for chunk_start, chunk_end, _chunk_n, _chunk_m in chunk_plan:
             query_start = (
                 query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
             )
@@ -937,6 +937,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         triton_sparse_mla_enabled = is_triton_sparse_mla_enabled(q.device)
         indexed_d512_split_prefill = False
         indexed_d512_chunked_prefill = False
+        extra_specs: list[tuple[tuple[int, ...], torch.dtype]] = []
         if triton_sparse_mla_enabled:
             query_chunk_size = min(
                 max_query_chunk_tokens,
@@ -959,7 +960,6 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     max_prefill_seq_len=int(seq_lens_cpu.max().item()),
                     swa_only=swa_only,
                 )
-            extra_specs: list[tuple[tuple[int, ...], torch.dtype]] = []
             if indexed_d512_split_prefill:
                 extra_specs.append(
                     (
@@ -986,44 +986,51 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                         ),
                     )
                 )
-            (
-                kv,
-                combined_indices_buffer,
-                combined_lens_buffer,
-                max_score_buffer,
-                denom_buffer,
-                output_buffer,
-                *extra_state_buffers,
-            ) = workspace_manager.get_simultaneous(
-                ((chunk_size_const, M, q.shape[-1]), torch.bfloat16),
-                ((max_query_chunk_tokens, combined_topk), torch.int32),
-                ((max_query_chunk_tokens,), torch.int32),
-                ((query_chunk_size, self.n_local_heads), torch.float32),
-                ((query_chunk_size, self.n_local_heads), torch.float32),
-                ((query_chunk_size, self.n_local_heads, q.shape[-1]), torch.float32),
-                *extra_specs,
-            )
-            prefill_state_buffers = (
-                max_score_buffer,
-                denom_buffer,
-                output_buffer,
-                *extra_state_buffers,
-            )
-        else:
-            (
-                kv,
-                combined_indices_buffer,
-                combined_lens_buffer,
-            ) = workspace_manager.get_simultaneous(
-                ((chunk_size_const, M, q.shape[-1]), torch.bfloat16),
-                ((max_query_chunk_tokens, combined_topk), torch.int32),
-                ((max_query_chunk_tokens,), torch.int32),
-            )
-            prefill_state_buffers = None
-        for chunk_idx in range(num_chunks):
-            chunk_start = chunk_idx * chunk_size_const
-            chunk_end = min(chunk_start + chunk_size_const, num_prefills)
+
+        # Per-chunk workspace allocation (#45061): the kv buffer width is this
+        # chunk's compressed+gather width (chunk_m), keeping the area bounded by
+        # the planner's max_workspace_area instead of the batch-wide worst case.
+        for chunk_start, chunk_end, chunk_n, chunk_m in chunk_plan:
             chunk_size = chunk_end - chunk_start
+            if triton_sparse_mla_enabled:
+                (
+                    kv,
+                    combined_indices_buffer,
+                    combined_lens_buffer,
+                    max_score_buffer,
+                    denom_buffer,
+                    output_buffer,
+                    *extra_state_buffers,
+                ) = workspace_manager.get_simultaneous(
+                    ((chunk_size, chunk_m, q.shape[-1]), torch.bfloat16),
+                    ((max_query_chunk_tokens, combined_topk), torch.int32),
+                    ((max_query_chunk_tokens,), torch.int32),
+                    ((query_chunk_size, self.n_local_heads), torch.float32),
+                    ((query_chunk_size, self.n_local_heads), torch.float32),
+                    (
+                        (query_chunk_size, self.n_local_heads, q.shape[-1]),
+                        torch.float32,
+                    ),
+                    *extra_specs,
+                )
+                prefill_state_buffers = (
+                    max_score_buffer,
+                    denom_buffer,
+                    output_buffer,
+                    *extra_state_buffers,
+                )
+            else:
+                (
+                    kv,
+                    combined_indices_buffer,
+                    combined_lens_buffer,
+                ) = workspace_manager.get_simultaneous(
+                    ((chunk_size, chunk_m, q.shape[-1]), torch.bfloat16),
+                    ((max_query_chunk_tokens, combined_topk), torch.int32),
+                    ((max_query_chunk_tokens,), torch.int32),
+                )
+                prefill_state_buffers = None
+
             if not swa_only:
                 # Gather compressed KV
                 assert attn_metadata is not None
@@ -1047,7 +1054,7 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 gather_lens=gather_lens[chunk_start:chunk_end],
                 block_table=swa_block_table[chunk_start:chunk_end],
                 block_size=swa_metadata.block_size,
-                offset=N,
+                offset=chunk_n,
             )
 
             # Combine the topk indices and SWA indices for gathered KV cache
@@ -1068,8 +1075,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 self.window_size,
                 self.compress_ratio,
                 top_k,
-                M,
-                N,
+                chunk_m,
+                chunk_n,
                 combined_indices=combined_indices_buffer,
                 combined_lens=combined_lens_buffer,
             )
