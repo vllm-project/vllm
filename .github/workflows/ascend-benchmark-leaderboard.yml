@@ -143,6 +143,37 @@ jobs:
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
 
     steps:
+      - name: Detect runner user and Ascend devices
+        shell: bash
+        run: |
+          if [[ "$(id -u)" == "0" ]]; then
+            echo "Runner is running as root; sudo helper is not required."
+            echo "ASCEND_BENCHMARK_USE_SUDO=0" >> "$GITHUB_ENV"
+          fi
+
+          # Auto-detect NPU devices when no visibility env is set.
+          # This is needed for root runners (where the root helper is
+          # skipped) and any other case where the caller did not pre-set
+          # ASCEND_VISIBLE_DEVICES / ASCEND_RT_VISIBLE_DEVICES.
+          if [[ -z "${ASCEND_VISIBLE_DEVICES:-}" && -z "${ASCEND_RT_VISIBLE_DEVICES:-}" ]]; then
+            detected_devices=""
+            if command -v npu-smi >/dev/null 2>&1; then
+              detected_devices="$(npu-smi info -m 2>/dev/null \
+                | awk 'NR>2 && NF>=3 && $1+0==$1 {print $1}' \
+                | sort -un | paste -sd ',' || true)"
+            fi
+            if [[ -z "$detected_devices" ]]; then
+              detected_devices="$(find /dev -maxdepth 1 -name 'davinci[0-9]*' -printf '%f\n' 2>/dev/null \
+                | sort -t i -k2 -n | paste -sd ',' || true)"
+            fi
+            if [[ -n "$detected_devices" ]]; then
+              echo "Auto-detected NPU devices: $detected_devices"
+              echo "ASCEND_VISIBLE_DEVICES=$detected_devices" >> "$GITHUB_ENV"
+            else
+              echo "[WARN] No NPU devices detected." >&2
+            fi
+          fi
+
       - name: Pre-clean stale checkout state
         shell: bash
         run: |
