@@ -8,18 +8,6 @@ state machine::
     <|channel>thought
     ...reasoning...<channel|>
     <|tool_call>call:func_name{key:<|"|>value<|"|>,num:42}<tool_call|>
-
-Gemma4 requires ``skip_special_tokens=False`` because its arg format uses
-``<|"|>`` (a special token) as a string delimiter.  The side-effect is that
-*all* special tokens become visible in ``delta_text``, including ones the
-parser doesn't use.  The model actively generates some of these (e.g.
-``<turn|>`` after content, ``<|tool_response>`` after tool calls — see replay
-test cases 005/006), so they must be explicitly dropped to prevent leaking
-into response content.
-
-``_GEMMA4_MODEL_DROP_TOKENS`` lists the Gemma4-specific tokens to drop.
-Universal structural tokens (``<eos>``, ``<bos>``, etc.) are handled
-separately via :data:`~.parser_engine_config.STRUCTURAL_DROP_TOKENS`.
 """
 
 from __future__ import annotations
@@ -47,14 +35,15 @@ if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
     from vllm.tool_parsers.abstract_tool_parser import Tool
 
+# Tokens the model generates that must not leak into response content.
 _GEMMA4_MODEL_DROP_TOKENS: set[str] = {
-    # Turn boundaries (model generates <turn|> after content — test case 006)
+    # Turn boundaries
     "<|turn>",
     "<turn|>",
     # Channel / reasoning
     "<|channel>",
     "<channel|>",
-    # Tool protocol tokens (model generates <|tool_response> — test case 005)
+    # Tool protocol tokens
     "<|tool>",
     "<tool|>",
     "<|tool_call>",
@@ -96,12 +85,7 @@ _PARTIAL_DELIM_SUFFIXES = tuple(
 def _strip_partial_delim(value: str) -> str:
     """Strip a trailing partial ``STRING_DELIM`` prefix from *value*.
 
-    During streaming, an unterminated string value may end with a
-    partial ``<|"|>`` delimiter (e.g. ``<|"``).  The ``"`` inside
-    would be JSON-escaped as ``\\"``, and the ``\\`` bypasses the
-    safe_json stripping in ``_compute_arg_delta``, corrupting the
-    streamed argument diff.  Stripping it here prevents the leak;
-    the full value arrives on the next delta or final flush.
+    Prevents partial delimiters from leaking into the streamed JSON diff.
     """
     for suffix in _PARTIAL_DELIM_SUFFIXES:
         if value.endswith(suffix):
@@ -166,10 +150,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             val_start = i
             end_pos = args_str.find(STRING_DELIM, i)
             if end_pos == -1:
-                # Unterminated string — take rest, but strip any
-                # trailing partial STRING_DELIM prefix so it doesn't
-                # leak into the JSON (the " in <|" gets escaped as
-                # \" which bypasses safe_json stripping).
+                # Unterminated string — take rest, strip partial delimiter.
                 value = args_str[val_start:]
                 if partial:
                     value = _strip_partial_delim(value)
@@ -238,10 +219,8 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                 break
             raw_val = args_str[val_start:i].strip()
             if partial and raw_val.endswith("."):
-                # Trailing dot means decimal digits may still arrive
-                # (e.g. "108." may become "108.2"). Parsing now would
-                # yield float("108.") == 108.0, whose json repr "108.0"
-                # corrupts the streaming diff when the true digit lands.
+                # Digits may still arrive (e.g. "108." -> "108.2");
+                # withhold to avoid corrupting the streaming diff.
                 break
             result[key] = raw_val
 
@@ -330,12 +309,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
 
 
 def _gemma4_arg_converter(raw_args: str, partial: bool) -> str:
-    """Convert Gemma4 custom arg format to JSON string.
-
-    The raw text is everything between ``{`` and the closing ``}``
-    (inclusive of any trailing ``}`` from the format).  We strip the
-    trailing ``}`` before parsing.
-    """
+    """Convert Gemma4 custom arg format to a JSON string."""
     text = raw_args.strip()
     if text.endswith("}"):
         text = text[:-1]
@@ -408,10 +382,8 @@ def gemma4_config() -> ParserEngineConfig:
                 ParserState.CONTENT,
                 (),
             ),
-            # Absorb a bare <channel|> in content state.  This can occur when
-            # holdback-released bytes reconstruct the token after a premature
-            # THINK_END firing has already transitioned the state machine to
-            # CONTENT.  Silently drop it rather than leaking it as TEXT_CHUNK.
+            # Absorb a bare <channel|> that arrives after we already
+            # returned to CONTENT; prevents leaking it as TEXT_CHUNK.
             (ParserState.CONTENT, "THINK_END"): Transition(
                 ParserState.CONTENT,
                 (),

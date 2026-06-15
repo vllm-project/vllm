@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the unified Gemma4 parser engine.
-
-Covers both streaming and non-streaming tool call extraction,
-reasoning + tool call combinations, and detokenizer holdback edge cases.
-"""
+"""Tests for the unified Gemma4 parser engine."""
 
 import json
 from unittest.mock import MagicMock
@@ -62,10 +58,7 @@ def _make_tokenizer(sequence: list[tuple[int, str]]) -> MagicMock:
     return tokenizer
 
 
-# ── Model output (exact tokens from the user's dump) ────────────────
-# <|channel>thought\n...reasoning...<channel|><|tool_call>
-# call:get_current_weather{city:<|"|>Dallas<|"|>,state:<|"|>TX<|"|>,
-# unit:<|"|>fahrenheit<|"|>}<tool_call|>
+# ── Model output ────────────────────────────────────────────────────
 
 REASONING_TEXT = (
     "The user is asking for the current weather in Dallas, Texas, "
@@ -75,7 +68,7 @@ REASONING_TEXT = (
     "`state='TX'`, and `unit='fahrenheit'`."
 )
 
-# Break reasoning into word-level tokens (IDs 1000+)
+# Break reasoning into word-level tokens
 _reasoning_words = REASONING_TEXT.split(" ")
 _REGULAR_TOKEN_START = 1000
 REASONING_TOKENS: list[tuple[int, str]] = []
@@ -83,7 +76,7 @@ for i, word in enumerate(_reasoning_words):
     prefix = " " if i > 0 else ""
     REASONING_TOKENS.append((_REGULAR_TOKEN_START + i, prefix + word))
 
-# Tool call body tokens (IDs 2000+)
+# Tool call body tokens
 TOOL_BODY_TOKENS: list[tuple[int, str]] = [
     (2000, "call"),
     (2001, ":"),
@@ -91,61 +84,42 @@ TOOL_BODY_TOKENS: list[tuple[int, str]] = [
     (2003, "{"),
     (2004, "city"),
     (2005, ":"),
-    # <|"|> Dallas <|"|>
     (2006, "Dallas"),
     (2007, ","),
     (2008, "state"),
     (2009, ":"),
-    # <|"|> TX <|"|>
     (2010, "TX"),
     (2011, ","),
     (2012, "unit"),
     (2013, ":"),
-    # <|"|> fahrenheit <|"|>
     (2014, "fahrenheit"),
     (2015, "}"),
 ]
 
-# Full token sequence matching the model output
 FULL_TOKEN_SEQUENCE: list[tuple[int, str]] = []
-
-# <|channel>
 FULL_TOKEN_SEQUENCE.append((CHANNEL_START_ID, "<|channel>"))
-# thought\n
 FULL_TOKEN_SEQUENCE.append((3000, "thought"))
 FULL_TOKEN_SEQUENCE.append((3001, "\n"))
-# reasoning text
 FULL_TOKEN_SEQUENCE.extend(REASONING_TOKENS)
-# <channel|>
 FULL_TOKEN_SEQUENCE.append((CHANNEL_END_ID, "<channel|>"))
-# <|tool_call>
 FULL_TOKEN_SEQUENCE.append((TOOL_CALL_START_ID, "<|tool_call>"))
-# call:get_current_weather{
 FULL_TOKEN_SEQUENCE.extend(TOOL_BODY_TOKENS[:4])
-# city:
 FULL_TOKEN_SEQUENCE.extend(TOOL_BODY_TOKENS[4:6])
-# <|"|>Dallas<|"|>
 FULL_TOKEN_SEQUENCE.append((QUOTED_ID, '<|"|>'))
-FULL_TOKEN_SEQUENCE.append(TOOL_BODY_TOKENS[6])  # Dallas
+FULL_TOKEN_SEQUENCE.append(TOOL_BODY_TOKENS[6])
 FULL_TOKEN_SEQUENCE.append((QUOTED_ID, '<|"|>'))
-# ,state:
 FULL_TOKEN_SEQUENCE.extend(TOOL_BODY_TOKENS[7:10])
-# <|"|>TX<|"|>
 FULL_TOKEN_SEQUENCE.append((QUOTED_ID, '<|"|>'))
-FULL_TOKEN_SEQUENCE.append(TOOL_BODY_TOKENS[10])  # TX
+FULL_TOKEN_SEQUENCE.append(TOOL_BODY_TOKENS[10])
 FULL_TOKEN_SEQUENCE.append((QUOTED_ID, '<|"|>'))
-# ,unit:
 FULL_TOKEN_SEQUENCE.extend(TOOL_BODY_TOKENS[11:14])
-# <|"|>fahrenheit<|"|>
 FULL_TOKEN_SEQUENCE.append((QUOTED_ID, '<|"|>'))
-FULL_TOKEN_SEQUENCE.append(TOOL_BODY_TOKENS[14])  # fahrenheit
+FULL_TOKEN_SEQUENCE.append(TOOL_BODY_TOKENS[14])
 FULL_TOKEN_SEQUENCE.append((QUOTED_ID, '<|"|>'))
-# }
-FULL_TOKEN_SEQUENCE.append(TOOL_BODY_TOKENS[15])  # }
-# <tool_call|>
+FULL_TOKEN_SEQUENCE.append(TOOL_BODY_TOKENS[15])
 FULL_TOKEN_SEQUENCE.append((TOOL_CALL_END_ID, "<tool_call|>"))
 
-# Full model output as a single string (used by non-streaming tests)
+# Full model output as a single string
 FULL_MODEL_OUTPUT = "".join(text for _, text in FULL_TOKEN_SEQUENCE)
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -154,12 +128,7 @@ FULL_MODEL_OUTPUT = "".join(text for _, text in FULL_TOKEN_SEQUENCE)
 def _stream_tokens_batched(
     parser, tokenizer, request, batch_size=10, prompt_token_ids=None
 ) -> list[DeltaMessage | None]:
-    """Feed tokens in batches through parse_delta.
-
-    Uses batch_size tokens per call (like --stream-interval 10) to
-    reproduce the bug where <channel|> and <|tool_call> land in the
-    same parse_delta() call.
-    """
+    """Feed tokens in batches through parse_delta."""
     token_ids = tokenizer.encode("", add_special_tokens=False)
     results: list[DeltaMessage | None] = []
 
@@ -210,16 +179,7 @@ def request_obj():
 
 
 class TestGemma4StreamingReasoningThenToolCall:
-    """Reproduce streaming failure: reasoning prefix -> tool call.
-
-    The model output is:
-        <|channel>thought\\n...reasoning...<channel|>
-        <|tool_call>call:get_current_weather{city:<|"|>Dallas<|"|>,...}<tool_call|>
-
-    Non-streaming correctly extracts the tool call; streaming does not
-    when tokens are batched such that <channel|> and <|tool_call> are
-    in the same parse_delta() call.
-    """
+    """Streaming: reasoning followed by a tool call."""
 
     def test_tool_call_extracted(self, parser, mock_tokenizer, request_obj):
         """Tool calls must be extracted from streaming output."""
@@ -233,13 +193,11 @@ class TestGemma4StreamingReasoningThenToolCall:
 
         reasoning, content, tool_calls = _collect_fields(results)
 
-        # Tool call should be extracted
         assert len(tool_calls) > 0, (
             f"Expected tool_calls but got none. "
             f"content={content!r}, reasoning={reasoning[:80]!r}..."
         )
 
-        # Verify the tool call details
         names = [
             tc.function.name for tc in tool_calls if tc.function and tc.function.name
         ]
@@ -354,29 +312,27 @@ FULL_TOKEN_SEQUENCE_2.append((3000, "thought"))
 FULL_TOKEN_SEQUENCE_2.append((3001, "\n"))
 FULL_TOKEN_SEQUENCE_2.extend(REASONING_TOKENS_2)
 FULL_TOKEN_SEQUENCE_2.append((CHANNEL_END_ID, "<channel|>"))
-# First tool call
 FULL_TOKEN_SEQUENCE_2.append((TOOL_CALL_START_ID, "<|tool_call>"))
 FULL_TOKEN_SEQUENCE_2.extend(TOOL_BODY_TOKENS_2A[:6])
 FULL_TOKEN_SEQUENCE_2.append((QUOTED_ID, '<|"|>'))
-FULL_TOKEN_SEQUENCE_2.append(TOOL_BODY_TOKENS_2A[6])  # hostname
+FULL_TOKEN_SEQUENCE_2.append(TOOL_BODY_TOKENS_2A[6])
 FULL_TOKEN_SEQUENCE_2.append((QUOTED_ID, '<|"|>'))
 FULL_TOKEN_SEQUENCE_2.extend(TOOL_BODY_TOKENS_2A[7:10])
 FULL_TOKEN_SEQUENCE_2.append((QUOTED_ID, '<|"|>'))
-FULL_TOKEN_SEQUENCE_2.append(TOOL_BODY_TOKENS_2A[10])  # description value
+FULL_TOKEN_SEQUENCE_2.append(TOOL_BODY_TOKENS_2A[10])
 FULL_TOKEN_SEQUENCE_2.append((QUOTED_ID, '<|"|>'))
-FULL_TOKEN_SEQUENCE_2.append(TOOL_BODY_TOKENS_2A[11])  # }
+FULL_TOKEN_SEQUENCE_2.append(TOOL_BODY_TOKENS_2A[11])
 FULL_TOKEN_SEQUENCE_2.append((TOOL_CALL_END_ID, "<tool_call|>"))
-# Second tool call
 FULL_TOKEN_SEQUENCE_2.append((TOOL_CALL_START_ID, "<|tool_call>"))
 FULL_TOKEN_SEQUENCE_2.extend(TOOL_BODY_TOKENS_2B[:6])
 FULL_TOKEN_SEQUENCE_2.append((QUOTED_ID, '<|"|>'))
-FULL_TOKEN_SEQUENCE_2.append(TOOL_BODY_TOKENS_2B[6])  # date
+FULL_TOKEN_SEQUENCE_2.append(TOOL_BODY_TOKENS_2B[6])
 FULL_TOKEN_SEQUENCE_2.append((QUOTED_ID, '<|"|>'))
 FULL_TOKEN_SEQUENCE_2.extend(TOOL_BODY_TOKENS_2B[7:10])
 FULL_TOKEN_SEQUENCE_2.append((QUOTED_ID, '<|"|>'))
-FULL_TOKEN_SEQUENCE_2.append(TOOL_BODY_TOKENS_2B[10])  # description value
+FULL_TOKEN_SEQUENCE_2.append(TOOL_BODY_TOKENS_2B[10])
 FULL_TOKEN_SEQUENCE_2.append((QUOTED_ID, '<|"|>'))
-FULL_TOKEN_SEQUENCE_2.append(TOOL_BODY_TOKENS_2B[11])  # }
+FULL_TOKEN_SEQUENCE_2.append(TOOL_BODY_TOKENS_2B[11])
 FULL_TOKEN_SEQUENCE_2.append((TOOL_CALL_END_ID, "<tool_call|>"))
 
 
@@ -388,13 +344,7 @@ def _stream_tokens_with_holdback(
     holdback_chars=12,
     prompt_token_ids=None,
 ) -> list[DeltaMessage | None]:
-    """Feed tokens in batches with simulated detokenizer holdback.
-
-    Instead of decoding each batch independently, simulates incremental
-    decoding where the detokenizer holds back the last N characters of
-    decoded text until the next batch arrives.  This reproduces the
-    delta_text / delta_token_ids mismatch that occurs in production.
-    """
+    """Feed tokens in batches with simulated detokenizer holdback."""
     token_ids = tokenizer.encode("", add_special_tokens=False)
     results: list[DeltaMessage | None] = []
     prev_safe_text = ""
@@ -427,17 +377,7 @@ def _stream_tokens_with_holdback(
 
 
 class TestGemma4ReasoningTruncationWithHoldback:
-    """Reproduce reasoning text truncation when detokenizer holds back text.
-
-    With stream_interval=10 and SentencePiece holdback, the last word(s)
-    before <channel|> can be lost:
-    - delta_text is shorter than what delta_token_ids decode to
-    - Scanner defers the <channel|> terminal (text not in delta_text)
-    - DelegatingParser sees CHANNEL_END_ID in raw token IDs and
-      transitions to tool mode prematurely
-    - Holdback text ("efficiency.") arrives in the next batch but goes
-      to the tool parser instead of the reasoning parser
-    """
+    """Reasoning text must not be truncated when detokenizer holds back text."""
 
     @pytest.fixture
     def tokenizer_2(self):
@@ -507,8 +447,7 @@ class TestGemma4ReasoningTruncationWithHoldback:
 
 @pytest.fixture
 def tool_call_tokenizer():
-    """Mock tokenizer with Gemma4 tool call + channel vocab for
-    ``Gemma4Parser``."""
+    """Mock tokenizer with Gemma4 special token vocab."""
     tokenizer = MagicMock()
     tokenizer.encode.return_value = [1, 2, 3]
     tokenizer.get_vocab.return_value = {
@@ -824,16 +763,7 @@ class TestStreamingToolCallEdgeCases:
 
 
 class TestNonStreamingReasoningPlusToolCalls:
-    """Non-streaming extraction with reasoning + tool calls.
-
-    Reproduces the bug where the non-streaming serving path calls
-    extract_reasoning() (which consumes tool call text via the state
-    machine but only returns TEXT_CHUNK content) and then passes the
-    resulting empty content to extract_tool_calls(), finding nothing.
-
-    The fix ensures extract_tool_calls() receives the full model output
-    so the state machine can parse it independently.
-    """
+    """Non-streaming extraction with reasoning + tool calls."""
 
     def test_extract_tool_calls_from_full_text(self, parser, request_obj):
         """extract_tool_calls on full model output must find tools."""
@@ -1159,11 +1089,7 @@ class TestGemma4NestedSchemaCoercion:
 
 # ── Tests for bare "thought" without channel opener ──────────────────
 
-# Token sequence: model omits <|channel> and starts with bare "thought"
-# thought\n...reasoning...<channel|><|tool_call>call:get_current_weather{
-#   city:<|"|>Dallas<|"|>}<tool_call|>
 BARE_THOUGHT_SEQUENCE: list[tuple[int, str]] = []
-# No <|channel> — bare "thought\n"
 BARE_THOUGHT_SEQUENCE.append((3000, "thought"))
 BARE_THOUGHT_SEQUENCE.append((3001, "\n"))
 BARE_THOUGHT_SEQUENCE.extend(REASONING_TOKENS)

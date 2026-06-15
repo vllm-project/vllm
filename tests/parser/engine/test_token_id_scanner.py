@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for TokenIDScanner, focusing on hold-back text recovery.
-
-Uses gemma4_config for all end-to-end engine tests, covering
-reasoning channels, tool calls, and combined flows."""
+"""Tests for TokenIDScanner."""
 
 from unittest.mock import MagicMock
 
@@ -56,8 +53,7 @@ def scanner(tokenizer):
 
 
 class TestJoinDecodedTextReturnsStr:
-    """_join_decoded_text now returns str unconditionally (was
-    str | None when an isinstance guard made a branch unreachable)."""
+    """_join_decoded_text always returns str."""
 
     @pytest.fixture
     def bare_scanner(self):
@@ -85,9 +81,7 @@ class TestJoinDecodedTextReturnsStr:
 
 class TestHoldbackTextRecovery:
     def test_holdback_text_with_special_token_text_absent(self, scanner):
-        """delta_text has hold-back text but the special token's text is
-        NOT in delta_text (held back by the detokenizer).  Terminal is
-        deferred until the text arrives in a subsequent delta."""
+        """Terminal deferred when its text is absent from delta_text."""
         result = scanner.scan(
             delta_text="processed is appropriate.",
             delta_token_ids=[CHANNEL_END_ID],
@@ -95,8 +89,6 @@ class TestHoldbackTextRecovery:
 
         assert len(result) == 0
 
-        # Second scan: terminal text arrives (detokenizer flushes).
-        # Deferred terminal resolves with holdback text before it.
         result2 = scanner.scan(
             delta_text="<channel|>Understood.",
             delta_token_ids=[20, 21],
@@ -110,7 +102,7 @@ class TestHoldbackTextRecovery:
         assert "Understood." in combined
 
     def test_holdback_text_with_special_token_text_present(self, scanner):
-        """delta_text includes hold-back text AND the special token text."""
+        """Hold-back text + special token text both in delta_text."""
         result = scanner.scan(
             delta_text="holdback text<channel|>",
             delta_token_ids=[CHANNEL_END_ID],
@@ -123,7 +115,7 @@ class TestHoldbackTextRecovery:
         assert result[1].terminal == "THINK_END"
 
     def test_no_holdback_text(self, scanner):
-        """delta_text is exactly the special token text — no hold-back."""
+        """delta_text is exactly the special token text."""
         result = scanner.scan(
             delta_text="<channel|>",
             delta_token_ids=[CHANNEL_END_ID],
@@ -134,7 +126,7 @@ class TestHoldbackTextRecovery:
         assert result[0].terminal == "THINK_END"
 
     def test_empty_delta_text(self, scanner):
-        """delta_text is empty — terminal deferred until text arrives."""
+        """Empty delta_text defers the terminal until text arrives."""
         result = scanner.scan(
             delta_text="",
             delta_token_ids=[CHANNEL_END_ID],
@@ -148,9 +140,7 @@ class TestHoldbackTextRecovery:
         assert flushed[0].terminal == "THINK_END"
 
     def test_empty_delta_text_drops_individual_decode_text(self, tokenizer):
-        """delta_text="" with multiple tokens including special: all
-        results deferred — individually-decoded TextChunks are unreliable
-        and PreLexedTerminals wait for text confirmation."""
+        """Empty delta_text with multiple tokens: all results deferred."""
         tool_start_id = 400
         tok_a = 201
         tok_b = 202
@@ -178,7 +168,6 @@ class TestHoldbackTextRecovery:
         assert flushed[0].terminal == "TOOL_START"
 
     def test_holdback_before_start_tag(self, scanner):
-        """Hold-back text before a reasoning start tag."""
         result = scanner.scan(
             delta_text="prefix text<|channel>",
             delta_token_ids=[CHANNEL_START_ID],
@@ -191,8 +180,7 @@ class TestHoldbackTextRecovery:
         assert result[1].terminal == "THINK_START"
 
     def test_multi_token_batch_special_in_middle(self, scanner, tokenizer):
-        """Stream-interval > 1: batch has regular tokens + special token.
-        delta_text differs from individual decodes (context-dependent)."""
+        """Multi-token batch with special token in the middle."""
         tok_a = 201
         tok_b = 202
         tokenizer.decode.side_effect = lambda ids: {
@@ -217,10 +205,7 @@ class TestHoldbackTextRecovery:
         assert "holdback wordA" in "".join(texts)
 
     def test_multi_token_batch_special_token_text_absent(self, scanner, tokenizer):
-        """Stream-interval > 1: batch has regular + special token, but
-        delta_text doesn't contain the special token text at all
-        (held back by detokenizer along with trailing regular tokens).
-        Terminal is deferred until text arrives."""
+        """Multi-token batch where special token text is absent."""
         tok_a = 201
         tok_b = 202
         tokenizer.decode.side_effect = lambda ids: {
@@ -241,8 +226,6 @@ class TestHoldbackTextRecovery:
 
         assert len(result) == 0
 
-        # Next delta: terminal text arrives (detokenizer flushes).
-        # Deferred terminal resolves with holdback text before it.
         result2 = scanner_multi.scan(
             delta_text="<channel|> more text",
             delta_token_ids=[300],
@@ -256,8 +239,7 @@ class TestHoldbackTextRecovery:
         assert "more text" in combined
 
     def test_holdback_with_content_after_special_token(self, tokenizer):
-        """delta_text has hold-back + special token + content after,
-        with corresponding token IDs for all parts."""
+        """Hold-back + special token + content after in one delta."""
         tok_content = 210
         tokenizer.decode.side_effect = lambda ids: {
             CHANNEL_END_ID: CHANNEL_END,
@@ -285,8 +267,7 @@ class TestHoldbackTextRecovery:
 
 class TestDropTokens:
     def test_drop_token_with_holdback(self, tokenizer):
-        """Drop tokens stripped from delta_text, hold-back text preserved.
-        Terminal is deferred when its text is absent from delta_text."""
+        """Drop tokens stripped; hold-back text preserved."""
         drop_id = 300
         tokenizer.decode.side_effect = lambda ids: {
             CHANNEL_END_ID: CHANNEL_END,
@@ -306,7 +287,6 @@ class TestDropTokens:
 
         assert len(result) == 0
 
-        # Terminal text arrives in next delta; deferred terminal resolves.
         result2 = scanner.scan(
             delta_text="<channel|>content",
             delta_token_ids=[20],
@@ -323,9 +303,7 @@ class TestDropTokens:
 
 
 class TestEndToEndReasoningHoldback:
-    """End-to-end tests through the full parser engine simulating
-    stream-interval > 1 and detokenizer hold-back, using
-    gemma4_config."""
+    """End-to-end engine tests with detokenizer hold-back."""
 
     def test_reasoning_content_not_truncated(self):
         config = gemma4_config()
@@ -343,30 +321,21 @@ class TestEndToEndReasoningHoldback:
         engine = StreamingParserEngine(config, tok)
         all_events = []
 
-        # Delta 1: channel start token (text includes start tag)
         all_events.extend(engine.feed(CHANNEL_START, [CHANNEL_START_ID]))
-
-        # Delta 2: reasoning text (normal content, no special tokens)
         all_events.extend(
             engine.feed(
                 "thought\nThe request was received and ",
                 [10, 11, 12, 13, 14],
             )
         )
-
-        # Delta 3: MORE reasoning text, the detokenizer held some back.
-        # Then channel end token arrives in token_ids, but its text
-        # is NOT in delta_text (held back by detokenizer).
-        # delta_text = previously held-back reasoning text only.
+        # CHANNEL_END token arrives but its text is held back.
         all_events.extend(
             engine.feed(
                 "processed is appropriate.",
                 [CHANNEL_END_ID],
             )
         )
-
-        # Delta 4: detokenizer flushes held-back channel end text
-        # plus new content tokens.
+        # Detokenizer flushes the held-back text.
         all_events.extend(
             engine.feed(
                 "<channel|>Understood.",
@@ -387,7 +356,6 @@ class TestEndToEndReasoningHoldback:
         assert "Understood." in content_text
 
     def test_backtick_content_not_truncated(self):
-        """Reproduces the hostname backtick truncation case."""
         config = gemma4_config()
         tok = MagicMock()
         vocab = {
@@ -410,17 +378,12 @@ class TestEndToEndReasoningHoldback:
                 [10, 11, 12, 13],
             )
         )
-
-        # Hold-back text includes backtick content; channel end text
-        # absent from delta_text.
         all_events.extend(
             engine.feed(
                 "`hostname`.\n",
                 [CHANNEL_END_ID],
             )
         )
-
-        # Next delta flushes channel end + tool call start
         all_events.extend(
             engine.feed(
                 "<channel|>tool output",
@@ -437,9 +400,6 @@ class TestEndToEndReasoningHoldback:
         assert "`hostname`." in reasoning_text
 
 
-# ---------------------------------------------------------------------------
-# Token IDs for multi-token boundary tests
-# ---------------------------------------------------------------------------
 _CHANNEL_START_TAG = "<|channel>"
 _CHANNEL_END_TAG = "<channel|>"
 _TOOL_START_TAG = "<|tool_call>"
@@ -455,7 +415,6 @@ _TOK = list(range(200, 215))
 
 
 def _gemma4_vocab() -> dict[str, int]:
-    """Vocab mapping for Gemma4 special tokens."""
     return {
         _CHANNEL_START_TAG: _CHANNEL_START_TID,
         _CHANNEL_END_TAG: _CHANNEL_END_TID,
@@ -468,7 +427,6 @@ def _gemma4_vocab() -> dict[str, int]:
 def _make_gemma4_tokenizer(
     extra_decode: dict[int, str] | None = None,
 ) -> MagicMock:
-    """Mock tokenizer for Gemma4 with configurable regular-token text."""
     special = {
         _CHANNEL_START_TID: _CHANNEL_START_TAG,
         _CHANNEL_END_TID: _CHANNEL_END_TAG,
@@ -485,7 +443,6 @@ def _make_gemma4_tokenizer(
 
 
 def _collect_events(engine, deltas):
-    """Feed all (delta_text, delta_token_ids) pairs and return events."""
     from vllm.parser.engine.events import SemanticEvent
 
     all_events: list[SemanticEvent] = []
@@ -512,35 +469,19 @@ def _has_event(events, event_type) -> bool:
 
 
 class TestMultiTokenBoundaryPreservation:
-    """End-to-end tests verifying no text is lost at state boundaries
-    when multiple tokens arrive per delta with detokenizer holdback.
-
-    Uses gemma4_config which covers both reasoning and tool calls
-    in a single engine."""
-
-    # -- Unique edge cases from channel-only tests -------------------------
+    """No text lost at state boundaries with multi-token deltas."""
 
     def test_empty_delta_text_at_channel_end_unified(self):
-        """delta_text="" when CHANNEL_END arrives; text comes later.
-
-        When delta_text is empty the PreLexedTerminal fires immediately.
-        The tag text then appears in the *next* delta's delta_text and
-        may be echoed by the lexer — that is accepted.  The invariant
-        we enforce is that no reasoning or content text is *lost*."""
+        """Empty delta_text when CHANNEL_END arrives; text comes later."""
         tok = _make_gemma4_tokenizer()
         engine = StreamingParserEngine(gemma4_config(), tok)
 
         events = _collect_events(
             engine,
             [
-                # CHANNEL_START with empty delta_text (detokenizer hasn't
-                # flushed yet).
                 ("", [_CHANNEL_START_TID]),
-                # Detokenizer flushes start tag text + reasoning.
                 ("<|channel>thought\nSome reasoning.", [_TOK[0], _TOK[1]]),
-                # CHANNEL_END with empty delta_text.
                 ("", [_CHANNEL_END_TID]),
-                # Detokenizer flushes end tag text + content.
                 ("<channel|>Final answer.", [_TOK[2], _TOK[3]]),
             ],
         )
@@ -553,7 +494,7 @@ class TestMultiTokenBoundaryPreservation:
         assert _has_event(events, EventType.REASONING_END)
 
     def test_deferred_channel_end_flushed_at_finish_unified(self):
-        """Deferred CHANNEL_END flushed at end-of-stream via finish()."""
+        """Deferred CHANNEL_END flushed at end-of-stream."""
         tok = _make_gemma4_tokenizer()
         engine = StreamingParserEngine(gemma4_config(), tok)
 
@@ -562,7 +503,6 @@ class TestMultiTokenBoundaryPreservation:
             [
                 (_CHANNEL_START_TAG, [_CHANNEL_START_TID]),
                 ("thought\nReasoning text.", [_TOK[0]]),
-                # Holdback + deferred — no more deltas after this.
                 (" Final thought.", [_CHANNEL_END_TID]),
             ],
         )
@@ -571,24 +511,17 @@ class TestMultiTokenBoundaryPreservation:
         assert "Reasoning text. Final thought." in reasoning
         assert _has_event(events, EventType.REASONING_END)
 
-    # -- Cross-engine: reasoning → tool call in single unified engine -----
-
     def test_reasoning_to_tool_call_handoff_unified(self):
-        """Full reasoning → content → tool call through a single engine.
-
-        Verifies the unified config handles the complete flow without
-        needing separate reasoning and tool-call engines."""
+        """Full reasoning -> content -> tool call flow."""
         tok = _make_gemma4_tokenizer()
         engine = StreamingParserEngine(gemma4_config(), tok)
 
         events = _collect_events(
             engine,
             [
-                # Reasoning section
                 (_CHANNEL_START_TAG, [_CHANNEL_START_TID]),
                 ("thought\nI need to check the weather.", [_TOK[0], _TOK[1], _TOK[2]]),
                 (_CHANNEL_END_TAG, [_CHANNEL_END_TID]),
-                # Content + tool call
                 ("Let me call a tool.", [_TOK[3], _TOK[4]]),
                 (_TOOL_START_TAG, [_TOOL_START_TID]),
                 ("call:get_weather{city:", [_TOK[5], _TOK[6]]),
@@ -609,22 +542,17 @@ class TestMultiTokenBoundaryPreservation:
         assert "SF" in _arg_text(events)
 
     def test_multiple_tool_calls_rapid_transitions_unified(self):
-        """Two back-to-back tool calls in the unified config.
-
-        Verifies tool_index tracking and text integrity — the key behavior
-        lost when test_multiple_tool_calls_rapid_transitions was removed."""
+        """Two back-to-back tool calls with correct tool_index tracking."""
         tok = _make_gemma4_tokenizer()
         engine = StreamingParserEngine(gemma4_config(), tok)
 
         events = _collect_events(
             engine,
             [
-                # Tool call 0
                 (_TOOL_START_TAG, [_TOOL_START_TID]),
                 ("call:get_weather{city:", [_TOK[0], _TOK[1]]),
                 ('<|"|>NYC<|"|>}', [_QUOTE_TID, _TOK[2], _QUOTE_TID, _TOK[3]]),
                 (_TOOL_END_TAG, [_TOOL_END_TID]),
-                # Tool call 1 immediately after
                 (_TOOL_START_TAG, [_TOOL_START_TID]),
                 ("call:get_time{tz:", [_TOK[4], _TOK[5]]),
                 ('<|"|>EST<|"|>}', [_QUOTE_TID, _TOK[6], _QUOTE_TID, _TOK[7]]),
@@ -644,10 +572,7 @@ class TestMultiTokenBoundaryPreservation:
         assert "get_time" in names
 
     def test_deferred_channel_end_before_tool_call_unified(self):
-        """CHANNEL_END deferred (text held back), then tool call follows.
-
-        Covers the case where reasoning ends with holdback at <channel|>
-        and a tool call fires in the same unified engine afterward."""
+        """Deferred CHANNEL_END followed by a tool call."""
         tok = _make_gemma4_tokenizer()
         engine = StreamingParserEngine(gemma4_config(), tok)
 
@@ -656,11 +581,8 @@ class TestMultiTokenBoundaryPreservation:
             [
                 (_CHANNEL_START_TAG, [_CHANNEL_START_TID]),
                 ("thought\nNeed to call a tool.", [_TOK[0], _TOK[1]]),
-                # Holdback: reasoning tail in delta_text, CHANNEL_END text absent.
                 (" Let me proceed.", [_CHANNEL_END_TID]),
-                # Deferred CHANNEL_END resolves.
                 (_CHANNEL_END_TAG, [_TOK[2]]),
-                # Tool call follows
                 (_TOOL_START_TAG, [_TOOL_START_TID]),
                 ("call:get_weather{city:", [_TOK[3], _TOK[4]]),
                 ('<|"|>Tokyo<|"|>}', [_QUOTE_TID, _TOK[5], _QUOTE_TID, _TOK[6]]),
@@ -677,30 +599,14 @@ class TestMultiTokenBoundaryPreservation:
 
 
 class TestStreamInterval10:
-    """Tests that model ``--stream-interval 10`` behavior.
-
-    With stream_interval=10 the output processor holds tokens until 10
-    have accumulated, then emits them all at once.  ``delta_token_ids``
-    contains ~10 token IDs and ``delta_text`` is a substring of the
-    detokenizer's accumulated output — it includes hold-back text from
-    *previous* batches and may or may not include special-token text.
-
-    The critical difference from interval=1: a special token can land
-    in the *middle* of a 10-token batch, meaning tokens before it belong
-    to one parser state and tokens after belong to another, all arriving
-    in a single ``feed()`` call."""
+    """Tests with stream_interval=10 (large multi-token batches)."""
 
     def test_channel_end_mid_batch_text_present(self):
-        """<channel|> lands at position 4 of a 10-token batch.
-
-        delta_text includes all text: holdback from previous batch +
-        reasoning text + <channel|> text + content text.  All in one
-        feed() call with 10 token IDs."""
+        """<channel|> mid-batch with its text present in delta_text."""
         tok = _make_gemma4_tokenizer({_TOK[i]: f"word{i} " for i in range(15)})
         engine = StreamingParserEngine(gemma4_config(), tok)
 
         events: list = []
-        # Batch 1: channel start + first reasoning tokens (10 tokens)
         events.extend(
             engine.feed(
                 "<|channel>thought\nword0 word1 word2 word3 word4 "
@@ -720,9 +626,6 @@ class TestStreamInterval10:
             )
         )
 
-        # Batch 2: 10 tokens, <channel|> at position 4.
-        # delta_text includes holdback from previous batch ("word9 ")
-        # + reasoning tokens + <channel|> + content tokens.
         events.extend(
             engine.feed(
                 "word9 word10 word11 <channel|>word12 word13 word14 word0 word1 word2 ",
@@ -746,25 +649,21 @@ class TestStreamInterval10:
         reasoning = _reasoning_text(events)
         content = _content_text(events)
 
-        # Reasoning must include all text up to <channel|>.
         for w in ("word9", "word10", "word11"):
             assert w in reasoning, f"{w!r} missing from reasoning"
 
-        # Content must include all text after <channel|>.
         for w in ("word12", "word13", "word14"):
             assert w in content, f"{w!r} missing from content"
 
         assert _has_event(events, EventType.REASONING_END)
 
     def test_channel_end_and_tool_start_same_batch_unified(self):
-        """Both <channel|> AND <|tool_call> in a single 10-token batch,
-        handled by the unified config in one engine."""
+        """Both <channel|> and <|tool_call> in a single batch."""
         tok = _make_gemma4_tokenizer({_TOK[i]: f"w{i} " for i in range(15)})
         engine = StreamingParserEngine(gemma4_config(), tok)
 
         events: list = []
 
-        # Batch 1: reasoning start + content (10 tokens)
         events.extend(
             engine.feed(
                 "<|channel>thought\nw0 w1 w2 w3 w4 w5 w6 w7 w8 ",
@@ -783,8 +682,6 @@ class TestStreamInterval10:
             )
         )
 
-        # Batch 2: 10 tokens with <channel|> at pos 2, <|tool_call> at pos 4.
-        # Unified engine handles both the reasoning end and tool call start.
         events.extend(
             engine.feed(
                 "w9 w10 <channel|>w11 <|tool_call>",
@@ -812,17 +709,11 @@ class TestStreamInterval10:
         assert _has_event(events, EventType.TOOL_CALL_START)
 
     def test_channel_end_mid_batch_text_absent(self):
-        """<channel|> at position 4 of 10-token batch, but its text is
-        NOT in delta_text — detokenizer held it back.
-
-        The terminal is deferred, and tokens after it in the same batch
-        have their individually-decoded text dropped (unreliable without
-        delta_text confirmation)."""
+        """<channel|> mid-batch with its text absent from delta_text."""
         tok = _make_gemma4_tokenizer({_TOK[i]: f"word{i} " for i in range(15)})
         engine = StreamingParserEngine(gemma4_config(), tok)
 
         events: list = []
-        # Batch 1: channel start + reasoning (10 tokens)
         events.extend(
             engine.feed(
                 "<|channel>thought\nword0 word1 word2 word3 word4 "
@@ -842,9 +733,6 @@ class TestStreamInterval10:
             )
         )
 
-        # Batch 2: 10 tokens, <channel|> at position 4.
-        # delta_text has holdback + reasoning text but NOT the <channel|>
-        # text or anything after — detokenizer held those back.
         events.extend(
             engine.feed(
                 "word9 word10 word11 ",
@@ -863,7 +751,6 @@ class TestStreamInterval10:
             )
         )
 
-        # Batch 3: detokenizer flushes held-back text.
         events.extend(
             engine.feed(
                 "<channel|>word12 word13 word14 word0 word1 word2 ",
@@ -876,21 +763,16 @@ class TestStreamInterval10:
         reasoning = _reasoning_text(events)
         content = _content_text(events)
 
-        # All reasoning text preserved, including holdback "word9..word11".
         for w in ("word9", "word10", "word11"):
             assert w in reasoning, f"{w!r} missing from reasoning"
 
-        # Content after <channel|> preserved.
         for w in ("word12", "word13", "word14"):
             assert w in content, f"{w!r} missing from content"
 
         assert _has_event(events, EventType.REASONING_END)
 
     def test_tool_end_mid_batch_text_absent_unified(self):
-        """<tool_call|> at position 5 of 10-token batch, text absent.
-
-        Same pattern as channel_end but for tool calls — verifies
-        arg text isn't lost at tool-call end with large batches."""
+        """<tool_call|> mid-batch with text absent."""
         tok = _make_gemma4_tokenizer({_TOK[i]: f"w{i}" for i in range(15)})
         engine = StreamingParserEngine(gemma4_config(), tok)
 
@@ -920,9 +802,6 @@ class TestStreamInterval10:
             )
         )
 
-        # Batch 2: 10 tokens, quote + value tokens + quote + close brace
-        # + TOOL_END (text absent) + content tokens.
-        # delta_text only has the arg text, not <tool_call|> or after.
         events.extend(
             engine.feed(
                 '<|"|>San Francisco<|"|>}',
@@ -941,7 +820,6 @@ class TestStreamInterval10:
             )
         )
 
-        # Batch 3: detokenizer flushes <tool_call|> text + content.
         events.extend(
             engine.feed(
                 "<tool_call|>w8w9w10w11w12",
@@ -955,20 +833,12 @@ class TestStreamInterval10:
         assert "San Francisco" in _arg_text(events)
 
     def test_large_batch_holdback_spans_two_batches(self):
-        """Realistic stream_interval=10: reasoning text accumulates
-        across two 10-token batches, with <channel|> in the second
-        batch and holdback from the first.
-
-        This is the most realistic production scenario: the detokenizer
-        has been accumulating text across multiple tokens, holds some
-        back at the batch boundary, and the special token arrives in
-        the next batch with the held-back text in delta_text."""
+        """Holdback text spanning two batches with <channel|> in the second."""
         tok = _make_gemma4_tokenizer({_TOK[i]: f"w{i} " for i in range(15)})
         engine = StreamingParserEngine(gemma4_config(), tok)
 
         events: list = []
 
-        # Batch 1 (10 tokens): channel start + reasoning
         events.extend(
             engine.feed(
                 "<|channel>thought\nThe user asked about machine learning "
@@ -988,9 +858,6 @@ class TestStreamInterval10:
             )
         )
 
-        # Batch 2 (10 tokens): holdback from batch 1 (" explain")
-        # + more reasoning + <channel|> (text absent from delta_text)
-        # + content tokens (text also absent).
         events.extend(
             engine.feed(
                 " explain this complex topic. Let me organize my thoughts.",
@@ -1009,8 +876,6 @@ class TestStreamInterval10:
             )
         )
 
-        # Batch 3 (10 tokens): detokenizer flushes <channel|> text
-        # + content from batch 2 + new content.
         events.extend(
             engine.feed(
                 "<channel|>w0 w1 w2 Here is what I recommend: start with "
@@ -1035,11 +900,8 @@ class TestStreamInterval10:
         reasoning = _reasoning_text(events)
         content = _content_text(events)
 
-        # The held-back reasoning text must be preserved.
         assert "organize my thoughts." in reasoning
         assert "explain" in reasoning
-
-        # Content after <channel|> must be present.
         assert "recommend" in content
 
         assert _has_event(events, EventType.REASONING_START)
@@ -1047,9 +909,7 @@ class TestStreamInterval10:
 
 
 class TestRebuildFromAnchorsLiteralLookalike:
-    """When delta_text contains a literal mention of a special token's
-    text before the real special token, _rebuild_from_anchors must
-    anchor at the real occurrence, not the literal one."""
+    """Literal token text in prose must not be consumed as an anchor."""
 
     @pytest.fixture
     def tool_scanner(self):
@@ -1068,8 +928,6 @@ class TestRebuildFromAnchorsLiteralLookalike:
         )
 
     def test_literal_before_real_anchor(self, tool_scanner):
-        """Literal <tool_call> in prose followed by a real <tool_call>
-        special token — the scanner must split at the real one."""
         delta_text = 'Use <tool_call> like this: <tool_call>{"name":"f"}</tool_call>'
         delta_token_ids = [1, 2, 3, 4, 5, TOOL_START_ID, 6, 7, TOOL_END_ID]
         items = tool_scanner.scan(delta_text, delta_token_ids)
@@ -1081,14 +939,11 @@ class TestRebuildFromAnchorsLiteralLookalike:
         assert terminals[0].terminal == "TOOL_START"
         assert terminals[1].terminal == "TOOL_END"
 
-        # The literal mention must appear in a text chunk, not be
-        # consumed by the TOOL_START anchor.
         joined_text = "".join(text_parts)
         assert "<tool_call>" in joined_text
         assert '{"name":"f"}' in joined_text
 
     def test_multiple_tool_calls_with_literal_between(self, tool_scanner):
-        """Two real tool calls with a literal mention between them."""
         delta_text = (
             '<tool_call>{"name":"a"}</tool_call>'
             " see <tool_call> syntax "
@@ -1112,14 +967,11 @@ class TestRebuildFromAnchorsLiteralLookalike:
 
         text_parts = [it.text for it in items if isinstance(it, TextChunk)]
         joined_text = "".join(text_parts)
-        # The literal mention between the two real calls must be in text
         assert "<tool_call> syntax" in joined_text
 
 
 class TestRebuildFromAnchorsCascadingDeferral:
-    """When a middle anchor's text is absent from delta_text,
-    only that anchor should be deferred — not subsequent ones
-    with valid positions."""
+    """Missing middle anchor defers only itself, not subsequent ones."""
 
     @pytest.fixture
     def bare_scanner(self):
@@ -1178,9 +1030,6 @@ class TestRebuildFromAnchorsCascadingDeferral:
         texts = [r for r in rebuilt if isinstance(r, TextChunk)]
         joined = "".join(t.text for t in texts)
         assert "text" in joined
-        # "more" is deferred along with the missing terminal —
-        # it will be resolved in the next scan when the terminal
-        # text arrives.
         assert bare_scanner._deferred_post_text == "more"
         assert len(bare_scanner._deferred_terminals) == 1
         assert bare_scanner._deferred_terminals[0].terminal == "THINK_END"
