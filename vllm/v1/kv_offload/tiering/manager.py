@@ -591,6 +591,35 @@ class TieringOffloadingManager(OffloadingManager):
         yield from self.primary_tier.take_events()
 
     @override
+    def reset_cache(self) -> None:
+        """Drop all tracked state in the orchestrator and primary tier.
+
+        Called during sleep, weight update, or resume. Each secondary tier
+        drains its in-flight transfers via drain_jobs() so no tier I/O is
+        touching primary memory before the primary tier is reset. A stuck
+        tier will block here visibly — preferable to silent corruption
+        from reusing primary slots while a transfer is mid-copy.
+
+        Secondary tiers are intentionally not reset: persistent stores
+        (FS, network) keep their data across resets.
+        """
+        for tier in self.secondary_tiers:
+            tier.drain_jobs()
+        # All tier I/O has stopped; consume their completion notifications
+        # so manager bookkeeping is consistent before the primary reset.
+        self._process_finished_jobs()
+
+        # Deferred promotion submissions reserve primary slots that the
+        # reset below invalidates; their submit_load() has not yet been
+        # called so no tier I/O is touching that memory.
+        self._pending_load_submissions.clear()
+
+        self.primary_tier.reset_cache()
+
+        self._request_level_tiers.clear()
+        self._processed_jobs_this_step = False
+
+    @override
     def shutdown(self) -> None:
         """Shutdown all tiers and release resources."""
         for tier in self.secondary_tiers:
