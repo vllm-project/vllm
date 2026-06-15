@@ -1211,9 +1211,6 @@ class MLACommonPrefillMetadata:
         # New for MLA (compared to FlashAttention)
         # For handling chunked prefill
         cu_seq_lens: torch.Tensor
-        # CPU mirror of cu_seq_lens (pin-memory int32 [num_chunks, num_prefills+1]).
-        # Lets prefill backends that build host-side metadata (e.g. AITER_ASM PS
-        # scheduler) avoid a DtoH copy + host sync per layer per chunk.
         cu_seq_lens_cpu: torch.Tensor
         starts: torch.Tensor
         seq_tot: list[int]
@@ -1233,9 +1230,6 @@ class MLACommonPrefillMetadata:
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
-    # CPU mirror of query_start_loc (int32 [num_prefills+1]). Mirrors
-    # cu_seq_lens_cpu on ChunkedContextMetadata; populated unconditionally so
-    # PS backends don't need a per-layer DtoH copy.
     query_start_loc_cpu: torch.Tensor
     max_query_len: int
     chunked_context: ChunkedContextMetadata | None = None
