@@ -1337,30 +1337,28 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
 
 
 @functools.cache
-def backend_supports_prefill_query_quantization() -> bool:
-    """Check if the selected MLA prefill backend supports query quantization.
+def backend_supports_prefill_query_quantization(
+    backend_cls: type[MLAPrefillBackend],
+) -> bool:
+    """Check if the given MLA prefill backend supports query quantization.
 
     Currently supported backends:
-    - FlashInfer
-    - TRT-LLM Ragged
+    - FlashInfer (GB200)
+    - TRT-LLM Ragged (GB200)
+    - Tokenspeed MLA (GB200)
+    - AITER ASM (gfx950, kernel requires FP8 Q)
 
     Not supported:
     - FlashAttention (FA3/FA4)
     - Non-GB200 devices (FP8 prefill requires device capability 100)
     """
-    # FP8 prefill query quantization requires GB200 (device capability 100)
+    if backend_cls.requires_fp8_query_quantization:
+        return True
+
+    # FP8 prefill query quantization on CUDA requires GB200 (device capability 100)
     # for the necessary FP8 kernels at the moment.
     if not current_platform.is_device_capability_family(100):
         return False
-
-    from vllm.config import get_current_vllm_config
-    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
-
-    vllm_config = get_current_vllm_config()
-    backend_cls = get_mla_prefill_backend(vllm_config)
-
-    if backend_cls.requires_fp8_query_quantization:
-        return True
 
     return backend_cls.get_name() in (
         "FLASHINFER",
@@ -1428,33 +1426,46 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     ) -> torch.dtype:
         """
         Determine the query data type for prefill queries.
-        Return FP8 dtype if cache is FP8 and prefill query quantization
-        is enabled, else model dtype.
+        Return FP8 dtype if either
+        1. cache is FP8 and prefill query quantization is enabled, or
+        2. the backend requires FP8 Q.
+        Otherwise return model dtype.
         """
-        use_fp8 = (
-            is_quantized_kv_cache(vllm_config.cache_config.cache_dtype)
-            and vllm_config.attention_config.use_prefill_query_quantization
-            and backend_supports_prefill_query_quantization()
-        )
-
-        # For backends only supporting FP8 Q, auto-enable FP8 even if
-        # user flag use_prefill_query_quantization is not set.
-        if not use_fp8 and is_quantized_kv_cache(vllm_config.cache_config.cache_dtype):
+        is_fp8_kv = is_quantized_kv_cache(vllm_config.cache_config.cache_dtype)
+        backend_cls = None
+        if is_fp8_kv:
             from vllm.v1.attention.backends.mla.prefill import (
                 get_mla_prefill_backend,
             )
 
             backend_cls = get_mla_prefill_backend(vllm_config)
-            if backend_cls.requires_fp8_query_quantization:
-                use_fp8 = True
-                logger.info_once(
-                    "FP8 prefill attention auto-enabled: %s backend "
-                    "requires FP8 Q (use_prefill_query_quantization=%s, "
-                    "cache_dtype=%s).",
-                    backend_cls.get_name(),
-                    vllm_config.attention_config.use_prefill_query_quantization,
-                    vllm_config.cache_config.cache_dtype,
-                )
+
+        backend_supports_fp8_q = (
+            backend_cls is not None
+            and backend_supports_prefill_query_quantization(backend_cls)
+        )
+
+        # 1. fp8 if user opts in
+        use_fp8 = (
+            vllm_config.attention_config.use_prefill_query_quantization
+            and backend_supports_fp8_q
+        )
+
+        # 2. fp8 if backend requires it
+        if (
+            not use_fp8
+            and backend_cls is not None
+            and backend_cls.requires_fp8_query_quantization
+        ):
+            use_fp8 = True
+            logger.info_once(
+                "FP8 prefill attention auto-enabled: %s backend "
+                "requires FP8 Q (use_prefill_query_quantization=%s, "
+                "cache_dtype=%s).",
+                backend_cls.get_name(),
+                vllm_config.attention_config.use_prefill_query_quantization,
+                vllm_config.cache_config.cache_dtype,
+            )
 
         if use_fp8:
             fp8_dtype = current_platform.fp8_dtype()
@@ -1468,10 +1479,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 " backend is compatible with FP8 attention.",
             )
             return model_dtype
-        elif (
-            is_quantized_kv_cache(vllm_config.cache_config.cache_dtype)
-            and backend_supports_prefill_query_quantization()
-        ):
+        elif backend_supports_fp8_q:
             logger.warning_once(
                 "FP8 KV cache is enabled but prefill queries are not "
                 "quantized to FP8. For long-context workloads (ISL >= 4K), "
