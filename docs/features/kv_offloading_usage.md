@@ -62,12 +62,71 @@ vllm serve <model> \
   }'
 ```
 
+## Hugepage CPU Primary Tier
+
+Hugepage-backed CPU memory is opt-in and applies only to the
+`TieringOffloadingSpec` CPU primary tier. With no hugepage keys, vLLM preserves
+the existing defaults: single-tier `CPUOffloadingSpec` uses torch CPU tensors,
+and `TieringOffloadingSpec` uses a shared mmap file under `/dev/shm`.
+
+Before starting vLLM, reserve enough hugepages and mount a hugetlbfs directory
+on the host. vLLM validates and maps an existing hugetlbfs path; it does not
+reserve hugepages or create the mount for you.
+
+```bash
+sudo mkdir -p /dev/hugepages
+sudo mount -t hugetlbfs -o pagesize=2M none /dev/hugepages
+sudo mkdir -p /dev/hugepages/vllm
+```
+
+Then set `cpu_memory_backend` to `"hugetlbfs"` and point `cpu_memory_path` at
+the hugetlbfs directory:
+
+```bash
+vllm serve <model> \
+  --kv-transfer-config '{
+    "kv_connector": "OffloadingConnector",
+    "kv_role": "kv_both",
+    "kv_connector_extra_config": {
+      "spec_name": "TieringOffloadingSpec",
+      "cpu_memory_backend": "hugetlbfs",
+      "cpu_memory_path": "/dev/hugepages/vllm",
+      "cpu_hugepage_block_size": "2MB",
+      "cpu_bytes_to_use": 10737418240,
+      "block_size": 16,
+      "eviction_policy": "lru",
+      "secondary_tiers": []
+    }
+  }'
+```
+
+Invalid or unavailable hugepage mappings fail startup with an actionable error.
+Examples include a missing or unwritable `cpu_memory_path`, using `/dev/shm` for
+`hugetlbfs`, a detectable non-hugetlbfs filesystem, a detected mount page size
+that does not match `cpu_hugepage_block_size`, or insufficient reserved
+hugepages when sizing the mmap file.
+
+To verify that the offload region is backed by hugepages, inspect the vLLM
+process mappings and look for the offload file under `cpu_memory_path`:
+
+```bash
+PID=<vllm-worker-pid>
+grep -A20 '/dev/hugepages/vllm/vllm_offload_' /proc/${PID}/smaps
+```
+
+The matching mapping should report the hugetlbfs file path and hugepage
+properties such as `KernelPageSize` matching the configured page size or
+`VmFlags` containing `ht`.
+
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
 | --- | --- | --- | --- | --- |
 | `spec_name` | no | `CPUOffloadingSpec` | both | Set to `TieringOffloadingSpec` for multi-tier. |
 | `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). |
+| `cpu_memory_backend` | no | `default` | both | `default`, `shm`, or `hugetlbfs`. `default` preserves current behavior. Explicit `shm` and `hugetlbfs` are supported only by `TieringOffloadingSpec`. |
+| `cpu_memory_path` | no | `/dev/shm` for shared mmap | multi-tier | Directory for shared mmap files. Required for `cpu_memory_backend="hugetlbfs"`; optional for `shm`. |
+| `cpu_hugepage_block_size` | no | `2MB` | multi-tier | Expected hugetlbfs page size, either `2MB` or `1GB`. vLLM aligns the mapped file size to this value and validates the mount page size when it can detect it. |
 | `block_size` | no | GPU block size | both | Offloaded block size in tokens; must be a multiple of the GPU block size. |
 | `eviction_policy` | no | `lru` | both | Primary tier policy: `lru` or `arc`. |
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
@@ -120,9 +179,30 @@ To enable KV cache sharing between multiple vLLM instances using the same `root_
 PYTHONHASHSEED=0 vllm serve ...
 ```
 
+### Object Store (OBJ)
+
+The OBJ tier (`type: "obj"`) transfers blocks between the CPU primary tier and
+an object backend through NIXL. The CPU primary tier can be backed by hugetlbfs
+without changing the OBJ tier configuration. See
+`examples/features/kv_offloading/doca_memos/kv_transfer_config.doca_memos_hugepages.json`
+for a DOCA MEMOS example that sets `cpu_memory_backend="hugetlbfs"` and keeps
+the object secondary tier unchanged.
+
+When several vLLM processes share the same object tier prefix, set
+`PYTHONHASHSEED` to the same fixed value on every process so identical token
+content maps to identical object keys.
+
 ## Tuning Tips
 
 - `cpu_bytes_to_use`: a bigger CPU tier means fewer trips to slower secondary tiers and a higher hit rate. The value is total across all workers, not per-worker. Leave headroom for the rest of the host workload.
+- Hugepages: reserve enough hugepages for the aligned mmap size before starting
+  vLLM. Keep additional host-memory headroom for model runtime, request state,
+  networking, and secondary-tier clients; `cpu_bytes_to_use` is only the logical
+  KV capacity and does not include general process memory.
+- Containers: mount the hugetlbfs directory into the container and, on
+  Kubernetes, request the corresponding hugepage resources. vLLM must see the
+  same `cpu_memory_path` inside the container that you configure in
+  `kv_connector_extra_config`.
 - For single-tier (CPU-only) setups, set `cpu_bytes_to_use` larger than the aggregate GPU KV cache. Because offloading is immediate, a smaller CPU tier just mirrors what the GPU already holds and adds no hit rate.
 - `block_size`: larger offloaded blocks reduce per-block bookkeeping overhead but increase the granularity of lookups. Must be a multiple of the GPU block size.
 - FS thread counts: tune `n_read_threads` and `n_write_threads` to the parallelism your storage can sustain. Reads are latency-sensitive on the prefill path, so prefer more read threads when prefill hit rates are high.

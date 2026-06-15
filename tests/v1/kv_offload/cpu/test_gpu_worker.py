@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import mmap
 import random
 import time
 import uuid
+from typing import Any
 
 import pytest
 import torch
@@ -16,8 +18,10 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheTensor,
     GPULoadStoreSpec,
 )
+from vllm.v1.kv_offload.cpu import gpu_worker as gpu_worker_module
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
+from vllm.v1.kv_offload.cpu.memory import CPUOffloadMemoryConfig
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 NUM_GPU_BLOCKS = [64]
@@ -30,6 +34,98 @@ DEVICE_TYPE = current_platform.device_type
 DEVICES = [f"{DEVICE_TYPE}:0"]
 NUM_MAPPINGS = [3]
 NUM_MAPPINGS_PER_GROUP = [2]
+requires_accelerator = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="GPU offload transfer tests require CUDA/ROCm/XPU",
+)
+
+
+def test_handlers_consume_shared_region_selected_by_memory_config(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(gpu_worker_module, "PIN_MEMORY", False)
+    created_handlers: list[Any] = []
+
+    class FakeSingleDirectionOffloadingHandler:
+        def __init__(
+            self,
+            *,
+            gpu_tensors: list[torch.Tensor],
+            cpu_tensors: list[torch.Tensor],
+            block_size_factor: int,
+            kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
+            gpu_to_cpu: bool,
+            mmap_region: SharedOffloadRegion | None = None,
+            pin_thread: Any = None,
+            manually_pinned_tensors: list[torch.Tensor] | None = None,
+        ) -> None:
+            self.gpu_tensors = gpu_tensors
+            self.cpu_tensors = cpu_tensors
+            self.block_size_factor = block_size_factor
+            self.kv_cache_groups_data_refs = kv_cache_groups_data_refs
+            self.gpu_to_cpu = gpu_to_cpu
+            self.mmap_region = mmap_region
+            created_handlers.append(self)
+
+    monkeypatch.setattr(
+        gpu_worker_module,
+        "SingleDirectionOffloadingHandler",
+        FakeSingleDirectionOffloadingHandler,
+    )
+
+    gpu_page_size_bytes = mmap.PAGESIZE
+    block_size_factor = 2
+    num_cpu_blocks = 3
+    kv_caches = CanonicalKVCaches(
+        tensors=[
+            CanonicalKVCacheTensor(
+                tensor=torch.zeros((4, gpu_page_size_bytes), dtype=torch.int8),
+                page_size_bytes=gpu_page_size_bytes,
+            )
+        ],
+        group_data_refs=[
+            [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=gpu_page_size_bytes)]
+        ],
+    )
+    memory_config = CPUOffloadMemoryConfig.from_extra_config(
+        {"cpu_memory_backend": "shm", "cpu_memory_path": str(tmp_path)}
+    )
+    mmap_region = SharedOffloadRegion(
+        instance_id=str(uuid.uuid4()),
+        num_blocks=num_cpu_blocks,
+        rank=0,
+        kv_bytes_per_block=gpu_page_size_bytes * block_size_factor,
+        cpu_page_size=gpu_page_size_bytes * block_size_factor,
+        memory_config=memory_config,
+    )
+
+    cpu_tensor: torch.Tensor | None = None
+    try:
+        CPUOffloadingWorker(
+            kv_caches=kv_caches,
+            block_size_factor=block_size_factor,
+            num_cpu_blocks=num_cpu_blocks,
+            mmap_region=mmap_region,
+        )
+
+        assert len(created_handlers) == 2
+        cpu_tensor = created_handlers[0].cpu_tensors[0]
+        assert cpu_tensor is not None
+        assert created_handlers[1].cpu_tensors[0] is cpu_tensor
+        assert created_handlers[0].mmap_region is mmap_region
+        assert created_handlers[1].mmap_region is None
+        assert mmap_region.mmap_path.startswith(str(tmp_path))
+        assert cpu_tensor.shape == (
+            num_cpu_blocks,
+            gpu_page_size_bytes * block_size_factor,
+        )
+        assert cpu_tensor.data_ptr() == mmap_region._base.data_ptr()
+    finally:
+        for handler in created_handlers:
+            handler.cpu_tensors.clear()
+            handler.gpu_tensors.clear()
+        cpu_tensor = None
+        mmap_region.cleanup()
 
 
 @pytest.mark.parametrize("gpu_to_cpu", [True, False])
@@ -42,6 +138,7 @@ NUM_MAPPINGS_PER_GROUP = [2]
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("use_shared_memory", [False, True])
+@requires_accelerator
 @torch.inference_mode()
 def test_transfer(
     default_vllm_config,
@@ -219,6 +316,7 @@ def test_transfer(
 @pytest.mark.parametrize("num_cpu_blocks", NUM_CPU_BLOCKS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
+@requires_accelerator
 @torch.inference_mode()
 def test_transfer_multi_group(
     default_vllm_config,
