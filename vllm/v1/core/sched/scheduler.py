@@ -149,10 +149,6 @@ class Scheduler(SchedulerInterface):
             multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
             if multiple_inflight_batches and kv_transfer_config.is_kv_consumer:
                 self.defer_block_free = True
-                logger.info(
-                    "Deferred block freeing enabled (overlapping batches + "
-                    "KV-consumer connector)."
-                )
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
