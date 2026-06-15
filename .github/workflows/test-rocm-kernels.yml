@@ -116,9 +116,10 @@ jobs:
           # torchvision/torchaudio pins sharing the same +rocm build-date
           # suffix. Without this, the vllm wheel's `torch==2.11.0` dep is
           # satisfied by the vanilla PyPI wheel (PyTorch 2.11.0+cu130,
-          # HIP: None), and tests fail to find any GPU. See the build
-          # workflow for the same trick.
-          echo 'torch==2.11.*' > constraints.in
+          # HIP: None), and tests fail to find any GPU. Pin the +rocm
+          # build-date to match the build workflow: the 20260612 nightly
+          # segfaults on `import torch`.
+          echo 'torch==2.11.0+rocm7.14.0a20260608' > constraints.in
           uv pip compile constraints.in \
             --index-url ${{ env.PYTORCH_INDEX_URL }} \
             --prerelease allow \

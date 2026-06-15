@@ -55,11 +55,13 @@ jobs:
           # Resolve torch on the ROCm nightly index, then derive matching
           # torchvision/torchaudio pins. The nightly publishes multiple
           # base versions side-by-side (2.9, 2.10, 2.11, 2.12); pin to
-          # 2.11 to match requirements/build/rocm.txt. The three packages
-          # must share the same +rocm build-date suffix or they
-          # ABI-mismatch at import ("operator torchvision::nms does not
-          # exist").
-          echo 'torch==2.11.*' > constraints.in
+          # 2.11 to match requirements/build/rocm.txt. Pin the +rocm
+          # build-date too: the 20260612 nightly segfaults on `import
+          # torch`, so floating to the latest breaks the build/test jobs.
+          # The three packages must share the same +rocm build-date suffix
+          # or they ABI-mismatch at import ("operator torchvision::nms does
+          # not exist").
+          echo 'torch==2.11.0+rocm7.14.0a20260608' > constraints.in
           # --no-deps: torch pins exact rocm[libraries]/triton versions
           # in its metadata (e.g. rocm[libraries]==7.14.0a..., triton==
           # 3.7.0+rocm...); we don't want those locked in constraints.
