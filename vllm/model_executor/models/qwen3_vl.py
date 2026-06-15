@@ -379,6 +379,8 @@ class Qwen3_VisionPatchEmbed(nn.Module):
         full_temporal_patch_size = compact_image_patch_size * self.temporal_patch_size
 
         if compact_image_patch_size == C:
+            # Still images duplicate the same frame across the temporal axis,
+            # so summing Conv3D weights over time is the same projection.
             weight = self.proj.weight.sum(dim=2).reshape(
                 self.hidden_size, compact_image_patch_size
             )
