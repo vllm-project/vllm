@@ -47,7 +47,7 @@ _BASE_ARGS = [
     "--max-num-seqs",
     "32",
     "--gpu-memory-utilization",
-    "0.55",
+    "0.75",
     "--enable-sleep-mode",
     "--enforce-eager",
 ]
