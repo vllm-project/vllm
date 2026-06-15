@@ -229,6 +229,7 @@ jsonlines==4.0.0
     # via lm-eval
 jsonschema==4.26.0
     # via
+    #   -c requirements/common.txt
     #   hypothesis-jsonschema
     #   mistral-common
     #   schemathesis
