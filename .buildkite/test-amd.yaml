@@ -398,7 +398,7 @@ steps:
   - tests/kernels/helion/
   - vllm/platforms/rocm.py
   commands:
-  - pip install helion==1.0.0
+  - pip install helion==1.1.0
   - pytest -v -s kernels/helion/
 
 - label: Kernels Mamba Test # TBD

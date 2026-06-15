@@ -79,6 +79,8 @@ class TritonAttentionMetadata:
     softmax_segm_max: torch.Tensor
     softmax_segm_expsum: torch.Tensor
 
+    causal: bool | torch.Tensor
+
     # For cascade attention.
     use_cascade: bool
     common_prefix_len: int
@@ -219,6 +221,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             seq_lens=seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
+            causal=common_attn_metadata.causal,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             cu_prefix_query_lens=cu_prefix_query_lens,
@@ -270,6 +273,10 @@ class TritonAttentionBackend(AttentionBackend):
         return block_size % 16 == 0
 
     forward_includes_kv_cache_update: bool = False
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
 
     @staticmethod
     def get_name() -> str:
@@ -457,6 +464,26 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        cap = current_platform.get_device_capability()
+        cap_str = cap.as_version_str() if cap is not None else "unknown"
+        dev = current_platform.get_device_name()
+        if self.kv_cache_dtype.startswith("fp8") and not (
+            current_platform.has_device_capability(89)
+        ):
+            suggested = "float16" if (cap is None or cap.to_int() < 80) else "bfloat16"
+            raise ValueError(
+                f"FP8 KV cache is not supported by the Triton attention backend "
+                f"on {dev} (compute capability {cap_str}); native FP8 (fp8e4nv) "
+                f"requires SM89+. Re-run with --kv-cache-dtype {suggested}."
+            )
+        if self.kv_cache_dtype == "bfloat16" and not (
+            current_platform.has_device_capability(80)
+        ):
+            raise ValueError(
+                f"bfloat16 KV cache is not supported on {dev} (compute capability "
+                f"{cap_str}); bfloat16 requires SM80+. Re-run with "
+                f"--kv-cache-dtype float16."
+            )
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -619,7 +646,7 @@ class TritonAttentionImpl(AttentionImpl):
             seqused_k=seqused_k,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
-            causal=True,
+            causal=attn_metadata.causal,
             alibi_slopes=self.alibi_slopes,
             use_alibi_sqrt=self.use_alibi_sqrt,
             window_size=self.sliding_window,

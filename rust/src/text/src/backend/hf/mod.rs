@@ -100,6 +100,10 @@ impl TextBackend for HfTextBackend {
         self.model_config.is_moe()
     }
 
+    fn model_vocab_size(&self) -> Option<usize> {
+        self.model_config.vocab_size().map(|v| v as usize)
+    }
+
     fn model_id(&self) -> &str {
         &self.model_id
     }
