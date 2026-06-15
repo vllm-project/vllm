@@ -91,9 +91,9 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND QUTLASS_ARCHS)
     CUDA_ARCHS "${QUTLASS_ARCHS}"
   )
 
-  target_sources(_C PRIVATE ${QUTLASS_SOURCES})
-  target_include_directories(_C PRIVATE ${QUTLASS_INCLUDES})
-  target_compile_definitions(_C PRIVATE
+  target_sources(_C_stable_libtorch PRIVATE ${QUTLASS_SOURCES})
+  target_include_directories(_C_stable_libtorch PRIVATE ${QUTLASS_INCLUDES})
+  target_compile_definitions(_C_stable_libtorch PRIVATE
     QUTLASS_DISABLE_PYBIND=1
     TARGET_CUDA_ARCH=${QUTLASS_TARGET_CC}
   )

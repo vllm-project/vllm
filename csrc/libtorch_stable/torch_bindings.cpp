@@ -497,7 +497,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "persistent_masked_m_silu_mul_quant(Tensor input, Tensor counts, Tensor! "
       "y_q, Tensor! y_s, bool use_ue8m0) -> ()");
+#ifndef USE_ROCM
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
+#endif
 
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
@@ -715,7 +717,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   // Activation kernels (shared CUDA/ROCm)
   ops.impl("persistent_masked_m_silu_mul_quant",
            TORCH_BOX(&persistent_masked_m_silu_mul_quant));
+#ifndef USE_ROCM
   ops.impl("weak_ref_tensor", TORCH_BOX(&weak_ref_tensor));
+#endif
   ops.impl("silu_and_mul_quant", TORCH_BOX(&silu_and_mul_quant));
   ops.impl("silu_and_mul", TORCH_BOX(&silu_and_mul));
   ops.impl("mul_and_silu", TORCH_BOX(&mul_and_silu));
