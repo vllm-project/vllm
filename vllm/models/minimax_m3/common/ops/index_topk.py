@@ -794,7 +794,7 @@ def minimax_m3_index_decode(
     )
     # split-K over seq blocks; chunk count depends only on shape constants so
     # the grid is fixed within a cuda graph.
-    TARGET_GRID = 4096
+    TARGET_GRID = 512
     MAX_NUM_KV_CHUNKS = 256
     # Use the configured max decode length to avoid Triton recompiles when
     # switching between qlen=1 and spec-decode verification batches.
