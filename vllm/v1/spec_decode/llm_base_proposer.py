@@ -470,6 +470,7 @@ class SpecDecodeBaseProposer:
 
     def propose(
         self,
+        num_speculative_tokens,
         # [num_tokens]
         target_token_ids: torch.Tensor,
         # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
@@ -487,6 +488,7 @@ class SpecDecodeBaseProposer:
         | list[dict[str, torch.Tensor]]
         | None = None,
     ) -> torch.Tensor:
+        self.num_speculative_tokens = num_speculative_tokens
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
 
@@ -556,6 +558,17 @@ class SpecDecodeBaseProposer:
             self.model.model.set_skip_topk(True)
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
+
+        # No draft tokens requested (e.g. Dynamic SD decided K=0).
+        # The prefill forward pass above already ran to keep the drafter
+        # KV cache in sync, so just return an empty tensor.
+        if self.num_speculative_tokens == 0:
+            return torch.empty(
+                batch_size,
+                0,
+                device=sample_hidden_states.device,
+                dtype=torch.int64,
+            )
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -1512,23 +1525,10 @@ class SpecDecodeBaseProposer:
                     f"{self.model.__class__.__name__} does not implement "
                     "get_top_tokens()."
                 )
-            # Warn if draft model has vocab remapping, which forces fallback
-            # to the full-logits path (negating the optimization).
-            if (
-                hasattr(self.model, "draft_id_to_target_id")
-                and self.model.draft_id_to_target_id is not None
-            ):
-                logger.warning(
-                    "use_local_argmax_reduction is enabled but draft model "
-                    "uses draft_id_to_target_id vocab remapping. The "
-                    "optimization will be bypassed (falling back to full "
-                    "logits gather + argmax)."
-                )
-            else:
-                logger.info(
-                    "Using local argmax reduction for draft token generation "
-                    "(communication: O(2*tp_size) vs O(vocab_size))."
-                )
+            logger.info(
+                "Using local argmax reduction for draft token generation "
+                "(communication: O(2*tp_size) vs O(vocab_size))."
+            )
 
     @torch.inference_mode()
     def dummy_run(
