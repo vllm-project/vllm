@@ -593,7 +593,26 @@ class Scheduler(SchedulerInterface):
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
-                    break
+                    if self.policy == SchedulingPolicy.PRIORITY:
+                        request_queue = self._select_waiting_queue_for_scheduling()
+                        if request_queue is not None:
+                            waiting_head = request_queue.peek_request()
+                            lowest_running = max(
+                                self.running,
+                                key=lambda r: (r.priority, r.arrival_time),
+                            )
+                            if waiting_head < lowest_running:
+                                self.running.remove(lowest_running)
+                                self._preempt_request(
+                                    lowest_running, scheduled_timestamp)
+                                preempted_reqs.append(lowest_running)
+                                continue
+                            else:
+                                break
+                        else:
+                            break
+                    else:
+                        break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
