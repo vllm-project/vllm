@@ -247,6 +247,10 @@ void copy_and_expand_dflash_inputs_kernel_impl(
     if (rejected_ptr != nullptr) {
       valid_ctx_end -= rejected_ptr[req_idx];
     }
+    // Guard against out-of-bounds: ensure valid_ctx_end > ctx_start so that
+    // valid_ctx_end - 1 never reads before the request's context range.
+    valid_ctx_end =
+        std::max(valid_ctx_end, static_cast<int64_t>(ctx_start + 1));
 
     int64_t last_pos = target_pos_ptr[valid_ctx_end - 1];
 

@@ -268,6 +268,8 @@ def _copy_and_expand_dflash_inputs_kernel_impl(
             valid_ctx_end = ctx_end
             if rejected_i64 is not None:
                 valid_ctx_end -= int(rejected_i64[req_idx].item())
+            # Guard against out-of-bounds: ensure valid_ctx_end > ctx_start.
+            valid_ctx_end = max(valid_ctx_end, ctx_start + 1)
 
             last_pos = int(target_positions_i64[valid_ctx_end - 1].item())
 
