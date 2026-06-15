@@ -3,7 +3,8 @@ use std::sync::Arc;
 use vllm_tokenizer::Tokenizer;
 
 use super::{
-    DeepSeekR1ReasoningParser, DelimitedReasoningParser, Qwen3ReasoningParser, ReasoningParser,
+    DeepSeekR1ReasoningParser, DelimitedReasoningParser, MiniMaxM3ReasoningParser,
+    Qwen3ReasoningParser, ReasoningParser,
 };
 
 pub(crate) struct FakeTokenizer;
@@ -32,6 +33,8 @@ impl Tokenizer for FakeTokenizer {
             "<|END_THINKING|>" => Some(4),
             "◁think▷" => Some(5),
             "◁/think▷" => Some(6),
+            "<mm:think>" => Some(8),
+            "</mm:think>" => Some(9),
             "<seed:think>" => Some(10),
             "</seed:think>" => Some(11),
             _ => None,
@@ -159,5 +162,68 @@ fn deepseek_r1_stops_scanning_at_last_special_token() {
 
     let delta = parser.push("reason</think>answer").unwrap();
     assert_eq!(delta.reasoning.as_deref(), Some("reason"));
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn minimax_m3_handles_explicit_think_delimiters() {
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
+
+    let delta = parser.push("<mm:think>reason</mm:think>answer").unwrap();
+    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn minimax_m3_drops_leading_end_marker() {
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
+
+    let delta = parser.push("</mm:think>answer").unwrap();
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn minimax_m3_preserves_non_leading_end_marker() {
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
+
+    let delta = parser.push("XXX</mm:think>YYY").unwrap();
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(delta.content.as_deref(), Some("XXX</mm:think>YYY"));
+}
+
+#[test]
+fn minimax_m3_drops_split_leading_end_marker() {
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
+
+    assert!(parser.push("</mm").unwrap().is_empty());
+    let delta = parser.push(":think>answer").unwrap();
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn minimax_m3_uses_prompt_prefilled_start_marker() {
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
+    parser.initialize(&[8]).unwrap();
+
+    let delta = parser.push("reason</mm:think>answer").unwrap();
+    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn minimax_m3_uses_prompt_prefilled_end_marker() {
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = MiniMaxM3ReasoningParser::new(tokenizer).unwrap();
+    parser.initialize(&[9]).unwrap();
+
+    let delta = parser.push("answer").unwrap();
+    assert_eq!(delta.reasoning, None);
     assert_eq!(delta.content.as_deref(), Some("answer"));
 }
