@@ -335,7 +335,13 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             and type(self.base_layer).forward is not merged_cls.forward
         ):
             return self._apply_base_forward(x)
-        return _mcp_apply(x, bias, self)
+        # _mcp_apply always all-gathers the shrink buffer, which is only
+        # correct when lora_a is TP-sharded (S-LoRA). For the default path
+        # lora_a is replicated on every rank, so all_gather would inflate
+        # the buffer rank dim and break add_expand against lora_b_stacked.
+        if self.lora_config.fully_sharded_loras:
+            return _mcp_apply(x, bias, self)
+        return self._apply_sync(x, bias)
 
     @classmethod
     def can_replace_layer(
