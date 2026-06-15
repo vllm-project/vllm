@@ -2434,6 +2434,14 @@ class EngineArgs:
                 "or produce incorrect outputs.",
             )
 
+        if self.prefill_context_parallel_size > 1 and self.enable_chunked_prefill:
+            logger.warning_once(
+                "Disabling chunked prefill because prefill context parallelism "
+                "does not yet support chunked prefill in the upstream "
+                "FlashAttention backend."
+            )
+            self.enable_chunked_prefill = False
+
         # Disable chunked prefill and prefix caching for:
         # RISCV CPUs in V1
         if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
