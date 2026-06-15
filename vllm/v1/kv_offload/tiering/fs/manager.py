@@ -107,11 +107,12 @@ class FileSystemTierManager(SecondaryTierManager):
         )
         self._block_size: int = primary_kv_view.strides[0]
 
-        # Create file mapper
+        # Opt in; FileMapper enables it only for a parallelism-invariant block.
         self.file_mapper = FileMapper.from_offloading_spec(
             root_dir=root_dir,
             offloading_spec=offloading_spec,
             gpu_blocks_per_file=offloading_spec.block_size_factor,
+            parallel_agnostic=True,
         )
 
         # Write config file

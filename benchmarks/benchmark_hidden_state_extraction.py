@@ -92,7 +92,6 @@ def run_baseline(
     llm = LLM(
         model=model,
         enable_prefix_caching=False,
-        enable_chunked_prefill=False,
         **extra_args,
     )
     sampling_params = SamplingParams(max_tokens=1)
@@ -194,7 +193,6 @@ async def _run_extraction_async(
     engine_args = AsyncEngineArgs(
         model=model,
         enable_prefix_caching=False,
-        enable_chunked_prefill=False,
         max_num_batched_tokens=40960,
         max_model_len=40960,
         speculative_config={
