@@ -14,11 +14,15 @@ from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LoadStoreSpec,
     OffloadingCounterMetadata,
+    OffloadingGaugeMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
     OffloadingSpec,
 )
-from vllm.v1.kv_offload.cpu.common import METRIC_STORES_SKIPPED, CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import (
+    CPULoadStoreSpec,
+    CPUOffloadingMetrics,
+)
 from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.worker.worker import OffloadingHandler
@@ -31,17 +35,22 @@ class CPUOffloadingSpec(OffloadingSpec):
     def build_metric_definitions(
         cls, extra_config: dict[str, Any]
     ) -> dict[str, OffloadingMetricMetadata]:
-        store_threshold = int(extra_config.get("store_threshold", 0))
-        if store_threshold < 2:
-            return {}
-        return {
-            METRIC_STORES_SKIPPED: OffloadingCounterMetadata(
-                documentation=(
-                    "Number of KV offload stores skipped because the reuse "
-                    "threshold was not reached."
-                ),
-            )
+        definitions: dict[str, OffloadingMetricMetadata] = {
+            CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC: OffloadingGaugeMetadata(
+                documentation="CPU KV-cache offload usage. 1 means 100 percent usage.",
+            ),
         }
+        store_threshold = int(extra_config.get("store_threshold", 0))
+        if store_threshold >= 2:
+            definitions[CPUOffloadingMetrics.STORES_SKIPPED] = (
+                OffloadingCounterMetadata(
+                    documentation=(
+                        "Number of KV offload stores skipped because the reuse "
+                        "threshold was not reached."
+                    ),
+                )
+            )
+        return definitions
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, kv_cache_config)

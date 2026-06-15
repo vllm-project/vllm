@@ -18,7 +18,10 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
 )
-from vllm.v1.kv_offload.cpu.common import METRIC_STORES_SKIPPED, CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import (
+    CPULoadStoreSpec,
+    CPUOffloadingMetrics,
+)
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
@@ -282,13 +285,14 @@ class CPUOffloadingManager(OffloadingManager):
             self.events.clear()
 
     def get_stats(self) -> OffloadingConnectorStats | None:
-        if self.store_threshold < 2:
-            return None
-
         stats = OffloadingConnectorStats()
-        stats.increase_counter(
-            METRIC_STORES_SKIPPED,
-            self.stores_skipped_in_current_batch,
-        )
-        self.stores_skipped_in_current_batch = 0
+        num_used = self._num_blocks - self._get_num_free_blocks()
+        usage = num_used / self._num_blocks if self._num_blocks > 0 else 0.0
+        stats.set_gauge(CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC, usage)
+        if self.store_threshold >= 2:
+            stats.increase_counter(
+                CPUOffloadingMetrics.STORES_SKIPPED,
+                self.stores_skipped_in_current_batch,
+            )
+            self.stores_skipped_in_current_batch = 0
         return stats

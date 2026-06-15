@@ -14,11 +14,12 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import (
+    CPULoadStoreSpec,
+    CPUOffloadingMetrics,
+)
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
-
-STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
 
 
 def make_req_context(
@@ -181,10 +182,40 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     )
     stats = manager.get_stats()
     assert stats is not None
-    assert stats.reduce()[STORES_SKIPPED] == 3
+    assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 3
     stats = manager.get_stats()
     assert stats is not None
-    assert stats.reduce()[STORES_SKIPPED] == 0
+    assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 0
+
+
+def test_cpu_manager_reports_cache_usage_gauge():
+    # Zero-capacity manager always reports 0.0
+    manager = make_cpu_manager(num_blocks=0)
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()[CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC] == 0.0
+
+    # Empty manager (4 blocks, none allocated): usage = 0.0
+    manager = make_cpu_manager(num_blocks=4)
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()[CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC] == 0.0
+
+    # After allocating 2 of 4 blocks: usage = 0.5
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()[CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC] == pytest.approx(
+        0.5
+    )
+
+    # After filling all 4 blocks: usage = 1.0
+    manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()[CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC] == pytest.approx(
+        1.0
+    )
 
 
 def test_cpu_manager():
