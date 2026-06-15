@@ -8,7 +8,9 @@ The tier manager writes KV cache blocks to disk and reads them back, verifying
 data integrity throughout the process.
 """
 
+import mmap
 import os
+import threading
 import time
 from unittest.mock import MagicMock
 
@@ -21,13 +23,14 @@ from vllm.v1.kv_offload.tiering.base import JobMetadata
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
 )
+from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-_BLOCK_ELEMENTS = 512 * 1024  # 2 MB per block (float32 × 512K = 2MB)
-_DTYPE = torch.float32
+_BLOCK_ELEMENTS = 128 * mmap.PAGESIZE  # 2MB per block for pagesize 4096.
+_DTYPE: torch.dtype = torch.float32
 _CTX = ReqContext(req_id="test")
 
 _MOCK_VLLM_CONFIG = MagicMock()
@@ -70,9 +73,9 @@ def make_job(
     )
 
 
-def drain(tier: FileSystemTierManager, max_rounds: int = 40) -> list:
+def drain(tier: FileSystemTierManager, max_rounds: int = 100) -> list:
     """
-    Call get_finished_jobs() repeatedly until no new results arrive for 5
+    Call get_finished_jobs() repeatedly until no new results arrive for 20
     consecutive rounds or max_rounds is reached.
     """
     results = []
@@ -85,9 +88,53 @@ def drain(tier: FileSystemTierManager, max_rounds: int = 40) -> list:
             idle = 0
         else:
             idle += 1
-            if idle >= 5:
+            if idle >= 20:
                 break
     return results
+
+
+def lookup_and_wait(
+    tier: FileSystemTierManager,
+    keys: list[OffloadKey],
+    ctx: ReqContext = _CTX,
+    timeout: float = 1.0,
+) -> list[bool]:
+    """Perform a full async lookup cycle and return resolved results."""
+    for k in keys:
+        tier.lookup(k, ctx)
+    tier.on_schedule_end()
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not tier._lookup_manager._pending_results.empty():
+            break
+        time.sleep(0.01)
+    return [tier.lookup(k, ctx) for k in keys]
+
+
+def _page_aligned_zero_tensor(
+    num_blocks: int, block_elements: int, dtype: torch.dtype = _DTYPE
+) -> torch.Tensor:
+    page_size = mmap.PAGESIZE
+    dtype_num_bytes = torch.tensor([], dtype=dtype).element_size()
+
+    num_bytes = num_blocks * block_elements * dtype_num_bytes
+    num_bytes_aligned = num_bytes + page_size
+    t = torch.zeros(num_bytes_aligned, dtype=torch.uint8)
+
+    ptr = t.data_ptr()
+    alignment_offset = ptr % page_size
+    # Move tensor to next page regardless.
+    shift = page_size - alignment_offset
+    t = t[shift : shift + num_bytes]
+    return t.view(dtype).view(num_blocks, block_elements)
+
+
+def _page_aligned_rand_tensor(
+    num_blocks: int, block_elements: int, dtype: torch.dtype = _DTYPE
+) -> torch.Tensor:
+    rand_tensor = _page_aligned_zero_tensor(num_blocks, block_elements)
+    rand_tensor[:] = torch.rand(num_blocks, block_elements, dtype=dtype)
+    return rand_tensor
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +144,7 @@ def drain(tier: FileSystemTierManager, max_rounds: int = 40) -> list:
 
 @pytest.fixture
 def fs_tier(tmp_path):
-    tensor = torch.zeros((4, _BLOCK_ELEMENTS), dtype=_DTYPE)
+    tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
     mock_view = memoryview(tensor.numpy())
     tier = FileSystemTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
@@ -118,8 +165,8 @@ def fs_tier(tmp_path):
 
 def test_lookup_empty_tier(fs_tier):
     tier, _ = fs_tier
-    assert tier.lookup(key(1), _CTX) is False
-    assert tier.lookup(key(2), _CTX) is False
+    results = lookup_and_wait(tier, [key(1), key(2)])
+    assert results == [False, False]
 
 
 def test_store_creates_file_and_lookup_succeeds(fs_tier):
@@ -129,7 +176,7 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     results = drain(tier)
     assert len(results) == 1
     assert results[0].success
-    assert tier.lookup(key(1), _CTX) is True
+    assert lookup_and_wait(tier, [key(1)]) == [True]
     dest = tier.file_mapper.get_file_name(key(1))
     assert os.path.exists(dest), f"Expected file at {dest}"
 
@@ -141,21 +188,19 @@ def test_store_then_load_roundtrip(fs_tier):
     store_results = drain(tier)
     assert all(r.success for r in store_results)
 
-    assert tier.lookup(key(1), _CTX) is True
-    assert tier.lookup(key(2), _CTX) is True
+    assert lookup_and_wait(tier, [key(1), key(2)]) == [True, True]
 
     job_l = make_job(2, [key(1), key(2)], [2, 3], is_promotion=True)
     tier.submit_load(job_l)
     load_results = drain(tier)
     assert all(r.success for r in load_results)
     # Blocks stay on disk after load
-    assert tier.lookup(key(1), _CTX) is True
-    assert tier.lookup(key(2), _CTX) is True
+    assert lookup_and_wait(tier, [key(1), key(2)]) == [True, True]
 
 
 def test_invalid_path_raises_at_construction():
     """Construction must fail immediately when the config file cannot be written."""
-    tensor = torch.zeros((32, _BLOCK_ELEMENTS), dtype=_DTYPE)
+    tensor = _page_aligned_zero_tensor(32, _BLOCK_ELEMENTS)
     mock_view = memoryview(tensor.numpy())
 
     with pytest.raises(OSError):
@@ -186,8 +231,7 @@ def test_multiple_jobs_tracked_independently(fs_tier):
     results = drain(tier)
     job_ids = {r.job_id for r in results}
     assert job_ids == {1, 2}
-    assert tier.lookup(key(1), _CTX) is True
-    assert tier.lookup(key(2), _CTX) is True
+    assert lookup_and_wait(tier, [key(1), key(2)]) == [True, True]
 
 
 def test_multi_block_job_partial_failure(fs_tier):
@@ -228,7 +272,7 @@ def test_store_load_data_integrity(fs_tier):
     """Data written by store must be exactly recovered by load."""
     tier, tensor = fs_tier
     # Populate tensor with random data
-    tensor[:] = torch.rand((4, _BLOCK_ELEMENTS), dtype=_DTYPE)
+    tensor[:] = _page_aligned_rand_tensor(4, _BLOCK_ELEMENTS)
 
     # Store first 2 blocks
     num_store = 2
@@ -254,3 +298,23 @@ def test_store_load_data_integrity(fs_tier):
         assert torch.allclose(tensor[bid], expected[i]), (
             f"Block {bid} data mismatch after store+load"
         )
+
+
+def test_wait_idle_blocks_until_tasks_complete():
+    """wait_idle must not return while a task is still in flight."""
+    pool = DualQueueThreadPool(n_read_threads=1, n_write_threads=1)
+    gate = threading.Event()
+    pool.enqueue_store(job_id=1, n_tasks=1, tasks=[lambda: gate.wait(timeout=5.0)])
+
+    waiter = threading.Thread(target=pool.wait_idle)
+    waiter.start()
+    try:
+        waiter.join(timeout=0.2)
+        assert waiter.is_alive(), "wait_idle returned before task completed"
+        gate.set()
+        waiter.join(timeout=5.0)
+        assert not waiter.is_alive(), "wait_idle did not unblock"
+    finally:
+        gate.set()
+        pool.shutdown(wait=True)
+        waiter.join(timeout=5.0)

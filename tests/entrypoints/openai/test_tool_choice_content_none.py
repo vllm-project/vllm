@@ -78,9 +78,9 @@ def test_responses_parser_allows_named_tool_choice_with_none_content():
     )
     parser = _DummyDelegatingParser(tokenizer=None)
 
-    tool_calls, content = parser._parse_tool_calls(
-        request=request,
+    tool_calls, content = parser._extract_tool_calls(
         content=None,
+        request=request,
         enable_auto_tools=False,
     )
 

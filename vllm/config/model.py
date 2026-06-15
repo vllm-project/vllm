@@ -42,12 +42,6 @@ from vllm.transformers_utils.config import (
     uses_mrope,
     uses_xdrope_dim,
 )
-from vllm.transformers_utils.gguf_utils import (
-    is_gguf,
-    is_remote_gguf,
-    maybe_patch_hf_config_from_gguf,
-    split_remote_gguf,
-)
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
@@ -135,14 +129,12 @@ class ModelConfig:
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
-    - "qwen_vl" will always use the tokenizer from `qwen_vl`.
     - Other custom values can be supported via plugins.
 
     To swap the Rust BPE backend that powers HF fast tokenizers for the
     [fastokens](https://github.com/crusoecloud/fastokens) implementation, set
     `VLLM_USE_FASTOKENS=1` instead — that override applies to any mode that
-    loads an HF fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`,
-    `qwen_vl`, …)."""
+    loads an HF fast tokenizer (`hf`, `deepseek_v32`, `deepseek_v4`, …)."""
     trust_remote_code: bool = False
     """Trust remote code (e.g., from HuggingFace) when downloading the model
     and tokenizer."""
@@ -235,9 +227,10 @@ class ModelConfig:
     temperature and top_k/top_p.
     """
     use_fp64_gumbel: bool = False
-    """Whether to use FP64 (instead of FP32) for the Gumbel noise used by the
-    sampler. FP64 reduces the chance of ties in Gumbel-max sampling at the cost
-    of significantly lower kernel throughput on most GPUs."""
+    """Whether to use FP64 (instead of FP32) random noise for Gumbel-max and
+    equivalent exponential-race sampling. FP64 preserves lower-tail sampling
+    events that fp32 uniform/exponential draws can truncate, at the cost of
+    significantly lower throughput on most GPUs."""
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
     window functionality of the model, capping to sliding window size. If the
@@ -527,7 +520,7 @@ class ModelConfig:
         if self.enable_sleep_mode:
             if not current_platform.is_sleep_mode_available():
                 raise ValueError("Sleep mode is not supported on current platform.")
-            if not self.enable_cumem_allocator:
+            if current_platform.is_cuda_alike() and not self.enable_cumem_allocator:
                 logger.info_once(
                     "Enabling cumem allocator because sleep mode requires it."
                 )
@@ -548,11 +541,6 @@ class ModelConfig:
             hf_overrides_fn=hf_overrides_fn,
             token=self.hf_token,
         )
-        hf_config = maybe_patch_hf_config_from_gguf(
-            self.model,
-            hf_config,
-        )
-
         self.hf_config = hf_config
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
@@ -617,8 +605,6 @@ class ModelConfig:
                 self.tokenizer_mode = "grok2"
             elif arch == "MoonshotKimiaForCausalLM":
                 self.tokenizer_mode = "kimi_audio"
-            elif arch == "QwenVLForConditionalGeneration":
-                self.tokenizer_mode = "qwen_vl"
             elif arch == "DeepseekV32ForCausalLM":
                 self.tokenizer_mode = "deepseek_v32"
             elif arch == "DeepseekV4ForCausalLM":
@@ -726,14 +712,6 @@ class ModelConfig:
                     "--renderer-num-workers 1 (the default), or "
                     "disable the cache with --mm-processor-cache-gb 0."
                 )
-
-        # Multimodal GGUF models must use original repo for mm processing
-        if is_gguf(self.tokenizer) and self.is_multimodal_model:
-            raise ValueError(
-                "Loading a multimodal GGUF model needs to use original "
-                "tokenizer. Please specify the unquantized hf model's "
-                "repo name or path using the --tokenizer argument."
-            )
 
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
@@ -887,10 +865,7 @@ class ModelConfig:
             self.tokenizer = object_storage_tokenizer.dir
 
     def _get_encoder_config(self) -> dict[str, Any] | None:
-        model = self.model
-        if is_remote_gguf(model):
-            model, _ = split_remote_gguf(model)
-        return get_sentence_transformer_tokenizer_config(model, self.revision)
+        return get_sentence_transformer_tokenizer_config(self.model, self.revision)
 
     def _get_default_runner_type(
         self,
@@ -1022,7 +997,6 @@ class ModelConfig:
                 "gpt_oss_mxfp4",
                 "deepseek_v4_fp8",
                 "humming",
-                "gguf",
             ]
             # if the user specifies humming, we should always use humming
             if self.quantization == "humming":
@@ -1548,6 +1522,11 @@ class ModelConfig:
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
         return is_encoder_decoder(self.hf_config)
+
+    @cached_property
+    def is_diffusion(self) -> bool:
+        """Detect discrete diffusion (dLLM) models from HF config."""
+        return getattr(self.hf_config, "canvas_length", None) is not None
 
     @property
     def uses_alibi(self) -> bool:
