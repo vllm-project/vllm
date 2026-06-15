@@ -2285,3 +2285,42 @@ class TestReasoningTokensThroughServing:
         assert len(usage_chunks) == 1
         usage = usage_chunks[0]["usage"]
         assert usage["completion_tokens_details"]["reasoning_tokens"] == 2
+
+    @pytest.mark.asyncio
+    async def test_non_streaming_no_start_token(self, serving_chat, tokenizer):
+        """When <think> is prepended by the chat template, only </think>
+        appears in the generated token IDs.  Tokens before </think> should
+        still be counted as reasoning tokens."""
+        # tok10 tok11 </think>(end) tok20
+        # -> 2 reasoning tokens (tok10, tok11)
+        token_ids = [10, 11, THINK_END_ID, 20]
+
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "test"}],
+        )
+
+        async def result_generator():
+            yield _make_request_output(
+                req.request_id,
+                token_ids=token_ids,
+                text="reasoning</think>answer",
+                finish_reason="stop",
+                finished=True,
+            )
+
+        response = await serving_chat.chat_completion_full_generator(
+            request=req,
+            result_generator=result_generator(),
+            request_id=req.request_id,
+            model_name=MODEL_NAME,
+            conversation=[],
+            tokenizer=tokenizer,
+            request_metadata=RequestResponseMetadata(
+                request_id=req.request_id,
+            ),
+        )
+
+        assert response.usage is not None
+        assert response.usage.completion_tokens_details is not None
+        assert response.usage.completion_tokens_details.reasoning_tokens == 2

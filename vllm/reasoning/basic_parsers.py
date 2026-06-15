@@ -185,9 +185,17 @@ class BaseThinkingReasoningParser(ReasoningParser):
 
         Uses a depth counter so nested spans are handled safely and stray end
         tokens do not drive the counter negative.
+
+        When the start token is absent but the end token is present (common
+        when the chat template prepends ``<think>`` as part of the prompt),
+        assumes generation began inside a reasoning span — matching the
+        convention used by ``extract_reasoning()``.
         """
+        has_start = self.start_token_id in token_ids
+        has_end = self.end_token_id in token_ids
+
         count = 0
-        depth = 0
+        depth = 0 if has_start else (1 if has_end else 0)
         for token_id in token_ids:
             if token_id == self.start_token_id:
                 depth += 1
