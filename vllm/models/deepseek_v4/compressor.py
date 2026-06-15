@@ -5,14 +5,21 @@ from dataclasses import dataclass
 from typing import Any, ClassVar, cast
 
 import torch
+import torch.distributed as dist
 from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
+    _dsv4_pcp_compressor_partial_stats_kernel,
+    _dsv4_pcp_finalize_indexer_attn_kernel,
+    _dsv4_pcp_finalize_indexer_mxfp4_attn_kernel,
+    _dsv4_pcp_finalize_sparse_attn_kernel,
+    _dsv4_pcp_rescale_partial_stats_kernel,
     compress_norm_rope_store_triton,
 )
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
@@ -20,6 +27,7 @@ from vllm.models.deepseek_v4.common.ops.save_partial_states import (
     save_partial_states,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -32,6 +40,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+from vllm.v1.worker.cp_utils import get_total_cp_world_size_and_rank
 
 
 class CompressorBackend(AttentionBackend):
@@ -212,6 +221,9 @@ class DeepseekCompressor(nn.Module):
         self.device = current_platform.device_type
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len = vllm_config.model_config.max_model_len
+        self.cp_kv_cache_interleave_size = (
+            vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
 
         self.overlap = compress_ratio == 4
         self.coff = 1 + self.overlap
@@ -257,15 +269,20 @@ class DeepseekCompressor(nn.Module):
             self._quant_block = 64
             self._token_stride = self.nope_head_dim + self.rope_head_dim * 2
             self._scale_dim = self.nope_head_dim // 64 + 1  # 7 real + 1 pad
+            self._num_warps = 4
+            self._pcp_finalize_kernel = _dsv4_pcp_finalize_sparse_attn_kernel
         elif self.head_dim == 128:
             if use_fp4_cache:
                 self._quant_block = MXFP4_BLOCK_SIZE
                 self._token_stride = self.head_dim // 2
                 self._scale_dim = self.head_dim // MXFP4_BLOCK_SIZE
+                self._pcp_finalize_kernel = _dsv4_pcp_finalize_indexer_mxfp4_attn_kernel
             else:
                 self._quant_block = 128
                 self._token_stride = self.head_dim
                 self._scale_dim = 4  # single float32 scale
+                self._pcp_finalize_kernel = _dsv4_pcp_finalize_indexer_attn_kernel
+            self._num_warps = 1
         else:
             raise ValueError(
                 f"Unsupported head_dim for fused quant+cache: {self.head_dim}"
@@ -350,6 +367,26 @@ class DeepseekCompressor(nn.Module):
             else None
         )
 
+        total_cp_world_size, total_cp_rank = get_total_cp_world_size_and_rank()
+        if total_cp_world_size > 1:
+            self._pcp_compress_and_insert(
+                state_cache=state_cache,
+                token_to_req_indices=token_to_req_indices,
+                positions=positions,
+                state_slot_mapping=slot_mapping,
+                block_table=block_table,
+                block_size=block_size,
+                state_width=state_width,
+                cos_sin_cache=cos_sin_cache,
+                kv_cache=kv_cache,
+                kv_slot_mapping=k_cache_metadata.slot_mapping,
+                num_actual=num_actual,
+                total_cp_world_size=total_cp_world_size,
+                total_cp_rank=total_cp_rank,
+                pdl_kwargs=pdl_kwargs,
+            )
+            return
+
         # cutedsl (head=512) accepts the full-cache flags; triton (indexer/AMD)
         # does not, so the two callables have different signatures.
         compress_norm_rope_store_fn: Any
@@ -396,4 +433,114 @@ class DeepseekCompressor(nn.Module):
             token_stride=self._token_stride,
             scale_dim=self._scale_dim,
             **extra_kwargs,
+        )
+
+    def _pcp_compress_and_insert(
+        self,
+        *,
+        state_cache: torch.Tensor,
+        token_to_req_indices: torch.Tensor,
+        positions: torch.Tensor,
+        state_slot_mapping: torch.Tensor,
+        block_table: torch.Tensor,
+        block_size: int,
+        state_width: int,
+        cos_sin_cache: torch.Tensor,
+        kv_cache: torch.Tensor,
+        kv_slot_mapping: torch.Tensor,
+        num_actual: int,
+        total_cp_world_size: int,
+        total_cp_rank: int,
+        pdl_kwargs: dict[str, Any],
+    ) -> None:
+        pcp_group = get_pcp_group()
+        assert pcp_group.world_size == total_cp_world_size, (
+            "Deepseek V4 PCP compressor currently supports PCP-only CP."
+        )
+
+        shape = (num_actual, self.head_dim)
+        partial_m = torch.empty(shape, device=positions.device, dtype=torch.float32)
+        partial_s = torch.empty_like(partial_m)
+        partial_v = torch.empty_like(partial_m)
+
+        _dsv4_pcp_compressor_partial_stats_kernel[(num_actual,)](
+            # state cache
+            state_cache,
+            state_cache.stride(0),
+            state_cache.stride(1),
+            # metadata
+            token_to_req_indices,
+            positions,
+            state_slot_mapping,
+            block_table,
+            block_table.stride(0),
+            block_size,
+            # partial stats
+            partial_m,
+            partial_s,
+            partial_v,
+            partial_m.stride(0),
+            # constexprs
+            HEAD_SIZE=self.head_dim,
+            TRITON_BLOCK_SIZE=triton.next_power_of_2(self.head_dim),
+            STATE_WIDTH=state_width,
+            COMPRESS_RATIO=self.compress_ratio,
+            OVERLAP=self.overlap,
+            TOTAL_CP_WORLD_SIZE=total_cp_world_size,
+            TOTAL_CP_RANK=total_cp_rank,
+            CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
+            num_warps=self._num_warps,
+            **pdl_kwargs,
+        )
+
+        global_m = partial_m.clone()
+        dist.all_reduce(global_m, op=dist.ReduceOp.MAX, group=pcp_group.device_group)
+
+        global_s = torch.empty_like(partial_s)
+        global_v = torch.empty_like(partial_v)
+        _dsv4_pcp_rescale_partial_stats_kernel[(num_actual,)](
+            partial_m,
+            partial_s,
+            partial_v,
+            global_m,
+            global_s,
+            global_v,
+            partial_m.stride(0),
+            HEAD_SIZE=self.head_dim,
+            TRITON_BLOCK_SIZE=triton.next_power_of_2(self.head_dim),
+            num_warps=self._num_warps,
+            **pdl_kwargs,
+        )
+        global_s = pcp_group.all_reduce(global_s)
+        global_v = pcp_group.all_reduce(global_v)
+
+        self._pcp_finalize_kernel[(num_actual,)](
+            # merged stats
+            global_s,
+            global_v,
+            global_s.stride(0),
+            # metadata
+            positions,
+            # RMSNorm
+            self.norm.weight,
+            self.rms_norm_eps,
+            # RoPE
+            cos_sin_cache,
+            cos_sin_cache.stride(0),
+            # KV cache
+            kv_cache,
+            kv_slot_mapping,
+            kv_cache.shape[1],
+            # constexprs
+            HEAD_SIZE=self.head_dim,
+            TRITON_BLOCK_SIZE=triton.next_power_of_2(self.head_dim),
+            COMPRESS_RATIO=self.compress_ratio,
+            ROPE_HEAD_DIM=self.rope_head_dim,
+            FP8_MAX=448.0,
+            QUANT_BLOCK=self._quant_block,
+            TOKEN_STRIDE=self._token_stride,
+            SCALE_DIM=self._scale_dim,
+            KV_BLOCK_STRIDE=kv_cache.stride(0),
+            num_warps=self._num_warps,
+            **pdl_kwargs,
         )

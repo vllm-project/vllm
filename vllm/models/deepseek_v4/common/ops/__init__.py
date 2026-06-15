@@ -5,6 +5,7 @@ from .cache_utils import (
     build_flashinfer_mixed_sparse_indices,
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
+    compute_local_topk_indices_and_lens,
     dequantize_and_gather_k_cache,
     quantize_and_insert_k_cache,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "build_flashinfer_mixed_sparse_indices",
     "combine_topk_swa_indices",
     "compute_global_topk_indices_and_lens",
+    "compute_local_topk_indices_and_lens",
     "dequantize_and_gather_k_cache",
     "fused_indexer_q_rope_quant",
     "fused_inv_rope_fp8_quant",
