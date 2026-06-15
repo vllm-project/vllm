@@ -4883,6 +4883,139 @@ def test_priority_preemption_at_max_num_seqs_no_preempt_when_not_higher():
     assert scheduler.requests["lo"].status == RequestStatus.WAITING
 
 
+def test_priority_preemption_at_max_num_seqs_equal_priority_no_preempt():
+    """Preemption at max_num_seqs must NOT fire when priorities are equal,
+    even if the waiting request arrived earlier.
+
+    Using __lt__ would trigger preemption because the tiebreaker falls
+    back to arrival_time / request_id.  A preempted request keeps its
+    earlier arrival time, so it would immediately reclaim the slot on the
+    next step — causing ping-pong.
+
+    The fix compares only `.priority`, not `__lt__`.
+    """
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=200,
+        num_blocks=100,
+    )
+
+    # Two priority-5 requests fill the running queue.
+    running_reqs = create_requests_with_priority(
+        num_requests=2,
+        priorities=[5, 5],
+        arrival_times=[2.0, 3.0],
+        num_tokens=10,
+        req_ids=["r1", "r2"],
+    )
+    for req in running_reqs:
+        scheduler.add_request(req)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 2
+
+    # Decode.
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["r1", "r2"],
+            req_id_to_index={"r1": 0, "r2": 1},
+            sampled_token_ids=[[99], [98]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # A waiting request with the SAME priority (5) but an EARLIER
+    # arrival time (1.0 < 2.0).  It must NOT preempt — equal priority
+    # means no preemption.
+    waiting_req = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        num_tokens=10,
+        req_ids=["w1"],
+    )[0]
+    scheduler.add_request(waiting_req)
+
+    output = scheduler.schedule()
+
+    w1_scheduled = any(
+        req.req_id == "w1" for req in output.scheduled_new_reqs
+    )
+    assert not w1_scheduled, (
+        "Equal-priority waiting request 'w1' must NOT preempt "
+        "(same priority = no preemption)"
+    )
+    assert len(scheduler.running) == 2
+    assert scheduler.requests["w1"].status == RequestStatus.WAITING
+
+
+def test_priority_preemption_at_max_num_seqs_blocked_skipped():
+    """A blocked waiting request (WAITING_FOR_REMOTE_KVS) must NOT
+    trigger preemption at max_num_seqs — we don't evict a runner for a
+    request that can't be admitted this step anyway."""
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=1,
+        max_num_batched_tokens=200,
+        num_blocks=100,
+        use_kv_connector=True,
+    )
+
+    # Fill the single running slot with a low-priority request.
+    [runner] = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        num_tokens=10,
+        req_ids=["runner"],
+    )
+    scheduler.add_request(runner)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+    assert len(scheduler.running) == 1
+
+    # Decode.
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["runner"],
+            req_id_to_index={"runner": 0},
+            sampled_token_ids=[[99]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # Artificially set a high-priority request as WAITING_FOR_REMOTE_KVS
+    # and add it to the skipped queue directly (mimicking what happens
+    # after an async KV load is initiated).
+    blocked_req = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],  # Higher priority than runner (0 < 5)
+        arrival_times=[2.0],
+        num_tokens=10,
+        req_ids=["blocked_hi"],
+    )[0]
+    blocked_req.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+    scheduler.add_request(blocked_req)
+    # Move to skipped queue simulating a previously skipped request.
+    scheduler.skipped_waiting.add_request(blocked_req)
+    scheduler.waiting.pop_request()
+
+    # Schedule — should NOT preempt because blocked_hi can't be
+    # admitted yet.
+    output = scheduler.schedule()
+
+    assert scheduler.requests["runner"].status == RequestStatus.RUNNING, (
+        "Runner must NOT be preempted for a blocked waiting request"
+    )
+    assert len(scheduler.running) == 1
+
+
 def test_async_load_reservation_prevents_wedge_e2e():
     """Same wedge scenario as PR #40968's lateral-preemption e2e test, but
     resolved by reservation-based admission control instead of preemption.

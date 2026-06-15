@@ -613,12 +613,52 @@ class Scheduler(SchedulerInterface):
                 if len(self.running) == self.max_num_running_reqs:
                     if self.policy == SchedulingPolicy.PRIORITY:
                         # Priority-based preemption at max_num_seqs:
-                        # Allow a higher-priority waiting request to preempt
-                        # a lower-priority running request.
+                        # A higher-priority waiting request can preempt a
+                        # lower-priority running request.  Run the blocked-
+                        # status and max_loras admission checks first so we
+                        # don't evict a runner for a request that can't be
+                        # admitted this step.
                         request_queue = self._select_waiting_queue_for_scheduling()
                         if request_queue is None:
                             break
-                        waiting_req = request_queue.peek_request()
+                        request = request_queue.peek_request()
+                        request_id = request.request_id
+
+                        # Blocked-status check: don't preempt for a request
+                        # that is still waiting on async deps.
+                        if self._is_blocked_waiting_status(
+                            request.status
+                        ) and not self._try_promote_blocked_waiting_request(
+                            request
+                        ):
+                            if (
+                                request.status
+                                == RequestStatus.WAITING_FOR_REMOTE_KVS
+                            ):
+                                logger.debug(
+                                    "%s is still in "
+                                    "WAITING_FOR_REMOTE_KVS state.",
+                                    request_id,
+                                )
+                            request_queue.pop_request()
+                            step_skipped_waiting.prepend_request(request)
+                            continue
+
+                        # Max_loras check: don't preempt if the waiting
+                        # request would exceed the LoRA limit.
+                        if (
+                            self.lora_config
+                            and request.lora_request
+                            and (
+                                len(scheduled_loras)
+                                == self.lora_config.max_loras
+                                and request.lora_request.lora_int_id
+                                not in scheduled_loras
+                            )
+                        ):
+                            request_queue.pop_request()
+                            step_skipped_waiting.prepend_request(request)
+                            continue
 
                         # Find the lowest-priority running request.
                         lowest_priority_req = max(
@@ -626,60 +666,77 @@ class Scheduler(SchedulerInterface):
                             key=lambda r: (r.priority, r.arrival_time),
                         )
 
-                        # If the waiting request has higher priority
-                        # (lower numerical value), preempt the runner.
-                        if waiting_req < lowest_priority_req:
-                            self.running.remove(lowest_priority_req)
-                            if lowest_priority_req in scheduled_running_reqs:
-                                scheduled_running_reqs.remove(
-                                    lowest_priority_req
-                                )
-                                preempted_req_id = (
-                                    lowest_priority_req.request_id
-                                )
-                                token_budget += (
-                                    num_scheduled_tokens.pop(
-                                        preempted_req_id
-                                    )
-                                )
-                                req_to_new_blocks.pop(preempted_req_id)
-                                scheduled_spec_decode_tokens.pop(
+                        # Preempt only for strictly higher priority
+                        # (lower numerical value).  Equal priority must
+                        # not preempt — it causes ping-pong since the
+                        # preempted request keeps its earlier arrival
+                        # time and would immediately reclaim the slot.
+                        if (
+                            request.priority
+                            >= lowest_priority_req.priority
+                        ):
+                            break
+
+                        # Remove the victim from the running queue and
+                        # undo any scheduling already done for it in
+                        # this step.
+                        self.running.remove(lowest_priority_req)
+                        if lowest_priority_req in scheduled_running_reqs:
+                            scheduled_running_reqs.remove(
+                                lowest_priority_req
+                            )
+                            preempted_req_id = (
+                                lowest_priority_req.request_id
+                            )
+                            token_budget += num_scheduled_tokens.pop(
+                                preempted_req_id
+                            )
+                            req_to_new_blocks.pop(preempted_req_id)
+                            scheduled_spec_decode_tokens.pop(
+                                preempted_req_id, None
+                            )
+                            preempted_encoder_inputs = (
+                                scheduled_encoder_inputs.pop(
                                     preempted_req_id, None
                                 )
-                                preempted_encoder_inputs = (
-                                    scheduled_encoder_inputs.pop(
-                                        preempted_req_id, None
-                                    )
-                                )
-                                if preempted_encoder_inputs:
-                                    num_embeds_to_restore = sum(
-                                        lowest_priority_req.get_num_encoder_embeds(i)
-                                        for i in preempted_encoder_inputs
-                                    )
-                                    encoder_compute_budget += (
-                                        num_embeds_to_restore
-                                    )
-
-                                # Recalculate scheduled_loras since
-                                # scheduled_running_reqs changed.
-                                if self.lora_config:
-                                    scheduled_loras = set(
-                                        req.lora_request.lora_int_id
-                                        for req in scheduled_running_reqs
-                                        if (
-                                            req.lora_request
-                                            and req.lora_request.lora_int_id > 0
-                                        )
-                                    )
-
-                            self._preempt_request(
-                                lowest_priority_req, scheduled_timestamp
                             )
-                            preempted_reqs.append(lowest_priority_req)
-                            # Loop back to schedule the waiting request.
-                            continue
-                        else:
-                            break
+                            if preempted_encoder_inputs:
+                                encoder_compute_budget += sum(
+                                    lowest_priority_req.get_num_encoder_embeds(
+                                        i
+                                    )
+                                    for i in preempted_encoder_inputs
+                                )
+
+                            # Discard only the victim's LoRA when no
+                            # remaining scheduled request uses it.
+                            # This preserves LoRA IDs from waiting
+                            # requests already admitted earlier in
+                            # this scheduling pass.
+                            if (
+                                self.lora_config
+                                and lowest_priority_req.lora_request
+                            ):
+                                victim_lora_id = (
+                                    lowest_priority_req.lora_request.lora_int_id
+                                )
+                                if victim_lora_id > 0 and not any(
+                                    req.lora_request
+                                    and req.lora_request.lora_int_id
+                                    == victim_lora_id
+                                    for req in scheduled_running_reqs
+                                ):
+                                    scheduled_loras.discard(
+                                        victim_lora_id
+                                    )
+
+                        self._preempt_request(
+                            lowest_priority_req, scheduled_timestamp
+                        )
+                        preempted_reqs.append(lowest_priority_req)
+                        # Loop back to schedule the waiting request
+                        # (len(self.running) is now < max_num_running_reqs).
+                        continue
                     else:
                         break
 
