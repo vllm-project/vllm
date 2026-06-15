@@ -80,11 +80,9 @@ PREFILL_BACKENDS_TO_TEST = [
     MLAPrefillBackendEnum.AITER_ASM,
 ]
 
-# Remove AITER_ASM if not running on gfx950 with an AITER build that exports
-# the PS ASM kernels.
+# Remove AITER_ASM if backend not available (e.g. not on gfx950)
 try:
-    _aiter_asm_cls = MLAPrefillBackendEnum.AITER_ASM.get_class()
-    if not _aiter_asm_cls.is_available():
+    if not MLAPrefillBackendEnum.AITER_ASM.get_class().is_available():
         PREFILL_BACKENDS_TO_TEST.remove(MLAPrefillBackendEnum.AITER_ASM)
 except ImportError:
     PREFILL_BACKENDS_TO_TEST.remove(MLAPrefillBackendEnum.AITER_ASM)
