@@ -44,6 +44,9 @@ class ThinkingBudgetStateHolder:
 
     # Fraction of budget where the soft zone begins (0.7 = last 30%).
     _SOFT_ZONE_START_FRAC = 0.7
+    # Keep the soft target just below the current best logit so it nudges the
+    # model toward a natural close without becoming the argmax at temperature 0.
+    _SOFT_TARGET_MARGIN = 0.25
 
     think_start_token_ids: list[int]
     think_end_token_ids: list[int]
@@ -560,12 +563,11 @@ class ThinkingBudgetStateHolder:
                 and self.think_end_token_ids
                 and state.get("soft_progress", 0.0) > 0.0
             ):
-                # Adaptive soft bias: boost the end-of-thinking logit
-                # relative to the current gap between the top logit and the
-                # end token.
+                # Adaptive soft bias: pull the end-of-thinking logit toward
+                # just below the current top logit.
                 #   progress=0%   -> target = end_logit (no change)
-                #   progress=50%  -> target = top_logit (equal)
-                #   progress=100% -> target = top + gap (dominates)
+                #   progress=50%  -> halfway to top_logit - margin
+                #   progress=100% -> target = top_logit - margin
                 #
                 # Kept entirely in torch ops — no ``.item()`` — so the
                 # sampler never syncs device->host on this path. Only the
@@ -578,8 +580,9 @@ class ThinkingBudgetStateHolder:
                     next_id = self._next_close_token_id(state)
                     top = logits[row].max()
                     end = logits[row, next_id]
-                    gap = torch.clamp(top - end, min=1.0)
-                    target = end + 2.0 * state["soft_progress"] * gap
+                    target = end + state["soft_progress"] * (
+                        (top - self._SOFT_TARGET_MARGIN) - end
+                    )
                     logits[row, next_id] = torch.maximum(end, target)
 
         if active_indices_cpu:

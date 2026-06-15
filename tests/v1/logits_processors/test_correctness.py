@@ -1248,8 +1248,22 @@ def test_thinking_budget_soft_zone_biases_before_hard_force():
     logits[0, THINK_END_TOKEN_ID] = 2.0
     h.apply_to_logits(logits, predict_bonus_token=False, spec_token_ids=None)
 
-    assert 2.0 < logits[0, THINK_END_TOKEN_ID] < 1.0e8
+    expected = 2.0 + state["soft_progress"] * (10.0 - 0.25 - 2.0)
+    assert logits[0, THINK_END_TOKEN_ID] == pytest.approx(expected)
     assert logits[0, 7] == 10.0
+
+
+def test_thinking_budget_soft_zone_does_not_overtake_top_logit():
+    h, _ = _make_holder_in_soft_zone(MockReasoningConfig())
+    h._state[0]["soft_progress"] = 1.0
+
+    logits = torch.zeros((1, VOCAB_SIZE), dtype=torch.float32)
+    logits[0, 7] = 10.0
+    logits[0, THINK_END_TOKEN_ID] = -20.0
+    h.apply_to_logits(logits, predict_bonus_token=False, spec_token_ids=None)
+
+    assert logits[0, THINK_END_TOKEN_ID] == pytest.approx(9.75)
+    assert logits[0, THINK_END_TOKEN_ID] < logits[0, 7]
 
 
 def test_thinking_budget_soft_zone_biases_only_next_close_token():
