@@ -1168,7 +1168,7 @@ package_data = {
         "third_party/deep_gemm/include/**/*.h",
         "third_party/deep_gemm/include/**/*.hpp",
         # fmha_sm100 sparse CuTe-DSL helper kernels (vendored via cmake)
-        "third_party/fmha_sm100/cute/src/sm100/build_k2q_csr/build_k2q_csr.cu",
+        "third_party/fmha_sm100/cute/**/*.cu",
     ]
 }
 
