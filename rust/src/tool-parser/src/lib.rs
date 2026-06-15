@@ -4,6 +4,7 @@
 mod error;
 mod deepseek_dsml;
 mod deepseek_json;
+mod dynamo_adapter;
 mod gemma4;
 mod glm_xml;
 mod hy_v3;
@@ -20,6 +21,7 @@ use std::collections::{BTreeMap, btree_map};
 
 pub use deepseek_dsml::{DeepSeekV4ToolParser, DeepSeekV32ToolParser};
 pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
+pub use dynamo_adapter::DynamoDeepSeekV4ToolParser;
 pub use error::{Result, ToolParserError};
 pub use gemma4::Gemma4ToolParser;
 pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};

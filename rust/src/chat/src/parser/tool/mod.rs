@@ -4,14 +4,18 @@ use std::sync::LazyLock;
 
 pub use vllm_tool_parser::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
-    Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser,
-    HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
-    MinimaxM2ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, ToolCallDelta, ToolParser, ToolParserError, ToolParserOutput,
+    DynamoDeepSeekV4ToolParser, Gemma4ToolParser, Glm45MoeToolParser, Glm47MoeToolParser,
+    Granite4ToolParser, HermesToolParser, HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser,
+    Llama3JsonToolParser, MinimaxM2ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
+    Qwen3CoderToolParser, Qwen3XmlToolParser, ToolCallDelta, ToolParser, ToolParserError,
+    ToolParserOutput,
 };
 
 use crate::parser::ParserFactory;
 use crate::request::ChatTool;
+
+pub const USE_EXPERIMENTAL_DYNAMO_RUST_PARSER_ENV: &str =
+    "VLLM_USE_EXPERIMENTAL_DYNAMO_RUST_PARSER";
 
 /// Canonical public names for registered tool parsers.
 pub mod names {
@@ -55,13 +59,24 @@ impl ToolParserFactory {
     /// Create the default registry with built-in parser names and model
     /// mappings.
     pub fn new() -> Self {
+        Self::new_with_options(use_experimental_dynamo_rust_parser())
+    }
+
+    fn new_with_options(use_dynamo_deepseek_v4: bool) -> Self {
         let mut factory = Self::default();
 
         factory
             .register_parser::<DeepSeekV3ToolParser>(names::DEEPSEEK_V3)
             .register_parser::<DeepSeekV31ToolParser>(names::DEEPSEEK_V31)
-            .register_parser::<DeepSeekV32ToolParser>(names::DEEPSEEK_V32)
-            .register_parser::<DeepSeekV4ToolParser>(names::DEEPSEEK_V4)
+            .register_parser::<DeepSeekV32ToolParser>(names::DEEPSEEK_V32);
+
+        if use_dynamo_deepseek_v4 {
+            factory.register_parser::<DynamoDeepSeekV4ToolParser>(names::DEEPSEEK_V4);
+        } else {
+            factory.register_parser::<DeepSeekV4ToolParser>(names::DEEPSEEK_V4);
+        }
+
+        factory
             .register_parser::<Glm45MoeToolParser>(names::GLM45)
             .register_parser::<Glm47MoeToolParser>(names::GLM47)
             .register_parser::<Gemma4ToolParser>(names::GEMMA4)
@@ -154,6 +169,11 @@ impl ToolParserFactory {
         })?;
         self.create(name, tools)
     }
+}
+
+fn use_experimental_dynamo_rust_parser() -> bool {
+    std::env::var(USE_EXPERIMENTAL_DYNAMO_RUST_PARSER_ENV)
+        .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "True" | "TRUE"))
 }
 
 #[cfg(test)]
