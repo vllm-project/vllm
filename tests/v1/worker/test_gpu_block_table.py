@@ -41,7 +41,7 @@ def test_block_tables_apply_staged_writes_fuses_kv_groups(monkeypatch):
         overwrite=True,
     )
     block_tables.apply_staged_writes()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     assert torch.equal(
         block_tables.block_tables[0].gpu[0, :2],

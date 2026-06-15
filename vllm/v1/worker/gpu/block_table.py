@@ -7,10 +7,10 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import (
+    FusedStagedWriter,
     StagedWriteTensor,
     UvaBackedTensor,
-    UvaBufferPool,
-    async_tensor_h2d,
+    _load_ptr,
 )
 
 
@@ -57,22 +57,12 @@ class BlockTables:
             (self.num_kv_cache_groups, self.max_num_reqs),
             dtype=torch.int32,
         )
-        self.write_group_ids = UvaBufferPool(
-            self.num_kv_cache_groups * self.max_num_reqs,
-            dtype=torch.int32,
-        )
-        self.write_indices = UvaBufferPool(
-            self.num_kv_cache_groups * self.max_num_reqs,
-            dtype=torch.int32,
-        )
-        self.write_starts = UvaBufferPool(
-            self.num_kv_cache_groups * self.max_num_reqs,
-            dtype=torch.int32,
-        )
-        self.write_cu_lens = UvaBufferPool(
-            self.num_kv_cache_groups * self.max_num_reqs,
-            dtype=torch.int32,
-        )
+        self.fused_writer: FusedStagedWriter | None = None
+        if self.num_kv_cache_groups > 1:
+            # Only the multi-group path uses the fused writer.
+            self.fused_writer = FusedStagedWriter(
+                self.device, self.num_kv_cache_groups * self.max_num_reqs
+            )
 
         # Block tables used for model's forward pass.
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
@@ -131,54 +121,14 @@ class BlockTables:
 
     def apply_staged_writes(self) -> None:
         if self.num_kv_cache_groups == 1:
+            # Single group: write directly, skipping the per-write group lookup.
             self.block_tables[0].apply_write()
-            self.num_blocks.copy_to_uva()
-            return
-
-        write_group_ids: list[int] = []
-        write_indices: list[int] = []
-        write_starts: list[int] = []
-        write_contents: list[int] = []
-        write_cu_lens: list[int] = []
-
-        for group_id, block_table in enumerate(self.block_tables):
-            num_writes = len(block_table._staged_write_indices)
-            if num_writes == 0:
-                continue
-
-            write_group_ids.extend([group_id] * num_writes)
-            write_indices.extend(block_table._staged_write_indices)
-            write_starts.extend(block_table._staged_write_starts)
-            content_base = len(write_contents)
-            write_contents.extend(block_table._staged_write_contents)
-            write_cu_lens.extend(
-                content_base + cu_len for cu_len in block_table._staged_write_cu_lens
+        else:
+            # Multiple groups: apply all block tables with one fused kernel.
+            assert self.fused_writer is not None
+            self.fused_writer.apply(
+                self.block_tables, self.block_table_ptrs, self.block_table_strides
             )
-
-        num_writes = len(write_group_ids)
-        if num_writes == 0:
-            self.num_blocks.copy_to_uva()
-            return
-
-        group_ids_uva = self.write_group_ids.copy_to_uva(write_group_ids)
-        indices_uva = self.write_indices.copy_to_uva(write_indices)
-        starts_uva = self.write_starts.copy_to_uva(write_starts)
-        cu_lens_uva = self.write_cu_lens.copy_to_uva(write_cu_lens)
-        contents = async_tensor_h2d(write_contents, torch.int32, self.device)
-
-        _apply_block_table_writes_kernel[(num_writes,)](
-            self.block_table_ptrs,
-            self.block_table_strides,
-            group_ids_uva,
-            indices_uva,
-            starts_uva,
-            contents,
-            cu_lens_uva,
-            BLOCK_SIZE=1024,
-        )
-
-        for block_table in self.block_tables:
-            block_table.clear_staged_writes()
         self.num_blocks.copy_to_uva()
 
     def gather_block_tables(
@@ -244,40 +194,6 @@ class BlockTables:
         # with the same memory address as that used during the model's forward pass,
         # rather than allocating a new tensor.
         return self.slot_mappings[:, :num_tokens]
-
-
-@triton.jit
-def _apply_block_table_writes_kernel(
-    block_table_ptrs,  # [num_kv_cache_groups]
-    block_table_strides,  # [num_kv_cache_groups]
-    write_group_ids_ptr,
-    write_indices_ptr,
-    write_starts_ptr,
-    write_contents_ptr,
-    write_cu_lens_ptr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    group_id = tl.load(write_group_ids_ptr + pid)
-    row_idx = tl.load(write_indices_ptr + pid)
-    start_idx = tl.load(write_starts_ptr + pid)
-
-    cu_start = tl.load(write_cu_lens_ptr + pid - 1) if pid > 0 else 0
-    cu_end = tl.load(write_cu_lens_ptr + pid)
-    content_len = cu_end - cu_start
-
-    block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
-    block_table_stride = tl.load(block_table_strides + group_id)
-
-    for i in range(0, content_len, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < content_len
-        block_ids = tl.load(write_contents_ptr + cu_start + block, mask=mask)
-        tl.store(
-            block_table_ptr + row_idx * block_table_stride + start_idx + block,
-            block_ids,
-            mask=mask,
-        )
 
 
 @triton.jit(do_not_specialize=["num_reqs"])
@@ -383,10 +299,3 @@ def _compute_slot_mappings_kernel(
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
 
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)
-
-
-@triton.jit
-def _load_ptr(ptr_to_ptr, elem_dtype):
-    ptr = tl.load(ptr_to_ptr)
-    ptr = tl.cast(ptr, tl.pointer_type(elem_dtype))
-    return tl.multiple_of(ptr, 16)
