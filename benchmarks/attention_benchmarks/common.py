@@ -15,6 +15,8 @@ from batch_spec import get_batch_type, parse_batch_spec
 from rich.console import Console
 from rich.table import Table
 
+from vllm.triton_utils import triton
+
 
 def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
     """
@@ -32,6 +34,30 @@ def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
     except Exception:
         # Fallback for unparsable specs
         return (0, 0, 0)
+
+
+def run_do_bench(
+    benchmark_fn,
+    use_cuda_graphs: bool,
+    warmup_ms: int | None = None,
+) -> list[float]:
+    kwargs: dict[str, Any] = {"return_mode": "all"}
+    if use_cuda_graphs:
+        result = triton.testing.do_bench_cudagraph(benchmark_fn, **kwargs)
+    else:
+        if warmup_ms is not None:
+            kwargs["warmup"] = warmup_ms
+        result = triton.testing.do_bench(benchmark_fn, **kwargs)
+    return result
+
+
+def run_ncu_profile(benchmark_fn) -> None:
+    benchmark_fn()
+    torch.accelerator.synchronize()
+    torch.cuda.cudart().cudaProfilerStart()
+    benchmark_fn()
+    torch.accelerator.synchronize()
+    torch.cuda.cudart().cudaProfilerStop()
 
 
 # Mock classes for vLLM attention infrastructure
@@ -182,17 +208,36 @@ class ParameterSweep:
 
 @dataclass
 class ModelParameterSweep:
-    """Configuration for sweeping a model configuration parameter."""
+    """Configuration for sweeping model configuration parameter(s).
 
-    param_name: str  # Name of the model config parameter to sweep (e.g., "num_q_heads")
-    values: list[Any]  # List of values to test
-    label_format: str = "{backend}_{param_name}_{value}"  # Result label template
+    Supports two modes:
+    - Single param: param_name="head_dim", values=[128, 256, 512]
+    - Multi param: values=[{head_dim: 192, v_head_dim: 128}, {head_dim: 256}]
+      When values are dicts, each dict's keys are applied as config overrides.
+    """
+
+    param_name: str | None = None
+    values: list[Any] | None = None
+    label_format: str = "{backend}_{param_name}_{value}"
 
     def get_label(self, backend: str, value: Any) -> str:
         """Generate a label for a specific parameter value."""
+        if isinstance(value, dict):
+            return self.label_format.format(
+                backend=backend, param_name=self.param_name, value=value, **value
+            )
         return self.label_format.format(
             backend=backend, param_name=self.param_name, value=value
         )
+
+    def apply(self, config_args: dict, value: Any) -> None:
+        """Apply a sweep value to config args."""
+        if isinstance(value, dict):
+            config_args.update(value)
+        elif self.param_name is not None:
+            config_args[self.param_name] = value
+        else:
+            raise ValueError("param_name must be set if sweep values are not dicts")
 
 
 @dataclass
@@ -208,10 +253,10 @@ class BenchmarkConfig:
     block_size: int
     device: str
     dtype: torch.dtype = torch.float16
-    repeats: int = 1
-    warmup_iters: int = 3
     profile_memory: bool = False
     use_cuda_graphs: bool = False
+    ncu_profile: bool = False
+    warmup_ms: int | None = None
 
     # "auto" or "fp8"
     kv_cache_dtype: str = "auto"
@@ -226,6 +271,7 @@ class BenchmarkConfig:
     # Backend-specific tuning
     num_kv_splits: int | None = None  # CUTLASS MLA
     reorder_batch_threshold: int | None = None  # FlashAttn MLA, FlashMLA
+    num_splits: int | None = None  # FlashAttention split-K (0=auto, 1=disabled)
 
 
 @dataclass
@@ -234,6 +280,7 @@ class BenchmarkResult:
 
     config: BenchmarkConfig
     mean_time: float  # seconds
+    median_time: float  # seconds
     std_time: float  # seconds
     min_time: float  # seconds
     max_time: float  # seconds
@@ -252,6 +299,7 @@ class BenchmarkResult:
         return {
             "config": asdict(self.config),
             "mean_time": self.mean_time,
+            "median_time": self.median_time,
             "std_time": self.std_time,
             "min_time": self.min_time,
             "max_time": self.max_time,
