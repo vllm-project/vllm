@@ -393,7 +393,14 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def _reap_dead_sessions(self) -> None:
         # Pending sessions (no connection yet) are kept untouched —
         # they're awaiting the decoder's connect handshake, not dead.
-        dead = [pid for pid, s in self._sessions.items() if s.connected and not s.alive]
+        dead: list[str] | None = None
+        for pid, s in self._sessions.items():
+            if s.connected and not s.alive:
+                if dead is None:
+                    dead = []
+                dead.append(pid)
+        if dead is None:
+            return
         for pid in dead:
             session = self._sessions.pop(pid)
             failed_loads, failed_stores = session.close()
