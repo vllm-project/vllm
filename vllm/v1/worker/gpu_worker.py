@@ -78,6 +78,7 @@ from .utils import request_memory
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.device_allocator.cumem import CuMemAllocator
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -173,7 +174,23 @@ class Worker(WorkerBase):
             }
 
         allocator = get_mem_allocator_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
+        # CUDA graphs live in the "graphs"-tagged cumem pool and are offloaded
+        # to CPU (not discarded) at both levels so they can be restored in
+        # place on wake without re-capture (their captured pointers stay valid
+        # because cumem preserves virtual addresses).
+        #   Level 1: offload weights + graphs to CPU; discard KV.
+        #   Level 2: offload graphs to CPU; discard weights + KV.
+        allocator.sleep(
+            offload_tags=("weights", "graphs") if level == 1 else ("graphs",)
+        )
+
+        # Release idle NCCL communicator memory (NCCL >= 2.29.7). Collective
+        # across ranks; no-op at world_size 1 or on older NCCL. Done after the
+        # cumem unmap so the reported freed bytes include the NCCL release.
+        from vllm.distributed.device_communicators import nccl_suspend
+
+        nccl_suspend.suspend_nccl_comms()
+
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
@@ -188,6 +205,12 @@ class Worker(WorkerBase):
         allocator = get_mem_allocator_instance()
         allocator.wake_up(tags)
 
+        # Restore NCCL communicator memory before any collective runs again.
+        # Collective across ranks; no-op at world_size 1 or on older NCCL.
+        from vllm.distributed.device_communicators import nccl_suspend
+
+        nccl_suspend.resume_nccl_comms()
+
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
             model = self.model_runner.model
@@ -198,6 +221,39 @@ class Worker(WorkerBase):
 
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
+
+    def _pin_sleep_mode_graph_pool(self) -> "CuMemAllocator | None":
+        """Pin the cumem-backed CUDA graph pool before graph capture.
+
+        Returns the allocator when graph offload is active so the caller can
+        hold the ``graphs`` tag across capture and restore it afterwards, else
+        None.
+
+        The cumem graph pool must be the pool every CUDA-graph capture allocates
+        into, so it has to be wired up *before* ``capture_model``:
+        ``CudaPlatform._global_graph_pool`` is cached process-wide on the first
+        ``get_global_graph_pool()`` call, which can precede the cumem instance
+        and cache the native pool; and ``CUDAGraphWrapper`` instances cache
+        ``graph_pool`` at construction. We therefore overwrite the global pool
+        and re-point every live wrapper at the cumem pool. Without this, capture
+        routes to the native allocator and the graph memory is never offloaded.
+        """
+        if not self.vllm_config.model_config.enable_cumem_allocator:
+            return None
+        if not current_platform.is_cuda_alike():
+            return None
+        from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+        from vllm.compilation.cuda_graph import CUDAGraphWrapper
+        from vllm.device_allocator.cumem import CuMemAllocator
+
+        allocator = CuMemAllocator.get_instance()
+        pool_id = allocator.get_graph_pool_handle()
+        type(current_platform)._global_graph_pool = pool_id
+        for inst in list(CUDAGraphWrapper._all_instances) + list(
+            BreakableCUDAGraphWrapper._all_instances
+        ):
+            inst.graph_pool = pool_id
+        return allocator
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
@@ -627,7 +683,17 @@ class Worker(WorkerBase):
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
-            cuda_graph_memory_bytes = self.model_runner.capture_model()
+            # Wire the cumem graph pool before capture so the captured graph
+            # memory is tagged "graphs" and participates in sleep/wake offload.
+            graph_allocator = self._pin_sleep_mode_graph_pool()
+            if graph_allocator is not None:
+                old_tag = graph_allocator.current_tag
+                graph_allocator.current_tag = graph_allocator.graphs_tag
+            try:
+                cuda_graph_memory_bytes = self.model_runner.capture_model()
+            finally:
+                if graph_allocator is not None:
+                    graph_allocator.current_tag = old_tag
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (

@@ -104,6 +104,7 @@ class CuMemAllocator:
 
     instance: "CuMemAllocator | None" = None
     default_tag: str = "default"
+    graphs_tag: str = "graphs"
 
     @staticmethod
     def get_instance() -> "CuMemAllocator":
@@ -188,6 +189,16 @@ class CuMemAllocator:
 
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle
+            # CUDA graphs that are not selected for offload must stay resident.
+            # Their memory lives in the cumem pool, but discarding it (unmap
+            # without a CPU backup) would leave the captured graph pointing at
+            # undefined pages after wake-up -> garbage output, since graphs are
+            # restored in place rather than re-captured. Skipping the unmap
+            # keeps level-1 sleep byte-identical to the pre-graph-offload
+            # behavior; level 2 puts the graphs tag in offload_tags so the
+            # pool is backed up to CPU and released.
+            if data.tag == CuMemAllocator.graphs_tag and data.tag not in offload_tags:
+                continue
             total_bytes += handle[1]
             if data.tag in offload_tags:
                 backup_bytes += handle[1]
@@ -213,7 +224,13 @@ class CuMemAllocator:
         )
 
         gc.collect()
-        torch.cuda.empty_cache()
+        # Flush torch's caching layer so freed blocks are returned to the
+        # driver. This can raise if a pluggable mem-pool context is active (the
+        # persistent CUDA-graph pool); guard so sleep still succeeds.
+        try:
+            torch.cuda.empty_cache()
+        except Exception as e:
+            logger.debug("torch.cuda.empty_cache() skipped during sleep: %s", e)
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         """
@@ -309,3 +326,47 @@ class CuMemAllocator:
             handle = data.handle
             sum_bytes += handle[1]
         return sum_bytes
+
+    def get_graph_pool_handle(self) -> tuple[int, int]:
+        """Return a CUDA graph memory pool id backed by this allocator.
+
+        CUDA graphs captured against this pool are tagged ``graphs`` and thus
+        participate in the same sleep/wake offload mechanism as weights and the
+        KV cache. The pool context is entered once and kept open for the
+        lifetime of the process, so every subsequent graph capture allocates
+        into it.
+
+        Returns:
+            The mempool id tuple ``(int, int)`` to pass as the ``pool``
+            argument of ``torch.cuda.graph`` (matches the return type of
+            ``torch.cuda.graph_pool_handle``). The owning ``MemPool`` object is
+            kept alive via ``allocator_and_pools`` / ``_custom_graph_pool_obj``.
+        """
+        if not hasattr(self, "_custom_graph_pool_id"):
+            logger.info(
+                "CuMemAllocator: creating CUDA graph pool with tag '%s'",
+                CuMemAllocator.graphs_tag,
+            )
+            # Create a MemPool backed by the cumem pluggable allocator, but do
+            # NOT enter a ``use_mem_pool`` context: ``torch.cuda.graph(pool=id)``
+            # runs its own ``beginAllocateToPool`` for the same pool during
+            # capture, and an outer ``use_mem_pool`` on the same id would make
+            # that fail with "already recording to mempool_id".
+            #
+            # The ``graphs`` tag is applied by the capture caller holding
+            # ``current_tag = graphs_tag`` across ``capture_model`` (see
+            # ``GPUWorker._pin_sleep_mode_graph_pool``), so graph allocations are
+            # tagged correctly even when other pool contexts run in between.
+            new_alloc = get_pluggable_allocator(
+                self.python_malloc_callback, self.python_free_callback
+            )
+            mem_pool = torch.cuda.memory.MemPool(new_alloc._allocator)
+            self.allocator_and_pools[CuMemAllocator.graphs_tag] = (
+                mem_pool,
+                new_alloc,
+            )
+            # Keep a strong ref so the pool is not destroyed, and hand callers
+            # the mempool id tuple that torch.cuda.graph(pool=...) expects.
+            self._custom_graph_pool_obj = mem_pool
+            self._custom_graph_pool_id = mem_pool.id
+        return self._custom_graph_pool_id

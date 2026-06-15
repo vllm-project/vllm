@@ -501,6 +501,32 @@ class CudaPlatformBase(Platform):
         return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
     @classmethod
+    def graph_pool_handle(cls):
+        """Return the CUDA graph memory pool.
+
+        When the cumem allocator is active (sleep mode), route CUDA graph
+        captures through the allocator's ``graphs``-tagged pool so the graph
+        memory can be offloaded and restored on sleep/wake. Otherwise fall back
+        to the native ``torch.cuda.graph_pool_handle()``.
+
+        The "is sleep mode on" signal is the existence of the ``CuMemAllocator``
+        singleton: it is created the first time a cumem memory pool is entered
+        (weight loading under sleep mode), which always precedes CUDA graph
+        capture. We deliberately do NOT use ``get_current_vllm_config()`` here
+        because graph_pool_handle() is also called during ``torch.compile``,
+        where the current-config context is not set and the lookup raises.
+        """
+        try:
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            if CuMemAllocator.instance is not None:
+                logger.debug("Routing CUDA graph pool through CuMemAllocator")
+                return CuMemAllocator.instance.get_graph_pool_handle()
+        except Exception as e:
+            logger.warning("Falling back to native CUDA graph pool (%s)", str(e))
+        return torch.cuda.graph_pool_handle()
+
+    @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
         if dtype == torch.bfloat16:  # noqa: SIM102
             if not cls.has_device_capability(80):

@@ -54,6 +54,35 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
             use_flashinfer_allreduce = envs.VLLM_ALLREDUCE_USE_FLASHINFER
 
+            # Sleep-mode CUDA-graph offload routes the graph pool through the
+            # cumem VMM allocator. CustomAllreduce registers captured graph
+            # buffers for IPC via cudaIpcGetMemHandle, which fails on VMM memory
+            # (cudaErrorInvalidValue; VMM needs cuMemExportToShareableHandle) and
+            # crashes FULL-cudagraph capture. Disable it while graph offload is
+            # active; the symm-mem / pynccl backends remain available.
+            if use_custom_allreduce:
+                try:
+                    from vllm.config import get_current_vllm_config
+
+                    mc = get_current_vllm_config().model_config
+                    graph_offload_active = (
+                        mc is not None
+                        and getattr(mc, "enable_cumem_allocator", False)
+                        and not getattr(mc, "enforce_eager", False)
+                    )
+                except Exception:
+                    graph_offload_active = False
+                if graph_offload_active:
+                    use_custom_allreduce = False
+                    logger.warning(
+                        "Disabling custom all-reduce: sleep-mode CUDA-graph "
+                        "offload routes the graph pool through the cumem VMM "
+                        "allocator, which is incompatible with custom "
+                        "all-reduce's IPC graph-buffer registration "
+                        "(cudaIpcGetMemHandle fails on VMM memory). Falling back "
+                        "to symm-mem / pynccl all-reduce."
+                    )
+
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
