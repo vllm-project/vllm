@@ -142,8 +142,19 @@ def qwen2audio_aligned_content_and_embeds_b64() -> tuple[str, str]:
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "audio_first",
-    [True, False],
-    ids=["audio_embeds-then-text", "text-then-audio_embeds"],
+    [
+        pytest.param(True, id="audio_embeds-then-text"),
+        pytest.param(
+            False,
+            id="text-then-audio_embeds",
+            marks=pytest.mark.xfail(
+                reason="torch 2.12 regression: prompt_embeds output diverges "
+                "from raw-text when text precedes audio; "
+                "https://github.com/pytorch/pytorch/issues/184431",
+                strict=True,
+            ),
+        ),
+    ],
 )
 async def test_text_content_and_prompt_embeds_match_with_audio_embeds(
     qwen2audio_client: openai.AsyncOpenAI,

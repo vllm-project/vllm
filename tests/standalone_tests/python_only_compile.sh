@@ -90,11 +90,14 @@ apt autoremove -y
 echo 'import os; os.system("touch /tmp/changed.file")' >> vllm/__init__.py
 
 # ROCm CI uses setuptools develop for editable installs (see Dockerfile.rocm and run-amd-test.sh).
+# RELEASE-ONLY: torch==2.13.0 is a pre-release that is not on PyPI yet, so pull
+# it from the PyTorch test channel. Drop this once torch 2.13.0 is published to PyPI.
 _vllm_target_lower="$(printf '%s' "${VLLM_TARGET_DEVICE:-}" | tr '[:upper:]' '[:lower:]')"
 if [[ "${_vllm_target_lower}" == "rocm" ]]; then
   VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 python3 setup.py develop
 else
-  VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
+  VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e . \
+      --extra-index-url https://download.pytorch.org/whl/test/cu130
 fi
 unset -v _vllm_target_lower
 # Run the script

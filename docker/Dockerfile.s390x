@@ -92,13 +92,13 @@ ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
 
 FROM python-install AS torch-vision
 # Install torchvision
-ARG TORCH_VISION_VERSION=v0.26.0
+ARG TORCH_VISION_VERSION=v0.28.0
 WORKDIR /tmp
 RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/pytorch/vision.git && \
     cd vision && \
     git checkout $TORCH_VISION_VERSION && \
-    uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu && \
+    uv pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/test/cpu && \
     python setup.py bdist_wheel
 
 FROM python-install AS hf-xet-builder
@@ -210,7 +210,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # # Final build stage
 FROM python-install AS vllm-cpu
 ARG PYTHON_VERSION
-ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
+ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/test/cpu"
 # Set correct library path for torch and numactl
 ENV LD_LIBRARY_PATH="/opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/torch/lib:/usr/local/lib:/opt/rh/gcc-toolset-14/root/usr/lib64:$LD_LIBRARY_PATH"
 ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"

@@ -23,7 +23,7 @@
       "default": "https://bootstrap.pypa.io/get-pip.py"
     },
     "PYTORCH_CUDA_INDEX_BASE_URL": {
-      "default": "https://download.pytorch.org/whl"
+      "default": "https://download.pytorch.org/whl/test"
     },
     "PIP_KEYRING_PROVIDER": {
       "default": "disabled"

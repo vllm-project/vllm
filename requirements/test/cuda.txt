@@ -613,7 +613,7 @@ nvidia-cuda-nvrtc==13.0.88
     # via cuda-toolkit
 nvidia-cuda-runtime==13.0.96
     # via cuda-toolkit
-nvidia-cudnn-cu13==9.19.0.56
+nvidia-cudnn-cu13==9.20.0.48
     # via torch
 nvidia-cufft==12.0.0.61
     # via cuda-toolkit
@@ -627,9 +627,9 @@ nvidia-cusparse==12.6.3.3
     # via
     #   cuda-toolkit
     #   nvidia-cusolver
-nvidia-cusparselt-cu13==0.8.0
+nvidia-cusparselt-cu13==0.8.1
     # via torch
-nvidia-nccl-cu13==2.28.9
+nvidia-nccl-cu13==2.29.7
     # via torch
 nvidia-nvjitlink==13.0.88
     # via
@@ -1205,7 +1205,11 @@ tokenizers==0.22.2
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in
     #   transformers
-torch==2.11.0+cu130
+tomli==2.2.1
+    # via schemathesis
+tomli-w==1.2.0
+    # via schemathesis
+torch==2.13.0+cu130
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
@@ -1232,7 +1236,7 @@ torchaudio==2.11.0+cu130
     #   -r requirements/test/cuda.in
     #   encodec
     #   vocos
-torchvision==0.26.0+cu130
+torchvision==0.28.0+cu130
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
@@ -1269,7 +1273,7 @@ transformers==5.5.3
     #   xgrammar
 transformers-stream-generator==0.0.5
     # via -r requirements/test/cuda.in
-triton==3.6.0
+triton==3.7.1
     # via
     #   torch
     #   xgrammar

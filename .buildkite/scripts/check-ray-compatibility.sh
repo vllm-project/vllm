@@ -16,22 +16,27 @@ RAY_BASE_URL="https://raw.githubusercontent.com/ray-project/ray/master/python"
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-# ── Detect PyTorch index URL ─────────────────────────────────────────────
-
+# ── Detect PyTorch index URLs ────────────────────────────────────────────
+#
+# Offer the resolver every channel that could serve the installed torch and
+# let uv (run below with --index-strategy unsafe-best-match) pick whichever one
+# actually has the pinned version. For CUDA we pass both the stable and the
+# test channels: release candidates live on the test channel until they are
+# promoted to stable, so a stable-only index breaks RC validation (e.g. a
+# torch==X.Y.Z pin from nixl-cuNN that is only published to /whl/test). We add
+# both channels unconditionally rather than probing the directory listing,
+# since those listings are not reliably reachable from CI egress.
+TORCH_INDEX_URLS=()
 if python3 -c "import torch; assert torch.version.hip" 2>/dev/null; then
     ROCM_VER=$(python3 -c "import torch; print(torch.version.hip.rsplit('.', 1)[0])")
-    CANDIDATE_URL="https://download.pytorch.org/whl/rocm${ROCM_VER}"
-    if curl -fsSL --head "${CANDIDATE_URL}/" >/dev/null 2>&1; then
-        TORCH_INDEX_URL="${CANDIDATE_URL}"
-    else
-        echo ">>> WARNING: ROCm ${ROCM_VER} wheel index not found at ${CANDIDATE_URL}"
-        echo ">>>          Falling back to default PyPI (resolution may be incomplete)"
-        TORCH_INDEX_URL=""
-    fi
+    TORCH_INDEX_URLS+=("https://download.pytorch.org/whl/rocm${ROCM_VER}")
+    TORCH_INDEX_URLS+=("https://download.pytorch.org/whl/test/rocm${ROCM_VER}")
 else
-    TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
+    CUDA_TAG="cu$(python3 -c "import torch; print((torch.version.cuda or '').replace('.', ''))")"
+    TORCH_INDEX_URLS+=("https://download.pytorch.org/whl/${CUDA_TAG}")
+    TORCH_INDEX_URLS+=("https://download.pytorch.org/whl/test/${CUDA_TAG}")
 fi
-echo ">>> Using PyTorch index: ${TORCH_INDEX_URL:-PyPI default}"
+echo ">>> Using PyTorch indexes: ${TORCH_INDEX_URLS[*]:-PyPI default}"
 
 # Fetch all Ray requirement files used in the LLM depset pipeline
 echo ">>> Fetching Ray requirement files"
@@ -134,9 +139,9 @@ echo ">>> Resolving: Can Ray generate compatible lock files?"
 echo "============================================================"
 
 EXTRA_INDEX_ARGS=()
-if [[ -n "${TORCH_INDEX_URL}" ]]; then
-    EXTRA_INDEX_ARGS+=(--extra-index-url "${TORCH_INDEX_URL}")
-fi
+for INDEX_URL in "${TORCH_INDEX_URLS[@]}"; do
+    EXTRA_INDEX_ARGS+=(--extra-index-url "${INDEX_URL}")
+done
 
 set +e
 uv pip compile \

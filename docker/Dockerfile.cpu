@@ -25,7 +25,7 @@ FROM ubuntu:22.04 AS base-common
 WORKDIR /workspace
 
 ARG PYTHON_VERSION=3.12
-ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
+ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/test/cpu"
 
 ARG max_jobs=32
 ENV MAX_JOBS=${max_jobs}
@@ -193,16 +193,30 @@ FROM base AS vllm-test-deps
 
 WORKDIR /vllm-workspace
 
-# Test requirements are compiled from requirements/test/cuda.in into
-# requirements/test/cpu.txt by the pip-compile-cpu pre-commit hook, which
-# resolves CPU wheels via uv's --torch-backend cpu.
-COPY requirements/test/cpu.txt requirements/test/cpu.txt
+# cpu.txt is compiled at build time from cuda.in (seeded as cpu.in) so the torch
+# 2.13 CPU test-channel wheels resolve; upstream's pre-committed cpu.txt still
+# pins torch 2.11 and cannot carry the test-channel pins.
+COPY requirements/test/cuda.in requirements/test/cpu.in
 
-# cpu.txt is compiled for x86_64, so platform markers are resolved away. Drop
-# packages unavailable on aarch64 (decord, terratorch) for arm builds.
-RUN case "$(uname -m)" in \
-    aarch64|arm64) sed -i '/^decord==/d; /^terratorch==/d' requirements/test/cpu.txt ;; \
-    esac
+RUN \
+    sed -i '/mamba_ssm/d' requirements/test/cpu.in && \
+    remove_packages_not_supported_on_aarch64() { \
+    case "$(uname -m)" in \
+    aarch64|arm64) \
+    sed -i '/decord/d' requirements/test/cpu.in; \
+    sed -i '/terratorch/d' requirements/test/cpu.in; \
+    ;; \
+    esac; \
+    }; \
+    remove_packages_not_supported_on_aarch64 && \
+    # cpu.in is seeded from cuda.in which points at whl/test/cu130; redirect to CPU test channel
+    sed -i 's|https://download.pytorch.org/whl/test/cu130|https://download.pytorch.org/whl/test/cpu|g' requirements/test/cpu.in && \
+    sed -i 's/^torch==.*/torch==2.13.0/g' requirements/test/cpu.in && \
+    sed -i 's/torchaudio.*/torchaudio/g' requirements/test/cpu.in && \
+    sed -i 's/torchvision.*/torchvision/g' requirements/test/cpu.in && \
+    # Related issue: https://github.com/vllm-project/vllm/pull/38800#issuecomment-4228314305
+    sed -i 's/^sentence-transformers.*/sentence-transformers==5.3.0/g' requirements/test/cpu.in && \
+    uv pip compile requirements/test/cpu.in -o requirements/test/cpu.txt --index-strategy unsafe-best-match
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/test/cpu.txt
