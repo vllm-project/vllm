@@ -28,7 +28,7 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -1135,18 +1135,7 @@ class FlashAttentionImpl(AttentionImpl):
         attn_out: torch.Tensor,
         attn_lse: torch.Tensor,
     ) -> torch.Tensor:
-        out_lse = torch.cat([attn_out, attn_lse.unsqueeze(-1)], dim=-1)
-        out_lse = get_pcp_group().all_gather(out_lse.contiguous(), dim=0)
-        num_tokens = attn_out.shape[0]
-        out_lse = out_lse.view(
-            self.pcp_world_size,
-            num_tokens,
-            self.num_heads,
-            self.head_size + 1,
-        )
-        out_all, lse_all = torch.split(out_lse, [self.head_size, 1], dim=-1)
-        lse = torch.logsumexp(lse_all, dim=0)
-        return torch.sum(torch.exp(lse_all - lse.unsqueeze(0)) * out_all, dim=0)
+        return cp_lse_ag_out_ar(attn_out, attn_lse, get_pcp_group())
 
     def _forward_with_pcp(
         self,
