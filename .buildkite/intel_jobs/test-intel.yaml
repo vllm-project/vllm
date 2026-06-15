@@ -145,7 +145,8 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
-        pytest -v -s quantization/test_auto_round.py'
+        pytest -v -s quantization/test_auto_round.py &&
+        pytest -v -s quantization/test_online.py'
   - label: "XPU compressed tensors FP8 test"
     depends_on:
       - image-build-xpu

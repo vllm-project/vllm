@@ -89,6 +89,9 @@ def test_online_quantization(
     if use_rocm_aiter:
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
 
+    if current_platform.is_xpu() and quant_scheme == "fp8_per_block":
+        monkeypatch.setenv("VLLM_XPU_FUSED_MOE_USE_REF", "1")
+
     # `LLM.apply_model` requires pickling a function.
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
