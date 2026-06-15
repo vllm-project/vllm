@@ -33,10 +33,10 @@ _KVLEN_GRANULARITY = 128
 class AiterAsmPrefillBackend(MLAPrefillBackend):
     """FP8 MLA prefill backend built on AITER persistent-scheduling ASM on gfx950.
 
-    The PS metadata is built once per batch for the new-tokens chunk and once per
-    context chunk, then reused inside the kernel dispatch.
+    Persistent metadata buffers are prepared once per forward and then re-used across
+    layers.
 
-    Requires FP8 Q and KV cache and gfx950.
+    Requires FP8 Q/KV cache and gfx950.
     """
 
     supported_dtypes = [torch.float16, torch.bfloat16]
