@@ -1,6 +1,10 @@
 #!/bin/bash
 set -xe
 
+# Connector selection (default: NixlConnector)
+CONNECTOR_NAME=${CONNECTOR_NAME:-NixlConnector}
+SIDE_CHANNEL_PREFIX=${SIDE_CHANNEL_PREFIX:-NIXL}
+
 # E2E test: Mamba hybrid prefix cache hits in PD disaggregation.
 # Spins up a 1P1D setup with a Mamba hybrid model and verifies
 # repeated prompts yield non-zero D-side prefix cache hits.
@@ -12,7 +16,7 @@ GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.8}
 
 echo "Running Mamba prefix cache test (GPUs: P=$PREFILL_GPU_ID, D=$DECODE_GPU_ID, model=$MODEL)"
 
-KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+KV_CONFIG='{"kv_connector":"'"${CONNECTOR_NAME}"'","kv_role":"kv_both"}'
 
 # Resolve repository root
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -41,7 +45,7 @@ PREFILL_PORT=8001
 CUDA_VISIBLE_DEVICES=$PREFILL_GPU_ID \
 VLLM_SSM_CONV_STATE_LAYOUT=DS \
 VLLM_KV_CACHE_LAYOUT=HND \
-VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
+VLLM_${SIDE_CHANNEL_PREFIX}_SIDE_CHANNEL_PORT=5559 \
 vllm serve $MODEL \
   --port $PREFILL_PORT \
   --enforce-eager \
@@ -58,7 +62,7 @@ DECODE_PORT=8002
 CUDA_VISIBLE_DEVICES=$DECODE_GPU_ID \
 VLLM_SSM_CONV_STATE_LAYOUT=DS \
 VLLM_KV_CACHE_LAYOUT=HND \
-VLLM_NIXL_SIDE_CHANNEL_PORT=6000 \
+VLLM_${SIDE_CHANNEL_PREFIX}_SIDE_CHANNEL_PORT=6000 \
 vllm serve $MODEL \
   --port $DECODE_PORT \
   --enforce-eager \

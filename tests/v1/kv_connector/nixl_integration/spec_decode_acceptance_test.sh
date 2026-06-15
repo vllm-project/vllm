@@ -30,6 +30,16 @@
 #   VLLM_SERVE_EXTRA_ARGS - comma-separated extra args for vllm serve
 set -ex
 
+# Connector selection (default: NixlConnector)
+CONNECTOR_NAME=${CONNECTOR_NAME:-NixlConnector}
+SIDE_CHANNEL_PREFIX=${SIDE_CHANNEL_PREFIX:-NIXL}
+
+# UCX is only needed by NIXL connector
+UCX_ENV=""
+if [[ "$CONNECTOR_NAME" == *"Nixl"* ]]; then
+    UCX_ENV="UCX_NET_DEVICES=all"
+fi
+
 # ── Model & spec decode config ──────────────────────────────────────────
 
 MODEL_NAME="${MODEL_NAME:-meta-llama/Llama-3.1-8B-Instruct}"
@@ -139,12 +149,12 @@ wait_for_nixl_side_channel() {
   local server_name=$4
   local deadline=120
   local elapsed=0
-  echo "Waiting for ${server_name} NIXL side channel on ${host}:${port}..."
+  echo "Waiting for ${server_name} ${SIDE_CHANNEL_PREFIX} side channel on ${host}:${port}..."
   while [ $elapsed -lt $deadline ]; do
     if ! ps -p "$server_pid" > /dev/null 2>&1; then
       local status=0
       wait "$server_pid" || status=$?
-      echo "FAIL: ${server_name} server process ${server_pid} exited with status ${status} before NIXL side channel ${host}:${port} became ready"
+      echo "FAIL: ${server_name} server process ${server_pid} exited with status ${status} before ${SIDE_CHANNEL_PREFIX} side channel ${host}:${port} became ready"
       exit 1
     fi
     if python3 "${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/nixl_side_channel_probe.py" \
@@ -152,13 +162,13 @@ wait_for_nixl_side_channel() {
       --port "$port" \
       --timeout-ms 1000 > /dev/null 2>&1
     then
-      echo "${server_name} NIXL side channel on ${host}:${port} ready"
+      echo "${server_name} ${SIDE_CHANNEL_PREFIX} side channel on ${host}:${port} ready"
       return 0
     fi
     sleep 2
     elapsed=$((elapsed + 2))
   done
-  echo "FAIL: ${server_name} NIXL side channel ${host}:${port} did not start within ${deadline}s"
+  echo "FAIL: ${server_name} ${SIDE_CHANNEL_PREFIX} side channel ${host}:${port} did not start within ${deadline}s"
   exit 1
 }
 
@@ -193,16 +203,16 @@ run_test_for_device() {
   local kv_device=$1
 
   if [[ "$kv_device" == "cuda" ]]; then
-    local kv_config_p='{"kv_connector":"NixlConnector","kv_role":"kv_producer"}'
-    local kv_config_d='{"kv_connector":"NixlConnector","kv_role":"kv_consumer"}'
+    local kv_config_p='{"kv_connector":"'"${CONNECTOR_NAME}"'","kv_role":"kv_producer"}'
+    local kv_config_d='{"kv_connector":"'"${CONNECTOR_NAME}"'","kv_role":"kv_consumer"}'
   else
-    local kv_config_p="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"${kv_device}\"}"
-    local kv_config_d="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"${kv_device}\"}"
+    local kv_config_p="{\"kv_connector\":\"${CONNECTOR_NAME}\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"${kv_device}\"}"
+    local kv_config_d="{\"kv_connector\":\"${CONNECTOR_NAME}\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"${kv_device}\"}"
   fi
 
   echo ""
   echo "================================================================"
-  echo "NixlConnector PD + Spec Decode Acceptance Test (kv_buffer_device=${kv_device})"
+  echo "${CONNECTOR_NAME} PD + Spec Decode Acceptance Test (kv_buffer_device=${kv_device})"
   echo "================================================================"
   echo "Model:              ${MODEL_NAME}"
   echo "SD method:          ${SD_METHOD}"
@@ -212,7 +222,7 @@ run_test_for_device() {
   echo "Attention backend:  ${ATTENTION_BACKEND}"
   echo "GPU platform:       ${GPU_PLATFORM}"
   echo "Server host:        ${SERVER_HOST}"
-  echo "NIXL side channel:  ${NIXL_SIDE_CHANNEL_HOST}"
+  echo "${SIDE_CHANNEL_PREFIX} side channel:  ${NIXL_SIDE_CHANNEL_HOST}"
   echo "GPUs available:     ${ALL_GPUS[*]}"
   echo "================================================================"
 
@@ -239,10 +249,10 @@ run_test_for_device() {
     env \
     ${GPU_DEVICE_VAR}=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT='HND' \
-    UCX_NET_DEVICES=all \
+    ${UCX_ENV} \
     ${VLLM_SSM_CONV_STATE_LAYOUT:+VLLM_SSM_CONV_STATE_LAYOUT=$VLLM_SSM_CONV_STATE_LAYOUT} \
-    VLLM_NIXL_SIDE_CHANNEL_HOST=$NIXL_SIDE_CHANNEL_HOST \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    VLLM_${SIDE_CHANNEL_PREFIX}_SIDE_CHANNEL_HOST=$NIXL_SIDE_CHANNEL_HOST \
+    VLLM_${SIDE_CHANNEL_PREFIX}_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $MODEL_NAME \
       --port $PORT \
       --enforce-eager \
@@ -259,7 +269,9 @@ run_test_for_device() {
     PREFILL_HOSTS+=("$SERVER_HOST")
     PREFILL_PORTS+=("$PORT")
     wait_for_server "$PORT" "$SERVER_PID" "prefill"
-    wait_for_nixl_side_channel "$NIXL_SIDE_CHANNEL_HOST" "$SIDE_CHANNEL_PORT" "$SERVER_PID" "prefill"
+    if [[ "$CONNECTOR_NAME" == *"Nixl"* ]]; then
+      wait_for_nixl_side_channel "$NIXL_SIDE_CHANNEL_HOST" "$SIDE_CHANNEL_PORT" "$SERVER_PID" "prefill"
+    fi
   done
 
   # Start decode instances after prefill is ready.
@@ -278,10 +290,10 @@ run_test_for_device() {
     env \
     ${GPU_DEVICE_VAR}=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT='HND' \
-    UCX_NET_DEVICES=all \
+    ${UCX_ENV} \
     ${VLLM_SSM_CONV_STATE_LAYOUT:+VLLM_SSM_CONV_STATE_LAYOUT=$VLLM_SSM_CONV_STATE_LAYOUT} \
-    VLLM_NIXL_SIDE_CHANNEL_HOST=$NIXL_SIDE_CHANNEL_HOST \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    VLLM_${SIDE_CHANNEL_PREFIX}_SIDE_CHANNEL_HOST=$NIXL_SIDE_CHANNEL_HOST \
+    VLLM_${SIDE_CHANNEL_PREFIX}_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $MODEL_NAME \
       --port $PORT \
       --enforce-eager \
@@ -298,7 +310,9 @@ run_test_for_device() {
     DECODE_HOSTS+=("$SERVER_HOST")
     DECODE_PORTS+=("$PORT")
     wait_for_server "$PORT" "$SERVER_PID" "decode"
-    wait_for_nixl_side_channel "$NIXL_SIDE_CHANNEL_HOST" "$SIDE_CHANNEL_PORT" "$SERVER_PID" "decode"
+    if [[ "$CONNECTOR_NAME" == *"Nixl"* ]]; then
+      wait_for_nixl_side_channel "$NIXL_SIDE_CHANNEL_HOST" "$SIDE_CHANNEL_PORT" "$SERVER_PID" "decode"
+    fi
   done
 
   # Start proxy

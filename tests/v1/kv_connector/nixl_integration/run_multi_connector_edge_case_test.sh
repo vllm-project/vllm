@@ -22,6 +22,16 @@
 #   VLLM_SERVE_EXTRA_ARGS    - comma-separated extra args for vllm serve
 set -xe
 
+# Connector selection (default: NixlConnector)
+CONNECTOR_NAME=${CONNECTOR_NAME:-NixlConnector}
+SIDE_CHANNEL_PREFIX=${SIDE_CHANNEL_PREFIX:-NIXL}
+
+# UCX is only needed by NIXL connector
+UCX_ENV=""
+if [[ "$CONNECTOR_NAME" == *"Nixl"* ]]; then
+    UCX_ENV="UCX_NET_DEVICES=all"
+fi
+
 # ── Configuration ────────────────────────────────────────────────────────
 
 MODEL_NAMES=${MODEL_NAMES:-}
@@ -45,7 +55,7 @@ KV_CONFIG='{
   "kv_role":"kv_both",
   "kv_connector_extra_config":{
     "connectors":[
-      {"kv_connector":"NixlConnector","kv_role":"kv_both"},
+      {"kv_connector":"'"${CONNECTOR_NAME}"'","kv_role":"kv_both"},
       {"kv_connector":"OffloadingConnector","kv_role":"kv_both",
        "kv_connector_extra_config":{"cpu_bytes_to_use":2147483648}}
     ]
@@ -93,8 +103,8 @@ run_tests_for_model() {
   echo "Starting prefill instance on GPU $PREFILL_GPU, port $PREFILL_PORT"
   BASE_CMD="CUDA_VISIBLE_DEVICES=$PREFILL_GPU \
     VLLM_KV_CACHE_LAYOUT='HND' \
-    UCX_NET_DEVICES=all \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$PREFILL_SIDE_CHANNEL_PORT \
+    $UCX_ENV \
+    VLLM_${SIDE_CHANNEL_PREFIX}_SIDE_CHANNEL_PORT=$PREFILL_SIDE_CHANNEL_PORT \
     vllm serve \"$model_name\" \
     --port $PREFILL_PORT \
     --enforce-eager \
@@ -116,8 +126,8 @@ run_tests_for_model() {
   echo "Starting decode instance on GPU $DECODE_GPU, port $DECODE_PORT"
   BASE_CMD="CUDA_VISIBLE_DEVICES=$DECODE_GPU \
     VLLM_KV_CACHE_LAYOUT='HND' \
-    UCX_NET_DEVICES=all \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$DECODE_SIDE_CHANNEL_PORT \
+    $UCX_ENV \
+    VLLM_${SIDE_CHANNEL_PREFIX}_SIDE_CHANNEL_PORT=$DECODE_SIDE_CHANNEL_PORT \
     vllm serve \"$model_name\" \
     --port $DECODE_PORT \
     --enforce-eager \

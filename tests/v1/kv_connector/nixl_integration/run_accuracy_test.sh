@@ -1,6 +1,16 @@
 #!/bin/bash
 set -xe
 
+# Connector selection (default: NixlConnector)
+CONNECTOR_NAME=${CONNECTOR_NAME:-NixlConnector}
+SIDE_CHANNEL_PREFIX=${SIDE_CHANNEL_PREFIX:-NIXL}
+
+# UCX is only needed by NIXL connector
+UCX_ENV=""
+if [[ "$CONNECTOR_NAME" == *"Nixl"* ]]; then
+    UCX_ENV="UCX_NET_DEVICES=all"
+fi
+
 # Parse command line arguments
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
 ATTENTION_BACKEND=""  # Default to empty (use vllm default)
@@ -51,11 +61,11 @@ fi
 
 # Build the kv-transfer-config for P and D
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG_P='{"kv_connector":"NixlConnector","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
-  KV_CONFIG_D='{"kv_connector":"NixlConnector","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
+  KV_CONFIG_P='{"kv_connector":"'"${CONNECTOR_NAME}"'","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
+  KV_CONFIG_D='{"kv_connector":"'"${CONNECTOR_NAME}"'","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
 else
-  KV_CONFIG_P="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
-  KV_CONFIG_D="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
+  KV_CONFIG_P="{\"kv_connector\":\"${CONNECTOR_NAME}\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
+  KV_CONFIG_D="{\"kv_connector\":\"${CONNECTOR_NAME}\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
 fi
 
 # Models to run
@@ -153,8 +163,8 @@ run_tests_for_model() {
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT='HND' \
-    UCX_NET_DEVICES=all \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    $UCX_ENV \
+    VLLM_${SIDE_CHANNEL_PREFIX}_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
@@ -202,8 +212,8 @@ run_tests_for_model() {
     # Build the command with or without model-specific args
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
-    UCX_NET_DEVICES=all \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    $UCX_ENV \
+    VLLM_${SIDE_CHANNEL_PREFIX}_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
     --port $PORT \
     --enforce-eager \

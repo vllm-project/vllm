@@ -180,6 +180,12 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "UcclP2pConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.uccl_p2p",
+    "UcclP2pConnector",
+)
+
+KVConnectorFactory.register_connector(
     "MultiConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.multi_connector",
     "MultiConnector",

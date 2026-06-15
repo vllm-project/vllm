@@ -1,6 +1,16 @@
 #!/bin/bash
 set -xe
 
+# Connector selection (default: NixlConnector)
+CONNECTOR_NAME=${CONNECTOR_NAME:-NixlConnector}
+SIDE_CHANNEL_PREFIX=${SIDE_CHANNEL_PREFIX:-NIXL}
+
+# UCX is only needed by NIXL connector
+UCX_ENV=""
+if [[ "$CONNECTOR_NAME" == *"Nixl"* ]]; then
+    UCX_ENV="UCX_NET_DEVICES=all"
+fi
+
 # Parse command line arguments
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
 PREFILL_GPU_ID=4         # Default GPU IDs
@@ -23,9 +33,9 @@ echo "Running edge case tests with kv_buffer_device=$KV_BUFFER_DEVICE (GPUs: $PR
 
 # Build the kv-transfer-config once
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
+  KV_CONFIG='{"kv_connector":"'"${CONNECTOR_NAME}"'","kv_role":"kv_both"}'
 else
-  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}"
+  KV_CONFIG="{\"kv_connector\":\"${CONNECTOR_NAME}\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\"}"
 fi
 
 # Models to run
@@ -66,7 +76,10 @@ run_tests_for_model() {
   # Start prefill instance
   PREFILL_PORT=8001
 
-  BASE_CMD="CUDA_VISIBLE_DEVICES=$PREFILL_GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=5559 vllm serve $model_name \
+  BASE_CMD="CUDA_VISIBLE_DEVICES=$PREFILL_GPU_ID \
+  $UCX_ENV \
+  VLLM_${SIDE_CHANNEL_PREFIX}_SIDE_CHANNEL_PORT=5559 \
+  vllm serve $model_name \
   --port $PREFILL_PORT \
   --enforce-eager \
   --gpu-memory-utilization 0.2 \
@@ -80,7 +93,10 @@ run_tests_for_model() {
   DECODE_PORT=8002
 
   # Build the command with or without model-specific args
-  BASE_CMD="CUDA_VISIBLE_DEVICES=$DECODE_GPU_ID VLLM_NIXL_SIDE_CHANNEL_PORT=6000 vllm serve $model_name \
+  BASE_CMD="CUDA_VISIBLE_DEVICES=$DECODE_GPU_ID \
+  $UCX_ENV \
+  VLLM_${SIDE_CHANNEL_PREFIX}_SIDE_CHANNEL_PORT=6000 \
+  vllm serve $model_name \
   --port $DECODE_PORT \
   --enforce-eager \
   --gpu-memory-utilization 0.2 \

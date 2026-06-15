@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Connector selection (default: NixlConnector)
+CONNECTOR_NAME=${CONNECTOR_NAME:-NixlConnector}
+
 # Utility to run integration tests sequentially with varying TP configurations.
 SCRIPT="v1/kv_connector/nixl_integration/run_accuracy_test.sh"
 IMPORT_CANARY="v1/kv_connector/nixl_integration/test_nixl_imports.py"
 
-echo "=== Running NIXL import canary ==="
+echo "=== Running ${CONNECTOR_NAME} import canary ==="
 python3 -m pytest -s -x "${IMPORT_CANARY}"
 
 # Define test configurations

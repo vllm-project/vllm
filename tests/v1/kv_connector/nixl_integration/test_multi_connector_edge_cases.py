@@ -19,6 +19,8 @@ import urllib.request
 import openai
 import regex as re
 
+TEST_CONNECTOR = os.environ.get("TEST_CONNECTOR", "nixl")
+
 # ── Server configuration from environment ─────────────────────────────────
 
 PREFILL_HOST = os.getenv("PREFILL_HOST", "localhost")
@@ -97,7 +99,9 @@ def _fetch_prefill_metrics() -> dict[str, float]:
     return _fetch_metrics(PREFILL_HOST, PREFILL_PORT)
 
 
-_NIXL_BYTES_RE = re.compile(r"vllm:nixl_bytes_transferred_sum\b.*?\s+([\d.eE+\-]+)")
+_NIXL_BYTES_RE = re.compile(
+    rf"vllm:{TEST_CONNECTOR}_bytes_transferred_sum\b.*?\s+([\d.eE+\-]+)"
+)
 
 
 def _fetch_nixl_bytes(host: str, port: str) -> float:

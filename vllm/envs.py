@@ -193,6 +193,8 @@ if TYPE_CHECKING:
     VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
+    VLLM_UCCL_P2P_SIDE_CHANNEL_HOST: str = "localhost"
+    VLLM_UCCL_P2P_SIDE_CHANNEL_PORT: int = 5700
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
     VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO: float = 0.9
@@ -1475,6 +1477,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NIXL_SIDE_CHANNEL_PORT": lambda: int(
         os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5600")
     ),
+    # IP address used for UCCL P2P handshake between remote agents.
+    "VLLM_UCCL_P2P_SIDE_CHANNEL_HOST": lambda: os.getenv(
+        "VLLM_UCCL_P2P_SIDE_CHANNEL_HOST", "localhost"
+    ),
+    # Port used for UCCL P2P handshake between remote agents.
+    "VLLM_UCCL_P2P_SIDE_CHANNEL_PORT": lambda: int(
+        os.getenv("VLLM_UCCL_P2P_SIDE_CHANNEL_PORT", "5700")
+    ),
     # Port used for Mooncake handshake between remote agents.
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
@@ -1972,6 +1982,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_NIXL_SIDE_CHANNEL_HOST",
+        "VLLM_UCCL_P2P_SIDE_CHANNEL_HOST",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_CI_USE_S3",
         "VLLM_MODEL_REDIRECT_PATH",

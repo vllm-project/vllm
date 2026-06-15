@@ -4,12 +4,15 @@
 
 import importlib
 import importlib.metadata as metadata
+import os
 import pathlib
 import subprocess
 import sys
 
 import pytest
 import torch
+
+TEST_CONNECTOR = os.environ.get("TEST_CONNECTOR", "nixl")
 
 
 def _print_distribution_version(package_name: str) -> None:
@@ -20,6 +23,10 @@ def _print_distribution_version(package_name: str) -> None:
     print(f"{package_name}: {version}")
 
 
+@pytest.mark.skipif(
+    TEST_CONNECTOR != "nixl",
+    reason="NixlConnector import checks only run for nixl connector",
+)
 @pytest.mark.skipif(torch.version.cuda is None, reason="CUDA NIXL EP canary")
 def test_nixl_and_nixl_ep_imports() -> None:
     """Verify both core NIXL and the NIXL EP extension import successfully."""

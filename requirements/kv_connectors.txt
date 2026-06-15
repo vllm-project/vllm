@@ -3,4 +3,6 @@ lmcache >= 0.3.9
 # until a fixed newer release is verified for runtime images.
 cupy-cuda13x < 14.1.0
 nixl >= 1.1.0 # Required for disaggregated prefill
+# Required for disaggregated prefill with UCCL P2P
+uccl-p2p >= 0.1.0
 mooncake-transfer-engine >= 0.3.8

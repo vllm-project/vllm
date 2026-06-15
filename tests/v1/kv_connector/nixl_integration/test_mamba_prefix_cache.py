@@ -13,6 +13,8 @@ import openai
 import regex as re
 import requests
 
+TEST_CONNECTOR = os.environ.get("TEST_CONNECTOR", "nixl")
+
 PREFILL_HOST = os.getenv("PREFILL_HOST", "localhost")
 PREFILL_PORT = os.environ["PREFILL_PORT"]
 DECODE_HOST = os.getenv("DECODE_HOST", "localhost")
@@ -222,10 +224,10 @@ while len(PROMPT) < 23000:
 
 
 METRICS_OF_INTEREST = [
-    "vllm:nixl_bytes_transferred_sum",
-    "vllm:nixl_bytes_transferred_count",
-    "vllm:nixl_num_descriptors_sum",
-    "vllm:nixl_num_descriptors_count",
+    f"vllm:{TEST_CONNECTOR}_bytes_transferred_sum",
+    f"vllm:{TEST_CONNECTOR}_bytes_transferred_count",
+    f"vllm:{TEST_CONNECTOR}_num_descriptors_sum",
+    f"vllm:{TEST_CONNECTOR}_num_descriptors_count",
     "vllm:prefix_cache_hits",
     "vllm:prefix_cache_queries",
 ]
@@ -291,12 +293,12 @@ def test_mamba_prefix_cache_hit():
     print_metrics("D-side after req1", m_after_req1)
 
     transfer_req1 = (
-        m_after_req1["vllm:nixl_bytes_transferred_sum"]
-        - m_baseline["vllm:nixl_bytes_transferred_sum"]
+        m_after_req1[f"vllm:{TEST_CONNECTOR}_bytes_transferred_sum"]
+        - m_baseline[f"vllm:{TEST_CONNECTOR}_bytes_transferred_sum"]
     )
     descs_req1 = (
-        m_after_req1["vllm:nixl_num_descriptors_sum"]
-        - m_baseline["vllm:nixl_num_descriptors_sum"]
+        m_after_req1[f"vllm:{TEST_CONNECTOR}_num_descriptors_sum"]
+        - m_baseline[f"vllm:{TEST_CONNECTOR}_num_descriptors_sum"]
     )
     print(f"  Transfer: {transfer_req1 / 1e6:.2f} MB, {descs_req1:.0f} descs")
 
@@ -313,12 +315,12 @@ def test_mamba_prefix_cache_hit():
     print_metrics("D-side after req2", m_after_req2)
 
     transfer_req2 = (
-        m_after_req2["vllm:nixl_bytes_transferred_sum"]
-        - m_after_req1["vllm:nixl_bytes_transferred_sum"]
+        m_after_req2[f"vllm:{TEST_CONNECTOR}_bytes_transferred_sum"]
+        - m_after_req1[f"vllm:{TEST_CONNECTOR}_bytes_transferred_sum"]
     )
     descs_req2 = (
-        m_after_req2["vllm:nixl_num_descriptors_sum"]
-        - m_after_req1["vllm:nixl_num_descriptors_sum"]
+        m_after_req2[f"vllm:{TEST_CONNECTOR}_num_descriptors_sum"]
+        - m_after_req1[f"vllm:{TEST_CONNECTOR}_num_descriptors_sum"]
     )
     print(f"  Transfer: {transfer_req2 / 1e6:.2f} MB, {descs_req2:.0f} descs")
 
