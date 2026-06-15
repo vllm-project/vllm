@@ -341,7 +341,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             and base_forward is not merged_forward
         ):
             return self._apply_base_forward(x)
-        return _mcp_apply(x, bias, self)
+        return self._apply_sync(x, bias)
 
     @classmethod
     def can_replace_layer(
