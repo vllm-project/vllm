@@ -415,33 +415,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     endif()
     FetchContent_MakeAvailable(cutlass)
 
-    # Expert-specialization MXFP8 blockscaled grouped kernels (SM100+).
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
-      cuda_archs_loose_intersection(ES_MXFP8_GROUPED_MM_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
-    else()
-      cuda_archs_loose_intersection(ES_MXFP8_GROUPED_MM_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
-    endif()
-    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND ES_MXFP8_GROUPED_MM_ARCHS)
-      set(SRCS
-        "csrc/libtorch_stable/moe/mxfp8_moe/cutlass_mxfp8_grouped_mm.cu"
-        "csrc/libtorch_stable/moe/mxfp8_moe/mxfp8_experts_quant.cu")
-      set_gencode_flags_for_srcs(
-        SRCS "${SRCS}"
-        CUDA_ARCHS "${ES_MXFP8_GROUPED_MM_ARCHS}")
-      list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
-      list(APPEND VLLM_GPU_FLAGS "-DENABLE_ES_MXFP8_GROUPED_MM_SM100=1")
-      message(STATUS "Building ES MXFP8 grouped kernels for archs: ${ES_MXFP8_GROUPED_MM_ARCHS}")
-    else()
-      if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8
-          AND ES_MXFP8_GROUPED_MM_ARCHS)
-        message(STATUS "Not building ES MXFP8 grouped kernels as CUDA Compiler version is "
-                       "not >= 12.8.")
-      else()
-        message(STATUS "Not building ES MXFP8 grouped kernels as no compatible archs found "
-                       "in CUDA target architectures.")
-      endif()
-    endif()
-
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/libtorch_stable/cuda_view.cu"
       "csrc/libtorch_stable/cuda_utils_kernels.cu"
@@ -524,6 +497,35 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_STABLE_EXT_SRC}"
       CUDA_ARCHS "${CUDA_ARCHS}")
+
+    # Expert-specialization MXFP8 blockscaled grouped kernels (SM100+).
+    # Must be registered after the blanket gencode pass above: these use
+    # family-specific arches (10.0f/11.0f) and cannot also get sm_100/sm_110.
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+      cuda_archs_loose_intersection(ES_MXFP8_GROUPED_MM_ARCHS "10.0f;11.0f" "${CUDA_ARCHS}")
+    else()
+      cuda_archs_loose_intersection(ES_MXFP8_GROUPED_MM_ARCHS "10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+    endif()
+    if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND ES_MXFP8_GROUPED_MM_ARCHS)
+      set(SRCS
+        "csrc/libtorch_stable/moe/mxfp8_moe/cutlass_mxfp8_grouped_mm.cu"
+        "csrc/libtorch_stable/moe/mxfp8_moe/mxfp8_experts_quant.cu")
+      set_gencode_flags_for_srcs(
+        SRCS "${SRCS}"
+        CUDA_ARCHS "${ES_MXFP8_GROUPED_MM_ARCHS}")
+      list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+      list(APPEND VLLM_GPU_FLAGS "-DENABLE_ES_MXFP8_GROUPED_MM_SM100=1")
+      message(STATUS "Building ES MXFP8 grouped kernels for archs: ${ES_MXFP8_GROUPED_MM_ARCHS}")
+    else()
+      if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8
+          AND ES_MXFP8_GROUPED_MM_ARCHS)
+        message(STATUS "Not building ES MXFP8 grouped kernels as CUDA Compiler version is "
+                       "not >= 12.8.")
+      else()
+        message(STATUS "Not building ES MXFP8 grouped kernels as no compatible archs found "
+                       "in CUDA target architectures.")
+      endif()
+    endif()
 
     # Only build Marlin kernels if we are building for at least some compatible archs.
     # Keep building Marlin for 9.0 as there are some group sizes and shapes that
