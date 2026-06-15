@@ -100,14 +100,44 @@ For further details on renderer APIs, please refer to [this page](renderer.md).
 - `/version` - Version information
 - `/load` - Server load metrics
 
-## Sleep Mode APIs
+## Server in development mode
+
+When using the flag VLLM_SERVER_DEV_MODE=1, you enable development endpoints.
+
+**SECURITY WARNING: These endpoints should NOT be used in production!**
+
+### Cache Management APIs
+
+- `/reset_prefix_cache` - Reset prefix cache (can disrupt service)
+- `/reset_mm_cache` - Reset multimodal cache (can disrupt service)
+- `/reset_encoder_cache` - Reset encoder cache (can disrupt service)
+
+### Weight Transfer APIs (RL Training)
+
+For further details on Weight Transfer, please refer to [this page](../../training/weight_transfer/README.md).
+
+- `/pause` - Pause generation (causes denial of service)
+- `/resume` - Resume generation
+- `/is_paused` - Check if generation is paused
+- `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
+- `/update_weights` - Update model weights (can alter model behavior)
+- `/get_world_size` - Get distributed world size
+
+### Collective RPC
+
+- `/collective_rpc` - Execute arbitrary RPC methods on the engine (extremely dangerous)
+
+### Server info
+
+- `/server_info` - Get detailed server configuration
+
+### Sleep Mode APIs
 
 For further details on sleep mode, please refer to [this page](../../features/sleep_mode.md).
 
 - `/sleep` - Put engine to sleep (causes denial of service)
 - `/wake_up` - Wake engine from sleep
 - `/is_sleeping` - Check if engine is sleeping
-- `/collective_rpc` - Execute arbitrary RPC methods on the engine (extremely dangerous)
 
 ## Chat Template
 
