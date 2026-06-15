@@ -1866,15 +1866,9 @@ class DPEngineCoreProc(EngineCoreProc):
                     # All engines are idle.
                     continue
 
-                # We are in a running state and so must execute a dummy pass
-                # if the model didn't execute any ready requests -- unless the
-                # engine is sleeping. sleep(level>=1) calls pause_scheduler()
-                # before the device→host KV offload begins; model_executor
-                # .is_sleeping only flips True after the offload completes, so
-                # we guard on self.is_sleeping() (= is_scheduler_paused() or
-                # model_executor.is_sleeping) to cover the offload window too.
-                # The finished-sync all-reduce below still runs (DP group, no
-                # GPU work), keeping DP ranks in lockstep.
+                # Execute a dummy pass when no ready requests ran, unless the
+                # engine is sleeping. self.is_sleeping() also covers the KV-offload
+                # window before model_executor.is_sleeping flips.
                 elif not self.is_sleeping():
                     with self.log_iteration_details(None):
                         self.execute_dummy_batch()
