@@ -92,6 +92,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "minimax_m2_reasoning_parser",
         "MiniMaxM2AppendThinkReasoningParser",
     ),
+    "minimax_m3": (
+        "minimax_m3_reasoning_parser",
+        "MiniMaxM3ReasoningParser",
+    ),
     "mistral": (
         "mistral_reasoning_parser",
         "MistralReasoningParser",
