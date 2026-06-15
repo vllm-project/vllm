@@ -64,7 +64,7 @@ class _InboundRequestState:
     kv_request_id: str
     submitted_at: float
     phase: _LoadPhase = _LoadPhase.ACTIVE
-    abort_at: float | None = None
+    aborted_at: float | None = None
 
 
 class LoadResult(NamedTuple):
@@ -410,7 +410,7 @@ class P2PSession:
             if req.phase == _LoadPhase.ACTIVE:
                 if now - req.submitted_at >= _LOAD_TIMEOUT_S:
                     req.phase = _LoadPhase.ABORTING
-                    req.abort_at = now
+                    req.aborted_at = now
                     logger.warning(
                         "P2PSession %s: %s timed out, sending abort",
                         self.peer_id,
@@ -423,8 +423,8 @@ class P2PSession:
                         }
                     )
             elif req.phase == _LoadPhase.ABORTING:
-                assert req.abort_at is not None
-                if now - req.abort_at >= _ABORT_ACK_TIMEOUT_S:
+                assert req.aborted_at is not None
+                if now - req.aborted_at >= _ABORT_ACK_TIMEOUT_S:
                     self._inbound.pop(req_id)
                     results.append(
                         LoadResult(
