@@ -12,6 +12,8 @@ matrix cores. Falls back (via the kernel selector) to the BF16
 import torch
 from torch.nn.parameter import Parameter
 
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
@@ -22,6 +24,8 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
+
+logger = init_logger(__name__)
 
 
 @triton.jit
@@ -88,6 +92,27 @@ def _mxfp8_dot_scaled_linear(
     M, K = x.shape
     N = w.shape[0]
     x_q, x_scale = mxfp8_e4m3_quantize(x)
+    # aiter small-M HIP path (gfx950); returns None outside its measured
+    # envelope (or on failure), so this degrades cleanly to Triton.
+    if rocm_aiter_ops.is_linear_enabled():
+        try:
+            from aiter.ops.smallm_gemm_mxfp8 import mxfp8_gemv as _aiter_smallm_gemv
+
+            aiter_out = _aiter_smallm_gemv(x_q, x_scale, w, w_scale, x.dtype)
+            if aiter_out is not None:
+                logger.info_once(
+                    "MiniMax-M3 MXFP8 dense linear: using aiter small-M HIP GEMV."
+                )
+                return aiter_out
+        except Exception as err:
+            logger.debug("aiter dense GEMV failed, falling back to Triton: %s", err)
+    elif current_platform.supports_mx():
+        # On gfx950 the slower Triton dot_scaled path runs when aiter is off;
+        # surface it once so silent non-engagement is visible in the log.
+        logger.info_once(
+            "MiniMax-M3 MXFP8 dense linear: aiter HIP GEMV available but "
+            "VLLM_ROCM_USE_AITER is not set; using the Triton dot_scaled path."
+        )
     out = torch.empty((M, N), dtype=x.dtype, device=x.device)
     # Regime-gated launch tiles for gfx950, tuned at MiniMax-M3 shapes:
     # for example, 8k/1k, 1k/1k
