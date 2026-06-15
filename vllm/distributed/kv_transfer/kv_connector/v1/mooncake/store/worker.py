@@ -1558,7 +1558,9 @@ class LookupKeyClient:
         self.results: dict[str, int] = {}
         self.inflight: set[str] = set()
         self.cancelled: set[str] = set()
-        self.job_queue: queue.Queue[tuple[str, int, list[BlockHash]]] = queue.Queue()
+        self.job_queue: queue.Queue[tuple[str, int, list[BlockHash]] | None] = (
+            queue.Queue()
+        )
         self.thread = threading.Thread(
             target=self.process_lookups,
             name="MooncakeLookupClient",
@@ -1599,7 +1601,11 @@ class LookupKeyClient:
 
     def process_lookups(self) -> None:
         while True:
-            req_id, token_len, block_hashes = self.job_queue.get()
+            job = self.job_queue.get()
+            if job is None:
+                # Sentinel from close(): stop the background thread.
+                return
+            req_id, token_len, block_hashes = job
             with self.state_lock:
                 if req_id in self.cancelled:
                     self.cancelled.discard(req_id)
@@ -1614,7 +1620,7 @@ class LookupKeyClient:
                     self.cancelled.discard(req_id)
                 else:
                     self.results[req_id] = res
-                self.inflight.discard(req_id)
+                    self.inflight.discard(req_id)
 
     def reset(self) -> bool:
         """Trigger ``store.remove_all(force=True)`` on worker rank 0.
@@ -1630,6 +1636,8 @@ class LookupKeyClient:
         return bytes(resp) == RESP_OK
 
     def close(self):
+        self.job_queue.put(None)
+        self.thread.join(timeout=1.0)
         self.socket.close(linger=0)
 
 

@@ -500,7 +500,11 @@ def test_lookup_key_client_discard_clears_state():
 
 def test_get_num_new_matched_tokens_async_defers_then_reports():
     """Async lookup returns (None, False) until ready, then the hit count."""
-    vllm_config = _make_vllm_config()
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"lookup_async": True},
+    )
     kv_cache_config = _make_kv_cache_config()
 
     with (

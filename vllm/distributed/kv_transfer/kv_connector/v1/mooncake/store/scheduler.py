@@ -59,7 +59,7 @@ class MooncakeStoreScheduler:
         )
         self.lookup_async = (
             vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "lookup_async", True
+                "lookup_async", False
             )
         )
         self.client = LookupKeyClient(vllm_config)
