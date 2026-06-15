@@ -214,6 +214,12 @@ class Scheduler(SchedulerInterface):
             else EncoderCacheManager(cache_size=encoder_cache_size)
         )
 
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        self.is_decode_instance = (
+            kv_transfer_config is not None
+            and kv_transfer_config.kv_role == "kv_consumer"
+        )
+
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
@@ -761,12 +767,13 @@ class Scheduler(SchedulerInterface):
                         break
 
                     # Pad placeholder spec tokens for the first decode step
-                    # so the batch shape matches pre-compiled CUDA graphs.
+                    # in PD-separated decode so the batch shape matches
+                    # pre-compiled CUDA graphs.
                     if (
-                        self.num_spec_tokens > 0
+                        self.is_decode_instance
+                        and self.num_spec_tokens > 0
                         and num_new_tokens == 1
                         and num_computed_tokens == request.num_tokens - 1
-                        and num_computed_tokens > 0
                         and token_budget >= 1 + self.num_spec_tokens
                     ):
                         scheduled_spec_decode_tokens[request_id] = [
