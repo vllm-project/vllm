@@ -7,7 +7,7 @@ import signal
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
@@ -81,7 +81,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import IterationDetails, compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
@@ -1562,12 +1562,10 @@ class EngineCoreProc(EngineCore):
 
         # Msgpack serialization encoding.
         encoder = MsgpackEncoder()
-        # Send buffers to reuse.
-        reuse_buffers: list[bytearray] = []
         # Keep references to outputs and buffers until zmq is finished
         # with them (outputs may contain tensors/np arrays whose
         # backing buffers were extracted for zero-copy send).
-        pending = deque[tuple[zmq.MessageTracker, Any, bytearray]]()
+        pending = deque[tuple[zmq.MessageTracker, Sequence[bytestr], Any]]()
 
         # We must set linger to ensure the ENGINE_CORE_DEAD
         # message is sent prior to closing the socket.
@@ -1587,8 +1585,6 @@ class EngineCoreProc(EngineCore):
                 if coord_output_path is not None
                 else None
             )
-            max_reuse_bufs = len(sockets) + 1
-
             while True:
                 output = self.output_queue.get()
                 if output == EngineCoreProc.ENGINE_CORE_DEAD:
@@ -1606,21 +1602,17 @@ class EngineCoreProc(EngineCore):
                     coord_socket.send_multipart(encoder.encode(outputs))
                     continue
 
-                # Reclaim buffers that zmq is finished with.
+                # Release zero-copy frame references that zmq is finished with.
                 while pending and pending[-1][0].done:
-                    reuse_buffers.append(pending.pop()[2])
+                    pending.pop()
 
-                buffer = reuse_buffers.pop() if reuse_buffers else bytearray()
-                buffers = encoder.encode_into(outputs, buffer)
+                buffers = encoder.encode(outputs)
                 tracker = sockets[client_index].send_multipart(
                     buffers, copy=False, track=True
                 )
                 if not tracker.done:
                     ref = outputs if len(buffers) > 1 else None
-                    pending.appendleft((tracker, ref, buffer))
-                elif len(reuse_buffers) < max_reuse_bufs:
-                    # Limit the number of buffers to reuse.
-                    reuse_buffers.append(buffer)
+                    pending.appendleft((tracker, buffers, ref))
 
     def _handle_request_preproc_error(self, request: EngineCoreRequest) -> None:
         """Log and return a request-scoped error response for exceptions raised
