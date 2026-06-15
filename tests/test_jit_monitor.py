@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import sys
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
 
@@ -18,6 +19,12 @@ def _reset_monitor():
     jit_monitor._active = False
 
 
+@pytest.fixture
+def enable_debug_recompile():
+    with mock.patch.object(jit_monitor.envs, "VLLM_DEBUG_TRITON_RECOMPILE", True):
+        yield
+
+
 # ------------------------------------------------------------------
 # Helpers — lightweight stand-ins for triton.knobs
 # ------------------------------------------------------------------
@@ -30,10 +37,15 @@ def _make_fake_knobs(*, autotuning_print=False, jit_hook=None):
     return SimpleNamespace(autotuning=autotuning, runtime=runtime)
 
 
+@contextmanager
 def _patch_triton_knobs(fake_knobs):
     """Context manager that makes ``from triton import knobs`` return *fake_knobs*."""
     fake_triton = SimpleNamespace(knobs=fake_knobs)
-    return mock.patch.dict(sys.modules, {"triton": fake_triton})
+    with (
+        mock.patch.dict(sys.modules, {"triton": fake_triton}),
+        mock.patch.object(jit_monitor, "HAS_TRITON", True),
+    ):
+        yield
 
 
 # ------------------------------------------------------------------
@@ -108,7 +120,10 @@ class TestJitHook:
         hook = fake.runtime.jit_post_compile_hook
         mock_fn = SimpleNamespace(name="test_kernel")
 
-        with mock.patch.object(jit_monitor.logger, "warning") as m:
+        with (
+            mock.patch.object(jit_monitor.logger, "warning_once") as m,
+            mock.patch.object(jit_monitor.logger, "warning") as warning,
+        ):
             hook(
                 key="some_key",
                 repr="some_repr",
@@ -119,6 +134,7 @@ class TestJitHook:
             )
 
         m.assert_called_once()
+        warning.assert_not_called()
         msg = m.call_args[0][0] % m.call_args[0][1:]
         assert "Triton kernel JIT compilation during inference" in msg
         assert "test_kernel" in msg
@@ -206,9 +222,9 @@ if _HAS_TRITON:
         tl.store(out_ptr + offs, x + y, mask=mask)
 
 
-def _run_add_kernel(n: int, block: int = 256) -> None:
+def _run_add_kernel(n: int, block: int = 256, offset: int = 0) -> None:
     """Launch ``_add_kernel`` with vectors of length *n*."""
-    x = torch.randn(n, device="cuda")
+    x = torch.randn(n + offset, device="cuda")[offset:]  # affect alignment
     y = torch.randn(n, device="cuda")
     out = torch.empty(n, device="cuda")
     grid = ((n + block - 1) // block,)
@@ -224,7 +240,7 @@ class TestTritonJitHookIntegration:
         _run_add_kernel(1024)
 
         jit_monitor.activate()
-        with mock.patch.object(jit_monitor.logger, "warning") as w:
+        with mock.patch.object(jit_monitor.logger, "warning_once") as w:
             _run_add_kernel(1024)
         w.assert_not_called()
 
@@ -232,9 +248,21 @@ class TestTritonJitHookIntegration:
         _run_add_kernel(1024, block=256)
 
         jit_monitor.activate()
-        with mock.patch.object(jit_monitor.logger, "warning") as w:
+        with mock.patch.object(jit_monitor.logger, "warning_once") as w:
             # Different BLOCK (a tl.constexpr) forces recompilation.
             _run_add_kernel(1024, block=512)
         w.assert_called()
         msg = w.call_args[0][0] % w.call_args[0][1:]
         assert "_add_kernel" in msg
+
+    def test_debug_warning_on_each_new_pointer_alignment(self, enable_debug_recompile):
+        _run_add_kernel(1024)
+
+        jit_monitor.activate()
+        with (
+            mock.patch.object(jit_monitor.logger, "warning") as w,
+            mock.patch.object(jit_monitor.logger, "warning_once") as w_once,
+        ):
+            _run_add_kernel(1024, offset=1)
+        assert w.called
+        w_once.assert_not_called()
