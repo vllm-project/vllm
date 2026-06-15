@@ -1594,14 +1594,16 @@ class LookupKeyClient:
         with self.state_lock:
             self.results.pop(req_id, None)
             if req_id in self.inflight:
-                # A job may already be running; mark it so its result is not
-                # re-inserted into results after we discard it here.
                 self.inflight.discard(req_id)
                 self.cancelled.add(req_id)
 
     def process_lookups(self) -> None:
         while True:
             req_id, token_len, block_hashes = self.job_queue.get()
+            with self.state_lock:
+                if req_id in self.cancelled:
+                    self.cancelled.discard(req_id)
+                    continue
             try:
                 res = self.lookup(token_len, block_hashes)
             except Exception as e:
