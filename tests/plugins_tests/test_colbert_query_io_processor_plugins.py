@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from typing import TypedDict
 
 import pytest
 import requests
@@ -9,8 +10,19 @@ import requests
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import IOProcessorResponse
 
+
 # Test configuration for ColBERT query plugin
-model_config = {
+class ModelConfig(TypedDict):
+    model_name: str
+    plugin: str
+    query_input: str
+    document_input: str
+    hf_overrides: str
+    embedding_dim: int
+    query_maxlen: int
+
+
+model_config: ModelConfig = {
     "model_name": "jinaai/jina-colbert-v2",
     "plugin": "colbert_query_plugin",
     "query_input": "What is machine learning?",
@@ -119,9 +131,7 @@ def test_colbert_query_plugin_missing_input_type_online(server: RemoteOpenAIServ
 def test_colbert_query_plugin_batch_online(server: RemoteOpenAIServer):
     """A list input returns one entry per prompt."""
     queries = ["What is machine learning?", "What is deep learning?"]
-    parsed_response = _post_pooling(
-        server, {"input": queries, "input_type": "query"}
-    )
+    parsed_response = _post_pooling(server, {"input": queries, "input_type": "query"})
 
     data = _get_attr_or_val(parsed_response, "data")
     assert len(data) == len(queries)

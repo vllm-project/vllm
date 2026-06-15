@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator, Sequence
+from typing import cast
 
 from vllm.config import VllmConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
@@ -25,6 +26,10 @@ DOCUMENT_MARKER_TOKEN = "[DocumentMarker]"
 class ColBERTQueryEmbeddingProcessor(
     IOProcessor[ColBERTEmbeddingCompletionRequestMixin, ColBERTEmbeddingResponse]
 ):
+    """This IO processor only supports the ColBERT-style model jinaai/jina-colbert-v2.
+    It does not support all ColBERT-style variants (e.g. colbert-ir/colbertv2.0).
+    """
+
     def __init__(self, vllm_config: VllmConfig, renderer: BaseRenderer):
         super().__init__(vllm_config, renderer)
         self.requests_cache: dict[str, ColBERTEmbeddingCompletionRequestMixin] = {}
@@ -78,14 +83,14 @@ class ColBERTQueryEmbeddingProcessor(
             raise ValueError("input must be a non-empty string or list")
 
         if is_list_of(request_input, int):
-            yield list(request_input)
+            yield list(cast(list[int], request_input))
             return
 
         for item in request_input:
             if isinstance(item, str):
                 yield tokenizer.encode(item, add_special_tokens=False)
             else:
-                yield list(item)
+                yield list(cast(list[int], item))
 
     def _build_query_prompt(
         self,
