@@ -509,22 +509,25 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         downsample_mode = self._get_downsample_mode(downsample_mode)
         token_divisor = 4 if downsample_mode == "4x" else 16
 
+        # vLLM ImageSize is (width, height); transformers expects (height, width)
+        hf_image_size = (image_size.height, image_size.width)
+
         # transformers v5.7+ requires `scale_resolution` arg
         try:
             grids = image_processor.get_sliced_grid(
-                image_size,
+                hf_image_size,
                 max_slice_nums,
                 scale_res,
             )
         except TypeError:
             grids = image_processor.get_sliced_grid(
-                image_size,
+                hf_image_size,
                 max_slice_nums,
             )
 
         if grids is None:
             best_size = image_processor.find_best_resize(
-                image_size,
+                hf_image_size,
                 scale_res,
                 patch_size,
                 allow_upscale=True,
@@ -535,7 +538,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             return [0, 0], source_tokens, 0
 
         best_resize = image_processor.find_best_resize(
-            image_size,
+            hf_image_size,
             scale_res,
             patch_size,
         )
@@ -543,7 +546,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             best_resize[0] * best_resize[1] // (patch_size * patch_size * token_divisor)
         )
         refine_size = image_processor.get_refine_size(
-            image_size,
+            hf_image_size,
             grids,
             scale_res,
             patch_size,

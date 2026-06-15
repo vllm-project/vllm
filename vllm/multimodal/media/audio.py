@@ -92,8 +92,9 @@ def load_audio_pyav(
                     raise ValueError(
                         f"Audio exceeds maximum allowed duration of "
                         f"{max_duration_s}s (metadata reports "
-                        f"{metadata_duration_s:.1f}s). This limit "
-                        f"prevents decompression-bomb attacks."
+                        f"{metadata_duration_s:.1f}s). Set "
+                        f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
+                        f"increase this limit."
                     )
 
             max_samples = (
@@ -129,8 +130,9 @@ def load_audio_pyav(
                     raise ValueError(
                         f"Audio exceeds maximum allowed duration of "
                         f"{max_duration_s}s (decoded {total_samples} "
-                        f"samples at {sr}Hz). This limit prevents "
-                        f"decompression-bomb attacks."
+                        f"samples at {sr}Hz). Set "
+                        f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
+                        f"increase this limit."
                     )
     except (ValueError, ImportError):
         raise
@@ -166,8 +168,9 @@ def load_audio_soundfile(
                 raise ValueError(
                     f"Audio exceeds maximum allowed duration of "
                     f"{max_duration_s}s (file contains "
-                    f"{file_duration_s:.1f}s at {native_sr}Hz). "
-                    f"This limit prevents decompression-bomb attacks."
+                    f"{file_duration_s:.1f}s at {native_sr}Hz). Set "
+                    f"VLLM_MAX_AUDIO_DECODE_DURATION_S to "
+                    f"increase this limit."
                 )
         y = f.read(dtype="float32", always_2d=False).T
 
