@@ -140,6 +140,9 @@ def _grouped_gemm_mxfp8(
     a_div: int,
     mul_weight_by: torch.Tensor | None = None,
     expert_map: torch.Tensor | None = None,
+    block_n: int = 128,
+    num_warps: int = 8,
+    num_stages: int = 2,
 ) -> torch.Tensor:
     M_routed = num_valid_tokens
     E, N, K = w.shape
@@ -149,9 +152,8 @@ def _grouped_gemm_mxfp8(
     # written — zero them so the downstream reduction ignores their garbage.
     alloc = torch.zeros if expert_map is not None else torch.empty
     out = alloc((M_routed, N), dtype=out_dtype, device=a_q.device)
-    BLOCK_N = 128
     BLOCK_K = 128
-    grid = (triton.cdiv(sorted_token_ids.shape[0], block_m), triton.cdiv(N, BLOCK_N))
+    grid = (triton.cdiv(sorted_token_ids.shape[0], block_m), triton.cdiv(N, block_n))
     _mxfp8_grouped_gemm_kernel[grid](
         a_q,
         a_scale,
@@ -181,11 +183,28 @@ def _grouped_gemm_mxfp8(
         A_DIV=a_div,
         MUL_WEIGHT=mul_weight_by is not None,
         BLOCK_M=block_m,
-        BLOCK_N=BLOCK_N,
+        BLOCK_N=block_n,
         BLOCK_K=BLOCK_K,
-        num_warps=8,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return out
+
+
+# Tuned native-MXFP8 launch tiles for gfx950 (CDNA4) at MiniMax-M3 MoE shapes.
+# The 8k-prefill (large token count, compute-bound) and decode (small,
+# launch/bandwidth-bound) regimes want different tiles; a single set leaves
+# ~1.5-1.9x on the prefill GEMMs. Crossover measured at ~1024 tokens.
+_MXFP8_PREFILL_TILES = dict(block_m=128, block_n=256, num_warps=8, num_stages=2)
+_MXFP8_DECODE_TILES = dict(block_m=64, block_n=64, num_warps=4, num_stages=2)
+_MXFP8_PREFILL_MIN_TOKENS = 1024
+
+
+def _mxfp8_moe_tiles(num_tokens: int) -> dict:
+    """Pick grouped-GEMM launch tiles by regime (token count)."""
+    if num_tokens >= _MXFP8_PREFILL_MIN_TOKENS:
+        return _MXFP8_PREFILL_TILES
+    return _MXFP8_DECODE_TILES
 
 
 def fused_moe_mxfp8_native(
@@ -207,7 +226,13 @@ def fused_moe_mxfp8_native(
     top_k = topk_ids.shape[1]
     M = T * top_k
 
-    block_m = 64
+    tiles = _mxfp8_moe_tiles(T)
+    block_m = tiles["block_m"]
+    gemm_kw = dict(
+        block_n=tiles["block_n"],
+        num_warps=tiles["num_warps"],
+        num_stages=tiles["num_stages"],
+    )
     sorted_ids, expert_ids, num_post = moe_align_block_size(
         topk_ids,
         block_m,
@@ -232,6 +257,7 @@ def fused_moe_mxfp8_native(
         hidden_states.dtype,
         a_div=top_k,
         expert_map=expert_map,
+        **gemm_kw,
     )  # [M, 2I]
 
     # SwiGLU-OAI (split layout: gate=g1[:, :I], up=g1[:, I:]) FUSED with the
@@ -260,6 +286,7 @@ def fused_moe_mxfp8_native(
         a_div=1,
         mul_weight_by=topk_weights.reshape(-1).to(torch.float32),
         expert_map=expert_map,
+        **gemm_kw,
     )  # [M, H] == [T*top_k, H]
 
     return g2.view(T, top_k, H).sum(dim=1).to(hidden_states.dtype)

@@ -89,7 +89,15 @@ def _mxfp8_dot_scaled_linear(
     N = w.shape[0]
     x_q, x_scale = mxfp8_e4m3_quantize(x)
     out = torch.empty((M, N), dtype=x.dtype, device=x.device)
-    BLOCK_M, BLOCK_N, BLOCK_K = 64, 128, 128
+    # Regime-gated launch tiles (gfx950, tuned at MiniMax-M3 shapes): the
+    # 8k-prefill (large M, compute-bound) and decode (small M) regimes want
+    # different configs; one fixed set leaves ~1.8x on prefill. Crossover
+    # measured at ~1024 tokens.
+    if M >= 1024:
+        BLOCK_M, BLOCK_N, num_warps, num_stages = 128, 256, 8, 2
+    else:
+        BLOCK_M, BLOCK_N, num_warps, num_stages = 64, 64, 4, 2
+    BLOCK_K = 128
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
     _mxfp8_linear_kernel[grid](
         x_q,
@@ -113,7 +121,8 @@ def _mxfp8_dot_scaled_linear(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
-        num_warps=8,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return out
 
