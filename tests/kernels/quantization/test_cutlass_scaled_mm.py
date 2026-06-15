@@ -453,9 +453,9 @@ def test_cutlass_int8_gemm_m_sweep(
     torch.cuda.get_device_capability() >= (10, 0),
     reason="INT8 is not supported on this GPU type"
 )
-@pytest.mark.parametrize("m", [32])#, 64, 128])
-@pytest.mark.parametrize("n", [16])#, 32, 64])
-@pytest.mark.parametrize("k", [64])#, 128, 256])
+@pytest.mark.parametrize("m", [32, 64, 128])
+@pytest.mark.parametrize("n", [16, 32, 64])
+@pytest.mark.parametrize("k", [64, 128, 256])
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skip
 def test_cutlass_int8_azp_bias_fold(m: int, n: int, k: int, out_dtype: torch.dtype):
