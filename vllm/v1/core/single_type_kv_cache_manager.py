@@ -20,7 +20,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowMomeSpec,
     SlidingWindowSpec,
@@ -1285,30 +1284,6 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         raise NotImplementedError("CrossAttentionManager does not support caching")
 
 
-class SinkFullAttentionManager(FullAttentionManager):
-    def __init__(
-        self,
-        kv_cache_spec: SinkFullAttentionSpec,
-        block_pool: BlockPool,
-        enable_caching: bool,
-        kv_cache_group_id: int,
-        dcp_world_size: int = 1,
-        pcp_world_size: int = 1,
-    ):
-        super().__init__(
-            kv_cache_spec,
-            block_pool,
-            enable_caching,
-            kv_cache_group_id,
-            dcp_world_size,
-            pcp_world_size,
-        )
-        sink_len = kv_cache_spec.sink_len
-        assert sink_len is not None and sink_len > 0 and sink_len % self.block_size == 0
-        num_sink_block = sink_len // self.block_size
-        self.sink_blocks = self.block_pool.free_block_queue.popleft_n(num_sink_block)
-
-
 def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
     max_num_batched_tokens: int,
@@ -1400,11 +1375,6 @@ def register_all_kvcache_specs(vllm_config):
     KVCacheSpecRegistry.register(
         HiddenStateCacheSpec,
         FullAttentionManager,
-        uniform_type_base_spec=FullAttentionSpec,
-    )
-    KVCacheSpecRegistry.register(
-        SinkFullAttentionSpec,
-        SinkFullAttentionManager,
         uniform_type_base_spec=FullAttentionSpec,
     )
 

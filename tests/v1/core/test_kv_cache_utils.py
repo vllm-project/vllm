@@ -48,7 +48,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    SinkFullAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
@@ -1935,18 +1934,6 @@ def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
     assert (
         get_kv_cache_spec_kind(sliding_window_mla_spec)
         == KVCacheSpecKind.SLIDING_WINDOW_MLA
-    )
-
-    sink_full_attention_spec = SinkFullAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=64,
-        dtype=torch.float32,
-        sink_len=4,
-    )
-    assert (
-        get_kv_cache_spec_kind(sink_full_attention_spec)
-        == KVCacheSpecKind.SINK_FULL_ATTENTION
     )
 
 
