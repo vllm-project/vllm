@@ -174,6 +174,9 @@ def select_nvfp4_moe_backend(
 
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        # flashinfer cutlass_fused_moe applies swiglu_alpha/beta/limit, so it can
+        # serve clamped-swiglu models (e.g. MiniMax-M3 swigluoai_uninterleave).
+        NvFp4MoeBackend.FLASHINFER_CUTLASS,
     }
 
     if config.swiglu_limit is not None:
@@ -416,7 +419,16 @@ def make_nvfp4_moe_quant_config(
     a13_scale: torch.Tensor,
     a2_scale: torch.Tensor,
     swiglu_limit: float | None = None,
+    swiglu_alpha: float | None = None,
+    swiglu_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
+    # Clamped SwiGLU-OAI (MiniMax-M3 / gpt-oss) hard-codes the +1 bias on the up
+    # branch: out = (clamp(up) + 1) * gate*sigmoid(alpha*gate). M3's checkpoint
+    # omits swiglu_beta (arrives None); default it to 1.0 so every NVFP4 backend
+    # (cutlass SwigluBias, emulation eager) gets the correct bias.
+    if swiglu_limit is not None and swiglu_beta is None:
+        swiglu_beta = 1.0
+
     if backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(
             g1_alphas=w13_scale_2,
@@ -433,6 +445,8 @@ def make_nvfp4_moe_quant_config(
             w1_scale=w13_scale,
             w2_scale=w2_scale,
             gemm1_clamp_limit=swiglu_limit,
+            gemm1_alpha=swiglu_alpha,
+            gemm1_beta=swiglu_beta,
         )
 
     # Pass w13_scale_2 / w2_scale_2 directly as g1/g2_alphas.
@@ -457,6 +471,8 @@ def make_nvfp4_moe_quant_config(
             )
         ),
         gemm1_clamp_limit=swiglu_limit,
+        gemm1_alpha=swiglu_alpha,
+        gemm1_beta=swiglu_beta,
     )
 
 

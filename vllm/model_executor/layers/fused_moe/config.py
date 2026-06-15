@@ -811,6 +811,8 @@ def nvfp4_moe_quant_config(
     w2_bias: torch.Tensor | None = None,
     is_scale_swizzled: bool = True,
     gemm1_clamp_limit: float | None = None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for mxfp4 activations and nvp4 weights.
@@ -830,6 +832,8 @@ def nvfp4_moe_quant_config(
         block_shape=None,
         is_scale_swizzled=is_scale_swizzled,
         gemm1_clamp_limit=gemm1_clamp_limit,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
     )
 
 

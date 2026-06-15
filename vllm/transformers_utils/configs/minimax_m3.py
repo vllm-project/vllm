@@ -4,6 +4,10 @@ from typing import Any
 
 from transformers import PretrainedConfig
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class MiniMaxM3TextConfig(PretrainedConfig):
     """Config for the MiniMax M3 text backbone (MiniMaxM3SparseForCausalLM).
@@ -69,6 +73,18 @@ class MiniMaxM3TextConfig(PretrainedConfig):
         self.rope_theta = rope_theta
         self.rotary_dim = rotary_dim
         self.partial_rotary_factor = partial_rotary_factor
+        # The M3 text backbone is always SwiGLU-OAI (the model implementation
+        # only supports hidden_act == "swigluoai"). Some exports record the
+        # activation as "silu" alongside the swiglu_* params — e.g. the
+        # transformers-5 NVFP4 export lukealonso/MiniMax-M3-NVFP4. Normalize it
+        # so those checkpoints serve directly without a hand-patched config.
+        if hidden_act != "swigluoai":
+            logger.warning_once(
+                "MiniMax-M3 text config has hidden_act=%r; coercing to "
+                "'swigluoai' (the only activation the M3 backbone supports).",
+                hidden_act,
+            )
+            hidden_act = "swigluoai"
         self.hidden_act = hidden_act
         self.swiglu_alpha = swiglu_alpha
         self.swiglu_beta = swiglu_beta
