@@ -25,7 +25,6 @@ from vllm._custom_ops import (
 if torch.cpu._is_amx_tile_supported():
     torch.cpu._init_amx()
 
-
 NUM_HEADS = [
     (4, 4),
     (8, 2),
@@ -42,6 +41,11 @@ SEQ_LENS = [  # (q_len, kv_len)
     [(1, 213), (1, 1), (1, 312), (1, 7), (1, 7812)],  # decode batch
     [(2345, 2345), (5, 5), (3, 16), (134, 5131)],  # prefill batch
     [(992, 2456), (1, 1234), (98, 1145), (1, 4162), (2345, 2345)],  # mixed batch
+]
+_FP8_ATOL = {"fp8_e4m3": 0.2, "fp8_e5m2": 0.3}
+_FP8_RTOL = 0.1
+ENCODER_SEQ_LENS = [
+    [1, 678, 2367, 145, 4162, 36, 7812],
 ]
 
 
@@ -61,10 +65,7 @@ def get_attn_isa(
 
 # rand number generation takes too much time, cache rand tensors
 @functools.lru_cache(maxsize=128, typed=False)
-def tensor_cache(
-    elem_num: int,
-    dtype: torch.dtype,
-) -> torch.Tensor:
+def tensor_cache(elem_num: int, dtype: torch.dtype, tag: str = "none") -> torch.Tensor:
     tensor = torch.randn(elem_num, dtype=dtype)
 
     return tensor
@@ -183,8 +184,222 @@ def ref_paged_attn(
     return torch.cat(outputs, dim=0)
 
 
-_FP8_ATOL = {"fp8_e4m3": 0.2, "fp8_e5m2": 0.3}
-_FP8_RTOL = 0.1
+def ref_varlen_encoder_attn(
+    query: torch.Tensor,  # [token, q_head_num, head_dim]
+    key: torch.Tensor,  # [token, kv_head_num, head_dim]
+    value: torch.Tensor,
+    seq_lens: list[int],
+    scale: float,
+    sliding_window: int | None = None,
+) -> torch.Tensor:
+    num_seqs = len(seq_lens)
+    dtype = query.dtype
+
+    output = torch.empty_like(query)
+
+    start_idx = 0
+    for i in range(num_seqs):
+        seq_len = seq_lens[i]
+        q = query[start_idx : start_idx + seq_len].float()
+        k = key[start_idx : start_idx + seq_len].float()
+        v = value[start_idx : start_idx + seq_len].float()
+        q *= scale
+
+        if q.shape[1] != k.shape[1]:
+            k = torch.repeat_interleave(k, q.shape[1] // k.shape[1], dim=1)
+            v = torch.repeat_interleave(v, q.shape[1] // v.shape[1], dim=1)
+        attn = torch.einsum("qhd,khd->hqk", q, k).float()
+        empty_mask = torch.ones(seq_len, seq_len)
+        if sliding_window is not None:
+            mask = (
+                torch.triu(empty_mask, diagonal=1 - sliding_window).bool()
+                ^ torch.triu(empty_mask, diagonal=sliding_window).bool()
+            ).logical_not()
+        else:
+            mask = empty_mask.logical_not()
+
+        attn.masked_fill_(mask, float("-inf"))
+        attn = torch.softmax(attn, dim=-1)
+        out = torch.einsum("hqk,khd->qhd", attn, v).to(dtype=dtype)
+        output[start_idx : start_idx + seq_len].copy_(out)
+
+        start_idx += seq_len
+
+    return output
+
+
+@torch.inference_mode()
+def varlen_encoder_attention(
+    seq_lens: list[int],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    isa: str,
+) -> None:
+    set_random_seed(0)
+    num_seqs = len(seq_lens)
+    num_query_heads = num_heads[0]
+    num_kv_heads = num_heads[1]
+    assert num_query_heads % num_kv_heads == 0
+    window_size = (
+        (sliding_window - 1, sliding_window - 1)
+        if sliding_window is not None
+        else (-1, -1)
+    )
+    scale = head_size**-0.5
+    token_num = sum(seq_lens)
+
+    seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int32)
+    query_start_loc = torch.zeros(num_seqs, dtype=torch.int32)
+    torch.cumsum(seq_lens_tensor[:-1], 0, out=query_start_loc[1:])
+    block_nums = (seq_lens_tensor + block_size - 1) // block_size
+    start_block_ids = torch.zeros_like(seq_lens_tensor)
+    torch.cumsum(block_nums[:-1], 0, out=start_block_ids[1:])
+    total_block_num: int = block_nums.sum().item()
+    max_block_num = block_nums.max().item()
+    block_offsets = torch.arange(0, max_block_num, dtype=torch.int32)
+    encoder_block_table = start_block_ids[:, None] + block_offsets[None, :]
+    slot_mapping_list = []
+    slot_start_idx = 0
+    for i in range(num_seqs):
+        block_num = block_nums[i].item()
+        seq_len = seq_lens[i]
+        slot_mapping_list.append(torch.arange(slot_start_idx, slot_start_idx + seq_len))
+        slot_start_idx += block_num * block_size
+    slot_mapping = torch.cat(slot_mapping_list)
+
+    query = tensor_cache(
+        elem_num=token_num * num_query_heads * head_size,
+        dtype=dtype,
+        tag="query",
+    )
+    query = query.view(
+        token_num,
+        num_query_heads,
+        head_size,
+    )
+
+    key_value = tensor_cache(
+        elem_num=2 * token_num * num_kv_heads * head_size,
+        dtype=dtype,
+        tag="kv",
+    )
+    key_value = key_value.view(
+        2,
+        token_num,
+        num_kv_heads,
+        head_size,
+    )
+    key, value = key_value.unbind(0)
+
+    # KV cache for CPU attention
+    packed_key_value_cache = torch.zeros(
+        total_block_num, num_kv_heads, block_size, head_size * 2, dtype=dtype
+    )
+    packed_key_value_cache = packed_key_value_cache.view(
+        (total_block_num, num_kv_heads, block_size * 2, -1)
+    )
+    packed_key_cache, packed_value_cache = packed_key_value_cache.chunk(2, dim=2)
+
+    cu_query_lens = torch.tensor([0] + seq_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    kv_lens_tensor = torch.tensor(seq_lens, dtype=torch.int32)
+
+    # use reshape_and_cache to pack key_cache and value_cache
+    cpu_attn_reshape_and_cache(
+        key=key.view(-1, num_kv_heads, head_size),
+        value=value.view(-1, num_kv_heads, head_size),
+        key_cache=packed_key_cache,
+        value_cache=packed_value_cache,
+        slot_mapping=slot_mapping,
+        isa=isa,
+    )
+
+    metadata = cpu_attn_get_scheduler_metadata(
+        num_reqs=num_seqs,
+        num_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_size,
+        seq_lens=kv_lens_tensor,
+        dtype=dtype,
+        query_start_loc=cu_query_lens,
+        causal=False,
+        sliding_window_size=sliding_window if sliding_window is not None else -1,
+        isa=isa,
+        enable_kv_split=False,
+    )
+
+    out_without_split = torch.empty_like(query)
+    cpu_attention_with_kv_cache(
+        query=query,
+        key_cache=packed_key_cache,
+        value_cache=packed_value_cache,
+        output=out_without_split,
+        query_start_loc=cu_query_lens,
+        seq_lens=kv_lens_tensor,
+        scale=scale,
+        causal=False,
+        alibi_slopes=None,
+        sliding_window=window_size,
+        block_table=encoder_block_table,
+        softcap=0,
+        scheduler_metadata=metadata,
+        s_aux=None,
+    )
+
+    metadata = cpu_attn_get_scheduler_metadata(
+        num_reqs=num_seqs,
+        num_heads=num_query_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_size,
+        seq_lens=kv_lens_tensor,
+        dtype=dtype,
+        query_start_loc=cu_query_lens,
+        causal=False,
+        sliding_window_size=sliding_window if sliding_window is not None else -1,
+        isa=isa,
+        enable_kv_split=True,
+    )
+
+    out_with_split = torch.empty_like(query)
+    cpu_attention_with_kv_cache(
+        query=query,
+        key_cache=packed_key_cache,
+        value_cache=packed_value_cache,
+        output=out_with_split,
+        query_start_loc=cu_query_lens,
+        seq_lens=kv_lens_tensor,
+        scale=scale,
+        causal=False,
+        alibi_slopes=None,
+        sliding_window=window_size,
+        block_table=encoder_block_table,
+        softcap=0,
+        scheduler_metadata=metadata,
+        s_aux=None,
+    )
+
+    ref_output = ref_varlen_encoder_attn(
+        query=query,
+        key=key,
+        value=value,
+        seq_lens=seq_lens,
+        scale=scale,
+        sliding_window=sliding_window,
+    )
+    atol, rtol = 1.5e-2, 1e-2
+
+    (
+        torch.testing.assert_close(out_with_split, ref_output, atol=atol, rtol=rtol),
+        f"{torch.max(torch.abs(out_with_split - ref_output))}",
+    )
+    (
+        torch.testing.assert_close(out_without_split, ref_output, atol=atol, rtol=rtol),
+        f"{torch.max(torch.abs(out_without_split - ref_output))}",
+    )
 
 
 @torch.inference_mode()
@@ -415,6 +630,71 @@ def varlen_with_paged_kv(
     (
         torch.testing.assert_close(out_without_split, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(out_without_split - ref_output))}",
+    )
+
+
+@pytest.mark.parametrize("seq_lens", ENCODER_SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize(
+    "block_size",
+    [
+        128,
+    ],
+)
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", QTYPES)
+@pytest.mark.parametrize("isa", ["vec"])
+def test_varlen_encoder_attention_vec(
+    seq_lens: list[int],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    isa: str,
+) -> None:
+    varlen_encoder_attention(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        isa=isa,
+    )
+
+
+@pytest.mark.parametrize("seq_lens", ENCODER_SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize(
+    "block_size",
+    [
+        128,
+    ],
+)
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("isa", ["amx"])
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+def test_varlen_encoder_attention_amx(
+    seq_lens: list[int],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    isa: str,
+) -> None:
+    varlen_encoder_attention(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        isa=isa,
     )
 
 
