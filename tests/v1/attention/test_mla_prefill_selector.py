@@ -24,6 +24,17 @@ def clear_cache():
     _auto_select_mla_prefill_backend.cache_clear()
 
 
+GFX950 = DeviceCapability(major=9, minor=5)
+HOPPER = DeviceCapability(major=9, minor=0)
+
+
+def _aiter_asm_class():
+    try:
+        return MLAPrefillBackendEnum.AITER_ASM.get_class()
+    except ImportError:
+        return None
+
+
 def _make_mock_model_config(
     qk_nope_head_dim: int = 128,
     qk_rope_head_dim: int = 64,
@@ -287,3 +298,73 @@ class TestMLAPrefillBackendConfig:
             mla_prefill_backend=MLAPrefillBackendEnum.TRTLLM_RAGGED,
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED
+
+
+class TestAiterAsmValidation:
+    """AITER_ASM-specific validate_configuration contract (gfx950 FP8 only)."""
+
+    @pytest.mark.parametrize(
+        ("capability", "cache_dtype", "is_r1_compatible", "expect_valid", "reason"),
+        [
+            (GFX950, "fp8", True, True, None),
+            (GFX950, "auto", True, False, "fp8"),
+            (HOPPER, "fp8", True, False, "compute capability"),
+            (GFX950, "fp8", False, False, "R1"),
+        ],
+    )
+    def test_validate_configuration(
+        self, capability, cache_dtype, is_r1_compatible, expect_valid, reason
+    ):
+        cls = _aiter_asm_class()
+        if cls is None:
+            pytest.skip("AITER_ASM backend not importable")
+        with patch.object(cls, "is_available", return_value=True):
+            reasons = cls.validate_configuration(
+                capability,
+                MLAPrefillSelectorConfig(
+                    dtype=torch.bfloat16,
+                    is_r1_compatible=is_r1_compatible,
+                    cache_dtype=cache_dtype,
+                ),
+            )
+        if expect_valid:
+            assert reasons == []
+        else:
+            assert any(reason.lower() in r.lower() for r in reasons)
+
+
+class TestAiterAsmSelectorPriority:
+    """On gfx950, AITER_ASM should win over FLASH_ATTN when FP8 KV is on."""
+
+    def test_aiter_asm_wins_on_gfx950_fp8(self):
+        cls = _aiter_asm_class()
+        if cls is None:
+            pytest.skip("AITER_ASM backend not importable")
+        cfg = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            is_r1_compatible=True,
+            cache_dtype="fp8",
+        )
+        with patch.object(cls, "is_available", return_value=True):
+            selected = _auto_select_mla_prefill_backend(GFX950, cfg)
+            assert selected.get_name() == "AITER_ASM"
+
+    def test_falls_through_to_flash_attn_when_not_fp8(self):
+        cls = _aiter_asm_class()
+        if cls is None:
+            pytest.skip("AITER_ASM backend not importable")
+        try:
+            fa_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
+        except ImportError:
+            pytest.skip("FLASH_ATTN backend not importable")
+        cfg = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            is_r1_compatible=True,
+            cache_dtype="auto",
+        )
+        with (
+            patch.object(cls, "is_available", return_value=True),
+            patch.object(fa_cls, "validate_configuration", return_value=[]),
+        ):
+            selected = _auto_select_mla_prefill_backend(GFX950, cfg)
+            assert selected.get_name() == "FLASH_ATTN"
