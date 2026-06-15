@@ -58,9 +58,11 @@ def _on_gfx1151() -> bool:
 
 
 # Maximum batch size M for the HIP skinny kernel path (C++ supports N_in
-# up to 5).  When M exceeds this AND K*M fits in LDS, the skinny kernel is
+# up to 5).  When M is below this AND K*M fits in LDS, the skinny kernel is
 # used; otherwise the Triton prefill path handles the GEMM.
 MAX_SKINNY_BATCH_SIZE = 5
+# 64 KiB per-workgroup LDS limit expressed in fp16 elements.
+# (AMD RDNA has 128 KiB total LDS per CU, but 64 KiB per workgroup.)
 LDS_CAPACITY_ELEMENTS = 64 * 1024 // 2  # 32768 fp16 elements
 
 
