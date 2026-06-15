@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from pathlib import Path
+
 import pytest
 from transformers import AutoTokenizer
 
@@ -11,7 +13,12 @@ parser_name = "minimax_m2_append_think"
 end_token = "</think>"
 
 # MiniMax M2 model path
-REASONING_MODEL_NAME = "MiniMaxAI/MiniMax-M2"
+LOCAL_REASONING_MODEL_PATH = Path("/mnt/data3/models/MiniMax/MiniMax-M2.5")
+REASONING_MODEL_NAME = (
+    str(LOCAL_REASONING_MODEL_PATH)
+    if LOCAL_REASONING_MODEL_PATH.exists()
+    else "MiniMaxAI/MiniMax-M2"
+)
 
 
 @pytest.fixture(scope="module")

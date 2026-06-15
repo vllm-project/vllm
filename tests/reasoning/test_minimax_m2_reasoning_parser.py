@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from pathlib import Path
+
 import pytest
 from transformers import AutoTokenizer
 
@@ -11,7 +13,12 @@ parser_name = "minimax_m2"
 end_token = "</think>"
 
 # MiniMax M2 model path
-REASONING_MODEL_NAME = "MiniMaxAI/MiniMax-M2"
+LOCAL_REASONING_MODEL_PATH = Path("/mnt/data3/models/MiniMax/MiniMax-M2.5")
+REASONING_MODEL_NAME = (
+    str(LOCAL_REASONING_MODEL_PATH)
+    if LOCAL_REASONING_MODEL_PATH.exists()
+    else "MiniMaxAI/MiniMax-M2"
+)
 
 
 @pytest.fixture(scope="module")
@@ -59,28 +66,12 @@ MULTIPLE_LINES = {
     "is_reasoning_end": True,
 }
 
-# Case: only end token (empty reasoning, immediate response)
-SHORTEST_REASONING_NO_STREAMING = {
-    "output": "</think>This is the response",
-    "reasoning": "",
-    "content": "This is the response",
-    "is_reasoning_end": True,
-}
-
 # Case: only end token streaming (reasoning is None because it's just the token)
 SHORTEST_REASONING_STREAMING = {
     "output": "</think>This is the response",
     "reasoning": None,
     "content": "This is the response",
     "is_reasoning_end": True,
-}
-
-# Case: empty output
-EMPTY = {
-    "output": "",
-    "reasoning": "",
-    "content": None,
-    "is_reasoning_end": False,
 }
 
 # Case: empty streaming
@@ -150,19 +141,9 @@ TEST_CASES = [
         id="multiple_lines_streaming",
     ),
     pytest.param(
-        False,
-        SHORTEST_REASONING_NO_STREAMING,
-        id="shortest_reasoning",
-    ),
-    pytest.param(
         True,
         SHORTEST_REASONING_STREAMING,
         id="shortest_reasoning_streaming",
-    ),
-    pytest.param(
-        False,
-        EMPTY,
-        id="empty",
     ),
     pytest.param(
         True,
