@@ -44,13 +44,46 @@ LDS_CAPACITY_ELEMENTS = 64 * 1024 // 2  # 32768 fp16 elements
 # ---------------------------------------------------------------------------
 
 
+@tl.target_info.constexpr_function
+def _target_is_gfx1x() -> bool:
+    """Compile-time True on RDNA gfx11/gfx12 (where the v_and_or_b32 packed
+    dequant is validated/tuned)."""
+    target = tl.target_info.current_target()
+    if target is None or target.backend != "hip":
+        return False
+    arch = str(target.arch)
+    return arch.startswith("gfx11") or arch.startswith("gfx12")
+
+
+@triton.jit
+def _int4_pair_to_fp16x2(x):
+    """Unpack two packed int4 nibbles into a uint32 holding two fp16 lanes,
+    each equal to 1024 + nibble, with one ``v_and_or_b32``
+    (``(x & 0x000F000F) | 0x64006400``).
+
+    OR-ing a 4-bit nibble into the low mantissa of fp16 1024.0 (0x6400)
+    bitcasts to exactly 1024+n (CK's i4_to_half trick). Doing it on a full
+    32-bit lane dequants two nibbles per instruction, vs the scalar
+    v_and_b16 + v_or_b16 pair Triton emits from the elementwise form.
+    """
+    mask = tl.full(x.shape, 0x000F000F, tl.int32)
+    return tl.inline_asm_elementwise(
+        asm="v_and_or_b32 $0, $1, $2, 0x64006400",
+        constraints="=v,v,v",
+        args=[x, mask],
+        dtype=tl.uint32,
+        is_pure=True,
+        pack=1,
+    )
+
+
 @triton.jit
 def _triton_w4a16_skinny_fmt_kernel(
     # Pointers
     a_ptr,  # [M, K]  fp16/bf16 activations
     b_ptr,  # [N, K//8]  int32 packed (ExLlama shuffle, K is packed dim)
-    scales_ptr,  # [N, K//G]  fp16/bf16 scales (skinny layout)
-    zp_ptr,  # [N, K//G]  fp16/bf16 raw zero-points (when HAS_ZP=True)
+    scales_ptr,  # [N, K//G]  fp16/bf16 scales (sym path, HAS_ZP=False)
+    packed_scale_zp_ptr,  # [N, K//G]  int32 scale/zp carrier (asym, HAS_ZP)
     c_ptr,  # [M, N]  fp16/bf16 output
     # Dimensions
     M,
@@ -59,27 +92,32 @@ def _triton_w4a16_skinny_fmt_kernel(
     K8,  # K // 8
     stride_bn,  # per-row stride of b_ptr (in int32 elements)
     num_groups,  # K // group_size
-    # Quantization parameters
     group_size,
-    ZP_BIAS: tl.constexpr,
-    HAS_ZP: tl.constexpr,
+    HAS_ZP: tl.constexpr,  # asym: read the scale/zp carrier; sym: scales + (-8)
     # Block sizes
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
     """
-    Fused W4A16 GEMM reading weights from skinny format [N, K//8].
+    Fused W4A16 GEMM reading skinny weights [N, K//8].
 
     B is stored as [N, K//8] int32 using ExLlama shuffle packing:
       each int32 packs 8 K-values with interleave [0,2,4,6,1,3,5,7]:
         packed = val[0] | (val[2]<<4) | (val[4]<<8) | (val[6]<<12)
                | (val[1]<<16) | (val[3]<<20) | (val[5]<<24) | (val[7]<<28)
 
-    Scales are [N, K//G] (skinny layout, NOT transposed).
-    When HAS_ZP=True, raw zero-points zp_raw are loaded from zp_ptr [N, K//G]
-    and subtracted directly: (nibble - zp_raw) * scale.
-    When HAS_ZP=False, only the constant ZP_BIAS is subtracted (symmetric).
+    Two dequant paths, chosen at the layer's sym/asym nature:
+      - HAS_ZP=True (asymmetric): read the carrier ``packed_scale_zp_ptr``
+        [N, K//G] (one fp32 per (n, group)) — it folds the per-group scale AND
+        the zero-point offset into a single load, replacing the separate scale +
+        zp loads. Layout: fp16 = scale | bias_eff (= -8*scale - scaled_zp),
+        dequant (nibble-1024)*scale + bias_eff via the magic-const fp16 unpack;
+        bf16 = scale | zp_int, dequant (nibble - zp_int)*scale.
+      - HAS_ZP=False (symmetric): the -8 offset is a constant, so there is
+        no second load to fold — read ``scales_ptr`` directly and subtract the
+        constant 8. fp16: (nibble - 1032)*scale via the magic unpack; bf16:
+        (nibble - 8)*scale. (No carrier overhead for the sym fast path.)
     """
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
@@ -115,43 +153,85 @@ def _triton_w4a16_skinny_fmt_kernel(
         mask_b = (offs_n[:, None] < N) & (offs_k8[None, :] < K8)
         b_packed = tl.load(b_ptrs, mask=mask_b, other=0)
 
-        # ---- Unpack int4 weights with ExLlama unshuffle ----
-        b = tl.interleave(b_packed, b_packed)
-        b = tl.interleave(b, b)
-        b = tl.interleave(b, b)
-        b = (b >> shifts_full) & 0xF  # [BLOCK_N, BLOCK_K]
+        # ---- Unpack int4 weights ----
+        # The packed v_and_or_b32 / v_pk_fma dequant is fp16-only (the 1024+n
+        # magic trick needs fp16's mantissa) and only validated/tuned on RDNA
+        # gfx11/gfx12. Decided here at compile time (dtype + target arch) so
+        # callers pass no flag; everything else uses the scalar unpack. The
+        # condition is written inline (not via a local) so Triton constexpr-
+        # eliminates the dead arm — the per-dtype vars below are only defined
+        # on the taken path.
+        if (a.dtype == tl.float16) and _target_is_gfx1x():
+            # Packed dequant (fp16). The ExLlama int32 holds the
+            # paired nibbles val[2p] @ bits[4p:4p+4] and val[2p+1] @
+            # bits[16+4p:20+4p], so for pre-shift 4p (p=0..3),
+            #   (x >> 4p) & 0x000F000F | 0x64006400
+            # is one v_and_or_b32 producing a half2 = (1024+val[2p],
+            # 1024+val[2p+1]) in K order (signed shift is fine: the sign fill
+            # lands above bit 20, masked out). This dequants TWO nibbles per
+            # instruction; the elementwise form lowers to scalar v_and_b16 +
+            # v_or_b16 (1 nibble each). The interleave(lo, hi) lays b_raw out as
+            # half2 so the downstream affine also packs into v_pk_fma_f16. The
+            # dequant inner loop is VALU-issue-bound on gfx11, so this ~halves
+            # the dequant instruction count per WMMA and matches CK.
+            shifts4 = (tl.arange(0, 4) * 4)[None, None, :]
+            bp_shift = tl.reshape(
+                b_packed[:, :, None] >> shifts4, (BLOCK_N, BLOCK_K // 2)
+            )
+            packed_hl = _int4_pair_to_fp16x2(bp_shift)  # u32 half2: 1024+nibble pair
+            lo = (packed_hl & 0xFFFF).to(tl.uint16).to(tl.float16, bitcast=True)
+            hi = (packed_hl >> 16).to(tl.uint16).to(tl.float16, bitcast=True)
+            b_raw = tl.interleave(lo, hi)  # [BLOCK_N, BLOCK_K] fp16 = 1024+nibble
+        else:
+            # ExLlama unshuffle: replicate each int32 8x then per-lane shift+mask.
+            b = tl.interleave(b_packed, b_packed)
+            b = tl.interleave(b, b)
+            b = tl.interleave(b, b)
+            b = (b >> shifts_full) & 0xF  # [BLOCK_N, BLOCK_K]
 
-        # ---- Load scales from [N, K//G] layout ----
+        # ---- Per-group quant params from [N, K//G] layout ----
         g_idx = (k_start * BLOCK_K) // group_size
-        scale_ptrs = scales_ptr + offs_n * num_groups + g_idx
         scale_mask = offs_n < N
-        scales = tl.load(scale_ptrs, mask=scale_mask, other=1.0)
 
         # ---- Dequantize ----
         if HAS_ZP:
-            zp_ptrs = zp_ptr + offs_n * num_groups + g_idx
-            zp_raw = tl.load(zp_ptrs, mask=scale_mask, other=0.0)
-            if scales.dtype == tl.bfloat16:
-                # bf16: subtract zp in INT (zp values are 0..15, exact
-                # roundtrip), then cast once. This mirrors the symmetric
-                # path and avoids the per-tile int->bf16 cast of the full
-                # [BLOCK_N, BLOCK_K] nibble block, which is the bottleneck
-                # for asymmetric w4a16 bf16 prefill on RDNA3.5 (Strix Halo,
-                # gfx1151). Casting zp_raw (only BLOCK_N elements) to int
-                # is cheap. Recovers ~14% TFLOPS across Qwen3-8B w4a16
-                # prefill projections without changing fp16 behavior.
-                zp_int = zp_raw.to(b.dtype)
-                b_fp = (b - zp_int[:, None]).to(scales.dtype) * scales[:, None]
+            # Asymmetric: packed scale/zp carrier (one fp32/group folds scale + zp).
+            psz = tl.load(
+                packed_scale_zp_ptr + offs_n * num_groups + g_idx,
+                mask=scale_mask,
+                other=0,
+            )
+            psz_u = psz.to(tl.uint32, bitcast=True)
+            if a.dtype == tl.float16:
+                # fp16: low16 = scale, high16 = bias_eff (= -8*scale - scaled_zp).
+                # ONE fp16 FMA per group via the magic-constant i4->fp16 unpack.
+                scale = (psz_u & 0xFFFF).to(tl.uint16).to(tl.float16, bitcast=True)
+                bias_eff = (psz_u >> 16).to(tl.uint16).to(tl.float16, bitcast=True)
+                if not _target_is_gfx1x():
+                    b_raw = (b | 0x6400).to(tl.uint16).to(tl.float16, bitcast=True)
+                c1024 = tl.full((), 1024.0, tl.float16)
+                b_fp = (b_raw - c1024) * scale[:, None] + bias_eff[:, None]
             else:
-                # fp16: original asymmetric path. The int->fp16 cast on
-                # RDNA3.5 has a direct ISA path and fuses well with the
-                # subsequent subtraction, so keeping the cast-first order
-                # avoids a small fp16 regression observed when switching
-                # both dtypes to the int-subtract-first form.
-                b_fp = (b.to(scales.dtype) - zp_raw[:, None]) * scales[:, None]
+                # bf16: low16 = scale, high16 = zp_int. Cheap int-domain subtract
+                # before the single bf16 multiply (RDNA3 has no v_pk_fma_bf16).
+                scale = (psz_u & 0xFFFF).to(tl.uint16).to(tl.bfloat16, bitcast=True)
+                zp_int = ((psz_u >> 16) & 0xFFFF).to(b.dtype)
+                b_fp = (b - zp_int[:, None]).to(scale.dtype) * scale[:, None]
         else:
-            # Symmetric: (w - 8) * scale
-            b_fp = (b - ZP_BIAS).to(scales.dtype) * scales[:, None]
+            # Symmetric: the -8 offset is constant (no zp to fold), so read the
+            # scale directly — no carrier overhead.
+            scales = tl.load(
+                scales_ptr + offs_n * num_groups + g_idx, mask=scale_mask, other=1.0
+            )
+            if a.dtype == tl.float16:
+                # (nibble - 8) * scale == (b_raw - (1024+8)) * scale, via magic.
+                if not _target_is_gfx1x():
+                    b_raw = (b | 0x6400).to(tl.uint16).to(tl.float16, bitcast=True)
+                c = tl.full((), float(1024 + 8), tl.float16)
+                b_fp = (b_raw - c) * scales[:, None]
+            else:
+                # bf16: (nibble - 8) * scale, int subtract before the cast.
+                b_fp = (b - 8).to(scales.dtype) * scales[:, None]
 
         # ---- Transpose to [BLOCK_K, BLOCK_N] for matmul ----
         b_fp_t = tl.trans(b_fp)
@@ -166,26 +246,140 @@ def _triton_w4a16_skinny_fmt_kernel(
     tl.store(c_ptrs, c, mask=mask_c)
 
 
+# Explicit gfx11 prefill tile selection -- DTYPE-AWARE. The kernel takes the
+# packed v_and_or/v_pk_fma dequant for fp16 and the scalar dequant for bf16, and
+# the two paths want different tiles (most visibly BLOCK_N at deep M: 256 for
+# packed fp16 vs 64 for scalar bf16). Both were validated under do_bench_cudagraph
+# with rotating cold weights over the F.2 catalog.
+#
+# fp16 (packed) -- tuned table (weights are row-padded as in production, so the
+# K%4096 global-load cliff is already dodged and needs no special-casing):
+#   * M <= 16: BLOCK_M=16 (more M-tiles fill the 40 CUs at tiny M).
+#   * 17..64: BLOCK_M=32; small BLOCK_N keeps the grid large (a wide BLOCK_N
+#     leaves only ceil(N/BN) workgroups -- the M-blind BLOCK_N=256 was a 1.6-3x
+#     regression here). Square mid shapes take BLOCK_N=128/BK=64.
+#   * 65..256: square -> BLOCK_N=128 (BK=32 nw=8 at M>=128); tall -> BLOCK_N=128.
+#   * 257..2047: the wide distilled BLOCK_N=256/BLOCK_M=128 tile.
+#   * M >= 2048: distilled BLOCK_N=256; BLOCK_M=64 for narrow+deep K (N<=2048 and
+#     K>=4096), else 128. +13-50% over gfx11.
+#
+# bf16 (scalar) -- reuse the pre-packed-kernel ("gfx11") scalar-tuned table. The
+# bf16 kernel body is byte-identical to that kernel, so this keeps bf16 at gfx11
+# parity (the packed fp16 table regresses bf16 by up to ~40% at deep M, where
+# scalar bf16 wants BLOCK_N=64, not 256).
+#
+# BLOCK_K is capped to group_size so a K-block never straddles a quant group
+# (scale aliasing); gs128 -- the bulk -- passes the table BLOCK_K through.
+def _select_skinny_gfx11_config(
+    M: int, N: int, K: int, group_size: int, dtype: torch.dtype
+) -> tuple[int, int, int, int]:
+    """Return (BLOCK_M, BLOCK_N, BLOCK_K, num_warps) for the gfx11 skinny GEMM."""
+    if dtype == torch.float16:
+        # Packed-dequant path (fp16 on gfx1x). Cold-optimal tiers from a broad
+        # rotating-buffer cudagraph sweep over the catalog (weights row-padded
+        # exactly as production via pack_skinny_int4, so the K%4096 cliff is
+        # already dodged -- no cliff special-casing needed here).
+        tall = K >= 2 * N  # tall-K (down_proj-like)
+        # very wide N with small K (e.g. gemma gate_up 32768x2048): memory-bound,
+        # wants the small square tile at tiny M, not BM=16.
+        vwide_smallk = N >= 8192 and K <= 2048
+        if M <= 16:  # BM=16: more M-tiles fill the CUs at tiny M
+            if N <= 1024 or vwide_smallk:
+                block_m, block_n, block_k, num_warps = 32, 32, 128, 4
+            else:
+                block_m, block_n, block_k, num_warps = 16, 64, 128, 4
+        elif M <= 32:
+            if vwide_smallk:
+                block_m, block_n, block_k, num_warps = 32, 32, 128, 4
+            else:
+                block_m, block_n, block_k, num_warps = 32, 64, 128, 4
+        elif M <= 64:
+            if tall or N >= 4 * K:  # tall or very wide
+                block_m, block_n, block_k, num_warps = 32, 64, 128, 4
+            else:  # square mid
+                block_m, block_n, block_k, num_warps = 32, 128, 64, 4
+        elif M <= 128:
+            if tall:
+                block_m, block_n, block_k, num_warps = 32, 128, 64, 4
+            elif N >= 32768 and K <= 2048:  # extremely wide + tiny K (gemma
+                # gate_up 32768x2048): BLOCK_N=128 collapses (0.6x), needs 64.
+                block_m, block_n, block_k, num_warps = 128, 64, 64, 8
+            elif N >= 16384:  # very wide N (K>2048): BLOCK_N=128 wins
+                block_m, block_n, block_k, num_warps = 128, 128, 32, 8
+            elif K <= 2048:  # small-K square needs BLOCK_K=128
+                block_m, block_n, block_k, num_warps = 32, 64, 128, 4
+            else:  # larger square
+                block_m, block_n, block_k, num_warps = 64, 128, 32, 4
+        elif M <= 256:
+            block_m, block_n, block_k, num_warps = 128, 128, 32, 8
+        elif M < 2048:  # 257..2047 (mostly 512, 1024): wide distilled tile
+            block_m, block_n, block_k, num_warps = 128, 256, 32, 8
+        else:  # M >= 2048 (deep prefill)
+            if N <= 2048 and K >= 4096:  # narrow + deep: halved BLOCK_M saturates
+                block_m, block_n, block_k, num_warps = 64, 256, 32, 8
+            else:
+                block_m, block_n, block_k, num_warps = 128, 256, 32, 8
+        # Very narrow N (e.g. L2 N=512 microbench shapes) at small/mid M: a wide
+        # BLOCK_N leaves too few N-tiles to fill the CUs, so clamp it. At M>=1024
+        # the M-tiles already saturate, so the wide tile is kept.
+        if N <= 1024 and M <= 512:
+            block_n = min(block_n, 32)
+    else:
+        # Scalar-dequant path (bf16): pre-packed-kernel scalar-tuned table.
+        if M <= 32:
+            block_m, block_n, block_k, num_warps = 32, 32, 128, 4
+        elif M <= 64:
+            block_m, block_n, block_k, num_warps = 64, 64, 32, 4
+        elif M <= 128:
+            if K >= 4096 and N >= 4096:
+                block_m, block_n, block_k, num_warps = 64, 32, 128, 4
+            elif K >= 2 * N:  # tall K (down_proj)
+                block_m, block_n, block_k, num_warps = 64, 16, 64, 1
+            elif N > K:  # wide N (qkv / gate_up)
+                block_m, block_n, block_k, num_warps = 64, 64, 64, 4
+            else:  # N ~= K (o_proj)
+                block_m, block_n, block_k, num_warps = 64, 32, 64, 4
+        elif M <= 1024:
+            if K >= 2 * N:  # tall K (down_proj)
+                block_m, block_n, block_k, num_warps = 64, 64, 64, 4
+            elif N >= 4 * K:  # very wide N (gate_up)
+                block_m, block_n, block_k, num_warps = 128, 64, 64, 8
+            else:
+                block_m, block_n, block_k, num_warps = 64, 128, 32, 4
+        else:  # M > 1024
+            if K >= 2 * N:  # tall K (down_proj)
+                block_m, block_n, block_k, num_warps = 128, 512, 32, 16
+            else:
+                block_m, block_n, block_k, num_warps = 128, 64, 64, 8
+    return block_m, block_n, min(block_k, group_size), num_warps
+
+
 def triton_w4a16_skinny_fmt_gemm(
     a: torch.Tensor,  # [M, K] fp16/bf16
     b_q: torch.Tensor,  # [N, K//8] int32 (ExLlama shuffle packed)
-    scales: torch.Tensor,  # [N, K//G] fp16/bf16
+    scales: torch.Tensor,  # [N, K//G] fp16/bf16 (used for the symmetric path)
     group_size: int,
-    zp_bias: int = 8,
-    zp: torch.Tensor | None = None,  # [N, K//G] per-group zero-points
+    out: torch.Tensor | None = None,  # [M, N] optional pre-allocated output
+    packed_scale_zp: torch.Tensor | None = None,  # [N, K//G] fp32 carrier (asym only)
 ) -> torch.Tensor:
     """
-    Fused W4A16 GEMM reading from skinny weight format [N, K//8].
+    Fused W4A16 GEMM reading skinny weights [N, K//8].
+
+    Asymmetric layers pass ``packed_scale_zp`` (the carrier that folds scale +
+    zero-point into one load); symmetric layers leave it None and the kernel
+    reads ``scales`` directly with a constant -8 offset (no carrier overhead —
+    sym has no second load to fold).
 
     Args:
         a:          Activation matrix [M, K], float16 or bfloat16.
         b_q:        Packed weight matrix [N, K//8], int32 (ExLlama shuffle).
-        scales:     Per-group scales [N, K//G], same dtype as a.
+        scales:     Per-group scales [N, K//G], same dtype as a (symmetric path).
         group_size: Quantization group size (resolved from -1 to K by caller).
-        zp_bias:    Constant zero bias (default 8 for unsigned int4).
-        zp:         Raw per-group zero-points [N, K//G] (asymmetric),
-                    stored as zp_raw in activation dtype. When provided,
-                    dequant is (nibble - zp_raw) * scale.
+        out:        Optional pre-allocated [M, N] output.
+        packed_scale_zp:  Optional packed scale/zp carrier [N, K//G] fp32 for asymmetric
+                    layers; layout is dtype-specific (fp16: scale|bias_eff; bf16:
+                    scale|zp_int) — see the kernel docstring. When None, the
+                    symmetric path is used.
 
     Returns:
         Output matrix [M, N], same dtype as a.
@@ -206,14 +400,58 @@ def triton_w4a16_skinny_fmt_gemm(
     assert scales.shape == (N, num_groups), (
         f"scales shape mismatch: {scales.shape} vs ({N}, {num_groups})"
     )
-    if zp is not None:
-        assert zp.is_contiguous(), "Zero-points must be contiguous"
-        assert zp.shape == (N, num_groups), (
-            f"zp shape mismatch: {zp.shape} vs ({N}, {num_groups})"
+    has_zp = packed_scale_zp is not None
+    if packed_scale_zp is not None:
+        assert packed_scale_zp.is_contiguous(), "packed_scale_zp must be contiguous"
+        assert packed_scale_zp.shape == (N, num_groups), (
+            f"packed_scale_zp shape mismatch: {packed_scale_zp.shape} "
+            f"vs ({N}, {num_groups})"
         )
-    has_zp = zp is not None
+        packed_scale_zp_i32 = packed_scale_zp.view(torch.int32)
+    else:
+        packed_scale_zp_i32 = scales  # dummy pointer (unused when HAS_ZP=False)
 
-    c = torch.empty((M, N), dtype=a.dtype, device=a.device)
+    if out is None:
+        c = torch.empty((M, N), dtype=a.dtype, device=a.device)
+    else:
+        assert out.shape == (M, N), f"out shape mismatch: {out.shape} vs ({M}, {N})"
+        assert out.dtype == a.dtype, f"out dtype mismatch: {out.dtype} vs {a.dtype}"
+        assert out.device == a.device, (
+            f"out device mismatch: {out.device} vs {a.device}"
+        )
+        assert out.is_contiguous(), "out must be contiguous"
+        c = out
+
+    # On gfx11x, select the tile config per (M, N, K) from the per-M table
+    # (see _select_skinny_gfx11_config). BLOCK_K is capped to group_size there
+    # so a K-block never straddles a quant group (no scale aliasing).
+    if on_gfx1x():
+        block_m, block_n, block_k, num_warps = _select_skinny_gfx11_config(
+            M, N, K, group_size, a.dtype
+        )
+        grid = (triton.cdiv(M, block_m), triton.cdiv(N, block_n))
+        # The kernel picks the packed (fp16/gfx1x) vs scalar unpack itself.
+        _triton_w4a16_skinny_fmt_kernel[grid](
+            a,
+            b_q,
+            scales,
+            packed_scale_zp_i32,
+            c,
+            M,
+            N,
+            K,
+            K8,
+            stride_bn,
+            num_groups,
+            group_size=group_size,
+            HAS_ZP=has_zp,
+            BLOCK_M=block_m,
+            BLOCK_N=block_n,
+            BLOCK_K=block_k,
+            num_warps=num_warps,
+            num_stages=1,  # >1 regresses badly for this kernel (no SW pipeline)
+        )
+        return c
 
     # AMD-specific scheduling hint; only consumed by the HIP backend below
     # (see compiler.py amdgpu-waves-per-eu attribute). Set to 0 by default
@@ -254,55 +492,6 @@ def triton_w4a16_skinny_fmt_gemm(
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 256, 64, 64, 8
             else:
                 BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 128, 32, 8
-    elif on_gfx1x():
-        # Tuned on gfx1151 (Strix Halo, 40 CUs, 32-wide wavefronts)
-        # using Qwen3-4B weight shapes with group_size=128.
-        # waves_per_eu=0 means no constraint; specific values pin LLVM
-        # to a target VGPR budget per occupancy.md (gfx1151 has 1536
-        # VGPRs/SIMD; waves_per_eu=N sets max VGPRs to ~1536/N).
-        if M <= 32:
-            BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 32, 32, 128, 4
-        elif M <= 64:
-            BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 64, 32, 4
-        elif M <= 128:
-            # For K >= 4096 AND N >= 4096, a single config (BN=32, BK=128,
-            # NW=4) wins on every projection shape across Qwen3-8B and
-            # Llama-3.1-8B (down/qkv/gate_up/o_proj all gain +23%..+35% vs
-            # prior shape-specific configs). The wider K-tile escapes WMMA
-            # latency-bound regime (wmma.md: >= 2 waves/SIMD), and BN=32
-            # keeps the workgroup grid large enough to saturate 40 CUs even
-            # at N up to ~28k.
-            #
-            # Small-N or small-K shapes (Qwen3-VL-4B / Qwen3-4B) need the
-            # legacy shape-specific configs — at N=2560 the BN=32 grid drops
-            # below the saturation point.
-            if K >= 4096 and N >= 4096:
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 32, 128, 4
-                # waves_per_eu=6 matches the natural VGPR-bound occupancy
-                # but explicitly pinning the target gives LLVM a single
-                # register count to optimize against (compiler.py: "forces
-                # LLVM to focus on a single register count, simplifies some
-                # heuristics and may improve scheduling"). +5-8% across all
-                # 4 K=N=4096 projection shapes.
-                waves_per_eu = 6
-            elif K >= 2 * N:  # tall K, small-N down (e.g. Qwen3-VL-4B down)
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 16, 64, 1
-            elif N > K:  # wide N, small K (e.g. Qwen3-VL-4B qkv/gate_up)
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 64, 64, 4
-            else:  # N ~= K, small K (e.g. Qwen3-VL-4B o_proj)
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 32, 64, 4
-        elif M <= 1024:
-            if K >= 2 * N:  # tall K (e.g. down_proj)
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 64, 64, 4
-            elif N >= 4 * K:  # very wide N (e.g. gate_up_proj)
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 64, 64, 8
-            else:
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 128, 32, 4
-        else:
-            if K >= 2 * N:  # tall K (e.g. down_proj)
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 512, 32, 16
-            else:
-                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 64, 64, 8
     else:
         num_warps = 4
         if M <= 32:
@@ -323,7 +512,7 @@ def triton_w4a16_skinny_fmt_gemm(
         a,
         b_q,
         scales,
-        zp if has_zp else scales,  # dummy pointer when no zp (unused)
+        packed_scale_zp_i32,
         c,
         M,
         N,
@@ -332,7 +521,6 @@ def triton_w4a16_skinny_fmt_gemm(
         stride_bn,
         num_groups,
         group_size=group_size,
-        ZP_BIAS=zp_bias,
         HAS_ZP=has_zp,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
@@ -368,6 +556,38 @@ def pack_int4_exllama_shuffle(w_uint4: torch.Tensor) -> torch.Tensor:
     )
 
 
+def pack_skinny_int4(unpacked: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pack [N, K] uint4 into the skinny weight layout the kernels consume.
+
+    Single source of truth for the skinny weight memory layout: ExLlama shuffle
+    to [N, K//8] int32, then -- on gfx1151 only, when K_packed (= K/2 bytes) is a
+    multiple of 2048 -- pad each row by +32 int32 (+128 B). That pad makes the
+    GEMM read a non-power-of-2 row stride, dodging the multi-row global-load
+    cliff (channel/MALL hash collisions). Used by both
+    ``process_weights_after_loading`` and the perf benchmark so the benchmark can
+    never drift from the production stride.
+
+    Returns ``(w_q_skinny, w_q_skinny_i32)``: an int8 view for the HIP skinny
+    kernel and the int32 view for the Triton kernel; both share stride(0).
+    """
+    shuffled = pack_int4_exllama_shuffle(unpacked)
+    n_rows, k8 = shuffled.shape
+    k_packed_bytes = k8 * 4  # int32 -> bytes
+    pad_int32 = 32  # +128 B = one cache line, keeps each row cache-line aligned
+    if on_gfx1151() and k_packed_bytes % 2048 == 0 and shuffled.device.type == "cuda":
+        padded = torch.empty(
+            (n_rows, k8 + pad_int32), dtype=torch.int32, device=shuffled.device
+        )
+        padded[:, :k8].copy_(shuffled)
+        # Both views inherit stride(0) = k8 + pad_int32.
+        w_q_skinny_i32 = padded[:, :k8]
+        w_q_skinny = padded.view(torch.int8)[:, : k8 * 4]
+    else:
+        w_q_skinny_i32 = shuffled.contiguous()
+        w_q_skinny = w_q_skinny_i32.view(torch.int8)
+    return w_q_skinny, w_q_skinny_i32
+
+
 # ---------------------------------------------------------------------------
 # Hybrid dispatch logic
 # ---------------------------------------------------------------------------
@@ -382,6 +602,7 @@ def _hybrid_w4a16_apply_impl(
     bias: torch.Tensor | None,
     cu_count: int,
     group_size: int,
+    packed_scale_zp: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Dispatch between skinny GEMM and Triton based on batch size M.
 
@@ -392,6 +613,8 @@ def _hybrid_w4a16_apply_impl(
       w_zp:    [N, K//G] raw zero-points (zp_raw) in act dtype,
                or None for symmetric. Both HIP skinny and Triton use this
                single format: dequant = (nibble - zp_raw) * scale.
+      packed_scale_zp: [N, K//G] fp32 carrier packing scale + zero-point per
+               group (Triton prefill, asymmetric only), or None for symmetric.
 
     Registered as a custom op so torch.compile treats it as opaque.
     """
@@ -418,12 +641,15 @@ def _hybrid_w4a16_apply_impl(
         else torch.profiler.record_function(f"hybrid_triton_w4a16 {M}x{N}x{K}")
     )
     with ctx:
+        # Asymmetric layers carry the packed scale/zp carrier (scale + zero-point folded
+        # into one load); symmetric layers pass packed_scale_zp=None and the kernel
+        # reads scales directly with a constant -8 offset (no carrier overhead).
         output = triton_w4a16_skinny_fmt_gemm(
-            a=x_2d,
-            b_q=w_q_i32,
-            scales=w_s,
-            group_size=group_size,
-            zp=w_zp,
+            x_2d,
+            w_q_i32,
+            w_s,
+            group_size,
+            packed_scale_zp=packed_scale_zp,
         )
         if bias is not None:
             output.add_(bias)
@@ -439,6 +665,7 @@ def _hybrid_w4a16_apply_fake(
     bias: torch.Tensor | None,
     cu_count: int,
     group_size: int,
+    packed_scale_zp: torch.Tensor | None = None,
 ) -> torch.Tensor:
     M = x_2d.size(0)
     N = w_q.size(0)
@@ -531,41 +758,8 @@ class HybridW4A16LinearKernel(MPLinearKernel):
         if getattr(w_q_raw, "output_dim", 0) != 0:
             unpacked = unpacked.t().contiguous()
 
-        # ---- Pack into skinny format: [N, K//8] ExLlama shuffle ----
-        shuffled = pack_int4_exllama_shuffle(unpacked)
-
-        # ---- Pad K axis by +128 B per row on the gfx1151 cliff ----
-        # On gfx1151 (Strix Halo) the int4 wvSplitK skinny kernel hits a sharp
-        # BW cliff when K_packed = K/2 is a multiple of 2048 B -- multi-row
-        # weight loads collide on memory-subsystem hash bits (DRAM channel
-        # and/or MALL slice) downstream of L2.  Adding 128 B (one cache line /
-        # 32 int32 cols) to the row stride breaks the collision.  Other gfx11x
-        # parts (Strix Point gfx1150, Krackan gfx115{2,3}) lack the
-        # multi-channel / MALL combination that produces the cliff and see no
-        # benefit from the pad, so the 3% weight-memory overhead is gated to
-        # gfx1151 only.
-        N_rows, K8 = shuffled.shape
-        K_packed_bytes = K8 * 4  # int32 -> bytes
-        # +128 B per row = one cache line, keeping each row cache-line aligned.
-        pad_int32 = 32
-        if (
-            on_gfx1151()
-            and K_packed_bytes % 2048 == 0
-            and shuffled.device.type == "cuda"
-        ):
-            padded = torch.empty(
-                (N_rows, K8 + pad_int32),
-                dtype=torch.int32,
-                device=shuffled.device,
-            )
-            padded[:, :K8].copy_(shuffled)
-            # Both views inherit stride(0) = K8 + pad_int32.
-            w_q_skinny_i32 = padded[:, :K8]
-            w_q_skinny = padded.view(torch.int8)[:, :K_packed_bytes]
-        else:
-            # Store as int8 for skinny kernel, keep int32 view for triton kernel
-            w_q_skinny_i32 = shuffled.contiguous()
-            w_q_skinny = w_q_skinny_i32.view(torch.int8)
+        # ---- Pack into skinny [N, K//8] (ExLlama shuffle + gfx1151 cliff pad) ----
+        w_q_skinny, w_q_skinny_i32 = pack_skinny_int4(unpacked)
 
         # ---- Prepare skinny scales: normalize to [N, K//G] ----
         permute_param_layout_(w_s_raw, input_dim=1, output_dim=0)
@@ -598,6 +792,35 @@ class HybridW4A16LinearKernel(MPLinearKernel):
             torch.nn.Parameter(w_q_skinny_i32, requires_grad=False),
         )
 
+        # Packed scale/zp carrier for the Triton prefill path — built ONLY
+        # for asymmetric layers, where it folds the two per-group loads (scale +
+        # zp) into one. Symmetric layers skip it: the -8 offset is a constant, so
+        # there is no second load to fold and the carrier would be pure overhead
+        # (measured ~+8% on fp16 sym); sym reads scales directly instead.
+        # Layout (matches the kernel's HAS_ZP dequant):
+        #   fp16: low16 = scale, high16 = bias_eff (= -8*scale - (zp-8)*scale).
+        #         Consumed via one fp16 FMA with the magic-constant i4->fp16 unpack.
+        #   bf16: low16 = scale (bf16 bits), high16 = zp_int (raw zp 0..15), as a
+        #         plain integer. Consumed by the int-domain subtract (RDNA3 has no
+        #         v_pk_fma_bf16). Bit-identical to the separate scale+zp loads.
+        if c.zero_points and c.act_type in (torch.float16, torch.bfloat16):
+            scale_u16 = w_s_skinny.view(torch.uint16).to(torch.int32) & 0xFFFF
+            if c.act_type == torch.float16:
+                w_s_f32 = w_s_skinny.to(torch.float32)
+                scaled_zp_f32 = (w_zp.to(torch.float32) - 8.0) * w_s_f32
+                bias_eff = (-(8.0 * w_s_f32 + scaled_zp_f32)).to(c.act_type)
+                bias_u16 = bias_eff.contiguous().view(torch.uint16)
+                hi_u16 = bias_u16.to(torch.int32) & 0xFFFF
+            else:
+                hi_u16 = w_zp.to(torch.int32) & 0xFFFF  # raw zp 0..15
+            packed_scale_zp = (
+                ((hi_u16 << 16) | scale_u16).view(torch.float32).contiguous()
+            )
+            layer.register_parameter(
+                "_hybrid_w_packed_scale_zp",
+                torch.nn.Parameter(packed_scale_zp, requires_grad=False),
+            )
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
@@ -609,6 +832,8 @@ class HybridW4A16LinearKernel(MPLinearKernel):
         c = self.config
         w_q, w_s, w_zp, _ = self._get_weight_params(layer)
         w_q_i32 = layer._hybrid_w_q_i32
+        # Packed scale/zp carrier (asymmetric layers only; None for sym).
+        packed_scale_zp = getattr(layer, "_hybrid_w_packed_scale_zp", None)
 
         x_2d = x.reshape(-1, x.shape[-1])
         N = w_q.shape[0]
@@ -624,5 +849,6 @@ class HybridW4A16LinearKernel(MPLinearKernel):
             bias,
             cu_count,
             c.group_size,
+            packed_scale_zp,
         )
         return output.reshape(out_shape)

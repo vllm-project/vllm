@@ -217,6 +217,43 @@ SHAPES: list[dict[str, Any]] = [
         "group_size": 128,
         "comment": "L2 2MiB above",
     },
+    {
+        "in_features": 2048,
+        "out_features": 4096,
+        "group_size": 128,
+        "comment": "Qwen3-1.7B qkv_proj",
+    },
+    {
+        "in_features": 2048,
+        "out_features": 12288,
+        "group_size": 128,
+        "comment": "Qwen3-1.7B gate_up_proj",
+    },
+    {
+        "in_features": 6144,
+        "out_features": 2048,
+        "group_size": 128,
+        "comment": "Qwen3-1.7B down_proj",
+    },
+    # RedHatAI/gemma-3-4b-it-quantized.w4a16 (g=128)
+    {
+        "in_features": 2560,
+        "out_features": 4096,
+        "group_size": 128,
+        "comment": "Gemma3-4B qkv_proj",
+    },
+    {
+        "in_features": 2560,
+        "out_features": 20480,
+        "group_size": 128,
+        "comment": "Gemma3-4B gate_up_proj",
+    },
+    {
+        "in_features": 10240,
+        "out_features": 2560,
+        "group_size": 128,
+        "comment": "Gemma3-4B down_proj",
+    },
 ]
 
 # Provider naming convention: "<base>[-zp][-bf16]". Suffix -zp selects the
@@ -337,12 +374,18 @@ def prepare_hybrid_weights(
     Scales/zp follow the activation *dtype* so the kernel exercises the
     same fp16 vs bf16 code path it takes in production.
     """
+    from vllm.model_executor.kernels.linear.mixed_precision.hybrid_w4a16 import (
+        pack_skinny_int4,
+    )
+
     num_groups = K // group_size
 
-    w_q_skinny_i32 = torch.randint(
-        0, 2**31, (N, K // 8), dtype=torch.int32, device=device
-    )
-    w_q_skinny = w_q_skinny_i32.view(torch.int8).contiguous()
+    # Build the skinny weights via the SAME production helper the layer uses at
+    # load time, so the benchmark exercises the real memory layout -- including
+    # the gfx1151 cliff row-pad -- with no duplicated stride logic here. Values
+    # are random (irrelevant to timing); only shape/stride/dtype matter.
+    unpacked = torch.randint(0, 16, (N, K), dtype=torch.int32, device=device)
+    w_q_skinny, w_q_skinny_i32 = pack_skinny_int4(unpacked)
     w_s_skinny = torch.randn(N, num_groups, dtype=dtype, device=device) * 0.01
     w_zp = torch.randint(0, 16, (N, num_groups), dtype=torch.int32, device=device).to(
         dtype
@@ -354,6 +397,34 @@ def prepare_hybrid_weights(
         "w_q_skinny_i32": w_q_skinny_i32,
         "w_zp": w_zp,
     }
+
+
+def _compute_packed_scale_zp(
+    w_s: torch.Tensor,
+    w_zp: torch.Tensor | None,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    """Pack the per-group packed scale/zp carrier into one fp32, matching the load-time
+    carrier built in ``HybridW4A16LinearKernel.process_weights_after_loading``.
+
+    Built ONLY for asymmetric layers (``w_zp`` given); returns None for symmetric
+    (the kernel uses the constant -8 offset there, no carrier). Low 16 bits =
+    scale; high 16 bits are dtype-specific:
+      fp16: bias_eff = -(8*scale + (zp-8)*scale) — magic-constant fp16 FMA dequant.
+      bf16: zp_int = raw zp 0..15 — int-domain subtract (bit-identical to the
+            separate scale + zp loads).
+    """
+    if w_zp is None or dtype not in (torch.float16, torch.bfloat16):
+        return None
+    scale_u16 = w_s.view(torch.uint16).to(torch.int32) & 0xFFFF
+    if dtype == torch.float16:
+        w_s_f32 = w_s.to(torch.float32)
+        scaled_zp_f32 = (w_zp.to(torch.float32) - 8.0) * w_s_f32
+        bias_eff = (-(8.0 * w_s_f32 + scaled_zp_f32)).to(dtype)
+        hi_u16 = bias_eff.contiguous().view(torch.uint16).to(torch.int32) & 0xFFFF
+    else:
+        hi_u16 = w_zp.to(torch.int32) & 0xFFFF
+    return ((hi_u16 << 16) | scale_u16).view(torch.float32).contiguous()
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +450,25 @@ def _cool_down(config: Any, test_id: str) -> None:
     _log_temp(config, f"{test_id}:post-sleep")
 
 
+# Rotate the weight operand through this many MiB so a revisited buffer has been
+# evicted from the gfx1151 32 MiB MALL -- yields cold-weight measurements (as in
+# a real forward pass, where each weight is read once and evicted before its next
+# use) instead of the hot-MALL numbers a single-buffer cudagraph would report.
+_ROTATE_TARGET_BYTES = 48 << 20
+_ROTATE_MAX = 32
+
+
+def _clone_strided(t: torch.Tensor | None) -> torch.Tensor | None:
+    """Clone preserving exact size AND stride (the K%2048 cliff workaround uses
+    row-padded weight strides; a plain .clone() would compact them and change
+    the measured kernel). None passes through (symmetric path has no carrier)."""
+    if t is None:
+        return None
+    c = torch.empty_strided(t.size(), t.stride(), dtype=t.dtype, device=t.device)
+    c.copy_(t)
+    return c
+
+
 def measure_tflops(
     M: int,
     weights: dict[str, torch.Tensor],
@@ -387,7 +477,13 @@ def measure_tflops(
     group_size: int,
     provider: str,
 ) -> tuple[str, float]:
-    """Run the kernel and return (kernel label, median TFLOP/s)."""
+    """Run the kernel and return (kernel label, median TFLOP/s).
+
+    The weight operand is rotated through enough copies to exceed the MALL so
+    each captured call reads cold weights; the activation stays single-buffered
+    (hot), matching a real prefill where activations are freshly produced and
+    weights stream from HBM.
+    """
     from vllm.model_executor.kernels.linear.mixed_precision.hybrid_w4a16 import (
         _hybrid_w4a16_apply_impl,
     )
@@ -400,17 +496,47 @@ def measure_tflops(
 
     cu_count = num_compute_units()
     use_zp = _provider_use_zp(provider)
+    # packing zero point and scales for faster access
+    packed_scale_zp = _compute_packed_scale_zp(
+        weights["w_s_skinny"], weights["w_zp"] if use_zp else None, dtype
+    )
+
+    # Build N rotating copies of the (cold) weight operands; the dominant read is
+    # w_q_skinny_i32 (N*K/2 bytes), so size the rotation off it. run() advances a
+    # buffer index per call; do_bench_cudagraph unrolls n_repeat = rep/est calls
+    # into the graph, so at small M (tiny est) n_repeat far exceeds n_buf and the
+    # rotation is complete -- exactly where cache residency matters. At large M
+    # the kernel is compute-bound (cache-insensitive), so partial rotation there
+    # is immaterial.
+    w_bytes = (
+        weights["w_q_skinny_i32"].numel() * weights["w_q_skinny_i32"].element_size()
+    )
+    n_buf = max(2, min(_ROTATE_MAX, -(-_ROTATE_TARGET_BYTES // w_bytes)))
+    bufs = [
+        {
+            "w_q_skinny": _clone_strided(weights["w_q_skinny"]),
+            "w_s_skinny": _clone_strided(weights["w_s_skinny"]),
+            "w_q_skinny_i32": _clone_strided(weights["w_q_skinny_i32"]),
+            "w_zp": _clone_strided(weights["w_zp"]) if use_zp else None,
+            "packed_scale_zp": _clone_strided(packed_scale_zp),
+        }
+        for _ in range(n_buf)
+    ]
+    idx = [0]
 
     def run():
+        w = bufs[idx[0] % n_buf]
+        idx[0] += 1
         return _hybrid_w4a16_apply_impl(
             a,
-            weights["w_q_skinny"],
-            weights["w_s_skinny"],
-            weights["w_q_skinny_i32"],
-            weights["w_zp"] if use_zp else None,
+            w["w_q_skinny"],
+            w["w_s_skinny"],
+            w["w_q_skinny_i32"],
+            w["w_zp"],
             None,  # bias
             cu_count,
             group_size,
+            w["packed_scale_zp"],
         )
 
     ms = triton.testing.do_bench_cudagraph(run, quantiles=[0.5])
