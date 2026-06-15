@@ -58,6 +58,7 @@ class MockConnector(KVConnectorBase_V1):
         mock = MagicMock(spec_set=KVConnectorBase_V1)
         # Override just build_kv_connector_stats
         mock.build_kv_connector_stats = cls.build_kv_connector_stats
+        mock.get_kv_connector_stats.return_value = None
         return mock
 
     @classmethod
@@ -93,6 +94,7 @@ class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
 
     def __new__(cls, *args, **kwargs):
         mock = MagicMock(spec_set=cls)
+        mock.get_kv_connector_stats.return_value = None
         return mock
 
     def start_load_kv(self, forward_context, **kwargs):
@@ -366,7 +368,10 @@ def test_multi_example_connector_consistency():
 
 
 def _ignore_event_collection(events: list[str]) -> list[str]:
-    return [event for event in events if event != "take_events"]
+    # Filter out per-step polling hooks that the scheduler calls repeatedly
+    # and which are not meaningful state transitions for these assertions.
+    ignored = {"get_kv_connector_stats", "has_pending_push_work", "take_events"}
+    return [event for event in events if event not in ignored]
 
 
 def get_connector_events() -> dict[str, list[str]]:
@@ -1072,7 +1077,7 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
     )
 
     with patch(
-        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     ):
         llm = LLM(
