@@ -39,8 +39,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   2: Add remote_request_id to kv_transfer_params
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
+#   5: Add block_strides
 #
-NIXL_CONNECTOR_VERSION: int = 4
+NIXL_CONNECTOR_VERSION: int = 5
 
 
 @dataclass
@@ -51,6 +52,7 @@ class NixlAgentMetadata:
     device_id: int
     num_blocks: int
     block_lens: list[int]
+    block_strides: list[int]
     kv_cache_layout: str
     block_size: int
     ssm_sizes: tuple[int, int]
