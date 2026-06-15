@@ -193,40 +193,25 @@ def _reshape_attention_kv_cache(
     ]
 
     if kv_cache_spec.page_size_padded is not None:
-        # Use strided views to skip padding between logical pages.
+        # Use a strided view to skip the padding between physical pages.
+        #
+        # Only num-blocks-first layouts are supported (the block dimension is
+        # dim 0 of the unpermuted shape). kv-first layouts such as ROCm's
+        # ``(2, num_blocks, ...)`` are intentionally not supported here. For a
+        # num-blocks-first layout the only stride that must change is the block
+        # stride: every other (contiguous) stride already steps within the
+        # unpadded region of a page, so no further adjustment is needed.
+        assert unpermuted_kv_cache_shape[0] == num_blocks, (
+            "Padded KV pages require a num-blocks-first KV cache layout (got "
+            f"shape {unpermuted_kv_cache_shape} with num_blocks={num_blocks}); "
+            "kv-first layouts are not supported."
+        )
         dtype_size = get_dtype_size(kv_cache_spec.dtype)
         page_stride = kv_cache_spec.page_size_bytes // dtype_size
 
-        if unpermuted_kv_cache_shape[0] == num_blocks:
-            unpermuted_num_blocks_dim = 0
-        elif len(unpermuted_kv_cache_shape) > 1 and (
-            unpermuted_kv_cache_shape[1] == num_blocks
-        ):
-            unpermuted_num_blocks_dim = 1
-        else:
-            unpermuted_num_blocks_dim = unpermuted_kv_cache_shape.index(num_blocks)
-        num_blocks_dim = inv_order[unpermuted_num_blocks_dim]
-
+        num_blocks_dim = inv_order[0]
         strides = list(torch.empty(kv_cache_shape).stride())
-        unpadded_page_stride = strides[num_blocks_dim]
         strides[num_blocks_dim] = page_stride
-
-        # FlashAttention-style layouts have an explicit K/V dimension adjacent
-        # to the block dimension. Avoid matching unrelated size-2 dims like
-        # head_size or num_kv_heads.
-        kv_dim = None
-        for dim in (
-            unpermuted_num_blocks_dim - 1,
-            unpermuted_num_blocks_dim + 1,
-        ):
-            if (
-                0 <= dim < len(unpermuted_kv_cache_shape)
-                and unpermuted_kv_cache_shape[dim] == 2
-            ):
-                kv_dim = dim
-                break
-        if kv_dim is not None:
-            strides[inv_order[kv_dim]] = unpadded_page_stride // 2
 
         kv_cache = torch.as_strided(
             kv_tensor,
