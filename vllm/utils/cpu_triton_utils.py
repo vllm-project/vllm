@@ -427,7 +427,12 @@ def _sample_recovered_tokens_kernel_impl(
     vocab_size,
     BLOCK_SIZE=None,
     NO_DRAFT_PROBS=False,
+    USE_FP64_GUMBEL=False,
 ):
+    # USE_FP64_GUMBEL only controls the gumbel-noise precision, which the caller
+    # has already applied to `inv_q` (fp64 vs fp32). The CPU kernel consumes
+    # `inv_q` directly, so the flag is accepted for interface parity and the
+    # value is read at its existing dtype.
     # C++ reads integer tensors as int64_t*; ensure correct dtype.
     orig_dtype = output_token_ids.dtype
     output_i64 = _ensure_int64(output_token_ids)
