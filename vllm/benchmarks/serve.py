@@ -1153,6 +1153,11 @@ async def benchmark(
         )
         actual_output_lens = 0
 
+    if diffusion_stats is not None and isinstance(metrics, BenchmarkMetrics):
+        # Committed decode-only throughput (excludes the first canvas, which
+        # lands in TTFT). See BenchmarkMetrics.decode_throughput.
+        diffusion_stats["decode_throughput"] = metrics.decode_throughput
+
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
     print("{:<40} {:<10}".format("Failed requests:", metrics.failed))
@@ -1183,10 +1188,10 @@ async def benchmark(
                     metrics.output_throughput,
                 )
             )
-            if metrics.decode_throughput > 0:
+            if metrics.decode_throughput > 0 and diffusion_stats is None:
                 print(
                     "{:<40} {:<10.2f}".format(
-                        "Output throughput (decode only) (tok/s):",
+                        "Output throughput (excl. prefill) (tok/s):",
                         metrics.decode_throughput,
                     )
                 )
@@ -1268,6 +1273,7 @@ async def benchmark(
         result["diffusion_committed_throughput"] = diffusion_stats[
             "committed_throughput"
         ]
+        result["diffusion_decode_throughput"] = diffusion_stats["decode_throughput"]
         result["diffusion_steps_per_canvas"] = diffusion_stats["steps_per_canvas"]
         result["diffusion_committed_per_step"] = diffusion_stats["committed_per_step"]
         result["diffusion_committed_tokens"] = int(diffusion_stats["committed_tokens"])
@@ -1322,7 +1328,16 @@ async def benchmark(
     if diffusion_stats is not None:
         print("{s:{c}^{n}}".format(s="Diffusion Decoding", n=50, c="-"))
         for label, key, value_fmt in (
-            ("Committed throughput (tok/s):", "committed_throughput", "{:<10.2f}"),
+            (
+                "Committed throughput (e2e, incl. prefill) (tok/s):",
+                "committed_throughput",
+                "{:<10.2f}",
+            ),
+            (
+                "Committed throughput (excl. prefill) (tok/s):",
+                "decode_throughput",
+                "{:<10.2f}",
+            ),
             ("Denoising steps per canvas:", "steps_per_canvas", "{:<10.2f}"),
             ("Committed per denoising step:", "committed_per_step", "{:<10.2f}"),
             ("Committed tokens:", "committed_tokens", "{:<10d}"),
