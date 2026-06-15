@@ -21,6 +21,7 @@ from typing import Optional
 import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.custom_all_reduce import (
     is_weak_contiguous,
@@ -79,7 +80,7 @@ class PushAllReduce:
         self.disabled = False
 
         # Feature toggle: check env var to disable this feature
-        if os.environ.get(_DISABLE_ENV_VAR) == "1":
+        if envs.VLLM_DISABLE_PUSH_ALLREDUCE:
             logger.info(
                 "%s is DISABLED (env override)",
                 _FEATURE_DESCRIPTION,
