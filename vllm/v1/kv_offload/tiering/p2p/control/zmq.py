@@ -27,6 +27,10 @@ _HEARTBEAT_IVL_MS = 2000
 _HEARTBEAT_TIMEOUT_MS = 10000
 _HEARTBEAT_TTL_MS = 10000
 
+# Shared sentinel returned by recv() when the inbox is empty. Callers must
+# not mutate it (all current callers only iterate / index).
+_EMPTY_INBOX: list[dict] = []
+
 
 def _tcp_addr(host: str, port: int | str) -> str:
     return f"tcp://{host}:{port}"
@@ -64,6 +68,8 @@ class ZmqConnection(ControlConnection):
 
     def recv(self) -> list[dict]:
         """Drain and return all buffered incoming messages."""
+        if not self._inbox:
+            return _EMPTY_INBOX
         msgs = self._inbox
         self._inbox = []
         return msgs
