@@ -395,7 +395,6 @@ class P2PSession:
     # ------------------------------------------------------------------
 
     def _collect_load_results(self) -> list[LoadResult]:
-        results: list[LoadResult] = []
         now = time.monotonic()
         for req_id, req in list(self._inbound.items()):
             if req.aborted_at is None:
@@ -415,7 +414,7 @@ class P2PSession:
             else:
                 if now - req.aborted_at >= _ABORT_ACK_TIMEOUT_S:
                     self._inbound.pop(req_id)
-                    results.append(
+                    self._completed_loads.append(
                         LoadResult(
                             job_id=req.job_id, kv_request_id=req_id, success=False
                         )
@@ -426,7 +425,7 @@ class P2PSession:
                         req_id,
                     )
 
-        results.extend(self._completed_loads)
+        results = self._completed_loads
         self._completed_loads = []
         return results
 
