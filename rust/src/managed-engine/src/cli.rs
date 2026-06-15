@@ -72,6 +72,8 @@ impl ManagedEngineArgs {
         model: String,
         max_model_len: Option<u32>,
         language_model_only: bool,
+        disable_log_stats: bool,
+        shutdown_timeout: u64,
         handshake_port: u16,
     ) -> ManagedEngineConfig {
         let mut python_args = self.python_args;
@@ -82,6 +84,15 @@ impl ManagedEngineArgs {
         }
         if language_model_only {
             python_args.push("--language-model-only".to_string());
+        }
+        if disable_log_stats {
+            python_args.push("--disable-log-stats".to_string());
+        }
+        // we must pass through shutdown_timeout to the engine,
+        // otherwise inflight requests get aborted on shutdown
+        if shutdown_timeout > 0 {
+            python_args.push("--shutdown-timeout".to_string());
+            python_args.push(shutdown_timeout.to_string());
         }
         if let Some(data_parallel_size_local) = self.data_parallel_size_local {
             python_args.push("--data-parallel-size-local".to_string());
