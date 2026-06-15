@@ -53,6 +53,7 @@ class DeepSeekV32ToolParser(ToolParser):
 
     tool_call_start_token: str = "<｜DSML｜function_calls>"
     tool_call_end_token: str = "</｜DSML｜function_calls>"
+    structural_tag_model = "deepseek_v3_2"
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
