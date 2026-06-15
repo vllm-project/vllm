@@ -984,9 +984,14 @@ class PCPManager:
         cp_unpad_mask = self.pcp_unpad_mask_cpu_tensor[
             : num_tokens * self.pcp_world_size
         ].to(pcp_padded_slot_mapping.device, non_blocking=True)
+        num_unpadded_slots = int(cp_unpad_mask.sum().item())
+        assert slot_mapping.shape[0] >= num_unpadded_slots, (
+            f"PCP slot_mapping has {slot_mapping.shape[0]} entries, but "
+            f"{num_unpadded_slots} unpadded slots are required."
+        )
         pcp_padded_slot_mapping.fill_(-1)
         pcp_padded_slot_mapping[: num_tokens * self.pcp_world_size][cp_unpad_mask] = (
-            slot_mapping
+            slot_mapping[:num_unpadded_slots]
         )
         return pcp_padded_slot_mapping
 
