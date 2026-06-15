@@ -519,6 +519,13 @@ class ParserEngine(Parser):
                     return input_ids[i + 1 :]
         return input_ids
 
+    def get_streaming_fallback_content(
+        self,
+        text: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> str | None:
+        return None
+
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         start_id = self._reasoning_start_token_id
         end_id = self._reasoning_end_token_id

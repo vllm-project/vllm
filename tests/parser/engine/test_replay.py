@@ -8,6 +8,8 @@ holdback depths to verify chunk-size invariance and terminal-token hygiene.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from tests.parser.engine.replay_harness import (
@@ -23,15 +25,18 @@ from tests.parser.engine.trace_builder import build_samples
 from vllm.parser.abstract_parser import Parser
 from vllm.parser.engine.registered_adapters import (
     Gemma4Parser,
+    NemotronV3Parser,
     Qwen3Parser,
 )
 
 _ENGINE_PARSERS: dict[str, type[Parser]] = {
     "qwen3_engine": Qwen3Parser,
     "gemma4_engine": Gemma4Parser,
+    "nemotron_v3_engine": NemotronV3Parser,
 }
 
 _gemma4_samples = build_samples("gemma4")
+_nemotron_v3_samples = build_samples("nemotron_v3")
 _qwen3_samples = build_samples("qwen3")
 
 _GEMMA4_TERMINALS = ["<|channel>", "<channel|>", "<|tool_call>", "<tool_call|>"]
@@ -102,10 +107,20 @@ class TestGemma4ReplayWithHoldback:
 
 TEXT_HOLDBACK_DELAYS = [1, 2, 3]
 
+_TEXT_HOLDBACK_SAMPLES = (
+    [(Qwen3Parser, s, _QWEN3_TERMINALS) for s in _qwen3_samples]
+    + [(Gemma4Parser, s, _GEMMA4_TERMINALS) for s in _gemma4_samples]
+    + [(NemotronV3Parser, s, _QWEN3_TERMINALS) for s in _nemotron_v3_samples]
+)
+
 
 @pytest.mark.parametrize("delay", TEXT_HOLDBACK_DELAYS, ids=lambda d: f"delay{d}")
-@pytest.mark.parametrize("sample", _gemma4_samples, ids=lambda s: s.id)
-class TestGemma4TextHoldback:
+@pytest.mark.parametrize(
+    "parser_cls,sample,terminals",
+    _TEXT_HOLDBACK_SAMPLES,
+    ids=lambda v: v.id if hasattr(v, "id") else "",
+)
+class TestTextHoldback:
     """Replay with production-like text/token-ID misalignment.
 
     In production the detokenizer sends token IDs immediately but holds
@@ -113,9 +128,9 @@ class TestGemma4TextHoldback:
     terminal path that aligned-holdback tests do not cover.
     """
 
-    def test_replay(self, sample, delay):
+    def test_replay(self, parser_cls, sample, terminals, delay):
         tokenizer = make_mock_tokenizer(sample)
-        parser = Gemma4Parser(tokenizer, sample.tools)
+        parser = parser_cls(tokenizer, sample.tools)
         deltas = replay_with_text_holdback(
             parser,
             sample.tokens,
@@ -127,9 +142,104 @@ class TestGemma4TextHoldback:
         assert_parse_output(output, sample)
         assert_no_terminal_leakage(
             output,
-            _GEMMA4_TERMINALS,
+            terminals,
             context=f"text_delay={delay}",
         )
+
+
+@pytest.mark.parametrize(
+    "chunk_size", [1, 2, 3, 5, 10, 19, 20, None], ids=lambda c: f"chunk{c}"
+)
+@pytest.mark.parametrize("sample", _nemotron_v3_samples, ids=lambda s: s.id)
+class TestNemotronV3Replay:
+    """Replay Nemotron V3 token sequences at different chunk sizes."""
+
+    def test_replay(self, sample, chunk_size):
+        tokenizer = make_mock_tokenizer(sample)
+        parser = NemotronV3Parser(tokenizer, sample.tools)
+        deltas = replay_streaming(
+            parser,
+            sample.tokens,
+            chunk_size=chunk_size,
+            prompt_token_ids=sample.prompt_token_ids,
+        )
+        output = collect_output(deltas)
+
+        assert_parse_output(output, sample)
+        assert_no_terminal_leakage(output, _QWEN3_TERMINALS)
+
+
+_DEFERRAL_SAMPLES = (
+    [(Qwen3Parser, s, "</tool_call>") for s in _qwen3_samples if s.expected_tool_calls]
+    + [
+        (Gemma4Parser, s, "<tool_call|>")
+        for s in _gemma4_samples
+        if s.expected_tool_calls
+    ]
+    + [
+        (NemotronV3Parser, s, "</tool_call>")
+        for s in _nemotron_v3_samples
+        if s.expected_tool_calls
+    ]
+)
+
+
+@pytest.mark.parametrize(
+    "parser_cls,sample,tool_end_text",
+    _DEFERRAL_SAMPLES,
+    ids=lambda v: v.id if hasattr(v, "id") else getattr(v, "__name__", ""),
+)
+class TestDeferralFinish:
+    """Test that parse_delta(finished=True) resolves deferred scanner state.
+
+    Simulates a production failure where delta_text is missing the
+    tool-call-end text but delta_token_ids has the token, causing the
+    scanner to defer it.  Without finish(), the deferred state is lost
+    and tool call arguments are empty.
+    """
+
+    def test_misaligned_last_delta_with_finish(self, parser_cls, sample, tool_end_text):
+        tokenizer = make_mock_tokenizer(sample)
+        parser = parser_cls(tokenizer, sample.tools)
+
+        request = _test_request()
+
+        all_ids = [tid for tid, _ in sample.tokens]
+        all_texts = [text for _, text in sample.tokens]
+
+        tool_end_id = sample.vocab.get(tool_end_text)
+        split_idx = None
+        for i in range(len(all_ids) - 1, -1, -1):
+            if all_ids[i] == tool_end_id:
+                split_idx = i
+                break
+
+        if split_idx is None:
+            pytest.skip(f"no {tool_end_text} token found")
+
+        first_ids = all_ids[:split_idx]
+        first_text = "".join(all_texts[:split_idx])
+
+        last_ids = all_ids[split_idx:]
+        last_text_missing = "".join(all_texts[split_idx:]).replace(tool_end_text, "")
+
+        result1 = parser.parse_delta(
+            first_text,
+            first_ids,
+            request,
+            prompt_token_ids=[],
+            finished=False,
+        )
+        result2 = parser.parse_delta(
+            last_text_missing, last_ids, request, finished=True
+        )
+
+        output = collect_output([result1, result2])
+
+        tool_calls_only = dataclasses.replace(
+            sample, expected_reasoning=None, expected_content=None
+        )
+        assert_parse_output(output, tool_calls_only)
 
 
 class TestParserEngineAdjustRequest:
@@ -145,15 +255,23 @@ class TestParserEngineAdjustRequest:
         assert adjusted.skip_special_tokens is False
 
 
-_TOOL_CALL_SAMPLES = [
-    (Qwen3Parser, s)
-    for s in _qwen3_samples
-    if s.expected_tool_calls and s.expected_reasoning
-] + [
-    (Gemma4Parser, s)
-    for s in _gemma4_samples
-    if s.expected_tool_calls and s.expected_reasoning
-]
+_TOOL_CALL_SAMPLES = (
+    [
+        (Qwen3Parser, s)
+        for s in _qwen3_samples
+        if s.expected_tool_calls and s.expected_reasoning
+    ]
+    + [
+        (Gemma4Parser, s)
+        for s in _gemma4_samples
+        if s.expected_tool_calls and s.expected_reasoning
+    ]
+    + [
+        (NemotronV3Parser, s)
+        for s in _nemotron_v3_samples
+        if s.expected_tool_calls and s.expected_reasoning
+    ]
+)
 
 
 def _suppressed_expectations(sample) -> tuple[str, str]:
