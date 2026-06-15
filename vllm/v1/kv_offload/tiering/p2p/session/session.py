@@ -46,6 +46,7 @@ logger = init_logger(__name__)
 _LOAD_TIMEOUT_S = 30.0
 _ABORT_ACK_TIMEOUT_S = 10.0
 _STORE_TIMEOUT_S = 30.0
+_CANCEL_DRAIN_TIMEOUT_S = 10.0
 
 
 @dataclass
@@ -196,6 +197,7 @@ class P2PSession:
         self._outbound: dict[str, _OutboundRequestState] = {}
         self._inflight: dict[int, _InflightXfer] = {}  # transfer_id → xfer
         self._store_jobs: dict[int, float] = {}  # job_id → submitted_at
+        self._pending_aborts: dict[str, float] = {}  # kv_request_id → start
         self._remote_registered = False
 
         if conn is not None:
@@ -362,6 +364,7 @@ class P2PSession:
 
         loads = self._collect_load_results()
         stores = self._collect_store_results()
+        self._drain_pending_aborts()
         return loads, stores
 
     def close(self) -> tuple[list[tuple[int, str]], list[int]]:
@@ -381,6 +384,7 @@ class P2PSession:
             self._transport.cancel(list(self._inflight.keys()))
         self._inflight.clear()
         self._outbound.clear()
+        self._pending_aborts.clear()
 
         if self._conn is not None:
             with contextlib.suppress(Exception):
@@ -648,16 +652,71 @@ class P2PSession:
     def _on_abort_fetch(self, msg: dict) -> None:
         AbortFetchMsg.validate(msg)
         kv_request_id = msg[AbortFetchMsg.KV_REQUEST_ID]
+        # Idempotent: receiving AbortFetchMsg again before we've sent the
+        # ack just triggers another drain attempt without resetting the
+        # deadline.
+        self._pending_aborts.setdefault(kv_request_id, time.monotonic())
+        self._drain_abort(kv_request_id)
+
+    def _drain_pending_aborts(self) -> None:
+        """Re-attempt every parked abort once per poll tick."""
+        if not self._pending_aborts:
+            return
+        for kv_request_id in list(self._pending_aborts):
+            self._drain_abort(kv_request_id)
+
+    def _drain_abort(self, kv_request_id: str) -> None:
+        """One drain attempt for a pending abort.
+
+        Stops accepting more blocks for ``kv_request_id``, then asks the
+        transport to cancel any matching inflight transfers in
+        ``mode="wait"``. Sends ``AbortAckMsg`` once nothing remains
+        inflight, or after ``_CANCEL_DRAIN_TIMEOUT_S`` falls back to
+        ``mode="immediate"`` and acks anyway.
+        """
         self._outbound.pop(kv_request_id, None)
-        ids_to_cancel = [
+        ids = [
             tid
             for tid, xfer in self._inflight.items()
             if xfer.kv_request_id == kv_request_id
         ]
-        for tid in ids_to_cancel:
-            del self._inflight[tid]
-        if ids_to_cancel:
-            self._transport.cancel(ids_to_cancel)
+        if not ids:
+            self._finalize_abort(kv_request_id)
+            return
+
+        started_at = self._pending_aborts.get(kv_request_id)
+        expired = (
+            started_at is not None
+            and time.monotonic() - started_at >= _CANCEL_DRAIN_TIMEOUT_S
+        )
+        if expired:
+            for tid in ids:
+                self._inflight.pop(tid, None)
+            self._transport.cancel(ids, mode="immediate")
+            logger.warning(
+                "P2PSession %s: cancel drain timed out for kv_request_id=%s,"
+                " force-canceled %d transfers",
+                self.peer_id,
+                kv_request_id,
+                len(ids),
+            )
+            self._finalize_abort(kv_request_id)
+            return
+
+        still = self._transport.cancel(ids, mode="wait")
+        # Tids the transport successfully released are gone from its
+        # _inflight; mirror that in session bookkeeping so they don't
+        # block the drain forever waiting for a poll() event that will
+        # never come.
+        still_set = set(still)
+        for tid in ids:
+            if tid not in still_set:
+                self._inflight.pop(tid, None)
+        if not still:
+            self._finalize_abort(kv_request_id)
+
+    def _finalize_abort(self, kv_request_id: str) -> None:
+        self._pending_aborts.pop(kv_request_id, None)
         self._send(
             {
                 TYPE_KEY: AbortAckMsg.TYPE,

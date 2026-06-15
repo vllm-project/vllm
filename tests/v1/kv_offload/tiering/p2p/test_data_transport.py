@@ -191,14 +191,60 @@ class TestNixlTransportWithMockedAgent:
         tid = transport.write_blocks("peer:1", [0], [1])
         assert tid in transport._inflight
 
-        transport.cancel([tid])
+        result = transport.cancel([tid])
+        assert result == []
         assert tid not in transport._inflight
         transport._agent.release_xfer_handle.assert_called()
 
     def test_cancel_ignores_unknown_ids(self):
         """cancel with unknown IDs doesn't crash."""
         transport = self._make_transport()
-        transport.cancel([999, 1000])  # should not raise
+        assert transport.cancel([999, 1000]) == []
+        assert transport.cancel([999, 1000], mode="wait") == []
+
+    def test_cancel_wait_release_succeeds(self):
+        """wait-mode cancel that succeeds pops the entry and returns []."""
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+
+        tid = transport.write_blocks("peer:1", [0], [1])
+        assert tid in transport._inflight
+
+        result = transport.cancel([tid], mode="wait")
+        assert result == []
+        assert tid not in transport._inflight
+        transport._agent.release_xfer_handle.assert_called_once()
+
+    def test_cancel_wait_release_raises(self):
+        """wait-mode cancel keeps the entry and returns the tid on raise."""
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+
+        tid = transport.write_blocks("peer:1", [0], [1])
+        transport._agent.release_xfer_handle.side_effect = RuntimeError(
+            "NIXL_ERR_REPOST_ACTIVE"
+        )
+
+        result = transport.cancel([tid], mode="wait")
+        assert result == [tid]
+        assert tid in transport._inflight
+
+    def test_cancel_wait_then_poll_completes(self):
+        """A wait-cancel that left a tid pending later completes via poll."""
+        transport = self._make_transport()
+        transport.add_remote_peer("peer:1", b"meta", 0x1000, 8, 1024)
+
+        tid = transport.write_blocks("peer:1", [0], [1])
+        transport._agent.release_xfer_handle.side_effect = RuntimeError("busy")
+        assert transport.cancel([tid], mode="wait") == [tid]
+        assert tid in transport._inflight
+
+        transport._agent.release_xfer_handle.side_effect = None
+        transport._agent.check_xfer_state.return_value = "DONE"
+
+        result = transport.poll()
+        assert tid in result.done
+        assert tid not in transport._inflight
 
     def test_add_and_remove_remote_peer(self):
         transport = self._make_transport()

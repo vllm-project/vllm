@@ -31,6 +31,10 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     FetchMsg,
     TransferDoneMsg,
 )
+from vllm.v1.kv_offload.tiering.p2p.session.session import (
+    _CANCEL_DRAIN_TIMEOUT_S,
+    _InflightXfer,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -56,6 +60,8 @@ class FakeDataTransport:
         self._next_id = 0
         self._poll_done: list[int] = []
         self._poll_failed: list[int] = []
+        self._cancel_still_inflight: set[int] = set()
+        self._cancel_calls: list[tuple[list[int], str]] = []
 
     @property
     def base_addr(self) -> int:
@@ -105,9 +111,21 @@ class FakeDataTransport:
         self._poll_failed.clear()
         return result
 
-    def cancel(self, transfer_ids) -> None:
-        for tid in transfer_ids:
+    def cancel(self, transfer_ids, mode: str = "immediate") -> list[int]:
+        ids = list(transfer_ids)
+        self._cancel_calls.append((ids, mode))
+        if mode == "wait":
+            still: list[int] = []
+            for tid in ids:
+                if tid in self._cancel_still_inflight:
+                    still.append(tid)
+                else:
+                    self._transfers.pop(tid, None)
+            return still
+        for tid in ids:
             self._transfers.pop(tid, None)
+            self._cancel_still_inflight.discard(tid)
+        return []
 
     def close(self) -> None:
         pass
@@ -423,6 +441,142 @@ class TestServerFlows:
         session.poll()
         ack = next(m for m in conn._sent if m[TYPE_KEY] == AbortAckMsg.TYPE)
         assert ack[AbortAckMsg.KV_REQUEST_ID] == "req-1"
+        assert "req-1" not in session._pending_aborts
+
+    def test_abort_fetch_defers_ack_when_cancel_pending(self):
+        """If cancel(mode='wait') reports still-inflight tids, the ack is
+        deferred and the abort is parked in _pending_aborts."""
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        # Seed an inflight transfer for req-1 that the transport pretends
+        # cannot be canceled yet.
+        tid = 42
+        session._inflight[tid] = _InflightXfer(
+            kv_request_id="req-1", block_count=1, job_ids={1}
+        )
+        transport._cancel_still_inflight.add(tid)
+
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortFetchMsg.TYPE,
+                AbortFetchMsg.KV_REQUEST_ID: "req-1",
+            }
+        )
+        session.poll()
+
+        assert not any(m[TYPE_KEY] == AbortAckMsg.TYPE for m in conn._sent)
+        assert "req-1" in session._pending_aborts
+        # First attempt happens inside _on_abort_fetch; the per-tick
+        # drain runs again at the end of poll() — both are wait-mode.
+        assert all(mode == "wait" for _, mode in transport._cancel_calls)
+        assert tid in session._inflight  # still tracked
+
+    def test_abort_fetch_acks_after_drain(self):
+        """Once the transport reports the tid as DONE the parked abort
+        completes and AbortAckMsg is sent."""
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        tid = 42
+        session._inflight[tid] = _InflightXfer(
+            kv_request_id="req-1", block_count=1, job_ids={1}
+        )
+        transport._cancel_still_inflight.add(tid)
+
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortFetchMsg.TYPE,
+                AbortFetchMsg.KV_REQUEST_ID: "req-1",
+            }
+        )
+        session.poll()
+        assert "req-1" in session._pending_aborts
+
+        # Backend finishes draining: transport.poll() will return tid as
+        # DONE, and the next cancel(mode='wait') call sees it's gone.
+        transport._cancel_still_inflight.discard(tid)
+        transport._poll_done.append(tid)
+
+        session.poll()
+
+        ack = next(m for m in conn._sent if m[TYPE_KEY] == AbortAckMsg.TYPE)
+        assert ack[AbortAckMsg.KV_REQUEST_ID] == "req-1"
+        assert "req-1" not in session._pending_aborts
+        assert tid not in session._inflight
+
+    def test_abort_fetch_force_cancels_after_timeout(self):
+        """If wait-mode never drains, the deadline forces immediate
+        cancel and an ack is still sent."""
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        tid = 42
+        session._inflight[tid] = _InflightXfer(
+            kv_request_id="req-1", block_count=1, job_ids={1}
+        )
+        transport._cancel_still_inflight.add(tid)
+
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortFetchMsg.TYPE,
+                AbortFetchMsg.KV_REQUEST_ID: "req-1",
+            }
+        )
+        session.poll()
+        assert "req-1" in session._pending_aborts
+        # Backdate past the drain deadline.
+        session._pending_aborts["req-1"] = (
+            time.monotonic() - _CANCEL_DRAIN_TIMEOUT_S - 1.0
+        )
+        # Even if the transport still claims it can't cancel, the
+        # session must force-pop and ack.
+        transport._cancel_calls.clear()
+
+        session.poll()
+
+        ack = next(m for m in conn._sent if m[TYPE_KEY] == AbortAckMsg.TYPE)
+        assert ack[AbortAckMsg.KV_REQUEST_ID] == "req-1"
+        assert "req-1" not in session._pending_aborts
+        assert tid not in session._inflight
+        assert ([tid], "immediate") in transport._cancel_calls
+
+    def test_abort_fetch_idempotent_while_draining(self):
+        """Receiving AbortFetchMsg twice for the same kv_request_id
+        keeps a single pending entry and produces a single ack."""
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        tid = 42
+        session._inflight[tid] = _InflightXfer(
+            kv_request_id="req-1", block_count=1, job_ids={1}
+        )
+        transport._cancel_still_inflight.add(tid)
+
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortFetchMsg.TYPE,
+                AbortFetchMsg.KV_REQUEST_ID: "req-1",
+            }
+        )
+        session.poll()
+        first_started_at = session._pending_aborts["req-1"]
+
+        # Second AbortFetchMsg for the same kv_request_id while still
+        # draining must not reset the deadline.
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortFetchMsg.TYPE,
+                AbortFetchMsg.KV_REQUEST_ID: "req-1",
+            }
+        )
+        session.poll()
+        assert session._pending_aborts["req-1"] == first_started_at
+
+        # Now let the drain succeed and confirm exactly one ack ever.
+        transport._cancel_still_inflight.discard(tid)
+        transport._poll_done.append(tid)
+        session.poll()
+
+        acks = [m for m in conn._sent if m[TYPE_KEY] == AbortAckMsg.TYPE]
+        assert len(acks) == 1
+        assert acks[0][AbortAckMsg.KV_REQUEST_ID] == "req-1"
 
     def test_store_timeout(self):
         session, conn, _ = _make_session()

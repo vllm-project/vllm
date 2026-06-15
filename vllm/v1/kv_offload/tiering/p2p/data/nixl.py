@@ -13,7 +13,11 @@ from typing import Any
 from vllm.distributed.nixl_utils import NixlWrapper as _NixlAgent
 from vllm.distributed.nixl_utils import nixl_agent_config as _NixlAgentConfig
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.tiering.p2p.data.base import DataTransport, PollResult
+from vllm.v1.kv_offload.tiering.p2p.data.base import (
+    CancelMode,
+    DataTransport,
+    PollResult,
+)
 
 logger = init_logger(__name__)
 
@@ -197,12 +201,43 @@ class NixlTransport(DataTransport):
             failed=failed_ids if failed_ids is not None else _EMPTY_POLL_RESULT.failed,
         )
 
-    def cancel(self, transfer_ids: Iterable[int]) -> None:
-        """Cancel inflight transfers by their IDs."""
-        handles = [
-            self._inflight.pop(tid) for tid in transfer_ids if tid in self._inflight
-        ]
-        self._release_handles(handles)
+    def cancel(
+        self,
+        transfer_ids: Iterable[int],
+        mode: CancelMode = "immediate",
+    ) -> list[int]:
+        """Cancel inflight transfers by their IDs.
+
+        See ``DataTransport.cancel`` for the contract. In "wait" mode,
+        transfers whose ``release_xfer_handle`` raises (NIXL could not
+        complete the abort because the backend is still draining) stay
+        in ``self._inflight`` so a later ``poll()`` will observe them.
+        """
+        if mode == "immediate":
+            handles = [
+                self._inflight.pop(tid) for tid in transfer_ids if tid in self._inflight
+            ]
+            self._release_handles(handles)
+            return []
+
+        still_inflight: list[int] = []
+        for tid in transfer_ids:
+            handle = self._inflight.get(tid)
+            if handle is None:
+                continue
+            try:
+                self._agent.release_xfer_handle(handle)
+            except Exception as exc:
+                logger.debug(
+                    "NixlTransport %s: cancel pending for transfer_id=%d: %s",
+                    self._local_id,
+                    tid,
+                    exc,
+                )
+                still_inflight.append(tid)
+                continue
+            del self._inflight[tid]
+        return still_inflight
 
     # ------------------------------------------------------------------
     # Lifecycle

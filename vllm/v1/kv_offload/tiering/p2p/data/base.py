@@ -46,8 +46,10 @@ Transfer lifecycle
 3. Poll: poll() → PollResult(done=[...], failed=[...])
    - Returns transfer_ids that completed or failed since last poll
    - Completed transfers are automatically cleaned up
-4. Cancel: cancel(transfer_ids)
+4. Cancel: cancel(transfer_ids, mode="immediate" | "wait")
    - Best-effort cancellation of inflight transfers
+   - mode="wait" returns ids still in PROC/PEND so the caller can poll
+     them to completion
 
 Implementor contracts
 ---------------------
@@ -74,7 +76,9 @@ import hashlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import NamedTuple
+from typing import Literal, NamedTuple
+
+CancelMode = Literal["immediate", "wait"]
 
 
 class PollResult(NamedTuple):
@@ -215,11 +219,33 @@ class DataTransport(ABC):
         ...
 
     @abstractmethod
-    def cancel(self, transfer_ids: Iterable[int]) -> None:
+    def cancel(
+        self,
+        transfer_ids: Iterable[int],
+        mode: CancelMode = "immediate",
+    ) -> list[int]:
         """Cancel inflight transfers by their IDs.
 
         Best-effort: transfers that already completed are ignored.
-        Cancelled transfers are removed from the inflight set.
+
+        Args:
+            transfer_ids: IDs to cancel. Unknown IDs are ignored.
+            mode:
+                "immediate" (default): pop and release each handle and
+                    return []. Matches the legacy fire-and-forget
+                    behavior — the caller does not wait for the
+                    underlying transfer to drain.
+                "wait": attempt to release each handle. If the release
+                    cannot complete because the transfer is still
+                    PROC/PEND, the entry stays in the inflight set and
+                    its id is included in the returned list. The
+                    caller is expected to keep calling poll() until
+                    every returned id surfaces in done/failed.
+
+        Returns:
+            For mode="wait", the subset of *transfer_ids* still
+            tracked as inflight after the cancel attempt. For
+            mode="immediate", always [].
         """
         ...
 
