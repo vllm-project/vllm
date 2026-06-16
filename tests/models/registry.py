@@ -420,6 +420,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "MiniMaxAI/MiniMax-M2",
         trust_remote_code=True,
     ),
+    "MiniMaxM3SparseForCausalLM": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "Ministral3ForCausalLM": _HfExamplesInfo("mistralai/Ministral-3-3B-Instruct-2512"),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
@@ -1099,6 +1104,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "MiniMaxAI/MiniMax-VL-01",
         trust_remote_code=True,
     ),
+    "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
         extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"},
@@ -1599,6 +1609,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "XiaomiMiMo/MiMo-V2.5-Omni",
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-V2.5-Omni",
+        is_available_online=False,
+    ),
+    "MiniMaxM3MTP": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
         is_available_online=False,
     ),
     "NemotronHMTPModel": _HfExamplesInfo(

@@ -290,6 +290,33 @@ class TestMockObjTierBasic:
         assert len(results) == 1
         assert results[0].success
 
+    def test_drain_jobs_polls_until_transfers_complete(self):
+        """drain_jobs must keep polling check_xfer_state until every
+        in-flight transfer finishes. A buggy implementation that only
+        polled once would return with _transfers still populated.
+        """
+        call_count = [0]
+        original = self.agent.check_xfer_state
+
+        def delayed(h):
+            call_count[0] += 1
+            # Stay in PROC for the first 2 polls, then DONE.
+            return "PROC" if call_count[0] < 3 else original(h)
+
+        self.agent.check_xfer_state = delayed
+
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        assert self.tier._transfers  # in flight
+
+        self.tier.drain_jobs()
+
+        assert not self.tier._transfers  # fully drained
+        assert call_count[0] >= 3  # polled past the initial PROC responses
+        # Result is buffered for the next get_finished_jobs() call.
+        results = list(self.tier.get_finished_jobs())
+        assert len(results) == 1
+        assert results[0].success
+
 
 class TestMockObjTierMultiBlock:
     def test_store_multiple_blocks(self):
