@@ -13,7 +13,7 @@
 #SBATCH --mail-user=jason.miller@eng.ox.ac.uk
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --account=engs-glass
-#SBATCH --qos=engs-glass
+#SBATCH --qos=priority
 
 set -euo pipefail
 
