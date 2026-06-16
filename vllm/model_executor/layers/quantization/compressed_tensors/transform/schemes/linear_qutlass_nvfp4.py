@@ -26,11 +26,20 @@ __all__ = ["is_qutlass_fp4_scheme", "QutlassNvFP4LinearMethod"]
 NVFP4_MAX = 6.0
 
 
+# QUTLASS supports block sizes (16, 32, 64, 128) for NVFP4
+# https://github.com/IST-DASLab/qutlass/blob/v0.2.0/qutlass/csrc/bindings.cpp#L413-L414
 def is_qutlass_fp4_scheme(
     quant_scheme: CompressedTensorsScheme | None,
     input_tfms: dict[int, TransformTuple],
 ) -> bool:
-    return isinstance(quant_scheme, CompressedTensorsW4A4Fp4) and len(input_tfms) >= 1
+    return (
+        isinstance(quant_scheme, CompressedTensorsW4A4Fp4)
+        and len(input_tfms) >= 1
+        and all(
+            input_tfm.scheme.head_dim in (16, 32, 64, 128)
+            for input_tfm in input_tfms.values()
+        )
+    )
 
 
 class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
