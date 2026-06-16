@@ -3,10 +3,10 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Generic, overload, Callable
+from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
 
@@ -154,7 +154,6 @@ class BaseRenderer(ABC, Generic[_T]):
             self._async_tokenizer_encode = make_async(
                 self.get_tokenizer().encode, executor=self._executor
             )
-
 
     def get_mm_processor(self) -> "BaseMultiModalProcessor":
         if self.mm_processor is None:
