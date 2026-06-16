@@ -89,6 +89,10 @@ class BaseRenderer(ABC, Generic[_T]):
         # to keep the asyncio event loop responsive under concurrent load.
         self._mm_executor: Executor = self._executor
 
+        self._async_tokenizer = make_async(
+            self.get_tokenizer(), executor=self._executor
+        )
+
         self.mm_processor: BaseMultiModalProcessor | None = None
         self._readonly_mm_processor: BaseMultiModalProcessor | None = None
         self._mm_cache_stats: MultiModalCacheStats | None = None
@@ -422,8 +426,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: TextPrompt,
         params: TokenizeParams,
     ) -> TokensPrompt:
-        tokenizer = self.get_tokenizer()
-        prompt_token_ids = tokenizer.encode(
+        prompt_token_ids = await self._async_tokenizer.encode(
             prompt["prompt"],
             **params.get_encode_kwargs(),
         )
@@ -437,8 +440,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return prompt
 
     async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
-        tokenizer = self.get_tokenizer()
-        prompt["prompt"] = tokenizer.decode(prompt["prompt_token_ids"])
+        prompt["prompt"] = await self._async_tokenizer.decode(prompt["prompt_token_ids"])
 
         return prompt
 
