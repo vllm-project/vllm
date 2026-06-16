@@ -5,7 +5,6 @@
 import io
 import json
 import math
-import os
 
 import numpy as np
 import pytest
@@ -23,8 +22,6 @@ MISTRAL_FORMAT_ARGS = [
     "--load_format",
     "mistral",
 ]
-PARAKEET_HF_MODEL_NAME = "nvidia/parakeet-tdt-0.6b-v3"
-PARAKEET_MODEL_NAME = os.environ.get("PARAKEET_TEST_MODEL", PARAKEET_HF_MODEL_NAME)
 
 
 def make_long_audio(file, *, repeats: int) -> tuple[io.BytesIO, int]:
@@ -180,8 +177,9 @@ async def test_basic_audio_foscolo(foscolo, rocm_aiter_fa_attention, model_name)
         )
 
 
-@pytest.fixture(scope="module")
-def parakeet_server(rocm_aiter_fa_attention):
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", ["nvidia/parakeet-tdt-0.6b-v3"])
+async def test_basic_audio_parakeet(mary_had_lamb, model_name, rocm_aiter_fa_attention):
     server_args = [
         "--max-model-len",
         "512",
@@ -193,20 +191,15 @@ def parakeet_server(rocm_aiter_fa_attention):
     add_attention_backend(server_args, rocm_aiter_fa_attention)
 
     with RemoteOpenAIServer(
-        PARAKEET_MODEL_NAME,
+        model_name,
         server_args,
         max_wait_seconds=480,
         env_dict=ROCM_ENV_OVERRIDES,
     ) as remote_server:
-        yield remote_server
-
-
-@pytest.mark.asyncio
-async def test_basic_audio_parakeet(mary_had_lamb, parakeet_server):
-    async with parakeet_server.get_async_client() as client:
+        client = remote_server.get_async_client()
         await transcribe_and_check(
             client,
-            PARAKEET_MODEL_NAME,
+            model_name,
             mary_had_lamb,
             language="en",
             expected_text="Mary had a little lamb",
@@ -215,11 +208,30 @@ async def test_basic_audio_parakeet(mary_had_lamb, parakeet_server):
 
 
 @pytest.mark.asyncio
-async def test_streaming_audio_parakeet_strips_eos(mary_had_lamb, parakeet_server):
-    transcription = ""
-    async with parakeet_server.get_async_client() as client:
+@pytest.mark.parametrize("model_name", ["nvidia/parakeet-tdt-0.6b-v3"])
+async def test_streaming_audio_parakeet_strips_eos(
+    mary_had_lamb, model_name, rocm_aiter_fa_attention
+):
+    server_args = [
+        "--max-model-len",
+        "512",
+        "--max-num-batched-tokens",
+        "512",
+        "--max-num-seqs",
+        "1",
+    ]
+    add_attention_backend(server_args, rocm_aiter_fa_attention)
+
+    with RemoteOpenAIServer(
+        model_name,
+        server_args,
+        max_wait_seconds=480,
+        env_dict=ROCM_ENV_OVERRIDES,
+    ) as remote_server:
+        client = remote_server.get_async_client()
+        transcription = ""
         res = await client.audio.transcriptions.create(
-            model=PARAKEET_MODEL_NAME,
+            model=model_name,
             file=mary_had_lamb,
             language="en",
             temperature=0.0,
@@ -234,12 +246,28 @@ async def test_streaming_audio_parakeet_strips_eos(mary_had_lamb, parakeet_serve
 
 
 @pytest.mark.asyncio
-async def test_long_audio_parakeet(mary_had_lamb, parakeet_server):
-    long_audio, expected_seconds = make_long_audio(mary_had_lamb, repeats=3)
+@pytest.mark.parametrize("model_name", ["nvidia/parakeet-tdt-0.6b-v3"])
+async def test_long_audio_parakeet(mary_had_lamb, model_name, rocm_aiter_fa_attention):
+    server_args = [
+        "--max-model-len",
+        "512",
+        "--max-num-batched-tokens",
+        "512",
+        "--max-num-seqs",
+        "1",
+    ]
+    add_attention_backend(server_args, rocm_aiter_fa_attention)
 
-    async with parakeet_server.get_async_client() as client:
+    with RemoteOpenAIServer(
+        model_name,
+        server_args,
+        max_wait_seconds=480,
+        env_dict=ROCM_ENV_OVERRIDES,
+    ) as remote_server:
+        client = remote_server.get_async_client()
+        long_audio, expected_seconds = make_long_audio(mary_had_lamb, repeats=3)
         transcription = await client.audio.transcriptions.create(
-            model=PARAKEET_MODEL_NAME,
+            model=model_name,
             file=long_audio,
             language="en",
             response_format="text",
