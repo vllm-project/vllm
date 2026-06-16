@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
+    PoolKey,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
@@ -251,6 +252,31 @@ def _patch_worker_runtime(
     monkeypatch.setattr(worker, "get_pcp_group", lambda: single_rank_group)
     monkeypatch.setattr(worker, "get_dcp_group", lambda: dcp_group)
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
+
+
+def test_pool_key_to_string_without_prefix_is_unchanged():
+    """Default (empty) cache_prefix keeps keys byte-identical to the
+    historical unprefixed format so existing deployments keep their hits."""
+    key = PoolKey(KeyMetadata("test-model", 0, 0, 0, 0), "deadbeef")
+    assert (
+        key.to_string() == "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
+    )
+
+
+def test_pool_key_cache_prefix_namespaces_and_disambiguates():
+    """A non-empty cache_prefix is prepended, and two instances with
+    different prefixes never collide on identical block hashes."""
+    md_a = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="depA")
+    md_b = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="depB")
+
+    key_a = PoolKey(md_a, "deadbeef")
+    key_b = PoolKey(md_b, "deadbeef")
+
+    assert key_a.to_string() == (
+        "depA@test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
+    )
+    assert key_a.to_string() != key_b.to_string()
+    assert hash(key_a) != hash(key_b)
 
 
 def test_default_local_buffer_size_matches_pr40900():

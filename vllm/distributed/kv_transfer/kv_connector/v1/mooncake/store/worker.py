@@ -988,6 +988,11 @@ class MooncakeStoreWorker:
             pcp_rank=self.pcp_rank,
             dcp_rank=self.dcp_rank,
             pp_rank=self.pp_rank,
+            cache_prefix=str(
+                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                    "cache_prefix", ""
+                )
+            ),
         )
 
         # Initialize MooncakeDistributedStore with its own TransferEngine
