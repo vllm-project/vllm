@@ -525,7 +525,7 @@ class CPUOffloadingWorker(OffloadingWorker):
                     dtype=torch.int8,
                     device="cpu",
                 )
-                logger.info(
+                logger.debug(
                     "torch.zeros tensor %d×%d (%.2f GB): %.3f s",
                     num_cpu_blocks,
                     cpu_page_size_bytes,
