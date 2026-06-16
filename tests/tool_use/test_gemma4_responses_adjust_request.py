@@ -20,6 +20,13 @@ calling for parsers relying on special-token delimiters (Gemma4):
    tracked in ``__fields_set__``, which can drop the nested config from
    ``model_dump``. It also passed a ``description`` kwarg carrying the
    wrong-purpose string ``"Response format for tool calling"``.
+
+3. :class:`Gemma4EngineToolParser` (the engine-based parser, #45588) sets
+   ``supports_required_and_named=False`` but did not skip the forced
+   ``structured_outputs`` JSON for ``required``/named tool choice. The model
+   was constrained to JSON the native parser cannot read, so the call leaked
+   as content with empty ``tool_calls``. ``adjust_request`` now skips that
+   constraint so Gemma4 emits its native ``<|tool_call>`` syntax.
 """
 
 from __future__ import annotations
@@ -28,6 +35,7 @@ from typing import Any
 
 from openai.types.responses.tool_param import FunctionToolParam
 
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.gemma4_engine_tool_parser import (
@@ -49,7 +57,7 @@ def _get_weather_tool() -> FunctionToolParam:
     )
 
 
-def _build_responses_request(*, tool_choice: str) -> ResponsesRequest:
+def _build_responses_request(*, tool_choice: str | dict[str, Any]) -> ResponsesRequest:
     return ResponsesRequest(
         model="gemma4-test",
         input=[{"role": "user", "content": "What is the weather in Hanoi?"}],
@@ -57,6 +65,30 @@ def _build_responses_request(*, tool_choice: str) -> ResponsesRequest:
         tool_choice=tool_choice,
         stream=True,
         max_output_tokens=200,
+    )
+
+
+def _build_chat_request(*, tool_choice: str | dict[str, Any]) -> ChatCompletionRequest:
+    return ChatCompletionRequest.model_validate(
+        {
+            "model": "gemma4-test",
+            "messages": [{"role": "user", "content": "What is the weather in Hanoi?"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get current weather for a city",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                        },
+                    },
+                }
+            ],
+            "tool_choice": tool_choice,
+        }
     )
 
 
@@ -121,3 +153,62 @@ def test_tool_parser_adjust_request_builds_valid_response_text_config() -> None:
     # The old code passed a wrong-purpose string; valid field should now
     # either be absent or None (the openai-python default).
     assert fmt.get("description") in (None, "")
+
+
+def test_gemma4_required_skips_structured_outputs_chatcompletion() -> None:
+    """required + ChatCompletion: ``Gemma4EngineToolParser`` must skip the
+    forced JSON ``structured_outputs`` so the model emits its native
+    ``<|tool_call>`` syntax. The base parser constrained output to JSON the
+    native parser cannot read, leaking it as content with empty
+    ``tool_calls`` (regression after #45588).
+    """
+    parser = Gemma4ToolParser(_StubTokenizer())
+    request = _build_chat_request(tool_choice="required")
+
+    parser.adjust_request(request)
+
+    assert request.structured_outputs is None
+    assert request.skip_special_tokens is False
+
+
+def test_gemma4_named_skips_structured_outputs_chatcompletion() -> None:
+    """named + ChatCompletion: the forced single-function JSON schema must be
+    skipped, same as ``required``.
+    """
+    parser = Gemma4ToolParser(_StubTokenizer())
+    request = _build_chat_request(
+        tool_choice={"type": "function", "function": {"name": "get_weather"}}
+    )
+
+    parser.adjust_request(request)
+
+    assert request.structured_outputs is None
+    assert request.skip_special_tokens is False
+
+
+def test_gemma4_required_skips_structured_outputs_responses() -> None:
+    """required + Responses: the forced JSON schema (``request.text``) must be
+    skipped so the native delimiters reach the extractor.
+    """
+    parser = Gemma4ToolParser(_StubTokenizer())
+    request = _build_responses_request(tool_choice="required")
+
+    parser.adjust_request(request)
+
+    assert request.text is None
+    assert request.skip_special_tokens is False
+
+
+def test_gemma4_named_skips_structured_outputs_responses() -> None:
+    """named (``ToolChoiceFunction``) + Responses: the forced single-function
+    JSON schema must be skipped.
+    """
+    parser = Gemma4ToolParser(_StubTokenizer())
+    request = _build_responses_request(
+        tool_choice={"type": "function", "name": "get_weather"}
+    )
+
+    parser.adjust_request(request)
+
+    assert request.text is None
+    assert request.skip_special_tokens is False
