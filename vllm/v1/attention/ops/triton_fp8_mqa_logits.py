@@ -5,8 +5,11 @@
 This module ships a vLLM-local copy of AITER's ``fp8_mqa_logits`` Triton
 kernel together with the launch-time tile-size selection from AITER PR
 ROCm/aiter#3257. It exists solely as a temporary workaround so that
-PR vllm-project/vllm#42893 (DeepSeek V4 functional fixes on MI300X) can
+PR vllm-project/vllm#45681 (DeepSeek V4 functional fixes on MI300X) can
 land *without* requiring an AITER version bump on the consumer side.
+
+TODO: Remove this vendored copy once vLLM pins an AITER version that includes
+ROCm/aiter#3257.
 
 Background
 ----------
