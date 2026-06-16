@@ -77,6 +77,8 @@ def test_benchmark_run_id_and_summary_use_target_repo_sha():
 
     assert "RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.TARGET_REPO_SHA }}" in text
     assert "target_repo_sha = os.environ.get('TARGET_REPO_SHA') or os.environ['GITHUB_SHA']" in text
+    assert "const targetRepoSha = process.env.TARGET_REPO_SHA || process.env.GITHUB_SHA;" in text
+    assert "ci-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-${targetRepoSha}" in text
     assert "f'- Commit: `{target_repo_sha}`'" in text
 
 

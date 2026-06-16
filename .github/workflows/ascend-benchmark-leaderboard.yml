@@ -1137,7 +1137,8 @@ jobs:
             const fs = require('fs');
             const path = require('path');
 
-            const runId = `ci-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-${process.env.GITHUB_SHA}`;
+            const targetRepoSha = process.env.TARGET_REPO_SHA || process.env.GITHUB_SHA;
+            const runId = `ci-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-${targetRepoSha}`;
             const commentPath = path.join(process.env.GITHUB_WORKSPACE, '.benchmarks', 'ci', runId, 'benchmark_comment.md');
             const marker = '<!-- ascend-benchmark-leaderboard-comment -->';
 
