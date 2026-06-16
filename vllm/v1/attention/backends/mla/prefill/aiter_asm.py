@@ -144,6 +144,49 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
             vllm_config.scheduler_config.max_num_batched_tokens
         )
 
+        # Need to reserve worst case workspace that accounts for chunked context since
+        # the warmup only accounts for new tokens.
+        self._reserve_workspace(max_num_seqs=vllm_config.scheduler_config.max_num_seqs)
+
+    def _reserve_workspace(self, max_num_seqs: int) -> None:
+        """Grow the shared scratch workspace to the prefill worst case."""
+        from vllm.utils.math_utils import cdiv
+        from vllm.v1.worker.workspace import (
+            current_workspace_manager,
+            is_workspace_manager_initialized,
+        )
+
+        if (
+            not is_workspace_manager_initialized()
+            or not torch.accelerator.is_available()
+        ):
+            return
+
+        # Realistic estimate of max number of partial tiles.
+        # The reduce_partial_map_size from get_ps_metadata_info_v1 is a much looser
+        # upper bound that reach TB scale at large context sizes, so it's unusable.
+        # The PS scheduler can emit one partial tile per QO tile OR per CU. Where
+        #  1. the QO tiles can be spread either over the max num batched tokens, or
+        #     over all requests (max num seqs)
+        #  2. the CU count is a property of gfx950.
+        qo_tile_cnt = (
+            cdiv(self._max_num_batched_tokens, _FP8_PREFILL_TILE_Q) + max_num_seqs - 1
+        )
+        cu_num = torch.cuda.get_device_properties(
+            torch.accelerator.current_device()
+        ).multi_processor_count
+        assert cu_num == 256
+        max_num_partial_tiles = qo_tile_cnt + cu_num
+
+        max_partial_q = max_num_partial_tiles * _FP8_PREFILL_TILE_Q
+        max_total_q = self._max_num_batched_tokens
+        # logits, attn_lse, final_lse
+        current_workspace_manager().get_simultaneous(
+            ((max_partial_q, self.num_heads, self.v_head_dim), torch.float32),
+            ((max_partial_q, self.num_heads), torch.float32),
+            ((max_total_q, self.num_heads), torch.float32),
+        )
+
     def _get_kv_indices_buf(self, device: torch.device, length: int) -> torch.Tensor:
         """Return a [0, 1, ..., length-1] int32 view into a shared arange buffer.
 
@@ -332,31 +375,24 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         can feed it directly to `merge_attn_states` or copy it into the
         final `output` buffer.
         """
+        from vllm.v1.worker.workspace import current_workspace_manager
+
         # mla_prefill_ps_asm_fwd requires contiguous V in (seq, head, v_head_dim).
         # cp_gather_cache produces V as a slice of the wider nope+rope buffer
         # so we need to copy.
         v = v.contiguous()
 
-        # Partial output buffers for the PS kernel.
         num_partial_tiles = ps["num_partial_tiles"]
-        logits = torch.empty(
-            (num_partial_tiles * _FP8_PREFILL_TILE_Q, self.num_heads, self.v_head_dim),
-            dtype=torch.float32,
-            device=q.device,
-        )
-        attn_lse = torch.empty(
-            (num_partial_tiles * _FP8_PREFILL_TILE_Q, self.num_heads),
-            dtype=torch.float32,
-            device=q.device,
-        )
-        # Output buffers
         total_q = q.shape[0]
         out_dtype = self._prefill_metadata.output_dtype
         assert out_dtype is not None
-        final_lse = torch.empty(
-            (total_q, self.num_heads),
-            dtype=torch.float32,
-            device=q.device,
+
+        # Partial/scratch buffers for the PS kernels.
+        partial_q = num_partial_tiles * _FP8_PREFILL_TILE_Q
+        logits, attn_lse, final_lse = current_workspace_manager().get_simultaneous(
+            ((partial_q, self.num_heads, self.v_head_dim), torch.float32),
+            ((partial_q, self.num_heads), torch.float32),
+            ((total_q, self.num_heads), torch.float32),
         )
         out = torch.empty(
             (total_q, self.num_heads, self.v_head_dim),
