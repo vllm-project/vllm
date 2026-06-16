@@ -89,8 +89,9 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         )
         if selector_config.cache_dtype not in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             invalid_reasons.append(
-                f"cache_dtype {selector_config.cache_dtype!r} is not FP8 "
-                "(requires fp8/fp8_e4m3/fp8_e5m2)"
+                f"cache_dtype {selector_config.cache_dtype!r} is unsupported "
+                "(AITER_ASM requires plain per-tensor FP8: fp8, fp8_e4m3, or "
+                "fp8_e5m2; per-token-head and nvfp4 variants are not supported)"
             )
         if selector_config.dcp_world_size > 1:
             # Decode context parallel does not support scaled/fp8 KV
