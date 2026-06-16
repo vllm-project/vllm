@@ -355,6 +355,14 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     reasoning_ended = None
 
+                reasoning_markers = None
+                rp = parser.reasoning_parser if parser is not None else None
+                if rp is not None:
+                    start = rp.reasoning_start_str
+                    end = rp.reasoning_end_str
+                    if start and end:
+                        reasoning_markers = (start, end)
+
                 generator = self.engine_client.generate(
                     engine_input,
                     sampling_params,
@@ -369,6 +377,7 @@ class OpenAIServingChat(OpenAIServing):
                     }
                     if parser is not None and parser.reasoning_parser is not None
                     else None,
+                    reasoning_markers=reasoning_markers,
                 )
 
             generators.append(generator)
