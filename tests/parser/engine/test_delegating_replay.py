@@ -75,11 +75,13 @@ def _discover_pairings() -> list[_PairingInfo]:
             ] = obj
 
     found: list[_PairingInfo] = []
+    missing_builders: list[str] = []
     for engine_cls, adapters in engines.items():
         if "tool" not in adapters or "reasoning" not in adapters:
             continue
         cfg = engine_cls(bare_tok, None).parser_engine_config
         if cfg.name not in _BUILDERS:
+            missing_builders.append(f"{engine_cls.__name__} (config.name={cfg.name!r})")
             continue
 
         parser_cls = type(
@@ -96,6 +98,12 @@ def _discover_pairings() -> list[_PairingInfo]:
                 name=cfg.name,
                 samples=build_samples(cfg.name),
             )
+        )
+    if missing_builders:
+        raise RuntimeError(
+            f"Engine adapters in registered_adapters have no test builder "
+            f"in trace_builder._BUILDERS: {', '.join(missing_builders)}. "
+            f"Add a builder to _BUILDERS for each new parser."
         )
     found.sort(key=lambda p: p.name)
     return found

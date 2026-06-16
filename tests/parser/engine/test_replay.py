@@ -48,9 +48,11 @@ def _discover_parsers() -> list[_ParserInfo]:
     """Discover engine parsers from registered_adapters that have test builders.
 
     Returns one ``_ParserInfo`` per parser, sorted by config name.
+    Raises ``RuntimeError`` if any registered parser lacks a builder.
     """
     bare_tok = MockTokenizer(vocab={}, tokens=[])
     found: list[_ParserInfo] = []
+    missing_builders: list[str] = []
     for obj in vars(_adapters_mod).values():
         if not (
             isinstance(obj, type)
@@ -60,7 +62,13 @@ def _discover_parsers() -> list[_ParserInfo]:
             continue
         cfg = obj(bare_tok, None).parser_engine_config
         if cfg.name not in _BUILDERS:
+            missing_builders.append(f"{obj.__name__} (config.name={cfg.name!r})")
             continue
+        tool_end = cfg.token_id_terminals.get("TOOL_END")
+        if not tool_end:
+            raise RuntimeError(
+                f"{obj.__name__} config missing 'TOOL_END' in token_id_terminals"
+            )
         all_vals = set(cfg.terminals.values()) | set(cfg.token_id_terminals.values())
         found.append(
             _ParserInfo(
@@ -68,10 +76,16 @@ def _discover_parsers() -> list[_ParserInfo]:
                 name=cfg.name,
                 samples=build_samples(cfg.name),
                 terminals=sorted(v for v in all_vals if len(v) > 1),
-                tool_end=cfg.token_id_terminals["TOOL_END"],
+                tool_end=tool_end,
                 think_end=cfg.terminals.get("THINK_END", ""),
                 tool_start=cfg.terminals.get("TOOL_START", ""),
             )
+        )
+    if missing_builders:
+        raise RuntimeError(
+            f"Engine parsers in registered_adapters have no test builder "
+            f"in trace_builder._BUILDERS: {', '.join(missing_builders)}. "
+            f"Add a builder to _BUILDERS for each new parser."
         )
     found.sort(key=lambda p: p.name)
     return found
@@ -122,13 +136,11 @@ class TestReplayWithHoldback:
 
 TEXT_HOLDBACK_DELAYS = [1, 2, 3]
 
-_TEXT_HOLDBACK_SAMPLES = _REPLAY_SAMPLES
-
 
 @pytest.mark.parametrize("delay", TEXT_HOLDBACK_DELAYS, ids=lambda d: f"delay{d}")
 @pytest.mark.parametrize(
     "parser_cls,sample,terminals",
-    _TEXT_HOLDBACK_SAMPLES,
+    _REPLAY_SAMPLES,
     ids=lambda v: v.id if hasattr(v, "id") else "",
 )
 class TestTextHoldback:
