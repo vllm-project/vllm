@@ -29,10 +29,12 @@ pub struct SamplingLimits {
     ///
     /// `-1` means allowing requests up to the model vocabulary size.
     pub max_logprobs: i32,
-    /// Model vocabulary size from the model config.
-    pub model_vocab_size: Option<usize>,
-    /// Tokenizer vocabulary size, used as a fallback when the model config does
-    /// not expose a vocabulary size.
+
+    /// Model vocabulary size from the model config, used to bound generated
+    /// token IDs and logits-domain sampling controls.
+    pub model_vocab_size: usize,
+    /// Tokenizer vocabulary size, used to bound `allowed_token_ids` and
+    /// token-ID prompts.
     pub tokenizer_vocab_size: usize,
 }
 
@@ -44,9 +46,9 @@ impl SamplingLimits {
     /// <https://github.com/vllm-project/vllm/blob/b5adb027ad03c29b46181752ba3b1cb84eff1dd4/vllm/sampling_params.py#L30-L32>
     pub const MAX_LOGPROB_TOKEN_IDS: usize = 128;
 
-    /// Return the vocabulary size used to expand `logprobs=-1`.
-    pub fn logprobs_vocab_size(&self) -> usize {
-        self.model_vocab_size.unwrap_or(self.tokenizer_vocab_size)
+    /// Return the union bound used to validate token-ID prompts.
+    pub fn prompt_token_vocab_size(&self) -> usize {
+        self.tokenizer_vocab_size.max(self.model_vocab_size)
     }
 }
 
@@ -69,10 +71,12 @@ pub trait TextBackend: Send + Sync {
         Ok(SamplingHints::default())
     }
 
-    /// Return the model vocabulary size from the model config, if known. Used to
-    /// range-check request token ids against the engine embedding table.
-    fn model_vocab_size(&self) -> Option<usize> {
-        None
+    /// Return the model vocabulary size from the model config.
+    ///
+    /// The permissive default exists for lightweight test backends. Production
+    /// backends should override it with the resolved model config value.
+    fn model_vocab_size(&self) -> usize {
+        usize::MAX
     }
 
     /// Return the full tokenizer vocabulary size (Python `len(tokenizer)`).

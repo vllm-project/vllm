@@ -7,7 +7,7 @@
 use std::mem::take;
 
 pub use backend::{DynTextBackend, SamplingHints, SamplingLimits, TextBackend};
-pub use error::{Error, LogprobsError, Result};
+pub use error::{Error, LogprobsError, OutOfVocabError, Result};
 use futures::Stream;
 pub use lower::{
     PreparedTextRequest, lower_sampling_params, lower_text_request, resolve_max_tokens,
@@ -97,9 +97,9 @@ impl TextLlm {
         self.backend.tokenizer_vocab_size()
     }
 
-    /// Model vocabulary size from the model config, used to bound `logit_bias`
-    /// keys and token-id prompts against the engine embedding table.
-    pub fn model_vocab_size(&self) -> Option<usize> {
+    /// Model vocabulary size from the model config, used to bound generated
+    /// token IDs and logits-domain sampling controls.
+    pub fn model_vocab_size(&self) -> usize {
         self.backend.model_vocab_size()
     }
 
