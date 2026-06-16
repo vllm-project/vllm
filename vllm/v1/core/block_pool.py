@@ -261,17 +261,7 @@ class BlockPool:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert block_mask is None or len(block_mask) == len(new_full_blocks)
-        if block_size == self.hash_block_size:
-            # Common case.
-            block_hashes: BlockHashList = request.block_hashes
-        else:
-            # block_size is a multiple of hash_block_size. This happens when
-            # different KV cache groups have different block sizes.
-            assert block_size % self.hash_block_size == 0
-            block_hashes = BlockHashListWithBlockSize(
-                request.block_hashes, self.hash_block_size, block_size
-            )
-        assert len(block_hashes) >= num_full_blocks
+        block_hashes = self._resolve_block_hashes(request, block_size)
 
         new_block_hashes = block_hashes[num_cached_blocks:]
         new_hashes: list[ExternalBlockHash] | None = (
@@ -338,22 +328,66 @@ class BlockPool:
                 extra_keys_list.append(extra_keys)
 
             self.kv_event_queue.append(
-                BlockStored(
+                self._build_block_stored_event(
+                    request,
                     block_hashes=new_hashes,
                     parent_block_hash=parent_block_hash,
-                    token_ids=request.all_token_ids[start_token_idx:end_token_idx],
+                    start_token_idx=start_token_idx,
+                    end_token_idx=end_token_idx,
                     block_size=block_size,
-                    lora_id=request.lora_request.adapter_id
-                    if request.lora_request
-                    else None,
-                    medium=MEDIUM_GPU,
-                    lora_name=request.lora_request.name
-                    if request.lora_request
-                    else None,
-                    extra_keys=extra_keys_list if extra_keys_list else None,
-                    group_idx=kv_cache_group_id,
+                    kv_cache_group_id=kv_cache_group_id,
+                    extra_keys_list=extra_keys_list,
                 )
             )
+
+    def _resolve_block_hashes(
+        self,
+        request: Request,
+        block_size: int,
+    ) -> BlockHashList:
+        """Resolve the block-hash view for ``request`` at ``block_size``.
+
+        When ``block_size`` equals ``hash_block_size``, reuse the request's
+        precomputed ``block_hashes`` directly; otherwise recalculate at
+        ``block_size`` granularity (``block_size`` must be a multiple of
+        ``hash_block_size``, which happens when KV cache groups differ in
+        block size).
+        """
+        if block_size == self.hash_block_size:
+            return request.block_hashes
+        assert block_size % self.hash_block_size == 0
+        return BlockHashListWithBlockSize(
+            request.block_hashes, self.hash_block_size, block_size
+        )
+
+    def _build_block_stored_event(
+        self,
+        request: Request,
+        block_hashes: list[ExternalBlockHash] | None,
+        parent_block_hash: ExternalBlockHash | None,
+        start_token_idx: int,
+        end_token_idx: int,
+        block_size: int,
+        kv_cache_group_id: int,
+        extra_keys_list: list[tuple[Any, ...] | None],
+    ) -> BlockStored:
+        """Build a ``BlockStored`` KV event for ``request``.
+
+        Shared by ``cache_full_blocks`` (newly cached blocks) and
+        ``emit_cached_block_events`` (prefix-cache-reused blocks) so both emit
+        identical event shapes for downstream consumers.
+        """
+        return BlockStored(
+            block_hashes=block_hashes,
+            parent_block_hash=parent_block_hash,
+            token_ids=request.all_token_ids[start_token_idx:end_token_idx],
+            block_size=block_size,
+            lora_id=request.lora_request.adapter_id if request.lora_request else None,
+            medium=MEDIUM_GPU,
+            lora_name=request.lora_request.name if request.lora_request else None,
+            extra_keys=extra_keys_list if extra_keys_list else None,
+            group_idx=kv_cache_group_id,
+        )
 
     def emit_cached_block_events(
         self,
@@ -377,19 +411,12 @@ class BlockPool:
         if not self.enable_kv_cache_events or num_cached_blocks == 0:
             return
 
-        # Resolve block hashes (same logic as cache_full_blocks)
-        if block_size == self.hash_block_size:
-            block_hashes: BlockHashList = request.block_hashes
-        else:
-            block_hashes = BlockHashListWithBlockSize(
-                request.block_hashes, self.hash_block_size, block_size
-            )
+        block_hashes = self._resolve_block_hashes(request, block_size)
 
-        # Collect external hashes and extra_keys for cached blocks
+        # Collect external hashes and extra_keys for cached blocks.
         cached_hashes: list[ExternalBlockHash] = []
         extra_keys_list: list[tuple[Any, ...] | None] = []
         curr_mm_idx = 0
-
         for i in range(num_cached_blocks):
             block_start = i * block_size
             block_end = block_start + block_size
@@ -402,9 +429,9 @@ class BlockPool:
         if not cached_hashes:
             return
 
-        # Reused blocks start from block 0, so parent is None
+        # Prefix-cache hits always form a contiguous prefix starting at block 0,
+        # so the first (and thus the whole group's) parent block hash is None.
         parent_block_hash: ExternalBlockHash | None = None
-
         start_token_idx = 0
         end_token_idx = num_cached_blocks * block_size
 
@@ -420,18 +447,15 @@ class BlockPool:
         )
 
         self.kv_event_queue.append(
-            BlockStored(
+            self._build_block_stored_event(
+                request,
                 block_hashes=cached_hashes,
                 parent_block_hash=parent_block_hash,
-                token_ids=list(request.all_token_ids[start_token_idx:end_token_idx]),
+                start_token_idx=start_token_idx,
+                end_token_idx=end_token_idx,
                 block_size=block_size,
-                lora_id=request.lora_request.adapter_id
-                if request.lora_request
-                else None,
-                medium=MEDIUM_GPU,
-                lora_name=request.lora_request.name if request.lora_request else None,
-                extra_keys=extra_keys_list if extra_keys_list else None,
-                group_idx=kv_cache_group_id,
+                kv_cache_group_id=kv_cache_group_id,
+                extra_keys_list=extra_keys_list,
             )
         )
 
