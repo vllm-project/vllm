@@ -158,6 +158,10 @@ class AsyncLookupManager(ABC):
         ):
             # Cannot determine lookup within the timeout. It is better to let
             # the request continue processing on the GPU.
+            logger.warning(
+                "Cannot determine lookup reliably within %.2f timeout seconds",
+                self._lookup_timeout_s,
+            )
             return False
 
         return state.result
