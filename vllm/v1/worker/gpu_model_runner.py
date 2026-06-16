@@ -2045,6 +2045,17 @@ class GPUModelRunner(
             token_indices_tensor,
             out=self.input_ids.cpu[:total_num_scheduled_tokens],
         )
+        if self.pcp_world_size > 1:
+            # PCP pad tokens' positions fall in [seq_len, padded_seq_len),
+            # which index stale cells of token_ids_cpu. A reused row only has
+            # its [:prompt_len] overwritten (gpu_input_batch), so the tail may
+            # hold -1 (the output-token placeholder sentinel from a previously
+            # freed request). At TP==1 the embedding gather is unmasked, so a
+            # -1 index trips "ind >= 0". Token ids are always non-negative, so
+            # clamp(min=0) only touches these stale -1 cells; the rows are
+            # dropped by pcp_unpad_mask before attention, so their value is
+            # irrelevant to correctness.
+            self.input_ids.cpu[:total_num_scheduled_tokens].clamp_(min=0)
         if self.enable_prompt_embeds:
             is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
             torch.index_select(
