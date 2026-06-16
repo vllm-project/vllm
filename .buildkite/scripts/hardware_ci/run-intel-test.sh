@@ -331,15 +331,6 @@ trap remove_docker_container EXIT
 
 # --- Single-node job ---
 
-# If VLLM_USE_SINGLE_GPU is set, extract first GPU from comma-separated list
-if [[ "${VLLM_USE_SINGLE_GPU:-0}" == "1" ]]; then
-  if [[ -n "${ZE_AFFINITY_MASK:-}" ]]; then
-    # Extract first GPU (e.g., "6,7" -> "6")
-    ZE_AFFINITY_MASK="${ZE_AFFINITY_MASK%%,*}"
-    echo "Extracted single GPU: ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK}"
-  fi
-fi
-
 if [[ -z "${ZE_AFFINITY_MASK:-}" ]]; then
   echo "Warning: ZE_AFFINITY_MASK is not set. Proceeding without device affinity." >&2
 fi

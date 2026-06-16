@@ -15,7 +15,6 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
-    VLLM_USE_SINGLE_GPU: "1"
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_cumem.py
