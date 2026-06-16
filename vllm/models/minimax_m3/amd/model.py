@@ -457,6 +457,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         cache_config: CacheConfig | None = None,
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -565,6 +566,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             local_blocks=sparse_cfg.get("sparse_local_block", 0),
             score_type=sparse_cfg.get("sparse_score_type", "max"),
             cache_config=cache_config,
+            topk_indices_buffer=topk_indices_buffer,
         )
 
         # Register the main K/V cache so the KV-cache manager allocates it.
@@ -671,6 +673,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         force_sparse_attn: bool = False,
         force_moe: bool = False,
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -690,6 +693,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
                 cache_config=cache_config,
+                topk_indices_buffer=topk_indices_buffer,
             )
         else:
             self.self_attn = MiniMaxM3Attention(
@@ -771,6 +775,22 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.embed_tokens",
         )
 
+        # Reserved top-k indices buffer shared by all sparse-attention indexer
+        # layers (mirrors DeepseekV4); the indexer writes its per-head decode/
+        # prefill block selection into it, the attend reads it back.
+        sparse_cfg = getattr(config, "sparse_attention_config", None)
+        if sparse_cfg is not None:
+            tp_size = get_tensor_model_parallel_world_size()
+            num_index_heads = max(1, sparse_cfg["sparse_num_index_heads"] // tp_size)
+            self.topk_indices_buffer = torch.empty(
+                num_index_heads,
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                sparse_cfg["sparse_topk_blocks"],
+                dtype=torch.int32,
+            )
+        else:
+            self.topk_indices_buffer = None
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MiniMaxM3DecoderLayer(
@@ -778,6 +798,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 prefix,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                topk_indices_buffer=self.topk_indices_buffer,
             ),
             prefix=f"{prefix}.layers",
         )
