@@ -5,13 +5,15 @@ import atexit
 import functools
 import inspect
 import os
+import threading
+import time
 import traceback
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from typing import Any
 
 from vllm.logger import init_logger
-from vllm.tracing.utils import TRACE_HEADERS, LoadingSpanAttributes
+from vllm.tracing.utils import TRACE_HEADERS, LoadingSpanAttributes, SpanAttributes
 
 logger = init_logger(__name__)
 
@@ -32,7 +34,11 @@ try:
     from opentelemetry.sdk.trace import TracerProvider
     from opentelemetry.sdk.trace.export import BatchSpanProcessor
     from opentelemetry.trace import (
+        Link,
+        NonRecordingSpan,
         SpanKind,  # noqa: F401
+        Status,
+        StatusCode,
         Tracer,
         set_tracer_provider,
     )
@@ -51,6 +57,8 @@ except ImportError:
     inject = None  # type: ignore
     Resource = None  # type: ignore
     SpanKind = Any  # type: ignore
+    NonRecordingSpan = Any  # type: ignore
+    TracerProvider = Any  # type: ignore
 
 
 def is_otel_available() -> bool:
@@ -263,3 +271,89 @@ def propagate_trace_to_env():
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = original_value
+
+
+TO_S = 1000_000_000
+TO_MS = 1000_000
+
+
+def init_otel_trace_provider(
+    otlp_traces_endpoint: str,
+    extra_attributes: dict[str, str] | None = None,
+):
+    if not _IS_OTEL_AVAILABLE:
+        return None
+
+    # Store the endpoint in environment so child processes can inherit it
+    os.environ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = otlp_traces_endpoint
+
+    attributes = {"service.name": "vllm"}
+    if extra_attributes is not None:
+        attributes.update(**extra_attributes)
+
+    resource = Resource.create(attributes=attributes)
+    trace_provider = TracerProvider(resource=resource)
+    span_exporter = get_span_exporter(otlp_traces_endpoint)
+    trace_provider.add_span_processor(BatchSpanProcessor(span_exporter))
+    set_tracer_provider(trace_provider)
+
+    atexit.register(trace_provider.shutdown)
+
+    return trace_provider
+
+
+def get_span_context(span):
+    return trace.set_span_in_context(NonRecordingSpan(span.get_span_context()))
+
+
+def maybe_get_links(span=None):
+    if span is None:
+        return None
+
+    return [Link(span.get_span_context())]
+
+
+def get_status_error():
+    return Status(StatusCode.ERROR)
+
+
+@contextmanager
+def maybe_start_span(tracer: Tracer | None, *args, **kwargs):
+    if tracer is None:
+        yield None
+    else:
+        start_time = time.time_ns()
+        start_ts = time.monotonic_ns()
+
+        attributes = kwargs.pop("attributes", {})
+        attributes[SpanAttributes.GEN_AI_PROCESS_ID] = str(os.getpid())
+        attributes[SpanAttributes.GEN_AI_THREADING_ID] = str(threading.get_ident())
+
+        span = tracer.start_span(
+            *args, start_time=start_time, attributes=attributes, **kwargs
+        )
+        yield span
+        end_ts = time.monotonic_ns()
+        end_time = start_time - start_ts + end_ts
+        span.end(end_time)
+
+
+@asynccontextmanager
+async def maybe_start_span_async(tracer: Tracer | None, *args, **kwargs):
+    if tracer is None:
+        yield None
+    else:
+        start_time = time.time_ns()
+        start_ts = time.monotonic_ns()
+
+        attributes = kwargs.pop("attributes", {})
+        attributes[SpanAttributes.GEN_AI_PROCESS_ID] = str(os.getpid())
+        attributes[SpanAttributes.GEN_AI_THREADING_ID] = str(threading.get_ident())
+
+        span = tracer.start_span(
+            *args, start_time=start_time, attributes=attributes, **kwargs
+        )
+        yield span
+        end_ts = time.monotonic_ns()
+        end_time = start_time - start_ts + end_ts
+        span.end(end_time)

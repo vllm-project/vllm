@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Mapping
 from concurrent.futures import Executor
@@ -10,7 +10,6 @@ from typing import ClassVar
 import torch
 from fastapi import Request
 from fastapi.responses import Response
-from starlette.datastructures import Headers
 
 from vllm import PoolingParams, PoolingRequestOutput, envs
 from vllm.config import VllmConfig
@@ -24,19 +23,15 @@ from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.inputs.preprocess import extract_prompt_components
-from vllm.tracing import (
-    contains_trace_headers,
-    extract_trace_headers,
-    log_tracing_disabled_warning,
-)
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
 from ..typing import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
+from .observability import PoolingServingObservabilityMixin
 
 
-class PoolingServingBase(ABC):
+class PoolingServingBase(PoolingServingObservabilityMixin, ABC):
     request_id_prefix: ClassVar[str]
 
     def __init__(
@@ -48,6 +43,7 @@ class PoolingServingBase(ABC):
         chat_template_config: ChatTemplateConfig,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
+        is_tracing_enabled: bool = False,
     ):
         self.engine_client = engine_client
         self.models = models
@@ -59,6 +55,7 @@ class PoolingServingBase(ABC):
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
         self.log_error_stack = log_error_stack
         self.chat_template_config = chat_template_config
+        self.is_tracing_enabled = is_tracing_enabled
 
         # Shared thread pool executor for preprocessing and postprocessing.
         self._executor: Executor = models.renderer._executor
@@ -69,17 +66,47 @@ class PoolingServingBase(ABC):
             self._postprocessing, executor=self._executor
         )
 
+        PoolingServingObservabilityMixin.__init__(self)
+
     async def __call__(
         self,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
+        arrival_time = time.time_ns()
+        time_offset = 0
+
+        if self.is_tracing_request:
+            arrival_ts = time.monotonic_ns()
+            time_offset = arrival_time - arrival_ts
+
         io_processor = self.get_io_processor(request)
         ctx = await self._init_ctx(io_processor, request, raw_request)
-        await self._preprocessing_async(io_processor, ctx)
-        await self._prepare_generators(ctx)
-        await self._collect_batch(ctx)
-        return await self._postprocessing_async(io_processor, ctx)
+
+        if self.is_tracing_request:
+            ctx.arrival_time = arrival_time
+            ctx.time_offset = time_offset
+
+        async with self._maybe_tracing(ctx, io_processor, raw_request):
+            await self._preprocessing_async(io_processor, ctx)
+
+            if self.is_tracing_request:
+                preprocessing_finished_ts = time.monotonic_ns()
+                ctx.preprocessing_finished = time_offset + preprocessing_finished_ts
+
+            await self._engine_call(ctx)
+
+            if self.is_tracing_request:
+                engine_call_ts = time.monotonic_ns()
+                ctx.engine_call_finished = time_offset + engine_call_ts
+
+            response = await self._postprocessing_async(io_processor, ctx)
+
+            if self.is_tracing_request:
+                postprocessing_finished_ts = time.monotonic_ns()
+                ctx.postprocessing_finished = time_offset + postprocessing_finished_ts
+
+            return response
 
     @abstractmethod
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
@@ -89,14 +116,52 @@ class PoolingServingBase(ABC):
     def _preprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
-        return io_processor.pre_process_online(ctx)
+        with self._maybe_start_span(
+            ctx.entrypoint_tracer,
+            self.span_entrypoint_preprocessing,
+            context=ctx.request_span_context,
+            links=ctx.entrypoint_span_links,
+        ) as span:
+            if span is not None:
+                ctx.entrypoint_span_links = self._maybe_get_links(span)
+                span.set_attributes(self._get_preprocessing_span_attributes(ctx))
+
+            return io_processor.pre_process_online(ctx)
+
+    async def _engine_call(self, ctx):
+        async with self._maybe_start_span_async(
+            ctx.entrypoint_tracer,
+            self.span_entrypoint_engine_call,
+            context=ctx.request_span_context,
+            links=ctx.entrypoint_span_links,
+        ) as span:
+            if span is not None:
+                ctx.entrypoint_span_links = self._maybe_get_links(span)
+                span_context = self._get_span_context(span)
+                trace_headers: Mapping[str, str] = {}
+                self.propagator.inject(trace_headers, context=span_context)
+                ctx.trace_headers = trace_headers
+                span.set_attributes(self._get_engine_call_span_attributes(ctx))
+
+            await self._prepare_generators(ctx)
+            await self._collect_batch(ctx)
 
     @torch.inference_mode()
     def _postprocessing(
         self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
     ):
-        io_processor.post_process_online(ctx)
-        return self._build_response(ctx)
+        with self._maybe_start_span(
+            ctx.entrypoint_tracer,
+            self.span_entrypoint_postprocessing,
+            context=ctx.request_span_context,
+            links=ctx.entrypoint_span_links,
+        ) as span:
+            if span is not None:
+                ctx.entrypoint_span_links = self._maybe_get_links(span)
+                span.set_attributes(self._get_postprocessing_span_attributes(ctx))
+
+            io_processor.post_process_online(ctx)
+            return self._build_response(ctx)
 
     async def _init_ctx(
         self,
@@ -111,7 +176,6 @@ class PoolingServingBase(ABC):
         pooling_params = io_processor.create_pooling_params(request)
         ctx = PoolingServeContext(
             request=request,
-            raw_request=raw_request,
             model_name=model_name,
             pooling_params=pooling_params,
             request_id=request_id,
@@ -129,12 +193,6 @@ class PoolingServingBase(ABC):
             raise ValueError("Engine prompts not available")
 
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-
-        trace_headers = (
-            None
-            if ctx.raw_request is None
-            else await self._get_trace_headers(ctx.raw_request.headers)
-        )
 
         assert ctx.pooling_params is not None
         pooling_params = ctx.pooling_params
@@ -170,7 +228,7 @@ class PoolingServingBase(ABC):
                 params,
                 prompt_request_id,
                 lora_request=ctx.lora_request,
-                trace_headers=trace_headers,
+                trace_headers=ctx.trace_headers,
                 priority=getattr(ctx.request, "priority", 0),
             )
 
@@ -258,20 +316,6 @@ class PoolingServingBase(ABC):
                 "greater than max_model_len."
                 " Please request a smaller truncation size."
             )
-
-        return None
-
-    async def _get_trace_headers(
-        self,
-        headers: Headers,
-    ) -> Mapping[str, str] | None:
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
-
-        if is_tracing_enabled:
-            return extract_trace_headers(headers)
-
-        if contains_trace_headers(headers):
-            log_tracing_disabled_warning()
 
         return None
 
