@@ -18,6 +18,7 @@ from typing import Any, Literal
 import torch
 
 from vllm.platforms import current_platform
+from vllm.platforms.interface import get_device_context
 from vllm.triton_utils import triton
 
 logger = logging.getLogger(__name__)
@@ -107,7 +108,7 @@ def input_guard(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
                     break
 
         if tensor is not None:
-            ctx = torch.accelerator.device_index(tensor.device.index)
+            ctx = get_device_context(tensor.device)
         else:
             ctx = contextlib.nullcontext()
 
