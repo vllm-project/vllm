@@ -8,10 +8,22 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .mamba_ssm import softplus
+
+
+@triton.jit
+def _td_store_2d(
+    base, value, rows, cols, srow, scol, roff, coff, BR: tl.constexpr, BC: tl.constexpr
+):
+    desc = tl.make_tensor_descriptor(
+        base, shape=[rows, cols], strides=[srow, scol], block_shape=[BR, BC]
+    )
+    desc.store([roff, coff], value)
 
 
 @triton.autotune(
@@ -55,6 +67,8 @@ def _chunk_cumsum_fwd_kernel(
     HAS_DT_BIAS: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr,
     BLOCK_SIZE_CHUNK: tl.constexpr,
+    # TD path gate; dead-code-eliminated when False.
+    USE_TD: tl.constexpr = False,
 ):
     # if dt is long, may cause problems, so use 64 bit
     # https://github.com/triton-lang/triton/issues/1058
@@ -99,11 +113,29 @@ def _chunk_cumsum_fwd_kernel(
     dt = tl.where(
         (offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size_limit), dt, 0.0
     )
-    tl.store(
-        dt_out_ptrs,
-        dt,
-        mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size),
-    )
+    if USE_TD:
+        # TD store of dt_out [BLOCK_SIZE_H, BLOCK_SIZE_CHUNK]; shape bounds zero
+        # heads >= nheads and csize >= chunk_size, replacing the store mask.
+        tl.static_assert((BLOCK_SIZE_H & (BLOCK_SIZE_H - 1)) == 0)
+        tl.static_assert((BLOCK_SIZE_CHUNK & (BLOCK_SIZE_CHUNK - 1)) == 0)
+        _td_store_2d(
+            dt_out_ptr,
+            dt,
+            nheads,
+            chunk_size,
+            stride_dt_out_head,
+            stride_dt_out_csize,
+            pid_h * BLOCK_SIZE_H,
+            0,
+            BLOCK_SIZE_H,
+            BLOCK_SIZE_CHUNK,
+        )
+    else:
+        tl.store(
+            dt_out_ptrs,
+            dt,
+            mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size),
+        )
     A = tl.load(A_ptrs, mask=offs_h < nheads, other=0.0).to(tl.float32)
     dA = dt * A[:, None]
     dA_cs = tl.cumsum(dA, axis=1)
@@ -321,6 +353,19 @@ def _chunk_cumsum_fwd(
         nheads, nchunks, chunk_size, device=dt.device, dtype=torch.float32
     )
     grid_chunk_cs = lambda META: (nchunks, triton.cdiv(nheads, META["BLOCK_SIZE_H"]))
+
+    # Tri-state TD toggle (VLLM_TRITON_USE_TD): unset -> auto (on for XPU).
+    td_override = envs.VLLM_TRITON_USE_TD
+    use_td = current_platform.is_xpu() if td_override is None else td_override
+    # TD store of dt_out needs the chunk-size (last) dim contiguous.
+    use_td = use_td and dt_out.stride(2) == 1
+    if use_td:
+        triton.set_allocator(
+            lambda size, alignment, stream: torch.empty(
+                size, device=dt.device, dtype=torch.int8
+            )
+        )
+
     with torch.accelerator.device_index(dt.device.index):
         _chunk_cumsum_fwd_kernel[grid_chunk_cs](
             dt_ptr=dt,
@@ -346,6 +391,7 @@ def _chunk_cumsum_fwd(
             DT_SOFTPLUS=dt_softplus,
             HAS_DT_BIAS=dt_bias is not None,
             BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
+            USE_TD=use_td,
         )
     return dA_cumsum, dt_out
 
