@@ -104,9 +104,6 @@ class BaseRenderer(ABC, Generic[_T]):
         self._process_multimodal_async = make_async(
             self._process_multimodal, executor=self._mm_executor
         )
-        self._safe_load_prompt_embeds_async = make_async(
-            safe_load_prompt_embeds, executor=self._executor
-        )
         if mm_registry.supports_multimodal_inputs(config.model_config):
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
@@ -379,28 +376,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return [self.render_prompt(prompt) for prompt in prompts]
 
-    async def _render_prompt_async(
-        self,
-        prompt: DictPrompt | bytes,
-    ) -> DictPrompt:
-        if isinstance(prompt, bytes):
-            embeds = await self._safe_load_prompt_embeds_async(
-                self.model_config, prompt
-            )
-            return EmbedsPrompt(prompt_embeds=embeds)
-
-        return prompt
-
     async def render_prompts_async(
         self,
         prompts: Sequence[DictPrompt | bytes],
     ) -> list[DictPrompt]:
-        if len(prompts) == 0:
-            raise ValueError("You must pass at least one prompt")
-
-        return await asyncio.gather(
-            *(self._render_prompt_async(prompt) for prompt in prompts)
-        )
+        return self.render_prompts(prompts)
 
     @abstractmethod
     def render_messages(
@@ -615,7 +595,13 @@ class BaseRenderer(ABC, Generic[_T]):
 
         for prompt in prompts:
             target_prompt = extract_target_prompt(self.model_config, prompt)
-            target_prompt.update(prompt_extras)  # type: ignore[arg-type]
+            extras = dict(prompt_extras)
+            colbert_key = extras.pop("colbert_cache_key", None)
+            if colbert_key is not None:
+                extras.setdefault("colbert_cache_key", colbert_key)
+                extras.setdefault("colbert_cache_salt", colbert_key)
+                extras.setdefault("cache_salt", colbert_key)
+            target_prompt.update(extras)  # type: ignore[arg-type]
 
     # Step 4: Convert to engine inputs
     def _validate_mm_uuids(
@@ -751,6 +737,18 @@ class BaseRenderer(ABC, Generic[_T]):
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
+        if mode := prompt.get("colbert_embedding_mode"):
+            engine_input["colbert_embedding_mode"] = mode
+        if prompt.get("colbert_attend_to_expansion"):
+            engine_input["colbert_attend_to_expansion"] = True
+        if colbert_salt := prompt.get("colbert_cache_salt"):
+            engine_input["colbert_cache_salt"] = colbert_salt
+        if colbert_key := prompt.get("colbert_cache_key"):
+            engine_input["colbert_cache_key"] = colbert_key
+        if prompt.get("colbert_full_attention_mask"):
+            engine_input["colbert_full_attention_mask"] = True
+        if colbert_attn := prompt.get("colbert_attention_mask"):
+            engine_input["colbert_attention_mask"] = list(colbert_attn)
 
         return engine_input
 
@@ -809,6 +807,18 @@ class BaseRenderer(ABC, Generic[_T]):
             engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
             engine_input["cache_salt"] = cache_salt
+        if mode := prompt.get("colbert_embedding_mode"):
+            engine_input["colbert_embedding_mode"] = mode
+        if prompt.get("colbert_attend_to_expansion"):
+            engine_input["colbert_attend_to_expansion"] = True
+        if colbert_salt := prompt.get("colbert_cache_salt"):
+            engine_input["colbert_cache_salt"] = colbert_salt
+        if colbert_key := prompt.get("colbert_cache_key"):
+            engine_input["colbert_cache_key"] = colbert_key
+        if prompt.get("colbert_full_attention_mask"):
+            engine_input["colbert_full_attention_mask"] = True
+        if colbert_attn := prompt.get("colbert_attention_mask"):
+            engine_input["colbert_attention_mask"] = list(colbert_attn)
 
         return engine_input
 

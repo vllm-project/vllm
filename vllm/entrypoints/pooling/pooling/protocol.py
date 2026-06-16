@@ -15,6 +15,7 @@ from vllm.utils import random_uuid
 from ..base.protocol import (
     ChatRequestMixin,
     ClassifyRequestMixin,
+    ColBERTEmbeddingModeMixin,
     CompletionRequestMixin,
     EmbedRequestMixin,
     EncodingRequestMixin,
@@ -28,16 +29,20 @@ class PoolingCompletionRequest(
     CompletionRequestMixin,
     EmbedRequestMixin,
     ClassifyRequestMixin,
+    ColBERTEmbeddingModeMixin,
     FixedMaxLenTokenizeParamsMixin,
 ):
     task: PoolingTask | None = None
 
     def to_pooling_params(self):
-        return PoolingParams(
+        params = PoolingParams(
             task=self.task,
             use_activation=self.use_activation,
             dimensions=self.dimensions,
+            embedding_mode=self.embedding_mode,
         )
+        params.sync_colbert_extra_kwargs()
+        return params
 
 
 class PoolingChatRequest(
@@ -45,16 +50,20 @@ class PoolingChatRequest(
     ChatRequestMixin,
     EmbedRequestMixin,
     ClassifyRequestMixin,
+    ColBERTEmbeddingModeMixin,
     FixedMaxLenTokenizeParamsMixin,
 ):
     task: PoolingTask | None = None
 
     def to_pooling_params(self):
-        return PoolingParams(
+        params = PoolingParams(
             task=self.task,
             use_activation=self.use_activation,
             dimensions=self.dimensions,
+            embedding_mode=self.embedding_mode,
         )
+        params.sync_colbert_extra_kwargs()
+        return params
 
 
 T = TypeVar("T")

@@ -15,6 +15,8 @@ from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...chat_utils import ChatTemplateResolutionError
 from ..base.io_processor import PoolingIOProcessor
+from ..colbert_io_mixin import ColBERTIOProcessorMixin
+from ..pooling.protocol import PoolingCompletionRequest
 from ..typing import (
     OfflineInputsContext,
     OfflineOutputsContext,
@@ -294,6 +296,76 @@ class LateInteractionIOProcessor(BiEncoderIOProcessor):
                 )
             )
         return final_res_batch
+
+
+class ColBERTLateInteractionIOProcessor(
+    ColBERTIOProcessorMixin, LateInteractionIOProcessor
+):
+    name = "late-interaction"
+    pooling_task: PoolingTask = "token_embed"
+
+    def pre_process_online(self, ctx: ScoringServeContext):
+        request = ctx.request
+
+        if isinstance(request, ScoreRequest):
+            data_1 = request.data_1
+            data_2 = request.data_2
+        elif isinstance(request, RerankRequest):
+            data_1 = request.query
+            data_2 = request.documents
+        else:
+            raise ValueError(f"Invalid {self.name} request type")
+
+        scoring_data = self.valid_inputs(data_1, data_2)
+
+        max_tokens_per_query, max_tokens_per_doc = self._get_token_limits(
+            request=request
+        )
+        if max_tokens_per_query > 0 or max_tokens_per_doc > 0:
+            scoring_data = self._truncate_scoring_data(
+                scoring_data, max_tokens_per_query, max_tokens_per_doc
+            )
+
+        tok_params = request.build_tok_params(self.model_config)
+        ctx.engine_inputs = self._pre_process(
+            scoring_data,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt", "chat_template_kwargs")
+                if (v := getattr(request, k, None)) is not None
+            },
+        )
+        ctx.n_queries = len(scoring_data.data_1)
+
+    def _pre_process(
+        self,
+        scoring_data: ScoringData,
+        tok_params: TokenizeParams,
+        prompt_extras: dict[str, Any] | None = None,
+    ) -> Sequence[EngineInput]:
+        data_1 = score_data_to_prompts(scoring_data.data_1, "query", self.model_config)
+        data_2 = score_data_to_prompts(
+            scoring_data.data_2, "document", self.model_config
+        )
+        proxy = PoolingCompletionRequest(
+            model=None,
+            input="",
+            add_special_tokens=True,
+        )
+        if prompt_extras:
+            for key in ("mm_processor_kwargs", "cache_salt"):
+                if key in prompt_extras:
+                    setattr(proxy, key, prompt_extras[key])
+
+        prompts = data_1 + data_2
+        modes: list[str] = ["query"] * len(data_1) + ["document"] * len(data_2)
+        return self._render_colbert_cmpl_batch(
+            proxy,
+            prompts,
+            modes,  # type: ignore[arg-type]
+            tok_params=tok_params,
+        )
 
 
 class FlashLateInteractionIOProcessor(LateInteractionIOProcessor):

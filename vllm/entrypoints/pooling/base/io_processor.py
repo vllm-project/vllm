@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.config import VllmConfig
@@ -117,6 +117,30 @@ class PoolingIOProcessor:
 
     #######################################
     # helpers
+
+    @staticmethod
+    def _colbert_renderer_prompt_extras(
+        embedding_mode: Literal["query", "document"],
+        raw_text: str,
+        *,
+        config,
+        model_name: str,
+        chat_template_hash: str,
+        colbert_config_hash: str,
+    ) -> dict[str, Any]:
+        """Renderer-safe ColBERT cache isolation metadata (prefix-cache safe)."""
+        from vllm.model_executor.models.colbert_encoding import (
+            build_colbert_prompt_extras,
+        )
+
+        return build_colbert_prompt_extras(
+            embedding_mode,
+            config,
+            model_name=model_name,
+            raw_text=raw_text,
+            chat_template_hash=chat_template_hash,
+            colbert_config_hash=colbert_config_hash,
+        )
 
     def _preprocess_cmpl_online(
         self,

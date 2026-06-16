@@ -25,6 +25,24 @@ class _InputOptions(TypedDict):
     cache_salt: NotRequired[str]
     """Optional cache salt to be used for prefix caching."""
 
+    colbert_embedding_mode: NotRequired[Literal["query", "document"]]
+    """ColBERT asymmetric encoding mode for this engine input."""
+
+    colbert_attend_to_expansion: NotRequired[bool]
+    """When true, query expansion tokens use full attention (ColBERT)."""
+
+    colbert_cache_salt: NotRequired[str]
+    """Per-request renderer/prefix-cache isolation key for ColBERT encoding."""
+
+    colbert_cache_key: NotRequired[str]
+    """Canonical ColBERT cache isolation key for this engine input."""
+
+    colbert_full_attention_mask: NotRequired[bool]
+    """When true, query expansion tokens use full attention (PyLate parity metadata)."""
+
+    colbert_attention_mask: NotRequired[list[int]]
+    """Per-token ColBERT attention mask for the model input builder."""
+
 
 class TokensInput(_InputOptions):
     """Represents token-based input to the engine."""

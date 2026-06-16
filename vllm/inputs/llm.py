@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, TypeAlias, TypeVar, final
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypeVar, final
 
 from typing_extensions import NotRequired, TypedDict
 
@@ -94,6 +94,23 @@ class _PromptOptions(TypedDict):
     """
     Optional cache salt to be used for prefix caching.
     """
+
+    colbert_embedding_mode: NotRequired[Literal["query", "document"]]
+    """ColBERT asymmetric encoding mode for this prompt."""
+
+    colbert_attend_to_expansion: NotRequired[bool]
+    """When true, query expansion tokens use full attention (ColBERT)."""
+
+    colbert_cache_salt: NotRequired[str]
+    """Per-request renderer/prefix-cache isolation key for ColBERT encoding."""
+
+    colbert_cache_key: NotRequired[str]
+    """Canonical ColBERT cache isolation key (mirrors cache_salt when set)."""
+
+    colbert_full_attention_mask: NotRequired[bool]
+
+    colbert_attention_mask: NotRequired[list[int]]
+    """When true, query expansion tokens use full attention (PyLate parity metadata)."""
 
 
 class TextPrompt(_PromptOptions):

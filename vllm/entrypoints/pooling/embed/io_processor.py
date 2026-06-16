@@ -18,14 +18,23 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
+from vllm.model_executor.models.colbert_encoding import (
+    ColBERTEmbeddingMode,
+    apply_embedding_mode_to_pooling_params,
+    validate_colbert_embedding_mode,
+)
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.renderers import merge_kwargs
 from vllm.renderers.hf import resolve_chat_template
+from vllm.renderers.inputs.preprocess import prompt_to_seq
 from vllm.utils.collection_utils import chunk_list
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ..base.io_processor import PoolingIOProcessor
+from ..colbert_io_mixin import ColBERTIOProcessorMixin
+from ..pooling.protocol import PoolingCompletionRequest
 from ..scoring.io_processor import JinaRankingIOProcessorMixin
+from ..scoring.typing import ScoringData
 from ..typing import (
     OfflineInputsContext,
     PoolingChatLikeRequest,
@@ -637,6 +646,130 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
 class TokenEmbedIOProcessor(PoolingIOProcessor):
     name = "token_embed"
+
+
+class ColBERTTokenEmbedIOProcessor(ColBERTIOProcessorMixin, TokenEmbedIOProcessor):
+    name = "token_embed"
+
+    def create_pooling_params(self, request):
+        mode = getattr(request, "embedding_mode", None)
+        validate_colbert_embedding_mode(self.model_config, mode)
+        params = super().create_pooling_params(request)
+        if mode is not None:
+            params.embedding_mode = mode
+            params.sync_colbert_extra_kwargs()
+        return params
+
+    def pre_process_online(self, ctx: PoolingServeContext) -> None:
+        request_mode = getattr(ctx.request, "embedding_mode", None)
+        validate_colbert_embedding_mode(self.model_config, request_mode)
+        mode = self._resolve_colbert_mode(
+            request_mode,
+            ctx.pooling_params if not isinstance(ctx.pooling_params, list) else None,
+        )
+        if mode is None:
+            return super().pre_process_online(ctx)
+
+        request = ctx.request
+        if isinstance(request, PoolingCompletionLikeRequest):
+            prompts = prompt_to_seq(request.input)
+            if isinstance(ctx.pooling_params, list):
+                modes_list = [
+                    self._resolve_colbert_mode(
+                        getattr(request, "embedding_mode", None), p
+                    )
+                    for p in ctx.pooling_params
+                ]
+                if any(m is None for m in modes_list):
+                    raise ValueError(
+                        "Each pooling param must specify ColBERT embedding_mode."
+                    )
+                ctx.engine_inputs = self._render_colbert_cmpl_batch(
+                    request,
+                    prompts,
+                    cast(list[ColBERTEmbeddingMode], modes_list),
+                    ctx.pooling_params,
+                )
+            else:
+                ctx.engine_inputs = self._render_colbert_cmpl(
+                    request,
+                    prompts,
+                    mode,
+                    ctx.pooling_params,
+                )
+            return
+        if isinstance(request, PoolingChatLikeRequest):
+            raise ValueError(
+                "ColBERT embedding_mode on chat requests is not supported yet."
+            )
+        return super().pre_process_online(ctx)
+
+    def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
+        assert not isinstance(ctx.prompts, ScoringData) and not (
+            isinstance(ctx.prompts, dict) and "data" in ctx.prompts
+        )
+
+        pooling_params = ctx.pooling_params
+        if isinstance(pooling_params, Sequence):
+            for params in pooling_params:
+                validate_colbert_embedding_mode(
+                    self.model_config, params.embedding_mode
+                )
+        else:
+            validate_colbert_embedding_mode(
+                self.model_config, pooling_params.embedding_mode
+            )
+        prompts = prompt_to_seq(ctx.prompts)
+        tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
+            **(ctx.tokenization_kwargs or {})
+        )
+        proxy = PoolingCompletionRequest(
+            model=None,
+            input=cast(Any, prompts[0] if len(prompts) == 1 else prompts),
+            add_special_tokens=True,
+        )
+
+        if isinstance(pooling_params, Sequence):
+            modes: list[ColBERTEmbeddingMode | None] = [
+                self._resolve_colbert_mode(None, p) for p in pooling_params
+            ]
+            if any(m is not None for m in modes):
+                if len(modes) != len(prompts):
+                    raise ValueError(
+                        "Number of pooling params must match number of prompts "
+                        "when using ColBERT embedding_mode."
+                    )
+                if any(m is None for m in modes):
+                    raise ValueError(
+                        "Mixed ColBERT and non-ColBERT embedding_mode in one "
+                        "offline batch is not supported."
+                    )
+                resolved_modes = cast(list[ColBERTEmbeddingMode], modes)
+                encoder_config = self._get_colbert_encoder().config
+                for params, colbert_mode in zip(pooling_params, resolved_modes):
+                    apply_embedding_mode_to_pooling_params(
+                        params, colbert_mode, encoder_config
+                    )
+                return self._render_colbert_cmpl_batch(
+                    proxy,
+                    prompts,
+                    resolved_modes,
+                    pooling_params,
+                    tok_params=tok_params,
+                )
+            return super().pre_process_offline(ctx)
+
+        resolved_mode = self._resolve_colbert_mode(None, pooling_params)
+        if resolved_mode is None:
+            return super().pre_process_offline(ctx)
+
+        return self._render_colbert_cmpl(
+            proxy,
+            prompts,
+            resolved_mode,
+            pooling_params,
+            tok_params=tok_params,
+        )
 
 
 class JinaRankingTokenEmbedIOProcessor(

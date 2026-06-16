@@ -21,12 +21,12 @@ if TYPE_CHECKING:
     from starlette.datastructures import State
 
     from vllm.engine.protocol import EngineClient
-    from vllm.entrypoints.serve.sagemaker.api_router import (
+    from vllm.entrypoints.logger import RequestLogger
+    from vllm.entrypoints.sagemaker.api_router import (
         EndpointFn,
         GetHandlerFn,
         RequestType,
     )
-    from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
 else:
     RequestLogger = object
@@ -61,9 +61,18 @@ def init_pooling_io_processors(
         processors["embed"] = EmbedIOProcessor
 
     if pooling_task == "token_embed":
-        from .embed.io_processor import TokenEmbedIOProcessor
+        from vllm.model_executor.models.colbert_encoding import is_colbert_pooling_model
 
-        processors["token_embed"] = TokenEmbedIOProcessor
+        from .embed.io_processor import (
+            ColBERTTokenEmbedIOProcessor,
+            TokenEmbedIOProcessor,
+        )
+
+        processors["token_embed"] = (
+            ColBERTTokenEmbedIOProcessor
+            if is_colbert_pooling_model(model_config)
+            else TokenEmbedIOProcessor
+        )
 
     if has_io_processor(
         vllm_config,
@@ -78,11 +87,21 @@ def init_pooling_io_processors(
         processors["plugin"] = PluginWithoutIOProcessorPlugins
 
     if enable_scoring_api(supported_tasks, model_config):
-        from .scoring.io_processor import ScoringIOProcessors
+        from vllm.model_executor.models.colbert_encoding import is_colbert_pooling_model
+
+        from .scoring.io_processor import (
+            ColBERTLateInteractionIOProcessor,
+            ScoringIOProcessors,
+        )
 
         score_type: str | None = SCORE_TYPE_MAP.get(pooling_task, None)  # type: ignore[arg-type]
         if score_type is not None and score_type in ScoringIOProcessors:
-            processors[score_type] = ScoringIOProcessors[score_type]
+            if score_type == "late-interaction" and is_colbert_pooling_model(
+                model_config
+            ):
+                processors[score_type] = ColBERTLateInteractionIOProcessor
+            else:
+                processors[score_type] = ScoringIOProcessors[score_type]
 
     if model_config.architecture == "JinaForRanking":
         from .embed.io_processor import JinaRankingTokenEmbedIOProcessor
