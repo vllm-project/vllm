@@ -721,80 +721,14 @@ cleanup() {
   fi
 }
 
-verify_npu_hardware_fallback() {
-  echo "[preflight-fallback] torch_npu probe reported no visible devices; verifying hardware via npu-smi and /dev..." >&2
-
-  local clean_ld=""
-  local entry
-  IFS=':' read -ra _ld_entries <<< "${LD_LIBRARY_PATH:-}"
-  for entry in "${_ld_entries[@]}"; do
-    [[ -z "$entry" ]] && continue
-    case "$entry" in
-      */conda/*|*/miniconda*|*/anaconda*|*/mambaforge*|*/miniforge*|*/envs/*)
-        continue ;;
-    esac
-    if [[ -n "$clean_ld" ]]; then
-      clean_ld="${clean_ld}:${entry}"
-    else
-      clean_ld="$entry"
-    fi
-  done
-
-  if command -v npu-smi >/dev/null 2>&1; then
-    local npu_smi_output
-    local npu_smi_exit_code
-    npu_smi_output="$(env LD_LIBRARY_PATH="$clean_ld" npu-smi info 2>&1)"
-    npu_smi_exit_code=$?
-    if [[ "$npu_smi_exit_code" -eq 0 ]]; then
-      local healthy_count
-      healthy_count="$(printf '%s\n' "$npu_smi_output" | grep -c '| OK ' || true)"
-      if [[ "$healthy_count" -gt 0 ]]; then
-        echo "[preflight-fallback] npu-smi confirms $healthy_count healthy NPU device(s)" >&2
-        printf '%s\n' "$npu_smi_output" | head -30 >&2
-        echo "selected_device=npu:0"
-        return 0
-      fi
-    else
-      echo "[preflight-fallback] npu-smi info failed (exit $npu_smi_exit_code):" >&2
-      printf '%s\n' "$npu_smi_output" | head -10 >&2
-    fi
-  else
-    echo "[preflight-fallback] npu-smi not found in PATH" >&2
-  fi
-
-  local dev
-  for dev in /dev/davinci[0-9]*; do
-    if [[ -e "$dev" ]]; then
-      local device_id
-      device_id="${dev#/dev/davinci}"
-      echo "[preflight-fallback] Found NPU device file: $(basename "$dev")" >&2
-      echo "selected_device=npu:${device_id}"
-      return 0
-    fi
-  done
-
-  echo "[preflight-fallback] No NPU hardware found via npu-smi or /dev/davinci*" >&2
-  return 1
-}
-
 run_runner_npu_preflight_once() {
   # Use hust-ascend-manager runtime check for the NPU probe. This runs the
   # torch_npu probe in a controlled subprocess environment (build_env_dict()
   # exports + PYTHONNOUSERSITE=1) which prevents conda library shadowing and
   # other environment contamination that cause 'path string is NULL' errors.
   if ! command -v hust-ascend-manager >/dev/null 2>&1; then
-    echo "[preflight] hust-ascend-manager not found in PATH; falling back to direct Python probe" >&2
-    "$PYTHON_BIN" - <<'PY'
-import importlib.util, os, sys, torch
-if importlib.util.find_spec("torch_npu") is None:
-    raise RuntimeError("torch_npu is not installed")
-import torch_npu  # noqa: F401
-dc = int(torch.npu.device_count())
-if dc <= 0:
-    raise RuntimeError("torch.npu.device_count() returned 0")
-print(f"device_count={dc}")
-PY
-    return $?
+    echo "[preflight] hust-ascend-manager not found in PATH" >&2
+    return 127
   fi
 
   local manager_output
@@ -807,8 +741,7 @@ PY
   echo "$manager_output"
   if [[ "$manager_rc" -ne 0 ]]; then
     echo "[preflight] hust-ascend-manager runtime check failed (exit $manager_rc)" >&2
-    verify_npu_hardware_fallback
-    return $?
+    return "$manager_rc"
   fi
 
   # Verify device_count > 0 from the JSON output
@@ -832,16 +765,11 @@ for line in sys.stdin:
     except Exception:
         pass
 raise SystemExit(1)
-" 2>/dev/null)" || {
-    echo "[preflight] could not parse a positive torch_npu device_count from runtime check output" >&2
-    verify_npu_hardware_fallback
-    return $?
-  }
+" 2>/dev/null)" || return 1
 
   if [[ -z "$device_count" ]] || [[ "$device_count" -le 0 ]]; then
     echo "torch.npu.device_count() returned 0 or could not be parsed" >&2
-    verify_npu_hardware_fallback
-    return $?
+    return 1
   fi
 
   # Run device selection and torch.zeros allocation check
