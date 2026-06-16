@@ -26,6 +26,7 @@ class bench_params_t:
     hidden_size: int
     add_residual: bool
     dtype: torch.dtype
+    wt_dtype: torch.dtype
     group_size: list[int]
 
     def description(self):
@@ -33,7 +34,8 @@ class bench_params_t:
             f"N {self.num_tokens} "
             f"x D {self.hidden_size} "
             f"x R {self.add_residual} "
-            f"x DT {self.dtype}"
+            f"x DT {self.dtype} "
+            f"x WDT {self.wt_dtype} "
             f"x GS {self.group_size}"
         )
 
@@ -44,11 +46,14 @@ def get_bench_params() -> list[bench_params_t]:
     HIDDEN_SIZES = list(range(1024, 8129, 1024))
     ADD_RESIDUAL = [True, False]
     DTYPES = [torch.bfloat16, torch.float]
+    WT_DTYPES = [torch.bfloat16, torch.float]
     GROUP_SIZES = [[1, 64], [1, 128]]
 
-    combinations = product(NUM_TOKENS, HIDDEN_SIZES, ADD_RESIDUAL, DTYPES, GROUP_SIZES)
+    combinations = product(
+        NUM_TOKENS, HIDDEN_SIZES, ADD_RESIDUAL, DTYPES, WT_DTYPES, GROUP_SIZES
+    )
     bench_params = list(
-        map(lambda x: bench_params_t(x[0], x[1], x[2], x[3], x[4]), combinations)
+        map(lambda x: bench_params_t(x[0], x[1], x[2], x[3], x[4], x[5]), combinations)
     )
     return bench_params
 
@@ -173,7 +178,7 @@ def bench_fn(
 
 def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasurement]:
     # Make inputs
-    layer = RMSNorm(params.hidden_size, 1e-6).to(dtype=params.dtype)
+    layer = RMSNorm(params.hidden_size, 1e-6, dtype=params.wt_dtype)
     # Make weights
     layer.weight.data.normal_(mean=1.0, std=0.1)
     # Make inputs

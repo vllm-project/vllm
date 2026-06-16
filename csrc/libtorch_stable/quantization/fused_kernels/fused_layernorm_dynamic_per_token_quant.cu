@@ -7,12 +7,12 @@
 
 namespace vllm {
 
-template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
+template <typename scalar_t, typename scalar_wt_t, typename scalar_out_t, bool has_residual = false>
 __device__ void rms_norm_dynamic_per_token_quant_vec(
     scalar_out_t* __restrict__ out,       // [..., hidden_size]
     float* __restrict__ scales,           // [num_tokens]
     scalar_t const* __restrict__ input,   // [..., hidden_size]
-    scalar_t const* __restrict__ weight,  // [hidden_size]
+    scalar_wt_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
     int32_t const input_stride, scalar_t* __restrict__ residual = nullptr) {
   float rms = 0.0f;
@@ -23,7 +23,7 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
       &rms, input, hidden_size, input_stride, var_epsilon, residual);
 
   // Compute scale
-  vllm::vectorized::compute_dynamic_per_token_scales<scalar_t, scalar_out_t,
+  vllm::vectorized::compute_dynamic_per_token_scales<scalar_t, scalar_wt_t, scalar_out_t,
                                                      has_residual>(
       &token_scale, scales, input, weight, rms, scale_ub, hidden_size,
       input_stride, residual);
@@ -31,13 +31,13 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
     token_scale = 1.0f / token_scale;
-    vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, true,
+    vllm::vectorized::norm_and_quant<scalar_t, scalar_wt_t, scalar_out_t, true,
                                      has_residual>(out, input, weight, rms,
                                                    &token_scale, hidden_size,
                                                    input_stride, residual);
   } else {
     // FP8 - Do not invert token_scale for exact match with FBGemm
-    vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, false,
+    vllm::vectorized::norm_and_quant<scalar_t, scalar_wt_t, scalar_out_t, false,
                                      has_residual>(out, input, weight, rms,
                                                    &token_scale, hidden_size,
                                                    input_stride, residual);
@@ -45,12 +45,12 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
 }
 
 // RMS norm + quant kernel
-template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
+template <typename scalar_t, typename scalar_wt_t, typename scalar_out_t, bool has_residual = false>
 __global__ void rms_norm_dynamic_per_token_quant_kernel(
     scalar_out_t* __restrict__ out,       // [..., hidden_size]
     float* __restrict__ scales,           // [num_tokens]
     scalar_t const* __restrict__ input,   // [..., hidden_size]
-    scalar_t const* __restrict__ weight,  // [hidden_size]
+    scalar_wt_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
     int32_t const input_stride, scalar_t* __restrict__ residual = nullptr) {
   // For vectorization, token_input and token_output pointers need to be
@@ -58,7 +58,7 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
   bool const can_vectorize = hidden_size % 4 == 0 and input_stride % 4 == 0;
 
   if (can_vectorize) {
-    return rms_norm_dynamic_per_token_quant_vec<scalar_t, scalar_out_t,
+    return rms_norm_dynamic_per_token_quant_vec<scalar_t, scalar_wt_t, scalar_out_t,
                                                 has_residual>(
         out, scales, input, weight, scale_ub, var_epsilon, hidden_size,
         input_stride, residual);
@@ -71,26 +71,26 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
   vllm::compute_rms<scalar_t, has_residual>(
       &rms, input, hidden_size, input_stride, var_epsilon, residual);
   // Compute Scale
-  vllm::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
+  vllm::compute_dynamic_per_token_scales<scalar_t, scalar_wt_t, scalar_out_t, has_residual>(
       &token_scale, scales, input, weight, rms, scale_ub, hidden_size,
       input_stride, residual);
 
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
     token_scale = 1.0f / token_scale;
-    vllm::norm_and_quant<scalar_t, scalar_out_t, true, has_residual>(
+    vllm::norm_and_quant<scalar_t, scalar_wt_t, scalar_out_t, true, has_residual>(
         out, input, weight, rms, &token_scale, hidden_size, input_stride,
         residual);
   } else {
     // FP8 - Do not invert s_token_scale for exact match with FBGemm
-    vllm::norm_and_quant<scalar_t, scalar_out_t, false, has_residual>(
+    vllm::norm_and_quant<scalar_t, scalar_wt_t, scalar_out_t, false, has_residual>(
         out, input, weight, rms, &token_scale, hidden_size, input_stride,
         residual);
   }
 }
 
 // RMS norm + quant kernel
-template <typename scalar_t, typename scalar_out_t, bool has_residual = false,
+template <typename scalar_t, typename scalar_wt_t, typename scalar_out_t, bool has_residual = false,
           bool is_scale_transposed = false, int32_t group_size = 0>
 __global__ void rms_norm_per_block_quant_kernel(
     scalar_out_t* __restrict__ out,  // [..., hidden_size]
@@ -98,7 +98,7 @@ __global__ void rms_norm_per_block_quant_kernel(
                                      // or
                                      // [hidden_size / group_size, num_tokens]
     scalar_t const* __restrict__ input,   // [..., hidden_size]
-    scalar_t const* __restrict__ weight,  // [hidden_size]
+    scalar_wt_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
     int32_t const input_stride, scalar_t* __restrict__ residual = nullptr,
     int64_t outer_scale_stride = 1) {
@@ -111,7 +111,7 @@ __global__ void rms_norm_per_block_quant_kernel(
   // Compute Scale
   // Always able to vectorize due to constraints on hidden_size and group_size
   vllm::vectorized::compute_dynamic_per_token_scales<
-      scalar_t, scalar_out_t, has_residual, is_scale_transposed, group_size>(
+      scalar_t, scalar_wt_t, scalar_out_t, has_residual, is_scale_transposed, group_size>(
       nullptr, scales, input, weight, rms, scale_ub, hidden_size, input_stride,
       residual, outer_scale_stride);
 
@@ -122,7 +122,7 @@ __global__ void rms_norm_per_block_quant_kernel(
   // between multiple threads, so this way, we avoid extra synchronization
   // overhead.
   vllm::vectorized::norm_and_quant<
-      scalar_t, scalar_out_t, std::is_same_v<scalar_out_t, int8_t>,
+      scalar_t, scalar_wt_t, scalar_out_t, std::is_same_v<scalar_out_t, int8_t>,
       has_residual, is_scale_transposed, group_size>(
       out, input, weight, rms, scales, hidden_size, input_stride, residual,
       outer_scale_stride);
@@ -131,7 +131,7 @@ __global__ void rms_norm_per_block_quant_kernel(
 }  // namespace vllm
 
 // Residual add + RMS norm + dynamic per token
-template <typename scalar_in_t>
+template <typename scalar_in_t, typename scalar_wt_t>
 void rms_norm_dynamic_per_token_quant_dispatch(
     torch::stable::Tensor& out,           // [..., hidden_size]
     torch::stable::Tensor const& input,   // [..., hidden_size]
@@ -154,13 +154,13 @@ void rms_norm_dynamic_per_token_quant_dispatch(
   VLLM_STABLE_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
     VLLM_STABLE_DISPATCH_QUANT_TYPES(
         out.scalar_type(), "rms_norm_dynamic_per_token_quant_kernel", [&] {
-          vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_in_t, scalar_t,
+          vllm::rms_norm_dynamic_per_token_quant_kernel<scalar_in_t, scalar_wt_t, scalar_t,
                                                         has_residual>
               <<<grid, block, 0, stream>>>(
                   out.mutable_data_ptr<scalar_t>(),
                   scales.mutable_data_ptr<float>(),
                   input.const_data_ptr<scalar_in_t>(),
-                  weight.const_data_ptr<scalar_in_t>(),
+                  weight.const_data_ptr<scalar_wt_t>(),
                   scale_ub.has_value() ? scale_ub->const_data_ptr<float>()
                                        : nullptr,
                   var_epsilon, hidden_size, input_stride,
@@ -190,7 +190,6 @@ void rms_norm_dynamic_per_token_quant(
   if (scale_ub.has_value()) {
     STD_TORCH_CHECK(out.scalar_type() == kFp8Type);
   }
-  STD_TORCH_CHECK(weight.scalar_type() == input.scalar_type());
   STD_TORCH_CHECK(scales.scalar_type() == torch::headeronly::ScalarType::Float);
   if (residual) {
     STD_TORCH_CHECK(residual->scalar_type() == input.scalar_type());
@@ -199,8 +198,13 @@ void rms_norm_dynamic_per_token_quant(
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_dynamic_per_token_quant_dispatch", [&] {
-        rms_norm_dynamic_per_token_quant_dispatch<scalar_t>(
+        using scalar_in_t = scalar_t;
+        VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+          weight.scalar_type(), "rms_norm_dynamic_per_token_quant_dispatch", [&] {
+            rms_norm_dynamic_per_token_quant_dispatch<scalar_in_t, scalar_t>(
             out, input, weight, scales, var_epsilon, scale_ub, residual);
+          }
+        );
       });
 }
 
@@ -240,32 +244,36 @@ void rms_norm_per_block_quant_dispatch(
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_per_block_quant_fp_dispatch", [&] {
         using scalar_in_t = scalar_t;
-        VLLM_STABLE_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
-          VLLM_STABLE_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
-            VLLM_STABLE_DISPATCH_BOOL(
-                is_scale_transposed, transpose_scale, [&] {
-                  VLLM_STABLE_DISPATCH_QUANT_TYPES(
-                      out.scalar_type(), "rms_norm_per_block_quant_kernel",
-                      [&] {
-                        vllm::rms_norm_per_block_quant_kernel<
-                            scalar_in_t, scalar_t, has_residual,
-                            transpose_scale, gs><<<grid, block, 0, stream>>>(
-                            out.mutable_data_ptr<scalar_t>(),
-                            scales.mutable_data_ptr<float>(),
-                            input.const_data_ptr<scalar_in_t>(),
-                            weight.const_data_ptr<scalar_in_t>(),
-                            scale_ub.has_value()
-                                ? scale_ub->const_data_ptr<float>()
-                                : nullptr,
-                            var_epsilon, hidden_size, input_stride,
-                            has_residual
-                                ? residual->mutable_data_ptr<scalar_in_t>()
-                                : nullptr,
-                            scales.stride(1));
-                      });
-                });
+        VLLM_STABLE_DISPATCH_FLOATING_TYPES(
+          weight.scalar_type(), "rms_norm_per_block_quant_wt_dispatch", [&] {
+            using scalar_wt_t = scalar_t;
+            VLLM_STABLE_DISPATCH_GROUP_SIZE(group_size, gs, [&] {
+              VLLM_STABLE_DISPATCH_BOOL(residual.has_value(), has_residual, [&] {
+                VLLM_STABLE_DISPATCH_BOOL(
+                    is_scale_transposed, transpose_scale, [&] {
+                      VLLM_STABLE_DISPATCH_QUANT_TYPES(
+                          out.scalar_type(), "rms_norm_per_block_quant_kernel",
+                          [&] {
+                            vllm::rms_norm_per_block_quant_kernel<
+                                scalar_in_t, scalar_wt_t, scalar_t, has_residual,
+                                transpose_scale, gs><<<grid, block, 0, stream>>>(
+                                out.mutable_data_ptr<scalar_t>(),
+                                scales.mutable_data_ptr<float>(),
+                                input.const_data_ptr<scalar_in_t>(),
+                                weight.const_data_ptr<scalar_wt_t>(),
+                                scale_ub.has_value()
+                                    ? scale_ub->const_data_ptr<float>()
+                                    : nullptr,
+                                var_epsilon, hidden_size, input_stride,
+                                has_residual
+                                    ? residual->mutable_data_ptr<scalar_in_t>()
+                                    : nullptr,
+                                scales.stride(1));
+                          });
+                    });
+              });
+            });
           });
-        });
       });
 }
 
@@ -289,7 +297,6 @@ void rms_norm_per_block_quant(torch::stable::Tensor& out,
   if (scale_ub.has_value()) {
     STD_TORCH_CHECK(out.scalar_type() == kFp8Type);
   }
-  STD_TORCH_CHECK(weight.scalar_type() == input.scalar_type());
   STD_TORCH_CHECK(scales.scalar_type() == torch::headeronly::ScalarType::Float);
   if (residual) {
     STD_TORCH_CHECK(residual->scalar_type() == input.scalar_type());
