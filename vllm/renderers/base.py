@@ -144,11 +144,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return tokenizer
 
-    def _decode(self, **kwargs):
-        return self.get_tokenizer.decode(**kwargs)
+    def _decode(self, *args, **kwargs):
+        return self.get_tokenizer().decode(*args, **kwargs)
 
-    def _encode(self, **kwargs):
-        return self.get_tokenizer.encode(**kwargs)
+    def _encode(self, *args, **kwargs):
+        return self.get_tokenizer().encode(*args, **kwargs)
 
     def get_mm_processor(self) -> "BaseMultiModalProcessor":
         if self.mm_processor is None:
