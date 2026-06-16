@@ -544,7 +544,7 @@ class MultiModalFlatField(BaseMultiModalField):
                 # An optimization when `batch` contains only one tensor:
                 # - produce exactly same result as `torch.concat(batch)`
                 # - will achieve zero-copy if the tensor is contiguous
-                out = batch[0].unsqueeze(0)
+                out = batch[0]
                 if not pin_memory:
                     return out.contiguous()
                 # Avoid extra copy - pinning unpinned memory will make it contiguous
