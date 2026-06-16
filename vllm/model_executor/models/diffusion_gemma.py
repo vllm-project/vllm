@@ -179,6 +179,14 @@ class DiffusionGemmaForConditionalGeneration(
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        # PP would desync the sampler-owned canvas state across ranks.
+        if vllm_config.parallel_config.pipeline_parallel_size > 1:
+            raise ValueError(
+                "DiffusionGemma does not support pipeline parallelism "
+                "(pipeline_parallel_size > 1). Serve it with a single "
+                "pipeline-parallel stage."
+            )
+
         config = vllm_config.model_config.hf_config
         text_config = vllm_config.model_config.hf_text_config
         self.config = config
