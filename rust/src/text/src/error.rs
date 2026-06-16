@@ -3,6 +3,7 @@ use vllm_engine_core_client::Error as EngineCoreError;
 use vllm_llm::Error as LlmError;
 
 pub use crate::lower::logprobs::LogprobsError;
+pub use crate::lower::token_ids::OutOfVocabError;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -17,6 +18,8 @@ pub enum Error {
     PromptTooLong { max_model_len: u32, prompt_len: u32 },
     #[error(transparent)]
     Logprobs(#[from] LogprobsError),
+    #[error(transparent)]
+    OutOfVocab(#[from] OutOfVocabError),
     #[error("text request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error(transparent)]
