@@ -245,10 +245,6 @@ impl ModelConfig {
     pub(super) fn is_moe(&self) -> bool {
         self.num_experts() > 0
     }
-
-    pub(super) fn max_position_embeddings(&self) -> Option<u32> {
-        self.effective_text_config().max_position_embeddings
-    }
 }
 
 /// Load the tokenizer-side EOS metadata if a config file is present.
@@ -356,7 +352,10 @@ mod tests {
 
         assert_eq!(config.num_experts(), 8);
         assert_eq!(config.model_type(), Some("top_level"));
-        assert_eq!(config.max_position_embeddings(), Some(4096));
+        assert_eq!(
+            config.effective_text_config().max_position_embeddings,
+            Some(4096)
+        );
         assert!(config.is_moe());
     }
 
@@ -367,7 +366,10 @@ mod tests {
 
         assert_eq!(config.num_experts(), 0);
         assert!(!config.is_moe());
-        assert_eq!(config.max_position_embeddings(), Some(4096));
+        assert_eq!(
+            config.effective_text_config().max_position_embeddings,
+            Some(4096)
+        );
     }
 
     #[test]
