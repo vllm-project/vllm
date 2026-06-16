@@ -177,7 +177,7 @@ et-xmlfile==2.0.0
     # via openpyxl
 evaluate==0.4.3
     # via lm-eval
-fastapi==0.137.0
+fastapi==0.136.3
     # via
     #   -c requirements/common.txt
     #   gpt-oss
