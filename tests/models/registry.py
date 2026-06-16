@@ -238,6 +238,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "CohereLabs/c4ai-command-r7b-12-2024",
         trust_remote_code=True,
     ),
+    "Cohere2MoeForCausalLM": _HfExamplesInfo(
+        "CohereLabs/North-Mini-Code",
+        trust_remote_code=True,
+        is_available_online=False,
+        min_transformers_version="5.9.0",
+    ),
     "CwmForCausalLM": _HfExamplesInfo("facebook/cwm", min_transformers_version="4.58"),
     # FIXME: databricks/dbrx-instruct has been deleted
     "DbrxForCausalLM": _HfExamplesInfo(
@@ -260,6 +266,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "DeepseekV32ForCausalLM": _HfExamplesInfo("deepseek-ai/DeepSeek-V3.2-Exp"),
+    "DeepseekV4ForCausalLM": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4-Flash", is_available_online=False
+    ),
     "Ernie4_5ForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-0.3B-PT"),
     "Ernie4_5_MoeForCausalLM": _HfExamplesInfo("baidu/ERNIE-4.5-21B-A3B-PT"),
     "ExaoneForCausalLM": _HfExamplesInfo(
@@ -324,26 +333,13 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
     ),
+    "HYV3ForCausalLM": _HfExamplesInfo("tencent/Hy3-preview", trust_remote_code=True),
     "HyperCLOVAXForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
-        trust_remote_code=True,
-    ),
-    "InternLMForCausalLM": _HfExamplesInfo(
-        "internlm/internlm-chat-7b", trust_remote_code=True
+        min_transformers_version="5.9.0",
     ),
     "InternLM2ForCausalLM": _HfExamplesInfo(
         "internlm/internlm2-chat-7b", trust_remote_code=True
-    ),
-    "InternLM2VEForCausalLM": _HfExamplesInfo(
-        "OpenGVLab/Mono-InternVL-2B",
-        trust_remote_code=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": (
-                "Custom config cannot be loaded with Transformers "
-                "v5 because `vision_config` is not always set"
-            )
-        },
     ),
     "InternLM3ForCausalLM": _HfExamplesInfo(
         "internlm/internlm3-8b-instruct", trust_remote_code=True
@@ -354,7 +350,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "IQuestLoopCoderForCausalLM": _HfExamplesInfo(
         "IQuestLab/IQuest-Coder-V1-40B-Loop-Instruct", trust_remote_code=True
     ),
-    "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "Jais2ForCausalLM": _HfExamplesInfo(
         "inceptionai/Jais-2-8B-Chat", min_transformers_version="4.58"
     ),
@@ -368,6 +363,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "KimiLinearForCausalLM": _HfExamplesInfo(
         "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
     ),
+    "LagunaForCausalLM": _HfExamplesInfo("poolside/Laguna-XS.2"),
     "Lfm2ForCausalLM": _HfExamplesInfo("LiquidAI/LFM2-1.2B"),
     "Lfm2MoeForCausalLM": _HfExamplesInfo(
         "LiquidAI/LFM2-8B-A1B",
@@ -423,6 +419,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiniMaxM2ForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M2",
         trust_remote_code=True,
+    ),
+    "MiniMaxM3SparseForCausalLM": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "Ministral3ForCausalLM": _HfExamplesInfo("mistralai/Ministral-3-3B-Instruct-2512"),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
@@ -495,14 +496,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "pfnet/plamo-3-nict-2b-base",
         trust_remote_code=True,
     ),
-    "QWenLMHeadModel": _HfExamplesInfo(
-        "Qwen/Qwen-7B-Chat",
-        max_transformers_version="4.53",
-        transformers_version_reason={
-            "hf": "HF model uses remote code that is not compatible with latest Transformers"  # noqa: E501
-        },
-        trust_remote_code=True,
-    ),
     "Qwen2ForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen2-0.5B-Instruct",
         extras={
@@ -513,10 +506,15 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
+    "MellumForCausalLM": _HfExamplesInfo("JetBrains/Mellum2-12B-A2.5B-Base"),
     "Qwen3NextForCausalLM": _HfExamplesInfo(
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
         extras={"tiny-random": "tiny-random/qwen3-next-moe"},
         min_transformers_version="4.56.3",
+    ),
+    "Rnj1ForCausalLM": _HfExamplesInfo(
+        "EssentialAI/rnj-1-instruct",
+        is_available_online=False,
     ),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
     "SarvamMoEForCausalLM": _HfExamplesInfo(
@@ -571,20 +569,13 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),
-    "XverseForCausalLM": _HfExamplesInfo(
-        "xverse/XVERSE-7B-Chat",
-        tokenizer="meta-llama/Llama-2-7b",
-        trust_remote_code=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": "XVERSE tokenizer is incompatible with transformers v5 "
-            "(add_prefix_space / prepend_scheme mismatch).",
-        },
-    ),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
     "MiMoV2FlashForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2-Flash", trust_remote_code=True
+    ),
+    "MiMoV2ForCausalLM": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Pro", trust_remote_code=True
     ),
     "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst"),
 }
@@ -592,7 +583,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
-    "ErnieModel": _HfExamplesInfo("shibing624/text2vec-base-chinese-sentence"),
     "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
         "naver/splade-v3",
         hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
@@ -722,9 +712,6 @@ _REWARD_EXAMPLE_MODELS = {
 
 _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForTokenClassification": _HfExamplesInfo("boltuix/NeuroBERT-NER"),
-    "ErnieForTokenClassification": _HfExamplesInfo(
-        "gyr66/Ernie-3.0-base-chinese-finetuned-ner"
-    ),
     "ModernBertForTokenClassification": _HfExamplesInfo(
         "disham993/electrical-ner-ModernBERT-base"
     ),
@@ -733,9 +720,6 @@ _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    ),
-    "ErnieForSequenceClassification": _HfExamplesInfo(
-        "Forrest20231206/ernie-3.0-base-zh-cls",
     ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "nie3e/sentiment-polish-gpt2-small"
@@ -827,7 +811,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "Cohere2VisionForConditionalGeneration": _HfExamplesInfo(
-        "CohereLabs/command-a-vision-07-2025"
+        "CohereLabs/command-a-vision-07-2025",
+        extras={"command-a-plus": "CohereLabs/command-a-plus-05-2026-bf16"},
+        min_transformers_version="5.9.0",
+    ),
+    "Cosmos3ForConditionalGeneration": _HfExamplesInfo(
+        "nvidia/Cosmos3-Nano",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        is_available_online=False,
     ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
@@ -890,26 +882,48 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
+    "DiffusionGemmaForBlockDiffusion": _HfExamplesInfo(
+        "google/diffusiongemma-26B-A4B-it",
+        trust_remote_code=True,
+    ),
     "Gemma4ForConditionalGeneration": _HfExamplesInfo(
         "google/gemma-4-E2B-it",
         min_transformers_version="5.5.0",
+    ),
+    # TODO: update min_transformers_version when Gemma4 Unified lands in
+    # a stable transformers release.
+    "Gemma4UnifiedForConditionalGeneration": _HfExamplesInfo(
+        "google/gemma-4-12B-it",
+        min_transformers_version="5.8.0",
+        is_available_online=False,
     ),
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmAsrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-ASR-Nano-2512",
         min_transformers_version="5.0.0",
     ),
+    "Granite4VisionForConditionalGeneration": _HfExamplesInfo(
+        "ibm-granite/granite-vision-4.1-4b",
+        is_available_online=False,
+    ),
     "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
         "ibm-granite/granite-speech-3.3-2b",
         extras={"4.0-1b": "ibm-granite/granite-4.0-1b-speech"},
+    ),
+    "GraniteSpeechPlusForConditionalGeneration": _HfExamplesInfo(
+        "ibm-granite/granite-speech-4.1-2b-plus",
+        min_transformers_version="5.8.0",
     ),
     "GLM4VForCausalLM": _HfExamplesInfo(
         "zai-org/glm-4v-9b",
         trust_remote_code=True,
         hf_overrides={"architectures": ["GLM4VForCausalLM"]},
     ),
-    "Glm4vForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.1V-9B-Thinking"),
+    "Glm4vForConditionalGeneration": _HfExamplesInfo(
+        "zai-org/GLM-4.1V-9B-Thinking",
+        extras={"4.6V": "zai-org/GLM-4.6V-Flash"},
+    ),
     "Glm4vMoeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V"),
     "GlmOcrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-OCR",
@@ -925,13 +939,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": (
-                "Custom config cannot be loaded with Transformers "
-                "v5 because `text_config` is not always set"
-            )
-        },
     ),
     "HCXVisionV2ForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
@@ -949,6 +956,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "PerceptronAI/Isaac-0.1",
         trust_remote_code=True,
         extras={"0.2-2B-Preview": "PerceptronAI/Isaac-0.2-2B-Preview"},
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "Custom Isaac code is not compatible with Transformers v5. "
+                "The model should be upstreamed to Transformers for "
+                "long-term support."
+            ),
+            "hf": (
+                "Isaac's remote model and processor code import or configure "
+                "APIs that changed in Transformers v5."
+            ),
+        },
     ),
     "InternS1ForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1",
@@ -961,6 +980,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1-Pro",
         trust_remote_code=True,
+    ),
+    "InternS2PreviewForConditionalGeneration": _HfExamplesInfo(
+        "internlm/Intern-S2-Preview",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "InternVLChatModel": _HfExamplesInfo(
         "OpenGVLab/InternVL2-1B",
@@ -1045,6 +1069,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiDashengLMModel": _HfExamplesInfo(
         "mispeech/midashenglm-7b", trust_remote_code=True
     ),
+    "MiMoV2OmniForCausalLM": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Omni", trust_remote_code=True, is_available_online=False
+    ),
     "MiniCPMO": _HfExamplesInfo(
         "openbmb/MiniCPM-o-2_6",
         trust_remote_code=True,
@@ -1069,9 +1096,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
         trust_remote_code=True,
     ),
+    "MiniCPMV4_6ForConditionalGeneration": _HfExamplesInfo(
+        "openbmb/MiniCPM-V-4_6",
+        min_transformers_version="5.7.0",
+    ),
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-VL-01",
         trust_remote_code=True,
+    ),
+    "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
@@ -1084,6 +1120,16 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "vllm": "Incorrectly-detected `tensorflow` import from processor."
         },
         extras={"olmo": "allenai/Molmo-7B-O-0924"},
+        trust_remote_code=True,
+    ),
+    "Moondream3ForCausalLM": _HfExamplesInfo(
+        "moondream/moondream3-preview",
+        tokenizer="moondream/starmie-v1",
+        trust_remote_code=True,
+    ),
+    "HfMoondream": _HfExamplesInfo(
+        "moondream/moondream3-preview",
+        tokenizer="moondream/starmie-v1",
         trust_remote_code=True,
     ),
     "Molmo2ForConditionalGeneration": _HfExamplesInfo(
@@ -1102,30 +1148,17 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "NemotronH_Nano_VL_V2": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
         max_model_len=4096,
-        # NemotronH layers are constructed via `hybrid_override_pattern`:
+        # NemotronH layers are constructed via `hybrid_override_pattern`
         use_original_num_layers=True,
         hf_overrides={
-            "vision_config": PretrainedConfig(
-                args={
-                    "min_num_patches": 1,  # Trigger image dynamic res
-                    "max_num_patches": 12,
-                    "model": "vit_huge_patch16_224",
-                },
-                # Trigger conv3d:
-                video_temporal_patch_size=2,
-            ),
-            "text_config": {
-                "num_hidden_layers": 2,
-                "hybrid_override_pattern": "M*",
-            },
+            "text_config": {"num_hidden_layers": 2, "hybrid_override_pattern": "M*"},
         },
         trust_remote_code=True,
     ),
-    # NemotronH_Nano_Omni_Reasoning_V3 is an alias for NemotronH_Nano_VL_V2
-    # Use the same registry test as NemotronH_Nano_VL_V2 above
     "NemotronH_Nano_Omni_Reasoning_V3": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16",
         max_model_len=4096,
+        # NemotronH layers are constructed via `hybrid_override_pattern`
         use_original_num_layers=True,
         hf_overrides={
             "vision_config": PretrainedConfig(
@@ -1135,35 +1168,17 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                     "model": "vit_huge_patch16_224",
                 },
                 video_temporal_patch_size=2,
+                # TODO(nhaber): This is `true` in the official `config.json`,
+                # but this causes a processor exception in the tests due to a known bug
+                # with mixed-resolution video when `true`. To be resolved.
+                video_maintain_aspect_ratio=False,
             ),
-            "text_config": {
-                "num_hidden_layers": 2,
-                "hybrid_override_pattern": "M*",
-            },
+            "text_config": {"num_hidden_layers": 2, "hybrid_override_pattern": "M*"},
         },
         trust_remote_code=True,
     ),
-    # NemotronH_Super_Omni_Reasoning_V3 is an alias for NemotronH_Nano_VL_V2 as well
-    # Use the same registry test as NemotronH_Nano_VL_V2 above
     "NemotronH_Super_Omni_Reasoning_V3": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
-        max_model_len=4096,
-        use_original_num_layers=True,
-        hf_overrides={
-            "vision_config": PretrainedConfig(
-                args={
-                    "min_num_patches": 1,
-                    "max_num_patches": 12,
-                    "model": "vit_huge_patch16_224",
-                },
-                video_temporal_patch_size=2,
-            ),
-            "text_config": {
-                "num_hidden_layers": 2,
-                "hybrid_override_pattern": "M*",
-            },
-        },
-        trust_remote_code=True,
+        "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16", is_available_online=False
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B",
@@ -1185,6 +1200,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                 "making all kwargs required. See https://huggingface.co/FreedomIntelligence/openPangu-VL-7B/discussions/2"
             )
         },
+    ),
+    "OpenVLAForActionPrediction": _HfExamplesInfo(
+        "openvla/openvla-7b",
+        trust_remote_code=True,
     ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
@@ -1256,15 +1275,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
         tokenizer_mode="mistral",
     ),
-    "QwenVLForConditionalGeneration": _HfExamplesInfo(
-        "Qwen/Qwen-VL",
-        extras={"chat": "Qwen/Qwen-VL-Chat"},
-        trust_remote_code=True,
-        max_transformers_version="4.53.3",
-        transformers_version_reason={
-            "hf": "HF model uses deprecated imports which have been removed."
-        },  # noqa: E501
-        hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
+    "QianfanOCRForConditionalGeneration": _HfExamplesInfo(
+        "baidu/Qianfan-OCR",
+        min_transformers_version="5.6.0",
     ),
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen2-Audio-7B-Instruct"
@@ -1318,7 +1331,16 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
     "SkyworkR1VChatModel": _HfExamplesInfo(
-        "Skywork/Skywork-R1V-38B", trust_remote_code=True
+        "Skywork/Skywork-R1V-38B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "SkyworkChatModel.__init__ does not call self.post_init(), so "
+                "`all_tied_weights_keys` is never set; Transformers v5 requires "
+                "this attribute in _move_missing_keys_from_meta_to_device."
+            )
+        },
     ),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
@@ -1328,6 +1350,16 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "StepVLForConditionalGeneration": _HfExamplesInfo(
         "stepfun-ai/Step3-VL-10B", trust_remote_code=True
+    ),
+    "Step3p7ForConditionalGeneration": _HfExamplesInfo(
+        "stepfun-ai/Step-3.7-Flash",
+        trust_remote_code=True,
+        use_original_num_layers=True,
+        # The MoE config lives in the nested ``text_config``, so the overrides
+        # must be nested too. Use 4 layers to initialize at least one MoE layer
+        # and shrink ``moe_num_experts`` (a non-standard key not handled by
+        # ``dummy_hf_overrides``) to avoid OOM during init.
+        hf_overrides={"text_config": {"num_hidden_layers": 4, "moe_num_experts": 8}},
     ),
     "UltravoxModel": _HfExamplesInfo(
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
@@ -1360,12 +1392,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     # [Encoder-decoder]
     "CohereAsrForConditionalGeneration": _HfExamplesInfo(
-        "CohereLabs/cohere-transcribe-03-2026",
-        trust_remote_code=True,
-        is_available_online=False,  # TODO (ekagra): revert after asr release
+        "CohereLabs/cohere-transcribe-03-2026", trust_remote_code=True
     ),
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/NVIDIA-Nemotron-Parse-v1.1", trust_remote_code=True
+        "nvidia/NVIDIA-Nemotron-Parse-v1.2", trust_remote_code=True
     ),
     "WhisperForConditionalGeneration": _HfExamplesInfo(
         "openai/whisper-large-v3-turbo",
@@ -1395,7 +1425,22 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
+    "DFlashQwen3NextDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3-Coder-Next",
+        speculative_model="z-lab/Qwen3-Coder-Next-DFlash",
+        use_original_num_layers=True,  # DFlash requires all layers
+        max_model_len=8192,  # Reduce for CI
+        max_num_seqs=32,
+        min_transformers_version="4.56.3",  # Required for Qwen3Next
+    ),
     # [Eagle]
+    "EagleCohereForCausalLM": _HfExamplesInfo(
+        "/host/engines/cohere-moe",
+        speculative_model="/host/engines/cohere-moe/eagle",
+        tokenizer="/host/engines/cohere-moe",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "EagleDeepSeekMTPModel": _HfExamplesInfo(
         "eagle618/deepseek-v3-random",
         speculative_model="eagle618/eagle-deepseek-v3-random",
@@ -1433,6 +1478,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
         tokenizer="MiniMaxAI/MiniMax-M2",
     ),
+    "EagleMistralForCausalLM": _HfExamplesInfo(
+        "mistralai/Mistral-Medium-3.5-128B",
+        speculative_model="mistralai/Mistral-Medium-3.5-128B-EAGLE",
+        is_available_online=False,
+    ),
     "EagleMistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512",
         speculative_model="mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle",
@@ -1467,11 +1517,38 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "Qwen/Qwen3-VL-8B-Instruct",
         speculative_model="taobao-mnn/Qwen3-VL-8B-Instruct-Eagle3",
     ),
+    # [PEagle]
+    "PEagleDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        trust_remote_code=True,
+        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
+        tokenizer="Qwen/Qwen3-8B",
+        use_original_num_layers=True,
+    ),
+    "PeagleLlamaForCausalLM": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        trust_remote_code=True,
+        speculative_model="nm-testing/qwen3-8b-peagle-speculators",
+        tokenizer="Qwen/Qwen3-8B",
+        use_original_num_layers=True,
+    ),
     # [MTP]
     "DeepSeekMTPModel": _HfExamplesInfo(
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
         trust_remote_code=True,
+    ),
+    "DeepSeekV4MTPModel": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4-Flash",
+        speculative_model="deepseek-ai/DeepSeek-V4-Flash",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
+    "Gemma4MTPModel": _HfExamplesInfo(
+        "google/gemma-4-E4B-it",
+        speculative_model="google/gemma-4-E4B-it-assistant",
+        trust_remote_code=True,
+        min_transformers_version="5.8.0",
     ),
     "ErnieMTPModel": _HfExamplesInfo(
         "baidu/ERNIE-4.5-21B-A3B-PT",
@@ -1508,6 +1585,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         min_transformers_version="5.1.0",
     ),
+    "HYV3MTPModel": _HfExamplesInfo(
+        "tencent/Hy3-preview",
+        speculative_model="tencent/Hy3-preview",
+    ),
     "LongCatFlashMTPModel": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat",
         trust_remote_code=True,
@@ -1517,6 +1598,23 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "XiaomiMiMo/MiMo-7B-RL",
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-7B-RL",
+    ),
+    "MiMoV2MTPModel": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Pro",
+        trust_remote_code=True,
+        speculative_model="XiaomiMiMo/MiMo-V2.5-Pro",
+        is_available_online=False,
+    ),
+    "MiMoV2OmniMTPModel": _HfExamplesInfo(
+        "XiaomiMiMo/MiMo-V2.5-Omni",
+        trust_remote_code=True,
+        speculative_model="XiaomiMiMo/MiMo-V2.5-Omni",
+        is_available_online=False,
+    ),
+    "MiniMaxM3MTP": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "NemotronHMTPModel": _HfExamplesInfo(
         "nvidia/Nemotron-Super-Placeholder",

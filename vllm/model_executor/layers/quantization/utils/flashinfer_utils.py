@@ -5,10 +5,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
@@ -36,6 +34,7 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.GELU_NO_MUL: ActivationType.Gelu,
         MoEActivation.SILU: ActivationType.Swiglu,
         MoEActivation.GELU: ActivationType.Geglu,
+        MoEActivation.GELU_TANH: ActivationType.Geglu,
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation]
@@ -92,35 +91,6 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     )
     gemm2_weights.data = torch.stack(gemm2_weights_fp8_shuffled).view(
         torch.float8_e4m3fn
-    )
-
-
-def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
-    backend_map = {
-        "throughput": FlashinferMoeBackend.CUTLASS,
-        "latency": FlashinferMoeBackend.TENSORRT_LLM,
-        "masked_gemm": FlashinferMoeBackend.CUTEDSL,
-    }
-
-    flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
-    if flashinfer_moe_backend in backend_map:
-        if (
-            flashinfer_moe_backend == "latency"
-            and not current_platform.is_device_capability_family(100)
-        ):
-            logger.info_once(
-                "Flashinfer TRTLLM MOE backend is only supported on "
-                "SM100 and later, using CUTLASS backend instead",
-                scope="local",
-            )
-            return FlashinferMoeBackend.CUTLASS
-        return backend_map[flashinfer_moe_backend]
-    elif current_platform.is_device_capability(90):
-        return FlashinferMoeBackend.CUTLASS
-
-    raise ValueError(
-        f"Unknown flashinfer moe backend: {flashinfer_moe_backend!r}. "
-        f"Expected one of {list(backend_map.keys())}."
     )
 
 
@@ -239,7 +209,6 @@ def align_fp4_moe_weights_for_fi(
         "Padding intermediate size from %d to %d for up/down projection weights.",
         intermediate,
         padded_intermediate,
-        scope="local",
     )
 
     up_mult = 2 if is_act_and_mul else 1
@@ -285,7 +254,6 @@ def align_trtllm_fp4_moe_hidden_dim_for_fi(
         "performance degradation.",
         hidden_size,
         padded_hidden_size,
-        scope="local",
     )
 
     padded_w13 = w13.new_zeros((num_experts, gate_up_dim, padded_hidden_size // 2))
@@ -331,7 +299,6 @@ def align_fp8_moe_weights_for_fi(
         "Padding intermediate size from %d to %d for up/down projection weights.",
         intermediate,
         padded_intermediate,
-        scope="local",
     )
 
     up_mult = 2 if is_act_and_mul else 1

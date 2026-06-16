@@ -152,7 +152,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         # Keep these as batched, as they always have batch size as first dim
         mm_fields["image_grid_thw"] = MultiModalFieldConfig.batched("image")
         mm_fields["video_grid_thw"] = MultiModalFieldConfig.batched("image")
-        mm_fields["num_image_patches"] = MultiModalFieldConfig.batched("image")
+        mm_fields["num_image_patches"] = MultiModalFieldConfig.batched(
+            "image", keep_on_cpu=True
+        )
         return mm_fields
 
     def _get_hf_mm_data(
@@ -204,12 +206,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
 
         # For gemma3 we check `token_type_ids` as the key
-        token_type_key = (
-            "mm_token_type_ids"
-            if "mm_token_type_ids" in processed_data
-            else "token_type_ids"
+        mm_token_type_ids = processed_data.get(
+            "mm_token_type_ids", processed_data.pop("token_type_ids", None)
         )
-        mm_token_type_ids = processed_data.get(token_type_key)
 
         # We can infer vLLM style placeholder from token type ids, if we split
         # it for each input `mm_data`.
@@ -262,8 +261,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
 
 class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
-    supports_multimodal_raw_input_only = True
-
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         # Skip SupportsMRoPE.__init__ and call the next class in MRO
         super(SupportsMRoPE, self).__init__(vllm_config=vllm_config, prefix=prefix)
@@ -336,15 +333,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        # Gemma3 and PaliGemma needs `token_type_ids` to work correctly
-        # Other models will not have `token_type_ids` in kwargs
-        kwargs = {k: v for k, v in kwargs.items() if k == "token_type_ids"}
         # Positions shape handling for MRoPE models
         if self.model_config.uses_mrope:
             # [3, seq_len] -> [3, 1, seq_len]
             positions = positions[:, None]
         model_output = super().forward(
-            input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
+            input_ids, positions, intermediate_tensors, inputs_embeds
         )
         return model_output
 
@@ -383,7 +377,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             return None
 
         num_image_patches = kwargs.pop("num_image_patches")
-        kwargs.pop("token_type_ids", None)  # used only in `forward`
         kwargs.pop("mm_token_type_ids", None)  # used only in `model.get_rope_index`
 
         if pixel_values is not None:

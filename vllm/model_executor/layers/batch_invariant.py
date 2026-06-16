@@ -8,15 +8,11 @@ from typing import Any
 import torch
 
 import vllm.envs as envs
-from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import is_torch_equal_or_newer
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
-logger = init_logger(__name__)
 
 
 def _matmul_launch_metadata(
@@ -25,22 +21,15 @@ def _matmul_launch_metadata(
     ret = {}
     m, n, k = args["M"], args["N"], args["K"]
     ret["name"] = f"{kernel.name} [M={m}, N={n}, K={k}]"
-    if "tiles_per_update" in args:
-        ret["name"] = (
-            f"{kernel.name} [M={m}, N={n}, K={k}, "
-            f"tiles_per_update={args['tiles_per_update']:02}]"
-        )
-    if "c_ptr" in args:
-        bytes_per_elem = args["c_ptr"].element_size()
-    else:
-        bytes_per_elem = 1 if args["FP8_OUTPUT"] else 2
+
+    bytes_per_elem = args["c_ptr"].element_size()
     ret[f"flops{bytes_per_elem * 8}"] = 2.0 * m * n * k
     ret["bytes"] = bytes_per_elem * (m * k + n * k + m * n)
     return ret
 
 
 @triton.jit
-def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS):
+def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M):
     group_id = tile_id // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
@@ -86,9 +75,7 @@ def matmul_kernel_persistent(
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
 
     for tile_id in tl.range(start_pid, num_tiles, NUM_SMS, flatten=True):
-        pid_m, pid_n = _compute_pid(
-            tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS
-        )
+        pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M)
         start_m = pid_m * BLOCK_SIZE_M
         start_n = pid_n * BLOCK_SIZE_N
         offs_am = start_m + tl.arange(0, BLOCK_SIZE_M)
@@ -125,7 +112,7 @@ def matmul_kernel_persistent(
 
         tile_id_c += NUM_SMS
         pid_m, pid_n = _compute_pid(
-            tile_id_c, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS
+            tile_id_c, num_pid_in_group, num_pid_m, GROUP_SIZE_M
         )
         offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
@@ -194,7 +181,6 @@ def matmul_persistent(
             "num_warps": 8,
         },
     }
-    # print(a.device, b.device, c.device)
     matmul_kernel_persistent[grid](
         a,
         b,
@@ -423,7 +409,7 @@ def log_softmax(input: torch.Tensor, dim: int = -1) -> torch.Tensor:
         input: Input tensor
         dim: Dimension along which to compute log_softmax
              (only -1 or last dim supported)
-    >> Stashed changes
+
     Returns:
         Tensor with log_softmax applied along the specified dimension
     """
@@ -836,23 +822,35 @@ def _rms_norm_kernel(
         tl.store(output_row_start_ptr + col_idx, output, mask=mask)
 
 
-def rms_norm(
-    input: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6
-) -> torch.Tensor:
+def rms_norm_batch_invariant(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float = 1e-6,
+    residual: torch.Tensor | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     Compute RMS normalization using Triton kernel.
 
-    RMS Norm normalizes the input by the root mean square and scales by weight:
-    output = input / sqrt(mean(input^2) + eps) * weight
 
     Args:
         input: Input tensor of shape (..., hidden_size)
         weight: Weight tensor of shape (hidden_size,)
         eps: Small constant for numerical stability
+        residual: Optional residual tensor fused into the normalization path
 
     Returns:
-        Tensor with RMS normalization applied along the last dimension
+        RMS normalized tensor, or ``(output, residual_out)`` when ``residual``
+        is provided
     """
+    if residual is not None:
+        assert input.shape == residual.shape, (
+            f"Input shape {input.shape} must match residual shape {residual.shape}"
+        )
+        import vllm._custom_ops as ops
+
+        ops.fused_add_rms_norm(input, residual, weight, eps)
+        return input, residual
+
     assert weight.dim() == 1, "Weight must be 1-dimensional"
     assert input.shape[-1] == weight.shape[0], (
         f"Input last dimension ({input.shape[-1]}) must match "
@@ -883,26 +881,6 @@ def rms_norm(
     return output.reshape(original_shape)
 
 
-def rms_norm_batch_invariant(
-    input: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6
-) -> torch.Tensor:
-    """
-    Batch-invariant wrapper for RMS normalization.
-
-    This function provides a deterministic, batch-invariant implementation
-    of RMS normalization for use with the batch_invariant mode.
-
-    Args:
-        input: Input tensor of shape (..., hidden_size)
-        weight: Weight tensor of shape (hidden_size,)
-        eps: Small constant for numerical stability
-
-    Returns:
-        RMS normalized tensor
-    """
-    return rms_norm(input, weight, eps=eps)
-
-
 def linear_batch_invariant(input, weight, bias=None):
     output = matmul_batch_invariant(input, weight.t())
 
@@ -913,18 +891,11 @@ def linear_batch_invariant(input, weight, bias=None):
 
 _batch_invariant_MODE = False
 _batch_invariant_LIB = None
-_original_torch_bmm = None
-_original_fp16_reduction_precision = None
-_original_bf16_reduction_precision = None
-_original_cublas_workspace_cfg = None
-_original_cublaslt_workspace_size = None
 _fp16_block_size_n = 256
 
 
 def enable_batch_invariant_mode():
-    global _batch_invariant_MODE, _batch_invariant_LIB, _original_torch_bmm
-    global _original_fp16_reduction_precision, _original_bf16_reduction_precision
-    global _original_cublas_workspace_cfg, _original_cublaslt_workspace_size
+    global _batch_invariant_MODE, _batch_invariant_LIB
     global _fp16_block_size_n
 
     if _batch_invariant_MODE:
@@ -933,28 +904,24 @@ def enable_batch_invariant_mode():
     _batch_invariant_MODE = True
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
-    if current_platform.is_device_capability_family(
-        100
-    ) or current_platform.is_device_capability_family(80):
-        # For PyTorch 2.9, B200 uses GEMV for bs=1
-        # Requires https://github.com/pytorch/pytorch/pull/166735
+    if current_platform.is_device_capability_family(80):
+        # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
+        # triton persistent matmul overrides for mm/addmm/matmul/linear.
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "CUDA")
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "CUDA")
         _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "CUDA")
         _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "CUDA")
-
-        # Query the shared memory size and set block size
-        # accordingly to avoid triton OutOfResources
-        _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
     else:
-        # Only source of batch invariance for Hopper is split-k, can disable through
-        # cuBLAS workspace config
-        _original_cublas_workspace_cfg = os.environ.get("CUBLAS_WORKSPACE_CONFIG", None)
-        _original_cublaslt_workspace_size = os.environ.get(
-            "CUBLASLT_WORKSPACE_SIZE", None
-        )
+        # Hopper (SM90) and Blackwell (SM100): the only source of batch
+        # variance is split-k, which we disable via the cuBLAS workspace
+        # config.
         os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
         os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
+
+    # Triton bmm/persistent-matmul kernels read this for the FP16 N-tile size;
+    # set unconditionally because bmm is overridden on all CUDA platforms.
+    if current_platform.is_cuda():
+        _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
 
     _batch_invariant_LIB.impl(
         "aten::_log_softmax", _log_softmax_batch_invariant, "CUDA"
@@ -963,17 +930,13 @@ def enable_batch_invariant_mode():
     _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, "CUDA")
     _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, "CUDA")
 
-    # Also monkeypatch torch.bmm directly as a fallback
-    _batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "CUDA")
-    _original_torch_bmm = torch.bmm
+    # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
+    # (torch._native.ops.bmm_outer_product), so we need allow_override
+    # to replace it at the dispatcher level.
+    _batch_invariant_LIB.impl(
+        "aten::bmm", bmm_batch_invariant, "CUDA", allow_override=True
+    )
     torch.bmm = bmm_batch_invariant
-
-    _original_bf16_reduction_precision = (
-        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
-    )
-    _original_fp16_reduction_precision = (
-        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
-    )
 
     reduced_precision_val = (
         (False, False) if is_torch_equal_or_newer("2.10.0") else False
@@ -987,40 +950,7 @@ def enable_batch_invariant_mode():
     torch.backends.cuda.preferred_blas_library(backend="cublaslt")
 
 
-def override_envs_for_invariance(
-    attention_backend: AttentionBackendEnum | None,
-):
-    decode_invariant_backends = [
-        AttentionBackendEnum.FLASH_ATTN,  # best supported backend
-        AttentionBackendEnum.TRITON_ATTN,
-    ]
-    supported_backends = decode_invariant_backends + [
-        # FlashInfer temporarily disabled due to invariant CTA sizes.
-        # See FlashInfer issue #2424
-        # AttentionBackendEnum.FLASHINFER,
-        AttentionBackendEnum.FLASH_ATTN_MLA,
-        AttentionBackendEnum.TRITON_MLA,
-        # Not yet supported MLA backends
-        # AttentionBackendEnum.FLASHMLA,
-        # AttentionBackendEnum.FLEX_ATTENTION,  # IMA issue
-        # AttentionBackendEnum.FLASHINFER_MLA,  # PR #28967
-    ]
-    if attention_backend not in supported_backends:
-        supported_names = [b.name for b in supported_backends]
-        backend_name = attention_backend.name if attention_backend else None
-        error = (
-            "VLLM batch_invariant mode requires an attention backend in "
-            f"{supported_names}, but got '{backend_name}'. "
-            "Please use --attention-backend or attention_config to set "
-            "one of the supported backends before enabling batch_invariant."
-        )
-        raise RuntimeError(error)
-    if attention_backend not in decode_invariant_backends:
-        warning = (
-            "You are using a non-decode-invariant form of batch invariance. "
-            "This will not be invariant between prefill and decode."
-        )
-        logger.warning_once(warning, scope="local")
+def override_envs_for_invariance():
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
 
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
@@ -1041,12 +971,10 @@ def override_envs_for_invariance(
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
 
 
-def init_batch_invariance(
-    attention_backend: AttentionBackendEnum | None,
-):
+def init_batch_invariance():
     # this will hit all the csrc overrides as well
     if envs.VLLM_BATCH_INVARIANT:
-        override_envs_for_invariance(attention_backend)
+        override_envs_for_invariance()
         enable_batch_invariant_mode()
 
         # Disable TF32 for batch invariance - it causes non-deterministic rounding
