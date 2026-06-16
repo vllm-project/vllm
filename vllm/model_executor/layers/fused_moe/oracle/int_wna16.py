@@ -1069,63 +1069,6 @@ def convert_to_wna16_moe_kernel_format(
                 w13_bias,
                 w2_bias,
             )
-    elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
-        return _process_weights_flashinfer(
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            w13_g_idx,
-            w2_g_idx,
-            w13_bias,
-            w2_bias,
-        )
-    elif backend == WNA16MoEBackend.TRITON:
-        # Three possible input layouts depending on the quantization source:
-        #
-        # MoeWNA16 (uint8):              (E, N_out, K // bit8_pack)  — N-first
-        #   → just view as uint8 (no-op)
-        #
-        # AutoGPTQ (int32, K-first):    (E, K // pack32, N_out)
-        #   → transpose to N-first, then view as uint8 to get
-        #     (E, N_out, K // bit8_pack)  [int32 = 4 bytes → 4 uint8s]
-        #   Scales: (E, K // gs, N_out) → transpose → (E, N_out, K // gs)
-        #
-        # compressed-tensors (int32, N-first "Flashinfer" layout):
-        #   (E, N_out, K // pack32)  — already N-first
-        #   → just view as uint8; scales are already (E, N_out, K // gs)
-        from vllm.model_executor.layers.quantization.auto_gptq import (
-            AutoGPTQConfig,
-        )
-
-        if isinstance(quant_config, AutoGPTQConfig):
-            # AutoGPTQ always builds in Marlin (K-first) format even when
-            # the Triton backend is selected.  Transpose to N-first first.
-            w13_uint8 = w13.transpose(1, 2).contiguous().view(torch.uint8)
-            w2_uint8 = w2.transpose(1, 2).contiguous().view(torch.uint8)
-            w13_scale = w13_scale.transpose(1, 2).contiguous()
-            w2_scale = w2_scale.transpose(1, 2).contiguous()
-        else:
-            # MoeWNA16 and compressed-tensors both use N-first layout when
-            # targeting the Triton backend.
-            w13_uint8 = w13.view(torch.uint8)
-            w2_uint8 = w2.view(torch.uint8)
-        return (
-            w13_uint8,
-            w2_uint8,
-            w13_scale,
-            w2_scale,
-            None,
-            None,
-            None,
-            None,
-            w13_qzeros,
-            w2_qzeros,
-            None,
-            None,
-            w13_bias,
-            w2_bias,
-        )
     elif backend == WNA16MoEBackend.CPU:
         return _process_weights_cpu(
             quant_config,
@@ -1186,6 +1129,52 @@ def convert_to_wna16_moe_kernel_format(
             None,  # w2_input_global_scale
             w13_bias_out,
             w2_bias_out,
+        )
+    elif backend == WNA16MoEBackend.TRITON:
+        # Three possible input layouts depending on the quantization source:
+        #
+        # MoeWNA16 (uint8):              (E, N_out, K // bit8_pack)  — N-first
+        #   → just view as uint8 (no-op)
+        #
+        # AutoGPTQ (int32, K-first):    (E, K // pack32, N_out)
+        #   → transpose to N-first, then view as uint8 to get
+        #     (E, N_out, K // bit8_pack)  [int32 = 4 bytes → 4 uint8s]
+        #   Scales: (E, K // gs, N_out) → transpose → (E, N_out, K // gs)
+        #
+        # compressed-tensors (int32, N-first "Flashinfer" layout):
+        #   (E, N_out, K // pack32)  — already N-first
+        #   → just view as uint8; scales are already (E, N_out, K // gs)
+        from vllm.model_executor.layers.quantization.auto_gptq import (
+            AutoGPTQConfig,
+        )
+
+        if isinstance(quant_config, AutoGPTQConfig):
+            # AutoGPTQ always builds in Marlin (K-first) format even when
+            # the Triton backend is selected.  Transpose to N-first first.
+            w13_uint8 = w13.transpose(1, 2).contiguous().view(torch.uint8)
+            w2_uint8 = w2.transpose(1, 2).contiguous().view(torch.uint8)
+            w13_scale = w13_scale.transpose(1, 2).contiguous()
+            w2_scale = w2_scale.transpose(1, 2).contiguous()
+        else:
+            # MoeWNA16 and compressed-tensors both use N-first layout when
+            # targeting the Triton backend.
+            w13_uint8 = w13.view(torch.uint8)
+            w2_uint8 = w2.view(torch.uint8)
+        return (
+            w13_uint8,
+            w2_uint8,
+            w13_scale,
+            w2_scale,
+            None,
+            None,
+            None,
+            None,
+            w13_qzeros,
+            w2_qzeros,
+            None,
+            None,
+            w13_bias,
+            w2_bias,
         )
     else:
         raise ValueError(f"Unsupported wna16 MoE backend: {backend.value}")
