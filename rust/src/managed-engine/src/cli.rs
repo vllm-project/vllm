@@ -71,6 +71,7 @@ impl ManagedEngineArgs {
         self,
         model: String,
         max_model_len: Option<u32>,
+        max_logprobs: Option<i32>,
         language_model_only: bool,
         disable_log_stats: bool,
         shutdown_timeout: u64,
@@ -81,6 +82,10 @@ impl ManagedEngineArgs {
         if let Some(max_model_len) = max_model_len {
             python_args.push("--max-model-len".to_string());
             python_args.push(max_model_len.to_string());
+        }
+        if let Some(max_logprobs) = max_logprobs {
+            python_args.push("--max-logprobs".to_string());
+            python_args.push(max_logprobs.to_string());
         }
         if language_model_only {
             python_args.push("--language-model-only".to_string());
