@@ -554,6 +554,11 @@ class ParallelLMHead(VocabParallelEmbedding):
 
     def tie_weights(self, embed_tokens: VocabParallelEmbedding):
         """Tie the weights with word embeddings."""
+        # Packed/quantized embeddings (e.g. compressed-tensors WNA16) expose no
+        # plain ``weight`` to share; reuse the embedding module directly so its
+        # quant method serves the lm_head matmul.
+        if not hasattr(embed_tokens, "weight"):
+            return embed_tokens
         return self.quant_method.tie_weights(self, embed_tokens)
 
     def forward(self, input_):
