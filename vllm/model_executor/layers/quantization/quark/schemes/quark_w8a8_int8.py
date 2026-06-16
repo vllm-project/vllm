@@ -10,6 +10,13 @@ from vllm.model_executor.kernels.linear import (
     init_int8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kDynamicTokenScale,
+    kInt8StaticChannelSym,
+    kInt8StaticTensorSym,
+    kStaticTensorScale,
+)
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     ChannelQuantScaleParameter,
@@ -58,10 +65,29 @@ class QuarkW8A8Int8(QuarkScheme):
                 loaded_weight = loaded_weight.unsqueeze(-1)
             return weight_loader(param, loaded_weight, *args, **kwargs)
 
+        is_channelwise = self.qscheme == "per_channel"
+        weight_quant_key = (
+            kInt8StaticChannelSym if is_channelwise else kInt8StaticTensorSym
+        )
+
+        is_static = self.is_static_input_scheme is True
+        input_symmetric = self.input_symmetric is True
+        if is_static:
+            activation_quant_key = QuantKey(
+                torch.int8,
+                kStaticTensorScale,
+                symmetric=input_symmetric,
+            )
+        else:
+            activation_quant_key = QuantKey(
+                torch.int8,
+                kDynamicTokenScale,
+                symmetric=input_symmetric,
+            )
+
         self.kernel = init_int8_linear_kernel(
-            is_channelwise=(self.qscheme == "per_channel"),
-            is_static_input_scheme=(self.is_static_input_scheme is True),
-            input_symmetric=(self.input_symmetric is True),
+            weight_quant_key=weight_quant_key,
+            activation_quant_key=activation_quant_key,
             module_name=self.__class__.__name__,
         )
 

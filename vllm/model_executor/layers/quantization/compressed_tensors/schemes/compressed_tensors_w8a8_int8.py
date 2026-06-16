@@ -13,6 +13,13 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kDynamicTokenScale,
+    kInt8StaticChannelSym,
+    kInt8StaticTensorSym,
+    kStaticTensorScale,
+)
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     ChannelQuantScaleParameter,
@@ -47,10 +54,27 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
     ):
         layer.logical_widths = output_partition_sizes
 
+        is_channelwise = self.strategy == QuantizationStrategy.CHANNEL
+        weight_quant_key = (
+            kInt8StaticChannelSym if is_channelwise else kInt8StaticTensorSym
+        )
+
+        if self.is_static_input_scheme:
+            activation_quant_key = QuantKey(
+                torch.int8,
+                kStaticTensorScale,
+                symmetric=self.input_symmetric,
+            )
+        else:
+            activation_quant_key = QuantKey(
+                torch.int8,
+                kDynamicTokenScale,
+                symmetric=self.input_symmetric,
+            )
+
         self.kernel = init_int8_linear_kernel(
-            is_channelwise=(self.strategy == QuantizationStrategy.CHANNEL),
-            is_static_input_scheme=self.is_static_input_scheme,
-            input_symmetric=self.input_symmetric,
+            weight_quant_key=weight_quant_key,
+            activation_quant_key=activation_quant_key,
             module_name=self.__class__.__name__,
         )
 

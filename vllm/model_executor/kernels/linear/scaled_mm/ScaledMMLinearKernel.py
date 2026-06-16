@@ -23,10 +23,8 @@ from ..base import MMLinearLayerConfig
 
 @dataclass
 class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
-    # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
-    is_static_input_scheme: bool
-    is_channelwise: bool
-    input_symmetric: bool
+    weight_quant_key: QuantKey
+    activation_quant_key: QuantKey
 
 
 @dataclass
