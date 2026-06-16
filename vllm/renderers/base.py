@@ -89,9 +89,12 @@ class BaseRenderer(ABC, Generic[_T]):
         # to keep the asyncio event loop responsive under concurrent load.
         self._mm_executor: Executor = self._executor
 
-        # Offloading tokenizer.encode to thread pool.
+        # Offloading tokenizer encode & decode to thread pool.
         self._async_tokenizer_encode = make_async(
             self.get_tokenizer().encode, executor=self._executor
+        )
+        self._async_tokenizer_decode = make_async(
+            self.get_tokenizer().decode, executor=self._executor
         )
 
         self.mm_processor: BaseMultiModalProcessor | None = None
@@ -441,7 +444,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return prompt
 
     async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
-        prompt["prompt"] = await self._async_tokenizer_encode(
+        prompt["prompt"] = await self._async_tokenizer_decode(
             prompt["prompt_token_ids"]
         )
 
