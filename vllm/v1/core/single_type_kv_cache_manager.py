@@ -1015,6 +1015,75 @@ class MambaManager(SingleTypeKVCacheManager):
 
         return computed_blocks
 
+    @classmethod
+    def reachable_block_mask(
+        cls,
+        start_block: int,
+        end_block: int,
+        alignment_tokens: int | None,
+        kv_cache_spec: KVCacheSpec,
+        use_eagle: bool,
+        retention_interval: int | None = None,
+        num_prompt_tokens: int | None = None,
+    ) -> list[bool] | None:
+        """Sparse Mamba state-snapshot retention.
+
+        A Mamba prefix-cache hit resumes the recurrent state from a *single*
+        cached state block at an ``alignment_tokens`` boundary (see
+        ``find_longest_cache_hit``). Caching the state at every block is what
+        lets a hit land at the finest granularity, but each snapshot is a full
+        recurrent state (one logical block, span >= 1) and dense retention can
+        dominate the KV pool at small block sizes — at ``block_size`` 128 a
+        per-block snapshot fills most of the pool, starving the allocator of
+        uncached blocks and forcing eviction of live attention prefixes.
+
+        ``retention_interval`` trades hit granularity for footprint by keeping
+        only one cached state per segment instead of one per block:
+
+          ``None`` -> dense (cache every block; default, unchanged behavior)
+          ``0``    -> keep only the latest replay boundary
+          ``> 0``  -> keep one state per ``retention_interval``-sized segment
+
+        A hit then resumes from the nearest retained boundary at or before the
+        shared prefix length (at most ``retention_interval`` tokens coarser),
+        which costs a little extra prefill but frees the intermediate snapshots
+        for reuse. ``retention_interval`` is validated to be a multiple of the
+        scheduler block size, so segment boundaries are always valid Mamba hit
+        boundaries.
+        """
+        if retention_interval is None or alignment_tokens is None:
+            # Dense caching (default) or no alignment constraint imposed.
+            return None
+        assert isinstance(kv_cache_spec, MambaSpec)
+        block_size = kv_cache_spec.block_size
+        mask = [False] * (end_block - start_block)
+
+        # (1) Segment-boundary states. A Mamba hit needs exactly the single
+        # state block ending on the boundary (no window, and draft models have
+        # no mamba layers, so no eagle shift). Block ``i`` ends at token
+        # ``(i + 1) * block_size``.
+        segment_tokens = None if retention_interval == 0 else retention_interval
+        if segment_tokens is not None:
+            per_segment = segment_tokens // block_size
+            if per_segment <= 1:
+                # Interval at/below the block size: every block is a boundary.
+                return None
+            for i in range(start_block, end_block):
+                if (i + 1) % per_segment == 0:
+                    mask[i - start_block] = True
+
+        # (2) Replay boundary. ``get_computed_blocks`` caps hits at
+        # ``num_prompt - 1``, so an exact prompt replay lands on the latest
+        # fine-aligned boundary. Sparse retention would otherwise skip its
+        # state, so keep it explicitly.
+        if num_prompt_tokens is not None:
+            latest = (num_prompt_tokens - 1) // alignment_tokens * alignment_tokens
+            boundary_block = latest // block_size - 1
+            if start_block <= boundary_block < end_block:
+                mask[boundary_block - start_block] = True
+
+        return mask
+
     def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
 
@@ -1221,9 +1290,12 @@ class MambaManager(SingleTypeKVCacheManager):
             for block in self.req_to_blocks[request.request_id][
                 num_cached_blocks_before:num_cached_blocks_after
             ]:
-                if block.is_null:
+                # Skip null blocks (align-mode skipped states) and blocks that
+                # were not cached this step — with sparse retention
+                # (reachable_block_mask) the intermediate state snapshots carry
+                # no hash and must not be recorded as cached-this-step.
+                if block.is_null or block.block_hash is None:
                     continue
-                assert block.block_hash is not None
                 self.cached_blocks_this_step.add(block.block_hash)
 
     def new_step_starts(self) -> None:
