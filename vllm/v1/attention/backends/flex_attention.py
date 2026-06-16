@@ -12,6 +12,7 @@ import torch
 import torch._dynamo.decorators
 import torch.nn.functional as F
 from torch.nn.attention.flex_attention import (
+    AuxRequest,
     BlockMask,
     _mask_mod_signature,
     _score_mod_signature,
@@ -1045,6 +1046,9 @@ class FlexAttentionImpl(AttentionImpl):
         if block_n is not None:
             self.block_n = block_n
 
+        # Optional post-attention epilogue transform
+        self.out_transform = kwargs.get("out_transform")
+
     @staticmethod
     def view_as_4d(tensor: torch.Tensor) -> torch.Tensor:
         """View a 3d tensor as 4D."""
@@ -1206,7 +1210,12 @@ class FlexAttentionImpl(AttentionImpl):
             self.scale,
             enable_gqa=enable_gqa,
             kernel_options=kernel_options,
+            return_aux=AuxRequest(lse=True) if self.out_transform is not None else None,
         )
+
+        if self.out_transform is not None:
+            out, aux = out
+            out = self.out_transform(out, aux.lse)
 
         # Flex doesn't have an out variant today, rely on epilogue fusion
         out = out.permute(0, 2, 1, 3).squeeze(0)
