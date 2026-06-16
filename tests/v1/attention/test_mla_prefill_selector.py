@@ -15,7 +15,6 @@ from vllm.v1.attention.backends.mla.prefill.selector import (
     MLAPrefillSelectorConfig,
     _auto_select_mla_prefill_backend,
     get_mla_prefill_backend,
-    get_mla_prefill_selector_config,
 )
 
 
@@ -220,15 +219,15 @@ class TestBackendValidation:
             pytest.skip("MLA prefill backend not available")
             return
 
-        vllm_config = _make_vllm_config(
-            model_config=_make_mock_model_config(
+        capability = DeviceCapability(major=10, minor=0)
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=MLADimensions(
                 qk_nope_head_dim=128,
                 qk_rope_head_dim=64,
                 v_head_dim=128,
-            )
+            ),
         )
-        capability = DeviceCapability(major=10, minor=0)
-        selector_config = get_mla_prefill_selector_config(vllm_config)
 
         with patch.object(FlashInferPrefillBackend, "is_available", return_value=True):
             invalid_reasons = FlashInferPrefillBackend.validate_configuration(
@@ -237,14 +236,14 @@ class TestBackendValidation:
             )
             assert len(invalid_reasons) == 0
 
-        vllm_config_invalid = _make_vllm_config(
-            model_config=_make_mock_model_config(
+        selector_config_invalid = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=MLADimensions(
                 qk_nope_head_dim=64,
                 qk_rope_head_dim=64,
                 v_head_dim=128,
-            )
+            ),
         )
-        selector_config_invalid = get_mla_prefill_selector_config(vllm_config_invalid)
 
         with patch.object(FlashInferPrefillBackend, "is_available", return_value=True):
             invalid_reasons = FlashInferPrefillBackend.validate_configuration(
@@ -254,19 +253,13 @@ class TestBackendValidation:
             assert len(invalid_reasons) == 1
             assert "supported MLA dimensions" in invalid_reasons[0]
 
-        vllm_config_glm5 = _make_vllm_config(
-            model_config=_make_mock_model_config(
+        selector_config_glm5 = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=MLADimensions(
                 qk_nope_head_dim=192,
                 qk_rope_head_dim=64,
                 v_head_dim=256,
-            )
-        )
-        selector_config_glm5 = get_mla_prefill_selector_config(vllm_config_glm5)
-
-        assert selector_config_glm5.mla_dimensions == MLADimensions(
-            qk_nope_head_dim=192,
-            qk_rope_head_dim=64,
-            v_head_dim=256,
+            ),
         )
 
         with patch.object(

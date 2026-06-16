@@ -38,31 +38,11 @@ class MLAPrefillSelectorConfig(NamedTuple):
         v_head_dim=0,
     )
 
-
-def get_mla_prefill_selector_config(
-    vllm_config: "VllmConfig",
-) -> MLAPrefillSelectorConfig:
-    if vllm_config.model_config is None:
-        mla_dimensions = MLADimensions(
-            qk_nope_head_dim=0,
-            qk_rope_head_dim=0,
-            v_head_dim=0,
+    def __repr__(self):
+        return (
+            f"MLAPrefillSelectorConfig(dtype={self.dtype}, "
+            f"mla_dimensions={self.mla_dimensions})"
         )
-        return MLAPrefillSelectorConfig(
-            dtype=torch.get_default_dtype(),
-            mla_dimensions=mla_dimensions,
-        )
-
-    hf_text_config = vllm_config.model_config.hf_text_config
-    mla_dimensions = MLADimensions(
-        qk_nope_head_dim=getattr(hf_text_config, "qk_nope_head_dim", 0),
-        qk_rope_head_dim=getattr(hf_text_config, "qk_rope_head_dim", 0),
-        v_head_dim=getattr(hf_text_config, "v_head_dim", 0),
-    )
-    return MLAPrefillSelectorConfig(
-        dtype=vllm_config.model_config.dtype,
-        mla_dimensions=mla_dimensions,
-    )
 
 
 def _get_mla_prefill_backend_priorities(
@@ -115,7 +95,19 @@ def get_mla_prefill_backend(
 
     attention_config = vllm_config.attention_config
 
-    selector_config = get_mla_prefill_selector_config(vllm_config)
+    model_config = vllm_config.model_config
+    if model_config is None:
+        selector_config = MLAPrefillSelectorConfig(dtype=torch.get_default_dtype())
+    else:
+        hf_text_config = model_config.hf_text_config
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=model_config.dtype,
+            mla_dimensions=MLADimensions(
+                qk_nope_head_dim=getattr(hf_text_config, "qk_nope_head_dim", 0),
+                qk_rope_head_dim=getattr(hf_text_config, "qk_rope_head_dim", 0),
+                v_head_dim=getattr(hf_text_config, "v_head_dim", 0),
+            ),
+        )
 
     if attention_config.mla_prefill_backend is not None:
         selected_backend = attention_config.mla_prefill_backend

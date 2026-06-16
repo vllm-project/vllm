@@ -458,15 +458,6 @@ def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
 
     # Parse class variables
     for item in class_node.body:
-        if isinstance(item, ast.Assign):
-            for target in item.targets:
-                if isinstance(target, ast.Name) and (
-                    target.id == "supported_mla_dimensions"
-                ):
-                    info["supported_mla_dimensions"] = parse_supported_mla_dimensions(
-                        item.value
-                    )
-
         if (
             isinstance(item, ast.AnnAssign)
             and isinstance(item.target, ast.Name)

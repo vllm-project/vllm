@@ -26,6 +26,13 @@ class MLADimensions:
     qk_rope_head_dim: int
     v_head_dim: int
 
+    def __str__(self) -> str:
+        return (
+            f"(qk_nope_head_dim={self.qk_nope_head_dim}, "
+            f"qk_rope_head_dim={self.qk_rope_head_dim}, "
+            f"v_head_dim={self.v_head_dim})"
+        )
+
 
 class MLAPrefillBackend(ABC):
     """Abstract base class for MLA prefill backends."""
@@ -83,20 +90,10 @@ class MLAPrefillBackend(ABC):
             cls.supported_mla_dimensions
             and selector_config.mla_dimensions not in cls.supported_mla_dimensions
         ):
-            supported = ", ".join(
-                f"(qk_nope_head_dim={dims.qk_nope_head_dim}, "
-                f"qk_rope_head_dim={dims.qk_rope_head_dim}, "
-                f"v_head_dim={dims.v_head_dim})"
-                for dims in cls.supported_mla_dimensions
-            )
+            supported = ", ".join(str(dims) for dims in cls.supported_mla_dimensions)
             invalid_reasons.append(
                 "Model does not have supported MLA dimensions "
-                "(got qk_nope_head_dim="
-                f"{selector_config.mla_dimensions.qk_nope_head_dim}, "
-                "qk_rope_head_dim="
-                f"{selector_config.mla_dimensions.qk_rope_head_dim}, "
-                f"v_head_dim={selector_config.mla_dimensions.v_head_dim}; "
-                f"supported: {supported})"
+                f"(got {selector_config.mla_dimensions}; supported: {supported})"
             )
 
         return invalid_reasons
