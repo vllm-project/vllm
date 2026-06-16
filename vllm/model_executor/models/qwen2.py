@@ -41,6 +41,7 @@ from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
 )
+from vllm.model_executor.layers.fusion.residual_stream import Scatter, finalize_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -420,7 +421,17 @@ class Qwen2Model(nn.Module, EagleModelMixin):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        # Route the final norm through the residual-stream finalizer: it reduces
+        # only when the last decoder left its output PARTIAL (migrated/deferred
+        # decoders, e.g. Qwen3). Unmigrated decoders expose no output_scatter ->
+        # FULL -> plain norm, identical to the pre-fusion path.
+        last_layer = self.layers[self.end_layer - 1]
+        hidden_states = finalize_norm(
+            self.norm,
+            hidden_states,
+            residual,
+            incoming=getattr(last_layer, "output_scatter", Scatter.FULL),
+        )
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

@@ -1,23 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Prototype: a per-layer TP communication state machine for manual fusion.
+"""``ResidualStream``: the single manual-fusion entry point for a decoder layer.
 
-Minimal skeleton of the manual-fusion endgame abstraction (RFC #43224),
-borrowing from SGLang's ``LayerCommunicator`` / tokenspeed's ``Placement``:
-instead of gating all-reduce in model code with ``do_allreduce=...`` booleans
-and a ``fuse_allreduce`` branch, each hidden-states tensor carries a typed
-distribution state and the communicator performs the one transition needed.
+The transformer residual stream is the running sum each sublayer reads from (via
+RMSNorm) and writes back into. ``ResidualStream`` owns that read point: at each
+sublayer boundary it performs the one transition the stream's distribution state
+requires -- (all-reduce +) residual-add + RMSNorm + optional activation-quant --
+and hands the (possibly pre-quantized) activation to the next consumer linear.
+This is the manual-fusion endgame shape for RFC #43224: model ``forward`` becomes
+``prepare_attn -> attn -> prepare_mlp -> mlp`` with no ``do_allreduce`` booleans
+or ``fuse_allreduce`` branch, and is the only abstraction model code touches (it
+subsumes the standalone ``fused_ar_rms_norm_quant`` kernel-dispatch helper).
 
-The communicator is the single path for every decoder and reads the layer's
-modules *live*, so it tracks late changes (e.g. eagle replacing its layer-0 norm
-with ``nn.Identity()`` after ``__init__``). Whether the layer defers its reduce
-is read from the row-linear's existing ``reduce_results`` flag -- the single
-source of truth -- so there is no separate fusion flag:
-- linears defer (``reduce_results=False``): inputs arrive ``PARTIAL``; the
-  communicator reduces them once while normalizing.
-- linears reduce themselves (``reduce_results=True``): inputs arrive ``FULL``;
-  the communicator only normalizes. This is how MoE / unfused reusers share the
-  same forward with no special-casing.
+It reads the layer's modules *live*, so it tracks late changes (e.g. eagle
+replacing its layer-0 norm with ``nn.Identity()`` after ``__init__``). Whether the
+layer defers its reduce is read from the row-linear's existing ``reduce_results``
+flag -- the single source of truth -- so there is no separate fusion flag:
+- linears defer (``reduce_results=False``): inputs arrive ``PARTIAL``; the stream
+  reduces them once while normalizing.
+- linears reduce themselves (``reduce_results=True``): inputs arrive ``FULL``; the
+  stream only normalizes. This is how MoE / unfused reusers share the same forward
+  with no special-casing.
 A second all-reduce is impossible by construction (``FULL`` never reduces), and a
 non-RMSNorm ``norm`` (eagle Identity) is tolerated.
 
@@ -48,7 +51,7 @@ class Scatter(Enum):
     # SHARD = auto()  # sequence-parallel token shard (future: RS/AG transitions)
 
 
-class LayerCommunicator:
+class ResidualStream:
     """Owns (AR +) residual-add + RMSNorm(+quant) for one decoder layer.
 
     Holds the decoder ``layer`` and reads its norms / consumer linears / reduce

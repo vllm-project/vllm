@@ -38,8 +38,9 @@ from vllm.model_executor.layers.attention.encoder_only_attention import (
     Attention,
     EncoderOnlyAttention,
 )
-from vllm.model_executor.layers.fusion.ar_rms_quant import (
-    fused_ar_rms_norm_quant,
+from vllm.model_executor.layers.fusion.residual_stream import (
+    ResidualStream,
+    Scatter,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
@@ -182,7 +183,6 @@ class Qwen3DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.tp_size = get_tensor_model_parallel_world_size()
         set_default_rope_theta(config, default_theta=1000000)
         dual_chunk_attention_config = getattr(
             config, "dual_chunk_attention_config", None
@@ -224,6 +224,10 @@ class Qwen3DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        # Qwen3 always defers (o_proj/down_proj run reduce_results=False), so this
+        # layer leaves a per-rank PARTIAL sum for the next layer / the final norm.
+        self.output_scatter = Scatter.PARTIAL
+        self.residual_stream = ResidualStream(self)
 
     def forward(
         self,
@@ -231,24 +235,15 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # residual is None only at layer 0 of the first PP rank (full-rank input).
-        hidden_states, residual = fused_ar_rms_norm_quant(
-            hidden_states,
-            residual,
-            self.input_layernorm,
-            consumer_linear=self.self_attn.qkv_proj,
-            do_allreduce=(residual is not None and self.tp_size > 1),
+        hidden_states, residual = self.residual_stream.prepare_attn(
+            hidden_states, residual
         )
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
-        hidden_states, residual = fused_ar_rms_norm_quant(
-            hidden_states,
-            residual,
-            self.post_attention_layernorm,
-            consumer_linear=self.mlp.gate_up_proj,
-            do_allreduce=(self.tp_size > 1),
+        hidden_states, residual = self.residual_stream.prepare_mlp(
+            hidden_states, residual
         )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual

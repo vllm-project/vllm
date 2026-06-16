@@ -208,10 +208,14 @@ class MistralDecoderLayer(LlamaDecoderLayer):
             hidden_states = self.mlp(hidden_states)
             return hidden_states, residual
 
-        # Standard Mistral: same communicator path as the base decoder.
-        hidden_states, residual = self.comm.prepare_attn(hidden_states, residual)
+        # Standard Mistral: same residual-stream path as the base decoder.
+        hidden_states, residual = self.residual_stream.prepare_attn(
+            hidden_states, residual
+        )
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-        hidden_states, residual = self.comm.prepare_mlp(hidden_states, residual)
+        hidden_states, residual = self.residual_stream.prepare_mlp(
+            hidden_states, residual
+        )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 

@@ -39,8 +39,8 @@ from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
 )
-from vllm.model_executor.layers.fusion.communicator import (
-    LayerCommunicator,
+from vllm.model_executor.layers.fusion.residual_stream import (
+    ResidualStream,
     Scatter,
     finalize_norm,
 )
@@ -329,7 +329,7 @@ class LlamaDecoderLayer(nn.Module):
         # Distribution state this layer leaves its output in (read by the model's
         # final norm). Deferred (fused) decoders skip o_proj/down_proj reduce.
         self.output_scatter = Scatter.FULL if reduce_results else Scatter.PARTIAL
-        self.comm = LayerCommunicator(self)
+        self.residual_stream = ResidualStream(self)
 
     def forward(
         self,
@@ -337,9 +337,13 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        hidden_states, residual = self.comm.prepare_attn(hidden_states, residual)
+        hidden_states, residual = self.residual_stream.prepare_attn(
+            hidden_states, residual
+        )
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-        hidden_states, residual = self.comm.prepare_mlp(hidden_states, residual)
+        hidden_states, residual = self.residual_stream.prepare_mlp(
+            hidden_states, residual
+        )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
