@@ -27,11 +27,13 @@ from vllm.config import (
 from vllm.config.load import LoadConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.utils import extend_all_queries_by_N
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
@@ -43,6 +45,52 @@ dflash_dir = "z-lab/Qwen3-8B-DFlash-b16"
 
 BLOCK_SIZE = 16
 DEVICE_TYPE = current_platform.device_type
+
+
+def _make_common_attn_metadata() -> CommonAttentionMetadata:
+    device = torch.device("cpu")
+    query_start_loc = torch.tensor([0, 51], dtype=torch.int32, device=device)
+    seq_lens = torch.tensor([51], dtype=torch.int32, device=device)
+
+    return CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc.cpu(),
+        seq_lens=seq_lens,
+        seq_lens_cpu_upper_bound=seq_lens.cpu(),
+        _seq_lens_cpu=seq_lens.cpu(),
+        _num_computed_tokens_cpu=torch.tensor([0], dtype=torch.int32),
+        num_reqs=1,
+        num_actual_tokens=51,
+        max_query_len=51,
+        max_seq_len=51,
+        block_table_tensor=torch.zeros((1, 4), dtype=torch.int32, device=device),
+        slot_mapping=torch.arange(51, dtype=torch.int64, device=device),
+    )
+
+
+def test_extend_all_queries_by_n_invalidates_stale_cpu_shadows():
+    common_attn_metadata = _make_common_attn_metadata()
+    updated_metadata = extend_all_queries_by_N(
+        common_attn_metadata,
+        N=1,
+        arange=torch.arange(2, dtype=torch.int32),
+        new_slot_mapping=torch.arange(52, dtype=torch.int64),
+    )
+
+    assert torch.equal(
+        updated_metadata.query_start_loc, torch.tensor([0, 52], dtype=torch.int32)
+    )
+    assert torch.equal(updated_metadata.seq_lens, torch.tensor([52], dtype=torch.int32))
+
+    assert updated_metadata._seq_lens_cpu is None
+    assert updated_metadata._num_computed_tokens_cpu is None
+
+    assert torch.equal(
+        updated_metadata.seq_lens_cpu, torch.tensor([52], dtype=torch.int32)
+    )
+    assert torch.equal(
+        updated_metadata.num_computed_tokens_cpu, torch.tensor([0], dtype=torch.int32)
+    )
 
 
 def _create_proposer(
