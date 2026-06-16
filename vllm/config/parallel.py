@@ -220,6 +220,10 @@ class ParallelConfig:
     prefills. If the number of tokens in the request is greater than this
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
+    dbo_prefill_min_seq_len: int = 2048
+    """Min max-prompt-length in a prefill batch for DBO to fire. Below this,
+    DBO setup overhead dominates and the cell regresses. Set to 0 to disable
+    the gate."""
 
     disable_nccl_for_dp_synchronization: bool | None = None
     """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 

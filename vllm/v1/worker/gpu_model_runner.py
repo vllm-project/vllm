@@ -2403,7 +2403,8 @@ class GPUModelRunner(
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[attn_group.layer_names[0]]
-            cache_key = (kv_cache_spec, type(builder))
+            # ubid in key: each ubatch gets its own FlashAttentionMetadata.
+            cache_key = (kv_cache_spec, type(builder), ubid)
 
             cascade_attn_prefix_len = (
                 cascade_attn_prefix_lens[kv_cache_gid][attn_gid]
@@ -3896,10 +3897,10 @@ class GPUModelRunner(
                 "a multiple of tensor parallel size"
             )
 
-        # Extra coordination when running data-parallel since we need to coordinate
-        # across ranks
+        # Enter for any ubatched run (incl. DP=1); coordinate_batch_across_dp
+        # short-circuits cross-rank ops when DP=1.
         should_ubatch, num_tokens_across_dp = False, None
-        if self.vllm_config.parallel_config.data_parallel_size > 1:
+        if self.vllm_config.parallel_config.num_ubatches > 1:
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
                 coordinate_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
@@ -3908,6 +3909,7 @@ class GPUModelRunner(
                     num_tokens_padded=num_tokens_padded,
                     uniform_decode=uniform_decode,
                     cudagraph_mode=cudagraph_mode.value,
+                    num_scheduled_tokens_per_request=num_scheduled_tokens_np,
                 )
             )
 

@@ -878,7 +878,7 @@ class VllmConfig:
                     "pipeline parallelism (PP > 1)."
                 )
 
-            # Incompatible with any KV connector — covers both PD disaggregation
+            # Incompatible with any KV connector - covers both PD disaggregation
             # (kv_producer/kv_consumer: routing captured on P can't reach D) and
             # single-instance KV offload/sharing (kv_both: slot_mapping semantics
             # change when KV blocks live outside local GPU memory, breaking the
@@ -1090,7 +1090,7 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
-        # For model classes don't carry @support_torch_compile —
+        # For model classes don't carry @support_torch_compile -
         # the breakable cudagraph is the supported PIECEWISE path. Auto-enable
         # it unless the user has explicitly opted out via the env var.
         if (
@@ -1442,19 +1442,19 @@ class VllmConfig:
             )
 
         if self.parallel_config.use_ubatching:
-            a2a_backend = self.parallel_config.all2all_backend
-            assert a2a_backend in [
-                "deepep_low_latency",
-                "deepep_high_throughput",
-                "nixl_ep",
-            ], (
-                "Microbatching currently only supports the deepep_low_latency, "
-                "deepep_high_throughput, and nixl_ep all2all backends. "
-                f"{a2a_backend} is not supported. To fix use "
-                "--all2all-backend=deepep_low_latency, "
-                "--all2all-backend=deepep_high_throughput, or "
-                "--all2all-backend=nixl_ep and install the matching kernels."
-            )
+            # deepep_* and nixl_ep backends are only required when EP is active.
+            if self.parallel_config.enable_expert_parallel:
+                a2a_backend = self.parallel_config.all2all_backend
+                if a2a_backend not in [
+                    "deepep_low_latency",
+                    "deepep_high_throughput",
+                    "nixl_ep",
+                ]:
+                    raise ValueError(
+                        "Microbatching with EP requires --all2all-backend="
+                        "deepep_low_latency, deepep_high_throughput, or nixl_ep; "
+                        f"got {a2a_backend}."
+                    )
 
             if not self.model_config.disable_cascade_attn:
                 self.model_config.disable_cascade_attn = True
