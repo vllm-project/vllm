@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaCopySpec,
     get_conv_copy_spec,
     get_temporal_copy_spec,
 )
@@ -86,6 +87,31 @@ def postprocess_mamba(
             if src_block_idx == dest_block_idx:
                 num_accepted_tokens_cpu[i] = 1
     do_mamba_copy_block(copy_bufs)
+
+
+class _FakeBuffer:
+    def __init__(self, array: np.ndarray):
+        self.np = array
+
+
+class _FakeBlock:
+    def __init__(self, ptr: int):
+        self._ptr = ptr
+
+    def data_ptr(self) -> int:
+        return self._ptr
+
+
+class _FakeState:
+    def __init__(self, ptrs: list[int], element_size: int):
+        self._ptrs = ptrs
+        self._element_size = element_size
+
+    def __getitem__(self, idx: int) -> _FakeBlock:
+        return _FakeBlock(self._ptrs[idx])
+
+    def element_size(self) -> int:
+        return self._element_size
 
 
 def _make_scheduler_output(
@@ -2132,3 +2158,39 @@ class TestPostprocessMambaFusedKernel:
             expected_accepted,
             msg="num_accepted_tokens mismatch at accept_token_bias=2",
         )
+
+
+def test_collect_mamba_copy_meta_accepts_high_bit_device_pointers():
+    """XPU pointers may be >= 2**63; store them by uint64 bit pattern."""
+    src_ptr = 2**63 + 17
+    dst_ptr = 2**63 + 41
+    state = _FakeState([0, dst_ptr], element_size=2)
+
+    copy_bufs = MambaCopyBuffers(
+        src_ptrs=_FakeBuffer(np.zeros(1, dtype=np.int64)),
+        dst_ptrs=_FakeBuffer(np.zeros(1, dtype=np.int64)),
+        sizes=_FakeBuffer(np.zeros(1, dtype=np.int32)),
+        mamba_group_ids=[0],
+        mamba_spec=MagicMock(),
+    )
+    kv_cache_config = MagicMock()
+    kv_cache_config.kv_cache_groups = [MagicMock(layer_names=["layer"])]
+    req_state = MagicMock(block_ids=([0, 1],))
+    forward_context = {"layer": MagicMock(kv_cache=[state])}
+
+    collect_mamba_copy_meta(
+        copy_bufs,
+        kv_cache_config,
+        (lambda *_: MambaCopySpec(start_addr=src_ptr, num_elements=7),),
+        [0],
+        src_block_idx=0,
+        dest_block_idx=1,
+        accept_token_bias=0,
+        req_state=req_state,
+        forward_context=forward_context,
+    )
+
+    assert copy_bufs.src_ptrs.np.view(np.uint64)[0] == src_ptr
+    assert copy_bufs.dst_ptrs.np.view(np.uint64)[0] == dst_ptr
+    assert copy_bufs.sizes.np[0] == 14
+    assert copy_bufs.offset == 1
