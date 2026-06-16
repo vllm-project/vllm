@@ -267,12 +267,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         )
         self._kv_cache = kv_caches[self.cache_layers[0]]
 
-        # Bind the allocated KV cache to the CacheOnlyAttentionLayer.
-        # bind_kv_cache() runs before the draft model is loaded, so the
-        # layer still holds its empty placeholder tensor.
-        for name, layer in layers.items():
-            layer.kv_cache = kv_caches[name]
-
         # Find the KV cache group index for hidden states
         if self._kv_cache_config is not None:
             for i, group in enumerate(self._kv_cache_config.kv_cache_groups):
