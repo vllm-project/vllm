@@ -475,6 +475,7 @@ class UBatchWrapper:
         dp_metadata = forward_context.dp_metadata
 
         # DP=1 (single-host TP-only DBO): dp_metadata is None.
+        ubatch_dp_metadata: list[DPMetadata | None]
         if dp_metadata is None:
             ubatch_dp_metadata = [None] * len(ubatch_slices)
         else:
