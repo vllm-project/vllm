@@ -268,7 +268,7 @@ class SpeculativeConfig:
     literal 'auto'. None disables dynamic verifying.
     Only applies to dflash for now."""
 
-    dynamic_verifying_min_length: int = Field(default=0, ge=0)
+    dynamic_verifying_min_length: int = Field(default=1, ge=1)
     """Minimum number of draft tokens to keep per request when dynamic
     verification is enabled. Prevents over-truncation when confidence is
     uniformly low. Only takes effect when dynamic_verifying is not None."""
@@ -901,10 +901,11 @@ class SpeculativeConfig:
             return
 
         if self.method != "dflash":
-            raise ValueError(
+            logger.warning(
                 f"dynamic_verifying is only supported with dflash for now, "
-                f"got method='{self.method}'."
+                f"got method='{self.method}', dynamic_verifying is set to None and disabled."
             )
+            self.dynamic_verifying = None
 
         if isinstance(self.dynamic_verifying, str):
             if self.dynamic_verifying not in ["auto"]:
@@ -917,7 +918,7 @@ class SpeculativeConfig:
                 if self.dynamic_verifying == 0:
                     logger.warning(
                         "dynamic_verifying=0 is effectively disabling dynamic "
-                        "verification, dynamic_verifying is set to None."
+                        "verification, dynamic_verifying is set to None and disabled."
                     )
                     self.dynamic_verifying = None
                 else:
