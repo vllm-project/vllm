@@ -145,8 +145,8 @@ impl ChatLlm {
         self.text.tokenizer_vocab_size()
     }
 
-    /// Model vocabulary size, else `None`.
-    pub fn model_vocab_size(&self) -> Option<usize> {
+    /// Model vocabulary size from the model config.
+    pub fn model_vocab_size(&self) -> usize {
         self.text.model_vocab_size()
     }
 

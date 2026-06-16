@@ -423,6 +423,8 @@ class Gemma4Parser(ParserEngine):
         tools: list[Tool] | None = None,
         **kwargs,
     ) -> None:
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        self._thinking_enabled = chat_kwargs.get("enable_thinking", True)
         super().__init__(
             tokenizer,
             tools,
@@ -436,6 +438,21 @@ class Gemma4Parser(ParserEngine):
         self._reasoning_text: str = ""
         self._prefix_stripped: bool = False
         self._is_first_feed: bool = True
+
+    def adjust_request(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        """Skip ``skip_special_tokens=False`` when thinking is disabled.
+
+        When there are no reasoning channel tokens to preserve,
+        keeping the default prevents tool-call delimiter tokens
+        from leaking into content (e.g. with ``tool_choice="none"``).
+        """
+        chat_template_kwargs = getattr(request, "chat_template_kwargs", None) or {}
+        if not chat_template_kwargs.get("enable_thinking", True):
+            return request
+        return super().adjust_request(request)
 
     def _reset(self, initial_state=None) -> None:
         super()._reset(initial_state=initial_state)
@@ -494,12 +511,12 @@ class Gemma4Parser(ParserEngine):
             if tool_call_id is not None and tid == tool_call_id:
                 return True
             if new_turn_id is not None and tid == new_turn_id:
-                return False
+                return not self._thinking_enabled
             if tool_response_id is not None and tid == tool_response_id:
-                return False
+                return not self._thinking_enabled
             if end_id is not None and tid == end_id:
                 return True
-        return self._reasoning_ended
+        return True
 
     def _events_to_delta(
         self,
