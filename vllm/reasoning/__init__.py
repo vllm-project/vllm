@@ -49,8 +49,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Ernie45ReasoningParser",
     ),
     "gemma4": (
-        "gemma4_reasoning_parser",
-        "Gemma4ReasoningParser",
+        "gemma4_engine_reasoning_parser",
+        "Gemma4ParserReasoningAdapter",
     ),
     "glm45": (
         "deepseek_v3_reasoning_parser",

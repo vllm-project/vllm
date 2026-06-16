@@ -118,7 +118,7 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
             # -- Tool call transitions --
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
-                (EventType.TOOL_CALL_START,),
+                (EventType.REASONING_END, EventType.TOOL_CALL_START),
             ),
             # Fallback: <function= without a preceding <tool_call>
             (ParserState.CONTENT, "FUNC_PREFIX"): Transition(

@@ -33,6 +33,7 @@ class Sample:
     expected_tool_calls: list[dict] | None
     tools: list[dict] | None = None
     chat_template_kwargs: dict | None = None
+    prompt_token_ids: list[int] | None = None
 
 
 @dataclass
@@ -120,6 +121,7 @@ def replay_streaming(
     holdback_chars: int = 0,
     finished_on_last: bool = False,
     tools: list[dict] | None = None,
+    prompt_token_ids: list[int] | None = None,
 ) -> list[DeltaMessage | None]:
     """Feed tokens through ``parser.parse_delta()`` at a given chunk size.
 
@@ -146,6 +148,7 @@ def replay_streaming(
     all_texts = [text for _, text in tokens]
 
     request = _test_request(tools=tools)
+    first_prompt_ids = prompt_token_ids if prompt_token_ids is not None else []
 
     if holdback_chars <= 0:
         chunks = list(range(0, len(tokens), chunk_size))
@@ -159,7 +162,7 @@ def replay_streaming(
                 delta_text,
                 batch_ids,
                 request,
-                prompt_token_ids=[] if start == 0 else None,
+                prompt_token_ids=first_prompt_ids if start == 0 else None,
                 finished=finished_on_last and is_last,
             )
             results.append(result)
@@ -192,7 +195,7 @@ def replay_streaming(
             delta_text,
             batch_ids,
             request,
-            prompt_token_ids=[] if is_first else None,
+            prompt_token_ids=first_prompt_ids if is_first else None,
             finished=finished_on_last and is_last_chunk,
         )
         results.append(result)
@@ -205,7 +208,7 @@ def replay_streaming(
             delta_text,
             batch_ids,
             request,
-            prompt_token_ids=[] if is_first else None,
+            prompt_token_ids=first_prompt_ids if is_first else None,
             finished=finished_on_last,
         )
         results.append(result)
@@ -218,6 +221,7 @@ def replay_with_text_holdback(
     tokens: list[tuple[int, str]],
     text_delay: int = 1,
     tools: list[dict] | None = None,
+    prompt_token_ids: list[int] | None = None,
 ) -> list[DeltaMessage | None]:
     """Replay token-by-token with text arriving *text_delay* steps late.
 
@@ -235,6 +239,7 @@ def replay_with_text_holdback(
     """
     results: list[DeltaMessage | None] = []
     request = _test_request(tools=tools)
+    first_prompt_ids = prompt_token_ids if prompt_token_ids is not None else []
 
     n = len(tokens)
     held_texts: list[str] = []
@@ -256,7 +261,7 @@ def replay_with_text_holdback(
             delta_text,
             [token_id],
             request,
-            prompt_token_ids=[] if i == 0 else None,
+            prompt_token_ids=first_prompt_ids if i == 0 else None,
             finished=is_last,
         )
         results.append(result)
