@@ -2129,7 +2129,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             if (
                 use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype()
             ) and _kv_b_proj_w_dtype != torch.uint8:
-                input_dtype = self.kv_b_proj.weight.dtype
+                input_dtype = _kv_b_proj_w_dtype
                 # ROCm BlockScaledMM quantizes input internally, so cast to model dtype
                 if (
                     current_platform.is_rocm()
