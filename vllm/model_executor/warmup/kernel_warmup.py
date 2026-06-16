@@ -354,6 +354,193 @@ def _run_deepseek_v4_mtp_spec_decode_warmup_kernels(
     )
 
 
+def _deepseek_v4_indexed_d512_split_prefill_warmup(runner: "GPUModelRunner") -> None:
+    """Force-compile the DeepSeek-V4 D512-split sparse-MLA prefill kernels.
+
+    The split path (``_use_indexed_d512_split_prefill`` ->
+    ``accumulate_indexed_d512_split_sparse_mla_attention``) bottoms out in three
+    plain ``@triton.jit`` kernels whose compile key is the constexpr set --
+    chiefly ``num_candidates`` (= the per-chunk ``combined_topk``) plus the
+    workspace buffer strides. ``combined_topk`` is 128-aligned
+    (``_SPARSE_PREFILL_TOPK_ALIGNMENT``) and the split path is gated to
+    ``[256, 1152]`` (``_is_indexed_d512_split_topk``), so the complete
+    specialization set is the eight widths {256, 384, ..., 1152}. The kernels
+    never see ``compress_ratio``, so one warm per width covers cr=4 and cr=128.
+
+    Without this, the first long-prefill request JIT-compiles these kernels
+    inside the engine step (~20s), parking EngineCore in shm_broadcast and
+    surfacing as a "sample_tokens RPC timed out" wedge (PR #41834).
+
+    Triton compilation is data-independent, so synthetic zero tensors compile
+    the same cubin a real request uses -- provided every constexpr matches. Two
+    non-obvious constexprs (verified against the live jit_monitor compile key):
+    the per-chunk ``scores``/``indices`` workspaces are sized to that chunk's own
+    ``combined_topk`` (contiguous at width C, so ``stride_scores_h == C`` and
+    ``stride_indices_t == C`` -- NOT a slice of a wider buffer), and the prefill
+    ``q`` buffer is padded to the FP8-decode head count (``padded_heads``), so
+    ``stride_q_t == padded_heads * head_dim`` even though the kernel reads only
+    ``n_local_heads``. The synthetic tensors mirror both.
+
+    Scope: only the split path (``combined_topk <= 1152``) is warmed. DeepSeek-V4
+    -Flash caps ``combined_topk`` at ``sparse_prefill_combined_topk_size(
+    index_topk=512, 128) = 640`` for every context length, so that is complete
+    coverage. A variant whose ``combined_topk`` can exceed 1152 routes onto the
+    chunked path (extra split-stride and merge kernels) which is not pre-warmed
+    here; that case is warned at startup rather than left as a silent gap.
+    """
+    if not (
+        envs.VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_WARMUP
+        and envs.VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL
+    ):
+        return
+
+    try:
+        from vllm.models.deepseek_v4.common.ops.cache_utils import (
+            sparse_prefill_combined_topk_size,
+        )
+        from vllm.models.deepseek_v4.nvidia.flashmla import (
+            _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK,
+            _INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS,
+            _INDEXED_D512_SPLIT_PREFILL_MIN_TOPK,
+            DeepseekV4FlashMLAAttention,
+        )
+        from vllm.v1.attention.backends.mla.sparse_mla_env import (
+            is_triton_sparse_mla_enabled_for_platform,
+            triton_sparse_mla_query_chunk_size,
+        )
+        from vllm.v1.attention.backends.mla.sparse_mla_kernels import (
+            accumulate_indexed_d512_split_sparse_mla_attention,
+        )
+    except ImportError:
+        logger.debug(
+            "Skipping DeepSeek V4 D512-split prefill warmup: split kernels or "
+            "helpers are unavailable on this build."
+        )
+        return
+
+    try:
+        if not is_triton_sparse_mla_enabled_for_platform():
+            return
+        if getattr(runner, "max_model_len", 0) < _INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS:
+            return
+
+        # The split kernel never sees compress_ratio, so any cr in (4, 128)
+        # layer yields identical strides; the first one is representative.
+        layer = None
+        for module in runner.get_model().modules():
+            if (
+                isinstance(module, DeepseekV4FlashMLAAttention)
+                and module.compress_ratio in (4, 128)
+            ):
+                layer = module
+                break
+        if layer is None:
+            return
+
+        head_dim = int(layer.head_dim)
+        if head_dim != 512:
+            return
+        num_heads = int(layer.n_local_heads)
+        window_size = max(1, int(layer.window_size))
+        device = layer.attn_sink.device
+
+        # Upper bound on the per-chunk combined_topk a real request can reach:
+        # the runtime sizes its prefill workspace from the same expression, so a
+        # request cannot exceed it. The split path is gated to <= 1152.
+        topk_bound = DeepseekV4FlashMLAAttention._prefill_workspace_topk_bound(layer)
+        max_reachable_topk = sparse_prefill_combined_topk_size(topk_bound, window_size)
+        # Non-silent gap: if combined_topk can exceed the split ceiling, the
+        # request routes onto the chunked path whose kernels we do not pre-warm.
+        # DSv4-Flash caps at 640 so this never fires for it; warn for variants.
+        if max_reachable_topk > _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK:
+            logger.warning(
+                "DeepSeek V4 D512 prefill: combined_topk can reach %d (> %d); the "
+                "chunked-prefill kernels are NOT pre-warmed and may JIT on the "
+                "first very-long prefill. Only the split path is warmed.",
+                max_reachable_topk,
+                _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK,
+            )
+        max_topk = min(_INDEXED_D512_SPLIT_PREFILL_MAX_TOPK, max_reachable_topk)
+        topk_widths = list(
+            range(_INDEXED_D512_SPLIT_PREFILL_MIN_TOPK, max_topk + 1, 128)
+        )
+        if not topk_widths:
+            return
+
+        # The real prefill q buffer is padded to the FP8-decode head count; the
+        # split kernel reads only n_local_heads, but stride_q_t (a constexpr in
+        # the compile key) reflects the padded width, so match it.
+        padded_heads = int(
+            getattr(layer, "padded_heads", 0)
+            or DeepseekV4FlashMLAAttention.get_padded_num_q_heads(num_heads)
+        )
+        # T sizes only the launch grid -- the cubin is T-independent -- so keep
+        # it small to bound the transient footprint.
+        num_tokens = max(1, min(triton_sparse_mla_query_chunk_size(), 32))
+
+        logger.info(
+            "Warming up DeepSeek V4 D512-split sparse-MLA prefill kernels for "
+            "combined_topk widths=%s (heads=%d, padded_q_heads=%d).",
+            topk_widths,
+            num_heads,
+            padded_heads,
+        )
+
+        # Throwaway tensors -- never the shared workspace, so warmup can't grow
+        # or leak steady-state memory. q/kv/state are width-independent; scores
+        # and indices are contiguous at each per-chunk width so their constexpr
+        # strides (stride_scores_h == width, stride_indices_t == width) match the
+        # runtime per-chunk workspace exactly.
+        q = torch.zeros(
+            (num_tokens, padded_heads, head_dim), dtype=torch.bfloat16, device=device
+        )
+        kv_flat = torch.zeros(
+            (max_topk, head_dim), dtype=torch.bfloat16, device=device
+        )
+        max_score = torch.zeros(
+            (num_tokens, num_heads), dtype=torch.float32, device=device
+        )
+        denom = torch.zeros(
+            (num_tokens, num_heads), dtype=torch.float32, device=device
+        )
+        acc = torch.zeros(
+            (num_tokens, num_heads, head_dim), dtype=torch.float32, device=device
+        )
+        lens = torch.zeros((num_tokens,), dtype=torch.int32, device=device)
+
+        for width in topk_widths:
+            # indices=0 (valid row) + lens=width keep every candidate active so
+            # the full kernel body, including the tl.dot MMA, compiles rather
+            # than an early-return stub.
+            indices = torch.zeros(
+                (num_tokens, width), dtype=torch.int32, device=device
+            )
+            scores = torch.zeros(
+                (num_tokens, num_heads, width), dtype=torch.float32, device=device
+            )
+            lens.fill_(width)
+            accumulate_indexed_d512_split_sparse_mla_attention(
+                q=q,
+                kv_flat=kv_flat,
+                indices=indices,
+                lens=lens,
+                scale=layer.scale,
+                scores=scores,
+                max_score=max_score,
+                denom=denom,
+                acc=acc,
+            )
+        torch.accelerator.synchronize()
+    except Exception as exc:  # noqa: BLE001 - warmup must never break startup
+        # Warn (not debug): a swallowed failure here silently leaves the split
+        # kernels uncompiled, so the first long prefill pays the JIT stall again.
+        logger.warning(
+            "DeepSeek V4 D512-split prefill warmup skipped after error "
+            "(first long prefill may JIT in-inference): %s",
+            exc,
+        )
+
+
 def _deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
     if not envs.VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP:
         return
@@ -417,6 +604,12 @@ def _deepseek_v4_sparse_mla_attention_warmup(worker: "Worker") -> None:
         # Do not synthesize multi-request prefill here: that dummy shape
         # overflows the CUTeDSL KV-gather workspace on SM12x. Revisit only
         # with a real buffer-sizing fix for that warmup path.
+
+    # The prefill dummies above never drive the C128A indexer, so the
+    # D512-split prefill kernels stay uncompiled until the first long request
+    # (PR #41834 wedge). Compile them directly with synthetic inputs.
+    _deepseek_v4_indexed_d512_split_prefill_warmup(runner)
+
     query_len = getattr(runner, "uniform_decode_query_len", 0)
     for num_reqs in uniform_decode_reqs:
         runner._dummy_run(
