@@ -164,7 +164,27 @@ class CompressedTensorsEmbeddingWNA16Int(QuantizeMethodBase):
         )
         return deq.reshape(*input_.shape, hidden)
 
-    def apply(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
-        raise NotImplementedError(
-            "CompressedTensorsEmbeddingWNA16Int supports embedding lookup only"
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Linear projection against the packed table (logits matmul).
+
+        Needed when a quantized embedding is reused as a tied ``lm_head``: the
+        logits step requires ``x @ W.T`` rather than a row gather. The full
+        table is dequantized once (reusing the gather kernel over all rows) and
+        passed to ``F.linear``. A fused dequant-GEMM would avoid materializing
+        the dense weight; left as a follow-up optimization.
+        """
+        vocab_size = layer.weight_packed.shape[0]
+        ids = torch.arange(vocab_size, device=layer.weight_packed.device)
+        weight = _dequant_gather_triton(
+            ids,
+            layer.weight_packed,
+            layer.weight_scale,
+            layer.hidden_size,
+            self.num_bits,
         )
+        return torch.nn.functional.linear(x, weight.to(x.dtype), bias)
