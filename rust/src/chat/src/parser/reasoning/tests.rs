@@ -84,14 +84,19 @@ fn factory_resolves_minimax_m3_before_generic_minimax() {
 }
 
 #[test]
-fn factory_routes_magistral_models_to_mistral_parser() {
+fn factory_does_not_auto_route_mistral_reasoning_models() {
     let factory = ReasoningParserFactory::new();
+    // Mistral `[THINK]` parser is never auto-selected; needs explicit
+    // `--reasoning-parser mistral`. Magistral-Small-2506 even emits `<think>`.
     assert_eq!(
         factory.resolve_name_for_model("mistralai/Magistral-Small-2506"),
-        Some(names::MISTRAL)
+        None
     );
-    // Plain Mistral / Mixtral / Ministral-Instruct are not reasoning models and
-    // must not auto-select this parser.
+    assert_eq!(
+        factory.resolve_name_for_model("mistralai/Magistral-Small-2509"),
+        None
+    );
+    // Plain Mistral / Mixtral / Ministral models are unaffected too.
     assert_eq!(
         factory.resolve_name_for_model("mistralai/Mistral-7B-Instruct-v0.3"),
         None
@@ -100,12 +105,6 @@ fn factory_routes_magistral_models_to_mistral_parser() {
         factory.resolve_name_for_model("mistralai/Mixtral-8x7B-Instruct-v0.1"),
         None
     );
-    assert_eq!(
-        factory.resolve_name_for_model("mistralai/Ministral-3-8B-Instruct-2512"),
-        None
-    );
-    // Reasoning, but deliberately not auto-routed (see the `magistral`
-    // registration); relies on explicit `--reasoning-parser mistral`.
     assert_eq!(
         factory.resolve_name_for_model("mistralai/Ministral-3-8B-Reasoning-2512"),
         None

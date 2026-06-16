@@ -87,11 +87,8 @@ impl ReasoningParserFactory {
             .register_pattern("glm-4.5", names::GLM45)
             .register_pattern("kimi-k2", names::KIMI_K2)
             .register_pattern("kimi", names::KIMI)
-            // Magistral models always reason, so auto-route them. Other Mistral
-            // `[THINK]` reasoning models (e.g. Ministral-*-Reasoning) share a prefix
-            // and architecture with non-reasoning variants, so they can't be safely
-            // auto-detected; those need explicit `--reasoning-parser mistral`.
-            .register_pattern("magistral", names::MISTRAL)
+            // Mistral `[THINK]` reasoning isn't auto-routed: needs explicit
+            // `--reasoning-parser mistral` (Magistral-Small-2506 emits `<think>`).
             // step3p5 patterns must precede `step3`: substring matching would
             // otherwise route step3p5 IDs to step3.
             .register_pattern("step-3p5", names::STEP3P5)
