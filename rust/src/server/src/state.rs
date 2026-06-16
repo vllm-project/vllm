@@ -124,6 +124,11 @@ impl AppState {
         self.chat.model_vocab_size()
     }
 
+    /// Maximum number of logprobs a single request may ask for.
+    pub fn max_logprobs(&self) -> i32 {
+        self.chat.max_logprobs()
+    }
+
     /// Return base served model names plus dynamically loaded LoRA adapter
     /// names.
     pub async fn served_model_names_with_loras(&self) -> Vec<String> {
