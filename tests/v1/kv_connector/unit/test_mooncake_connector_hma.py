@@ -379,7 +379,7 @@ def test_select_region_block_ids_skips_empty_remote_groups():
     assert len(local_block_ids) == len(remote_block_ids)
 
 
-def test_align_transfer_regions_fans_out_shared_alias_groups():
+def test_align_transfer_regions_fans_out_shared_physical_region_groups():
     local_swa_layer = TransferRegion(
         layer_name="model.layers.4.attn.swa_cache",
         layer_index=4,
@@ -598,7 +598,7 @@ def test_align_transfer_regions_rejects_duplicate_remote_alias_group():
 
 
 @pytest.mark.asyncio
-async def test_build_transfer_params_filters_groups_per_shared_alias():
+async def test_build_transfer_params_filters_groups_per_shared_tensor_alias():
     worker = make_transfer_worker()
     block_len = 100
     transfer_id = "xfer-dsv4-shifted-alias"

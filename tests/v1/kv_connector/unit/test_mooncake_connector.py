@@ -361,7 +361,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
         prefill_worker.shutdown()
 
 
-def test_align_transfer_regions_matches_shared_aliases():
+def test_align_transfer_regions_matches_shared_physical_region_aliases():
     """Shared physical regions should align by alias overlap."""
 
     local_regions = [
@@ -407,7 +407,7 @@ def test_align_transfer_regions_matches_shared_aliases():
     assert aligned_remote == remote_regions
 
 
-def test_align_transfer_regions_fans_out_split_alias_regions():
+def test_align_transfer_regions_fans_out_shared_region_to_split_aliases():
     """Shared producer regions can feed consumer regions split by alias."""
 
     local_regions = [
