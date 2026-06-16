@@ -423,7 +423,7 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
-        prompt_token_ids = await tokenizer.encode(
+        prompt_token_ids = tokenizer.encode(
             prompt["prompt"],
             **params.get_encode_kwargs(),
         )
@@ -438,7 +438,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
     async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
         tokenizer = self.get_tokenizer()
-        prompt["prompt"] = await tokenizer.decode(prompt["prompt_token_ids"])
+        prompt["prompt"] = tokenizer.decode(prompt["prompt_token_ids"])
 
         return prompt
 
