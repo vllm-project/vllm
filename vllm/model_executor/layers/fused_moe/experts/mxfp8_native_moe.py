@@ -192,9 +192,8 @@ def _grouped_gemm_mxfp8(
 
 
 # Tuned native-MXFP8 launch tiles for gfx950 (CDNA4) at MiniMax-M3 MoE shapes.
-# The 8k-prefill (large token count, compute-bound) and decode (small,
-# launch/bandwidth-bound) regimes want different tiles; a single set leaves
-# ~1.5-1.9x on the prefill GEMMs. Crossover measured at ~1024 tokens.
+# For example, 8k/1k, 1k/1k cases.
+
 _MXFP8_PREFILL_TILES = dict(block_m=128, block_n=256, num_warps=8, num_stages=2)
 _MXFP8_DECODE_TILES = dict(block_m=64, block_n=64, num_warps=4, num_stages=2)
 _MXFP8_PREFILL_MIN_TOKENS = 1024
@@ -228,11 +227,6 @@ def fused_moe_mxfp8_native(
 
     tiles = _mxfp8_moe_tiles(T)
     block_m = tiles["block_m"]
-    gemm_kw = dict(
-        block_n=tiles["block_n"],
-        num_warps=tiles["num_warps"],
-        num_stages=tiles["num_stages"],
-    )
     sorted_ids, expert_ids, num_post = moe_align_block_size(
         topk_ids,
         block_m,
@@ -257,7 +251,9 @@ def fused_moe_mxfp8_native(
         hidden_states.dtype,
         a_div=top_k,
         expert_map=expert_map,
-        **gemm_kw,
+        block_n=tiles["block_n"],
+        num_warps=tiles["num_warps"],
+        num_stages=tiles["num_stages"],
     )  # [M, 2I]
 
     # SwiGLU-OAI (split layout: gate=g1[:, :I], up=g1[:, I:]) FUSED with the
@@ -286,7 +282,9 @@ def fused_moe_mxfp8_native(
         a_div=1,
         mul_weight_by=topk_weights.reshape(-1).to(torch.float32),
         expert_map=expert_map,
-        **gemm_kw,
+        block_n=tiles["block_n"],
+        num_warps=tiles["num_warps"],
+        num_stages=tiles["num_stages"],
     )  # [M, H] == [T*top_k, H]
 
     return g2.view(T, top_k, H).sum(dim=1).to(hidden_states.dtype)
