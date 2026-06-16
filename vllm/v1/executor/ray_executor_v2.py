@@ -381,20 +381,15 @@ class RayExecutorV2(MultiprocExecutor):
         # Step 7: Initialize workers with correct local_rank and
         # CUDA_VISIBLE_DEVICES. Each worker sees all GPUs assigned to
         # this executor on its node; local_rank indexes into that set.
-        # DeepGEMM mega-MoE: leave CUDA_VISIBLE_DEVICES wide (inherited from the
-        # unmasked engine core) so every worker sees all node GPUs and binds a
-        # distinct cuda:{dp_rank} in gpu_worker, matching the mp backend. This is
-        # required for the symmetric-memory rendezvous to see distinct devices.
+        # With the mp-style device layout, leave CUDA_VISIBLE_DEVICES wide so
+        # each worker binds a distinct cuda:{dp_rank} in gpu_worker, which the
+        # symmetric-memory rendezvous needs (see ray_no_device_isolation).
         # See https://github.com/vllm-project/vllm/issues/44556.
-        megamoe = (
-            self.vllm_config.kernel_config is not None
-            and getattr(self.vllm_config.kernel_config, "moe_backend", None)
-            == "deep_gemm_mega_moe"
-        )
+        mp_device_layout = self.vllm_config.parallel_config.ray_no_device_isolation
         init_worker_refs = []
         for i, (node_id, _) in enumerate(worker_node_and_gpu_ids):
             local_rank = node_workers[node_id].index(i)
-            if megamoe:
+            if mp_device_layout:
                 worker_env_vars = {}
             else:
                 worker_env_vars = {
