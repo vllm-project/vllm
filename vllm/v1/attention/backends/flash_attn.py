@@ -196,9 +196,11 @@ class FlashAttentionBackend(AttentionBackend):
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return True
+        if kv_cache_dtype not in cls.supported_kv_cache_dtypes:
+            return False
         if is_quantized_kv_cache(kv_cache_dtype):
             return flash_attn_supports_kv_cache_dtype(kv_cache_dtype)
-        return kv_cache_dtype in ["auto", "float16", "bfloat16"]
+        return True
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
