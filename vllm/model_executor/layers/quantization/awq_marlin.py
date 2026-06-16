@@ -16,15 +16,13 @@ from vllm.model_executor.kernels.linear import (
     choose_mp_linear_kernel,
 )
 from vllm.model_executor.layers.fused_moe import (
+    FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
     SharedExperts,
     UnquantizedFusedMoEMethod,
-)
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.int_wna16 import (
     convert_to_wna16_moe_kernel_format,
@@ -291,8 +289,11 @@ class AWQMarlinConfig(QuantizationConfig):
                 skip_with_substr=True,
             ):
                 return UnquantizedLinearMethod()
-            # Check if the layer is supported by AWQMarlin.
-            if not check_marlin_supports_layer(layer, self.group_size):
+            # Check if the layer is supported by AWQMarlin; tile-misaligned
+            # shapes are fixed by padding at weight prep.
+            if not check_marlin_supports_layer(
+                layer, self.group_size, allow_tile_padding=True
+            ):
                 logger.warning_once(
                     "Layer '%s' is not supported by AWQMarlin. Falling back to unoptimized AWQ kernels.",  # noqa: E501
                     prefix,
@@ -702,8 +703,8 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             is_k_full=self.is_k_full,
             w13_g_idx=getattr(layer, "w13_g_idx", None),
             w2_g_idx=getattr(layer, "w2_g_idx", None),
-            w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
+            w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None),
+            w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None),
             routing_tables=layer._expert_routing_tables(),
         )
 
@@ -758,4 +759,28 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             expert_map=layer.expert_map,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+        )
+
+    def apply_monolithic(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
+            hidden_states=x,
+            w1=layer.w13_qweight,
+            w2=layer.w2_qweight,
+            router_logits=router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
         )

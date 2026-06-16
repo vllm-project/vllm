@@ -80,7 +80,7 @@ class Gemma4UnifiedVisionEmbedder(nn.Module):
     Pipeline: raw patches → LN₁ → Dense → LN₂ → +factorized_posemb → LN₃.
     """
 
-    def __init__(self, config, quant_config=None):
+    def __init__(self, config, quant_config=None, prefix=""):
         super().__init__()
         patch_dim = config.model_patch_size**2 * 3
         mm_embed_dim = config.mm_embed_dim
@@ -91,6 +91,7 @@ class Gemma4UnifiedVisionEmbedder(nn.Module):
             mm_embed_dim,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.patch_dense",
             gather_output=True,
         )
         self.patch_ln2 = nn.LayerNorm(mm_embed_dim)
@@ -267,6 +268,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
             Gemma4UnifiedVisionEmbedder(
                 config.vision_config,
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_embedder"),
             )
             if config.vision_config is not None
             else None

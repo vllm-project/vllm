@@ -457,9 +457,17 @@ class KimiVLForConditionalGeneration(
         # max_batch_size.
         per_mm_item_output = (token_budget + max_batch_size - 1) // max_batch_size
 
-        # Build a worst-case grid_hws that yields ``per_mm_item_output``
-        # merged tokens per item (h=kh, w=kw*per_mm_item_output).
-        grid_hws_list = [(kh, kw * per_mm_item_output) for _ in range(max_batch_size)]
+        # Shape the synthetic grid so neither dimension exceeds Rope2DPosEmb's
+        # precomputed range. Pack as wide a row as fits, then add rows.
+        rope = self.vision_tower.encoder.rope_2d
+        max_wo = rope.max_width // kw
+        wo = min(per_mm_item_output, max_wo)
+        ho = (per_mm_item_output + wo - 1) // wo
+        assert ho * kh <= rope.max_height, (
+            f"per_mm_item_output={per_mm_item_output} exceeds RoPE grid capacity "
+            f"(max {(rope.max_height // kh) * (rope.max_width // kw)} tokens)"
+        )
+        grid_hws_list = [(ho * kh, wo * kw) for _ in range(max_batch_size)]
 
         patch_size = self.config.vision_config.patch_size
         if isinstance(patch_size, int):
