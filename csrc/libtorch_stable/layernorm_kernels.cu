@@ -208,8 +208,8 @@ fused_add_rms_norm_kernel(
 
 }  // namespace vllm
 
-void rms_norm(torch::stable::Tensor& out,     // [..., hidden_size]
-              torch::stable::Tensor& input,   // [..., hidden_size]
+void rms_norm(torch::stable::Tensor& out,    // [..., hidden_size]
+              torch::stable::Tensor& input,  // [..., hidden_size]
               std::optional<torch::stable::Tensor> weight,  // [hidden_size]
               double epsilon) {
   STD_TORCH_CHECK(out.is_contiguous());
@@ -271,23 +271,23 @@ void rms_norm(torch::stable::Tensor& out,     // [..., hidden_size]
   });
 }
 
-#define LAUNCH_FUSED_ADD_RMS_NORM(width, has_weight)                         \
-  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                       \
-      input.scalar_type(), "fused_add_rms_norm_kernel", [&] {                \
-        if (has_weight) {                                                    \
-          vllm::fused_add_rms_norm_kernel<scalar_t, width, true>             \
-              <<<grid, block, 0, stream>>>(                                  \
-                  input.mutable_data_ptr<scalar_t>(), input_stride,           \
-                  residual.mutable_data_ptr<scalar_t>(),                     \
-                  weight->const_data_ptr<scalar_t>(), epsilon, num_tokens,   \
-                  hidden_size);                                              \
-        } else {                                                             \
-          vllm::fused_add_rms_norm_kernel<scalar_t, width, false>            \
-              <<<grid, block, 0, stream>>>(                                  \
-                  input.mutable_data_ptr<scalar_t>(), input_stride,           \
-                  residual.mutable_data_ptr<scalar_t>(), nullptr, epsilon,   \
-                  num_tokens, hidden_size);                                  \
-        }                                                                    \
+#define LAUNCH_FUSED_ADD_RMS_NORM(width, has_weight)                       \
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                     \
+      input.scalar_type(), "fused_add_rms_norm_kernel", [&] {              \
+        if (has_weight) {                                                  \
+          vllm::fused_add_rms_norm_kernel<scalar_t, width, true>           \
+              <<<grid, block, 0, stream>>>(                                \
+                  input.mutable_data_ptr<scalar_t>(), input_stride,        \
+                  residual.mutable_data_ptr<scalar_t>(),                   \
+                  weight->const_data_ptr<scalar_t>(), epsilon, num_tokens, \
+                  hidden_size);                                            \
+        } else {                                                           \
+          vllm::fused_add_rms_norm_kernel<scalar_t, width, false>          \
+              <<<grid, block, 0, stream>>>(                                \
+                  input.mutable_data_ptr<scalar_t>(), input_stride,        \
+                  residual.mutable_data_ptr<scalar_t>(), nullptr, epsilon, \
+                  num_tokens, hidden_size);                                \
+        }                                                                  \
       });
 
 void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]

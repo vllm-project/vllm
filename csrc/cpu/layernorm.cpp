@@ -107,10 +107,9 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input,
 
   VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_impl", [&] {
     CPU_KERNEL_GUARD_IN(rms_norm_impl)
-    rms_norm_impl(
-        out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
-        has_weight ? weight->data_ptr<scalar_t>() : nullptr, has_weight,
-        epsilon, num_tokens, hidden_size);
+    rms_norm_impl(out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+                  has_weight ? weight->data_ptr<scalar_t>() : nullptr,
+                  has_weight, epsilon, num_tokens, hidden_size);
     CPU_KERNEL_GUARD_OUT(rms_norm_impl)
   });
 }
