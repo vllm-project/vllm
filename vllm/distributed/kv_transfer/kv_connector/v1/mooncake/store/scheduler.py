@@ -54,14 +54,9 @@ class MooncakeStoreScheduler:
     ):
         assert vllm_config.kv_transfer_config is not None
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "load_async", True
-        )
-        self.lookup_async = (
-            vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                "lookup_async", False
-            )
-        )
+        kvc_extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.load_async = kvc_extra_config.get("load_async", True)
+        self.lookup_async = kvc_extra_config.get("lookup_async", False)
         self.client = LookupKeyClient(vllm_config)
 
         # Align with the engine's own scheduler_block_size and hash_block_size.
