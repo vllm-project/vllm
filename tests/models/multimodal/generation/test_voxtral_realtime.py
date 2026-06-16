@@ -182,6 +182,105 @@ def test_voxtral_realtime_forward(audio_assets, tokenizer, vllm_runner, monkeypa
             )
 
 
+# [EXPERIMENTAL] Narrow, equal text/audio sliding windows so a short clip's
+# growing position clock crosses the re-anchor threshold during the session.
+# Equal windows also exercise the merged-KV-group path (one mixed 128-NeoX /
+# 64-GPT-J group), where the worker reads head_size per layer.
+_REANCHOR_WINDOW = {
+    "text_config": {"sliding_window": 256},
+    "audio_config": {"sliding_window": 256},
+}
+
+
+async def _stream_transcribe(engine_args, tokenizer, audio_asset) -> list[int]:
+    """Drive one realtime streaming session to completion, greedily, returning
+    the decoded output token ids."""
+    from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
+
+    llm = AsyncLLM.from_engine_args(engine_args)
+    try:
+        audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
+        audio = Audio.from_file(audio_asset.get_local_path(), strict=False)
+        req = TranscriptionRequest(
+            streaming=StreamingMode.OFFLINE,
+            audio=RawAudio.from_audio(audio),
+            language=None,
+        )
+        audio_enc = tokenizer.encode_transcription(req)
+        buffer = VoxtralRealtimeBuffer(audio_config, audio_enc.tokens)
+        await buffer.append_audio(audio_enc.audios[0].audio_array)
+        await buffer.append_audio(None)
+
+        output_tokens: list[int] = []
+        async for resp in llm.generate(
+            prompt=buffer.get_input_stream(),
+            sampling_params=SamplingParams(temperature=0.0, max_tokens=1),
+            request_id="reanchor-parity",
+        ):
+            tokens = resp.outputs[0].token_ids[-1:]
+            output_tokens.extend(tokens)
+            await buffer.append_tokens(tokens)
+        return output_tokens
+    finally:
+        llm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_voxtral_realtime_reanchor_parity(audio_assets, tokenizer, caplog):
+    """[EXPERIMENTAL] End-to-end parity of RoPE re-anchoring (review of #45022).
+
+    A streaming session whose position clock crosses ``max_model_len - margin``
+    is re-anchored down by R(-D) on the live cached keys. This proves the
+    re-rotation is transparent end to end (real attention forward, real KV
+    layout), not just algebraically (tests/v1/worker/test_reanchor_rotary.py):
+    at an identical narrow window, a re-anchor-ON session must decode the SAME
+    tokens as a re-anchor-OFF reference. Both runs share the window, so any
+    divergence is the re-anchor's doing, not the window's.
+
+    GPU-only (the re-anchor path is CUDA-gated in VllmConfig). The test asserts a
+    re-anchor actually fired, so if max_model_len/margin are mis-sized for the
+    clip on your hardware it fails loudly instead of passing without exercising
+    the path. The winning_call clip is the longer of the two assets.
+    """
+    audio_asset = audio_assets[1]  # winning_call (longer clip)
+
+    # Reference: re-anchor OFF, room to run the full clip without length-capping.
+    ref_args = AsyncEngineArgs(
+        **{**ENGINE_CONFIG, "max_model_len": 8192, "hf_overrides": _REANCHOR_WINDOW}
+    )
+    ref_tokens = await _stream_transcribe(ref_args, tokenizer, audio_asset)
+
+    # Test: re-anchor ON with a small max_model_len so the same clip crosses the
+    # threshold (8192 -> 1024, margin 256) and re-anchors mid-session.
+    test_args = AsyncEngineArgs(
+        **{
+            **ENGINE_CONFIG,
+            "max_model_len": 1024,
+            "enable_realtime_unbounded": True,
+            "realtime_reanchor_margin_tokens": 256,
+            "enable_prefix_caching": False,
+            "hf_overrides": _REANCHOR_WINDOW,
+        }
+    )
+    with caplog.at_level("INFO", logger="vllm.v1.core.sched.scheduler"):
+        test_tokens = await _stream_transcribe(test_args, tokenizer, audio_asset)
+
+    # The session must actually have re-anchored, else this proves nothing.
+    assert "Re-anchored realtime session" in caplog.text, (
+        "no re-anchor fired; lower max_model_len or raise the clip length so the "
+        "position clock crosses max_model_len - realtime_reanchor_margin_tokens"
+    )
+    # ...and the re-anchored decode must match the reference token-for-token.
+    def _decode(toks: list[int]) -> str:
+        return tokenizer.decode(toks, special_token_policy=SpecialTokenPolicy.IGNORE)
+
+    assert test_tokens == ref_tokens, (
+        "re-anchored output diverged from the reference at the same window:\n"
+        f"  ref  ({len(ref_tokens)} toks): {_decode(ref_tokens)!r}\n"
+        f"  test ({len(test_tokens)} toks): {_decode(test_tokens)!r}"
+    )
+
+
 @pytest.mark.asyncio
 async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine):
     # Lazy import to avoid CUDA-reinitialization error
