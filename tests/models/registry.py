@@ -341,17 +341,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "InternLM2ForCausalLM": _HfExamplesInfo(
         "internlm/internlm2-chat-7b", trust_remote_code=True
     ),
-    "InternLM2VEForCausalLM": _HfExamplesInfo(
-        "OpenGVLab/Mono-InternVL-2B",
-        trust_remote_code=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": (
-                "Custom config cannot be loaded with Transformers "
-                "v5 because `vision_config` is not always set"
-            )
-        },
-    ),
     "InternLM3ForCausalLM": _HfExamplesInfo(
         "internlm/internlm3-8b-instruct", trust_remote_code=True
     ),
@@ -430,6 +419,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiniMaxM2ForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M2",
         trust_remote_code=True,
+    ),
+    "MiniMaxM3SparseForCausalLM": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "Ministral3ForCausalLM": _HfExamplesInfo("mistralai/Ministral-3-3B-Instruct-2512"),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
@@ -574,16 +568,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
-    ),
-    "XverseForCausalLM": _HfExamplesInfo(
-        "xverse/XVERSE-7B-Chat",
-        tokenizer="meta-llama/Llama-2-7b",
-        trust_remote_code=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": "XVERSE tokenizer is incompatible with transformers v5 "
-            "(add_prefix_space / prepend_scheme mismatch).",
-        },
     ),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
@@ -1120,6 +1104,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "MiniMaxAI/MiniMax-VL-01",
         trust_remote_code=True,
     ),
+    "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
         extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"},
@@ -1436,6 +1425,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
+    "DFlashQwen3NextDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3-Coder-Next",
+        speculative_model="z-lab/Qwen3-Coder-Next-DFlash",
+        use_original_num_layers=True,  # DFlash requires all layers
+        max_model_len=8192,  # Reduce for CI
+        max_num_seqs=32,
+        min_transformers_version="4.56.3",  # Required for Qwen3Next
+    ),
     # [Eagle]
     "EagleCohereForCausalLM": _HfExamplesInfo(
         "/host/engines/cohere-moe",
@@ -1612,6 +1609,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "XiaomiMiMo/MiMo-V2.5-Omni",
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-V2.5-Omni",
+        is_available_online=False,
+    ),
+    "MiniMaxM3MTP": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
         is_available_online=False,
     ),
     "NemotronHMTPModel": _HfExamplesInfo(
