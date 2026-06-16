@@ -16,6 +16,7 @@ const EXCLUDED_HANDLERS: &[&str] = &[
     "/ping",
     "/version",
     "/server_info",
+    "/tokenizer_info",
     // Rust frontend extra:
     "/reset_prefix_cache",
     "/reset_mm_cache",

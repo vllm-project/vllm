@@ -1,6 +1,9 @@
+use std::fs;
 use std::sync::Arc;
 
-use tracing::info;
+use serde_json::Value as JsonValue;
+use thiserror_ext::AsReport as _;
+use tracing::{info, warn};
 use vllm_text::backend::hf::{HfTextBackend, ResolvedModelFiles, load_model_config};
 use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{DynTextBackend, TextBackend as _};
@@ -14,7 +17,9 @@ use crate::multimodal::MultimodalModelInfo;
 use crate::output::{
     DefaultChatOutputProcessor, HarmonyChatOutputProcessor, validate_harmony_parser_overrides,
 };
-use crate::renderer::hf::{HfChatRenderer, MultimodalRenderInfo};
+use crate::renderer::hf::{
+    HfChatRenderer, MultimodalRenderInfo, load_chat_template, resolve_chat_template,
+};
 use crate::renderer::{DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer};
 use crate::request::ChatRequest;
 use crate::{DynChatOutputProcessor, RendererSelection};
@@ -115,6 +120,7 @@ pub(super) async fn load_model_backends(
     options: LoadModelBackendsOptions,
 ) -> Result<LoadedModelBackends> {
     let files = ResolvedModelFiles::new(model_id).await?;
+    let tokenizer_config_snapshot = build_tokenizer_config_snapshot(&files, &options);
     let text_backend =
         HfTextBackend::from_resolved_model_files(files.clone(), model_id.to_string())?;
     let tokenizer = text_backend.tokenizer();
@@ -130,7 +136,112 @@ pub(super) async fn load_model_backends(
     Ok(LoadedModelBackends {
         text_backend,
         chat_backend,
+        tokenizer_config_snapshot,
     })
+}
+
+fn build_tokenizer_config_snapshot(
+    files: &ResolvedModelFiles,
+    options: &LoadModelBackendsOptions,
+) -> Option<JsonValue> {
+    let tokenizer_config_path = files.tokenizer_config_path.as_deref()?;
+    let content = match fs::read_to_string(tokenizer_config_path) {
+        Ok(content) => content,
+        Err(error) => {
+            warn!(
+                path = %tokenizer_config_path.display(),
+                error = %error.as_report(),
+                "failed to read tokenizer config for /tokenizer_info"
+            );
+            return None;
+        }
+    };
+    let mut snapshot: JsonValue = match serde_json::from_str(&content) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            warn!(
+                path = %tokenizer_config_path.display(),
+                error = %error.as_report(),
+                "failed to parse tokenizer config for /tokenizer_info"
+            );
+            return None;
+        }
+    };
+
+    let Some(object) = snapshot.as_object_mut() else {
+        warn!(
+            path = %tokenizer_config_path.display(),
+            "tokenizer config for /tokenizer_info is not a JSON object"
+        );
+        return None;
+    };
+    object.remove("vocab_file");
+    object.remove("merges_file");
+
+    if resolved_renderer(files, options)? == RendererSelection::Hf
+        && !patch_effective_chat_template(object, files, options)
+    {
+        return None;
+    }
+
+    Some(snapshot)
+}
+
+fn resolved_renderer(
+    files: &ResolvedModelFiles,
+    options: &LoadModelBackendsOptions,
+) -> Option<RendererSelection> {
+    let model_config = match load_model_config(files.config_path.as_deref()) {
+        Ok(model_config) => model_config,
+        Err(error) => {
+            warn!(
+                error = %error.as_report(),
+                "failed to resolve model config for /tokenizer_info"
+            );
+            return None;
+        }
+    };
+    Some(options.renderer.resolve(model_config.model_type().unwrap_or_default()))
+}
+
+fn patch_effective_chat_template(
+    object: &mut serde_json::Map<String, JsonValue>,
+    files: &ResolvedModelFiles,
+    options: &LoadModelBackendsOptions,
+) -> bool {
+    if let Some(configured_template) = options.chat_template.as_deref() {
+        match resolve_chat_template(configured_template) {
+            Ok(template) => {
+                object.insert("chat_template".to_string(), JsonValue::String(template));
+                true
+            }
+            Err(error) => {
+                warn!(
+                    error = %error.as_report(),
+                    "failed to resolve configured chat template for /tokenizer_info"
+                );
+                false
+            }
+        }
+    } else if let Some(chat_template_path) = files.chat_template_path.as_deref() {
+        match load_chat_template(chat_template_path) {
+            Ok(Some(template)) if !template.trim().is_empty() => {
+                object.insert("chat_template".to_string(), JsonValue::String(template));
+                true
+            }
+            Ok(_) => true,
+            Err(error) => {
+                warn!(
+                    path = %chat_template_path.display(),
+                    error = %error.as_report(),
+                    "failed to load chat template for /tokenizer_info"
+                );
+                false
+            }
+        }
+    } else {
+        true
+    }
 }
 
 fn resolve_multimodal_render_info(
@@ -147,11 +258,12 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
+    use serde_json::json;
     use tempfile::tempdir;
     use vllm_text::backend::hf::TokenizerSource;
     use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 
-    use super::HfChatBackend;
+    use super::{HfChatBackend, build_tokenizer_config_snapshot};
     use crate::RendererSelection;
     use crate::backend::{ChatBackend, LoadModelBackendsOptions};
     use crate::request::{ChatContent, ChatMessage, ChatRequest};
@@ -219,6 +331,16 @@ mod tests {
         Arc::new(TestTokenizer)
     }
 
+    fn load_options(renderer: RendererSelection) -> LoadModelBackendsOptions {
+        LoadModelBackendsOptions {
+            renderer,
+            language_model_only: false,
+            chat_template_content_format: Default::default(),
+            chat_template: None,
+            default_chat_template_kwargs: HashMap::new(),
+        }
+    }
+
     fn render_prompt(
         renderer: RendererSelection,
         config_json: &str,
@@ -227,13 +349,7 @@ mod tests {
         let backend = HfChatBackend::from_resolved_model_files(
             resolved_files(config_json, tokenizer_config_json),
             "test-model".to_string(),
-            LoadModelBackendsOptions {
-                renderer,
-                language_model_only: false,
-                chat_template_content_format: Default::default(),
-                chat_template: None,
-                default_chat_template_kwargs: HashMap::new(),
-            },
+            load_options(renderer),
             test_tokenizer(),
         )
         .unwrap();
@@ -245,6 +361,79 @@ mod tests {
             .prompt
             .into_text()
             .expect("renderer should return text prompt")
+    }
+
+    #[test]
+    fn tokenizer_config_snapshot_strips_path_fields_and_preserves_extra_fields() {
+        let files = resolved_files(
+            r#"{"model_type":"qwen2"}"#,
+            r#"{"tokenizer_class":"Qwen2Tokenizer","chat_template":"raw","vocab_file":"/tmp/vocab.json","merges_file":"/tmp/merges.txt","bos_token":"<s>","extra":{"x":1}}"#,
+        );
+
+        let snapshot =
+            build_tokenizer_config_snapshot(&files, &load_options(RendererSelection::Hf))
+                .expect("snapshot");
+
+        assert_eq!(
+            snapshot,
+            json!({
+                "tokenizer_class": "Qwen2Tokenizer",
+                "chat_template": "raw",
+                "bos_token": "<s>",
+                "extra": {"x": 1}
+            })
+        );
+    }
+
+    #[test]
+    fn tokenizer_config_snapshot_uses_configured_hf_chat_template_override() {
+        let files = resolved_files(
+            r#"{"model_type":"qwen2"}"#,
+            r#"{"tokenizer_class":"Qwen2Tokenizer","chat_template":"raw"}"#,
+        );
+        let mut options = load_options(RendererSelection::Hf);
+        options.chat_template = Some("{{ override }}".to_string());
+
+        let snapshot = build_tokenizer_config_snapshot(&files, &options).expect("snapshot");
+
+        assert_eq!(snapshot["chat_template"], "{{ override }}");
+    }
+
+    #[test]
+    fn tokenizer_config_snapshot_uses_hf_chat_template_file() {
+        let mut files = resolved_files(
+            r#"{"model_type":"qwen2"}"#,
+            r#"{"tokenizer_class":"Qwen2Tokenizer","chat_template":"raw"}"#,
+        );
+        let template_path = files
+            .config_path
+            .as_ref()
+            .expect("config path")
+            .parent()
+            .expect("model dir")
+            .join("chat_template.jinja");
+        std::fs::write(&template_path, "{{ file_template }}").unwrap();
+        files.chat_template_path = Some(template_path);
+
+        let snapshot =
+            build_tokenizer_config_snapshot(&files, &load_options(RendererSelection::Hf))
+                .expect("snapshot");
+
+        assert_eq!(snapshot["chat_template"], "{{ file_template }}");
+    }
+
+    #[test]
+    fn tokenizer_config_snapshot_keeps_raw_template_for_deepseek_renderer() {
+        let files = resolved_files(
+            r#"{"model_type":"deepseek_v32"}"#,
+            r#"{"tokenizer_class":"DeepSeekTokenizer","chat_template":"raw"}"#,
+        );
+        let mut options = load_options(RendererSelection::Auto);
+        options.chat_template = Some("{{ override }}".to_string());
+
+        let snapshot = build_tokenizer_config_snapshot(&files, &options).expect("snapshot");
+
+        assert_eq!(snapshot["chat_template"], "raw");
     }
 
     #[test]

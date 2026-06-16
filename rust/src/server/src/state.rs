@@ -34,6 +34,8 @@ pub struct AppState {
     pub cors: CorsConfig,
     /// Runtime server information returned by `/server_info`, when available.
     server_info: Option<ServerInfoSnapshot>,
+    /// Tokenizer metadata returned by `/tokenizer_info`, when enabled.
+    tokenizer_info: Option<Value>,
     /// SHA-256 hashes of API keys accepted as bearer tokens for guarded routes.
     api_key_hashes: Vec<ApiKeyHash>,
     /// Number of in-flight inference requests currently owned by this frontend.
@@ -64,6 +66,7 @@ impl AppState {
             api_server_options: ApiServerOptions::default(),
             cors: CorsConfig::default(),
             server_info: None,
+            tokenizer_info: None,
             api_key_hashes: Vec::new(),
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
@@ -101,6 +104,17 @@ impl AppState {
         config_format: ServerInfoConfigFormat,
     ) -> Option<Value> {
         self.server_info.as_ref().map(|server_info| server_info.response(config_format))
+    }
+
+    /// Attach the tokenizer metadata snapshot used by `/tokenizer_info`.
+    pub(crate) fn with_tokenizer_info(mut self, tokenizer_info: Value) -> Self {
+        self.tokenizer_info = Some(tokenizer_info);
+        self
+    }
+
+    /// Return the `/tokenizer_info` response payload.
+    pub(crate) fn tokenizer_info(&self) -> Option<&Value> {
+        self.tokenizer_info.as_ref()
     }
 
     /// Configure API keys accepted by guarded HTTP routes.

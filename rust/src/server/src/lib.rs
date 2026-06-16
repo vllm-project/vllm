@@ -71,6 +71,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .context("failed to create chat/text backends")?;
     let text_backend = loaded.text_backend;
     let chat_backend = loaded.chat_backend;
+    let tokenizer_config_snapshot = loaded.tokenizer_config_snapshot;
 
     let coordinator_mode = config.effective_coordinator_mode(text_backend.is_moe());
     info!(
@@ -96,14 +97,19 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         .with_tool_call_parser(config.tool_call_parser.clone())
         .with_reasoning_parser(config.reasoning_parser.clone());
 
-    Ok(Arc::new(
-        AppState::new(served_model_names, chat)
-            .with_model_path(config.model.clone())
-            .with_api_server_options(config.api_server_options)
-            .with_server_info(ServerInfoSnapshot::from_config(config))
-            .with_api_keys(config.api_keys.clone())
-            .with_cors(config.cors.clone()),
-    ))
+    let mut state = AppState::new(served_model_names, chat)
+        .with_model_path(config.model.clone())
+        .with_api_server_options(config.api_server_options)
+        .with_server_info(ServerInfoSnapshot::from_config(config))
+        .with_api_keys(config.api_keys.clone())
+        .with_cors(config.cors.clone());
+    if config.api_server_options.enable_tokenizer_info_endpoint
+        && let Some(snapshot) = tokenizer_config_snapshot
+    {
+        state = state.with_tokenizer_info(snapshot);
+    }
+
+    Ok(Arc::new(state))
 }
 
 /// Run the OpenAI-compatible HTTP server until the supplied shutdown token is

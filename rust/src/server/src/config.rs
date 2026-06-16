@@ -44,6 +44,8 @@ pub struct ApiServerOptions {
     pub enable_prompt_tokens_details: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
+    /// When `true`, expose `/tokenizer_info` if tokenizer metadata was loaded.
+    pub enable_tokenizer_info_endpoint: bool,
 }
 
 /// CORS settings mirroring Python's `CORSMiddleware`; the default is permissive.

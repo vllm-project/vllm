@@ -80,6 +80,10 @@ fn build_router_with_options(
         .route("/detokenize", post(tokenize::detokenize))
         .route("/inference/v1/generate", post(inference::generate));
 
+    if state.tokenizer_info().is_some() {
+        router = router.route("/tokenizer_info", get(tokenize::tokenizer_info));
+    }
+
     if runtime_lora_updating_enabled {
         router = router
             .route("/v1/load_lora_adapter", post(lora::load_lora_adapter))

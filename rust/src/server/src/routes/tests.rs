@@ -830,6 +830,19 @@ async fn test_dev_mode_app_with_ready(
     (app, engine_task)
 }
 
+async fn test_app_with_tokenizer_info(snapshot: serde_json::Value) -> axum::Router {
+    let (chat, _engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-tokenizer-info",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+            .with_tokenizer_info(snapshot),
+    ))
+}
+
 async fn test_app_with_request_id_headers() -> (axum::Router, MockEngineTask) {
     let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
         b"engine-openai-request-id",
@@ -1673,6 +1686,49 @@ async fn server_info_endpoint_is_dev_mode_only() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenizer_info_endpoint_is_hidden_without_snapshot() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/tokenizer_info")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn tokenizer_info_endpoint_returns_snapshot() {
+    let expected = json!({
+        "tokenizer_class": "Qwen2Tokenizer",
+        "chat_template": "{{ messages }}",
+        "bos_token": "<s>",
+        "extra": {"x": 1}
+    });
+    let mut app = test_app_with_tokenizer_info(expected.clone()).await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/tokenizer_info")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let actual: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(actual, expected);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
