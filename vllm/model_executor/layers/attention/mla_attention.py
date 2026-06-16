@@ -687,7 +687,24 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mqa_tokens = attn_metadata.num_decode_tokens
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
+        # Fuse quant output, currently supports:
+        # - static fp8 in chunked prefill path, dcp <= 1
+        mha_use_quant_fusion = (
+            quant_key == kFp8StaticTensorSym
+            and attn_metadata is not None
+            and attn_metadata.prefill is not None
+            and attn_metadata.prefill.chunked_context is not None
+            and self.impl.dcp_world_size <= 1
+        )
+
         if num_mha_tokens > 0:
+            if mha_use_quant_fusion:
+                mha_output = quant_output
+                mha_output_scale = output_scale
+            else:
+                mha_output = output
+                mha_output_scale = None
+
             self.impl.forward_mha(  # type: ignore[attr-defined]
                 q[num_mqa_tokens:],
                 k_c_normed[num_mqa_tokens:],
@@ -695,7 +712,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_cache,
                 attn_metadata,
                 self._k_scale,
-                output=output[num_mqa_tokens:],
+                output=mha_output[num_mqa_tokens:num_actual_toks],
+                output_scale=mha_output_scale,
             )
 
         if num_mqa_tokens > 0:
@@ -794,13 +812,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self._v_up_proj(attn_out, out=mqa_output_slice)
 
         if quant_key is not None:
-            # Quantize the BF16 computation result into the quantized output
-            actual = output[:num_actual_toks]
+            # Check if prefill rows are already quantized when fusion fired; only MQA
+            # rows still need post-quant.
+            quant_idx = num_mqa_tokens if mha_use_quant_fusion else num_actual_toks
+            if quant_idx == 0:
+                return quant_output
             if quant_key == kNvfp4Dynamic:
                 # NVFP4: two FP4 values packed into one uint8
                 assert output_block_scale is not None
-                fp4_data, fp4_scales = ops.scaled_fp4_quant(actual, output_scale)
-                quant_output[:num_actual_toks].copy_(fp4_data)
+                fp4_data, fp4_scales = ops.scaled_fp4_quant(
+                    output[:quant_idx], output_scale
+                )
+                quant_output[:quant_idx].copy_(fp4_data)
                 output_block_scale[: fp4_scales.shape[0]].copy_(fp4_scales)
             elif quant_key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym):
                 # Per-group FP8
@@ -811,9 +834,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 finfo = torch.finfo(_FP8_DTYPE)
                 torch.ops._C.per_token_group_fp8_quant(
-                    actual,
-                    quant_output[:num_actual_toks],
-                    output_block_scale[:num_actual_toks],
+                    output[:quant_idx],
+                    quant_output[:quant_idx],
+                    output_block_scale[:quant_idx],
                     quant_group_size,
                     1e-10,  # eps
                     finfo.min,
@@ -824,8 +847,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             elif quant_key == kFp8StaticTensorSym:
                 # Static FP8 quantization
-                fp8_data, _ = self._quant_fp8_op(actual, output_scale)
-                quant_output[:num_actual_toks].copy_(fp8_data)
+                fp8_data, _ = self._quant_fp8_op(output[:quant_idx], output_scale)
+                quant_output[:quant_idx].copy_(fp8_data)
             else:
                 raise ValueError(f"Unsupported quant_key: {quant_key}")
             return quant_output
@@ -2254,6 +2277,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
     ) -> None:
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size != -1
@@ -2311,6 +2335,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 suffix_output=suffix_output,
                 suffix_lse=suffix_lse,
                 prefill_tokens_with_context=prefill_metadata.chunked_context.prefill_tokens_with_context,
+                output_scale=output_scale,
             )
         else:
             assert isinstance(output_prefill, torch.Tensor)
