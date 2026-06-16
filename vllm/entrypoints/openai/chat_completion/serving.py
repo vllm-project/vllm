@@ -1056,7 +1056,7 @@ class OpenAIServingChat(OpenAIServing):
                 chat_template_kwargs=self._effective_chat_template_kwargs(request),
             )
             reasoning_count = sum(
-                reasoning_parser.count_reasoning_tokens(list(output.token_ids))
+                reasoning_parser.count_reasoning_tokens(output.token_ids)
                 for output in final_res.outputs
             )
             usage.completion_tokens_details = CompletionTokenUsageInfo(

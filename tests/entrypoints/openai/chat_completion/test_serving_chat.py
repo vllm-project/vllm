@@ -2087,11 +2087,10 @@ THINK_END_ID = 151645
 
 
 class _FakeTokenizer:
-    """Minimal tokenizer stub with ``<think>``/``</think>`` in its vocabulary.
+    """Minimal tokenizer stub for reasoning parser tests.
 
-    The Qwen3 reasoning parser only needs ``get_vocab()`` to locate
-    start/end token IDs; no other tokenizer behaviour is required for
-    the reasoning-token-counting path.
+    Only ``get_vocab()`` is needed to locate start/end token IDs;
+    no other tokenizer behaviour is required for the counting path.
     """
 
     def __init__(self):
@@ -2344,6 +2343,100 @@ class TestReasoningTokensThroughServing:
         assert usage["completion_tokens_details"]["reasoning_tokens"] == 2
 
     @pytest.mark.asyncio
+    async def test_streaming_no_reasoning_tokens(self, serving_chat, tokenizer):
+        """Streaming: reasoning_tokens is 0 when output has no think spans."""
+        all_token_ids = [20, 21, 22]
+
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "test"}],
+            stream=True,
+            stream_options=StreamOptions(include_usage=True),
+        )
+
+        async def result_generator():
+            for tid in all_token_ids[:-1]:
+                yield _make_request_output(req.request_id, token_ids=[tid])
+            yield _make_request_output(
+                req.request_id,
+                token_ids=[all_token_ids[-1]],
+                finish_reason="stop",
+                finished=True,
+            )
+
+        chunks = []
+        async for chunk_str in serving_chat.chat_completion_stream_generator(
+            request=req,
+            result_generator=result_generator(),
+            request_id=req.request_id,
+            model_name=MODEL_NAME,
+            conversation=[],
+            tokenizer=tokenizer,
+            request_metadata=RequestResponseMetadata(
+                request_id=req.request_id,
+            ),
+        ):
+            chunks.append(chunk_str)
+
+        parsed = _parse_sse_chunks(chunks)
+        usage_chunks = [
+            c for c in parsed if isinstance(c, dict) and c.get("choices") == []
+        ]
+        assert len(usage_chunks) == 1
+        assert (
+            usage_chunks[0]["usage"]["completion_tokens_details"]["reasoning_tokens"]
+            == 0
+        )
+
+    @pytest.mark.asyncio
+    async def test_streaming_no_start_token(self, serving_chat, tokenizer):
+        """Streaming: missing <think> (prepended by chat template) still
+        counts reasoning tokens before </think>."""
+        # tok10 tok11 </think> tok20 -> 2 reasoning tokens
+        all_token_ids = [10, 11, THINK_END_ID, 20]
+
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "test"}],
+            stream=True,
+            stream_options=StreamOptions(include_usage=True),
+        )
+
+        async def result_generator():
+            for tid in all_token_ids[:-1]:
+                yield _make_request_output(req.request_id, token_ids=[tid])
+            yield _make_request_output(
+                req.request_id,
+                token_ids=[all_token_ids[-1]],
+                finish_reason="stop",
+                finished=True,
+            )
+
+        chunks = []
+        async for chunk_str in serving_chat.chat_completion_stream_generator(
+            request=req,
+            result_generator=result_generator(),
+            request_id=req.request_id,
+            model_name=MODEL_NAME,
+            conversation=[],
+            tokenizer=tokenizer,
+            request_metadata=RequestResponseMetadata(
+                request_id=req.request_id,
+            ),
+        ):
+            chunks.append(chunk_str)
+
+        parsed = _parse_sse_chunks(chunks)
+        usage_chunks = [
+            c for c in parsed if isinstance(c, dict) and c.get("choices") == []
+        ]
+        assert len(usage_chunks) == 1
+        assert (
+            usage_chunks[0]["usage"]["completion_tokens_details"]["reasoning_tokens"]
+            == 2
+        )
+
+    @pytest.mark.asyncio
     async def test_non_streaming_no_start_token(self, serving_chat, tokenizer):
         """When <think> is prepended by the chat template, only </think>
         appears in the generated token IDs.  Tokens before </think> should
@@ -2381,3 +2474,45 @@ class TestReasoningTokensThroughServing:
         assert response.usage is not None
         assert response.usage.completion_tokens_details is not None
         assert response.usage.completion_tokens_details.reasoning_tokens == 2
+
+    @pytest.mark.asyncio
+    async def test_no_reasoning_parser_configured(self, tokenizer):
+        """When no reasoning parser is set, completion_tokens_details
+        should be None."""
+        engine = MagicMock(spec=AsyncLLM)
+        engine.errored = False
+        engine.model_config = MockModelConfig()
+        engine.input_processor = MagicMock()
+        engine.renderer = _build_renderer(engine.model_config)
+        chat = _build_serving_chat(engine)
+
+        token_ids = [THINK_START_ID, 10, 11, THINK_END_ID, 20]
+
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "test"}],
+        )
+
+        async def result_generator():
+            yield _make_request_output(
+                req.request_id,
+                token_ids=token_ids,
+                text="<think>reasoning</think>answer",
+                finish_reason="stop",
+                finished=True,
+            )
+
+        response = await chat.chat_completion_full_generator(
+            request=req,
+            result_generator=result_generator(),
+            request_id=req.request_id,
+            model_name=MODEL_NAME,
+            conversation=[],
+            tokenizer=tokenizer,
+            request_metadata=RequestResponseMetadata(
+                request_id=req.request_id,
+            ),
+        )
+
+        assert response.usage is not None
+        assert response.usage.completion_tokens_details is None
