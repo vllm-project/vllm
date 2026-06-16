@@ -18,6 +18,7 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+    VLLM_USE_SINGLE_GPU: "1"
   source_file_dependencies:
     - vllm/
     - tests/v1/core
@@ -51,6 +52,7 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+    VLLM_USE_SINGLE_GPU: "1"
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
@@ -95,6 +97,7 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+    VLLM_USE_SINGLE_GPU: "1"
   source_file_dependencies:
     - vllm/
     - vllm/v1/kv_offload/
@@ -126,6 +129,7 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+    VLLM_USE_SINGLE_GPU: "1"
   source_file_dependencies:
   - vllm/config/
   - vllm/distributed/
@@ -200,6 +204,7 @@ steps:
     REGISTRY: "public.ecr.aws/q9t5s3a7"
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
+    VLLM_USE_SINGLE_GPU: "1"
   source_file_dependencies:
   - vllm/assets/
   - vllm/config/
