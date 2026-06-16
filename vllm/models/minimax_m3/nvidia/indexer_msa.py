@@ -59,21 +59,30 @@ def estimate_num_kv_splits(
 ) -> int:
     """Estimate a fixed ``num_kv_splits`` for the score-only decode plan.
 
-    A uniform-context replica of ``_fmha_sm100_plan``'s auto-split heuristic, so
-    the split count depends only on the (fixed-per-cudagraph) batch size, not on
-    the actual KV lengths. ``num_tokens`` is the number of independent Q rows for
-    planning -- for uniform decode (q_len <= 128) that is the request count, not
-    ``requests * q_len``. ``num_qo_heads`` is the packed head count.
+    Splits the KV scan ~``num_sms / work_rows`` ways to fill the GPU, then CAPS
+    it. Measured on the fp8 decode score (``benchmark_m3/indexer_score_fp8.py``,
+    cudagraph timing): >16 splits with more than one work row hit a sharp
+    split-KV latency cliff (up to ~9x slower); the single-row (bs=1) case has no
+    cliff and benefits from more splits. The optimum is ~context-independent --
+    more context just means more KV tiles per split -- so ``context_len`` only
+    bounds the split count for short contexts (via the KV-tile count). The split
+    depends only on the (fixed-per-cudagraph) batch size, so it is stable across
+    replays. ``num_tokens`` is the number of independent Q rows for planning --
+    for uniform decode (q_len <= 128) that is the request count, not
+    ``requests * q_len``; ``num_qo_heads`` is the packed head count.
     """
     if num_tokens <= 0:
         return 1
     work_rows = num_tokens * num_qo_heads
-    if work_rows > 4096:
-        return 1
     kv_iters = (context_len + kv_tile_size - 1) // kv_tile_size
-    avg_iters = max(2, (work_rows * kv_iters + num_sms - 1) // num_sms + 3)
-    max_pieces = (kv_iters + avg_iters - 1) // avg_iters
-    return min(2 * max(max_pieces, 1), 64)
+    if work_rows == 1:
+        # bs=1 has no split-KV cliff; fill with many splits, bounded by KV tiles.
+        return max(1, min(64, kv_iters))
+    # bs>=2: split ~ num_sms/work_rows to fill the GPU, capped to stay off the
+    # split-KV decode-score cliff. The cliff ceiling rises with context, so the
+    # cap is 16 through the ~60-100k target and 32 for longer context.
+    cap = 32 if context_len > 98304 else 16
+    return max(1, min(num_sms // work_rows, cap, kv_iters))
 
 
 class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
