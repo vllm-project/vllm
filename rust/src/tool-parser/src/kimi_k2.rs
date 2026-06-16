@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use winnow::ascii::{digit1, multispace0 as ws0};
 use winnow::combinator::{alt, eof, repeat, seq};
 use winnow::prelude::*;
@@ -33,6 +35,7 @@ enum KimiK2Event {
     ToolCallsStart,
     ToolCallStart,
     ToolCallHeader {
+        tool_call_id: String,
         function_name: String,
         function_index: usize,
     },
@@ -60,6 +63,7 @@ pub struct KimiK2ToolParser {
     buffer: String,
     mode: KimiK2Mode,
     active_tool_index: Option<usize>,
+    call_ids: BTreeMap<usize, String>,
 }
 
 impl KimiK2ToolParser {
@@ -69,6 +73,7 @@ impl KimiK2ToolParser {
             buffer: String::new(),
             mode: KimiK2Mode::Text,
             active_tool_index: None,
+            call_ids: BTreeMap::new(),
         }
     }
 
@@ -81,6 +86,7 @@ impl KimiK2ToolParser {
             KimiK2Event::ToolCallsStart => self.mode = KimiK2Mode::ToolBlock,
             KimiK2Event::ToolCallStart => self.mode = KimiK2Mode::Header,
             KimiK2Event::ToolCallHeader {
+                tool_call_id,
                 function_name,
                 function_index,
             } => {
@@ -89,6 +95,7 @@ impl KimiK2ToolParser {
                 self.mode = KimiK2Mode::Arguments {
                     json_scan: JsonObjectScanState::default(),
                 };
+                self.call_ids.insert(tool_index, tool_call_id);
                 output.calls.push(ToolCallDelta {
                     tool_index,
                     name: Some(function_name),
@@ -123,6 +130,7 @@ impl KimiK2ToolParser {
     fn reset(&mut self) -> String {
         self.mode = KimiK2Mode::Text;
         self.active_tool_index = None;
+        self.call_ids.clear();
         std::mem::take(&mut self.buffer)
     }
 }
@@ -137,6 +145,10 @@ impl ToolParser for KimiK2ToolParser {
 
     fn preserve_special_tokens(&self) -> bool {
         true
+    }
+
+    fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
+        self.call_ids.get(&tool_index).map(String::as_str)
     }
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
@@ -232,16 +244,18 @@ fn tool_call_end_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> 
 
 /// Parse a Kimi K2 tool-call header before the argument marker.
 fn tool_call_header_event(input: &mut KimiK2Input<'_>) -> ModalResult<KimiK2Event> {
-    let (header, _) = (
+    let (raw_header, _) = (
         take_until(1.., TOOL_CALL_ARGUMENT_START),
         literal(TOOL_CALL_ARGUMENT_START),
     )
         .parse_next(input)?;
 
-    let mut header_input = header;
+    let tool_call_id = raw_header.trim().to_string();
+    let mut header_input = raw_header;
     let (header, _, _) = (tool_header, ws0, eof).parse_next(&mut header_input)?;
 
     Ok(KimiK2Event::ToolCallHeader {
+        tool_call_id,
         function_name: header.function_name,
         function_index: header.function_index,
     })
@@ -503,15 +517,35 @@ mod tests {
     }
 
     #[test]
+    fn kimi_k2_preserves_model_generated_tool_call_ids() {
+        let mut parser = KimiK2ToolParser::new(&test_tools());
+        let input = build_tool_section(&[
+            build_tool_call("get_weather", 0, r#"{"location":"Shanghai"}"#),
+            build_tool_call("add", 1, r#"{"x":1,"y":2}"#),
+        ]);
+
+        for chunk in split_by_chars(&input, 7) {
+            parser.parse_chunk(chunk).unwrap();
+        }
+
+        // IDs are available after parsing but before finish(), which calls reset().
+        assert_eq!(parser.tool_call_id(0), Some("functions.get_weather:0"));
+        assert_eq!(parser.tool_call_id(1), Some("functions.add:1"));
+        parser.finish().unwrap();
+        assert_eq!(parser.tool_call_id(0), None);
+    }
+
+    #[test]
     fn kimi_k2_accepts_non_functions_header_prefix() {
         let mut parser = KimiK2ToolParser::new(&test_tools());
         let input = format!(
             "{TOOL_CALLS_START}{TOOL_CALL_START}api.tools.search:42{TOOL_CALL_ARGUMENT_START}{{}}{TOOL_CALL_END}{TOOL_CALLS_END}"
         );
 
-        let output = parser.parse_complete(&input).unwrap();
+        let output = parser.parse_chunk(&input).unwrap().coalesce_calls();
 
         assert_eq!(output.calls[0].tool_index, 42);
+        assert_eq!(parser.tool_call_id(42), Some("api.tools.search:42"));
         assert_eq!(output.calls[0].name.as_deref(), Some("search"));
         assert_eq!(output.calls[0].arguments, "{}");
     }
