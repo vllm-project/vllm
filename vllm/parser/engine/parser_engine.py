@@ -182,6 +182,21 @@ class ParserEngine(Parser):
         request.skip_special_tokens = False
         return request
 
+    def _preprocess_feed(
+        self,
+        delta_text: str,
+        delta_token_ids: Sequence[int],
+    ) -> tuple[str, Sequence[int]]:
+        return delta_text, delta_token_ids
+
+    def _feed(
+        self,
+        delta_text: str,
+        delta_token_ids: Sequence[int],
+    ) -> list[SemanticEvent]:
+        delta_text, delta_token_ids = self._preprocess_feed(delta_text, delta_token_ids)
+        return self._engine.feed(delta_text, delta_token_ids)
+
     # ── Schema-aware type correction ─────────────────────────────────
 
     @staticmethod
@@ -340,7 +355,7 @@ class ParserEngine(Parser):
         finished: bool,
     ) -> DeltaMessage | None:
         self._check_skip_tool_parsing(request)
-        events = self._engine.feed(delta_text, delta_token_ids)
+        events = self._feed(delta_text, delta_token_ids)
         if finished:
             events.extend(self._engine.finish())
         result = self._events_to_delta(events, finished=finished)
@@ -384,7 +399,7 @@ class ParserEngine(Parser):
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> tuple[str | None, str | None]:
         self._reset()
-        events = self._engine.feed(model_output, [])
+        events = self._feed(model_output, [])
         events.extend(self._engine.finish())
 
         reasoning_parts: list[str] = []
@@ -417,7 +432,7 @@ class ParserEngine(Parser):
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
         self.initialize_streaming()
-        events = self._engine.feed(delta_text, delta_token_ids)
+        events = self._feed(delta_text, delta_token_ids)
         return self._strip_trailing_reasoning(self._events_to_delta(events))
 
     # ── Non-streaming: extract_tool_calls ─────────────────────────────
@@ -477,7 +492,7 @@ class ParserEngine(Parser):
     ) -> DeltaMessage | None:
         self.initialize_streaming()
         self._check_skip_tool_parsing(request)
-        events = self._engine.feed(delta_text, delta_token_ids)
+        events = self._feed(delta_text, delta_token_ids)
         return self._strip_trailing_reasoning(self._events_to_delta(events))
 
     # ── Reasoning state queries ───────────────────────────────────────
@@ -503,6 +518,13 @@ class ParserEngine(Parser):
                 if input_ids[i] == end_id:
                     return input_ids[i + 1 :]
         return input_ids
+
+    def get_streaming_fallback_content(
+        self,
+        text: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> str | None:
+        return None
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         start_id = self._reasoning_start_token_id
@@ -537,7 +559,7 @@ class ParserEngine(Parser):
         state that ``_build_extracted_result`` reads.
         """
         self._reset(initial_state=initial_state)
-        events = self._engine.feed(text, token_ids)
+        events = self._feed(text, token_ids)
         events.extend(self._engine.finish())
 
         delta = self._events_to_delta(events)

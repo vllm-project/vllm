@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use axum::http::{HeaderName, HeaderValue, Method};
 use educe::Educe;
 use serde::Serialize;
@@ -131,6 +131,9 @@ pub struct Config {
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
+    /// Optional maximum number of top log probabilities accepted by the
+    /// frontend. `None` delegates to the text layer default.
+    pub max_logprobs: Option<i32>,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
     /// CORS settings applied to every HTTP response.
@@ -155,6 +158,14 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
         self.cors.validate()?;
+        if let Some(max_logprobs) = self.max_logprobs
+            && max_logprobs < -1
+        {
+            bail!(
+                "max_logprobs must be non-negative or -1, got {}",
+                max_logprobs
+            );
+        }
 
         Ok(())
     }
