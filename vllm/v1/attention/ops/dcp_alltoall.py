@@ -26,6 +26,10 @@ import torch
 import torch.distributed as dist
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
@@ -108,21 +112,49 @@ def _dcp_a2a_lse_pack_dim(output_dtype: torch.dtype) -> int:
     raise ValueError(f"Cannot pack fp32 LSE into output dtype {output_dtype}.")
 
 
+def dcp_a2a_packed_workspace_specs(
+    num_tokens: int,
+    num_heads_per_rank: int,
+    head_dim: int,
+    dcp_world_size: int,
+    output_dtype: torch.dtype,
+) -> list[tuple[tuple[int, ...], torch.dtype]]:
+    """Return (shape, dtype) specs for the two DCP A2A packed send/recv
+    staging buffers, each (N, tokens, H/N, D + lse_pack)."""
+    lse_pack_dim = _dcp_a2a_lse_pack_dim(output_dtype)
+    shape = (dcp_world_size, num_tokens, num_heads_per_rank, head_dim + lse_pack_dim)
+    return [(shape, output_dtype), (shape, output_dtype)]
+
+
+def dcp_a2a_reserve_workspace(
+    num_tokens: int,
+    num_heads_per_rank: int,
+    head_dim: int,
+    dcp_world_size: int,
+    output_dtype: torch.dtype,
+) -> None:
+    """Pre-size packed DCP A2A decode staging buffers in the workspace."""
+    current_workspace_manager().get_simultaneous(
+        *dcp_a2a_packed_workspace_specs(
+            num_tokens=num_tokens,
+            num_heads_per_rank=num_heads_per_rank,
+            head_dim=head_dim,
+            dcp_world_size=dcp_world_size,
+            output_dtype=output_dtype,
+        )
+    )
+
+
 def _dcp_a2a_send_recv_buffers(
     shape: tuple[int, ...],
     device: torch.device,
     dtype: torch.dtype,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    # Don't use the shared WorkspaceManager here. A FULL cudagraph bakes in the
-    # buffer address at capture, but the workspace is growable and sized only to
-    # the largest *captured* batch (the cudagraph capture cap). Any eager a2a
-    # with a bigger batch regrows it, freeing that address and poisoning every
-    # captured graph -> illegal memory access on replay. This bites the very
-    # first request: the post-capture warmup runs an eager decode at
-    # max_num_seqs (> the cap), so the graphs are already dangling before the
-    # server is ready. torch.empty buffers instead live in the graph's private
-    # pool and stay valid for its lifetime (as _dcp_a2a_unpack_combine and the
-    # AG+RS combine path already rely on).
+    if is_workspace_manager_initialized():
+        send_buffer, recv_buffer = current_workspace_manager().get_simultaneous(
+            (shape, dtype), (shape, dtype)
+        )
+        return send_buffer, recv_buffer
     return (
         torch.empty(shape, device=device, dtype=dtype),
         torch.empty(shape, device=device, dtype=dtype),
@@ -426,13 +458,21 @@ def dcp_a2a_lse_reduce(
     if H % world_size != 0:
         raise ValueError(f"H={H} must be divisible by DCP world size {world_size}.")
     H_per_rank = H // world_size
-    lse_pack_dim = _dcp_a2a_lse_pack_dim(cp_attn_out.dtype)
+    workspace_specs = dcp_a2a_packed_workspace_specs(
+        num_tokens=B,
+        num_heads_per_rank=H_per_rank,
+        head_dim=D,
+        dcp_world_size=world_size,
+        output_dtype=cp_attn_out.dtype,
+    )
+    (staging_shape, staging_dtype), _ = workspace_specs
 
     send_buffer, recv_buffer = _dcp_a2a_send_recv_buffers(
-        (world_size, B, H_per_rank, D + lse_pack_dim),
+        staging_shape,
         device=cp_attn_out.device,
-        dtype=cp_attn_out.dtype,
+        dtype=staging_dtype,
     )
+    lse_pack_dim = staging_shape[-1] - D
 
     _dcp_a2a_pack_send(
         cp_attn_out,
@@ -453,5 +493,9 @@ def dcp_a2a_lse_reduce(
     work.wait()
 
     return _dcp_a2a_unpack_combine(
-        recv_buffer, D, lse_pack_dim, return_lse, is_lse_base_on_e
+        recv_buffer,
+        D,
+        lse_pack_dim,
+        return_lse,
+        is_lse_base_on_e,
     )
