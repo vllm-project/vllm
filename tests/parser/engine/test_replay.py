@@ -4,15 +4,21 @@
 
 Replays dynamically built token sequences at different chunk sizes and
 holdback depths to verify chunk-size invariance and terminal-token hygiene.
+
+Parser discovery is automatic: any ``ParserEngine`` subclass registered in
+``registered_adapters`` that also has a builder in ``trace_builder._BUILDERS``
+is picked up with zero manual wiring.
 """
 
 from __future__ import annotations
 
 import dataclasses
+from typing import NamedTuple
 
 import pytest
 
 from tests.parser.engine.replay_harness import (
+    MockTokenizer,
     _test_request,
     assert_no_terminal_leakage,
     assert_parse_output,
@@ -21,73 +27,82 @@ from tests.parser.engine.replay_harness import (
     replay_streaming,
     replay_with_text_holdback,
 )
-from tests.parser.engine.trace_builder import build_samples
-from vllm.parser.abstract_parser import Parser
-from vllm.parser.engine.registered_adapters import (
-    Gemma4Parser,
-    NemotronV3Parser,
-    Qwen3Parser,
-)
+from tests.parser.engine.trace_builder import _BUILDERS, build_samples
+from vllm.parser.engine import registered_adapters as _adapters_mod
+from vllm.parser.engine.parser_engine import ParserEngine
 
-_ENGINE_PARSERS: dict[str, type[Parser]] = {
-    "qwen3_engine": Qwen3Parser,
-    "gemma4_engine": Gemma4Parser,
-    "nemotron_v3_engine": NemotronV3Parser,
+# ── Parser discovery ─────────────────────────────────────────────────
+
+
+class _ParserInfo(NamedTuple):
+    parser_cls: type[ParserEngine]
+    name: str
+    samples: tuple
+    terminals: list[str]
+    tool_end: str
+    think_end: str
+    tool_start: str
+
+
+def _discover_parsers() -> list[_ParserInfo]:
+    """Discover engine parsers from registered_adapters that have test builders.
+
+    Returns one ``_ParserInfo`` per parser, sorted by config name.
+    """
+    bare_tok = MockTokenizer(vocab={}, tokens=[])
+    found: list[_ParserInfo] = []
+    for obj in vars(_adapters_mod).values():
+        if not (
+            isinstance(obj, type)
+            and issubclass(obj, ParserEngine)
+            and obj is not ParserEngine
+        ):
+            continue
+        cfg = obj(bare_tok, None).parser_engine_config
+        if cfg.name not in _BUILDERS:
+            continue
+        all_vals = set(cfg.terminals.values()) | set(cfg.token_id_terminals.values())
+        found.append(
+            _ParserInfo(
+                parser_cls=obj,
+                name=cfg.name,
+                samples=build_samples(cfg.name),
+                terminals=sorted(v for v in all_vals if len(v) > 1),
+                tool_end=cfg.token_id_terminals["TOOL_END"],
+                think_end=cfg.terminals.get("THINK_END", ""),
+                tool_start=cfg.terminals.get("TOOL_START", ""),
+            )
+        )
+    found.sort(key=lambda p: p.name)
+    return found
+
+
+_PARSERS = _discover_parsers()
+
+_ENGINE_PARSERS: dict[str, type[ParserEngine]] = {
+    f"{p.name}_engine": p.parser_cls for p in _PARSERS
 }
 
-_gemma4_samples = build_samples("gemma4")
-_nemotron_v3_samples = build_samples("nemotron_v3")
-_qwen3_samples = build_samples("qwen3")
-
-_GEMMA4_TERMINALS = ["<|channel>", "<channel|>", "<|tool_call>", "<tool_call|>"]
-
-_QWEN3_TERMINALS = [
-    "<think>",
-    "</think>",
-    "<tool_call>",
-    "</tool_call>",
-    "<function=",
-    "</function>",
-]
+# ── Parametrize sample lists ─────────────────────────────────────────
 
 HOLDBACK_CONFIGS = [6, 12, 24]
 
-
-@pytest.mark.parametrize("holdback", HOLDBACK_CONFIGS, ids=lambda h: f"holdback{h}")
-@pytest.mark.parametrize("chunk_size", [5, 10], ids=lambda c: f"chunk{c}")
-@pytest.mark.parametrize("sample", _qwen3_samples, ids=lambda s: s.id)
-class TestQwen3ReplayWithHoldback:
-    """Replay Qwen3 with simulated detokenizer holdback."""
-
-    def test_replay(self, sample, chunk_size, holdback):
-        tokenizer = make_mock_tokenizer(sample)
-        parser = Qwen3Parser(tokenizer, sample.tools)
-        deltas = replay_streaming(
-            parser,
-            sample.tokens,
-            chunk_size=chunk_size,
-            holdback_chars=holdback,
-            prompt_token_ids=sample.prompt_token_ids,
-        )
-        output = collect_output(deltas)
-
-        assert_parse_output(output, sample)
-        assert_no_terminal_leakage(
-            output,
-            _QWEN3_TERMINALS,
-            context=f"chunk_size={chunk_size}, holdback={holdback}",
-        )
+_REPLAY_SAMPLES = [(p.parser_cls, s, p.terminals) for p in _PARSERS for s in p.samples]
 
 
 @pytest.mark.parametrize("holdback", HOLDBACK_CONFIGS, ids=lambda h: f"holdback{h}")
 @pytest.mark.parametrize("chunk_size", [3, 5, 10], ids=lambda c: f"chunk{c}")
-@pytest.mark.parametrize("sample", _gemma4_samples, ids=lambda s: s.id)
-class TestGemma4ReplayWithHoldback:
-    """Replay with simulated detokenizer holdback."""
+@pytest.mark.parametrize(
+    "parser_cls,sample,terminals",
+    _REPLAY_SAMPLES,
+    ids=lambda v: v.id if hasattr(v, "id") else "",
+)
+class TestReplayWithHoldback:
+    """Replay all parsers with simulated detokenizer holdback."""
 
-    def test_replay(self, sample, chunk_size, holdback):
+    def test_replay(self, parser_cls, sample, terminals, chunk_size, holdback):
         tokenizer = make_mock_tokenizer(sample)
-        parser = Gemma4Parser(tokenizer, sample.tools)
+        parser = parser_cls(tokenizer, sample.tools)
         deltas = replay_streaming(
             parser,
             sample.tokens,
@@ -100,18 +115,14 @@ class TestGemma4ReplayWithHoldback:
         assert_parse_output(output, sample)
         assert_no_terminal_leakage(
             output,
-            _GEMMA4_TERMINALS,
+            terminals,
             context=f"chunk_size={chunk_size}, holdback={holdback}",
         )
 
 
 TEXT_HOLDBACK_DELAYS = [1, 2, 3]
 
-_TEXT_HOLDBACK_SAMPLES = (
-    [(Qwen3Parser, s, _QWEN3_TERMINALS) for s in _qwen3_samples]
-    + [(Gemma4Parser, s, _GEMMA4_TERMINALS) for s in _gemma4_samples]
-    + [(NemotronV3Parser, s, _QWEN3_TERMINALS) for s in _nemotron_v3_samples]
-)
+_TEXT_HOLDBACK_SAMPLES = _REPLAY_SAMPLES
 
 
 @pytest.mark.parametrize("delay", TEXT_HOLDBACK_DELAYS, ids=lambda d: f"delay{d}")
@@ -150,13 +161,17 @@ class TestTextHoldback:
 @pytest.mark.parametrize(
     "chunk_size", [1, 2, 3, 5, 10, 19, 20, None], ids=lambda c: f"chunk{c}"
 )
-@pytest.mark.parametrize("sample", _nemotron_v3_samples, ids=lambda s: s.id)
-class TestNemotronV3Replay:
-    """Replay Nemotron V3 token sequences at different chunk sizes."""
+@pytest.mark.parametrize(
+    "parser_cls,sample,terminals",
+    _REPLAY_SAMPLES,
+    ids=lambda v: v.id if hasattr(v, "id") else "",
+)
+class TestReplay:
+    """Replay all parsers at varied chunk sizes without holdback."""
 
-    def test_replay(self, sample, chunk_size):
+    def test_replay(self, parser_cls, sample, terminals, chunk_size):
         tokenizer = make_mock_tokenizer(sample)
-        parser = NemotronV3Parser(tokenizer, sample.tools)
+        parser = parser_cls(tokenizer, sample.tools)
         deltas = replay_streaming(
             parser,
             sample.tokens,
@@ -166,22 +181,15 @@ class TestNemotronV3Replay:
         output = collect_output(deltas)
 
         assert_parse_output(output, sample)
-        assert_no_terminal_leakage(output, _QWEN3_TERMINALS)
+        assert_no_terminal_leakage(output, terminals)
 
 
-_DEFERRAL_SAMPLES = (
-    [(Qwen3Parser, s, "</tool_call>") for s in _qwen3_samples if s.expected_tool_calls]
-    + [
-        (Gemma4Parser, s, "<tool_call|>")
-        for s in _gemma4_samples
-        if s.expected_tool_calls
-    ]
-    + [
-        (NemotronV3Parser, s, "</tool_call>")
-        for s in _nemotron_v3_samples
-        if s.expected_tool_calls
-    ]
-)
+_DEFERRAL_SAMPLES = [
+    (p.parser_cls, s, p.tool_end)
+    for p in _PARSERS
+    for s in p.samples
+    if s.expected_tool_calls
+]
 
 
 @pytest.mark.parametrize(
@@ -242,47 +250,41 @@ class TestDeferralFinish:
         assert_parse_output(output, tool_calls_only)
 
 
+@pytest.mark.parametrize(
+    "parser_cls,sample",
+    [(p.parser_cls, p.samples[0]) for p in _PARSERS],
+    ids=[p.name for p in _PARSERS],
+)
 class TestParserEngineAdjustRequest:
     """Verify ParserEngine and its adapters set skip_special_tokens=False."""
 
-    def test_adjust_request_disables_skip_special_tokens(self):
-        sample = _gemma4_samples[0]
+    def test_adjust_request_disables_skip_special_tokens(self, parser_cls, sample):
         tokenizer = make_mock_tokenizer(sample)
-        parser = Gemma4Parser(tokenizer, sample.tools)
+        parser = parser_cls(tokenizer, sample.tools)
         request = _test_request()
         assert request.skip_special_tokens is True
         adjusted = parser.adjust_request(request)
         assert adjusted.skip_special_tokens is False
 
 
-_TOOL_CALL_SAMPLES = (
-    [
-        (Qwen3Parser, s)
-        for s in _qwen3_samples
-        if s.expected_tool_calls and s.expected_reasoning
-    ]
-    + [
-        (Gemma4Parser, s)
-        for s in _gemma4_samples
-        if s.expected_tool_calls and s.expected_reasoning
-    ]
-    + [
-        (NemotronV3Parser, s)
-        for s in _nemotron_v3_samples
-        if s.expected_tool_calls and s.expected_reasoning
-    ]
-)
+_TOOL_CALL_SAMPLES = [
+    (p.parser_cls, s, p.think_end, p.tool_start)
+    for p in _PARSERS
+    for s in p.samples
+    if s.expected_tool_calls and s.expected_reasoning
+]
 
 
-def _suppressed_expectations(sample) -> tuple[str, str]:
+def _suppressed_expectations(
+    sample, think_end: str, tool_start: str
+) -> tuple[str, str]:
     """Compute expected (reasoning, content) when tools are suppressed.
 
-    When an explicit reasoning-end delimiter (``</think>``, ``<channel|>``)
-    is present, reasoning ends there and the tool call block becomes content.
-    When reasoning ends implicitly (the tool-start token triggers both
-    REASONING_END and TOOL_CALL_START), reasoning still ends at the tool
-    start and the raw tool call block becomes content text — only the
-    structured tool parsing is suppressed, not the reasoning boundary.
+    When an explicit reasoning-end delimiter is present, reasoning ends
+    there and the tool call block becomes content.  When reasoning ends
+    implicitly (the tool-start token triggers both REASONING_END and
+    TOOL_CALL_START), reasoning still ends at the tool start and the raw
+    tool call block becomes content text.
     """
     full_text = "".join(text for _, text in sample.tokens)
     reasoning = sample.expected_reasoning
@@ -290,12 +292,12 @@ def _suppressed_expectations(sample) -> tuple[str, str]:
     if idx < 0:
         return (full_text, "")
     after_reasoning = full_text[idx + len(reasoning) :]
-    for delim in ("</think>", "<channel|>"):
-        pos = after_reasoning.find(delim)
+    if think_end:
+        pos = after_reasoning.find(think_end)
         if pos >= 0:
-            return (reasoning, after_reasoning[pos + len(delim) :])
-    for delim in ("<tool_call>",):
-        pos = after_reasoning.find(delim)
+            return (reasoning, after_reasoning[pos + len(think_end) :])
+    if tool_start:
+        pos = after_reasoning.find(tool_start)
         if pos >= 0:
             return (reasoning, after_reasoning[pos:])
     return (full_text, "")
@@ -311,9 +313,9 @@ _DUMMY_TOOLS = [
 
 @pytest.mark.parametrize("chunk_size", [1, 5, None], ids=lambda c: f"chunk{c}")
 @pytest.mark.parametrize(
-    "parser_cls,sample",
+    "parser_cls,sample,think_end,tool_start",
     _TOOL_CALL_SAMPLES,
-    ids=lambda v: v.id if hasattr(v, "id") else v.__name__,
+    ids=lambda v: v.id if hasattr(v, "id") else getattr(v, "__name__", ""),
 )
 class TestSkipToolParsingReplay:
     """Replay with skip_tool_parsing=True (tool_choice='none').
@@ -322,7 +324,7 @@ class TestSkipToolParsingReplay:
     block appears as content text with no tool calls parsed.
     """
 
-    def test_replay(self, parser_cls, sample, chunk_size):
+    def test_replay(self, parser_cls, sample, think_end, tool_start, chunk_size):
         tokenizer = make_mock_tokenizer(sample)
         kwargs = {}
         if sample.chat_template_kwargs:
@@ -356,7 +358,9 @@ class TestSkipToolParsingReplay:
 
         output = collect_output(results)
 
-        expected_reasoning, expected_content = _suppressed_expectations(sample)
+        expected_reasoning, expected_content = _suppressed_expectations(
+            sample, think_end, tool_start
+        )
 
         assert output.reasoning == expected_reasoning, (
             f"Reasoning mismatch:\n"
