@@ -747,23 +747,30 @@ run_runner_npu_preflight_once() {
   # Verify device_count and allocation result from the JSON output.
   # The runtime check prints pretty JSON, so parse stdin as a full JSON document.
   local selected_device
-  selected_device="$(printf '%s\n' "$manager_output" | "$PYTHON_BIN" -c "
-import json, sys
+  selected_device="$(MANAGER_OUTPUT="$manager_output" "$PYTHON_BIN" - <<'PY'
+import json
+import os
+import sys
+
 try:
-    data = json.load(sys.stdin)
+    data = json.loads(os.environ["MANAGER_OUTPUT"])
 except json.JSONDecodeError as exc:
-    print(f'failed to parse runtime check JSON: {exc}', file=sys.stderr)
+    print(f"failed to parse runtime check JSON: {exc}", file=sys.stderr)
     raise SystemExit(1)
-probe = data.get('torch_npu_probe', {})
-dc = probe.get('device_count')
-if not isinstance(dc, int) or dc <= 0:
-    print(f'torch.npu.device_count() returned {dc!r}', file=sys.stderr)
+
+probe = data.get("torch_npu_probe", {})
+device_count = probe.get("device_count")
+if not isinstance(device_count, int) or device_count <= 0:
+    print(f"torch.npu.device_count() returned {device_count!r}", file=sys.stderr)
     raise SystemExit(1)
-if not probe.get('allocation_ok'):
-    print(f'torch_npu allocation check failed: {probe.get("error")}', file=sys.stderr)
+
+if not probe.get("allocation_ok"):
+    print(f"torch_npu allocation check failed: {probe.get('error')}", file=sys.stderr)
     raise SystemExit(1)
-print(probe.get('selected_device') or 'npu:0')
-" 2>/dev/null)" || return 1
+
+print(probe.get("selected_device") or "npu:0")
+PY
+  )" || return 1
 
   echo "selected_device=${selected_device}"
 }
