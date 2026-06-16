@@ -289,8 +289,11 @@ class AWQMarlinConfig(QuantizationConfig):
                 skip_with_substr=True,
             ):
                 return UnquantizedLinearMethod()
-            # Check if the layer is supported by AWQMarlin.
-            if not check_marlin_supports_layer(layer, self.group_size):
+            # Check if the layer is supported by AWQMarlin; tile-misaligned
+            # shapes are fixed by padding at weight prep.
+            if not check_marlin_supports_layer(
+                layer, self.group_size, allow_tile_padding=True
+            ):
                 logger.warning_once(
                     "Layer '%s' is not supported by AWQMarlin. Falling back to unoptimized AWQ kernels.",  # noqa: E501
                     prefix,

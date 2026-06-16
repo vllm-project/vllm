@@ -29,9 +29,9 @@ class GateLinear(ReplicatedLinear):
     DSV3_SUPPORTED_NUM_EXPERTS = [256, 384]
     DSV3_SUPPORTED_HIDDEN_SIZES = [7168]
 
-    # Dimensions supported by the fp32 specialized kernel
-    FP32_SUPPORTED_NUM_EXPERTS = [256]
-    FP32_SUPPORTED_HIDDEN_SIZES = [3072]
+    # (hidden_size, num_experts) pairs with an instantiated fp32 kernel:
+    #   (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
+    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128)}
     FP32_MAX_TOKENS = 32
 
     def __init__(
@@ -82,8 +82,7 @@ class GateLinear(ReplicatedLinear):
             and self.weight.dtype == torch.float32
             and current_platform.is_cuda()
             and (is_hopper or is_blackwell)
-            and output_size in self.FP32_SUPPORTED_NUM_EXPERTS
-            and input_size in self.FP32_SUPPORTED_HIDDEN_SIZES
+            and (input_size, output_size) in self.FP32_SUPPORTED_SHAPES
         )
 
         # cuBLAS bf16→fp32 eligibility
