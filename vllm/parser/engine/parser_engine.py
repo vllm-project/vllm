@@ -321,6 +321,8 @@ class ParserEngine(Parser):
         return args_json
 
     def _is_valid_tool_name(self, name: str) -> bool:
+        if not self.parser_engine_config.validate_tool_names:
+            return True
         if not self._tools:
             return True
         return find_tool_name(self._tools, name)
@@ -331,9 +333,11 @@ class ParserEngine(Parser):
         self,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> None:
+        tools = getattr(request, "tools", None)
+        if tools:
+            self._tools = tools
         if not self.skip_tool_parsing:
             tool_choice = getattr(request, "tool_choice", None)
-            tools = getattr(request, "tools", None)
             if tool_choice == "none" and tools:
                 self.skip_tool_parsing = True
 
@@ -593,6 +597,7 @@ class ParserEngine(Parser):
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        self._check_skip_tool_parsing(request)
         reasoning, content, tool_call_info = self._single_pass_parse(
             model_output,
             model_output_token_ids,
