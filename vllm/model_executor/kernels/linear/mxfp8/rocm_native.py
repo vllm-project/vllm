@@ -80,43 +80,44 @@ def _mxfp8_linear_kernel(
         mask=m_mask[:, None] & n_mask[None, :])
 
 
+
+# Tuned launch tiles for gfx950 (CDNA4) at MiniMax-M3 MTP decode shapes.
+# Each table maps (M_upper_bound, (BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages)).
+# Decode path (MTP EAGLE3, num_spec=3, conc=32): verify M≈128, draft M≈32.
+# K=6144 skinny-N projections (qkv/gate_up) favour BLOCK_N=32; wider shapes use
+# BLOCK_N=64/128. Prefill (M≥1024) uses the wide 128×256 tile for efficiency.
+# sentinel None in the last row catches all remaining M.
+_TILES: dict[tuple[int, int], list[tuple[int | None, tuple[int, ...]]]] = {
+    (6144, 2304): [(48,  (16, 32, 256, 2, 2)),   # qkv_proj decode
+                   (80,  (64, 32, 256, 2, 2)),
+                   (112, (32, 32, 512, 2, 2)),
+                   (256, (64, 32, 512, 4, 2))],
+    (6144, 1536): [(48,  (32, 32, 256, 4, 2)),   # mlp gate_up decode
+                   (80,  (32, 32, 256, 2, 2)),
+                   (112, (16, 32, 512, 2, 2)),
+                   (256, (64, 32, 256, 2, 2))],
+}
+_GENERIC_TILES: list[tuple[int | None, tuple[int, ...]]] = [
+    (64,   (32,  64, 256, 4, 2)),
+    (128,  (64,  64, 256, 4, 2)),
+    (1023, (64, 128, 256, 8, 2)),
+    (None, (128, 256, 256, 8, 2)),   # prefill: wide tile for long sequences
+]
+
+
+def _pick_tile(
+    table: list[tuple[int | None, tuple[int, ...]]], M: int
+) -> tuple[int, ...]:
+    return next(cfg for ub, cfg in table if ub is None or M <= ub)
+
+
 def _vllm_dot_scaled_kernel(x_q, x_scale, w, w_scale, out_dtype):
     M, K = x_q.shape
     N = w.shape[0]
     out = torch.empty((M, N), dtype=out_dtype, device=x_q.device)
 
-    # Tuned launch tiles for gfx950 (CDNA4) at MiniMax-M3 MTP decode shapes.
-    # Decode path (MTP EAGLE3, num_spec=3, conc=32): verify M=128, draft M=32.
-    # The K=6144 skinny-N projections (qkv/gate_up) win with BLOCK_N=32 over
-    # the wider BLOCK_N=64/128; o_proj/mlp_down (K<=2048) are already optimal.
-    # Prefill (M>=1024) uses the wider 128x256 tile for compute efficiency.
-    if K == 6144 and M <= 256 and N == 2304:   # qkv_proj decode
-        if M <= 48:
-            BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = 16, 32, 256, 2, 2
-        elif M <= 80:
-            BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = 64, 32, 256, 2, 2
-        elif M <= 112:
-            BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = 32, 32, 512, 2, 2
-        else:
-            BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = 64, 32, 512, 4, 2
-    elif K == 6144 and M <= 256 and N == 1536:  # mlp_gate_up decode
-        if M <= 48:
-            BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = 32, 32, 256, 4, 2
-        elif M <= 80:
-            BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = 32, 32, 256, 2, 2
-        elif M <= 112:
-            BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = 16, 32, 512, 2, 2
-        else:
-            BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = 64, 32, 256, 2, 2
-    elif M <= 64:
-        BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = 32, 64, 256, 4, 2
-    elif M <= 128:
-        BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = 64, 64, 256, 4, 2
-    elif M < 1024:
-        BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = 64, 128, 256, 8, 2
-    else:
-        # Prefill: wide tile for long-sequence compute efficiency.
-        BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = 128, 256, 256, 8, 2
+    table = _TILES.get((K, N), _GENERIC_TILES)
+    BLOCK_M, BLOCK_N, BLOCK_K, NUM_WARPS, NUM_STAGES = _pick_tile(table, M)
 
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
     _mxfp8_linear_kernel[grid](
