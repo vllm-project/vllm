@@ -8,7 +8,13 @@ names so that :class:`ReasoningParserManager` and
 """
 
 from vllm.parser.engine.adapters import make_adapters
+from vllm.parser.gemma4 import Gemma4Parser
 from vllm.parser.qwen3 import Qwen3Parser
+
+(
+    Gemma4ParserReasoningAdapter,
+    Gemma4ParserToolAdapter,
+) = make_adapters(Gemma4Parser)
 
 (
     Qwen3ParserReasoningAdapter,

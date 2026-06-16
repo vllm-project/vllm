@@ -118,12 +118,17 @@ def tool_call_payloads(delta_message) -> list:
     ]
 
 
-def combined_tool_arguments(delta_message) -> dict[int, str]:
-    combined: dict[int, str] = {}
-    for tool_call in tool_call_payloads(delta_message):
-        combined.setdefault(tool_call.index, "")
-        combined[tool_call.index] += tool_call.function.arguments
-    return combined
+def tool_call_entries(delta_message) -> list[tuple[int, str | None, str | None]]:
+    if delta_message is None or not delta_message.tool_calls:
+        return []
+    return [
+        (
+            tool_call.index,
+            tool_call.function.name if tool_call.function else None,
+            tool_call.function.arguments if tool_call.function else None,
+        )
+        for tool_call in delta_message.tool_calls
+    ]
 
 
 class TestParse:
@@ -481,18 +486,14 @@ class TestParseDelta:
         assert first_delta is not None
         assert first_delta.reasoning == "Thinking"
         assert first_delta.content is None
-        assert [tool.function.name for tool in tool_call_headers(first_delta)] == [
-            "get_weather"
+        assert tool_call_entries(first_delta) == [
+            (0, "get_weather", '{"location": '),
         ]
-        assert combined_tool_arguments(first_delta) == {0: '{"location": '}
-        assert {tool.index for tool in first_delta.tool_calls} == {0}
 
         assert second_delta is not None
         assert second_delta.reasoning is None
         assert second_delta.content is None
-        assert not tool_call_headers(second_delta)
-        assert combined_tool_arguments(second_delta) == {0: '"Paris"}'}
-        assert {tool.index for tool in second_delta.tool_calls} == {0}
+        assert tool_call_entries(second_delta) == [(0, None, '"Paris"}')]
 
     def test_commentary_preamble_streaming(self, gpt_oss_tokenizer, chat_request):
         parser = HarmonyParser(gpt_oss_tokenizer)
@@ -601,8 +602,7 @@ class TestParseDelta:
         assert delta is not None
         assert delta.reasoning == "Reasoning about query..."
         assert delta.content == "Done"
-        assert [tool.function.name for tool in tool_call_headers(delta)] == ["search"]
-        assert combined_tool_arguments(delta) == {0: '{"query": "vllm"}'}
+        assert tool_call_entries(delta) == [(0, "search", '{"query": "vllm"}')]
 
     def test_tool_index_across_calls(self, gpt_oss_tokenizer, chat_request):
         parser = HarmonyParser(gpt_oss_tokenizer)
@@ -665,22 +665,22 @@ class TestParseDelta:
             finished=False,
         )
 
+        assert tool_call_entries(first_delta) == [
+            (0, "tool_a", '{"a": 1}'),
+            (1, "tool_b", '{"b": '),
+        ]
         assert [tool.index for tool in tool_call_headers(first_delta)] == [0, 1]
-        assert combined_tool_arguments(first_delta) == {
-            0: '{"a": 1}',
-            1: '{"b": ',
-        }
 
         assert second_delta is not None
+        assert tool_call_entries(second_delta) == [(1, None, "2")]
         assert [tool.index for tool in tool_call_payloads(second_delta)] == [1]
-        assert combined_tool_arguments(second_delta) == {1: "2"}
 
         assert third_delta is not None
         assert third_delta.content == "Done"
-        assert combined_tool_arguments(third_delta) == {
-            1: "}",
-            2: '{"c": 3}',
-        }
+        assert tool_call_entries(third_delta) == [
+            (1, None, "}"),
+            (2, "tool_c", '{"c": 3}'),
+        ]
         assert [tool.index for tool in tool_call_headers(third_delta)] == [2]
 
 
