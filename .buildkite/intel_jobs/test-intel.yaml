@@ -19,6 +19,11 @@ steps:
       - image-build-xpu
     timeout_in_minutes: 30
     device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 2+
+      mem: 24g+
+      mem: 32g+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -49,6 +54,13 @@ steps:
       - image-build-xpu
     timeout_in_minutes: 30
     device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      gpu: 2+
+      mem: 16g+
+      mem: 24g+
+      mem: 32g+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -73,6 +85,13 @@ steps:
       - image-build-xpu
     timeout_in_minutes: 30
     device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      gpu: 2+
+      mem: 16g+
+      mem: 24g+
+      mem: 32g+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"

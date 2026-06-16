@@ -5,6 +5,13 @@ steps:
 - label: XPU Sleep Mode
   timeout_in_minutes: 30
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    gpu: 2+
+    mem: 16g+
+    mem: 24g+
+    mem: 32g+
   no_plugin: true
   working_dir: "."
   env:

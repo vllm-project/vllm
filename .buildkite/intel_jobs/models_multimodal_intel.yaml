@@ -6,6 +6,13 @@ steps:
   key: multi-modal-models-standard-1-qwen2
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    gpu: 2+
+    mem: 16g+
+    mem: 24g+
+    mem: 32g+
   no_plugin: true
   working_dir: "."
   env:
@@ -27,6 +34,13 @@ steps:
   key: multi-modal-models-standard-2-qwen3-gemma
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    gpu: 2+
+    mem: 16g+
+    mem: 24g+
+    mem: 32g+
   no_plugin: true
   working_dir: "."
   env:
@@ -47,6 +61,12 @@ steps:
   key: multi-modal-models-standard-3-llava-qwen2-vl
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    gpu: 2+
+    mem: 24g+
+    mem: 32g+
   no_plugin: true
   working_dir: "."
   env:
@@ -68,6 +88,13 @@ steps:
   key: multi-modal-models-standard-4-other-whisper
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    gpu: 2+
+    mem: 16g+
+    mem: 24g+
+    mem: 32g+
   no_plugin: true
   working_dir: "."
   env:
@@ -88,6 +115,13 @@ steps:
   key: multi-modal-processor
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    gpu: 2+
+    mem: 16g+
+    mem: 24g+
+    mem: 32g+
   no_plugin: true
   working_dir: "."
   env:
