@@ -1240,6 +1240,7 @@ setup(
             "av",
             "scipy",
             "soundfile",
+            "soxr",
             "mistral_common[audio]",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
