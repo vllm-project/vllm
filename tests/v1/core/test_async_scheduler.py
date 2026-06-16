@@ -64,6 +64,131 @@ def test_stop_by_max_tokens(max_tokens: int):
     assert total_num_scheduled_tokens == expected_total_num_scheduled_tokens
 
 
+@pytest.mark.parametrize("max_num_seqs", [2, 3])
+def test_async_scheduling_skipped_running_reqs_do_not_block_admission(
+    max_num_seqs: int,
+):
+    """Requests that reached max_tokens in the prior step but are still in the
+    running queue (async scheduling) must not count against max_num_seqs when
+    admitting new waiting requests.
+
+    max_tokens=1 mimics a P/D prefill node: each request finishes after a single
+    forward pass but stays in the running queue until its output is processed.
+    Under async scheduling the output is only processed after the next
+    schedule() call, so a full step happens with finished requests still
+    occupying the running queue.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/45257.
+    """
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=128,
+    )
+    requests = create_requests(
+        num_requests=2 * max_num_seqs,
+        num_tokens=10,
+        max_tokens=1,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    # First step: only max_num_seqs requests can be scheduled; the rest wait.
+    first_output = scheduler.schedule()
+
+    assert len(first_output.scheduled_new_reqs) == max_num_seqs
+    assert len(first_output.num_scheduled_tokens) == max_num_seqs
+    assert len(scheduler.running) == max_num_seqs
+    assert len(scheduler.waiting) == max_num_seqs
+    assert all(req.num_output_placeholders == 1 for req in scheduler.running)
+
+    # Second step, BEFORE the first step's output is processed: the running
+    # requests have already reached max_tokens, so they occupy the running queue
+    # without being rescheduled. They must not block admission of the remaining
+    # waiting requests.
+    second_output = scheduler.schedule()
+
+    assert len(second_output.scheduled_new_reqs) == max_num_seqs
+    assert len(second_output.num_scheduled_tokens) == max_num_seqs
+    assert set(second_output.num_scheduled_tokens) == {
+        request.request_id for request in requests[max_num_seqs:]
+    }
+    assert all(
+        num_tokens == 10 for num_tokens in second_output.num_scheduled_tokens.values()
+    )
+    assert len(scheduler.running) == 2 * max_num_seqs
+    assert len(scheduler.waiting) == 0
+
+
+def test_async_scheduling_skipped_running_reqs_do_not_trigger_watermark():
+    """Resident-but-skipped running requests must not make the KV watermark
+    gate fire when nothing is actually scheduled this step.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/45257.
+    """
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        max_num_seqs=1,
+        max_num_batched_tokens=128,
+        num_blocks=3,
+        watermark=1 / 3,
+    )
+    requests = create_requests(num_requests=2, num_tokens=10, max_tokens=1)
+    for request in requests:
+        scheduler.add_request(request)
+
+    first_output = scheduler.schedule()
+
+    assert set(first_output.num_scheduled_tokens) == {requests[0].request_id}
+    assert len(scheduler.running) == 1
+    assert len(scheduler.waiting) == 1
+    assert scheduler.running[0].num_output_placeholders == 1
+
+    # The single running request reached max_tokens and is skipped this step, so
+    # the watermark must not be applied against the waiting request.
+    second_output = scheduler.schedule()
+
+    assert set(second_output.num_scheduled_tokens) == {requests[1].request_id}
+    assert len(scheduler.running) == 2
+    assert len(scheduler.waiting) == 0
+
+
+def test_async_scheduling_over_limit_running_reqs_drain():
+    """Running queue transiently exceeds max_num_seqs while async outputs are in
+    flight; it must drain cleanly once those outputs are applied.
+    """
+    max_num_seqs = 2
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        max_num_seqs=max_num_seqs,
+        max_num_batched_tokens=128,
+    )
+    requests = create_requests(
+        num_requests=2 * max_num_seqs,
+        num_tokens=10,
+        max_tokens=1,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    first_output = scheduler.schedule()
+    second_output = scheduler.schedule()
+
+    assert len(first_output.num_scheduled_tokens) == max_num_seqs
+    assert len(second_output.num_scheduled_tokens) == max_num_seqs
+    assert len(scheduler.running) == 2 * max_num_seqs
+
+    scheduler.update_from_output(first_output, _make_model_runner_output(first_output))
+    assert len(scheduler.running) == max_num_seqs
+    scheduler.update_from_output(
+        second_output, _make_model_runner_output(second_output)
+    )
+
+    assert scheduler.get_num_unfinished_requests() == 0
+    assert len(scheduler.running) == 0
+    assert len(scheduler.waiting) == 0
+
+
 def test_abort():
     scheduler = create_scheduler(async_scheduling=True)
     requests = create_requests(num_requests=10, max_tokens=20)
