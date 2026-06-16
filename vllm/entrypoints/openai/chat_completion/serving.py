@@ -740,7 +740,7 @@ class OpenAIServingChat(OpenAIServing):
                         cached_tokens=num_cached_tokens
                     )
 
-                if self.reasoning_parser_cls and any(per_choice_token_ids):
+                if self.reasoning_parser_cls:
                     reasoning_parser = self.reasoning_parser_cls(
                         tokenizer,
                         chat_template_kwargs=(

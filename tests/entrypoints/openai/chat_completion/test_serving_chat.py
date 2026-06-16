@@ -2238,6 +2238,63 @@ class TestReasoningTokensThroughServing:
         assert response.usage.completion_tokens_details.reasoning_tokens == 0
 
     @pytest.mark.asyncio
+    async def test_non_streaming_n_gt1(self, serving_chat, tokenizer):
+        """With n=2 the reasoning token counts from each choice are summed."""
+        # Choice 0: <think> tok10 </think> tok20 -> 1 reasoning token
+        # Choice 1: <think> tok30 tok31 tok32 </think> tok40 -> 3 reasoning tokens
+        req = ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": "test"}],
+            n=2,
+        )
+
+        async def result_generator():
+            yield RequestOutput(
+                request_id=req.request_id,
+                prompt=None,
+                prompt_token_ids=[7, 8, 9],
+                prompt_logprobs=None,
+                outputs=[
+                    CompletionOutput(
+                        index=0,
+                        text="<think>r</think>a",
+                        token_ids=[THINK_START_ID, 10, THINK_END_ID, 20],
+                        cumulative_logprob=0.0,
+                        logprobs=None,
+                        finish_reason="stop",
+                        stop_reason=None,
+                    ),
+                    CompletionOutput(
+                        index=1,
+                        text="<think>rrr</think>a",
+                        token_ids=[THINK_START_ID, 30, 31, 32, THINK_END_ID, 40],
+                        cumulative_logprob=0.0,
+                        logprobs=None,
+                        finish_reason="stop",
+                        stop_reason=None,
+                    ),
+                ],
+                finished=True,
+            )
+
+        response = await serving_chat.chat_completion_full_generator(
+            request=req,
+            result_generator=result_generator(),
+            request_id=req.request_id,
+            model_name=MODEL_NAME,
+            conversation=[],
+            tokenizer=tokenizer,
+            request_metadata=RequestResponseMetadata(
+                request_id=req.request_id,
+            ),
+        )
+
+        assert response.usage is not None
+        assert response.usage.completion_tokens_details is not None
+        # 1 (choice 0) + 3 (choice 1) = 4
+        assert response.usage.completion_tokens_details.reasoning_tokens == 4
+
+    @pytest.mark.asyncio
     async def test_streaming_reasoning_tokens(self, serving_chat, tokenizer):
         """Streaming with include_usage: final SSE chunk carries
         completion_tokens_details.reasoning_tokens."""
