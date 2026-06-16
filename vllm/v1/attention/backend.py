@@ -267,6 +267,7 @@ class AttentionBackend(ABC):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: "DeviceCapability",
     ) -> str | None:
         return None
@@ -334,6 +335,7 @@ class AttentionBackend(ABC):
             use_mla,
             has_sink,
             use_sparse,
+            use_mm_prefix,
             device_capability,
         )
         if combination_reason is not None:
@@ -385,7 +387,7 @@ class CommonAttentionMetadata:
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
 
-    causal: bool = True
+    causal: bool | torch.Tensor = True
 
     # Needed by FastPrefillAttentionBuilder
     logits_indices_padded: torch.Tensor | None = None
@@ -414,6 +416,12 @@ class CommonAttentionMetadata:
     and for all rows outside async spec decode; optimistic for async-spec
     decode rows (assumes every draft was accepted). Not safe for kernels
     that need exact per-row context lengths on decode rows."""
+
+    mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
+    """PrefixLM bidirectional ranges for multimodal tokens. Maps
+    request index to list of (start, end) token position ranges
+    where bidirectional attention should apply. None for text-only
+    batches or non-PrefixLM models."""
 
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
@@ -489,7 +497,9 @@ class CommonAttentionMetadata:
             max_seq_len=self.max_seq_len,
             block_table_tensor=self.block_table_tensor[:num_actual_reqs],
             slot_mapping=self.slot_mapping[:num_actual_tokens],
-            causal=self.causal,
+            causal=self.causal[:num_actual_reqs]
+            if isinstance(self.causal, torch.Tensor)
+            else self.causal,
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
             encoder_seq_lens=maybe_slice_reqs(self.encoder_seq_lens),
