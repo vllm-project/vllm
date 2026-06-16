@@ -6281,16 +6281,23 @@ class GPUModelRunner(
                             dummy_modality
                         ]
 
-                        # Realtime streaming models (Voxtral realtime,
-                        # Qwen3-ASR realtime, ...) process at most one new
-                        # multimodal chunk per generation step per session,
-                        # regardless of max_num_seqs. Profiling with the
-                        # cartesian product (max_num_seqs x max audio length)
-                        # OOMs on consumer GPUs while never reflecting runtime
-                        # memory pressure. Clamp to a single item.
-                        # Refs vllm-project/vllm#38233.
+                        # Realtime models submit one new mm chunk per step per
+                        # session, so the max_num_seqs x max-audio product over-
+                        # profiles and OOMs on consumer GPUs (#38233). But runtime
+                        # encoder admission is bounded by the encoder *token*
+                        # budget, not item count (_try_schedule_encoder_inputs /
+                        # EncoderCacheManager), so several concurrent sessions'
+                        # chunks -- or a multi-audio prompt -- can land in a single
+                        # embed_multimodal forward. Profile exactly that many max-
+                        # size items (encoder_budget // max-tokens-per-item): the
+                        # same bound admission enforces. Clamping to 1 under-
+                        # profiles encoder peak memory and OOMs in service.
                         if supports_realtime(self.model):
-                            max_mm_items_per_batch = 1
+                            max_toks = mm_budget.mm_max_toks_per_item[dummy_modality]
+                            max_mm_items_per_batch = max(
+                                1,
+                                min(max_mm_items_per_batch, encoder_budget // max_toks),
+                            )
 
                         logger.info_once(
                             "Encoder cache will be initialized with a "

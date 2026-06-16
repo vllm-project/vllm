@@ -51,7 +51,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -191,6 +196,16 @@ class Scheduler(SchedulerInterface):
 
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
+
+        # Streaming sessions finished from inside schedule()/add_request() (e.g.
+        # a resumable realtime session that reached max_model_len). finish_requests
+        # frees them scheduler-side but, outside update_from_output, has no
+        # `outputs` dict to emit an EngineCoreOutput on -- and finished_req_ids is
+        # worker-facing only, so the client would never receive a finish_reason
+        # and the websocket would hang. Buffer (client_index, req_id, reason) here
+        # and drain it in the next update_from_output, mirroring the failed-KV-load
+        # finish path. Flushed each step.
+        self._streaming_finish_outputs: list[tuple[int, str, FinishReason]] = []
 
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
@@ -478,6 +493,12 @@ class Scheduler(SchedulerInterface):
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
+
+            # NOTE: realtime sessions advance their position clock through the
+            # WAITING loop (each audio chunk resumes the session with WAITING
+            # status), so the unbounded-realtime re-anchor trigger lives there,
+            # not here. The re-anchor margin keeps the running-loop decode clear
+            # of max_model_len between chunks.
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -868,9 +889,14 @@ class Scheduler(SchedulerInterface):
                         # and can never make progress. Finish it gracefully
                         # (finish_requests removes it from the waiting queues)
                         # instead of asserting and crashing the engine, and
-                        # avoid head-of-line blocking the waiting queue.
-                        self.finish_requests(
+                        # avoid head-of-line blocking the waiting queue. Buffer a
+                        # client-facing finish output so the websocket does not
+                        # hang waiting for a finish_reason that never arrives.
+                        finished = self.finish_requests(
                             request_id, RequestStatus.FINISHED_LENGTH_CAPPED
+                        )
+                        self._buffer_streaming_finish(
+                            finished, RequestStatus.FINISHED_LENGTH_CAPPED
                         )
                         continue
 
@@ -1807,6 +1833,22 @@ class Scheduler(SchedulerInterface):
                     )
                 )
 
+        # Emit client-facing finish outputs for streaming sessions finished from
+        # inside schedule()/add_request() (the request is already freed, so this
+        # is the only place the client learns it ended). Mirrors the failed-KV
+        # path above; without it the websocket hangs on a finish_reason that
+        # never comes.
+        if self._streaming_finish_outputs:
+            for client_index, req_id, reason in self._streaming_finish_outputs:
+                outputs[client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=reason,
+                    )
+                )
+            self._streaming_finish_outputs.clear()
+
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
@@ -2078,9 +2120,12 @@ class Scheduler(SchedulerInterface):
                         existing.num_tokens,
                         self.max_model_len,
                     )
-                    self.finish_requests(
+                    finished = self.finish_requests(
                         existing.request_id,
                         RequestStatus.FINISHED_LENGTH_CAPPED,
+                    )
+                    self._buffer_streaming_finish(
+                        finished, RequestStatus.FINISHED_LENGTH_CAPPED
                     )
             else:
                 # Streaming-input session finished.
@@ -2157,6 +2202,22 @@ class Scheduler(SchedulerInterface):
             self._free_request(request, delay_free_blocks=delay_free_blocks)
 
         return [(r.request_id, r.client_index) for r in valid_requests]
+
+    def _buffer_streaming_finish(
+        self,
+        finished: list[tuple[str, int]],
+        finished_status: RequestStatus,
+    ) -> None:
+        """Queue client-facing finish outputs for sessions finished from inside
+        schedule()/add_request() (where there is no `outputs` dict). Drained in
+        the next update_from_output so the client receives a finish_reason
+        instead of hanging. ``finished`` is the (req_id, client_index) list
+        returned by finish_requests."""
+        reason = RequestStatus.get_finished_reason(finished_status)
+        if reason is None:
+            return
+        for req_id, client_index in finished:
+            self._streaming_finish_outputs.append((client_index, req_id, reason))
 
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False
