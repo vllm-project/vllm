@@ -270,9 +270,9 @@ def _is_rdna() -> bool:
 def get_block_size(dtype: torch.dtype, head_dim: int | None = None) -> int:
     """Query-tile size BLOCK_M (also the KV tile unless get_block_n differs)."""
     # SigLIP / Qwen3-VL ViT (head_dim=72) on gfx1151: with the split-D kernel
-    # (D covered as 64+16, see _split_head_dim) a re-sweep over BM x BN x NW
-    # found BM=64 (with BN=32, NW=4) fastest -- ~20% over the BM=BN=32/NW=2
-    # tile that was optimal for the old next_pow2(72)=128 kernel.
+    # (D covered as 64+16, see _split_head_dim) BM=64 is fastest. The companion
+    # KV tile / warps were re-tuned after the head-stride alignment hint
+    # vectorized the loads (see get_block_n / get_num_warps: BN=16, NW=2).
     if _is_rdna() and head_dim == 72 and dtype in (torch.bfloat16, torch.float16):
         return 64
     if dtype == torch.float32:
@@ -291,10 +291,12 @@ def get_block_size(dtype: torch.dtype, head_dim: int | None = None) -> int:
 
 def get_block_n(dtype: torch.dtype, head_dim: int | None = None) -> int:
     """KV-tile size BLOCK_N. Defaults to BLOCK_M (square tile); the head_dim=72
-    split-D ViT path wants an asymmetric BM=64 / BN=32 tile (a wider KV tile
-    regressed; see the get_block_size sweep note)."""
+    split-D ViT path wants an asymmetric BM=64 / BN=16 tile. Re-tuned after the
+    head-stride 16B alignment hint (HEAD_STRIDE_ALIGNED_8) vectorized the Q/K/V
+    loads and removed register spills: with spills gone the narrower BN=16 / NW=2
+    tile wins (BN=32/NW=4/WE=6 was sized for the old spilling codegen)."""
     if _is_rdna() and head_dim == 72 and dtype in (torch.bfloat16, torch.float16):
-        return 32
+        return 16
     return get_block_size(dtype, head_dim)
 
 
@@ -305,10 +307,11 @@ def get_num_warps(head_dim: int) -> int:
         # Tested on Radeon 8060S (gfx1151) with Qwen2.5-VL-7B.
         # Tested configs: Block in {16,32,64}, Warps in {2,4,8,16}.
         if head_dim == 72:
-            # SigLIP / Qwen3-VL, split-D kernel: re-sweep picked BM=64 + BN=32
-            # + NW=4 + WE=6 (~2.95 ms vs 3.67 ms at the old BM=32/NW=2 on a
-            # B=1,S=3520,H=16,D=72 bf16 call).
-            return 4
+            # SigLIP / Qwen3-VL, split-D kernel. Re-tuned after the head-stride
+            # alignment hint vectorized the loads (0 reg spills): BM=64 + BN=16
+            # + NW=2 (no waves_per_eu override) is fastest at B=1,S=3520,H=16,
+            # D=72 bf16 (~2.36 ms vs ~2.85 ms at the old NW=4/WE=6 tile).
+            return 2
         return 8
     else:
         return 4 if head_dim <= 64 else 8
@@ -317,8 +320,10 @@ def get_num_warps(head_dim: int) -> int:
 def get_waves_per_eu(head_dim: int) -> int | None:
     """Per-shape waves_per_eu override for the ViT prefill kernel on RDNA."""
     if _is_rdna() and head_dim == 72:
-        # Gemma3 SigLIP. Cold-L2 sweep best (with BM=32, NW=2).
-        return 6
+        # No override after the alignment-hint re-tune: with vectorized loads /
+        # 0 spills the default occupancy beats the old waves_per_eu=6 (which was
+        # tuned for the spilling BM=32/NW=2 codegen).
+        return None
     return None
 
 
