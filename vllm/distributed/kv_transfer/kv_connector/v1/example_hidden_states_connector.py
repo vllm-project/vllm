@@ -152,9 +152,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         self._kv_cache: torch.Tensor | None = None
 
         # Identify which KV cache group holds the hidden-states layer.
-        # Must be set at init (not register_kv_caches) because the scheduler-
-        # side connector uses it in request_finished_all_groups but never
-        # calls register_kv_caches.
         self._hs_group_idx: int = 0
         if self._kv_cache_config is not None:
             for i, group in enumerate(self._kv_cache_config.kv_cache_groups):
