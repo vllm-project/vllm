@@ -92,6 +92,7 @@ impl HfSpecialTokens {
 pub struct ModelConfig {
     model_type: Option<String>,
     max_position_embeddings: Option<u32>,
+    vocab_size: Option<u32>,
     num_attention_heads: Option<u32>,
     num_experts: Option<OneOrManyExpertCount>,
     moe_num_experts: Option<OneOrManyExpertCount>,
@@ -179,6 +180,13 @@ impl ModelConfig {
         self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
     }
 
+    /// Return the effective model vocabulary size, following the same simplified
+    /// text-config selection as `model_type`: the top-level config wins,
+    /// otherwise a single nested `text_config` may provide it.
+    pub fn vocab_size(&self) -> Option<u32> {
+        self.vocab_size.or_else(|| self.text_config.as_deref()?.vocab_size())
+    }
+
     /// Reject partially nested `text_config` payloads that are unlikely to be
     /// valid LLM configs for our current use.
     ///
@@ -236,10 +244,6 @@ impl ModelConfig {
 
     pub(super) fn is_moe(&self) -> bool {
         self.num_experts() > 0
-    }
-
-    pub(super) fn max_position_embeddings(&self) -> Option<u32> {
-        self.effective_text_config().max_position_embeddings
     }
 }
 
@@ -348,7 +352,10 @@ mod tests {
 
         assert_eq!(config.num_experts(), 8);
         assert_eq!(config.model_type(), Some("top_level"));
-        assert_eq!(config.max_position_embeddings(), Some(4096));
+        assert_eq!(
+            config.effective_text_config().max_position_embeddings,
+            Some(4096)
+        );
         assert!(config.is_moe());
     }
 
@@ -359,7 +366,10 @@ mod tests {
 
         assert_eq!(config.num_experts(), 0);
         assert!(!config.is_moe());
-        assert_eq!(config.max_position_embeddings(), Some(4096));
+        assert_eq!(
+            config.effective_text_config().max_position_embeddings,
+            Some(4096)
+        );
     }
 
     #[test]
