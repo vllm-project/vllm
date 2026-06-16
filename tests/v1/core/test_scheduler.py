@@ -380,7 +380,7 @@ def test_throttle_capacity_bound_guard_admits():
     output = scheduler.schedule()
     assert "a" in output.num_scheduled_tokens
     assert "b" not in output.num_scheduled_tokens
-    assert scheduler._prefill_capacity_bound
+    assert scheduler.prefill_capacity_bound
 
     # Throttle. Because the previous release was capacity-bound, the guard backs
     # off and `b` is admitted rather than stalling the backlog.

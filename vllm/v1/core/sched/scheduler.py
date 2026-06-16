@@ -278,7 +278,7 @@ class Scheduler(SchedulerInterface):
         # DP prefill balancing: Flag to track whether the last cadence-aligned
         # prefill batch fully drained the waiting queue. Prefill throttling
         # is disabled in this case.
-        self._prefill_capacity_bound = False
+        self.prefill_capacity_bound = False
         self.scheduler_reserve_full_isl = (
             self.scheduler_config.scheduler_reserve_full_isl
         )
@@ -423,7 +423,7 @@ class Scheduler(SchedulerInterface):
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
         defer_prefills = (
-            throttle_prefills and not self._prefill_capacity_bound
+            throttle_prefills and not self.prefill_capacity_bound
         ) and any(not r.is_prefill_chunk for r in self.running)
 
         # First, schedule the RUNNING requests.
@@ -983,7 +983,7 @@ class Scheduler(SchedulerInterface):
             # DP prefill balancing: on a step that admitted prefills (release),
             # record whether it was capacity-bound.
             if not defer_prefills:
-                self._prefill_capacity_bound = bool(self.waiting)
+                self.prefill_capacity_bound = bool(self.waiting)
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
