@@ -22,8 +22,7 @@ steps:
     agent_tags:
       label: production
       gpu: 2+
-      mem: 24g+
-      mem: 32g+
+      mem: 24+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -57,10 +56,7 @@ steps:
     agent_tags:
       label: production
       gpu: 1+
-      gpu: 2+
-      mem: 16g+
-      mem: 24g+
-      mem: 32g+
+      mem: 16+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -89,10 +85,7 @@ steps:
     agent_tags:
       label: production
       gpu: 1+
-      gpu: 2+
-      mem: 16g+
-      mem: 24g+
-      mem: 32g+
+      mem: 16+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
