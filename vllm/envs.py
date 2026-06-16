@@ -106,6 +106,7 @@ if TYPE_CHECKING:
     VLLM_USE_BYTECODE_HOOK: bool = True
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
+    VLLM_FORCE_TRITON_CACHE_INVALIDATE: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -719,6 +720,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # without re-splitting graph modules. This reduces overhead during model
     # loading by using reconstruct_serializable_fn_from_mega_artifact.
     "VLLM_USE_MEGA_AOT_ARTIFACT": use_mega_aot_artifact,
+    # When set, vLLM wipes the user's Triton kernel cache
+    # (`~/.triton/cache`, or `$TRITON_CACHE_DIR` if set) on startup, but
+    # only when the current GPU's compute capability is NOT present in
+    # `torch.cuda.get_arch_list()` — i.e., when Triton is JIT-compiling
+    # from a PTX fallback. Defends against the silent-correctness mode
+    # described in https://github.com/vllm-project/vllm/issues/41871
+    # (stale cubins from a previous torch/triton combination producing
+    # wrong code on sm_121 etc.).
+    "VLLM_FORCE_TRITON_CACHE_INVALIDATE": lambda: os.environ.get(
+        "VLLM_FORCE_TRITON_CACHE_INVALIDATE", "0"
+    )
+    == "1",
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
@@ -1999,6 +2012,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
         "VLLM_FORCE_AOT_LOAD",
+        "VLLM_FORCE_TRITON_CACHE_INVALIDATE",
         "S3_ACCESS_KEY_ID",
         "S3_SECRET_ACCESS_KEY",
         "S3_ENDPOINT_URL",

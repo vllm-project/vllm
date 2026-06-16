@@ -7,6 +7,7 @@ pynvml. However, it should not initialize cuda context.
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
@@ -157,6 +158,83 @@ def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
             pynvml.nvmlShutdown()
 
     return wrapper
+
+
+@cache
+def _maybe_warn_arch_ptx_fallback(major: int, minor: int) -> None:
+    """Warn (once per node) when the running GPU's compute capability is
+    not in the arches torch was built against, so all Triton kernels JIT
+    through a PTX fallback. Optionally wipe the on-disk Triton cache to
+    defend against stale cubins silently producing wrong code (see issue
+    #41871).
+
+    Restricted to ``LOCAL_RANK == 0`` so that on multi-GPU nodes (TP, PP,
+    DP) only the local master logs the warning and touches the shared
+    cache directory — workers don't race on rmtree or spam the log.
+    """
+    if envs.LOCAL_RANK != 0:
+        return
+
+    sm = f"sm_{major}{minor}"
+    try:
+        arch_list = list(torch.cuda.get_arch_list())
+    except Exception:
+        # If we can't enumerate arches we cannot reason about the fallback;
+        # skip silently rather than spam logs on every uncommon backend.
+        return
+    if any(a.endswith(sm) for a in arch_list):
+        return
+
+    logger.warning(
+        "Detected compute capability %d.%d (%s) which is NOT in the arches "
+        "torch was built against (%s). Triton kernels will be JIT-compiled "
+        "from a PTX fallback. Stale entries in the Triton kernel cache "
+        "(~/.triton/cache or $TRITON_CACHE_DIR) can silently produce wrong "
+        "code in this mode; see "
+        "https://github.com/vllm-project/vllm/issues/41871 . "
+        "If you see garbled output or malformed tool-call headers, wipe "
+        "the cache or set VLLM_FORCE_TRITON_CACHE_INVALIDATE=1 so vLLM "
+        "wipes it automatically on startup.",
+        major,
+        minor,
+        sm,
+        arch_list,
+    )
+
+    if not envs.VLLM_FORCE_TRITON_CACHE_INVALIDATE:
+        return
+
+    cache_dir = os.environ.get(
+        "TRITON_CACHE_DIR", os.path.expanduser("~/.triton/cache")
+    )
+    if not os.path.isdir(cache_dir):
+        logger.info(
+            "VLLM_FORCE_TRITON_CACHE_INVALIDATE=1 set but Triton cache "
+            "directory %s does not exist; nothing to wipe.",
+            cache_dir,
+        )
+        return
+    try:
+        shutil.rmtree(cache_dir)
+    except FileNotFoundError:
+        # Another local-master-ish process (or an external cleaner) wiped
+        # the directory between the isdir check above and rmtree. Treat as
+        # success — the goal (no stale cubins) is already achieved.
+        return
+    except OSError as e:
+        logger.warning(
+            "VLLM_FORCE_TRITON_CACHE_INVALIDATE=1 set but failed to wipe "
+            "Triton cache at %s: %s",
+            cache_dir,
+            e,
+        )
+        return
+    logger.warning(
+        "VLLM_FORCE_TRITON_CACHE_INVALIDATE=1: wiped Triton cache at %s "
+        "to avoid stale-cubin silent-correctness issues on %s.",
+        cache_dir,
+        sm,
+    )
 
 
 class CudaPlatformBase(Platform):
@@ -841,6 +919,9 @@ class NvmlCudaPlatform(CudaPlatformBase):
                     "avoid unexpected behavior.",
                     ", ".join(device_names),
                 )
+        cap = cls.get_device_capability(0)
+        if cap is not None:
+            _maybe_warn_arch_ptx_fallback(cap.major, cap.minor)
 
 
 class NonNvmlCudaPlatform(CudaPlatformBase):
@@ -874,6 +955,15 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
     @classmethod
     def get_all_device_numa_nodes(cls) -> list[int] | None:
         return None
+
+    @classmethod
+    def log_warnings(cls):
+        try:
+            cap = cls.get_device_capability(0)
+        except Exception:
+            return
+        if cap is not None:
+            _maybe_warn_arch_ptx_fallback(cap.major, cap.minor)
 
 
 # Autodetect either NVML-enabled or non-NVML platform
