@@ -8,7 +8,12 @@ host. The only behavioral change is ``_enum``: by reporting ``OOT`` we
 trigger the ``hw_agnostic/`` dispatch in ``vllm.models.deepseek_v4``.
 """
 
+from typing import TYPE_CHECKING
+
 from vllm.platforms.cuda import NvmlCudaPlatform
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 class DSv4OOTPlatform(NvmlCudaPlatform):
@@ -31,3 +36,13 @@ class DSv4OOTPlatform(NvmlCudaPlatform):
 
     def is_out_of_tree(self) -> bool:
         return True
+
+    @classmethod
+    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        super().check_and_update_config(vllm_config)
+        # Explicitly disable CUDA graph capture for the hardware
+        # agnostic platform. Imported lazily to avoid a circular import
+        # at platform-resolution time (vllm.config imports vllm.platforms).
+        from vllm.config.compilation import CUDAGraphMode
+
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
