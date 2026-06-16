@@ -1176,6 +1176,27 @@ class FlashAttentionImpl(AttentionImpl):
             "Hybrid-attention PCP should use the hybrid PCP backend."
         )
         assert attn_metadata.pcp_query_start_loc is not None
+        # PCP_DEBUG: sync first to flush any pending async error from the
+        # (pre-attention) KV-cache update, then dump shapes. Tells us whether
+        # output.zero_() itself is the failing launch or just the surfacing
+        # point for an earlier reshape_and_cache failure.
+        import os as _os
+
+        if _os.environ.get("PCP_DEBUG"):
+            torch.cuda.synchronize()
+            logger.warning(
+                "PCP_DEBUG pre-zero: out=%s numel=%d dtype=%s contig=%s "
+                "stride=%s q=%s k=%s v=%s num_actual=%d",
+                tuple(output.shape),
+                output.numel(),
+                output.dtype,
+                output.is_contiguous(),
+                tuple(output.stride()),
+                tuple(query.shape),
+                tuple(key.shape),
+                tuple(value.shape),
+                attn_metadata.num_actual_tokens,
+            )
         output.zero_()
 
         sliding_window_size = (
@@ -1183,34 +1204,6 @@ class FlashAttentionImpl(AttentionImpl):
         )
         num_decode_tokens = attn_metadata.pcp_num_decode_tokens
         num_decodes = attn_metadata.pcp_num_decodes
-
-        # PCP_DEBUG: dump the attention config that feeds flash_attn / the
-        # merge kernel, to find which shape trips "invalid configuration
-        # argument" on decode/prefill batches the first request didn't hit.
-        import os as _os
-
-        if _os.environ.get("PCP_DEBUG"):
-            _kv = attn_metadata.pcp_decode_context_kv_lens
-            logger.warning(
-                "PCP_DEBUG attn cfg: num_actual=%d decode_tok=%d num_decodes=%d "
-                "max_num_splits=%d out=%s q[:dec]=%s kv_lens=%s max_kv_len=%s "
-                "pcp_padded=%d local_padded=%d rank=%d",
-                attn_metadata.num_actual_tokens,
-                num_decode_tokens,
-                num_decodes,
-                attn_metadata.max_num_splits,
-                tuple(output.shape),
-                tuple(query[:num_decode_tokens].shape)
-                if num_decode_tokens > 0
-                else None,
-                None
-                if _kv is None
-                else (tuple(_kv.shape), int(_kv.min()), int(_kv.max())),
-                attn_metadata.pcp_max_decode_context_kv_len,
-                pcp_metadata.num_actual_tokens_pcp_padded,
-                pcp_metadata.num_actual_tokens_pcp_padded // self.pcp_world_size,
-                self.pcp_rank,
-            )
 
         if num_decode_tokens > 0:
             assert attn_metadata.pcp_decode_context_kv_lens is not None
