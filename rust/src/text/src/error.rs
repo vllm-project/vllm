@@ -2,6 +2,8 @@ use thiserror::Error;
 use vllm_engine_core_client::Error as EngineCoreError;
 use vllm_llm::Error as LlmError;
 
+pub use crate::lower::logprobs::LogprobsError;
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("tokenizer error: {0}")]
@@ -13,6 +15,8 @@ pub enum Error {
          but the prompt contains {prompt_len} input tokens"
     )]
     PromptTooLong { max_model_len: u32, prompt_len: u32 },
+    #[error(transparent)]
+    Logprobs(#[from] LogprobsError),
     #[error("text request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error(transparent)]

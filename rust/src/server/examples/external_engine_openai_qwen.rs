@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
         chat_template: None,
         default_chat_template_kwargs: None,
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
+        max_logprobs: None,
         api_server_options: ApiServerOptions::default(),
         api_keys: Vec::new(),
         disable_log_stats: false,
