@@ -308,6 +308,9 @@ async fn completion_chunk_stream(
                 logprobs,
                 finished,
             }) => {
+                // Prompt-only streaming already emitted the echoed prompt in the Start chunk.
+                // The one generated token is only used to drive the engine to a finished event,
+                // so hide its delta and forward only the terminal finish/usage metadata.
                 if prompt_only {
                     if let Some(finished) = finished {
                         if enable_log_requests {
