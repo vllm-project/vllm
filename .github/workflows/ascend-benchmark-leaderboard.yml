@@ -3,6 +3,8 @@ name: Ascend Benchmark Leaderboard
 on:
   pull_request:
     types: [opened, reopened, synchronize, labeled]
+  issue_comment:
+    types: [created]
   push:
     branches: [main]
   workflow_dispatch:
@@ -62,14 +64,160 @@ on:
         default: ""
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: >-
+    ${{ github.workflow }}-${{ github.event_name == 'issue_comment' && format('pr-{0}', github.event.issue.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
 
 permissions:
   contents: read
   pull-requests: write
+  issues: write
 
 jobs:
+  issue-comment-command:
+    if: ${{ github.event_name == 'issue_comment' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      should_run: ${{ steps.parse-command.outputs.ASCEND_COMMENT_COMMAND }}
+      help_requested: ${{ steps.parse-command.outputs.ASCEND_COMMENT_HELP }}
+      deny_reason: ${{ steps.parse-command.outputs.ASCEND_COMMENT_DENY_REASON }}
+      pr_number: ${{ steps.parse-command.outputs.ISSUE_COMMENT_PR_NUMBER }}
+      pr_head_sha: ${{ steps.parse-command.outputs.ISSUE_COMMENT_PR_HEAD_SHA }}
+      pr_base_sha: ${{ steps.parse-command.outputs.ISSUE_COMMENT_PR_BASE_SHA }}
+      benchmark_scenario: ${{ steps.parse-command.outputs.INPUT_BENCHMARK_SCENARIO }}
+      model_name: ${{ steps.parse-command.outputs.MODEL_NAME }}
+      dataset_path: ${{ steps.parse-command.outputs.BENCH_DATASET_PATH }}
+      constraints_file: ${{ steps.parse-command.outputs.BENCH_CONSTRAINTS_FILE }}
+      num_prompts: ${{ steps.parse-command.outputs.BENCH_NUM_PROMPTS }}
+      request_rate: ${{ steps.parse-command.outputs.BENCH_REQUEST_RATE }}
+      max_concurrency: ${{ steps.parse-command.outputs.BENCH_MAX_CONCURRENCY }}
+      input_length: ${{ steps.parse-command.outputs.BENCH_INPUT_LEN }}
+      output_length: ${{ steps.parse-command.outputs.BENCH_OUTPUT_LEN }}
+      publish_to_hf: ${{ steps.parse-command.outputs.PUBLISH_TO_HF }}
+      publish_to_benchmark_repo: ${{ steps.parse-command.outputs.PUBLISH_TO_BENCHMARK_REPO }}
+    steps:
+      - name: Checkout workflow scripts
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Fetch PR metadata
+        id: fetch-pr
+        if: ${{ github.event.issue.pull_request }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const pull_number = context.payload.issue.number;
+            const {data: pullRequest} = await github.rest.pulls.get({owner, repo, pull_number});
+            const fs = require('fs');
+            fs.writeFileSync(process.env.RUNNER_TEMP + '/issue-comment-pr.json', JSON.stringify(pullRequest));
+            core.setOutput('pr_payload_path', process.env.RUNNER_TEMP + '/issue-comment-pr.json');
+
+      - name: Parse Ascend comment command
+        id: parse-command
+        if: ${{ github.event.comment.body != '' }}
+        shell: bash
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_COMMENT_PR_PAYLOAD: ${{ steps.fetch-pr.outputs.pr_payload_path }}
+        run: |
+          python3 .github/workflows/scripts/parse_ascend_comment_command.py \
+            --event-payload "$GITHUB_EVENT_PATH" \
+            --pr-payload "$ISSUE_COMMENT_PR_PAYLOAD" \
+            --github-output "$GITHUB_OUTPUT"
+
+  issue-comment-help:
+    needs: [issue-comment-command]
+    if: >-
+      always() &&
+      github.event_name == 'issue_comment' &&
+      needs.issue-comment-command.outputs.help_requested == '1'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Reply with Ascend command help
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        with:
+          script: |
+            const body = [
+              '<!-- ascend-benchmark-command-help -->',
+              '## Ascend Benchmark Command Help',
+              '',
+              'Supported same-repository PR preview commands:',
+              '- `/ascend benchmark random`',
+              '- `/ascend benchmark random --num-prompts 16 --request-rate inf --max-concurrency 4`',
+              '- `/ascend benchmark sharegpt --dataset-path /data/sharegpt.jsonl --constraints-file /data/constraints.json`',
+              '- `/ascend help`',
+              '',
+              'Notes:',
+              '- Commands only run on same-repository PRs.',
+              '- Commands require the PR author or a repository collaborator.',
+              '- Fork PR commands are rejected without using the Ascend self-hosted runner.',
+              '- Comment-triggered runs use the fixed preview model `Qwen/Qwen2.5-3B-Instruct`.',
+              '- Comment-triggered limits: `--num-prompts <= 32`, `--max-concurrency <= 4`, `--request-rate <= 4` or `inf`.',
+              '- ShareGPT dataset and constraints files must be absolute `.json`/`.jsonl` paths under `/data/` or `/mnt/data/`.',
+              '- Comment-triggered runs are optional preview checks and are not required checks.',
+              '- Comment-triggered runs do not publish to HF or the benchmark repository.',
+              '- `/ascend smoke`, `/ascend group ...`, `/ascend scenario ...`, and `/ascend official ...` are planned but not supported yet.',
+            ].join('\n');
+            const {owner, repo} = context.repo;
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: context.payload.issue.number,
+              body,
+            });
+
+  issue-comment-denied:
+    needs: [issue-comment-command]
+    if: >-
+      always() &&
+      github.event_name == 'issue_comment' &&
+      needs.issue-comment-command.outputs.should_run == '0' &&
+      needs.issue-comment-command.outputs.deny_reason != ''
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Reply with Ascend command denial reason
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        env:
+          ASCEND_COMMENT_DENY_REASON: ${{ needs.issue-comment-command.outputs.deny_reason }}
+        with:
+          script: |
+            const reason = process.env.ASCEND_COMMENT_DENY_REASON || 'The command could not be accepted.';
+            const safeReason = reason.replace(/([\\`*_{}[\]()#+.!|>-])/g, '\\$1').replace(/@/g, '@\u200b');
+            const body = [
+              '<!-- ascend-benchmark-command-denied -->',
+              '## Ascend Benchmark Command Not Accepted',
+              '',
+              `Reason: ${safeReason}`,
+              '',
+              'Supported same-repository PR preview commands:',
+              '- `/ascend benchmark random`',
+              '- `/ascend benchmark sharegpt --dataset-path /data/sharegpt.jsonl --constraints-file /data/constraints.json`',
+              '',
+              'Notes:',
+              '- Commands require the PR author or a repository collaborator.',
+              '- Comment-triggered limits: `--num-prompts <= 32`, `--max-concurrency <= 4`, `--request-rate <= 4` or `inf`.',
+              '- ShareGPT dataset and constraints files must be absolute `.json`/`.jsonl` paths under `/data/` or `/mnt/data/`.',
+              '- Comment-triggered runs are optional preview checks and are not required checks.',
+              '- `/ascend smoke`, `/ascend group ...`, `/ascend scenario ...`, and `/ascend official ...` are planned but not supported yet.',
+            ].join('\n');
+            const {owner, repo} = context.repo;
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: context.payload.issue.number,
+              body,
+            });
+
   fork-pr-security-note:
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
     runs-on: ubuntu-latest
@@ -77,14 +225,22 @@ jobs:
       - name: Explain fork PR restriction
         run: |
           echo "Skipping Ascend benchmark on fork PRs because this workflow requires a self-hosted Ascend runner and trusted execution." >> "$GITHUB_STEP_SUMMARY"
+          exit 1
 
   ascend-benchmark:
+    needs: [issue-comment-command]
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      always() &&
+      (
+        github.event_name == 'push' ||
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) ||
+        (github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.should_run == '1')
+      )
     permissions:
       contents: read
       pull-requests: write
+      issues: write
     runs-on:
       - self-hosted
       - linux-aarch64-a2b3-0
@@ -97,24 +253,26 @@ jobs:
       HF_HOME: ${{ github.workspace }}/../.hf-cache
       HUGGINGFACE_HUB_CACHE: ${{ github.workspace }}/../.hf-cache/hub
       TRANSFORMERS_CACHE: ${{ github.workspace }}/../.hf-cache/transformers
-      HF_TOKEN: ${{ github.event_name != 'pull_request' && secrets.HF_TOKEN || '' }}
+      HF_TOKEN: ${{ (github.event_name != 'pull_request' && github.event_name != 'issue_comment') && secrets.HF_TOKEN || '' }}
       HF_REPO_ID: intellistream/vllm-hust-benchmark-results
-      MODEL_NAME: ${{ github.event_name == 'workflow_dispatch' && inputs.model_name || 'Qwen/Qwen2.5-3B-Instruct' }}
-      BENCH_SCENARIO: ${{ github.event_name == 'workflow_dispatch' && inputs.benchmark_scenario || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_SCENARIO) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_SCENARIO) || 'random-online' }}
-      BENCH_DATASET_PATH: ${{ github.event_name == 'workflow_dispatch' && inputs.dataset_path || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_DATASET_PATH) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_DATASET_PATH) || '' }}
-      BENCH_CONSTRAINTS_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.constraints_file || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_CONSTRAINTS_FILE) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_CONSTRAINTS_FILE) || '' }}
+      MODEL_NAME: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.model_name || (github.event_name == 'workflow_dispatch' && inputs.model_name || 'Qwen/Qwen2.5-3B-Instruct') }}
+      BENCH_SCENARIO: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.benchmark_scenario || (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenario || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_SCENARIO) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_SCENARIO) || 'random-online') }}
+      BENCH_DATASET_PATH: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.dataset_path || (github.event_name == 'workflow_dispatch' && inputs.dataset_path || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_DATASET_PATH) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_DATASET_PATH) || '') }}
+      BENCH_CONSTRAINTS_FILE: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.constraints_file || (github.event_name == 'workflow_dispatch' && inputs.constraints_file || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_CONSTRAINTS_FILE) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_CONSTRAINTS_FILE) || '') }}
       MODEL_PARAMETERS: 3B
       MODEL_PRECISION: BF16
       DTYPE: bfloat16
       MAX_MODEL_LEN: "256"
       MAX_NUM_SEQS: "1"
-      BENCH_NUM_PROMPTS: ${{ github.event_name == 'workflow_dispatch' && inputs.num_prompts || '8' }}
+      BENCH_NUM_PROMPTS: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.num_prompts || (github.event_name == 'workflow_dispatch' && inputs.num_prompts || '8') }}
       BENCH_RANDOM_INPUT_LEN: "64"
       BENCH_RANDOM_OUTPUT_LEN: "16"
-      BENCH_REQUEST_RATE: ${{ github.event_name == 'workflow_dispatch' && inputs.request_rate || 'inf' }}
-      BENCH_MAX_CONCURRENCY: ${{ github.event_name == 'workflow_dispatch' && inputs.max_concurrency || '4' }}
-      BENCH_INPUT_LEN: ${{ github.event_name == 'workflow_dispatch' && inputs.input_length || '' }}
-      BENCH_OUTPUT_LEN: ${{ github.event_name == 'workflow_dispatch' && inputs.output_length || '' }}
+      BENCH_REQUEST_RATE: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.request_rate || (github.event_name == 'workflow_dispatch' && inputs.request_rate || 'inf') }}
+      BENCH_MAX_CONCURRENCY: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.max_concurrency || (github.event_name == 'workflow_dispatch' && inputs.max_concurrency || '4') }}
+      BENCH_INPUT_LEN: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.input_length || (github.event_name == 'workflow_dispatch' && inputs.input_length || '') }}
+      BENCH_OUTPUT_LEN: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.output_length || (github.event_name == 'workflow_dispatch' && inputs.output_length || '') }}
+      INPUT_BENCHMARK_SCENARIO: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.benchmark_scenario || (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenario || '') }}
+      PR_LABELS: ${{ github.event_name == 'pull_request' && toJson(github.event.pull_request.labels) || '[]' }}
       SOC_VERSION: ascend910b3
       HARDWARE_VENDOR: Huawei
       HARDWARE_CHIP_MODEL: 910B3
@@ -132,14 +290,15 @@ jobs:
       PUBLISH_TO_BENCHMARK_REPO: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && '1' || '0' }}
       PUBLISH_TO_HF: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && secrets.HF_TOKEN != '') && '1' || '0' }}
       TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
-      TARGET_REPO_SHA: ${{ github.sha }}
+      TARGET_REPO_SHA: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.pr_head_sha || github.sha }}
       BENCHMARK_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-benchmark.git
       BENCHMARK_REPO_SLUG: vLLM-HUST/vllm-hust-benchmark
-      BENCHMARK_REPO_GH_TOKEN: ${{ github.event_name != 'pull_request' && secrets.VLLM_HUST_BENCHMARK_GH_TOKEN || '' }}
-      BENCHMARK_REPO_SSH_KEY: ${{ github.event_name != 'pull_request' && secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY || '' }}
+      BENCHMARK_REPO_GH_TOKEN: ${{ (github.event_name != 'pull_request' && github.event_name != 'issue_comment') && secrets.VLLM_HUST_BENCHMARK_GH_TOKEN || '' }}
+      BENCHMARK_REPO_SSH_KEY: ${{ (github.event_name != 'pull_request' && github.event_name != 'issue_comment') && secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY || '' }}
       BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || 'feature/perfgate-two-stage' }}
       WEBSITE_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-website.git
       VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
+      ISSUE_COMMENT_PR_NUMBER: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.pr_number || '' }}
       HUST_ASCEND_MANAGER_REPO_URL: git@github.com:vLLM-HUST/ascend-runtime-manager.git
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
 
@@ -260,11 +419,11 @@ jobs:
           clone_with_retry "$TARGET_REPO_URL" "$GITHUB_WORKSPACE" "$TARGET_REPO_SHA"
 
       - name: Deepen clone for fork-point detection
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
         shell: bash
         env:
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.pr_head_sha || github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.pr_base_sha || github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           git fetch --deepen=500 origin main || git fetch --unshallow origin main || true
@@ -628,6 +787,12 @@ jobs:
             raise SystemExit("ascend platform plugin entry point is not installed")
           PY
 
+      - name: Resolve L1/L2 benchmark scenario
+        id: resolve-scenario
+        shell: bash
+        run: |
+          "${PYTHON_BIN}" .github/workflows/scripts/resolve_ascend_benchmark_scenario.py
+
       - name: Runner health preflight (before benchmark)
         env:
           VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
@@ -691,7 +856,7 @@ jobs:
             --json | tee "$PRECHECK_DIR/runtime-check.json"
 
       - name: Performance gate - fetch Stage 1 baseline
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
         shell: bash
         env:
           PERFGATE_ALLOW_BASELINE_FALLBACK: "0"
@@ -704,7 +869,7 @@ jobs:
           VLLM_HUST_REPO: ${{ github.workspace }}
           VLLM_HUST_BENCHMARK_REPO: ${{ github.workspace }}/vllm-hust-benchmark
           VLLM_HUST_WEBSITE_REPO: ${{ github.workspace }}/vllm-hust-website
-          RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.TARGET_REPO_SHA }}
           SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.PERFGATE_SPEC_FILE }}
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
@@ -734,7 +899,7 @@ jobs:
           done
 
       - name: Performance gate - Stage 1 comparison
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
         shell: bash
         env:
           SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.PERFGATE_SPEC_FILE }}
@@ -742,7 +907,7 @@ jobs:
 
 
       - name: Performance gate - Stage 2 trial rebase and benchmark
-        if: ${{ github.event_name == 'pull_request' && env.PERFGATE_BASELINE_AVAILABLE != '0' && (env.PERFGATE_MODE != 'enforce' || env.PERFGATE_STAGE1_RESULT == 'pass') }}
+        if: ${{ (github.event_name == 'pull_request' || github.event_name == 'issue_comment') && env.PERFGATE_BASELINE_AVAILABLE != '0' && (env.PERFGATE_MODE != 'enforce' || env.PERFGATE_STAGE1_RESULT == 'pass') }}
         shell: bash
         env:
           WORKSPACE_ROOT: ${{ github.workspace }}
@@ -756,7 +921,7 @@ jobs:
           bash .github/workflows/scripts/perfgate_stage2_rebase_and_benchmark.sh
 
       - name: Performance gate - two-stage comparison
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
         shell: bash
         env:
           SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.PERFGATE_SPEC_FILE }}
@@ -779,7 +944,8 @@ jobs:
           import os
           from pathlib import Path
 
-          run_id = f"ci-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}-{os.environ['GITHUB_SHA']}"
+          target_repo_sha = os.environ.get('TARGET_REPO_SHA') or os.environ['GITHUB_SHA']
+          run_id = f"ci-{os.environ['GITHUB_RUN_ID']}-{os.environ['GITHUB_RUN_ATTEMPT']}-{target_repo_sha}"
           result_root = Path(os.environ['GITHUB_WORKSPACE']) / '.benchmarks' / 'ci' / run_id
           raw_result = result_root / 'raw_benchmark.json'
           leaderboard_entry = result_root / 'submissions' / run_id / 'run_leaderboard.json'
@@ -802,6 +968,9 @@ jobs:
           leaderboard_url = os.environ.get('WEBSITE_LEADERBOARD_URL', '').strip()
           perfgate_mode = os.environ.get('PERFGATE_MODE', 'report')
           baseline_source = os.environ.get('PERFGATE_BASELINE_SOURCE') or 'unavailable'
+          l2_scenario_mode = os.environ.get('L2_SCENARIO_MODE', '').strip()
+          l2_scenario_label = os.environ.get('L2_SCENARIO_LABEL', '').strip()
+          l2_scenario_reason = os.environ.get('L2_SCENARIO_REASON', '').strip()
           snapshot_sync_status = os.environ.get('GITHUB_SNAPSHOT_SYNC_STATUS', '').strip()
           snapshot_sync_commit = os.environ.get('GITHUB_SNAPSHOT_SYNC_COMMIT', '').strip()
           snapshot_sync_repo = os.environ.get('GITHUB_SNAPSHOT_SYNC_REPO', '').strip()
@@ -822,6 +991,7 @@ jobs:
           lines = [
             '## Ascend Benchmark Summary',
             f'- Run ID: `{run_id}`',
+            f'- Commit: `{target_repo_sha}`',
             f'- Scenario: `{bench_scenario}`',
             f'- Model: `{display_model_name}`',
             f'- Publish mode: `{publish_mode}`',
@@ -829,11 +999,15 @@ jobs:
             f"- HF publish: `{'enabled' if hf_publish_enabled else 'skipped'}`",
             f'- Perfgate mode: `{perfgate_mode}`',
             f'- Baseline source: `{baseline_source}`',
+            f'- Scenario mode: `{l2_scenario_mode or "unavailable"}`',
+            f'- Scenario label: `{l2_scenario_label or "none"}`',
+            f'- Scenario reason: `{l2_scenario_reason or "unavailable"}`',
             f'- Workflow run: [view run]({run_url})',
           ]
           comment_lines = [
             '<!-- ascend-benchmark-leaderboard-comment -->',
             '## Ascend Benchmark Result',
+            f'- Commit: `{target_repo_sha}`',
             f'- Scenario: `{bench_scenario}`',
             f'- Model: `{display_model_name}`',
             f'- Publish mode: `{publish_mode}`',
@@ -841,6 +1015,9 @@ jobs:
             f"- HF publish: `{'enabled' if hf_publish_enabled else 'skipped'}`",
             f'- Perfgate mode: `{perfgate_mode}`',
             f'- Baseline source: `{baseline_source}`',
+            f'- Scenario mode: `{l2_scenario_mode or "unavailable"}`',
+            f'- Scenario label: `{l2_scenario_label or "none"}`',
+            f'- Scenario reason: `{l2_scenario_reason or "unavailable"}`',
             f'- Workflow run: [view run]({run_url})',
           ]
           if runner_preflight_failure.is_file():
@@ -952,7 +1129,7 @@ jobs:
           retention-days: 14
 
       - name: Update PR benchmark comment
-        if: ${{ always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}
+        if: ${{ always() && ((github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'issue_comment') }}
         continue-on-error: true
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         with:
@@ -970,7 +1147,11 @@ jobs:
             }
 
             const body = fs.readFileSync(commentPath, 'utf8');
-            const issue_number = context.payload.pull_request.number;
+            const issue_number = context.payload.pull_request?.number || Number(process.env.ISSUE_COMMENT_PR_NUMBER);
+            if (!issue_number) {
+              core.info('No PR number available for benchmark comment update.');
+              return;
+            }
             const {owner, repo} = context.repo;
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner,
@@ -1014,6 +1195,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Checkout benchmark repo
+        shell: bash
+        env:
+          BENCHMARK_REPO_URL: https://github.com/vLLM-HUST/vllm-hust-benchmark.git
+          BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || 'feature/perfgate-two-stage' }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "$BENCHMARK_REPO_URL" vllm-hust-benchmark
+          if ! git -C vllm-hust-benchmark rev-parse --verify --quiet "$BENCHMARK_REPO_REF^{commit}" >/dev/null; then
+            git -C vllm-hust-benchmark fetch --depth 1 origin "$BENCHMARK_REPO_REF"
+            git -C vllm-hust-benchmark checkout --force FETCH_HEAD
+          else
+            git -C vllm-hust-benchmark checkout --force "$BENCHMARK_REPO_REF"
+          fi
+
       - name: Download benchmark artifact
         uses: actions/download-artifact@v4
         with:
@@ -1026,5 +1222,8 @@ jobs:
           RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
           RESULT_ROOT: ${{ github.workspace }}/.benchmarks/ci/ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
           PYTHON_BIN: python3
+          PERFGATE_SPEC_FILE: ${{ vars.VLLM_HUST_PERFGATE_SPEC_FILE || 'docs/official-baselines/perfgate-ascend-qwen25-3b-910b3.json' }}
+          BENCHMARK_REPO_URL: https://github.com/vLLM-HUST/vllm-hust-benchmark.git
+          BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || 'feature/perfgate-two-stage' }}
           SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.PERFGATE_SPEC_FILE }}
         run: bash .github/workflows/scripts/perfgate_store_baseline.sh
