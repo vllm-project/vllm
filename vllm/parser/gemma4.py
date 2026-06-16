@@ -437,6 +437,21 @@ class Gemma4Parser(ParserEngine):
         self._prefix_stripped: bool = False
         self._is_first_feed: bool = True
 
+    def adjust_request(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        """Skip ``skip_special_tokens=False`` when thinking is disabled.
+
+        When there are no reasoning channel tokens to preserve,
+        keeping the default prevents tool-call delimiter tokens
+        from leaking into content (e.g. with ``tool_choice="none"``).
+        """
+        chat_template_kwargs = getattr(request, "chat_template_kwargs", None) or {}
+        if not chat_template_kwargs.get("enable_thinking", True):
+            return request
+        return super().adjust_request(request)
+
     def _reset(self, initial_state=None) -> None:
         super()._reset(initial_state=initial_state)
         self._reasoning_text = ""
