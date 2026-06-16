@@ -1004,6 +1004,7 @@ class InternVLChatModel(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1026,6 +1027,7 @@ class InternVLChatModel(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
@@ -1042,6 +1044,7 @@ class InternVLChatModel(
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         # The graph is always captured with pixel_values_flat as the input
         # buffer. During video replay the manager copies video tiles into
@@ -1054,6 +1057,7 @@ class InternVLChatModel(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         if self.get_input_modality(mm_kwargs) == "image":
             pixel_values = mm_kwargs["pixel_values_flat"]
