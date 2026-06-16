@@ -1103,8 +1103,15 @@ class Scheduler(SchedulerInterface):
             if idx >= num_running_reqs:
                 assert not scheduled_in_prev_step
                 resumed_req_ids.add(req_id)
-            if not scheduled_in_prev_step:
-                all_token_ids[req_id] = req.all_token_ids.copy()
+            # Only V1 model runner uses all_token_ids (for resumed requests in
+            # async scheduling mode to recover output tokens after a gap step).
+            # Skip the copy entirely for V2 and for non-async scheduling.
+            if (not self.use_v2_model_runner
+                    and not scheduled_in_prev_step
+                    and self.scheduler_config.async_scheduling):
+                num_out = req.num_output_tokens
+                if num_out > 0:
+                    all_token_ids[req_id] = req._all_token_ids[-num_out:]
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )

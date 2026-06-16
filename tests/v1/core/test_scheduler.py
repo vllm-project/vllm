@@ -2732,13 +2732,11 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv(
 
     # Preempted request resumed in scheduled_cached_reqs
     assert len(scheduled_cached_reqs.resumed_req_ids) == 1
-    assert len(scheduled_cached_reqs.all_token_ids) == 1
+    # all_token_ids is only populated in async scheduling mode (V1 only).
+    # This scheduler uses the default (non-async) config, so it is empty.
+    assert len(scheduled_cached_reqs.all_token_ids) == 0
     assert scheduled_cached_reqs.req_ids[0] == request_low.request_id
     assert request_low.request_id in scheduled_cached_reqs.resumed_req_ids
-    assert request_low.request_id in scheduled_cached_reqs.all_token_ids
-    # Resumed tokens include 30 prompt tokens and 2 decoded tokens
-    assert len(scheduled_cached_reqs.all_token_ids[request_low.request_id]) == 32
-    assert scheduled_cached_reqs.all_token_ids[request_low.request_id][31] == 100
 
 
 @pytest.mark.parametrize(
@@ -3586,13 +3584,11 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
 
     # Preempted request resumed in scheduled_cached_reqs
     assert len(scheduled_cached_reqs.resumed_req_ids) == 1
-    assert len(scheduled_cached_reqs.all_token_ids) == 1
+    # all_token_ids is only populated in async scheduling mode (V1 only).
+    # This scheduler uses the default (non-async) config, so it is empty.
+    assert len(scheduled_cached_reqs.all_token_ids) == 0
     assert scheduled_cached_reqs.req_ids[0] == request_low.request_id
     assert request_low.request_id in scheduled_cached_reqs.resumed_req_ids
-    assert request_low.request_id in scheduled_cached_reqs.all_token_ids
-    ## Resumed tokens include 94 prompt tokens and 2 decoded tokens
-    assert len(scheduled_cached_reqs.all_token_ids[request_low.request_id]) == 96
-    assert scheduled_cached_reqs.all_token_ids[request_low.request_id][95] == 100
     assert scheduler.running[0].request_id == request_low.request_id
     assert request_high.request_id in output.finished_req_ids
 
