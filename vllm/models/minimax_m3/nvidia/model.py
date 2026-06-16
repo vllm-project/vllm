@@ -490,6 +490,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         # cache (--attention-config '{"indexer_kv_dtype": ...}').
         self.indexer_kv_dtype = vllm_config.attention_config.indexer_kv_dtype
 
+        # Shared top-k buffer: the indexer writes the selected blocks into it and
+        # the attend impl reads them back (so nothing crosses the eager break as a
+        # Python value, which would freeze at capture).
+        self.topk_indices_buffer = topk_indices_buffer
         self.attn_backend = MiniMaxM3SparseBackend
         # Indexer (top-k selection) and main attention are separate impls, each
         # picking Triton vs MSA off its cache dtype. impl is AttentionImplBase
@@ -618,21 +622,21 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         index_query: torch.Tensor,
         output: torch.Tensor,
     ) -> torch.Tensor:
-        # The indexer's decode plan is cudagraph-safe (persistent buffers), so it
-        # stays in the captured segment; its top-k lands in the shared, stable
+        # The indexer's decode path is cudagraph-safe (persistent buffers), so it
+        # runs in the captured segment, writing its top-k into the shared, stable
         # ``topk_indices_buffer``. Only the sparse attention -- whose kernel reads
-        # per-request metadata -- is broken out into the eager segment.
-        topk_idx = self.indexer(index_query)
-        return self._run_sparse_attn(query, topk_idx, output)
+        # per-request metadata -- is broken out into the eager segment, where it
+        # reads that buffer back. Nothing crosses the break as a Python value.
+        self.indexer(index_query)
+        return self._run_sparse_attn(query, output)
 
     @eager_break_during_capture
     def _run_sparse_attn(
         self,
         query: torch.Tensor,
-        topk_idx: tuple[torch.Tensor | None, torch.Tensor | None],
         output: torch.Tensor,
     ) -> torch.Tensor:
-        return self.impl.forward(self, query, self.kv_cache, topk_idx, output)
+        return self.impl.forward(self, query, self.kv_cache, output)
 
 
 class MiniMaxM3DecoderLayer(nn.Module):
