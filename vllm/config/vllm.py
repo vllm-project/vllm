@@ -1162,18 +1162,26 @@ class VllmConfig:
                 # 128-dim GPT-J head, nor a pool that silently fell to 1 -- all
                 # of which would SILENTLY corrupt re-rotated keys, exactly like
                 # theta above. Validate the assumed geometry up front.
-                text_head_dim = getattr(text_config, "head_dim", None) or (
-                    getattr(text_config, "hidden_size", 0)
-                    // max(getattr(text_config, "num_attention_heads", 1), 1)
-                )
-                if text_head_dim != 128:
-                    raise ValueError(
-                        "enable_realtime_unbounded assumes a 128-dim NeoX decoder "
-                        "(the worker shifts a 128-dim head by D); text_config has "
-                        f"head_dim={text_head_dim}. This experimental path is "
-                        "validated for Voxtral/Ministral only."
-                    )
+                #
+                # Gate on audio_config: VllmConfig is re-validated with a
+                # sub-config swapped in during model init (voxtral.py calls
+                # with_hf_config(audio_config)), where text_config falls back to
+                # the audio encoder (head_dim 40, not the decoder's 128). Only the
+                # full multimodal config carries a nested audio_config, so that is
+                # where -- and the only place -- the decoder vs encoder geometry
+                # can be checked without falsely rejecting Voxtral.
                 if audio_config is not None:
+                    text_head_dim = getattr(text_config, "head_dim", None) or (
+                        getattr(text_config, "hidden_size", 0)
+                        // max(getattr(text_config, "num_attention_heads", 1), 1)
+                    )
+                    if text_head_dim != 128:
+                        raise ValueError(
+                            "enable_realtime_unbounded assumes a 128-dim NeoX decoder "
+                            "(the worker shifts a 128-dim head by D); text_config has "
+                            f"head_dim={text_head_dim}. This experimental path is "
+                            "validated for Voxtral/Ministral only."
+                        )
                     # Audio-encoder positions run at block_pool_size x the decoder
                     # clock, so the worker shifts encoder keys by pool*D. pool is
                     # derived from config, never validated; if it silently fell to
