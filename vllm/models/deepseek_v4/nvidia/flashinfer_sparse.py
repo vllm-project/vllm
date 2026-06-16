@@ -95,6 +95,7 @@ class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
         if device_capability.major == 10:
