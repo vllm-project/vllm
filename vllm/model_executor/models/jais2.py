@@ -161,9 +161,6 @@ class Jais2Attention(nn.Module):
         )
 
         is_neox_style = True
-        if quant_config is not None and quant_config.get_name() == "gguf":
-            is_neox_style = False
-
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=max_position_embeddings,
@@ -225,7 +222,6 @@ class Jais2DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
-        # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False
         )
