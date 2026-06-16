@@ -508,6 +508,9 @@ class Gemma3ForConditionalGeneration(
         self.model_config = vllm_config.model_config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
+        self.vit_positions_per_patch = (
+            self.config.vision_config.image_size // self.config.vision_config.patch_size
+        ) ** 2
 
         self.configure_mm_token_handling(
             vocab_size=config.text_config.vocab_size,
@@ -685,8 +688,6 @@ class Gemma3ForConditionalGeneration(
         # The Gemma3 connector maintains a 1:1 token mapping
         return num_vision_tokens
 
-    # --- Encoder CUDA Graph support ---
-
     def get_encoder_cudagraph_config(self):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphConfig,
@@ -697,15 +698,6 @@ class Gemma3ForConditionalGeneration(
             buffer_keys=["pixel_values"],
             out_hidden_size=self.config.text_config.hidden_size,
         )
-
-    def get_input_modality(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> str:
-        return "image"
-
-    def get_max_frames_per_video(self) -> int:
-        return 0
 
     def get_encoder_cudagraph_budget_range(
         self,
@@ -725,13 +717,11 @@ class Gemma3ForConditionalGeneration(
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
         num_patches = mm_kwargs["num_patches"]
-        vision_cfg = self.config.vision_config
-        vit_positions_per_patch = (vision_cfg.image_size // vision_cfg.patch_size) ** 2
         mm_tokens_per_image = self.config.mm_tokens_per_image
 
         return [
             EncoderItemSpec(
-                input_size=int(np) * vit_positions_per_patch,
+                input_size=int(np) * self.vit_positions_per_patch,
                 output_tokens=int(np) * mm_tokens_per_image,
             )
             for np in num_patches
@@ -745,15 +735,14 @@ class Gemma3ForConditionalGeneration(
         pixel_values = mm_kwargs["pixel_values"]
         num_patches = mm_kwargs["num_patches"]
 
-        cum_patches = [0]
-        for p in num_patches:
-            cum_patches.append(cum_patches[-1] + int(p))
-
         if len(indices) == 0:
             return {
                 "pixel_values": pixel_values[:0],
                 "num_patches": num_patches[:0],
             }
+        cum_patches = [0]
+        for p in num_patches:
+            cum_patches.append(cum_patches[-1] + int(p))
 
         selected_pv = torch.cat(
             [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
@@ -779,7 +768,7 @@ class Gemma3ForConditionalGeneration(
 
         mm_tokens_per_image = self.config.mm_tokens_per_image
         num_images = min(
-            (token_budget + mm_tokens_per_image - 1) // mm_tokens_per_image,
+            token_budget // mm_tokens_per_image,
             max_batch_size,
         )
 
