@@ -1049,25 +1049,9 @@ def fastsafetensors_weights_iterator(
 
     queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
     tqdm_enabled = enable_tqdm(use_tqdm_on_load)
-    try:
-        pl = ParallelLoader(
-            pg=pg,
-            hf_weights_files=hf_weights_files,
-            queue_size=queue_size,
-            use_tqdm_on_load=tqdm_enabled,
-            device=str(device),
-            nogds=nogds,
-        )
-    except RuntimeError as e:
-        if "gds" not in str(e):
-            raise
-        nogds = True
-        logger.warning_once(
-            "GDS not enabled, setting `nogds=True`.\n"
-            "For more information, see: https://github.com/foundation-model-stack/"
-            "fastsafetensors?tab=readme-ov-file#basic-api-usages"
-        )
-        pl = ParallelLoader(
+
+    def _make_loader(nogds: bool) -> "ParallelLoader":
+        return ParallelLoader(
             pg=pg,
             hf_weights_files=hf_weights_files,
             queue_size=queue_size,
@@ -1076,10 +1060,34 @@ def fastsafetensors_weights_iterator(
             nogds=nogds,
         )
 
+    # GDS can fail either at construction or lazily inside the producer
+    # thread during iteration (e.g. cuFileHandleRegister returning
+    # CU_FILE_HANDLE_NOT_REGISTERED on a filesystem without GDS support).
+    # Catch both and fall back to nogds, but only before yielding any
+    # tensor -- restarting mid-stream would reload earlier shards.
+    pl = None
+    yielded = False
     try:
-        yield from pl.iterate_weights()
+        try:
+            pl = _make_loader(nogds)
+            for name, tensor in pl.iterate_weights():
+                yielded = True
+                yield name, tensor
+        except RuntimeError as e:
+            if nogds or yielded or "gds" not in str(e):
+                raise
+            logger.warning_once(
+                "GDS not enabled, setting `nogds=True`.\n"
+                "For more information, see: https://github.com/foundation-model-stack/"
+                "fastsafetensors?tab=readme-ov-file#basic-api-usages"
+            )
+            if pl is not None:
+                pl.close()
+            pl = _make_loader(nogds=True)
+            yield from pl.iterate_weights()
     finally:
-        pl.close()
+        if pl is not None:
+            pl.close()
 
 
 def instanttensor_weights_iterator(
