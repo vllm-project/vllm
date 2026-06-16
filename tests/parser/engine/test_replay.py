@@ -17,18 +17,24 @@ from tests.parser.engine.replay_harness import (
     collect_output,
     make_mock_tokenizer,
     replay_streaming,
+    replay_with_text_holdback,
 )
 from tests.parser.engine.trace_builder import build_samples
 from vllm.parser.abstract_parser import Parser
 from vllm.parser.engine.registered_adapters import (
+    Gemma4Parser,
     Qwen3Parser,
 )
 
 _ENGINE_PARSERS: dict[str, type[Parser]] = {
     "qwen3_engine": Qwen3Parser,
+    "gemma4_engine": Gemma4Parser,
 }
 
+_gemma4_samples = build_samples("gemma4")
 _qwen3_samples = build_samples("qwen3")
+
+_GEMMA4_TERMINALS = ["<|channel>", "<channel|>", "<|tool_call>", "<tool_call|>"]
 
 _QWEN3_TERMINALS = [
     "<think>",
@@ -56,6 +62,7 @@ class TestQwen3ReplayWithHoldback:
             sample.tokens,
             chunk_size=chunk_size,
             holdback_chars=holdback,
+            prompt_token_ids=sample.prompt_token_ids,
         )
         output = collect_output(deltas)
 
@@ -67,9 +74,84 @@ class TestQwen3ReplayWithHoldback:
         )
 
 
+@pytest.mark.parametrize("holdback", HOLDBACK_CONFIGS, ids=lambda h: f"holdback{h}")
+@pytest.mark.parametrize("chunk_size", [3, 5, 10], ids=lambda c: f"chunk{c}")
+@pytest.mark.parametrize("sample", _gemma4_samples, ids=lambda s: s.id)
+class TestGemma4ReplayWithHoldback:
+    """Replay with simulated detokenizer holdback."""
+
+    def test_replay(self, sample, chunk_size, holdback):
+        tokenizer = make_mock_tokenizer(sample)
+        parser = Gemma4Parser(tokenizer, sample.tools)
+        deltas = replay_streaming(
+            parser,
+            sample.tokens,
+            chunk_size=chunk_size,
+            holdback_chars=holdback,
+            prompt_token_ids=sample.prompt_token_ids,
+        )
+        output = collect_output(deltas)
+
+        assert_parse_output(output, sample)
+        assert_no_terminal_leakage(
+            output,
+            _GEMMA4_TERMINALS,
+            context=f"chunk_size={chunk_size}, holdback={holdback}",
+        )
+
+
+TEXT_HOLDBACK_DELAYS = [1, 2, 3]
+
+
+@pytest.mark.parametrize("delay", TEXT_HOLDBACK_DELAYS, ids=lambda d: f"delay{d}")
+@pytest.mark.parametrize("sample", _gemma4_samples, ids=lambda s: s.id)
+class TestGemma4TextHoldback:
+    """Replay with production-like text/token-ID misalignment.
+
+    In production the detokenizer sends token IDs immediately but holds
+    back text by N tokens.  This exercises the TokenIDScanner deferred
+    terminal path that aligned-holdback tests do not cover.
+    """
+
+    def test_replay(self, sample, delay):
+        tokenizer = make_mock_tokenizer(sample)
+        parser = Gemma4Parser(tokenizer, sample.tools)
+        deltas = replay_with_text_holdback(
+            parser,
+            sample.tokens,
+            text_delay=delay,
+            prompt_token_ids=sample.prompt_token_ids,
+        )
+        output = collect_output(deltas)
+
+        assert_parse_output(output, sample)
+        assert_no_terminal_leakage(
+            output,
+            _GEMMA4_TERMINALS,
+            context=f"text_delay={delay}",
+        )
+
+
+class TestParserEngineAdjustRequest:
+    """Verify ParserEngine and its adapters set skip_special_tokens=False."""
+
+    def test_adjust_request_disables_skip_special_tokens(self):
+        sample = _gemma4_samples[0]
+        tokenizer = make_mock_tokenizer(sample)
+        parser = Gemma4Parser(tokenizer, sample.tools)
+        request = _test_request()
+        assert request.skip_special_tokens is True
+        adjusted = parser.adjust_request(request)
+        assert adjusted.skip_special_tokens is False
+
+
 _TOOL_CALL_SAMPLES = [
     (Qwen3Parser, s)
     for s in _qwen3_samples
+    if s.expected_tool_calls and s.expected_reasoning
+] + [
+    (Gemma4Parser, s)
+    for s in _gemma4_samples
     if s.expected_tool_calls and s.expected_reasoning
 ]
 
@@ -147,7 +229,9 @@ class TestSkipToolParsingReplay:
                 "".join(all_texts[start:end]),
                 all_ids[start:end],
                 request,
-                prompt_token_ids=[] if start == 0 else None,
+                prompt_token_ids=(sample.prompt_token_ids or [])
+                if start == 0
+                else None,
                 finished=is_last,
             )
             results.append(result)
