@@ -1028,28 +1028,11 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> list[bool] | None:
         """Sparse Mamba state-snapshot retention.
 
-        A Mamba prefix-cache hit resumes the recurrent state from a *single*
-        cached state block at an ``alignment_tokens`` boundary (see
-        ``find_longest_cache_hit``). Caching the state at every block is what
-        lets a hit land at the finest granularity, but each snapshot is a full
-        recurrent state (one logical block, span >= 1) and dense retention can
-        dominate the KV pool at small block sizes — at ``block_size`` 128 a
-        per-block snapshot fills most of the pool, starving the allocator of
-        uncached blocks and forcing eviction of live attention prefixes.
-
-        ``retention_interval`` trades hit granularity for footprint by keeping
-        only one cached state per segment instead of one per block:
+        ``retention_interval``:
 
           ``None`` -> dense (cache every block; default, unchanged behavior)
           ``0``    -> keep only the latest replay boundary
           ``> 0``  -> keep one state per ``retention_interval``-sized segment
-
-        A hit then resumes from the nearest retained boundary at or before the
-        shared prefix length (at most ``retention_interval`` tokens coarser),
-        which costs a little extra prefill but frees the intermediate snapshots
-        for reuse. ``retention_interval`` is validated to be a multiple of the
-        scheduler block size, so segment boundaries are always valid Mamba hit
-        boundaries.
         """
         if retention_interval is None or alignment_tokens is None:
             # Dense caching (default) or no alignment constraint imposed.
@@ -1068,9 +1051,11 @@ class MambaManager(SingleTypeKVCacheManager):
             if per_segment <= 1:
                 # Interval at/below the block size: every block is a boundary.
                 return None
-            for i in range(start_block, end_block):
-                if (i + 1) % per_segment == 0:
-                    mask[i - start_block] = True
+            first_boundary = (
+                start_block + per_segment
+            ) // per_segment * per_segment - 1
+            for i in range(first_boundary - start_block, len(mask), per_segment):
+                mask[i] = True
 
         # (2) Replay boundary. ``get_computed_blocks`` caps hits at
         # ``num_prompt - 1``, so an exact prompt replay lands on the latest
