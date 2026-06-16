@@ -26,7 +26,7 @@ __all__ = ["is_qutlass_fp4_scheme", "QutlassNvFP4LinearMethod"]
 NVFP4_MAX = 6.0
 
 
-# QUTLASS supports block sizes (16, 32, 64, 128) for NVFP4
+# QUTLASS supports transform block sizes (16, 32, 64, 128) for NVFP4
 # https://github.com/IST-DASLab/qutlass/blob/v0.2.0/qutlass/csrc/bindings.cpp#L413-L414
 def is_qutlass_fp4_scheme(
     quant_scheme: CompressedTensorsScheme | None,
