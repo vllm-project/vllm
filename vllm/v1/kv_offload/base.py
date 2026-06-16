@@ -116,6 +116,46 @@ class OffloadingEvent:
     removed: bool
 
 
+class BlockLifecycleObserver(ABC):
+    """Observe CPU-primary <-> secondary tier block movements.
+
+    Lets a per-block sidecar (e.g. routed-experts routing) follow the same
+    cascade / promotion events the KV blocks do in a multi-tier (disk/object)
+    setup, keeping its lifecycle identical to the KV cache's. Callbacks fire
+    on the scheduler thread; ``cpu_block_ids`` are CPU primary-tier block ids
+    and ``keys`` the matching offload keys, in the same order.
+    """
+
+    @abstractmethod
+    def on_blocks_cascaded(
+        self, keys: Sequence[OffloadKey], cpu_block_ids: "np.ndarray"
+    ) -> None:
+        """A set of CPU-primary blocks was cascaded to a secondary tier."""
+
+    @abstractmethod
+    def on_blocks_promoted(
+        self, keys: Sequence[OffloadKey], cpu_block_ids: "np.ndarray"
+    ) -> None:
+        """A set of blocks was promoted from a secondary tier into CPU primary."""
+
+    def on_blocks_promotion_started(
+        self, keys: Sequence[OffloadKey], cpu_block_ids: "np.ndarray"
+    ) -> None:
+        """A promotion (secondary -> CPU primary) was just submitted.
+
+        Fires when the KV-byte load starts, before it completes (and before
+        the matching ``on_blocks_promoted``). Lets a sidecar prefetch its rows
+        in parallel with the KV transfer. Default no-op.
+        """
+
+    def shutdown(self) -> None:
+        """Release any resources (flush async writers, stop pools, ...).
+
+        Default no-op; backends with background workers override this. Called
+        from the owning manager's ``shutdown``.
+        """
+
+
 """
 OffloadingManager class for managing KV data offloading in vLLM v1
 
@@ -175,6 +215,18 @@ class OffloadingKVEventsConfig:
 
 
 class OffloadingManager(ABC):
+    # Optional observer of CPU-primary <-> secondary tier movements. Only
+    # multi-tier managers (e.g. TieringOffloadingManager) fire it; default
+    # None means no observer and zero behavior change for single-tier CPU
+    # offload. Set via set_block_lifecycle_observer().
+    block_lifecycle_observer: "BlockLifecycleObserver | None" = None
+
+    def set_block_lifecycle_observer(
+        self, observer: "BlockLifecycleObserver | None"
+    ) -> None:
+        """Register (or clear) a CPU<->secondary block lifecycle observer."""
+        self.block_lifecycle_observer = observer
+
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """

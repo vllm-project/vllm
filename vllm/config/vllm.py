@@ -821,17 +821,14 @@ class VllmConfig:
     def _verify_return_routed_experts_kv_compat(self) -> None:
         """Reject KV connectors unsupported by --enable-return-routed-experts.
 
-        Routed-experts capture only works with the single-instance CPU
-        offload connector, whose transfer jobs the scheduler follows to
-        store/load routed expert metadata at block granularity. PD
-        disaggregation is unsupported (routing captured on P can't reach
-        D), as is any other connector. Must run after
+        Routing capture works only with the CPU offload connector
+        (``CPUOffloadingSpec`` or its multi-tier ``TieringOffloadingSpec``),
+        whose transfer jobs the scheduler follows at block granularity. PD
+        disaggregation (routing on P can't reach D) and other connectors are
+        rejected. Best-effort early check; must run after
         _post_init_kv_transfer_config() so the connector synthesized from
-        --kv-offloading-size is also checked.
-
-        This is a best-effort early check; the authoritative validation
-        (block_size_factor, full-attention-only) happens at scheduler
-        init where the resolved offloading spec is available.
+        --kv-offloading-size is also seen. Authoritative checks run at
+        scheduler init.
         """
         if self.model_config is None or not (
             self.model_config.enable_return_routed_experts
@@ -841,29 +838,23 @@ class VllmConfig:
         if ktc is None or not ktc.is_kv_transfer_instance:
             return
         extra = ktc.kv_connector_extra_config or {}
+        spec_name = extra.get("spec_name", "CPUOffloadingSpec")
         is_cpu_offload = (
             ktc.kv_connector == "OffloadingConnector"
             and ktc.kv_role == "kv_both"
-            and extra.get("spec_name", "CPUOffloadingSpec") == "CPUOffloadingSpec"
+            and spec_name in ("CPUOffloadingSpec", "TieringOffloadingSpec")
         )
         if not is_cpu_offload:
             raise ValueError(
                 "--enable-return-routed-experts only supports the CPU KV "
-                "offload connector (OffloadingConnector + CPUOffloadingSpec, "
-                "kv_role=kv_both); PD disaggregation and other KV connectors "
-                "are not supported."
+                "offload connector (OffloadingConnector + CPUOffloadingSpec "
+                "or its TieringOffloadingSpec subclass, kv_role=kv_both); "
+                "PD disaggregation and other KV connectors are not "
+                "supported."
             )
-        offloaded_block_size = extra.get("block_size")
-        if (
-            offloaded_block_size is not None
-            and self.cache_config.block_size is not None
-            and int(offloaded_block_size) != self.cache_config.block_size
-        ):
-            raise ValueError(
-                "--enable-return-routed-experts requires the offloaded "
-                f"block size ({offloaded_block_size}) to equal the GPU "
-                f"block size ({self.cache_config.block_size})."
-            )
+        # Any offloaded block size (block_size_factor >= 1) is fine here;
+        # the authoritative checks (full-attention group present, non-empty
+        # offload pool) run at scheduler init with the resolved spec.
 
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""

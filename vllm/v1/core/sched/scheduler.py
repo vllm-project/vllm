@@ -7,8 +7,6 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
-import numpy as np
-
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -29,8 +27,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
+    FullAttnBlockMap,
+    RoutedExpertsBlockLifecycleObserver,
     RoutedExpertsManager,
+    compute_full_attn_block_map,
     find_full_attention_gid,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -327,18 +328,24 @@ class Scheduler(SchedulerInterface):
 
             # With KV offload, the manager additionally stores/loads
             # routed experts per transfer job, following the KV block
-            # lifecycle.
+            # lifecycle (any block_size_factor; disk-tiering supported).
             num_offload_blocks = None
+            block_size_factor = 1
             if self.connector is not None:
-                num_offload_blocks = self._validate_routed_experts_offload(
-                    kv_cache_config
+                num_offload_blocks, block_size_factor = (
+                    self._validate_routed_experts_offload(kv_cache_config)
                 )
 
             self.routed_experts_mgr = RoutedExpertsManager(
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,
                 num_offload_blocks=num_offload_blocks,
+                block_size_factor=block_size_factor,
             )
+            # For disk / multi-tier offload, register the observer that makes
+            # routing follow the KV blocks' CPU<->secondary cascade/promotion.
+            if num_offload_blocks is not None:
+                self._maybe_register_routed_experts_secondary_store(vllm_config)
             # Expected group count in every transfer spec's group_sizes.
             self._re_num_kv_groups = len(kv_cache_config.kv_cache_groups)
             # Block-ID snapshot taken at schedule time (before forward),
@@ -352,17 +359,18 @@ class Scheduler(SchedulerInterface):
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
 
-    def _validate_routed_experts_offload(self, kv_cache_config: KVCacheConfig) -> int:
+    def _validate_routed_experts_offload(
+        self, kv_cache_config: KVCacheConfig
+    ) -> tuple[int, int]:
         """Validate the KV connector for offloaded routed experts.
 
-        Only the CPU OffloadingConnector with block_size_factor == 1 is
-        supported: the per-job GPU<->CPU block mapping relies on
-        prepare_store/prepare_load preserving key order — the same
-        contract the worker-side KV copy depends on (see
-        kv_offload/cpu/gpu_worker.py transfer_async).
+        Supports any CPU-backed OffloadingConnector — ``CPUOffloadingSpec``
+        and its multi-tier subclass ``TieringOffloadingSpec`` — with any
+        ``block_size_factor`` (>= 1); the per-job block mapping is handled by
+        ``compute_full_attn_block_map``.
 
         Returns:
-            The CPU offload block pool size.
+            ``(num_offload_blocks, block_size_factor)``.
 
         Raises:
             ValueError: On any unsupported connector / spec combination.
@@ -380,18 +388,14 @@ class Scheduler(SchedulerInterface):
             )
         cs = self.connector.connector_scheduler
         assert cs is not None
+        # TieringOffloadingSpec subclasses CPUOffloadingSpec, so both the
+        # single-tier CPU offload and the disk/object multi-tier offload
+        # are accepted here.
         if not isinstance(cs.spec, CPUOffloadingSpec):
             raise ValueError(
                 "--enable-return-routed-experts only supports "
-                "CPUOffloadingSpec; got "
-                f"{type(cs.spec).__name__}"
-            )
-        if cs.config.block_size_factor != 1:
-            raise ValueError(
-                "--enable-return-routed-experts requires the offloaded "
-                "block size to equal the GPU block size "
-                f"(block_size_factor={cs.config.block_size_factor}); drop "
-                "or adjust kv_connector_extra_config['block_size']."
+                "CPUOffloadingSpec (or its TieringOffloadingSpec subclass); "
+                f"got {type(cs.spec).__name__}"
             )
         if find_full_attention_gid(kv_cache_config) is None:
             raise ValueError(
@@ -405,19 +409,89 @@ class Scheduler(SchedulerInterface):
                 "a non-empty CPU offload block pool; increase "
                 "kv_offloading_size / cpu_bytes_to_use."
             )
-        return cs.spec.num_blocks
+        return cs.spec.num_blocks, cs.config.block_size_factor
 
-    def _slice_full_attn_transfer(
+    def _maybe_register_routed_experts_secondary_store(
+        self, vllm_config: VllmConfig
+    ) -> None:
+        """Attach a routing-sidecar observer when the offload manager tiers.
+
+        For a ``TieringOffloadingManager``, build a store for the first
+        secondary tier whose ``type`` has a ``RoutedExpertsStoreFactory``
+        builder and install a ``RoutedExpertsBlockLifecycleObserver``, so
+        routing cascades / promotes in lockstep with the KV blocks. A tier
+        type with no registered builder is skipped with a warning (KV still
+        tiers). Single-tier CPU offload installs nothing (no callbacks fire).
+        """
+        from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
+            RoutedExpertsStoreContext,
+            RoutedExpertsStoreFactory,
+        )
+        from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
+
+        assert self.connector is not None
+        cs = self.connector.connector_scheduler
+        assert cs is not None
+        manager = cs.manager
+        if not isinstance(manager, TieringOffloadingManager):
+            return
+
+        spec = cs.spec
+        mgr = self.routed_experts_mgr
+        row_shape = (
+            mgr.block_size_factor,
+            mgr.block_size,
+            mgr.num_layers,
+            mgr.num_experts_per_tok,
+        )
+        tier_configs = [
+            t
+            for t in (spec.extra_config.get("secondary_tiers") or [])
+            if isinstance(t, dict)
+        ]
+
+        store = None
+        for tier_config in tier_configs:
+            tier_type = tier_config.get("type")
+            if not tier_type or not RoutedExpertsStoreFactory.is_registered(tier_type):
+                continue
+            ctx = RoutedExpertsStoreContext(
+                tier_config=tier_config,
+                offloading_spec=spec,
+                row_shape=row_shape,
+                dtype=mgr.expert_id_dtype,
+            )
+            store = RoutedExpertsStoreFactory.create(tier_type, ctx)
+            if store is not None:
+                logger.info(
+                    "Registered routed-experts sidecar via '%s' tier (row_shape=%s)",
+                    tier_type,
+                    row_shape,
+                )
+                break
+
+        if store is None:
+            logger.warning(
+                "KV offload tiers to secondary storage but no routed-experts "
+                "store backend is registered for any configured tier type "
+                "(%s); routing will NOT survive CPU eviction. Register a "
+                "RoutedExpertsStoreFactory builder for your tier type.",
+                [t.get("type") for t in tier_configs],
+            )
+            return
+
+        observer = RoutedExpertsBlockLifecycleObserver(mgr, store)
+        manager.set_block_lifecycle_observer(observer)
+
+    def _full_attn_block_map(
         self, gpu_spec: object, cpu_spec: object
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Slice the full-attention group's blocks out of one transfer job.
+    ) -> FullAttnBlockMap:
+        """Map a transfer job's full-attention group to offloaded sub-blocks.
 
-        Sole adapter between the scheduler and KV offload transfer specs.
-        Core invariant: CPU block ids are laid out in the same group-major
-        flat order as GPU block ids, with per-group lengths given by
-        ``group_sizes`` — guaranteed by prepare_store/prepare_load
-        preserving key order. Returns ``(gpu_block_ids, cpu_block_ids)``
-        views (no copy) regardless of transfer direction.
+        Sole adapter between the scheduler and KV offload transfer specs:
+        validates the spec types, then delegates to
+        ``compute_full_attn_block_map`` (which checks the layout contract and
+        resolves the sub-block arithmetic for any ``block_size_factor``).
         """
         if not isinstance(gpu_spec, GPULoadStoreSpec):
             raise RuntimeError(
@@ -427,26 +501,14 @@ class Scheduler(SchedulerInterface):
             raise RuntimeError(
                 f"expected CPULoadStoreSpec, got {type(cpu_spec).__name__}"
             )
-        group_sizes = gpu_spec.group_sizes
-        attn_gid = self.routed_experts_mgr.attn_gid
-        if (
-            len(group_sizes) != self._re_num_kv_groups
-            or sum(group_sizes) != len(gpu_spec.block_ids)
-            or len(cpu_spec.block_ids) != len(gpu_spec.block_ids)
-        ):
-            raise RuntimeError(
-                "routed-experts offload transfer violates the group-major "
-                "flat-order contract (CPU block ids must match GPU block "
-                f"ids per group): group_sizes={list(group_sizes)}, "
-                f"num_kv_groups={self._re_num_kv_groups}, "
-                f"attn_gid={attn_gid}, len(gpu)={len(gpu_spec.block_ids)}, "
-                f"len(cpu)={len(cpu_spec.block_ids)}"
-            )
-        off = sum(group_sizes[:attn_gid])
-        n = group_sizes[attn_gid]
-        return (
-            gpu_spec.block_ids[off : off + n],
-            cpu_spec.block_ids[off : off + n],
+        return compute_full_attn_block_map(
+            gpu_block_ids=gpu_spec.block_ids,
+            cpu_block_ids=cpu_spec.block_ids,
+            group_sizes=gpu_spec.group_sizes,
+            block_indices=gpu_spec.block_indices,
+            attn_gid=self.routed_experts_mgr.attn_gid,
+            block_size_factor=self.routed_experts_mgr.block_size_factor,
+            expected_num_groups=self._re_num_kv_groups,
         )
 
     def _apply_routed_experts_offload_transfers(
@@ -473,18 +535,12 @@ class Scheduler(SchedulerInterface):
             )
         for job in meta.load_jobs.values():
             src, dst = job.transfer_spec  # CPU -> GPU
-            gpu_ids, cpu_ids = self._slice_full_attn_transfer(dst, src)
-            if len(gpu_ids):
-                self.routed_experts_mgr.load_routed_experts_from_cpu_blocks(
-                    cpu_ids, gpu_ids
-                )
+            block_map = self._full_attn_block_map(dst, src)
+            self.routed_experts_mgr.load_routed_experts_from_cpu_blocks(block_map)
         for job in meta.store_jobs.values():
             src, dst = job.transfer_spec  # GPU -> CPU
-            gpu_ids, cpu_ids = self._slice_full_attn_transfer(src, dst)
-            if len(gpu_ids):
-                self.routed_experts_mgr.store_routed_experts_to_cpu_blocks(
-                    gpu_ids, cpu_ids
-                )
+            block_map = self._full_attn_block_map(src, dst)
+            self.routed_experts_mgr.store_routed_experts_to_cpu_blocks(block_map)
 
     def _mamba_block_aligned_split(
         self,

@@ -321,7 +321,7 @@ class OffloadingConnectorScheduler:
 
     def __init__(self, spec: OffloadingSpec):
         # Kept for capability checks by the core scheduler
-        # (e.g. routed-experts mirror sizing).
+        # (e.g. routed-experts offload buffer sizing).
         self.spec = spec
         self.config = SchedulerOffloadConfig.from_spec(spec)
         self.manager: OffloadingManager = spec.get_manager()

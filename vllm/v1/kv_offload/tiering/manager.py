@@ -227,6 +227,16 @@ class TieringOffloadingManager(OffloadingManager):
                         job_metadata.req_context,
                         completed_job.success,
                     )
+                    # Restore routing for these blocks before any GPU load
+                    # can read them: a GPU load is only issued after the block
+                    # is ready, which complete_write above just made it.
+                    if (
+                        completed_job.success
+                        and self.block_lifecycle_observer is not None
+                    ):
+                        self.block_lifecycle_observer.on_blocks_promoted(
+                            list(job_metadata.keys), job_metadata.block_ids
+                        )
                 else:
                     # primary→secondary transfer completed.
                     # Decrement ref_cnt on primary blocks.
@@ -349,6 +359,14 @@ class TieringOffloadingManager(OffloadingManager):
                 )
                 self._transfer_jobs[job_id] = job_metadata
                 tier.submit_load(job_metadata)
+
+                # Prefetch routing in parallel with the KV-byte load, so the
+                # restore on promotion completion serves from memory instead of
+                # blocking the scheduler on disk.
+                if self.block_lifecycle_observer is not None:
+                    self.block_lifecycle_observer.on_blocks_promotion_started(
+                        list(entry.keys), job_metadata.block_ids
+                    )
 
         self._pending_load_submissions.clear()
 
@@ -494,6 +512,11 @@ class TieringOffloadingManager(OffloadingManager):
             self._transfer_jobs[job_id] = job_metadata
             tier.submit_store(job_metadata)
 
+            if self.block_lifecycle_observer is not None:
+                self.block_lifecycle_observer.on_blocks_cascaded(
+                    list(ready_keys), primary_blocks_spec.block_ids
+                )
+
     @override
     def complete_store(
         self,
@@ -546,6 +569,13 @@ class TieringOffloadingManager(OffloadingManager):
                 self._transfer_jobs[job_id] = job_metadata
 
                 tier.submit_store(job_metadata)
+
+            # Persist routing for the cascaded blocks; prepare_read above
+            # ref-protects them, so the rows are still valid here.
+            if self.block_lifecycle_observer is not None:
+                self.block_lifecycle_observer.on_blocks_cascaded(
+                    list(keys), primary_blocks_spec.block_ids
+                )
 
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
@@ -701,6 +731,8 @@ class TieringOffloadingManager(OffloadingManager):
     @override
     def shutdown(self) -> None:
         """Shutdown all tiers and release resources."""
+        if self.block_lifecycle_observer is not None:
+            self.block_lifecycle_observer.shutdown()
         for tier in self.secondary_tiers:
             tier.shutdown()
         self.primary_tier.shutdown()
