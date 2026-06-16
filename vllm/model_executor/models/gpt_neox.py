@@ -309,7 +309,7 @@ class GPTNeoXForCausalLM(nn.Module, SupportsPP):
             prefix=maybe_prefix(prefix, "embed_out"),
         )
         if self.config.tie_word_embeddings:
-            self.embed_out.weight = self.gpt_neox.embed_in.weight
+            self.embed_out = self.embed_out.tie_weights(self.gpt_neox.embed_in)
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.gpt_neox.make_empty_intermediate_tensors

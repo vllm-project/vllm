@@ -310,7 +310,11 @@ class Lfm2Model(nn.Module):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size, config.hidden_size, org_num_embeddings=config.vocab_size
+            self.vocab_size,
+            config.hidden_size,
+            org_num_embeddings=config.vocab_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
 
         def get_layer(prefix: str):

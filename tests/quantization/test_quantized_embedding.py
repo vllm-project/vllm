@@ -22,6 +22,11 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 # class-based "Embedding" target), produced with llm-compressor.
 MODEL_ID = "kkothuri/pythia-70m-emb-w4g64-ct"
 
+# Same, but with tied embeddings: the single packed table is reused as the
+# `embed_out` head, so the logits matmul runs through the quantized embedding's
+# `apply` and the tie must survive a packed (weight-less) embedding.
+TIED_MODEL_ID = "kkothuri/pythia-70m-tied-W4g64-ct"
+
 
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="quantized embedding kernel requires CUDA"
@@ -40,4 +45,27 @@ def test_quantized_embedding_dispatch(vllm_runner, monkeypatch) -> None:
         vllm_model.apply_model(check_model)
 
         # Smoke test: the dequant-gather embedding path runs end-to-end.
+        print(vllm_model.generate_greedy(["Hello my name is"], max_tokens=4)[0][1])
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="quantized embedding kernel requires CUDA"
+)
+def test_tied_quantized_embedding(vllm_runner, monkeypatch) -> None:
+    # `LLM.apply_model` requires pickling a function.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    with vllm_runner(
+        TIED_MODEL_ID, dtype=torch.float16, max_model_len=2048, enforce_eager=True
+    ) as vllm_model:
+
+        def check_model(model):
+            embed = model.gpt_neox.embed_in
+            assert isinstance(embed.quant_method, CompressedTensorsEmbeddingWNA16Int)
+            # Tied: the head reuses the quantized embedding module, so its
+            # `apply` (logits matmul) is exercised on the packed table.
+            assert model.embed_out is embed
+
+        vllm_model.apply_model(check_model)
+
+        # Smoke test: load + tie + the apply (logits) path run without error.
         print(vllm_model.generate_greedy(["Hello my name is"], max_tokens=4)[0][1])
