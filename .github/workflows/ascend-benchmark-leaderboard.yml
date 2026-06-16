@@ -576,23 +576,47 @@ jobs:
 
           verify_npu_via_npu_smi() {
             echo "[preflight-fallback] Verifying NPU hardware via npu-smi..."
-            if ! command -v npu-smi >/dev/null 2>&1; then
-              echo "[preflight-fallback] npu-smi not available" >&2
-              return 1
+
+            # Method 1: Try npu-smi with a clean LD_LIBRARY_PATH.
+            # use_single_ascend_env.sh overrides LD_LIBRARY_PATH with conda
+            # library paths that can conflict with npu-smi's system-level CANN
+            # driver dependencies. Unsetting it lets the system linker use
+            # default paths from /etc/ld.so.cache.
+            if command -v npu-smi >/dev/null 2>&1; then
+              local npu_smi_output
+              local npu_smi_exit_code
+              npu_smi_output="$(env -u LD_LIBRARY_PATH npu-smi info 2>&1)"
+              npu_smi_exit_code=$?
+              if [[ $npu_smi_exit_code -eq 0 ]]; then
+                local healthy_count
+                healthy_count="$(echo "$npu_smi_output" | grep -c '| OK ' || true)"
+                if [[ "$healthy_count" -gt 0 ]]; then
+                  echo "[preflight-fallback] npu-smi confirms $healthy_count healthy NPU device(s)"
+                  echo "$npu_smi_output" | head -30
+                  return 0
+                fi
+                echo "[preflight-fallback] npu-smi succeeded but found no healthy NPU devices" >&2
+              else
+                echo "[preflight-fallback] npu-smi info failed (exit $npu_smi_exit_code):" >&2
+                echo "$npu_smi_output" | head -10 >&2
+              fi
+            else
+              echo "[preflight-fallback] npu-smi not found in PATH" >&2
             fi
-            local npu_smi_output
-            npu_smi_output="$(npu-smi info 2>&1)" || {
-              echo "[preflight-fallback] npu-smi info failed" >&2
-              return 1
-            }
-            local healthy_count
-            healthy_count="$(echo "$npu_smi_output" | grep -c '| OK ' || true)"
-            if [[ "$healthy_count" -gt 0 ]]; then
-              echo "[preflight-fallback] npu-smi confirms $healthy_count healthy NPU device(s)"
-              echo "$npu_smi_output" | head -30
+
+            # Method 2: Check for NPU device files in /dev as a last resort.
+            local -a davinci_devices=()
+            for dev in /dev/davinci[0-9]*; do
+              if [[ -e "$dev" ]]; then
+                davinci_devices+=("$(basename "$dev")")
+              fi
+            done
+            if [[ ${#davinci_devices[@]} -gt 0 ]]; then
+              echo "[preflight-fallback] Found ${#davinci_devices[@]} NPU device file(s) in /dev: ${davinci_devices[*]}"
               return 0
             fi
-            echo "[preflight-fallback] npu-smi found no healthy NPU devices" >&2
+
+            echo "[preflight-fallback] No NPU devices found via any method" >&2
             return 1
           }
 
@@ -747,17 +771,19 @@ jobs:
             --require-npu \
             --json | tee "$PRECHECK_DIR/runtime-check.json" || {
             echo "[WARNING] Runtime check with --require-npu failed." >&2
-            if command -v npu-smi >/dev/null 2>&1; then
-              healthy_count="$(npu-smi info 2>&1 | grep -c '| OK ' || true)"
-              if [[ "$healthy_count" -gt 0 ]]; then
-                echo "[WARNING] npu-smi confirms $healthy_count healthy NPU device(s) — proceeding despite torch_npu probe failure." >&2
+            npu_smi_output="$(env -u LD_LIBRARY_PATH npu-smi info 2>&1)" || true
+            healthy_count="$(echo "$npu_smi_output" | grep -c '| OK ' || true)"
+            if [[ "$healthy_count" -gt 0 ]]; then
+              echo "[WARNING] npu-smi confirms $healthy_count healthy NPU device(s) — proceeding despite torch_npu probe failure." >&2
+            else
+              # Last resort: check for NPU device files in /dev
+              davinci_count="$(find /dev -maxdepth 1 -name 'davinci[0-9]*' 2>/dev/null | wc -l || echo 0)"
+              if [[ "$davinci_count" -gt 0 ]]; then
+                echo "[WARNING] Found $davinci_count NPU device file(s) in /dev — proceeding despite torch_npu probe failure." >&2
               else
                 echo "Runner health preflight failed before benchmark" >&2
                 exit 1
               fi
-            else
-              echo "Runner health preflight failed before benchmark" >&2
-              exit 1
             fi
           }
 
