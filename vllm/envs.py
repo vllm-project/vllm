@@ -87,6 +87,8 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_TRITON_USE_TD: bool | None = None
+    # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -523,6 +525,19 @@ def get_env_or_set_default(
 logger = logging.getLogger(__name__)
 
 
+def _deprecated_triton_attn_use_td() -> None:
+    """Warn that VLLM_TRITON_ATTN_USE_TD was renamed to VLLM_TRITON_USE_TD.
+
+    The old name is ignored; VLLM_TRITON_USE_TD is the supported variable.
+    """
+    if "VLLM_TRITON_ATTN_USE_TD" in os.environ:
+        logger.warning(
+            "VLLM_TRITON_ATTN_USE_TD is deprecated and will be removed in "
+            "v0.25. Use VLLM_TRITON_USE_TD instead."
+        )
+    return None
+
+
 def _resolve_rust_frontend_path() -> str | None:
     """Resolve the Rust frontend binary path.
 
@@ -578,13 +593,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on
-    # Intel Xe2/Xe3; the non-TD branch is dead-code-eliminated at Triton
+    # Intel XPU; the non-TD branch is dead-code-eliminated at Triton
     # compile time so other platforms see no overhead.  Tri-state override:
     # unset (default) lets the `triton_attn` backend auto-select per
     # platform (currently auto-enabled on XPU only); ``1`` forces TD on;
     # ``0`` forces TD off.  Useful for A/B benchmarking the TD path.
-    "VLLM_TRITON_ATTN_USE_TD": lambda: {"1": True, "0": False}.get(
-        os.getenv("VLLM_TRITON_ATTN_USE_TD", "").strip()
+    "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
+        os.getenv("VLLM_TRITON_USE_TD", "").strip()
     ),
     # If set, enable PyTorch's GPU<->CPU synchronization debug mode around
     # the worker's `execute_model` and `sample_tokens` calls. Valid values
@@ -593,6 +608,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GPU_SYNC_CHECK": env_with_choices(
         "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"]
     ),
+    # Deprecated: renamed to VLLM_TRITON_USE_TD.  Kept registered so it does
+    # not trip the unknown-env-var check; warns on use and is otherwise
+    # ignored.
+    "VLLM_TRITON_ATTN_USE_TD": lambda: _deprecated_triton_attn_use_td(),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
