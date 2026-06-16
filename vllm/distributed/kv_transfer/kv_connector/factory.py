@@ -225,6 +225,7 @@ KVConnectorFactory.register_connector(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector",
     "MooncakeStoreConnector",
 )
+
 KVConnectorFactory.register_connector(
     "FlexKVConnectorV1",
     "vllm.distributed.kv_transfer.kv_connector.v1.flexkv_connector",

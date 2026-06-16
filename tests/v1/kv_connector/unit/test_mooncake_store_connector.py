@@ -88,6 +88,27 @@ def test_scheduler_role_initializes_store_scheduler_only():
     assert connector.connector_worker is None
 
 
+def test_lookup_rpc_path_uses_data_parallel_index_in_dense_dp():
+    vllm_config = _make_vllm_config()
+    vllm_config.parallel_config.data_parallel_rank = 0
+    vllm_config.parallel_config.data_parallel_index = 3
+
+    path = worker.get_zmq_rpc_path_lookup(vllm_config)
+
+    assert path.endswith("_dp_rank3")
+
+
+def test_lookup_rpc_path_uses_local_rank_when_local_engines_only():
+    vllm_config = _make_vllm_config()
+    vllm_config.parallel_config.data_parallel_index = 7
+    vllm_config.parallel_config.data_parallel_rank_local = 1
+    vllm_config.parallel_config.data_parallel_hybrid_lb = True
+
+    path = worker.get_zmq_rpc_path_lookup(vllm_config)
+
+    assert path.endswith("_dp_rank1")
+
+
 def test_worker_methods_delegate_to_store_worker():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()
