@@ -536,6 +536,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             self.kv_cache_dtype, vllm_config.model_config
         )
 
+        # Shared top-k buffer: the indexer writes the selected blocks into it and
+        # the attend impl reads them back (no Python value crosses the break).
+        self.topk_indices_buffer = topk_indices_buffer
         self.attn_backend = MiniMaxM3SparseBackend
         # Indexer and main attention are separate impls. On ROCm the SM100 gate
         # is always False, so both pick Triton and the index cache stays bf16.
@@ -659,9 +662,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         output: torch.Tensor,
     ) -> torch.Tensor:
         # Single eager break around both: their split-K kernels read per-request
-        # metadata and can't be captured into a cudagraph.
-        topk_idx = self.indexer(index_query)
-        return self.impl.forward(self, query, self.kv_cache, topk_idx, output)
+        # metadata and can't be captured into a cudagraph. The indexer writes its
+        # top-k into the shared ``topk_indices_buffer``; the attend reads it back.
+        self.indexer(index_query)
+        return self.impl.forward(self, query, self.kv_cache, output)
 
 
 class MiniMaxM3DecoderLayer(nn.Module):
