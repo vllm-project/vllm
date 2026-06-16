@@ -70,6 +70,7 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
         "Qwen3ForCausalLM",
         "DeepseekV2ForCausalLM",
         "Qwen2MoeForCausalLM",
+        "GraniteMoeForCausalLM",
         "LlamaForCausalLM",
         "MistralForCausalLM",
     }
@@ -983,15 +984,6 @@ class VllmConfig:
                         "Async scheduling is not compatible with "
                         "disable_padded_drafter_batch=True."
                     )
-            if (
-                self.model_config is not None
-                and self.model_config.enable_prompt_embeds
-                and self.model_config.is_multimodal_model
-            ):
-                raise ValueError(
-                    "Async scheduling is not yet supported with prompt embeds "
-                    "for multimodal models."
-                )
             if not executor_supports_async_sched:
                 raise ValueError(
                     f"`{executor_backend}` does not support async scheduling yet."
@@ -1033,16 +1025,6 @@ class VllmConfig:
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend. ",
                     executor_backend,
-                )
-                self.scheduler_config.async_scheduling = False
-            elif (
-                self.model_config is not None
-                and self.model_config.enable_prompt_embeds
-                and self.model_config.is_multimodal_model
-            ):
-                logger.warning_once(
-                    "Async scheduling is not yet supported with prompt embeds "
-                    "for multimodal models and will be disabled."
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -1474,12 +1456,14 @@ class VllmConfig:
             assert a2a_backend in [
                 "deepep_low_latency",
                 "deepep_high_throughput",
+                "nixl_ep",
             ], (
-                "Microbatching currently only supports the deepep_low_latency and "
-                f"deepep_high_throughput all2all backend. {a2a_backend} is not "
-                "supported. To fix use --all2all-backend=deepep_low_latency or "
-                "--all2all-backend=deepep_high_throughput and install the DeepEP"
-                " kernels."
+                "Microbatching currently only supports the deepep_low_latency, "
+                "deepep_high_throughput, and nixl_ep all2all backends. "
+                f"{a2a_backend} is not supported. To fix use "
+                "--all2all-backend=deepep_low_latency, "
+                "--all2all-backend=deepep_high_throughput, or "
+                "--all2all-backend=nixl_ep and install the matching kernels."
             )
 
             if not self.model_config.disable_cascade_attn:
