@@ -1083,45 +1083,58 @@ class FlashAttentionImpl(AttentionImpl):
             value = value.contiguous()
             prefill_start = num_decode_tokens * self.pcp_world_size
             prefill_end = pcp_metadata.num_actual_tokens_pcp_padded
-            # PCP_DEBUG: check the prefill slot_mapping slice is in-bounds before
-            # the scatter write. An OOB slot silently corrupts GPU memory (no
-            # fault -> sync won't catch it) and surfaces later as a spurious
-            # "invalid configuration argument" on an unrelated launch.
+            # PCP_DEBUG: dump the counts that determine the prefill slice, and
+            # verify slot bounds. When prefill_end <= prefill_start the slice is
+            # empty -> reshape_and_cache_flash launches with grid=(0,) ->
+            # "invalid configuration argument" (deferred to the next launch).
             import os as _os
 
             if _os.environ.get("PCP_DEBUG"):
                 _sm = slot_mapping[prefill_start:prefill_end]
                 _cap = key_cache.shape[0] * key_cache.shape[1]
-                _valid = _sm[_sm >= 0]
+                _ne = _sm.numel()
+                _has_valid = _ne > 0 and bool((_sm >= 0).any())
                 logger.warning(
-                    "PCP_DEBUG prefill reshape: sm_slice=%s cap=%d sm_min=%d "
-                    "sm_max=%d valid_max=%s num_neg=%d key_slice=%s",
-                    tuple(_sm.shape),
+                    "PCP_DEBUG prefill reshape: pcp_padded=%d local_padded=%d "
+                    "num_dec=%d pcp=%d prefill_start=%d prefill_end=%d "
+                    "slice_len=%d cap=%d sm_min=%s sm_max=%s valid_max=%s "
+                    "num_neg=%s",
+                    pcp_metadata.num_actual_tokens_pcp_padded,
+                    local_padded_tokens,
+                    num_decode_tokens,
+                    self.pcp_world_size,
+                    prefill_start,
+                    prefill_end,
+                    _ne,
                     _cap,
-                    int(_sm.min()),
-                    int(_sm.max()),
-                    None if _valid.numel() == 0 else int(_valid.max()),
-                    int((_sm < 0).sum()),
-                    tuple(key[prefill_start:prefill_end].shape),
+                    None if _ne == 0 else int(_sm.min()),
+                    None if _ne == 0 else int(_sm.max()),
+                    None if not _has_valid else int(_sm[_sm >= 0].max()),
+                    None if _ne == 0 else int((_sm < 0).sum()),
                 )
-                if _valid.numel() > 0:
-                    assert int(_valid.max()) < _cap, (
-                        f"PCP_DEBUG: slot OOB max={int(_valid.max())} "
+                if _has_valid:
+                    assert int(_sm[_sm >= 0].max()) < _cap, (
+                        f"PCP_DEBUG: slot OOB max={int(_sm[_sm >= 0].max())} "
                         f">= cap={_cap}"
                     )
-            reshape_and_cache_flash(
-                key[prefill_start:prefill_end],
-                value[prefill_start:prefill_end],
-                key_cache,
-                value_cache,
-                slot_mapping[prefill_start:prefill_end],
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
-            if _os.environ.get("PCP_DEBUG"):
-                torch.cuda.synchronize()
-                logger.warning("PCP_DEBUG prefill reshape: done (synced)")
+            if prefill_end > prefill_start:
+                reshape_and_cache_flash(
+                    key[prefill_start:prefill_end],
+                    value[prefill_start:prefill_end],
+                    key_cache,
+                    value_cache,
+                    slot_mapping[prefill_start:prefill_end],
+                    self.kv_cache_dtype,
+                    layer._k_scale,
+                    layer._v_scale,
+                )
+                if _os.environ.get("PCP_DEBUG"):
+                    torch.cuda.synchronize()
+                    logger.warning("PCP_DEBUG prefill reshape: done (synced)")
+            elif _os.environ.get("PCP_DEBUG"):
+                logger.warning(
+                    "PCP_DEBUG prefill reshape: SKIPPED (empty slice)"
+                )
             return
 
         # Scatter write into the KV cache using slot_mapping indices.
@@ -1205,27 +1218,6 @@ class FlashAttentionImpl(AttentionImpl):
             "Hybrid-attention PCP should use the hybrid PCP backend."
         )
         assert attn_metadata.pcp_query_start_loc is not None
-        # PCP_DEBUG: sync first to flush any pending async error from the
-        # (pre-attention) KV-cache update, then dump shapes. Tells us whether
-        # output.zero_() itself is the failing launch or just the surfacing
-        # point for an earlier reshape_and_cache failure.
-        import os as _os
-
-        if _os.environ.get("PCP_DEBUG"):
-            torch.cuda.synchronize()
-            logger.warning(
-                "PCP_DEBUG pre-zero: out=%s numel=%d dtype=%s contig=%s "
-                "stride=%s q=%s k=%s v=%s num_actual=%d",
-                tuple(output.shape),
-                output.numel(),
-                output.dtype,
-                output.is_contiguous(),
-                tuple(output.stride()),
-                tuple(query.shape),
-                tuple(key.shape),
-                tuple(value.shape),
-                attn_metadata.num_actual_tokens,
-            )
         output.zero_()
 
         sliding_window_size = (
