@@ -193,9 +193,7 @@ class RocmAttentionBackend(AttentionBackend):
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 80, 96, 128, 160, 192, 224, 256]
 
-    @classmethod
-    def supports_mm_prefix(cls) -> bool:
-        return True
+    # removed "supports_mm_prefix(cls) -> True" as ROCM backend doesn't support this -> defer to Triton unified attention (default behaviour is False)
 
     @classmethod
     def supports_sink(cls) -> bool:
