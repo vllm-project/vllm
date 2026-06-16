@@ -1103,12 +1103,17 @@ class Scheduler(SchedulerInterface):
             if idx >= num_running_reqs:
                 assert not scheduled_in_prev_step
                 resumed_req_ids.add(req_id)
-            # Only V1 model runner uses all_token_ids (for resumed requests in
-            # async scheduling mode to recover output tokens after a gap step).
-            # Skip the copy entirely for V2 and for non-async scheduling.
-            if (not self.use_v2_model_runner
-                    and not scheduled_in_prev_step
-                    and self.scheduler_config.async_scheduling):
+            # all_token_ids is only read by the V1 model runner, to restore a
+            # resumed request's output tokens under async scheduling. Skip it
+            # for the V2 runner and when async scheduling is off. A request
+            # resumed here was not scheduled in the previous step, so it has no
+            # in-flight placeholder tokens, and we only need its output tokens.
+            if (
+                not self.use_v2_model_runner
+                and not scheduled_in_prev_step
+                and self.scheduler_config.async_scheduling
+            ):
+                assert req.num_output_placeholders == 0
                 num_out = req.num_output_tokens
                 if num_out > 0:
                     all_token_ids[req_id] = req._all_token_ids[-num_out:]

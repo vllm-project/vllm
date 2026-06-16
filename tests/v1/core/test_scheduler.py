@@ -143,6 +143,38 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     assert req.request_id in output.num_scheduled_tokens
 
 
+def test_cached_request_data_resumed_all_token_ids_async():
+    """Under async scheduling, a resumed request's all_token_ids must carry
+    only its output tokens (what the runner restores via
+    resumed_token_ids[-num_output_tokens:]), not the full prompt history.
+    """
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+
+    scheduler = create_scheduler(async_scheduling=True)
+    scheduler.scheduler_config.async_scheduling = True
+    (req,) = create_requests(num_requests=1, num_tokens=8)
+
+    output_tokens = [101, 102, 103]
+    req.append_output_token_ids(output_tokens)
+
+    # A resumed request was not scheduled in the previous step.
+    assert req.request_id not in scheduler.prev_step_scheduled_req_ids
+
+    empty_blocks = KVCacheBlocks(blocks=((),))
+    cached = scheduler._make_cached_request_data(
+        running_reqs=[],
+        resumed_reqs=[req],
+        num_scheduled_tokens={req.request_id: 1},
+        spec_decode_tokens={},
+        req_to_new_blocks={req.request_id: empty_blocks},
+    )
+
+    assert req.request_id in cached.resumed_req_ids
+    sent = cached.all_token_ids[req.request_id]
+    assert sent == output_tokens
+    assert len(sent) < len(req._all_token_ids)
+
+
 def test_schedule_partial_requests():
     """Test scheduling behavior with partial requests.
 
