@@ -25,7 +25,6 @@ AMD / non-SM100.
 from dataclasses import dataclass
 from typing import ClassVar
 
-import numpy as np
 import torch
 
 import vllm.envs as envs
@@ -38,7 +37,6 @@ from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerMetadataBuilder,
 )
 from vllm.models.minimax_m3.common.ops.index_topk import minimax_m3_index_topk
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -46,7 +44,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.v1.utils import CpuGpuBuffer
 
 # Page size == sparse block size == index-K block; fmha tile id == M3 block id.
 PAGE_SIZE = 128
@@ -140,7 +137,6 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         max_model_len = vllm_config.model_config.max_model_len
         pages_per_req = (max_model_len + PAGE_SIZE - 1) // PAGE_SIZE
         self._max_k_tiles = ((pages_per_req + 127) // 128) * 128
-        pin = not vllm_config.use_v2_model_runner and is_pin_memory_available()
 
         max_reqs = vllm_config.scheduler_config.max_num_seqs
 
@@ -173,10 +169,10 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         )
         max_total_qo = max_reqs * dql * self._pack_factor
 
-        def seg(n: int) -> CpuGpuBuffer:
-            return CpuGpuBuffer(n, dtype=torch.int32, device=device, pin_memory=pin)
+        def seg(n: int) -> torch.Tensor:
+            return torch.empty(n, dtype=torch.int32, device=device)
 
-        # Host->device segment buffers (filled per build()).
+        # Segment buffers, computed on-GPU per build() (no host staging needed).
         self._qo_seg_off = seg(max_reqs + 1)
         self._kv_seg_off = seg(max_reqs + 1)
         self._kv_page_indptr = seg(max_reqs + 1)
@@ -218,39 +214,47 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
 
     def _plan_decode(
         self,
-        qo_lens: np.ndarray,
-        kv_lens: np.ndarray,
-        qo_offset: np.ndarray,
+        qsl_dec: torch.Tensor,
+        seq_lens_dec: torch.Tensor,
+        num_decode_tokens: int,
         num_kv_splits: int,
     ) -> dict:
-        """Fill the persistent plan buffers and launch the plan kernel directly,
-        returning a PlanInfo over those (stable-address) buffers."""
+        """Fill the persistent plan buffers on-GPU and launch the plan kernel
+        directly, returning a PlanInfo over those (stable-address) buffers.
+
+        ``qsl_dec`` is the decode slice of ``query_start_loc`` ([n+1]); the
+        per-request q/kv lengths and their cumsums are derived with torch (no
+        host sync) and written into the persistent segment buffers in place.
+        """
         from vllm.third_party.fmha_sm100.api import _call_plan, _make_plan_info
 
-        n = qo_lens.shape[0]
+        n = seq_lens_dec.shape[0]
         pf = self._pack_factor
         hq = self._packed_heads
-        packed_qo = (qo_lens * pf).astype(np.int32)
-        nvp = (kv_lens + PAGE_SIZE - 1) // PAGE_SIZE
-        qo_off = np.zeros(n + 1, dtype=np.int32)
-        np.cumsum(packed_qo, out=qo_off[1:])
-        kv_off = np.zeros(n + 1, dtype=np.int32)
-        np.cumsum(kv_lens, out=kv_off[1:])
-        page_indptr = np.zeros(n + 1, dtype=np.int32)
-        np.cumsum(nvp, out=page_indptr[1:])
-        total_qo_len = int(qo_off[n])
-        max_qo_len = int(packed_qo.max())
+        # Uniform decode -> packed total/max known from host scalars (no sync).
+        total_qo_len = num_decode_tokens * pf
+        max_qo_len = (num_decode_tokens // n) * pf
 
-        def fill(buf: CpuGpuBuffer, data: np.ndarray, m: int) -> torch.Tensor:
-            buf.np[:m] = data
-            return buf.copy_to_gpu(m)
+        qo = (qsl_dec[1:] - qsl_dec[:-1]).to(torch.int32)
+        kv = seq_lens_dec.to(torch.int32)
+        packed_qo = qo * pf
+        nvp = (kv + PAGE_SIZE - 1) // PAGE_SIZE
+        self._qo_seg_lens[:n] = packed_qo
+        self._kv_seg_lens[:n] = kv
+        self._qo_offset[:n] = kv - qo  # bottom-right causal
+        self._qo_seg_off[0] = 0
+        self._kv_seg_off[0] = 0
+        self._kv_page_indptr[0] = 0
+        torch.cumsum(packed_qo, 0, out=self._qo_seg_off[1 : n + 1])
+        torch.cumsum(kv, 0, out=self._kv_seg_off[1 : n + 1])
+        torch.cumsum(nvp, 0, out=self._kv_page_indptr[1 : n + 1])
 
-        qo_seg_off = fill(self._qo_seg_off, qo_off, n + 1)
-        kv_seg_off = fill(self._kv_seg_off, kv_off, n + 1)
-        kv_page_indptr = fill(self._kv_page_indptr, page_indptr, n + 1)
-        qo_offset_gpu = fill(self._qo_offset, qo_offset.astype(np.int32), n)
-        kv_seg_lens = fill(self._kv_seg_lens, kv_lens.astype(np.int32), n)
-        qo_seg_lens = fill(self._qo_seg_lens, packed_qo, n)
+        qo_seg_off = self._qo_seg_off[: n + 1]
+        kv_seg_off = self._kv_seg_off[: n + 1]
+        kv_page_indptr = self._kv_page_indptr[: n + 1]
+        qo_offset_gpu = self._qo_offset[:n]
+        kv_seg_lens = self._kv_seg_lens[:n]
+        qo_seg_lens = self._qo_seg_lens[:n]
 
         split = num_kv_splits > 1
         kv_tile_begin = self._kv_tile_begin if split else None
@@ -338,28 +342,32 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             common_attn_metadata.compute_num_computed_tokens(), non_blocking=True
         )
 
-        qsl_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
-        qo_lens_cpu = (qsl_cpu[1:] - qsl_cpu[:-1]).to(torch.int32)
-        kv_lens_cpu = seq_lens[:num_reqs].cpu().to(torch.int32)
-        nvp = (kv_lens_cpu + PAGE_SIZE - 1) // PAGE_SIZE
         cols = torch.arange(block_table.shape[1], device=block_table.device)
 
         decode_metadata: MiniMaxM3IndexerMSASubMetadata | None = None
         if num_decodes > 0:
-            qo_np = qo_lens_cpu[:num_decodes].numpy()
-            kv_np = kv_lens_cpu[:num_decodes].numpy()
             num_kv_splits = estimate_num_kv_splits(
                 num_decodes,
                 num_qo_heads=self._packed_heads,
                 num_sms=self._num_ctas,
                 context_len=self._ctx_len,
             )
-            plan = self._plan_decode(qo_np, kv_np, kv_np - qo_np, num_kv_splits)
-            # Persistent decode flat page table (request-major).
-            dec_pages = int(nvp[:num_decodes].sum())
-            valid = cols[None, :] < nvp[:num_decodes].to(block_table.device)[:, None]
-            self._decode_kv_indices[:dec_pages].copy_(
-                block_table[:num_decodes][valid].to(torch.int32), non_blocking=True
+            # Fills self._kv_page_indptr (per-request page offsets) on-GPU.
+            plan = self._plan_decode(
+                query_start_loc[: num_decodes + 1],
+                seq_lens[:num_decodes],
+                num_decode_tokens,
+                num_kv_splits,
+            )
+            # Flat request-major decode page table, built on-GPU (no host sync):
+            # scatter block_table[b, :nvp[b]] to _decode_kv_indices[indptr[b] + j].
+            # The full buffer is passed to the run; it bounds reads via the page
+            # indptr, so no host page count is needed.
+            nvp = (seq_lens[:num_decodes] + PAGE_SIZE - 1) // PAGE_SIZE
+            valid = cols[None, :] < nvp[:, None]
+            dest = self._kv_page_indptr[:num_decodes, None] + cols[None, :]
+            self._decode_kv_indices[dest[valid]] = block_table[:num_decodes][valid].to(
+                torch.int32
             )
             self._cu_seqlens_q[: num_decodes + 1].copy_(
                 query_start_loc[: num_decodes + 1] - query_start_loc[0],
@@ -369,8 +377,8 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 plan=plan,
                 cu_seqlens_q=self._cu_seqlens_q[: num_decodes + 1],
                 prefix_lens=context_lens[:num_decodes],
-                max_query_len=int(qo_lens_cpu[:num_decodes].max()),
-                page_table=self._decode_kv_indices[:dec_pages],
+                max_query_len=num_decode_tokens // num_decodes,  # uniform decode qlen
+                page_table=self._decode_kv_indices,
                 max_score=self._max_score[
                     : self.num_index_heads * self._max_k_tiles * num_decode_tokens
                 ].view(self.num_index_heads, self._max_k_tiles, num_decode_tokens),
@@ -378,9 +386,16 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
 
         prefill_metadata: MiniMaxM3IndexerMSASubMetadata | None = None
         if num_prefills > 0:
+            # Prefill is eager (not captured); the host lengths it needs (and the
+            # _fmha_sm100_plan .tolist() inside) make the D->H sync unavoidable
+            # here, but it never runs on the captured decode path.
             from vllm.third_party.fmha_sm100.api import _fmha_sm100_plan
 
             lo, hi = num_decodes, num_reqs
+            qsl_cpu = common_attn_metadata.query_start_loc_cpu[: num_reqs + 1]
+            qo_lens_cpu = (qsl_cpu[1:] - qsl_cpu[:-1]).to(torch.int32)
+            kv_lens_cpu = seq_lens[:num_reqs].cpu().to(torch.int32)
+            nvp = (kv_lens_cpu + PAGE_SIZE - 1) // PAGE_SIZE
             side_qo = qo_lens_cpu[lo:hi]
             side_kv = kv_lens_cpu[lo:hi]
             plan = _fmha_sm100_plan(
@@ -469,9 +484,9 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
             )
             # Triton top-k wants [num_index_heads, num_tokens, max_block]; the
             # transpose is a strided view (the kernel reads via strides). One
-            # 128-token KV tile == one M3 sparse block. ``topk_out`` is the
-            # shared persistent buffer for decode (stable address), None for
-            # prefill (fresh, eager).
+            # 128-token KV tile == one M3 sparse block. ``topk_out`` is the slice
+            # of the shared persistent buffer this side writes into (stable
+            # address); None -> the kernel allocates fresh.
             return minimax_m3_index_topk(
                 max_score.transpose(1, 2),
                 meta.cu_seqlens_q,
@@ -483,16 +498,20 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                 out=topk_out,
             )
 
+        # Both sides write into the single persistent topk_indices_buffer (no
+        # fresh allocations): decode tokens at [:, :nd], prefill at [:, nd:]
+        # (the index_topk out= writes out[:, :total_q] for each side).
+        buf = self.topk_indices_buffer
+
         def run_decode() -> torch.Tensor | None:
             if md.decode_metadata is None:
                 return None
-            return score_topk(
-                md.decode_metadata, index_q[:nd], self.topk_indices_buffer
-            )
+            return score_topk(md.decode_metadata, index_q[:nd], buf)
 
         def run_prefill() -> torch.Tensor | None:
             if md.prefill_metadata is None:
                 return None
-            return score_topk(md.prefill_metadata, index_q[nd:], None)
+            out = buf[:, nd:, :] if buf is not None else None
+            return score_topk(md.prefill_metadata, index_q[nd:], out)
 
         return run_decode(), run_prefill()
