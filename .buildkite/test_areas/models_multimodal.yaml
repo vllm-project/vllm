@@ -66,6 +66,11 @@ steps:
     - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
     - pytest models/multimodal/generation/test_memory_leak.py -m core_model
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Multi-Modal Processor (CPU)
   key: multi-modal-processor-cpu
