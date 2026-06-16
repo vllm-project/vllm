@@ -90,9 +90,8 @@ class BaseRenderer(ABC, Generic[_T]):
         self._mm_executor: Executor = self._executor
 
         # Offloading tokenizer encode & decode to thread pool.
-        self._async_tokenizer_encode = make_async(self._decode, executor=self._executor)
-
-        self._async_tokenizer_decode = make_async(self._encode, executor=self._executor)
+        self._async_tokenizer_encode = make_async(self._encode, executor=self._executor)
+        self._async_tokenizer_decode = make_async(self._decode, executor=self._executor)
 
         self.mm_processor: BaseMultiModalProcessor | None = None
         self._readonly_mm_processor: BaseMultiModalProcessor | None = None
