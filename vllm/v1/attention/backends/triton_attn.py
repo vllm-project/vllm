@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.torch_utils import async_tensor_h2d, is_quantized_kv_cache
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -30,7 +30,10 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.attention.backends.utils import (
+    compute_mm_prefix_range_tensor,
+    get_kv_cache_layout,
+)
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
@@ -76,6 +79,8 @@ class TritonAttentionMetadata:
     softmax_segm_max: torch.Tensor
     softmax_segm_expsum: torch.Tensor
 
+    causal: bool | torch.Tensor
+
     # For cascade attention.
     use_cascade: bool
     common_prefix_len: int
@@ -88,40 +93,6 @@ class TritonAttentionMetadata:
     prefix_scheduler_metadata: torch.Tensor | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
     mm_prefix_range_tensor: torch.Tensor | None = None
-
-    @staticmethod
-    def compute_mm_prefix_range_tensor(
-        mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
-        num_seqs: int,
-        device: torch.device,
-    ) -> torch.Tensor | None:
-        """Convert mm_prefix_range dict to padded tensor for Triton kernel.
-
-        Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty ranges.
-        Empty ranges have start==end==0, which kernel skips via is_valid check.
-        """
-        if mm_prefix_range is None:
-            return None
-
-        # Collect ranges, using [(0,0)] for empty sequences to ensure uniform dims
-        range_lists = [
-            mm_prefix_range.get(i, [(0, 0)]) or [(0, 0)] for i in range(num_seqs)
-        ]
-
-        # Return None if all ranges are trivial (only (0,0) placeholders)
-        if all(r == [(0, 0)] for r in range_lists):
-            return None
-
-        # Build on CPU first then move to GPU in a single H2D transfer
-        max_ranges = max(len(r) for r in range_lists)
-        # Pad all sequences to the same number of ranges
-        padded = []
-        for r in range_lists:
-            padded_r = list(r) + [(0, 0)] * (max_ranges - len(r))
-            padded.append(padded_r)
-        # Build on pinned CPU memory so the H2D transfer is non-blocking.
-        padded = async_tensor_h2d(padded, dtype=torch.int32, device=device)
-        return padded.view(num_seqs, max_ranges, 2)
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -215,6 +186,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> TritonAttentionMetadata:
+        num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
@@ -249,6 +221,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             seq_lens=seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
+            causal=common_attn_metadata.causal,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
             cu_prefix_query_lens=cu_prefix_query_lens,
@@ -261,6 +234,14 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
         )
+
+        mm_ranges = common_attn_metadata.mm_req_doc_ranges
+        if mm_ranges is not None:
+            attn_metadata.mm_prefix_range = mm_ranges
+            attn_metadata.mm_prefix_range_tensor = compute_mm_prefix_range_tensor(
+                mm_ranges, num_reqs, seq_lens.device
+            )
+
         return attn_metadata
 
 
@@ -292,6 +273,10 @@ class TritonAttentionBackend(AttentionBackend):
         return block_size % 16 == 0
 
     forward_includes_kv_cache_update: bool = False
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
 
     @staticmethod
     def get_name() -> str:
@@ -479,6 +464,29 @@ class TritonAttentionImpl(AttentionImpl):
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
+        if current_platform.is_cuda():
+            cap = current_platform.get_device_capability()
+            cap_str = cap.as_version_str() if cap is not None else "unknown"
+            dev = current_platform.get_device_name()
+            if self.kv_cache_dtype.startswith("fp8") and not (
+                current_platform.has_device_capability(89)
+            ):
+                suggested = (
+                    "float16" if (cap is None or cap.to_int() < 80) else "bfloat16"
+                )
+                raise ValueError(
+                    f"FP8 KV cache is not supported by the Triton attention backend "
+                    f"on {dev} (compute capability {cap_str}); native FP8 (fp8e4nv) "
+                    f"requires SM89+. Re-run with --kv-cache-dtype {suggested}."
+                )
+            if self.kv_cache_dtype == "bfloat16" and not (
+                current_platform.has_device_capability(80)
+            ):
+                raise ValueError(
+                    f"bfloat16 KV cache is not supported on {dev} (compute capability "
+                    f"{cap_str}); bfloat16 requires SM80+. Re-run with "
+                    f"--kv-cache-dtype float16."
+                )
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
             logits_soft_cap = 0
@@ -641,7 +649,7 @@ class TritonAttentionImpl(AttentionImpl):
             seqused_k=seqused_k,
             max_seqlen_k=max_seqlen_k,
             softmax_scale=self.scale,
-            causal=True,
+            causal=attn_metadata.causal,
             alibi_slopes=self.alibi_slopes,
             use_alibi_sqrt=self.use_alibi_sqrt,
             window_size=self.sliding_window,

@@ -152,7 +152,8 @@ torch::Tensor get_scheduler_metadata(
     const torch::Tensor& seq_lens, at::ScalarType dtype,
     const torch::Tensor& query_start_loc, const bool casual,
     const int64_t window_size, const std::string& isa_hint,
-    const bool enable_kv_split);
+    const bool enable_kv_split,
+    const std::optional<torch::Tensor>& dynamic_causal);
 
 void cpu_attn_reshape_and_cache(const torch::Tensor& key,
                                 const torch::Tensor& value,
@@ -169,10 +170,10 @@ void cpu_attention_with_kv_cache(
     const torch::Tensor& query_start_loc, const torch::Tensor& seq_lens,
     const double scale, const bool causal,
     const std::optional<torch::Tensor>& alibi_slopes,
-    const int64_t sliding_window_left, const int64_t sliding_window_right,
-    const torch::Tensor& block_table, const double softcap,
-    const torch::Tensor& scheduler_metadata,
-    const std::optional<torch::Tensor>& s_aux, const double k_scale,
+    const int64_t sliding_window_left, const torch::Tensor& block_table,
+    const double softcap, const torch::Tensor& scheduler_metadata,
+    const std::optional<torch::Tensor>& s_aux,
+    const std::optional<torch::Tensor>& dynamic_causal, const double k_scale,
     const double v_scale, const std::string& kv_cache_dtype);
 
 // Note: just for avoiding importing errors
@@ -329,8 +330,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("rotary_embedding", torch::kCPU, &rotary_embedding);
 
   // Quantization
-#if defined(__AVX512F__) || defined(__AVX2__) || \
-    (defined(__aarch64__) && !defined(__APPLE__)) || defined(__powerpc64__)
+#if defined(__AVX512F__) || defined(__AVX2__) ||                               \
+    (defined(__aarch64__) && !defined(__APPLE__)) || defined(__powerpc64__) || \
+    defined(__riscv_v)
   // Helper function to release oneDNN handlers
   ops.def("release_dnnl_matmul_handler(int handler) -> ()",
           &release_dnnl_matmul_handler);
@@ -428,19 +430,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("int8_scaled_mm_with_quant", torch::kCPU,
            &int8_scaled_mm_with_quant);
 
-  // Adapted from sglang: INT4 W4A8 kernels
-  ops.def(
-      "convert_weight_packed_scale_zp(Tensor weight, Tensor qzeros, Tensor "
-      "scales, int quant_method_4bit) -> (Tensor, "
-      "Tensor, Tensor)");
-  ops.impl("convert_weight_packed_scale_zp", torch::kCPU,
-           &convert_weight_packed_scale_zp);
-
-  ops.def(
-      "int4_scaled_mm_cpu(Tensor(a0!) x, Tensor(a1!) w, Tensor(a2!) w_zeros, "
-      "Tensor(a3!) w_scales, Tensor? bias) -> Tensor");
-  ops.impl("int4_scaled_mm_cpu", torch::kCPU, &int4_scaled_mm_cpu);
-
   // Adapted from sglang: FP8 W8A16 kernel
   ops.def(
       "fp8_scaled_mm_cpu(Tensor(a0!) mat1, Tensor(a1!) mat2, Tensor(a2!) "
@@ -465,6 +454,23 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? cache_seqlens, Tensor? conv_state_indices, int pad_slot_id, "
       "bool is_vnni) -> Tensor");
   ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
+#endif
+
+#if (defined(__AVX512BF16__) && defined(__AVX512F__) && \
+     defined(__AVX512VNNI__)) ||                        \
+    defined(__riscv)
+  // Adapted from sglang: INT4 W4A8 kernels
+  ops.def(
+      "convert_weight_packed_scale_zp(Tensor weight, Tensor qzeros, Tensor "
+      "scales, int quant_method_4bit) -> (Tensor, "
+      "Tensor, Tensor)");
+  ops.impl("convert_weight_packed_scale_zp", torch::kCPU,
+           &convert_weight_packed_scale_zp);
+
+  ops.def(
+      "int4_scaled_mm_cpu(Tensor(a0!) x, Tensor(a1!) w, Tensor(a2!) w_zeros, "
+      "Tensor(a3!) w_scales, Tensor? bias) -> Tensor");
+  ops.impl("int4_scaled_mm_cpu", torch::kCPU, &int4_scaled_mm_cpu);
 #endif
 
   // Adapted from sglang: GDN kernels
@@ -495,7 +501,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "get_scheduler_metadata(int num_req, int num_heads_q, int num_heads_kv, "
       "int head_dim, Tensor seq_lens, ScalarType dtype, Tensor "
       "query_start_loc, bool casual, int window_size, str isa_hint, bool "
-      "enable_kv_split) -> Tensor",
+      "enable_kv_split, Tensor? dynamic_causal) -> Tensor",
       &get_scheduler_metadata);
   ops.def(
       "cpu_attn_reshape_and_cache(Tensor key, Tensor value, Tensor(a2!) "
@@ -507,8 +513,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cpu_attention_with_kv_cache(Tensor query, Tensor key_cache, Tensor "
       "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "
       "seq_lens, float scale, bool causal, Tensor? alibi_slopes, SymInt "
-      "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
-      "float softcap, Tensor scheduler_metadata, Tensor? s_aux, "
+      "sliding_window_size, Tensor block_table, "
+      "float softcap, Tensor scheduler_metadata, Tensor? s_aux, Tensor? "
+      "dynamic_causal, "
       "float k_scale=1.0, float v_scale=1.0, str kv_cache_dtype=\"auto\") -> "
       "()",
       &cpu_attention_with_kv_cache);
