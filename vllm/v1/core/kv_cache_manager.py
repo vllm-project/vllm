@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Literal, overload
 
 from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.prefix_scheduler import PrefixCacheSnapshot
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -554,6 +555,15 @@ class KVCacheManager:
     def get_block_ids(self, request_id: str) -> tuple[list[int], ...]:
         """Get the block ids of a request."""
         return self.get_blocks(request_id).get_block_ids()
+
+    def get_prefix_cache_snapshot(
+        self, node_id: str, data_parallel_rank: int | None = None
+    ) -> PrefixCacheSnapshot:
+        """Export the local prefix cache for a global prefix-aware scheduler."""
+        return self.coordinator.get_prefix_cache_local(
+            node_id=node_id,
+            data_parallel_rank=data_parallel_rank,
+        )
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request, if enabled.

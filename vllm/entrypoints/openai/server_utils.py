@@ -466,6 +466,9 @@ async def lifespan(app: FastAPI):
         try:
             yield
         finally:
+            prefix_routing_proxy = getattr(app.state, "prefix_routing_proxy", None)
+            if prefix_routing_proxy is not None:
+                await prefix_routing_proxy.shutdown()
             if task is not None:
                 task.cancel()
     finally:

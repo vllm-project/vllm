@@ -293,6 +293,14 @@ class FrontendArgs(BaseFrontendArgs):
     enable_flash_late_interaction: bool = True
     """If set, run pooling score MaxSim on GPU in the API server process.
     Can significantly improve late-interaction scoring performance."""
+    enable_prefix_routing: bool = False
+    """If set, this API server acts as a prefix-aware routing master and
+    forwards OpenAI generation requests to the configured vLLM nodes based on
+    the longest global prefix-cache match."""
+    prefix_routing_config: dict[str, Any] | None = None
+    """JSON configuration for prefix-aware routing. Example:
+    '{"nodes":[{"id":"node0","url":"http://10.0.0.1:8000",
+    "event_endpoint":"tcp://10.0.0.1:5557"}]}'."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -322,6 +330,10 @@ class FrontendArgs(BaseFrontendArgs):
         # comma-separated string, not a list
         if "nargs" in frontend_kwargs["disable_access_log_for_endpoints"]:
             del frontend_kwargs["disable_access_log_for_endpoints"]["nargs"]
+
+        frontend_kwargs["prefix_routing_config"]["type"] = json.loads
+        if "nargs" in frontend_kwargs["prefix_routing_config"]:
+            del frontend_kwargs["prefix_routing_config"]["nargs"]
 
         return frontend_kwargs
 

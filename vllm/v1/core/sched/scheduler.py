@@ -17,7 +17,11 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorRole,
 )
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
-from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
+from vllm.distributed.kv_events import (
+    EventPublisherFactory,
+    KVEventBatch,
+    PrefixCacheEventUploaderFactory,
+)
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
@@ -109,9 +113,9 @@ class Scheduler(SchedulerInterface):
             else self.scheduler_config.max_num_batched_tokens
         )
         self.max_model_len = vllm_config.model_config.max_model_len
-        self.enable_kv_cache_events = (
-            self.kv_events_config is not None
-            and self.kv_events_config.enable_kv_cache_events
+        self.enable_kv_cache_events = self.kv_events_config is not None and (
+            self.kv_events_config.enable_kv_cache_events
+            or self.kv_events_config.prefix_cache_upload_endpoint is not None
         )
 
         # Create KVConnector for the Scheduler. Note that each Worker
@@ -137,6 +141,10 @@ class Scheduler(SchedulerInterface):
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
 
         self.kv_event_publisher = EventPublisherFactory.create(
+            self.kv_events_config,
+            self.parallel_config.data_parallel_index,
+        )
+        self.prefix_cache_event_uploader = PrefixCacheEventUploaderFactory.create(
             self.kv_events_config,
             self.parallel_config.data_parallel_index,
         )
@@ -1543,6 +1551,7 @@ class Scheduler(SchedulerInterface):
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
+            self.prefix_cache_event_uploader.publish(batch)
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -2016,6 +2025,8 @@ class Scheduler(SchedulerInterface):
     def shutdown(self) -> None:
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
+        if self.prefix_cache_event_uploader:
+            self.prefix_cache_event_uploader.shutdown()
         if self.connector is not None:
             self.connector.shutdown()
 

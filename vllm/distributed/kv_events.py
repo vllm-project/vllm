@@ -4,6 +4,8 @@
 import queue
 import threading
 import time
+import urllib.error
+import urllib.request
 from abc import ABC, abstractmethod
 from collections import Counter, deque
 from collections.abc import Callable
@@ -265,6 +267,111 @@ class NullEventPublisher(EventPublisher):
         return
 
 
+class HttpPrefixCacheEventUploader(EventPublisher):
+    """Best-effort HTTP uploader for prefix-cache routing metadata.
+
+    This is intentionally not registered as a normal KV event publisher. It is
+    a side channel used by prefix-aware routing so that enabling it does not
+    replace the existing ZMQ/null publisher selected by ``KVEventsConfig``.
+    """
+
+    SHUTDOWN_TIMEOUT: float = 1.0
+
+    def __init__(
+        self,
+        data_parallel_rank: int,
+        endpoint: str,
+        max_queue_size: int = 100_000,
+        request_timeout: float = 5.0,
+        **_: Any,
+    ) -> None:
+        super().__init__(data_parallel_rank)
+        if not endpoint.startswith(("http://", "https://")):
+            raise ValueError(
+                "HTTP prefix-cache upload endpoint must start with "
+                f"http:// or https://, got {endpoint!r}"
+            )
+        self._endpoint = endpoint
+        self._request_timeout = request_timeout
+        self._event_queue = Queue[EventBatch | None](maxsize=max_queue_size)
+        self._pack = msgspec.msgpack.Encoder()
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._publisher_thread,
+            daemon=True,
+            name="prefix-cache-http-uploader",
+        )
+        self._thread.start()
+
+
+    def publish(self, events: EventBatch) -> None:
+        if not self._running:
+            return
+        if events.data_parallel_rank is None:
+            events.data_parallel_rank = self._data_parallel_rank
+        try:
+            self._event_queue.put_nowait(events)
+            # 这里设计直接丢弃，并不好
+        except queue.Full:
+            logger.warning(
+                "Dropping prefix-cache event batch because the HTTP upload "
+                "queue is full"
+            )
+
+    def shutdown(self) -> None:
+        self._running = False
+        try:
+            self._event_queue.put_nowait(None)
+        except queue.Full:
+            pass
+
+        start = time.time()
+        while not self._event_queue.empty() and (
+            time.time() - start < self.SHUTDOWN_TIMEOUT
+        ):
+            time.sleep(0.1)
+
+        if self._thread.is_alive():
+            self._thread.join(timeout=self.SHUTDOWN_TIMEOUT)
+
+    def _publisher_thread(self) -> None:
+        while self._running or self._event_queue.qsize() > 0:
+            try:
+                event = self._event_queue.get(timeout=0.1)
+                if event is None:
+                    self._event_queue.task_done()
+                    break
+            except queue.Empty:
+                continue
+
+            try:
+                payload = self._pack.encode(event)
+                request = urllib.request.Request(
+                    self._endpoint,
+                    data=payload,
+                    method="POST",
+                    headers={"Content-Type": "application/msgpack"},
+                )
+                with urllib.request.urlopen(
+                    request, timeout=self._request_timeout
+                ) as response:
+                    if response.status >= 300:
+                        logger.warning(
+                            "HTTP prefix-cache upload returned status %s",
+                            response.status,
+                        )
+            except urllib.error.URLError as exc:
+                logger.warning("HTTP prefix-cache upload failed: %s", exc)
+                time.sleep(0.1)
+            except Exception as exc:
+                logger.exception(
+                    "Unexpected HTTP prefix-cache upload error: %s", exc
+                )
+                time.sleep(0.1)
+            finally:
+                self._event_queue.task_done()
+
+
 class ZmqEventPublisher(EventPublisher):
     """Reliable PUB/ROUTER publisher with an in-memory replay buffer.
 
@@ -499,7 +606,9 @@ class EventPublisherFactory:
     }
 
     @classmethod
-    def register_publisher(cls, name: str, ctor: Callable[..., EventPublisher]) -> None:
+    def register_publisher(
+        cls, name: str, ctor: Callable[..., EventPublisher]
+    ) -> None:
         if name in cls._registry:
             raise KeyError(f"publisher '{name}' already registered")
         cls._registry[name] = ctor
@@ -520,8 +629,28 @@ class EventPublisherFactory:
 
         kind = config_dict.pop("publisher")
         config_dict.pop("enable_kv_cache_events")
+        config_dict.pop("prefix_cache_upload_endpoint")
+        config_dict.pop("prefix_cache_upload_max_queue_size")
+        config_dict.pop("prefix_cache_upload_timeout")
         try:
             constructor = cls._registry[kind]
         except KeyError as exc:
             raise ValueError(f"Unknown event publisher '{kind}'") from exc
         return constructor(data_parallel_rank=data_parallel_rank, **config_dict)
+
+
+class PrefixCacheEventUploaderFactory:
+    @classmethod
+    def create(
+        cls, config: KVEventsConfig | None, data_parallel_rank: int = 0
+    ) -> EventPublisher:
+        """Create the independent prefix-cache event upload side channel."""
+        if config is None or config.prefix_cache_upload_endpoint is None:
+            return NullEventPublisher()
+
+        return HttpPrefixCacheEventUploader(
+            data_parallel_rank=data_parallel_rank,
+            endpoint=config.prefix_cache_upload_endpoint,
+            max_queue_size=config.prefix_cache_upload_max_queue_size,
+            request_timeout=config.prefix_cache_upload_timeout,
+        )

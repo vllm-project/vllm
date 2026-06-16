@@ -32,7 +32,9 @@ logger = init_logger(__name__)
 
 
 class BlockHashToBlockMap:
-    """
+
+    """ 映射表 """
+    """ 
     Cache of blocks that are used for prefix caching. It caches blocks
     from hash directly to a block or multiple blocks
     (i.e. {block_hash: KVCacheBlocks})
@@ -123,11 +125,16 @@ class BlockHashToBlockMap:
     def __len__(self) -> int:
         return len(self._cache)
 
+    def keys(self) -> list[BlockHashWithGroupId]:
+        """Return all cached block hash keys."""
+        return list(self._cache.keys())
+
     def _unexpected_blocks_type(self, blocks: Any) -> None:
         raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
 
 
 class BlockPool:
+    """ 管理池 """
     """BlockPool that manages KVCacheBlocks.
     It provides methods to allocate, free and cache the kv cache blocks. The
     free_block_queue stores the free blocks in eviction order to enable
@@ -168,6 +175,7 @@ class BlockPool:
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
         # Cache for block lookup
+        # cached_block_hash_to_blocks就是一个映射表
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
 
         # To represent a placeholder block with block_id=0.
@@ -495,6 +503,20 @@ class BlockPool:
         if not total_gpu_blocks:
             return 0
         return 1.0 - (self.get_num_free_blocks() / total_gpu_blocks)
+
+    def get_cached_block_hashes_by_group(self) -> dict[int, set[ExternalBlockHash]]:
+        """Return cached prefix block hashes grouped by KV-cache group ID."""
+        group_hashes: dict[int, set[ExternalBlockHash]] = {}
+        for block_hash_with_group_id in self.cached_block_hash_to_block.keys():
+            # group_id 是 KV cache group 的编号
+            # 在 vLLM v1 里，KV cache 不一定只有一种布局。不同 attention 类型或不同 KV cache spec 可能会被分到不同的 kv_cache_group 里
+            # 如普通 full attention 一组，sliding window attention 一组，hybrid 模型里可能有多组，Mamba / MLA 等特殊 cache spec 也可能对应不同 group
+            group_id = get_group_id(block_hash_with_group_id)
+            block_hash = maybe_convert_block_hash(
+                get_block_hash(block_hash_with_group_id)
+            )
+            group_hashes.setdefault(group_id, set()).add(block_hash)
+        return group_hashes
 
     def take_events(self) -> list[KVCacheEvent]:
         """Atomically takes all events and clears the queue.

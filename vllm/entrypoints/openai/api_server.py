@@ -268,6 +268,15 @@ def build_app(
     app.exception_handler(GenerationError)(generation_error_handler)
     app.exception_handler(Exception)(exception_handler)
 
+    if args.enable_prefix_routing:
+        from vllm.entrypoints.openai.prefix_routing import (
+            PrefixRoutingMiddleware,
+            attach_prefix_routing_router,
+        )
+
+        attach_prefix_routing_router(app)
+        app.add_middleware(PrefixRoutingMiddleware)
+
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
     if tokens := [key for key in (args.api_key or [envs.VLLM_API_KEY]) if key]:
         from vllm.entrypoints.openai.server_utils import AuthenticationMiddleware
@@ -392,6 +401,11 @@ async def init_app_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
+
+    if args.enable_prefix_routing:
+        from vllm.entrypoints.openai.prefix_routing import init_prefix_routing
+
+        await init_prefix_routing(state, args)
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import init_generate_state
