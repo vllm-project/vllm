@@ -1215,6 +1215,58 @@ class DiffusionSampler:
             num_rejected=num_rejected,
         )
 
+    @staticmethod
+    def _assemble_committed_logprobs(
+        num_reqs: int,
+        slots_np: np.ndarray,
+        is_decode_np: np.ndarray,
+        committing_slots: set[int],
+        pending_logprobs: dict[int, LogprobsTensors],
+    ) -> LogprobsTensors | None:
+        """Pop and concatenate the stashed logprobs of committing requests.
+
+        A request's stashed logprobs are emitted (and removed from
+        ``pending_logprobs``) only when that request itself commits this step
+        (``slot in committing_slots``). A co-batched request that merely
+        converged this step is left untouched, so its stash survives until its
+        own commit. See #45689.
+
+        Args:
+            num_reqs: Number of requests in the batch.
+            slots_np: Per-request slot ids, shape ``[num_reqs]``.
+            is_decode_np: Per-request decode mask, shape ``[num_reqs]``.
+            committing_slots: Slot ids committing this step.
+            pending_logprobs: Slot -> stashed logprobs; mutated in place.
+
+        Returns:
+            The concatenated logprobs for the committing requests, or ``None``
+            if no committing request had a stash.
+        """
+        parts_ids, parts_lp, parts_ranks = [], [], []
+        cu_gen: list[int] = []
+        flat_offset = 0
+        for i in range(num_reqs):
+            cu_gen.append(flat_offset)
+            slot = int(slots_np[i])
+            if (
+                is_decode_np[i]
+                and slot in committing_slots
+                and slot in pending_logprobs
+            ):
+                lp = pending_logprobs.pop(slot)
+                parts_ids.append(lp.logprob_token_ids)
+                parts_lp.append(lp.logprobs)
+                parts_ranks.append(lp.selected_token_ranks)
+                flat_offset += lp.logprobs.shape[0]
+        if not parts_ids:
+            return None
+        return LogprobsTensors(
+            logprob_token_ids=torch.cat(parts_ids),
+            logprobs=torch.cat(parts_lp),
+            selected_token_ranks=torch.cat(parts_ranks),
+            cu_num_generated_tokens=cu_gen,
+        )
+
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
@@ -1366,28 +1418,21 @@ class DiffusionSampler:
                         )
 
         # Commit steps: is_committing was True at entry. Reassemble previously
-        # stashed logprobs and attach to SamplerOutput.
+        # stashed logprobs and attach to SamplerOutput. Only a committing
+        # request may pop its own stash: a co-batched request that merely
+        # converged this step keeps its stash until its own commit, otherwise
+        # a peer's commit would consume it one step early and the response
+        # would return fewer logprob rows than tokens (#45689).
         logprobs_tensors = None
         if max_num_logprobs >= 0 and is_committing.any() and self._pending_logprobs:
-            parts_ids, parts_lp, parts_ranks = [], [], []
-            cu_gen: list[int] = []
-            flat_offset = 0
-            for i in range(num_reqs):
-                cu_gen.append(flat_offset)
-                slot = int(slots_np[i])
-                if is_decode_np[i] and slot in self._pending_logprobs:
-                    lp = self._pending_logprobs.pop(slot)
-                    parts_ids.append(lp.logprob_token_ids)
-                    parts_lp.append(lp.logprobs)
-                    parts_ranks.append(lp.selected_token_ranks)
-                    flat_offset += lp.logprobs.shape[0]
-            if parts_ids:
-                logprobs_tensors = LogprobsTensors(
-                    logprob_token_ids=torch.cat(parts_ids),
-                    logprobs=torch.cat(parts_lp),
-                    selected_token_ranks=torch.cat(parts_ranks),
-                    cu_num_generated_tokens=cu_gen,
-                )
+            committing_slots = set(decode_slots[is_committing].tolist())
+            logprobs_tensors = self._assemble_committed_logprobs(
+                num_reqs,
+                slots_np,
+                is_decode_np,
+                committing_slots,
+                self._pending_logprobs,
+            )
 
         return self._build_output(
             input_batch,
