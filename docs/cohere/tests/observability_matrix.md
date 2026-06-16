@@ -51,6 +51,10 @@ This matrix is part of a three-layer documentation structure:
 - 2.2.7 `test_activation_scheme_static_raises`
 - 2.2.8 `test_no_scheme_raises`
 
+#### 2.3 [Online/Offline Quant Equivalence](./features/online_offline_quant.md)
+
+- 2.3.1 `test_c5_online_vs_offline_quant_logits`
+
 ### 3. Multimodal
 
 #### 3.1 [MM + GG + TB](./features/mm_gg_tb.md)

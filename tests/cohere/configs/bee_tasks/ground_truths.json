@@ -1,5 +1,5 @@
 {
-  "_comment": "Ground truths for bee eval tasks. NOTE: c4-25a218t_w4a8, c4-v2-25a218t_int4a16_gs32_gptq, and c4-v2-25a218t_int4a16_gs32_awq_gptq entry values are placeholders copied from c4-25a218t_int4a16; retune after the first successful CI run for each.",
+  "_comment": "Ground truths for bee eval tasks. NOTE: c4-25a218t_w4a8, c4-v2-25a218t_int4a16_gs32_gptq, and c4-v2-25a218t_int4a16_gs32_awq_gptq entry values are placeholders copied from c4-25a218t_int4a16; retune after the first successful CI run for each. NOTE: c5-3a30t-sft_block_fp8, c5-3a30t-sft_mxfp8, c5-3a30t-sft_fp8_online, c5-3a30t-sft_block_fp8_online, and c5-3a30t-sft_mxfp8_online values are placeholders copied from c5-3a30t_fp8 (instruct + reasoning tasks only); retune after the first successful CI run for each.",
   "command-r7b_fp8": {
     "MMLUPro_subset_AA": [0.28, 0.02]
   },
@@ -54,6 +54,26 @@
     "OCRBench_soft_acc": [0.84, 0.01],
     "MMLUPro_subset_AA": [0.72, 0.015],
     "aime_2025_AA": [0.71, 0.02]
+  },
+  "c5-3a30t-sft_block_fp8": {
+    "MMLUPro_subset_AA": [0.72, 0.02],
+    "aime_2025_AA": [0.7, 0.05]
+  },
+  "c5-3a30t-sft_mxfp8": {
+    "MMLUPro_subset_AA": [0.72, 0.02],
+    "aime_2025_AA": [0.7, 0.05]
+  },
+  "c5-3a30t-sft_fp8_online": {
+    "MMLUPro_subset_AA": [0.718, 0.02],
+    "aime_2025_AA": [0.717, 0.05]
+  },
+  "c5-3a30t-sft_block_fp8_online": {
+    "MMLUPro_subset_AA": [0.732, 0.02],
+    "aime_2025_AA": [0.667, 0.05]
+  },
+  "c5-3a30t-sft_mxfp8_online": {
+    "MMLUPro_subset_AA": [0.716, 0.02],
+    "aime_2025_AA": [0.717, 0.05]
   },
   "c5-3a30t-base_bf16": {
     "niah_single_2_match_rate_at_4096": [1.0, 0.02],

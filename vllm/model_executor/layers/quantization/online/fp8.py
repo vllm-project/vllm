@@ -17,6 +17,17 @@ if TYPE_CHECKING:
         QuantKey,  # cohere
     )
 
+# cohere start
+from compressed_tensors.quantization.lifecycle.forward_helpers import (
+    _quantize as ct_quantize,
+)
+from compressed_tensors.quantization.quant_args import (
+    QuantizationArgs,
+    QuantizationType,
+)
+from compressed_tensors.quantization.utils.helpers import _get_dtype_eps
+
+# cohere end
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
@@ -37,6 +48,7 @@ from vllm.model_executor.layers.quantization.online.moe_base import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
+    get_fp8_min_max,  # cohere
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
@@ -53,7 +65,124 @@ from vllm.model_executor.model_loader.reload.layerwise import (
 from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import per_block_cast_to_fp8
+
+# cohere start
+# Symmetric FP8 (E4M3) quant args reused for the compressed-tensors quantize
+# arithmetic; strategy is irrelevant here because we pass a pre-broadcast scale
+# straight to ``_quantize`` (only ``type``/``num_bits`` are consulted).
+_CT_FP8_QUANT_ARGS = QuantizationArgs(
+    num_bits=8, type=QuantizationType.FLOAT, symmetric=True
+)
+
+
+def _cast_to_fp8_match_ct(
+    x: torch.Tensor,
+    amax: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Core "match compressed-tensors" FP8 cast shared by the block- and
+    channel-wise online helpers.
+
+    Given a float tensor ``x`` and its per-group ``amax`` (already reduced and
+    broadcastable against ``x``), reproduce compressed-tensors' symmetric FP8
+    weight quantization exactly by reusing the library's own ``_quantize``
+    arithmetic and ``eps`` substitution instead of re-deriving them here:
+
+    * **Scale dtype.** The scale is kept in the weight dtype (bf16), matching
+      the offline checkpoint: the recipe leaves ``scale_dtype=None`` so the
+      scale inherits the bf16 weights, and the loader upcasts that bf16 value
+      into the fp32 scale buffer losslessly. An fp32-computed scale is ~0.4%
+      off per group vs. the bf16-rounded one actually used at inference — the
+      dominant discrepancy.
+    * **Scale value.** ``amax / fp8_max`` is exactly compressed-tensors'
+      symmetric ``calculate_qparams`` (``max_val_pos / (bit_range / 2)``).
+    * **Degenerate groups.** ``eps`` (via :func:`_get_dtype_eps`) is substituted
+      only where the scale is exactly zero, matching ``calculate_qparams``.
+    * **Quantize arithmetic.** ``_quantize`` divides (``w / scale``), *not*
+      reciprocal-multiply, and clamps to the fp8 range before the cast (required
+      because a bf16-rounded scale can push the largest element just above
+      ``fp8_max`` and otherwise saturate to inf/nan).
+    """
+    fp8_dtype = current_platform.fp8_dtype()
+    fp8_min, fp8_max = get_fp8_min_max()
+    orig_dtype = x.dtype
+
+    scale = (amax / fp8_max).to(orig_dtype)
+    eps = _get_dtype_eps(orig_dtype)
+    scale = torch.where(scale == 0, torch.full_like(scale, eps), scale)
+
+    q = ct_quantize(
+        x=x,
+        scale=scale,
+        zero_point=None,
+        q_min=fp8_min,
+        q_max=fp8_max,
+        args=_CT_FP8_QUANT_ARGS,
+        dtype=fp8_dtype,
+    )
+    return q, scale
+
+
+def _blockwise_cast_to_fp8_match_ct(
+    weight: torch.Tensor,
+    block_size: list[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Blockwise FP8 weight quantization that mirrors llm-compressor's
+    ``FP8_BLOCK`` (compressed-tensors) export, so the online quantize-at-load
+    path is numerically equivalent to the offline pre-quantized checkpoint.
+
+    We intentionally do *not* reuse :func:`vllm.utils.deep_gemm.
+    per_block_cast_to_fp8` here: that helper computes an fp32 scale via
+    reciprocal-multiply and floors the amax at ``1e-4``, all of which diverge
+    from compressed-tensors. See :func:`_cast_to_fp8_match_ct` for the exact
+    parity rules.
+    """
+    assert weight.dim() == 2
+    block_n, block_k = block_size
+    m, n = weight.shape
+
+    # Zero-pad to a multiple of the block size (mirrors compressed-tensors'
+    # maybe_pad_tensor_for_block_quant). Padding with zeros leaves each block's
+    # amax unchanged.
+    pad_m = (block_n - m % block_n) % block_n
+    pad_n = (block_k - n % block_k) % block_k
+    padded = torch.nn.functional.pad(weight, (0, pad_n, 0, pad_m), value=0)
+
+    # [num_row_blocks, block_n, num_col_blocks, block_k]
+    blocks = padded.view(
+        padded.size(0) // block_n, block_n, padded.size(1) // block_k, block_k
+    )
+    amax = blocks.abs().amax(dim=(1, 3), keepdim=True)
+    q, scale = _cast_to_fp8_match_ct(blocks, amax)
+    qweight = q.view_as(padded)[:m, :n].contiguous()
+    scale = scale.view(blocks.size(0), blocks.size(2))
+    return qweight, scale
+
+
+def _channelwise_cast_to_fp8_match_ct(
+    weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-output-channel FP8 weight quantization that mirrors llm-compressor's
+    ``FP8_DYNAMIC`` (compressed-tensors ``CHANNEL`` strategy) export, so the
+    online PTPC quantize-at-load path is numerically equivalent to the offline
+    pre-quantized checkpoint.
+
+    The offline path stores one bf16 scale per output row (``amax / fp8_max``)
+    and quantizes with ``w / scale``. ``ops.scaled_fp8_quant`` instead computes
+    an fp32 per-row scale and quantizes via reciprocal-multiply, which drifts
+    from the checkpoint. See :func:`_cast_to_fp8_match_ct` for the parity rules.
+
+    Returns ``(qweight[out, in], scale[out, 1])`` with the scale in the weight
+    dtype (bf16); the caller upcasts it into the fp32 scale buffer losslessly,
+    exactly as the loader does for the offline checkpoint.
+    """
+    assert weight.dim() == 2
+    amax = weight.abs().amax(dim=1, keepdim=True)
+    q, scale = _cast_to_fp8_match_ct(weight, amax)
+    return q.contiguous(), scale
+
+
+# cohere end
+
 
 # ---------------------------------------------------------------------------
 # Online FP8 Linear Methods
@@ -248,9 +377,14 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
             return
 
         layer.input_scale = None
-        qweight, weight_scale = ops.scaled_fp8_quant(
-            layer.weight, scale=None, use_per_token_if_dynamic=True
-        )
+        # Match the offline (compressed-tensors) FP8_DYNAMIC channel export so
+        # online and offline are numerically equivalent. ops.scaled_fp8_quant
+        # would compute an fp32 reciprocal-multiply scale that drifts from the
+        # bf16 checkpoint scale. See _channelwise_cast_to_fp8_match_ct.
+        qweight, weight_scale = _channelwise_cast_to_fp8_match_ct(layer.weight)
+        # Upcast the bf16 scale into the fp32 buffer the kernel expects; the
+        # value is unchanged, exactly as the loader does for offline weights.
+        weight_scale = weight_scale.to(torch.float32)
 
         replace_parameter(layer, "weight", qweight.t())
         replace_parameter(layer, "weight_scale", weight_scale)
@@ -332,9 +466,11 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
         layer.input_scale = None
         block_size = self.weight_block_size
 
-        qweight, weight_scale_inv = per_block_cast_to_fp8(
-            layer.weight, block_size=block_size, use_ue8m0=False
+        # cohere start
+        qweight, weight_scale_inv = _blockwise_cast_to_fp8_match_ct(
+            layer.weight, block_size=block_size
         )
+        # cohere end
 
         replace_parameter(layer, "weight", qweight.data)
         replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
@@ -587,17 +723,21 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             device=w2.device,
         )
 
+        # cohere start
+        # Match the offline (compressed-tensors) block-fp8 export so online and
+        # offline experts are numerically equivalent. The fp32 scale buffers
+        # above hold the bf16-rounded values losslessly. See
+        # _blockwise_cast_to_fp8_match_ct for the rationale.
         for expert in range(num_experts):
-            w13[expert], w13_scale[expert] = per_block_cast_to_fp8(
+            w13[expert], w13_scale[expert] = _blockwise_cast_to_fp8_match_ct(
                 layer.w13_weight[expert],
                 block_size=block_size,
-                use_ue8m0=False,
             )
-            w2[expert], w2_scale[expert] = per_block_cast_to_fp8(
+            w2[expert], w2_scale[expert] = _blockwise_cast_to_fp8_match_ct(
                 layer.w2_weight[expert],
                 block_size=block_size,
-                use_ue8m0=False,
             )
+        # cohere end
 
         layer.weight_block_size = block_size
 
@@ -677,16 +817,16 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
+        # Match the offline (compressed-tensors) FP8_DYNAMIC channel export so
+        # online and offline experts are numerically equivalent. The fp32 scale
+        # buffers above hold the bf16-rounded values losslessly. See
+        # _channelwise_cast_to_fp8_match_ct for the rationale.
         for expert in range(layer.local_num_experts):
-            w13[expert], w13_scale[expert] = ops.scaled_fp8_quant(
-                layer.w13_weight[expert],
-                scale=None,
-                use_per_token_if_dynamic=True,
+            w13[expert], w13_scale[expert] = _channelwise_cast_to_fp8_match_ct(
+                layer.w13_weight[expert]
             )
-            w2[expert], w2_scale[expert] = ops.scaled_fp8_quant(
-                layer.w2_weight[expert],
-                scale=None,
-                use_per_token_if_dynamic=True,
+            w2[expert], w2_scale[expert] = _channelwise_cast_to_fp8_match_ct(
+                layer.w2_weight[expert]
             )
 
         self._setup_kernel(

@@ -45,6 +45,26 @@
       "minimum_tp": 1,
       "recommended_tp": 1
     },
+    "c5-3a30t-sft_block_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_mxfp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_fp8_online": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_block_fp8_online": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_mxfp8_online": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
     "c5-3a30t-base_bf16": {
       "minimum_tp": 1,
       "recommended_tp": 1
@@ -87,6 +107,26 @@
       "minimum_tp": 1,
       "recommended_tp": 1
     },
+    "c5-3a30t-sft_block_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_mxfp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_fp8_online": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_block_fp8_online": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_mxfp8_online": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
     "c5-3a30t-base_bf16": {
       "minimum_tp": 1,
       "recommended_tp": 1
@@ -122,6 +162,26 @@
       "recommended_tp": 4
     },
     "c5-3a30t_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_block_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_mxfp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_fp8_online": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_block_fp8_online": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_mxfp8_online": {
       "minimum_tp": 1,
       "recommended_tp": 1
     },
@@ -172,6 +232,26 @@
       "recommended_tp": 4
     },
     "c5-3a30t_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_block_fp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_mxfp8": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_fp8_online": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_block_fp8_online": {
+      "minimum_tp": 1,
+      "recommended_tp": 1
+    },
+    "c5-3a30t-sft_mxfp8_online": {
       "minimum_tp": 1,
       "recommended_tp": 1
     },

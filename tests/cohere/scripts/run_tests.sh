@@ -164,9 +164,13 @@ run_model_arch_logits_checks() {
     echo "Running model architecture logits checks..."
     cd "${VLLM_WORKSPACE}"
 
+    # Run every sub-check independently and accumulate failures, so one failing
+    # check does not prevent the others from running (mirrors run_model_arch).
+    local failed=0
+
     if ! pytest -v -s tests/cohere/test_logits_processor.py; then
         echo "Model architecture logits checks failed (test_logits_processor)."
-        return 1
+        failed=1
     fi
 
     # FP32 logits consistency test: compare generation with and without fp32
@@ -174,6 +178,25 @@ run_model_arch_logits_checks() {
     MODEL_DIR=${ENGINES_DIR}/c5-3a30t_fp8
     if ! C5_MODEL_DIR=$MODEL_DIR pytest -v -s tests/cohere/test_c5_fp32_logits.py; then
         echo "Model architecture logits checks failed (test_c5_fp32_logits)."
+        failed=1
+    fi
+
+    # Offline-vs-online FP8 quant equivalence: for each scheme, load the offline
+    # pre-quantized checkpoint and the online (quantize-at-load) checkpoint and
+    # assert their output distributions match. The test self-skips when a
+    # checkpoint dir is absent or the scheme is unsupported on this GPU.
+    for q in fp8 mxfp8 block_fp8; do
+        if ! C5_OFFLINE_MODEL_DIR=${ENGINES_DIR}/c5-3a30t-sft_${q} \
+            C5_ONLINE_MODEL_DIR=${ENGINES_DIR}/c5-3a30t-sft_${q}_online \
+            C5_QUANT_SCHEME=${q} \
+            pytest -v -s tests/cohere/test_c5_online_vs_offline_quant.py; then
+            echo "Model architecture logits checks failed (online-vs-offline ${q})."
+            failed=1
+        fi
+    done
+
+    if [[ "${failed}" -ne 0 ]]; then
+        echo "Model architecture logits checks failed."
         return 1
     fi
 

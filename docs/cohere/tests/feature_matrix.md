@@ -49,9 +49,9 @@ This matrix is part of a three-layer documentation structure:
 | --- | --- | --- | --- | --- | --- | --- |
 | | | | | | | |
 
-| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config |
-| --- | --- | --- | --- | --- | --- | --- |
-| | | | | | | |
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config | Online/Offline Quant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | | |
 
 | Hardware | A100 | H100 | B200 | GB200 | MI300x |
 | --- | --- | --- | --- | --- | --- |
@@ -77,9 +77,9 @@ This matrix is part of a three-layer documentation structure:
 | --- | --- | --- | --- | --- | --- | --- |
 | | | | T.2.1.1 | | | |
 
-| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config |
-| --- | --- | --- | --- | --- | --- | --- |
-| | | | | | T.2.1.1 | |
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config | Online/Offline Quant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | | | | | T.2.1.1 | | |
 
 | Hardware | A100 | H100 | B200 | GB200 | MI300x |
 | --- | --- | --- | --- | --- | --- |
@@ -103,9 +103,9 @@ This matrix is part of a three-layer documentation structure:
 | --- | --- | --- | --- | --- | --- | --- |
 | | | | T.1.1.1 | | | |
 
-| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config |
-| --- | --- | --- | --- | --- | --- | --- |
-| | | T.1.1.1 | | | | |
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config | Online/Offline Quant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | | T.1.1.1 | | | | | |
 
 | Hardware | A100 | H100 | B200 | GB200 | MI300x |
 | --- | --- | --- | --- | --- | --- |
@@ -129,9 +129,9 @@ This matrix is part of a three-layer documentation structure:
 | --- | --- | --- | --- | --- | --- | --- |
 | | | | T.1.2.1 | | T.1.2.1 | |
 
-| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config |
-| --- | --- | --- | --- | --- | --- | --- |
-| | T.1.2.1 | | | | | |
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config | Online/Offline Quant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | T.1.2.1 | | | | | | |
 
 | Hardware | A100 | H100 | B200 | GB200 | MI300x |
 | --- | --- | --- | --- | --- | --- |
@@ -155,9 +155,9 @@ This matrix is part of a three-layer documentation structure:
 | --- | --- | --- | --- | --- | --- | --- |
 | | | | T.4.1.1, T.4.5.1 | | | |
 
-| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config |
-| --- | --- | --- | --- | --- | --- | --- |
-| | | T.4.1.1, T.4.5.1 | | | | |
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config | Online/Offline Quant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | | T.4.1.1, T.4.5.1 | | | | | |
 
 | Hardware | A100 | H100 | B200 | GB200 | MI300x |
 | --- | --- | --- | --- | --- | --- |
@@ -181,9 +181,9 @@ This matrix is part of a three-layer documentation structure:
 | --- | --- | --- | --- | --- | --- | --- |
 | | | | T.6.3.1 | | | |
 
-| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config |
-| --- | --- | --- | --- | --- | --- | --- |
-| | | T.6.3.1 | | | | |
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config | Online/Offline Quant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | | T.6.3.1 | | | | | |
 
 | Hardware | A100 | H100 | B200 | GB200 | MI300x |
 | --- | --- | --- | --- | --- | --- |
@@ -212,9 +212,9 @@ not exercised; entries are intentionally blank. The suite gates the
 | --- | --- | --- | --- | --- | --- | --- |
 | | T.6.1.1 | T.6.1.1 | T.6.1.1 | | | |
 
-| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config |
-| --- | --- | --- | --- | --- | --- | --- |
-| | | | | | | |
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config | Online/Offline Quant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | | |
 
 | Hardware | A100 | H100 | B200 | GB200 | MI300x |
 | --- | --- | --- | --- | --- | --- |
@@ -244,9 +244,9 @@ formulas.
 | --- | --- | --- | --- | --- | --- | --- |
 | | | | T.6.2.1 | | | |
 
-| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config |
-| --- | --- | --- | --- | --- | --- | --- |
-| | | | | | | |
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config | Online/Offline Quant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | | |
 
 | Hardware | A100 | H100 | B200 | GB200 | MI300x |
 | --- | --- | --- | --- | --- | --- |
@@ -270,9 +270,9 @@ formulas.
 | --- | --- | --- | --- | --- | --- | --- |
 | | | | | | | |
 
-| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config |
-| --- | --- | --- | --- | --- | --- | --- |
-| | | T.2.2.1 | T.2.2.1 | | | T.2.2.1 |
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config | Online/Offline Quant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | | T.2.2.1 | T.2.2.1 | | | T.2.2.1 | |
 
 | Hardware | A100 | H100 | B200 | GB200 | MI300x |
 | --- | --- | --- | --- | --- | --- |
@@ -281,6 +281,32 @@ formulas.
 | vLLM Feature | Chunked Prefill | Hybrid Memory Allocator | Asynchronous Scheduling | Torch Compile | CUDA Graphs | Sliding Window |
 | --- | --- | --- | --- | --- | --- | --- |
 | | | | | ❌ | ❌ | |
+
+### Online/Offline Quant
+
+| Input | Basic | Long Context | Multilingual | Multi Turn | Image | Audio |
+| --- | --- | --- | --- | --- | --- | --- |
+| | T.2.3.1 | | T.2.3.1 | | | |
+
+| Cohere Feature | Speculative Decoding | Guided Generation | Thinking Budget | Melody | Weight Reload | Auto-Config |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | |
+
+| Model Architecture | C3 Arch | C4 Arch | C5 Arch | Reward | LoRA | ASR |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | | T.2.3.1 | | | |
+
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config | Online/Offline Quant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | | T.2.3.1 | T.2.3.1 | | | | T.2.3.1 |
+
+| Hardware | A100 | H100 | B200 | GB200 | MI300x |
+| --- | --- | --- | --- | --- | --- |
+| | ❌ | T.2.3.1 | T.2.3.1 | T.2.3.1 | ❌ |
+
+| vLLM Feature | Chunked Prefill | Hybrid Memory Allocator | Asynchronous Scheduling | Torch Compile | CUDA Graphs | Sliding Window |
+| --- | --- | --- | --- | --- | --- | --- |
+| | T.2.3.1 | | | ❌ | ❌ | |
 
 ### ASR
 
@@ -296,9 +322,9 @@ formulas.
 | --- | --- | --- | --- | --- | --- | --- |
 | | | | | | | T.7.1.1 |
 
-| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config |
-| --- | --- | --- | --- | --- | --- | --- |
-| | | | | | | |
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config | Online/Offline Quant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | | |
 
 | Hardware | A100 | H100 | B200 | GB200 | MI300x |
 | --- | --- | --- | --- | --- | --- |

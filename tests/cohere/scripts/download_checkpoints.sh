@@ -297,6 +297,16 @@ download_model_arch_c5_3a30t_assets () {
     download_model_if_missing "c5-3a30t_fp8"
 }
 
+download_model_arch_quant_equiv_assets () {
+    # Offline + online checkpoint pairs for the online-vs-offline quant
+    # equivalence test (tests/cohere/test_c5_online_vs_offline_quant.py).
+    echo "==> Downloading checkpoints for online-vs-offline quant equivalence"
+    for q in fp8 mxfp8 block_fp8; do
+        download_model_if_missing "c5-3a30t-sft_${q}"
+        download_model_if_missing "c5-3a30t-sft_${q}_online"
+    done
+}
+
 download_model_arch_c5_lora_assets () {
     local DEST="${ENGINES_DIR}/c5-3a30t-petfatt-bf16"
     if [[ ! -d "${DEST}" ]]; then
@@ -322,6 +332,7 @@ download_model_arch () {
     download_model_arch_reward_assets
     download_model_arch_c5_3a30t_assets
     download_model_arch_c5_lora_assets
+    download_model_arch_quant_equiv_assets
 }
 
 
@@ -338,6 +349,7 @@ download_models () {
     download_model_arch_reward_assets
     download_model_arch_c5_3a30t_assets
     download_model_arch_c5_lora_assets
+    download_model_arch_quant_equiv_assets
 
     echo "==> All required models downloaded successfully"
 }
@@ -347,7 +359,7 @@ run_downloads () {
     case "${TEST_GROUP}" in
         cpu)               echo "==> CPU tests require no model downloads"; return 0 ;;
         model_arch)        download_model_arch        ;;
-        quantization_32bit_logits) download_model_arch_c5_3a30t_assets ;;
+        quantization_32bit_logits) download_model_arch_c5_3a30t_assets; download_model_arch_quant_equiv_assets ;;
         model_arch_reward) download_model_arch_reward_assets ;;
         model_arch_c5_3a30t)     download_model_arch_c5_3a30t_assets     ;;
         model_arch_c5_lora)      download_model_arch_c5_lora_assets      ;;

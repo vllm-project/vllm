@@ -370,7 +370,10 @@ pre-quantized checkpoint) now has a dedicated frontend package under
   registered as `"online"`); dispatches per-layer to the per-scheme methods
   in `get_quant_method`.
 - `fp8.py` — `Fp8PerTensorOnline{Linear,MoE}Method`,
-  `Fp8PerBlockOnline{Linear,MoE}Method`.
+  `Fp8PerBlockOnline{Linear,MoE}Method`, and the cohere-added
+  `Fp8PtpcOnline{Linear,MoE}Method` (per-output-channel weights + dynamic
+  per-token activations; the `FP8_PER_CHANNEL` / `fp8_per_channel` scheme,
+  mirroring llm-compressor's `FP8_DYNAMIC` recipe).
 - `mxfp8.py` — `Mxfp8Online{Linear,MoE}Method` (moved from the former
   single-file `vllm/model_executor/layers/quantization/mxfp8.py` in #40152).
 - `int8.py` — `Int8OnlineMoEMethod` (consolidated from `experts_int8` in
@@ -459,9 +462,75 @@ with a `warning_once`.
   `# cohere end` markers; keep them in place when porting future
   upstream changes to this method.
 
+### Offline-equivalent weight quantization (block & channel FP8)
+
+The online FP8 paths must produce the **same** fp8 weights and scales as the
+offline pre-quantized (compressed-tensors) checkpoint, otherwise online vs
+offline diverges (see
+[`tests/cohere/test_c5_online_vs_offline_quant.py`](../../../tests/cohere/test_c5_online_vs_offline_quant.py)).
+`ops.scaled_fp8_quant` is **not** offline-equivalent — it computes an **fp32**
+scale and quantizes by **reciprocal-multiply** (`w * (1/scale)`), whereas
+compressed-tensors stores a **bf16** scale (recipe leaves `scale_dtype=None`,
+so the scale inherits the bf16 weight; the loader upcasts that bf16 value into
+the fp32 scale buffer losslessly) and quantizes by **divide** (`w / scale`).
+On a per-channel weight this drifts ~3% of elements to the adjacent fp8 code,
+enough to flip top-1 tokens across many layers.
+
+Two helpers in `online/fp8.py` reproduce the compressed-tensors math exactly
+(bit-identical scale + fp8 bytes), sharing a `_cast_to_fp8_match_ct` core. That
+core reuses compressed-tensors' own code rather than re-deriving it: the scale
+is `amax / fp8_max` (its symmetric `calculate_qparams`), `eps` comes from
+`compressed_tensors...helpers._get_dtype_eps` and is substituted only where the
+scale is exactly 0, and the quant cast (divide + clamp + fp8 cast) is delegated
+to `compressed_tensors...forward_helpers._quantize` (imported as `ct_quantize`,
+parameterized by the module-level `_CT_FP8_QUANT_ARGS`):
+
+- `_blockwise_cast_to_fp8_match_ct` — `FP8_BLOCK` (128×128), used by
+  `Fp8PerBlockOnline{Linear,MoE}Method`.
+- `_channelwise_cast_to_fp8_match_ct` — `FP8_DYNAMIC` `CHANNEL` strategy
+  (per-output-row), used by `Fp8PtpcOnline{Linear,MoE}Method`.
+
+When adding/altering an online FP8 path, quantize through these helpers rather
+than `ops.scaled_fp8_quant`, and store the per-channel scale as fp32 holding
+the bf16-rounded value (what the offline loader yields).
+
+### Offline-equivalent weight quantization (MXFP8)
+
+The online MXFP8 path has the same requirement. FlashInfer's `mxfp8_quantize`
+picks the E8M0 exponent via `__nv_cvt_float_to_e8m0(amax/448, RoundPosInf)`
+(i.e. `ceil(log2(amax/448))`), which disagrees with compressed-tensors when the
+per-32 group amax is *exactly* `1.75·2^f` (~0.7% of weight blocks). The
+dequantized product still matches to ~1e-6, but the stored E8M0 **weight scale
+byte** and fp8 codes do not — so it is not a true bitwise match.
+
+`online/mxfp8.py::_mxfp8_weight_quant_match_ct` reuses compressed-tensors'
+`generate_mx_scales` + symmetric group quantize directly (no hand-rolled
+bit-twiddling):
+
+- **Scale (E8M0 byte).** `generate_mx_scales(amax, num_bits=8)` (`round_to_power_2`
+  of the per-32 **bf16** amax, then `127 + floor(log2(.)) - 8`, 8 =
+  `floor(log2(448))`), then `round_to_quantized_type_dtype(., uint8,
+  cast_to_original_dtype=False)` to clamp/cast to the uint8 exponent.
+- **Quantize.** `ct_quantize` divides by the bf16 power-of-two scale
+  `2**(byte-127)` (not reciprocal-multiply), clamps to the e4m3 range, casts to
+  fp8.
+
+Both `Mxfp8OnlineLinearMethod` and `Mxfp8OnlineMoEMethod` quantize through this
+helper instead of `mxfp8_e4m3_quantize`; the scale is still swizzled for the
+FlashInfer-CUTLASS kernel afterwards (linear) / by `convert_to_fp8_moe_kernel_
+format` (MoE). Verified bit-for-bit against the stored `c5_3a30t_code_mxfp8`
+export: **0 mismatches** across ~94M fp8 codes and ~2.9M uint8 scale bytes
+(60 sampled tensors), and the helper output is byte-identical to
+compressed-tensors' own `generate_mx_scales` + `quantize`. Activations stay
+dynamic (quantized at runtime by the same FlashInfer path on both sides), so
+weight parity makes online and offline MXFP8 fully equivalent.
+
 ### Validation
 
 - Parsing path: `pytest -v tests/cohere/cpu/test_online_quant_from_config.py`
   (CPU-only; runs in the `cpu_check` group on every PR).
 - Upstream CLI path:
   `pytest -v tests/quantization/test_online.py`.
+- Online vs offline equivalence (fp8 / block_fp8 / mxfp8):
+  `pytest -v -s tests/cohere/test_c5_online_vs_offline_quant.py` with the
+  paired offline/online checkpoint dirs (GPU; `quantization_32bit_logits`).
