@@ -745,7 +745,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.prompt_logprobs_worker is not None:
             self.prompt_logprobs_worker.remove_request(req_id)
         self.lora_state.remove_request(req_id)
-        self.model_state.remove_request(req_id)
         return True
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:

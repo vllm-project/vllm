@@ -40,7 +40,6 @@ class ParakeetTDTModelState(DefaultModelState):
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
-        req_states: RequestState,
     ) -> None:
         # Only prefilling requests carry encoder inputs. Run the FastConformer
         # encoder + greedy TDT decode once per request and cache the transcript.
