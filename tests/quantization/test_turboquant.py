@@ -528,7 +528,7 @@ class TestStoreDecodeRoundTrip:
         )
 
         if _use_fp8_e4b15(0):
-            pytest.skip("native TurboQuant store currently covers Hopper+ e4nv")
+            pytest.skip("native TurboQuant store currently covers SM 8.9+ e4nv")
         assert hasattr(torch.ops, "_C") and hasattr(
             torch.ops._C, "turboquant_store_fp8_v4"
         ), "native TurboQuant store op must be built on SM >= 8.9"
@@ -547,15 +547,19 @@ class TestStoreDecodeRoundTrip:
         key[0, 0, 1] = -1024.0
         slot_mapping = torch.tensor([0, -1, 3, 5], device=device, dtype=torch.int32)
 
-        kv_triton = torch.zeros(
-            num_blocks,
-            block_size,
-            Hk,
-            cfg.slot_size_aligned,
+        cache_sentinel = 0xA5
+        kv_triton = torch.full(
+            (
+                num_blocks,
+                block_size,
+                Hk,
+                cfg.slot_size_aligned,
+            ),
+            cache_sentinel,
             device=device,
             dtype=torch.uint8,
         )
-        kv_native = torch.zeros_like(kv_triton)
+        kv_native = torch.full_like(kv_triton, cache_sentinel)
 
         triton_turboquant_store(
             key,
@@ -590,6 +594,11 @@ class TestStoreDecodeRoundTrip:
         torch.cuda.synchronize()
 
         assert torch.equal(kv_native, kv_triton)
+        unused_slots = torch.tensor([1, 2, 4, 6, 7], device=device)
+        kv_native_slots = kv_native.view(
+            num_blocks * block_size, Hk, cfg.slot_size_aligned
+        )
+        assert kv_native_slots[unused_slots].eq(cache_sentinel).all().item()
 
     @pytest.mark.parametrize(
         "preset",

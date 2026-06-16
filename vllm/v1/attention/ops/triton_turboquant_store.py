@@ -166,7 +166,7 @@ def _tq_fused_store_fp8(
     # Packing block sizes
     BLOCK_VAL: tl.constexpr,
     BLOCK_GRP: tl.constexpr = 16,
-    FP8_E4B15: tl.constexpr = 0,  # 1 = e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
+    FP8_E4B15: tl.constexpr = 0,  # 1 = e4b15 (SM < 8.9), 0 = e4nv (SM >= 8.9)
 ):
     """FP8 key cast+scatter + value uniform quantization."""
     pid = tl.program_id(0)
