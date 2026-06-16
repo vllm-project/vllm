@@ -359,6 +359,12 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
         def get_vocab(self):
             return self._vocab
 
+        def decode(self, token_ids):
+            id_to_token = {v: k for k, v in self._vocab.items()}
+            return "".join(
+                id_to_token.get(token_id, f"token_{token_id}") for token_id in token_ids
+            )
+
     # Force non-harmony, SimpleContext path
     monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
 

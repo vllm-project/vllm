@@ -12,6 +12,8 @@ from dataclasses import dataclass
 @dataclass(slots=True)
 class TextChunk:
     text: str
+    token_texts: tuple[str, ...] = ()
+    token_count: int = 0
 
 
 @dataclass(slots=True)
@@ -19,6 +21,7 @@ class PreLexedTerminal:
     terminal: str
     token_id: int
     text: str
+    token_count: int = 0
 
 
 LexerInput = TextChunk | PreLexedTerminal
@@ -61,6 +64,11 @@ class TokenIDScanner:
             self._token_text_cache[token_id] = self.tokenizer.decode([token_id])
         return self._token_text_cache[token_id]
 
+    def _decode_tokens(self, token_ids: Sequence[int]) -> tuple[str, ...]:
+        if self.tokenizer is None:
+            return ()
+        return tuple(self._decode_token(tid) for tid in token_ids)
+
     _EMPTY: tuple[LexerInput, ...] = ()
 
     def scan(
@@ -76,7 +84,14 @@ class TokenIDScanner:
 
         if not self.token_id_to_terminal and not self._drop_token_ids:
             if effective_text:
-                prefix_items.append(TextChunk(effective_text))
+                token_texts = self._decode_tokens(delta_token_ids)
+                prefix_items.append(
+                    TextChunk(
+                        effective_text,
+                        token_texts=token_texts,
+                        token_count=len(token_texts),
+                    )
+                )
             return prefix_items
 
         has_special = False
@@ -92,14 +107,29 @@ class TokenIDScanner:
         if not has_special and not has_drop:
             if effective_text:
                 if not prefix_items:
-                    return [TextChunk(effective_text)]
-                prefix_items.append(TextChunk(effective_text))
+                    token_texts = self._decode_tokens(delta_token_ids)
+                    return [
+                        TextChunk(
+                            effective_text,
+                            token_texts=token_texts,
+                            token_count=len(token_texts),
+                        )
+                    ]
+                token_texts = self._decode_tokens(delta_token_ids)
+                prefix_items.append(
+                    TextChunk(
+                        effective_text,
+                        token_texts=token_texts,
+                        token_count=len(token_texts),
+                    )
+                )
             return prefix_items or self._EMPTY
 
         token_texts = [self._decode_token(tid) for tid in delta_token_ids]
 
         results: list[LexerInput] = []
         text_accum: list[str] = []
+        token_text_accum: list[str] = []
 
         for idx, tid in enumerate(delta_token_ids):
             if tid in self._drop_token_ids:
@@ -109,16 +139,30 @@ class TokenIDScanner:
                 if text_accum:
                     joined = "".join(text_accum)
                     if joined:
-                        results.append(TextChunk(joined))
+                        results.append(
+                            TextChunk(
+                                joined,
+                                token_texts=tuple(token_text_accum),
+                                token_count=len(token_text_accum),
+                            )
+                        )
                     text_accum.clear()
+                    token_text_accum.clear()
                 results.append(PreLexedTerminal(terminal, tid, token_texts[idx]))
             else:
                 text_accum.append(token_texts[idx])
+                token_text_accum.append(token_texts[idx])
 
         if text_accum:
             joined = "".join(text_accum)
             if joined:
-                results.append(TextChunk(joined))
+                results.append(
+                    TextChunk(
+                        joined,
+                        token_texts=tuple(token_text_accum),
+                        token_count=len(token_text_accum),
+                    )
+                )
 
         if effective_text:
             if has_drop:
@@ -278,6 +322,16 @@ class TokenIDScanner:
         if not anchors:
             return [TextChunk(delta_text)]
 
+        token_groups: list[list[str]] = [[] for _ in range(len(anchors) + 1)]
+        count_groups = [0] * (len(anchors) + 1)
+        group_idx = 0
+        for item in results:
+            if isinstance(item, PreLexedTerminal):
+                group_idx += 1
+            elif isinstance(item, TextChunk):
+                token_groups[group_idx].extend(item.token_texts)
+                count_groups[group_idx] += item.token_count
+
         # Resolve positions right-to-left: each anchor gets the
         # rightmost occurrence that is still before the next anchor.
         positions: list[int] = [-1] * len(anchors)
@@ -295,7 +349,13 @@ class TokenIDScanner:
             pos = positions[i]
             if pos >= consumed:
                 if pos > consumed:
-                    new_results.append(TextChunk(delta_text[consumed:pos]))
+                    new_results.append(
+                        TextChunk(
+                            delta_text[consumed:pos],
+                            token_texts=tuple(token_groups[i]),
+                            token_count=count_groups[i],
+                        )
+                    )
                 new_results.append(anchor)
                 consumed = pos + len(anchor.text)
             else:
@@ -305,5 +365,11 @@ class TokenIDScanner:
                     consumed = len(delta_text)
                 self._deferred_terminals.append(anchor)
         if consumed < len(delta_text):
-            new_results.append(TextChunk(delta_text[consumed:]))
+            new_results.append(
+                TextChunk(
+                    delta_text[consumed:],
+                    token_texts=tuple(token_groups[-1]),
+                    token_count=count_groups[-1],
+                )
+            )
         return new_results
