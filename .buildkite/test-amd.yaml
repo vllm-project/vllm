@@ -1610,9 +1610,10 @@ steps:
 #----------------------------------------------------------  mi300 · kernels  ----------------------------------------------------------#
 
 - label: Kernels Attention Test %N # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -3055,7 +3056,7 @@ steps:
 #----------------------------------------------------------  mi355 · kernels  ----------------------------------------------------------#
 
 - label: Kernels (B200-MI355) # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/"
@@ -3079,11 +3080,10 @@ steps:
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
 
 - label: Kernels Attention Test %N # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   parallelism: 2
-  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/attention/
