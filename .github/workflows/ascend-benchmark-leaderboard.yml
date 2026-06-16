@@ -210,6 +210,9 @@ jobs:
         run: |
           set -euo pipefail
 
+          # The runner container may not have HOME set; default to /root for root user.
+          export HOME="${HOME:-/root}"
+
           mkdir -p "$HOME/.ssh"
           chmod 700 "$HOME/.ssh"
 
