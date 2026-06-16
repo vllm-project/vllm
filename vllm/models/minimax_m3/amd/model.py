@@ -608,7 +608,11 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         unit scale -- matching the fp8 read path added in #33). Mirrors the
         pre-#20 unfused insert. The index cache stays bf16 (no quant).
         """
-        key_cache, value_cache = self.kv_cache.unbind(1)
+        # KV cache is packed as (B, H, N, 2*hs); transpose to
+        # (B, N, H, 2*hs) for reshape_and_cache_flash, then split K/V.
+        key_cache, value_cache = self.kv_cache.transpose(1, 2).split(
+            self.head_dim, dim=-1
+        )
         scale = torch.ones((), device=key.device)
         ops.reshape_and_cache_flash(
             key.view(-1, self.num_kv_heads, self.head_dim),

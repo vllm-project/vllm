@@ -561,8 +561,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         assert isinstance(main_meta, MiniMaxM3SparseMetadata)
         assert isinstance(index_meta, MiniMaxM3IndexerMetadata)
 
+        # KV cache is packed as (B, H, N, 2*hs); transpose to
+        # (B, N, H, 2*hs) for reshape_and_cache_flash, then split K/V.
         # Identity scale: unused for the bf16 cache, required arg of the op.
-        key_cache, value_cache = self.kv_cache.unbind(1)
+        key_cache, value_cache = self.kv_cache.transpose(1, 2).split(
+            self.head_dim, dim=-1
+        )
         scale = torch.ones((), device=key.device)
         ops.reshape_and_cache_flash(
             key.view(-1, self.num_kv_heads, self.head_dim),

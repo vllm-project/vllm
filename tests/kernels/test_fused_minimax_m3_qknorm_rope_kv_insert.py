@@ -159,7 +159,12 @@ def test_sparse_full(num_tokens, block_size):
 
     num_blocks = (num_tokens + block_size - 1) // block_size + 1
     kv_cache = torch.zeros(
-        num_blocks, 2, block_size, num_kv_heads, HEAD_DIM, dtype=dtype, device=device
+        num_blocks,
+        num_kv_heads,
+        block_size,
+        2 * HEAD_DIM,
+        dtype=dtype,
+        device=device,
     )
     index_cache = torch.zeros(
         num_blocks, block_size, HEAD_DIM, dtype=dtype, device=device
@@ -228,8 +233,8 @@ def test_sparse_full(num_tokens, block_size):
     torch.testing.assert_close(index_k, ik_ref, rtol=1e-2, atol=1e-2)
 
     # ── Cache inserts. ──
-    # Main cache layout is [num_blocks, 2, block_size, num_kv_heads, head_dim]
-    # (the K/V axis sits *before* block_size); index cache is [nb, bs, head_dim].
+    # Main cache layout is [num_blocks, num_kv_heads, block_size, 2*head_dim];
+    # index cache is [nb, bs, head_dim].
     idx_flat = index_cache.view(num_blocks * block_size, HEAD_DIM)
     k_ref_h = k_ref.view(num_tokens, num_kv_heads, HEAD_DIM)
     v_ref_h = v_in.view(num_tokens, num_kv_heads, HEAD_DIM)  # v is raw (no norm/rope)
@@ -237,8 +242,10 @@ def test_sparse_full(num_tokens, block_size):
         s = slot_mapping[t].item()
         b, pos = s // block_size, s % block_size
         torch.testing.assert_close(
-            kv_cache[b, 0, pos], k_ref_h[t], rtol=1e-2, atol=1e-2
+            kv_cache[b, :, pos, :HEAD_DIM], k_ref_h[t], rtol=1e-2, atol=1e-2
         )
-        torch.testing.assert_close(kv_cache[b, 1, pos], v_ref_h[t], rtol=0, atol=0)
+        torch.testing.assert_close(
+            kv_cache[b, :, pos, HEAD_DIM:], v_ref_h[t], rtol=0, atol=0
+        )
         index_s = index_slot_mapping[t].item()
         torch.testing.assert_close(idx_flat[index_s], ik_ref[t], rtol=1e-2, atol=1e-2)
