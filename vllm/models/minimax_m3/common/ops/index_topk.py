@@ -766,10 +766,13 @@ def minimax_m3_index_decode(
     num_kv_heads: int,
     decode_query_len: int,
     max_decode_query_len: int,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Decode index block-score + top-k, both split-K (cudagraph-safe).
 
     Returns topk_idx [num_kv_heads, total_q, topk] (0-indexed block ids, -1 pad).
+    When ``out`` ([num_kv_heads, >=total_q, topk]) is given, writes into
+    ``out[:, :total_q, :]`` (stable address for cudagraph) instead of allocating.
     """
     total_q, num_idx_heads, head_dim = idx_q.shape
     assert num_idx_heads == num_kv_heads, (
@@ -843,11 +846,14 @@ def minimax_m3_index_decode(
         **score_kwargs,
     )
 
-    topk_idx = torch.empty(
-        (num_idx_heads, total_q, topk),
-        dtype=torch.int32,
-        device=idx_q.device,
-    )
+    if out is not None:
+        topk_idx = out[:, :total_q, :]
+    else:
+        topk_idx = torch.empty(
+            (num_idx_heads, total_q, topk),
+            dtype=torch.int32,
+            device=idx_q.device,
+        )
     # Chunk count is shape-constant (cudagraph-safe), capped so the merge sorts
     # pow2(num_topk_chunks * pow2(topk)) candidates.
     TOPK_TARGET_GRID = 64
