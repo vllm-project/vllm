@@ -29,6 +29,7 @@ class VitCudagraphTestConfig:
     vllm_runner_kwargs: dict = field(default_factory=dict)
     compilation_config_overrides: dict = field(default_factory=dict)
     marks: list = field(default_factory=list)
+    skip: bool = False
 
 
 def params_with_marks(
@@ -196,6 +197,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
                 model_arch="DeepseekOCRForCausalLM",
             ),
         },
+        skip=True,  # TODO: Re-enable this once CI OOM issues are resolved.
     ),
 }
 
@@ -218,6 +220,9 @@ def get_compilation_config(config: VitCudagraphTestConfig):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
     config = MODEL_CONFIGS[model_id]
+
+    if config.skip:
+        pytest.skip(f"{model_id} is marked to be skipped.")
 
     if "image" not in config.modalities:
         pytest.skip(f"{model_id} does not support the image modality.")
@@ -259,6 +264,9 @@ def test_vit_cudagraph_image(model_id, vllm_runner, image_assets):
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
 def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
     config = MODEL_CONFIGS[model_id]
+
+    if config.skip:
+        pytest.skip(f"{model_id} is marked to be skipped.")
 
     if "video" not in config.modalities:
         pytest.skip(f"{model_id} does not support the video modality")
