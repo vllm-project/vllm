@@ -279,10 +279,6 @@ genai-perf==0.0.16
     # via -r requirements/test/rocm.in
 genson==1.3.0
     # via datamodel-code-generator
-gguf==0.18.0
-    # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
 google-api-core==2.30.0
     # via
     #   google-cloud-core
@@ -443,6 +439,8 @@ jsonpointer==3.1.0
     # via jsonschema
 jsonschema==4.26.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   hypothesis-jsonschema
     #   mcp
     #   mistral-common
@@ -589,7 +587,6 @@ numpy==2.2.6
     #   evaluate
     #   fastparquet
     #   genai-perf
-    #   gguf
     #   imagehash
     #   imageio
     #   librosa
@@ -959,7 +956,6 @@ pyyaml==6.0.3
     #   datamodel-code-generator
     #   datasets
     #   genai-perf
-    #   gguf
     #   huggingface-hub
     #   lm-format-enforcer
     #   optuna
@@ -1004,7 +1000,6 @@ requests==2.32.5
     #   datasets
     #   docker
     #   evaluate
-    #   gguf
     #   google-api-core
     #   google-cloud-storage
     #   gpt-oss
@@ -1231,7 +1226,6 @@ tqdm==4.67.3
     #   -r requirements/test/../common.txt
     #   datasets
     #   evaluate
-    #   gguf
     #   huggingface-hub
     #   lm-eval
     #   mteb

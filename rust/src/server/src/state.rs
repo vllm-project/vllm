@@ -9,7 +9,7 @@ use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 
-use crate::config::ApiServerOptions;
+use crate::config::{ApiServerOptions, CorsConfig};
 use crate::lora::{LoadLoraError, LoraManager, LoraModelResolution, UnloadLoraError};
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
@@ -30,6 +30,8 @@ pub struct AppState {
     pub chat: ChatLlm,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
+    /// CORS settings applied to every HTTP response.
+    pub cors: CorsConfig,
     /// Runtime server information returned by `/server_info`, when available.
     server_info: Option<ServerInfoSnapshot>,
     /// SHA-256 hashes of API keys accepted as bearer tokens for guarded routes.
@@ -58,6 +60,7 @@ impl AppState {
             served_model_names,
             chat,
             api_server_options: ApiServerOptions::default(),
+            cors: CorsConfig::default(),
             server_info: None,
             api_key_hashes: Vec::new(),
             server_load: AtomicU64::new(0),
@@ -68,6 +71,12 @@ impl AppState {
     /// Set HTTP/API-server behavior switches.
     pub fn with_api_server_options(mut self, options: ApiServerOptions) -> Self {
         self.api_server_options = options;
+        self
+    }
+
+    /// Set the CORS settings applied to every HTTP response.
+    pub fn with_cors(mut self, cors: CorsConfig) -> Self {
+        self.cors = cors;
         self
     }
 
@@ -112,16 +121,6 @@ impl AppState {
     /// All model names served by this frontend.
     pub fn served_model_names(&self) -> &[String] {
         &self.served_model_names
-    }
-
-    /// Tokenizer vocabulary size.
-    pub fn tokenizer_vocab_size(&self) -> usize {
-        self.chat.tokenizer_vocab_size()
-    }
-
-    /// Model vocabulary size, else `None`.
-    pub fn model_vocab_size(&self) -> Option<usize> {
-        self.chat.model_vocab_size()
     }
 
     /// Return base served model names plus dynamically loaded LoRA adapter
