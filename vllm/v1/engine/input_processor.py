@@ -179,6 +179,13 @@ class InputProcessor:
         adapter weights at a new ``lora_path``. Keying on the name only would
         reuse the previous adapter's encoder embeddings on a cache hit and
         skip recomputing the vision encoder/projector. See issue #44939.
+
+        Note: the fingerprint is over the ``lora_path`` string, so
+        re-uploading different adapter weights to the *same* ``lora_path``
+        under the same ``lora_name`` is not covered (the fingerprint is
+        unchanged and the stale encoder cache is reused). Catching that would
+        require content- or mtime-based keying, which costs more per request;
+        path-keying is the chosen tradeoff.
         """
         if (
             lora_request is None
