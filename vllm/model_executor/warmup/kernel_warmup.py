@@ -146,7 +146,9 @@ def _warmup_triton_nvfp4_attention(runner: "GPUModelRunner") -> None:
     ):
         return
 
-    num_tokens = runner.uniform_decode_query_len
+    num_tokens = getattr(
+        runner, "decode_query_len", getattr(runner, "uniform_decode_query_len", 1)
+    )
     if num_tokens <= 0 or num_tokens > runner.max_num_tokens:
         return
 

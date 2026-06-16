@@ -374,6 +374,31 @@ def test_triton_nvfp4_attention_warmup_runs_for_nvfp4_triton():
     }
 
 
+def test_triton_nvfp4_attention_warmup_uses_v2_decode_query_len():
+    runner, calls = _make_warmup_runner()
+    delattr(runner, "uniform_decode_query_len")
+    runner.decode_query_len = 3
+
+    _warmup_triton_nvfp4_attention(runner)
+
+    assert len(calls) == 2
+    assert calls[0]["num_tokens"] == 3
+    assert calls[0]["uniform_decode"] is True
+    assert calls[1]["num_tokens"] == 4096
+    assert calls[1]["uniform_decode"] is False
+
+
+def test_triton_nvfp4_attention_warmup_falls_back_to_single_decode_token():
+    runner, calls = _make_warmup_runner()
+    delattr(runner, "uniform_decode_query_len")
+
+    _warmup_triton_nvfp4_attention(runner)
+
+    assert len(calls) == 2
+    assert calls[0]["num_tokens"] == 1
+    assert calls[0]["uniform_decode"] is True
+
+
 @pytest.mark.parametrize(
     ("cache_dtype", "backend_name", "is_pooling_model"),
     [
