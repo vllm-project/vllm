@@ -10,6 +10,7 @@ from openai_harmony import (
     Message,
     RenderConversationConfig,
     Role,
+    StreamState,
 )
 from transformers import AutoTokenizer
 
@@ -435,7 +436,7 @@ class TestParseDelta:
                 "<|end|><|start|>assistant<|channel|>final<|message|>Answer"
             ),
             request=chat_request,
-            finished=False,
+            finished=True,
         )
 
         assert first_delta is not None
@@ -734,3 +735,20 @@ class TestProcessChunk:
             ("analysis", "One"),
             ("final", "Two"),
         ]
+
+
+class TestFlushCurrentSegment:
+    def test_flush_current_segment(self, harmony_parser):
+        harmony_parser.process_chunk(
+            encode_output("<|channel|>analysis<|message|>Think")
+        )
+
+        flushed = harmony_parser.flush_current_segment()
+
+        assert flushed is not None
+        assert flushed.channel == "analysis"
+        assert flushed.recipient is None
+        assert flushed.delta == ""
+        assert flushed.completed_message is not None
+        assert get_text(flushed.completed_message) == "Think"
+        assert harmony_parser.state == StreamState.EXPECT_START
