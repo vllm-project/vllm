@@ -29,9 +29,8 @@ def is_available() -> bool:
 
 
 # Two separate caches because the two kernels have different specialization axes
-# Dot-prod: keyed on (M, K) -> both are Constexpr in the kernel -> each unique pair needs
-# its own binary
-_compiled_cache: dict[tuple[int, int], object] = {}
+# Dot-prod: keyed on (M, K, bs) -> M and K are Constexpr in the kernel.
+_compiled_cache: dict[tuple[int, int, int], object] = {}
 # Split-K: keyed on (split_k, num_stages) -> compiled callable, fully shape-dynamic.
 _splitk_cache: dict = {}
 
@@ -62,9 +61,8 @@ def _stream():
     return CUstream(current_stream().cuda_stream)
 
 
-# Takes flattened 1D tensors. The dot-product kernel uses raw pointer
-# arithmetic, not cute's tiled layout system.
-def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat, bs: int = 128):
+# Takes full 2D row-major tensors.
+def _get_compiled_dotprod(M: int, K: int, N: int, a, b, c, bs: int = 128):
     cute, from_dlpack, CUstream, current_stream = _cute()
 
     key = (M, K, bs)
@@ -77,16 +75,15 @@ def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat, bs: in
     host_fn = make_host_bf16(K, bs=bs)  # creates a new kernel closure with K baked
     # into all loop bounds as Constexpr
 
-    a_c = from_dlpack(
-        a_flat, assumed_align=32, enable_tvm_ffi=True
-    ).mark_layout_dynamic()  # shape/stride can change between calls. This is
-    # what lets the cache work — one binary for all tensor sizes with the same (M, K).
-    b_c = from_dlpack(
-        b_flat, assumed_align=32, enable_tvm_ffi=True
-    ).mark_layout_dynamic()
-    c_c = from_dlpack(
-        c_flat, assumed_align=32, enable_tvm_ffi=True
-    ).mark_layout_dynamic()
+    a_c = from_dlpack(a, assumed_align=32, enable_tvm_ffi=True).mark_layout_dynamic(
+        leading_dim=1
+    )
+    b_c = from_dlpack(b, assumed_align=32, enable_tvm_ffi=True).mark_layout_dynamic(
+        leading_dim=1
+    )
+    c_c = from_dlpack(c, assumed_align=32, enable_tvm_ffi=True).mark_layout_dynamic(
+        leading_dim=1
+    )
 
     stream = _stream()
 
@@ -99,7 +96,7 @@ def _get_compiled_dotprod(M: int, K: int, N: int, a_flat, b_flat, c_flat, bs: in
         K,
         N,
         stream,
-        options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",  # caps register usage. Found empirically.
+        options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",  # cap regs
     )
     _compiled_cache[key] = compiled
     logger.debug("Compiled ll_bf16_dotprod: M=%d, K=%d", M, K)
@@ -111,7 +108,7 @@ def _get_compiled_splitk(a, b, c, split_k: int, num_stages: int):
     cute, from_dlpack, CUstream, current_stream = _cute()
     from ._ll_bf16_splitk import LLBf16SplitK
 
-    # fully shape-dynamic - one binary (same split_k and num_stages) works for all shapes.
+    # shape-dynamic: one binary (same split_k and num_stages) works for all shapes.
     cache_key = (split_k, num_stages)
     if cache_key in _splitk_cache:
         return _splitk_cache[cache_key]
@@ -125,7 +122,7 @@ def _get_compiled_splitk(a, b, c, split_k: int, num_stages: int):
             stride_order=(0, 1),  # row-major
             divisibility=div,
         )
-        # This lets the compiler generate more efficient address math knowing K alignment.
+        # Helps address math when K alignment is known.
     )
     mB = (
         from_dlpack(b, assumed_align=16, enable_tvm_ffi=True)
@@ -176,16 +173,14 @@ def ll_bf16_gemm(
     if config[0] == "splitk":
         _, split_k, num_stages = config
         compiled = _get_compiled_splitk(
-            hidden_states, router_weight, output,
-            split_k=split_k, num_stages=num_stages,
+            hidden_states, router_weight, output, split_k, num_stages
         )
         compiled(hidden_states, router_weight, output, stream, 1.0)
     else:
         _, bs = config
-        a_flat = hidden_states.reshape(-1)
-        b_flat = router_weight.reshape(-1)
-        c_flat = output.reshape(-1)
-        compiled = _get_compiled_dotprod(M, K, N, a_flat, b_flat, c_flat, bs=bs)
-        compiled(a_flat, b_flat, c_flat, N, stream)
+        compiled = _get_compiled_dotprod(
+            M, K, N, hidden_states, router_weight, output, bs
+        )
+        compiled(hidden_states, router_weight, output, N, stream)
 
     return output
