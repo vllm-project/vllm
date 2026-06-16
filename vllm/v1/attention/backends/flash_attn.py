@@ -1083,40 +1083,6 @@ class FlashAttentionImpl(AttentionImpl):
             value = value.contiguous()
             prefill_start = num_decode_tokens * self.pcp_world_size
             prefill_end = pcp_metadata.num_actual_tokens_pcp_padded
-            # PCP_DEBUG: dump the counts that determine the prefill slice, and
-            # verify slot bounds. When prefill_end <= prefill_start the slice is
-            # empty -> reshape_and_cache_flash launches with grid=(0,) ->
-            # "invalid configuration argument" (deferred to the next launch).
-            import os as _os
-
-            if _os.environ.get("PCP_DEBUG"):
-                _sm = slot_mapping[prefill_start:prefill_end]
-                _cap = key_cache.shape[0] * key_cache.shape[1]
-                _ne = _sm.numel()
-                _has_valid = _ne > 0 and bool((_sm >= 0).any())
-                logger.warning(
-                    "PCP_DEBUG prefill reshape: pcp_padded=%d local_padded=%d "
-                    "num_dec=%d pcp=%d prefill_start=%d prefill_end=%d "
-                    "slice_len=%d cap=%d sm_min=%s sm_max=%s valid_max=%s "
-                    "num_neg=%s",
-                    pcp_metadata.num_actual_tokens_pcp_padded,
-                    local_padded_tokens,
-                    num_decode_tokens,
-                    self.pcp_world_size,
-                    prefill_start,
-                    prefill_end,
-                    _ne,
-                    _cap,
-                    None if _ne == 0 else int(_sm.min()),
-                    None if _ne == 0 else int(_sm.max()),
-                    None if not _has_valid else int(_sm[_sm >= 0].max()),
-                    None if _ne == 0 else int((_sm < 0).sum()),
-                )
-                if _has_valid:
-                    assert int(_sm[_sm >= 0].max()) < _cap, (
-                        f"PCP_DEBUG: slot OOB max={int(_sm[_sm >= 0].max())} "
-                        f">= cap={_cap}"
-                    )
             if prefill_end > prefill_start:
                 reshape_and_cache_flash(
                     key[prefill_start:prefill_end],
@@ -1127,13 +1093,6 @@ class FlashAttentionImpl(AttentionImpl):
                     self.kv_cache_dtype,
                     layer._k_scale,
                     layer._v_scale,
-                )
-                if _os.environ.get("PCP_DEBUG"):
-                    torch.cuda.synchronize()
-                    logger.warning("PCP_DEBUG prefill reshape: done (synced)")
-            elif _os.environ.get("PCP_DEBUG"):
-                logger.warning(
-                    "PCP_DEBUG prefill reshape: SKIPPED (empty slice)"
                 )
             return
 
@@ -1228,6 +1187,25 @@ class FlashAttentionImpl(AttentionImpl):
 
         if num_decode_tokens > 0:
             assert attn_metadata.pcp_decode_context_kv_lens is not None
+            # PCP_DUMP: dump the per-request decode inputs. argmax showed
+            # decode index 0 is correct but 1+ are wrong for batched -> one of
+            # these is misaligned for indices >0: seqused_k (sharded kv len per
+            # decode req), the cu_seqlens, or the block_table rows.
+            import os as _os
+
+            if _os.environ.get("PCP_DUMP") and num_decodes > 1:
+                _kv = attn_metadata.pcp_decode_context_kv_lens
+                logger.warning(
+                    "PCP_DUMP decode_in num_dec=%d num_dec_tok=%d qsl=%s "
+                    "seqused_k=%s max_kv=%d bt_rows=%s rank=%d",
+                    num_decodes,
+                    num_decode_tokens,
+                    attn_metadata.query_start_loc[: num_decodes + 1].tolist(),
+                    _kv[:num_decodes].tolist(),
+                    attn_metadata.pcp_max_decode_context_kv_len,
+                    tuple(attn_metadata.block_table[:num_decodes].shape),
+                    self.pcp_rank,
+                )
             decode_out = torch.empty_like(output[:num_decode_tokens])
             decode_attn_out, decode_lse = flash_attn_varlen_func(
                 q=query[:num_decode_tokens],
