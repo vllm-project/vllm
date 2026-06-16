@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker_multiview import (  # noqa: E501
-    NixlBaseConnectorWorkerMultiview as NixlBaseConnectorWorker,
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+    NixlBaseConnectorWorker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlConnectorMetadata,
