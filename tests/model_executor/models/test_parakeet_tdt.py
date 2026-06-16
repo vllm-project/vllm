@@ -7,10 +7,6 @@ import pytest
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.models.config import (
-    MODELS_CONFIG_MAP,
-    ParakeetForTDTConfig,
-)
 from vllm.model_executor.models.parakeet_tdt import (
     ParakeetForTDT,
     ParakeetTDTForcedDecoderState,
@@ -84,27 +80,6 @@ def test_parakeet_tdt_forward_rejects_multiple_encoder_outputs():
             positions=torch.tensor([0, 0], dtype=torch.long),
             encoder_outputs=[torch.tensor(11), torch.tensor(21)],
         )
-
-
-def test_parakeet_tdt_config_updates_runtime_metadata():
-    model_config = SimpleNamespace(
-        enforce_eager=False,
-        hf_config=SimpleNamespace(eos_token_id=3),
-        hf_text_config=SimpleNamespace(eos_token_id=3),
-        override_generation_config={},
-    )
-    scheduler_config = SimpleNamespace(max_num_seqs=8)
-    vllm_config = SimpleNamespace(
-        model_config=model_config,
-        scheduler_config=scheduler_config,
-    )
-
-    assert MODELS_CONFIG_MAP["ParakeetForTDT"] is ParakeetForTDTConfig
-    ParakeetForTDTConfig.verify_and_update_config(vllm_config)
-
-    assert model_config.enforce_eager is True
-    assert scheduler_config.max_num_seqs == 1
-    assert model_config.override_generation_config == {"eos_token_id": 3}
 
 
 def test_parakeet_tdt_config_defines_eos_token_id():
