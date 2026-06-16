@@ -331,11 +331,9 @@ class ParserEngine(Parser):
         self,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> None:
-        tools = getattr(request, "tools", None)
-        if tools is not None:
-            self._tools = tools
         if not self.skip_tool_parsing:
             tool_choice = getattr(request, "tool_choice", None)
+            tools = getattr(request, "tools", None)
             if tool_choice == "none" and tools:
                 self.skip_tool_parsing = True
 
