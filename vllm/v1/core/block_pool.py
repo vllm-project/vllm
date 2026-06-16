@@ -416,17 +416,13 @@ class BlockPool:
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
-    def free_blocks(
-        self, ordered_blocks: Iterable[KVCacheBlock], prepend: bool = False
-    ) -> None:
+    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
 
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
-            prepend: Whether to put newly-free blocks at the front of the free
-                queue to be prioritized for reuse.
         """
         # Identify blocks with hash (LRU cache) and without it (will never match in APC)
         blocks_with_hash = []
@@ -439,13 +435,9 @@ class BlockPool:
                 else:
                     blocks_with_hash.append(block)
 
-        if prepend:
-            self.free_block_queue.prepend_n(blocks_with_hash)
-        else:
-            self.free_block_queue.append_n(blocks_with_hash)
-
         # Blocks without hash always get evicted first - prepend them last to the tail
         self.free_block_queue.prepend_n(blocks_without_hash)
+        self.free_block_queue.append_n(blocks_with_hash)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
