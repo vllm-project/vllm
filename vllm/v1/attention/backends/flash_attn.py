@@ -1066,7 +1066,12 @@ class FlashAttentionImpl(AttentionImpl):
             kv = get_pcp_group().all_gather(kv.contiguous(), dim=0)
             restore_idx = pcp_metadata.pcp_allgather_restore_idx
             assert restore_idx is not None
-            kv = torch.index_select(kv, 0, restore_idx[: kv.shape[0]])
+            _ri = restore_idx[: kv.shape[0]]
+            assert int(_ri.max()) < kv.shape[0], (
+                f"PCP_DEBUG: kv restore_idx OOB max={int(_ri.max())} "
+                f">= kv.shape[0]={kv.shape[0]}"
+            )
+            kv = torch.index_select(kv, 0, _ri)
             key, value = kv.split([key.shape[-1], value.shape[-1]], dim=-1)
             # `key`/`value` are non-contiguous views into `kv` (which packs
             # [key|value] on the last dim), so their head stride is
@@ -1226,7 +1231,12 @@ class FlashAttentionImpl(AttentionImpl):
         qkv = get_pcp_group().all_gather(qkv.contiguous(), dim=0)
         restore_idx = pcp_metadata.pcp_allgather_restore_idx
         assert restore_idx is not None
-        qkv = torch.index_select(qkv, 0, restore_idx[: qkv.shape[0]])
+        _ri = restore_idx[: qkv.shape[0]]
+        assert int(_ri.max()) < qkv.shape[0], (
+            f"PCP_DEBUG: qkv restore_idx OOB max={int(_ri.max())} "
+            f">= qkv.shape[0]={qkv.shape[0]}"
+        )
+        qkv = torch.index_select(qkv, 0, _ri)
 
         q_flat, k_flat, v_flat = qkv.split(
             [

@@ -4442,6 +4442,39 @@ class GPUModelRunner(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
 
+        # PCP_DEBUG: capture whether input_ids fed to the model contains any
+        # out-of-range token id. The async embedding-gather OOB we chase can
+        # only be a real input_ids OOB OR a downstream-gather poisoning that
+        # surfaces here -- this check disambiguates the two.
+        if self.pcp_world_size > 1 and input_ids is not None:
+            import os as _os
+
+            if _os.environ.get("PCP_DEBUG"):
+                torch.cuda.synchronize()
+                vocab = self.model_config.get_vocab_size()
+                n = num_tokens_padded
+                sub = input_ids[:n]
+                logger.warning(
+                    "PCP_DEBUG pre-forward input_ids: "
+                    "num_tokens_padded=%d local_total=%d vocab=%d dtype=%s "
+                    "min=%d max=%d ge_vocab=%d lt_zero=%d",
+                    n,
+                    getattr(self, "_local_num_scheduled_tokens", -1),
+                    vocab,
+                    input_ids.dtype,
+                    sub.min().item(),
+                    sub.max().item(),
+                    (sub >= vocab).sum().item(),
+                    (sub < 0).sum().item(),
+                )
+                assert sub.max().item() < vocab, (
+                    f"PCP_DEBUG: input_ids max ({sub.max().item()}) "
+                    f">= vocab_size ({vocab}) -- real input_ids OOB"
+                )
+                assert sub.min().item() >= 0, (
+                    f"PCP_DEBUG: input_ids min ({sub.min().item()}) < 0"
+                )
+
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
