@@ -59,6 +59,7 @@ def _fwd_kernel(
     SLIDING_WINDOW_Q: tl.constexpr,
     SLIDING_WINDOW_K: tl.constexpr,
     Lk: tl.constexpr,
+    HEAD_STRIDE_ALIGNED_8: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -75,13 +76,34 @@ def _fwd_kernel(
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+
+    # Head-axis byte offsets. For the packed [seq, heads, dim] layout the head
+    # stride equals head_dim; when head_dim is a multiple of 8 but not 16
+    # (e.g. 72) Triton's integer-arg auto-specialization does not attach
+    # tt.divisibility=8 to stride_*h (its threshold is 16), so AxisInfo treats
+    # the Q/K/V global loads as 2-byte aligned and Coalesce emits scalar
+    # buffer_load_u16 instead of vectorized buffer_load_b128. Hinting
+    # multiple_of(.., 8) on the head offset restores 16-byte alignment so the
+    # D-contiguous loads coalesce. The wrapper only sets the flag when the
+    # actual runtime strides are %8==0, so it stays sound for non-contiguous
+    # Q/K/V views. Mirrors aiter PR #3424.
+    off_h_q = cur_head * stride_qh
+    off_h_k = cur_kv_head * stride_kh
+    off_h_v = cur_kv_head * stride_vh
+    off_h_o = cur_head * stride_oh
+    if HEAD_STRIDE_ALIGNED_8:
+        off_h_q = tl.multiple_of(off_h_q, 8)
+        off_h_k = tl.multiple_of(off_h_k, 8)
+        off_h_v = tl.multiple_of(off_h_v, 8)
+        off_h_o = tl.multiple_of(off_h_o, 8)
+
     off_q = (
         (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs
-        + cur_head * stride_qh
+        + off_h_q
         + offs_d[None, :]
     )
-    off_k = offs_n[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None]
-    off_v = offs_n[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :]
+    off_k = offs_n[None, :] * stride_kbs + off_h_k + offs_d[:, None]
+    off_v = offs_n[:, None] * stride_vbs + off_h_v + offs_d[None, :]
 
     mask_d = offs_d < Lk
 
@@ -105,15 +127,11 @@ def _fwd_kernel(
         mask_dt = offs_dt < Lk
         off_qt = (
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs
-            + cur_head * stride_qh
+            + off_h_q
             + offs_dt[None, :]
         )
-        off_kt = (
-            offs_n[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_dt[:, None]
-        )
-        off_vt = (
-            offs_n[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_dt[None, :]
-        )
+        off_kt = offs_n[None, :] * stride_kbs + off_h_k + offs_dt[:, None]
+        off_vt = offs_n[:, None] * stride_vbs + off_h_v + offs_dt[None, :]
         qt = tl.load(
             Q + off_qt,
             mask=(offs_m[:, None] < cur_batch_seq_len) & (mask_dt[None, :]),
@@ -216,7 +234,7 @@ def _fwd_kernel(
     acc = acc / l_i[:, None]
     off_o = (
         (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
-        + cur_head * stride_oh
+        + off_h_o
         + offs_d[None, :]
     )
     out_ptrs = Out + off_o
@@ -227,7 +245,7 @@ def _fwd_kernel(
         acc_t = acc_t / l_i[:, None]
         off_o_tail = (
             (cur_batch_in_all_start_index + offs_m[:, None]) * stride_obs
-            + cur_head * stride_oh
+            + off_h_o
             + offs_dt[None, :]
         )
         tl.store(
@@ -364,6 +382,17 @@ def context_attention_fwd(
 
     block_dmodel, block_dmodel_tail = _split_head_dim(Lk)
 
+    # Hint 16-byte alignment on the head axis so the D-contiguous Q/K/V loads
+    # coalesce to buffer_load_b128 instead of scalar buffer_load_u16. Checked
+    # against the actual runtime strides (not head_dim) so it stays sound for
+    # non-contiguous Q/K/V/O views. See _fwd_kernel / aiter PR #3424.
+    head_stride_aligned_8 = (
+        q.stride(1) % 8 == 0
+        and k.stride(1) % 8 == 0
+        and v.stride(1) % 8 == 0
+        and o.stride(1) % 8 == 0
+    )
+
     _fwd_kernel[grid](
         q,
         k,
@@ -391,5 +420,6 @@ def context_attention_fwd(
         num_warps=num_warps,
         num_stages=1,
         Lk=Lk,
+        HEAD_STRIDE_ALIGNED_8=head_stride_aligned_8,
         **extra_kwargs,
     )
