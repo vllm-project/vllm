@@ -432,6 +432,19 @@ class cmake_build_ext(build_ext):
                     dirs_exist_ok=True,
                 )
 
+            # copy vendored fmha_sm100 package from build_lib to source tree
+            # for editable installs
+            fmha_sm100_build = os.path.join(
+                self.build_lib, "vllm", "third_party", "fmha_sm100"
+            )
+            if os.path.exists(fmha_sm100_build):
+                print(f"Copying {fmha_sm100_build} to vllm/third_party/fmha_sm100")
+                shutil.copytree(
+                    fmha_sm100_build,
+                    "vllm/third_party/fmha_sm100",
+                    dirs_exist_ok=True,
+                )
+
 
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
@@ -787,6 +800,7 @@ class precompiled_wheel_utils:
                 )
                 # DeepGEMM: extract all files (.py, .so, .cuh, .h, .hpp, etc.)
                 deep_gemm_regex = re.compile(r"vllm/third_party/deep_gemm/.*")
+                fmha_sm100_regex = re.compile(r"vllm/third_party/fmha_sm100/.*")
                 file_members = []
                 for member in wheel.filelist:
                     if member.filename in exact_members:
@@ -812,6 +826,7 @@ class precompiled_wheel_utils:
                         or triton_kernels_regex.match(member.filename)
                         or flashmla_regex.match(member.filename)
                         or deep_gemm_regex.match(member.filename)
+                        or fmha_sm100_regex.match(member.filename)
                     ):
                         file_members.append(member)
 
@@ -1120,6 +1135,8 @@ if _is_cuda():
         # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
         # Optional since it won't build on unsupported architectures
         ext_modules.append(CMakeExtension(name="vllm._deep_gemm_C", optional=True))
+    # fmha_sm100 is a Python/CuTe-DSL package installed into vllm.third_party.
+    ext_modules.append(CMakeExtension(name="vllm.fmha_sm100", optional=True))
 
 if _is_cpu():
     import platform
@@ -1150,6 +1167,8 @@ package_data = {
         "third_party/deep_gemm/include/**/*.cuh",
         "third_party/deep_gemm/include/**/*.h",
         "third_party/deep_gemm/include/**/*.hpp",
+        # fmha_sm100 sparse CuTe-DSL helper kernels (vendored via cmake)
+        "third_party/fmha_sm100/cute/src/sm100/build_k2q_csr/build_k2q_csr.cu",
     ]
 }
 
@@ -1229,7 +1248,7 @@ setup(
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
         #   - .buildkite/test-amd.yaml
-        "helion": ["helion==1.0.0"],
+        "helion": ["helion==1.1.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
         "grpc": ["smg-grpc-servicer[vllm] >= 0.5.2"],
         # Optional deps for OpenTelemetry tracing
@@ -1239,6 +1258,8 @@ setup(
             "opentelemetry-exporter-otlp>=1.26.0",
             "opentelemetry-semantic-conventions-ai>=0.4.1",
         ],
+        # extra quantization plugin
+        "extra-quant": ["vllm-gguf-plugin>=0.0.2"],
     },
     cmdclass=cmdclass,
     package_data=package_data,
