@@ -53,6 +53,10 @@ def _resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
 
 
 def kernel_warmup(worker: "Worker"):
+    from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
+        minimax_m3_msa_warmup,
+    )
+
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
         envs.VLLM_USE_DEEP_GEMM
@@ -63,6 +67,8 @@ def kernel_warmup(worker: "Worker"):
         model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
+
+    minimax_m3_msa_warmup(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
@@ -106,6 +112,12 @@ def kernel_warmup(worker: "Worker"):
         )
 
 
+# TODO: remove once FlashInfer upstream fixes the persistent file cache
+# to resolve collisions like `use_8x4_sf_layout=True/False`, which causes
+# invalid tactics to be chosen
+_FLASHINFER_USE_PERSISTENT_CACHE = False
+
+
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """
     Autotune FlashInfer operations.
@@ -121,6 +133,16 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """
     import vllm.utils.flashinfer as fi_utils
     from vllm.distributed.parallel_state import get_world_group
+
+    if not _FLASHINFER_USE_PERSISTENT_CACHE:
+        with torch.inference_mode(), fi_utils.autotune():
+            runner._dummy_run(
+                num_tokens=runner.scheduler_config.max_num_batched_tokens,
+                skip_eplb=True,
+                is_profile=True,
+            )
+        get_world_group().barrier()
+        return
 
     world = get_world_group()
     is_leader = world.rank_in_group == 0

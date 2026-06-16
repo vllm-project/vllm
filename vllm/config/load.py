@@ -51,10 +51,9 @@ class LoadConfig:
     - "bitsandbytes" will load the weights using bitsandbytes quantization.
     - "sharded_state" will load weights from pre-sharded checkpoint files,
       supporting efficient loading of tensor-parallel models.
-    - "gguf" will load weights from GGUF format files (details specified in
-      https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).
     - "mistral" will load weights from consolidated safetensors files used by
       Mistral models.
+    - "modelexpress" will load weights using ModelExpress.
     - Other custom values can be supported via plugins.
     """
     download_dir: str | None = None

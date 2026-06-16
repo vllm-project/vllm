@@ -98,7 +98,31 @@ pre-commit run --all-files
 pre-commit run ruff-check --all-files
 
 # Run mypy as it is in CI:
-pre-commit run mypy-3.10 --all-files --hook-stage manual
+pre-commit run mypy-3.12 --all-files --hook-stage manual
+```
+
+The line length limit for Python code is 88 characters. If you are not sure, use pre-commit to check.
+
+Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#38-comments-and-docstrings) (`Args:`/`Returns:`/`Raises:` sections), not reStructuredText/Sphinx fields (`:param:`, `:return:`, `:rtype:`).
+
+### Coding style guidelines
+
+Follow these rules for all code changes in this repository:
+
+- Try to match existing code style.
+- Code should be self-documenting and self-explanatory.
+- Keep comments and docstrings minimal and concise.
+- Assume the reader is familiar with vLLM.
+
+### Diagnosing CI failures
+
+Buildkite logs are public; no login needed. Details: [docs/contributing/ci/failures.md](docs/contributing/ci/failures.md).
+
+```bash
+# All failed-job logs for a PR's latest build (current branch's PR if omitted):
+.buildkite/scripts/ci-fetch-log.sh --pr <PR>
+# Any Buildkite build or job URL also works:
+.buildkite/scripts/ci-fetch-log.sh "<buildkite_url>"
 ```
 
 ### Commit messages
