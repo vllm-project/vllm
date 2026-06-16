@@ -333,6 +333,10 @@ class FlashInferBackend(AttentionBackend):
         "fp8_e5m2",
         "nvfp4",
     ]
+    # FlashInfer's paged KV cache reads pages through a configurable page
+    # stride (paged_kv_t::stride_page), so a physically padded page that is
+    # exposed via a strided view is read correctly.
+    supports_padded_kv_pages: ClassVar[bool] = True
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
