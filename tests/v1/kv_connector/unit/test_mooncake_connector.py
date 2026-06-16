@@ -20,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     MooncakeXferResponseStatus,
     PullReqMeta,
     SendBlockMeta,
+    split_transfer_descriptors,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
@@ -55,6 +56,60 @@ class FakeMooncakeWrapper:
 
     def batch_register_memory(self, buffer_addresses, capacities) -> int:
         return 0
+
+
+def test_split_transfer_descriptors_disabled():
+    src = [100, 200]
+    dst = [300, 400]
+    lengths = [16, 32]
+    assert split_transfer_descriptors(src, dst, lengths, 0) == (src, dst, lengths)
+
+
+def test_split_transfer_descriptors_splits_large_descriptor():
+    # Reproduces coalesced multimodal descriptor size from vllm #42395.
+    src_base, dst_base, total = 0x1000, 0x2000, 2_424_832
+    max_chunk = 262_144
+    out_src, out_dst, out_len = split_transfer_descriptors(
+        [src_base], [dst_base], [total], max_chunk
+    )
+    assert sum(out_len) == total
+    assert len(out_len) == (total + max_chunk - 1) // max_chunk
+    offset = 0
+    for src, dst, length in zip(out_src, out_dst, out_len):
+        assert src == src_base + offset
+        assert dst == dst_base + offset
+        assert 0 < length <= max_chunk
+        offset += length
+
+
+def test_send_blocks_splits_when_max_transfer_bytes_set():
+    """_send_blocks should chunk descriptors before calling TransferEngine."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
+        mooncake_connector as mc,
+    )
+
+    captured: list[list[int]] = []
+
+    class StubWorker:
+        _max_transfer_bytes = 8
+        _sync_after_transfer = False
+        _verify_transfer_integrity = False
+        device_id = 0
+
+        engine = FakeMooncakeWrapper()
+
+        def _send_blocks(self, remote_session, src_ptrs, dst_ptrs, lengths):
+            return mc.MooncakeConnectorWorker._send_blocks(
+                self, remote_session, src_ptrs, dst_ptrs, lengths
+            )
+
+    worker = StubWorker()
+    worker.engine.batch_transfer_sync_write = (  # type: ignore[method-assign]
+        lambda _session, _src, _dst, lengths: captured.append(lengths) or 0
+    )
+    ret = worker._send_blocks("host:1", [1000], [2000], [20])
+    assert ret == 0
+    assert captured == [[8, 8, 4]]
 
 
 def test_basic_interface():
