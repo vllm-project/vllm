@@ -398,7 +398,7 @@ steps:
   - tests/kernels/helion/
   - vllm/platforms/rocm.py
   commands:
-  - pip install helion==1.0.0
+  - pip install helion==1.1.0
   - pytest -v -s kernels/helion/
 
 - label: Kernels Mamba Test # TBD
@@ -608,6 +608,11 @@ steps:
   - pytest -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
   - pip uninstall bge_m3_sparse_plugin -y
   # END: `bge_m3_sparse io_processor` test
+  # BEGIN: `colbert_query io_processor` test
+  - pip install -e ./plugins/colbert_query_plugin
+  - pytest -v -s plugins_tests/test_colbert_query_io_processor_plugins.py
+  - pip uninstall colbert_query_plugin -y
+  # END: `colbert_query io_processor` test
   # BEGIN: `stat_logger` plugins test
   - pip install -e ./plugins/vllm_add_dummy_stat_logger
   - pytest -v -s plugins_tests/test_stats_logger_plugins.py
@@ -2754,7 +2759,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - python3 benchmarks/attention_benchmarks/benchmark.py --backends ROCM_ATTN ROCM_AITER_FA ROCM_AITER_UNIFIED_ATTN --batch-specs "8q1s1k" --repeats 1 --warmup-iters 1
+  - python3 benchmarks/attention_benchmarks/benchmark.py --backends ROCM_ATTN ROCM_AITER_FA ROCM_AITER_UNIFIED_ATTN --batch-specs "8q1s1k"
 
 #--------------------------------------------------------  mi355 · distributed  --------------------------------------------------------#
 
@@ -2946,7 +2951,6 @@ steps:
   - vllm/model_executor/models/qwen3_5_mtp.py
   - vllm/transformers_utils/configs/qwen3_5.py
   - vllm/transformers_utils/configs/qwen3_5_moe.py
-  - vllm/model_executor/models/qwen.py
   - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
@@ -3184,7 +3188,6 @@ steps:
   - vllm/model_executor/models/qwen3_5_mtp.py
   - vllm/transformers_utils/configs/qwen3_5.py
   - vllm/transformers_utils/configs/qwen3_5_moe.py
-  - vllm/model_executor/models/qwen.py
   - vllm/model_executor/models/qwen2.py
   - vllm/model_executor/models/qwen3.py
   - vllm/model_executor/models/qwen3_next.py
