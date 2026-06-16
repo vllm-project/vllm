@@ -1083,6 +1083,32 @@ class FlashAttentionImpl(AttentionImpl):
             value = value.contiguous()
             prefill_start = num_decode_tokens * self.pcp_world_size
             prefill_end = pcp_metadata.num_actual_tokens_pcp_padded
+            # PCP_DEBUG: check the prefill slot_mapping slice is in-bounds before
+            # the scatter write. An OOB slot silently corrupts GPU memory (no
+            # fault -> sync won't catch it) and surfaces later as a spurious
+            # "invalid configuration argument" on an unrelated launch.
+            import os as _os
+
+            if _os.environ.get("PCP_DEBUG"):
+                _sm = slot_mapping[prefill_start:prefill_end]
+                _cap = key_cache.shape[0] * key_cache.shape[1]
+                _valid = _sm[_sm >= 0]
+                logger.warning(
+                    "PCP_DEBUG prefill reshape: sm_slice=%s cap=%d sm_min=%d "
+                    "sm_max=%d valid_max=%s num_neg=%d key_slice=%s",
+                    tuple(_sm.shape),
+                    _cap,
+                    int(_sm.min()),
+                    int(_sm.max()),
+                    None if _valid.numel() == 0 else int(_valid.max()),
+                    int((_sm < 0).sum()),
+                    tuple(key[prefill_start:prefill_end].shape),
+                )
+                if _valid.numel() > 0:
+                    assert int(_valid.max()) < _cap, (
+                        f"PCP_DEBUG: slot OOB max={int(_valid.max())} "
+                        f">= cap={_cap}"
+                    )
             reshape_and_cache_flash(
                 key[prefill_start:prefill_end],
                 value[prefill_start:prefill_end],
@@ -1093,6 +1119,9 @@ class FlashAttentionImpl(AttentionImpl):
                 layer._k_scale,
                 layer._v_scale,
             )
+            if _os.environ.get("PCP_DEBUG"):
+                torch.cuda.synchronize()
+                logger.warning("PCP_DEBUG prefill reshape: done (synced)")
             return
 
         # Scatter write into the KV cache using slot_mapping indices.
