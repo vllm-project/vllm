@@ -248,46 +248,44 @@ jobs:
           fi
 
       - name: Checkout target repo with retry
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          clone_with_retry() {
-            local repo_url=$1
-            local target_dir=$2
-            local target_sha=$3
-            local attempts=4
-            local delay_seconds=15
-            local try=1
-            local parent_dir
-            local temp_dir
+          # Use HTTPS with GITHUB_TOKEN instead of SSH — the token is always
+          # available and works for both PR and push events. SSH keys are only
+          # configured for the benchmark repo (non-PR events).
+          target_repo_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          target_sha="$TARGET_REPO_SHA"
+          target_dir="$GITHUB_WORKSPACE"
+          attempts=4
+          delay_seconds=15
+          try=1
 
-            parent_dir=$(dirname "$target_dir")
-            temp_dir="${parent_dir}/.checkout-tmp-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # Pre-clean the workspace contents (the pre-clean step already did
+          # this, but ensure it's empty before reinitializing the git repo).
+          find "$target_dir" -mindepth 1 -delete 2>/dev/null || true
 
-            mkdir -p "$parent_dir"
-            rm -rf "$temp_dir"
-            while [[ "$try" -le "$attempts" ]]; do
-              if git clone --depth 1 "$repo_url" "$temp_dir"; then
-                if ! git -C "$temp_dir" rev-parse --verify --quiet "$target_sha^{commit}" >/dev/null; then
-                  git -C "$temp_dir" fetch --depth 1 origin "$target_sha"
-                fi
-                git -C "$temp_dir" checkout --force "$target_sha"
-                rm -rf "$target_dir"
-                mv "$temp_dir" "$target_dir"
-                return 0
-              fi
+          while [[ "$try" -le "$attempts" ]]; do
+            echo "[checkout-target] attempt ${try}/${attempts}"
+            if git init "$target_dir" && \
+               git -C "$target_dir" remote add origin "$target_repo_url" && \
+               git -C "$target_dir" fetch --depth 1 origin "$target_sha" && \
+               git -C "$target_dir" checkout --force "$target_sha"; then
+              echo "[checkout-target] checked out $target_sha"
+              exit 0
+            fi
 
-              echo "Clone failed ($try/$attempts): $repo_url" >&2
-              rm -rf "$temp_dir"
-              if [[ "$try" -lt "$attempts" ]]; then
-                sleep "$delay_seconds"
-              fi
-              try=$((try + 1))
-            done
+            echo "[checkout-target] attempt ${try} failed" >&2
+            # Reset workspace for retry
+            find "$target_dir" -mindepth 1 -delete 2>/dev/null || true
+            if [[ "$try" -lt "$attempts" ]]; then
+              sleep "$delay_seconds"
+            fi
+            try=$((try + 1))
+          done
 
-            echo "Failed to clone $repo_url after ${attempts} attempts" >&2
-            return 1
-          }
-
-          clone_with_retry "$TARGET_REPO_URL" "$GITHUB_WORKSPACE" "$TARGET_REPO_SHA"
+          echo "Failed to checkout target repo after ${attempts} attempts" >&2
+          exit 1
 
       - name: Deepen clone for fork-point detection
         if: ${{ github.event_name == 'pull_request' }}
