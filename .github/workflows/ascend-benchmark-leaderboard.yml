@@ -574,18 +574,41 @@ jobs:
             echo "ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
           } > "$PRECHECK_DIR/visible-devices.txt"
 
+          # Strip conda/mamba env library paths from LD_LIBRARY_PATH.
+          # Conda libs (libstdc++, libgcc_s) can shadow CANN driver libs,
+          # but we must keep CANN driver paths (needed by npu-smi).
+          _strip_conda_ld() {
+            local clean_ld=""
+            local entry
+            IFS=':' read -ra _ld_entries <<< "${LD_LIBRARY_PATH:-}"
+            for entry in "${_ld_entries[@]}"; do
+              if [[ -z "$entry" ]]; then continue; fi
+              case "$entry" in
+                */conda/*|*/miniconda*|*/anaconda*|*/mambaforge*|*/miniforge*|*/envs/*)
+                  continue ;;
+              esac
+              if [[ -n "$clean_ld" ]]; then
+                clean_ld="${clean_ld}:${entry}"
+              else
+                clean_ld="${entry}"
+              fi
+            done
+            printf '%s' "$clean_ld"
+          }
+
           verify_npu_via_npu_smi() {
             echo "[preflight-fallback] Verifying NPU hardware via npu-smi..."
 
-            # Method 1: Try npu-smi with a clean LD_LIBRARY_PATH.
-            # use_single_ascend_env.sh overrides LD_LIBRARY_PATH with conda
-            # library paths that can conflict with npu-smi's system-level CANN
-            # driver dependencies. Unsetting it lets the system linker use
-            # default paths from /etc/ld.so.cache.
+            # Method 1: Try npu-smi with conda paths stripped from LD_LIBRARY_PATH.
+            # build_env_dict() may inject conda env library paths that shadow
+            # CANN driver libraries (libc_sec.so, etc.), causing npu-smi to fail.
+            # We strip only conda paths, keeping CANN driver paths intact.
             if command -v npu-smi >/dev/null 2>&1; then
               local npu_smi_output
               local npu_smi_exit_code
-              npu_smi_output="$(env -u LD_LIBRARY_PATH npu-smi info 2>&1)"
+              local clean_ld
+              clean_ld="$(_strip_conda_ld)"
+              npu_smi_output="$(env LD_LIBRARY_PATH="$clean_ld" npu-smi info 2>&1)"
               npu_smi_exit_code=$?
               if [[ $npu_smi_exit_code -eq 0 ]]; then
                 local healthy_count
@@ -764,6 +787,26 @@ jobs:
             echo "ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-<unset>}"
           } > "$PRECHECK_DIR/visible-devices.txt"
 
+          # Strip conda/mamba env library paths from LD_LIBRARY_PATH.
+          _strip_conda_ld() {
+            local clean_ld=""
+            local entry
+            IFS=':' read -ra _ld_entries <<< "${LD_LIBRARY_PATH:-}"
+            for entry in "${_ld_entries[@]}"; do
+              if [[ -z "$entry" ]]; then continue; fi
+              case "$entry" in
+                */conda/*|*/miniconda*|*/anaconda*|*/mambaforge*|*/miniforge*|*/envs/*)
+                  continue ;;
+              esac
+              if [[ -n "$clean_ld" ]]; then
+                clean_ld="${clean_ld}:${entry}"
+              else
+                clean_ld="${entry}"
+              fi
+            done
+            printf '%s' "$clean_ld"
+          }
+
           hust_ascend_manager_run runtime check \
             --repo "$GITHUB_WORKSPACE" \
             --python "$PYTHON_BIN" \
@@ -771,7 +814,8 @@ jobs:
             --require-npu \
             --json | tee "$PRECHECK_DIR/runtime-check.json" || {
             echo "[WARNING] Runtime check with --require-npu failed." >&2
-            npu_smi_output="$(env -u LD_LIBRARY_PATH npu-smi info 2>&1)" || true
+            clean_ld="$(_strip_conda_ld)"
+            npu_smi_output="$(env LD_LIBRARY_PATH="$clean_ld" npu-smi info 2>&1)" || true
             healthy_count="$(echo "$npu_smi_output" | grep -c '| OK ' || true)"
             if [[ "$healthy_count" -gt 0 ]]; then
               echo "[WARNING] npu-smi confirms $healthy_count healthy NPU device(s) — proceeding despite torch_npu probe failure." >&2
