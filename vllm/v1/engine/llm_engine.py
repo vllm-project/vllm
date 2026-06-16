@@ -350,6 +350,8 @@ class LLMEngine:
         self.engine_core.reset_encoder_cache()
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+        if level >= 1:
+            self.renderer.clear_mm_cache()
         self.engine_core.sleep(level, mode)
 
         if self.logger_manager is not None:

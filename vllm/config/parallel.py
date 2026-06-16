@@ -42,7 +42,9 @@ All2AllBackend = Literal[
     "pplx",
     "deepep_high_throughput",
     "deepep_low_latency",
-    "mori",
+    "deepep_v2",
+    "mori_high_throughput",
+    "mori_low_latency",
     "nixl_ep",
     "allgather_reducescatter",
     "flashinfer_all2allv",  # temporary alias for flashinfer_nvlink_two_sided
@@ -77,7 +79,7 @@ class EPLBConfig:
     """
     Interval for logging the balancedness.
     """
-    use_async: bool = False
+    use_async: bool = True
     """
     Whether to use non-blocking EPLB.
     """
@@ -92,13 +94,20 @@ class EPLBConfig:
     - "torch_gloo": Use torch.distributed gloo with CPU staging
     - "nixl": Use NIXL/ RIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
-    - None: Auto-select backend ("torch_gloo" for async, "torch_nccl" for sync)
+    - None: Auto-select backend (prefers "nixl", falls back to "torch_gloo")
     """
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.use_async and self.policy != "default":
             raise ValueError("Async EPLB is only supported with the default policy.")
+        if self.use_async and self.communicator in ("torch_nccl", "pynccl"):
+            raise ValueError(
+                f"{self.communicator} communicator is incompatible with "
+                "async EPLB due to NCCL multi-stream conflicts. Use "
+                "'torch_gloo' or 'nixl' instead, or leave communicator "
+                "unset for automatic selection."
+            )
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
         return self
@@ -108,22 +117,24 @@ class EPLBConfig:
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
-    pipeline_parallel_size: int = 1
+    pipeline_parallel_size: int = Field(default=1, ge=1)
     """Number of pipeline parallel groups."""
-    tensor_parallel_size: int = 1
+    tensor_parallel_size: int = Field(default=1, ge=1)
     """Number of tensor parallel groups."""
-    prefill_context_parallel_size: int = 1
+    prefill_context_parallel_size: int = Field(default=1, ge=1)
     """Number of prefill context parallel groups."""
-    data_parallel_size: int = 1
+    data_parallel_size: int = Field(default=1, ge=1)
     """Number of data parallel groups. MoE layers will be sharded according to
     the product of the tensor parallel size and data parallel size."""
-    data_parallel_size_local: int = 1
-    """Number of local data parallel groups."""
-    data_parallel_rank: int = 0
-    """Rank of the data parallel group."""
+    data_parallel_size_local: int = Field(default=1, ge=0)
+    """Number of local data parallel groups. A value of 0 is a sentinel used by
+    the engine-args layer to signal that data parallelism was specified
+    externally (see `ParallelConfig.__post_init__`)."""
+    data_parallel_rank: int = Field(default=0, ge=0)
+    """Rank of the data parallel group. The runtime check at
+    ``__post_init__`` further bounds this by ``data_parallel_size``."""
     data_parallel_rank_local: int | None = None
-    """Local rank of the data parallel group,
-    set only in SPMD mode."""
+    """Local rank of the data parallel group, set only in SPMD mode."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
     data_parallel_rpc_port: int = 29550
@@ -135,8 +146,10 @@ class ParallelConfig:
     data_parallel_external_lb: bool = False
     """Whether to use "external" DP LB mode. Applies only to online serving
     and when data_parallel_size > 0. This is useful for a "one-pod-per-rank"
-    wide-EP setup in Kubernetes. Set implicitly when --data-parallel-rank
-    is provided explicitly to vllm serve."""
+    wide-EP setup in Kubernetes. Supported only for MoE deployments; non-MoE
+    models should use independent vLLM instances without --data-parallel-*
+    arguments. Set implicitly when --data-parallel-rank is provided explicitly
+    to vllm serve."""
     data_parallel_hybrid_lb: bool = False
     """Whether to use "hybrid" DP LB mode. Applies only to online serving
     and when data_parallel_size > 0. Enables running an AsyncLLM
@@ -175,12 +188,13 @@ class ParallelConfig:
     - "allgather_reducescatter": All2all based on allgather and reducescatter
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
-    - "mori": Use mori kernels
+    - "mori_high_throughput": MoRI EP with InterNodeV1 for multi-node
+    - "mori_low_latency": MoRI EP with InterNodeV1LL for multi-node
     - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
 
-    max_parallel_loading_workers: int | None = None
+    max_parallel_loading_workers: int | None = Field(default=None, ge=1)
     """Maximum number of parallel loading workers when loading model
     sequentially in multiple batches. To avoid RAM OOM when using tensor
     parallel and large models."""
@@ -193,15 +207,15 @@ class ParallelConfig:
 
     enable_dbo: bool = False
     """Enable dual batch overlap for the model executor."""
-    ubatch_size: int = 0
+    ubatch_size: int = Field(default=0, ge=0)
     """Number of ubatch size."""
 
-    dbo_decode_token_threshold: int = 32
+    dbo_decode_token_threshold: int = Field(default=32, ge=0)
     """The threshold for dual batch overlap for batches only containing decodes.
     If the number of tokens in the request is greater than this threshold,
     microbatching will be used. Otherwise, the request will be processed in a
     single batch."""
-    dbo_prefill_token_threshold: int = 512  # TODO(lucas): tune
+    dbo_prefill_token_threshold: int = Field(default=512, ge=0)  # TODO(lucas): tune
     """The threshold for dual batch overlap for batches that contain one or more
     prefills. If the number of tokens in the request is greater than this
     threshold, microbatching will be used. Otherwise, the request will be
@@ -256,14 +270,19 @@ class ParallelConfig:
     master_port: int = 29501
     """distributed master port for multi-node distributed 
     inference when distributed_executor_backend is mp."""
-    node_rank: int = 0
-    """distributed node rank for multi-node distributed 
+    node_rank: int = Field(default=0, ge=0)
+    """distributed node rank for multi-node distributed
     inference when distributed_executor_backend is mp."""
-    nnodes: int = 1
+    nnodes: int = Field(default=1, ge=1)
     """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
     numa_bind: bool = False
-    """Enable NUMA binding for GPU worker subprocesses."""
+    """Enable NUMA binding for GPU worker subprocesses.
+
+    By default, workers are pinned to their GPU's NUMA-local CPUs and
+    memory; on PCT-capable Xeons they also auto-bind to the SKU's
+    PCT priority cores.
+    """
     numa_bind_nodes: list[int] | None = None
     """NUMA node to bind each GPU worker to.
 
@@ -290,6 +309,10 @@ class ParallelConfig:
     timeout parameter. If None, PyTorch's default timeout is used (600s for NCCL).
     Increase this for multi-node setups where model downloads may be slow."""
 
+    cpu_distributed_timeout_seconds: int | None = None
+    """Timeout (in seconds) for cpu communication groups. If None, PyTorch's
+    default timeout is used (1800s for gloo)."""
+
     world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
 
@@ -305,7 +328,7 @@ class ParallelConfig:
     """Port of the coordination TCPStore. Can be set by the API server; workers
     connect as clients to exchange self-picked group ports at runtime."""
 
-    decode_context_parallel_size: int = 1
+    decode_context_parallel_size: int = Field(default=1, ge=1)
     """Number of decode context parallel groups, because the world size does
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
     needs to be divisible by dcp_size."""
@@ -615,7 +638,8 @@ class ParallelConfig:
                 "allgather_reducescatter",
                 "deepep_high_throughput",
                 "deepep_low_latency",
-                "mori",
+                "mori_high_throughput",
+                "mori_low_latency",
                 "nixl_ep",
             )
             and self.enable_expert_parallel
@@ -770,6 +794,13 @@ class ParallelConfig:
         if self.enable_elastic_ep:
             if not self.enable_eplb:
                 raise ValueError("Elastic EP is only supported with enable_eplb=True.")
+            if self.eplb_config.use_async:
+                raise ValueError(
+                    "Elastic EP requires the pynccl communicator, which is "
+                    "incompatible with async EPLB due to NCCL multi-stream "
+                    "conflicts. Disable async EPLB (eplb_config.use_async=False) "
+                    "to use elastic EP."
+                )
             if self.pipeline_parallel_size > 1:
                 raise ValueError(
                     "Elastic EP is not supported with pipeline parallelism "
@@ -894,12 +925,18 @@ class ParallelConfig:
                 # (torch.distributed.batch_isend_irecv doesn't
                 # support stateless mode), so we use PyNCCL backend
                 self.eplb_config.communicator = "pynccl"
-            elif self.eplb_config.use_async:
-                # Torch Gloo is a backend that allows avoiding hangs
-                # due to NCCL multi-thread conflicts in async EPLB
-                self.eplb_config.communicator = "torch_gloo"
             else:
-                self.eplb_config.communicator = "torch_nccl"
+                # Avoid torch_nccl: NCCL is fundamentally incompatible
+                # with async EPLB due to multi-stream conflicts, and
+                # batched isend/irecv hangs under high load.
+                # See https://github.com/pytorch/pytorch/issues/174288
+                # Prefer nixl when available; fall back to torch_gloo.
+                from vllm.distributed.nixl_utils import is_nixl_available
+
+                if is_nixl_available():
+                    self.eplb_config.communicator = "nixl"
+                else:
+                    self.eplb_config.communicator = "torch_gloo"
 
     @property
     def use_ray(self) -> bool:

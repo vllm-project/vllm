@@ -3,6 +3,7 @@
 import contextlib
 import importlib.metadata
 import os
+import platform
 import random
 import threading
 from collections.abc import Callable, Collection
@@ -67,6 +68,11 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 T = TypeVar("T")
 
 
+# Pin memory in non-WSL case.
+# Logic duplicated here for now to avoid circular import.
+PIN_MEMORY = "microsoft" not in " ".join(platform.uname()).lower()
+
+
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
     return (
         kv_cache_dtype.startswith("fp8")
@@ -108,6 +114,32 @@ def is_strictly_contiguous(t: torch.Tensor) -> bool:
             return False
         expected_stride *= shape[i]
     return True
+
+
+def canonicalize_singleton_dim_strides(t: torch.Tensor) -> torch.Tensor:
+    """Fix degenerate strides on size=1 dimensions for CUDA TMA compatibility.
+
+    PyTorch allows any stride on a size=1 dim (is_contiguous() is always True
+    there), so a size=1 dim may have stride=1 (2 bytes for bf16) instead of
+    the canonical product(shape[i+1:]).  CUDA TMA on H100+ requires all
+    non-outermost strides to be ≥16-byte aligned; stride=1 triggers
+    cudaErrorIllegalInstruction.  Zero-copy: patches stride metadata only via
+    as_strided; returns t unchanged if all size=1 strides are already canonical.
+    """
+    if 1 not in t.shape:
+        return t
+    strides = list(t.stride())
+    shape = t.shape
+    prev_stride = 1
+    changed = False
+    for i in range(len(shape) - 1, -1, -1):
+        if shape[i] == 1 and strides[i] != prev_stride:
+            strides[i] = prev_stride
+            changed = True
+        prev_stride = strides[i] * shape[i]
+    if not changed:
+        return t
+    return t.as_strided(t.shape, strides)
 
 
 @contextlib.contextmanager
@@ -576,12 +608,12 @@ def create_kv_caches_with_random(
 def async_tensor_h2d(
     data: list,
     dtype: torch.dtype,
-    target_device: str | torch.device,
-    pin_memory: bool,
+    device: str | torch.device,
+    pin_memory: bool = PIN_MEMORY,
 ) -> torch.Tensor:
     """Asynchronously create a tensor and copy it from host to device."""
     t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
-    return t.to(device=target_device, non_blocking=True)
+    return t.to(device=device, non_blocking=True)
 
 
 def make_ndarray_with_pad(

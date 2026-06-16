@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, overload
 import torch
 from typing_extensions import TypeVar
 
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.multimodal.parse import (
@@ -268,28 +269,6 @@ class InputProcessingContext:
         try:
             output = hf_processor(**data, **allowed_kwargs)
         except Exception as exc:
-            # See https://github.com/huggingface/tokenizers/issues/537
-            if (
-                isinstance(exc, RuntimeError)
-                and exc
-                and exc.args[0] == "Already borrowed"
-                and num_tries < max_tries
-            ):
-                logger.warning(
-                    "Failed to acquire tokenizer in current thread. "
-                    "Retrying (%d/%d)...",
-                    num_tries,
-                    max_tries,
-                )
-                time.sleep(0.5)
-                return self.call_hf_processor(
-                    hf_processor,
-                    data,
-                    kwargs,
-                    num_tries=num_tries + 1,
-                    max_tries=max_tries,
-                )
-
             msg = (
                 f"Failed to apply {type(hf_processor).__name__} "
                 f"on data={data} with kwargs={allowed_kwargs}"
@@ -446,7 +425,7 @@ class BaseProcessingInfo:
             if num_items <= supported_limit:
                 msg += " Set `--limit-mm-per-prompt` to increase this limit."
 
-            raise ValueError(msg)
+            raise VLLMValidationError(msg, parameter=modality)
 
     def parse_mm_data(
         self,

@@ -548,3 +548,133 @@ class TestAnyOfNullableParam:
         parsed = json.loads(tc[0]["arguments"])
         assert parsed["config"] == {"theme": "dark", "fontSize": 14}
         assert isinstance(parsed["config"], dict)
+
+
+class TestNoneStringPreservation:
+    """Regression tests for #39567: 'none' as a string must not become None."""
+
+    def test_none_string_preserved_in_enum(self):
+        """'none' in an enum must stay as the string 'none', not Python None."""
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="set_theme",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "theme": {
+                                "type": "string",
+                                "enum": ["dark", "light", "none"],
+                            },
+                        },
+                    },
+                ),
+            )
+        ]
+        parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
+
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="set_theme">'
+                '<parameter name="theme">none</parameter>'
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+        tc = _collect_tool_calls(results)
+        assert len(tc) == 1
+        parsed = json.loads(tc[0]["arguments"])
+        assert parsed["theme"] == "none"
+        assert parsed["theme"] is not None
+
+    def test_none_string_preserved_plain_string(self):
+        """'none' as a plain string param must stay as 'none'."""
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="echo",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+        parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
+
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="echo">'
+                '<parameter name="message">none</parameter>'
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+        tc = _collect_tool_calls(results)
+        assert len(tc) == 1
+        parsed = json.loads(tc[0]["arguments"])
+        assert parsed["message"] == "none"
+
+    def test_null_still_converts_to_none(self):
+        """'null' in a nullable param must still become Python None."""
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="update_profile",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "nickname": {
+                                "anyOf": [{"type": "string"}, {"type": "null"}],
+                            },
+                        },
+                    },
+                ),
+            )
+        ]
+        parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
+
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="update_profile">'
+                '<parameter name="nickname">null</parameter>'
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+        tc = _collect_tool_calls(results)
+        assert len(tc) == 1
+        parsed = json.loads(tc[0]["arguments"])
+        assert parsed["nickname"] is None
+
+    def test_nil_string_preserved(self):
+        """'nil' must stay as the string 'nil', not become None."""
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="echo",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "value": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+        parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
+
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="echo">'
+                '<parameter name="value">nil</parameter>'
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+        tc = _collect_tool_calls(results)
+        assert len(tc) == 1
+        parsed = json.loads(tc[0]["arguments"])
+        assert parsed["value"] == "nil"

@@ -47,7 +47,7 @@ After installing AutoAWQ, you are ready to quantize a model. Please refer to the
 To run an AWQ model with vLLM, you can use [TheBloke/Llama-2-7b-Chat-AWQ](https://huggingface.co/TheBloke/Llama-2-7b-Chat-AWQ) with the following command:
 
 ```bash
-python examples/offline_inference/llm_engine_example.py \
+python examples/deployment/llm_engine_example.py \
     --model TheBloke/Llama-2-7b-Chat-AWQ \
     --quantization awq
 ```

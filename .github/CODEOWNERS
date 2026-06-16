@@ -6,8 +6,8 @@
 /vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery @xuechendi
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
-/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety
-/vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety
+/vllm/model_executor/layers/fused_moe @mgoin @pavanimajety @zyongye
+/vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety @zyongye
 /vllm/model_executor/layers/mamba @tdoublep @tomeras91
 /vllm/model_executor/layers/mamba/gdn_linear_attn.py @tdoublep @ZJY0516 @vadiklyutiy
 /vllm/model_executor/layers/rotary_embedding.py @vadiklyutiy
@@ -18,26 +18,39 @@
 /vllm/kernels/helion @ProExpertProg @zou3519
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
 /vllm/vllm_flash_attn @LucasWilkinson @MatthewBonanni
-CMakeLists.txt @tlrmchlsmth @LucasWilkinson
+/CMakeLists.txt @tlrmchlsmth @LucasWilkinson @Harry-Chen
+/cmake @tlrmchlsmth @LucasWilkinson @Harry-Chen
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
-/vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
+/vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @yewentao256 @ProExpertProg
 /vllm/config/cache.py @heheda12345
+
+# Config utils
+/vllm/config/utils.py @hmellor
+/vllm/engine/arg_utils.py @hmellor
+/vllm/utils/argparse_utils.py
 
 # Entrypoints
 /vllm/entrypoints/anthropic @mgoin @DarkLight1337
 /vllm/entrypoints/cli @hmellor @mgoin @DarkLight1337 @russellb
 /vllm/entrypoints/mcp @heheda12345
 /vllm/entrypoints/openai @aarnphm @chaunceyjiang @DarkLight1337 @russellb
-/vllm/entrypoints/openai/realtime @njhill
-/vllm/entrypoints/openai/speech_to_text @NickLucche
+/vllm/entrypoints/speech_to_text/realtime @njhill
+/vllm/entrypoints/speech_to_text @NickLucche
 /vllm/entrypoints/pooling @noooop
-/vllm/entrypoints/sagemaker @DarkLight1337
+/vllm/entrypoints/serve/sagemaker @DarkLight1337
 /vllm/entrypoints/serve @njhill
 /vllm/entrypoints/*.py @njhill
 /vllm/entrypoints/chat_utils.py @DarkLight1337
+/vllm/entrypoints/offline_utils.py @DarkLight1337
 /vllm/entrypoints/llm.py @DarkLight1337
+
+# Rust Frontend
+/rust/ @BugenZhao @njhill
+/build_rust.sh @BugenZhao @njhill
+/rust-toolchain.toml @BugenZhao @njhill
+/.buildkite/test_areas/rust* @BugenZhao @njhill
 
 # Input/Output Processing
 /vllm/sampling_params.py @njhill @NickLucche
@@ -67,21 +80,27 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche
 
 # Model runner V2
-/vllm/v1/worker/gpu @WoosukKwon @njhill
+/vllm/v1/worker/gpu @WoosukKwon @njhill @yewentao256
 /vllm/v1/worker/gpu/kv_connector.py @orozery
 
+# CI & building
+/.buildkite @Harry-Chen @khluu
+/docker/Dockerfile @Harry-Chen @khluu
+/pyproject.toml @khluu
+/setup.py @khluu
+
 # Test ownership
-/.buildkite/lm-eval-harness @mgoin 
+/.buildkite/lm-eval-harness @mgoin
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
-/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche
-/tests/evals @mgoin @vadiklyutiy
-/tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256
+/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche @AndreasKaratzas
+/tests/evals @mgoin @vadiklyutiy @AndreasKaratzas
+/tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256 @zyongye @AndreasKaratzas
 /tests/kernels/ir @ProExpertProg @tjtanaa
-/tests/models @DarkLight1337 @ywang96
+/tests/models @DarkLight1337 @ywang96 @AndreasKaratzas
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche
-/tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety
+/tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety @zyongye @AndreasKaratzas
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
@@ -147,6 +166,10 @@ mkdocs.yaml @hmellor
 # MTP-specific files
 /vllm/model_executor/models/deepseek_mtp.py @luccafong
 
+# DeepseekV4-specific files
+/vllm/models/deepseek_v4 @zyongye
+/vllm/model_executor/layers/sparse_attn_indexer.py @zyongye
+
 # Mistral-specific files
 /vllm/model_executor/models/mistral*.py @patrickvonplaten
 /vllm/model_executor/models/mixtral*.py @patrickvonplaten
@@ -161,21 +184,21 @@ mkdocs.yaml @hmellor
 /vllm/model_executor/layers/fla @ZJY0516 @vadiklyutiy
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
-/vllm/**/*rocm* @tjtanaa
-/docker/Dockerfile.rocm* @gshtras @tjtanaa
-/vllm/v1/attention/backends/rocm*.py @gshtras @tjtanaa
-/vllm/v1/attention/backends/mla/rocm*.py @gshtras @tjtanaa
-/vllm/v1/attention/ops/rocm*.py @gshtras @tjtanaa
-/vllm/model_executor/layers/fused_moe/rocm*.py @gshtras @tjtanaa
-/csrc/rocm @gshtras @tjtanaa
-/requirements/*rocm* @tjtanaa
-/tests/**/*rocm* @tjtanaa
+/vllm/**/*rocm* @tjtanaa @dllehr-amd
+/docker/Dockerfile.rocm* @tjtanaa @dllehr-amd @AndreasKaratzas
+/vllm/v1/attention/backends/rocm*.py @tjtanaa @dllehr-amd
+/vllm/v1/attention/backends/mla/rocm*.py @tjtanaa @dllehr-amd
+/vllm/v1/attention/ops/rocm*.py @tjtanaa @dllehr-amd
+/vllm/model_executor/layers/fused_moe/rocm*.py @tjtanaa @dllehr-amd
+/csrc/rocm @tjtanaa @dllehr-amd
+/requirements/*rocm* @tjtanaa @AndreasKaratzas
+/tests/**/*rocm* @tjtanaa @AndreasKaratzas
 /docs/**/*rocm* @tjtanaa
 /vllm/**/*quark* @tjtanaa
-/tests/**/*quark* @tjtanaa
+/tests/**/*quark* @tjtanaa @AndreasKaratzas
 /docs/**/*quark* @tjtanaa
-/vllm/**/*aiter* @tjtanaa
-/tests/**/*aiter* @tjtanaa
+/vllm/**/*aiter* @tjtanaa @AndreasKaratzas
+/tests/**/*aiter* @tjtanaa @AndreasKaratzas
 
 # TPU
 /vllm/v1/worker/tpu* @NickLucche

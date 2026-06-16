@@ -12,8 +12,7 @@ vLLM can be deployed on [RunPod](https://www.runpod.io/), a cloud GPU platform t
 SSH into your RunPod pod and launch the vLLM OpenAI-compatible server:
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-    --model <model-name> \
+vllm serve <model-name> \
     --host 0.0.0.0 \
     --port 8000
 ```

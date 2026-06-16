@@ -56,6 +56,7 @@ def assert_scheduler_empty(scheduler: Scheduler):
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
     assert len(scheduler.finished_recving_kv_req_ids) == 0
+    assert len(scheduler._inflight_prefills) == 0
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
@@ -102,7 +103,9 @@ def create_vllm_config(
     attention_backend: str | None = None,
     kv_load_failure_policy: Literal["recompute", "fail"] = "fail",
     kv_connector: str = "NixlConnector",
-    kv_role: str = "kv_both",
+    kv_connector_module_path: str | None = None,
+    kv_role: str = "kv_consumer",
+    disable_hybrid_kv_cache_manager: bool | None = None,
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
@@ -118,6 +121,7 @@ def create_vllm_config(
         max_model_len=max_model_len,
         enable_chunked_prefill=enable_chunked_prefill,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -128,6 +132,7 @@ def create_vllm_config(
     )
     kv_transfer_config = KVTransferConfig(
         kv_connector=kv_connector,
+        kv_connector_module_path=kv_connector_module_path,
         kv_role=kv_role,
         enable_permute_local_kv=enable_permute_local_kv,
         kv_connector_extra_config=kv_connector_extra_config or {},
@@ -221,6 +226,7 @@ def create_request(
             remote_block_ids=list(range(num_remote_blocks)),
             remote_host="my-host",
             remote_port=1234,
+            tp_size=1,
         )
 
     max_tokens = 1 if do_remote_decode else max_tokens
@@ -291,9 +297,14 @@ def create_model_runner_output(
 
 
 class TestExampleConnector(ExampleConnector):
-    def __init__(self, config: VllmConfig, role, kv_cache_config):
+    def __init__(
+        self,
+        config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: KVCacheConfig,
+    ):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
-        self._connector = ExampleConnector(config, role)
+        self._connector = ExampleConnector(config, role, kv_cache_config)
         self.call_record: dict[str, int] = defaultdict(int)
         # Use a unique temp file per connector
         self._event_file = (
@@ -366,7 +377,7 @@ class MockKVConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig | None = None,
+        kv_cache_config: KVCacheConfig,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
         extra_config = self._kv_transfer_config.kv_connector_extra_config
@@ -475,10 +486,16 @@ def make_kv_cache_config(
     )
 
 
-def make_nixl_scheduler(has_mamba: bool = False, is_hma_required: bool = False):
+def make_nixl_scheduler(
+    has_mamba: bool = False,
+    is_hma_required: bool = False,
+    heartbeat: bool = False,
+    kv_lease_duration: int = 30,
+):
     """Create a NixlConnectorScheduler via __new__ (skipping __init__).
 
-    Only sets the two flags needed by the N-1 prefill logic.
+    Only sets the flags needed by the tests.  When *heartbeat=True* the
+    scheduler-side heartbeat bookkeeping fields are also initialised.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
@@ -487,4 +504,86 @@ def make_nixl_scheduler(has_mamba: bool = False, is_hma_required: bool = False):
     sched = object.__new__(NixlConnectorScheduler)
     sched._has_mamba = has_mamba
     sched._is_hma_required = is_hma_required
+
+    if heartbeat:
+        sched._heartbeat_by_engine = {}
+        sched._heartbeat_req_engine = {}
+        sched._last_heartbeat_time = 0.0
+        sched._kv_lease_duration = kv_lease_duration
+        sched._heartbeat_interval = kv_lease_duration // 6
+        # Fields touched by build_connector_meta / request_finished:
+        sched._reqs_need_recv = {}
+        sched._reqs_need_send = {}
+        sched._reqs_in_batch = set()
+        sched._reqs_not_processed = set()
+        sched._reqs_need_save = {}
+        sched.use_host_buffer = False
+        sched.engine_id = "test-engine"
+        sched.side_channel_host = "localhost"
+        sched.side_channel_port = 5555
+        sched.blocks_per_sw = []
+        sched.is_bidirectional_kv_xfer_enabled = False
+    return sched
+
+
+def make_nixl_push_scheduler(
+    *,
+    decoder_kv_blocks_ttl: float = 30.0,
+    push_registration_timeout: float | None = None,
+    is_bidirectional_kv_xfer_enabled: bool = False,
+    has_mamba: bool = False,
+):
+    """Create a NixlPushConnectorScheduler via __new__ (skipping __init__).
+
+    The push scheduler can't reuse :func:`make_nixl_scheduler` because it
+    is a different class (``NixlPushConnectorScheduler`` vs
+    ``NixlConnectorScheduler``) and carries push-specific state. Only the
+    fields touched by the unit tests are populated.
+    """
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_scheduler import (
+        NixlPushConnectorScheduler,
+    )
+
+    sched = object.__new__(NixlPushConnectorScheduler)
+
+    # Base scheduler fields (shared with pull / heartbeat path).
+    sched._reqs_need_recv = {}
+    sched._reqs_need_send = {}
+    sched._reqs_in_batch = set()
+    sched._reqs_not_processed = set()
+    sched._reqs_need_save = {}
+    sched._kv_lease_duration = 30
+    sched.decoder_kv_blocks_ttl = decoder_kv_blocks_ttl
+    sched.use_host_buffer = False
+    sched.engine_id = "decode-engine"
+    sched.side_channel_host = "127.0.0.1"
+    sched.side_channel_port = 5600
+    sched.is_bidirectional_kv_xfer_enabled = is_bidirectional_kv_xfer_enabled
+    sched._has_mamba = has_mamba
+
+    # vllm_config is consulted for parallel_config.tensor_parallel_size.
+    vllm_config = MagicMock()
+    vllm_config.parallel_config.tensor_parallel_size = 1
+    sched.vllm_config = vllm_config
+
+    # Push-specific state.
+    sched._push_pending_registrations = {}
+    sched._push_registration_deadlines = {}
+    sched._finished_request_blocks = {}
+    sched._newly_finished_push_blocks = {}
+    sched._push_registration_timeout = (
+        push_registration_timeout
+        if push_registration_timeout is not None
+        else decoder_kv_blocks_ttl
+    )
+
+    # Heartbeat fields touched by base request_finished /
+    # update_connector_output.
+    sched._heartbeat_by_engine = {}
+    sched._heartbeat_req_engine = {}
+    sched._last_heartbeat_time = 0.0
+    sched.blocks_per_sw = []
+
     return sched
