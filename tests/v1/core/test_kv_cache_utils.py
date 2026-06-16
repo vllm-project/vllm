@@ -1246,6 +1246,106 @@ def test_project_kv_cache_groups_to_worker():
     assert set(proj_spec.kv_cache_specs.keys()) == {"layer1", "layer3"}
 
 
+def test_deepseek_v4_projected_pp_groups_preserve_shared_layer_identity():
+    full_specs: dict[str, KVCacheSpec] = {}
+    for idx in range(8):
+        full_specs[f"model.layers.{idx}.self_attn"] = new_dsv4_mla_spec(
+            block_size=256,
+            num_kv_heads=1 if idx % 2 == 0 else 2,
+        )
+
+    swa_specs: dict[str, KVCacheSpec] = {}
+    for idx in range(4, 8):
+        swa_specs[f"model.layers.{idx}.swa_attn"] = new_dsv4_swa_mla_spec(
+            block_size=256,
+            num_kv_heads=1 if idx % 2 == 0 else 2,
+            sliding_window=512,
+        )
+
+    global_groups = [
+        KVCacheGroupSpec(
+            layer_names=list(full_specs),
+            kv_cache_spec=make_dsv4_uniform_group(full_specs),
+        ),
+        KVCacheGroupSpec(
+            layer_names=list(swa_specs),
+            kv_cache_spec=make_dsv4_uniform_group(swa_specs),
+        ),
+    ]
+
+    worker_spec = {
+        **{
+            name: spec
+            for name, spec in full_specs.items()
+            if name.startswith("model.layers.4.")
+            or name.startswith("model.layers.5.")
+            or name.startswith("model.layers.6.")
+            or name.startswith("model.layers.7.")
+        },
+        **swa_specs,
+    }
+
+    projected = kv_cache_utils._project_kv_cache_groups_to_worker(
+        global_groups,
+        worker_spec,
+    )
+
+    assert [group.layer_names for group in projected] == [
+        [
+            "model.layers.4.self_attn",
+            "model.layers.5.self_attn",
+            "model.layers.6.self_attn",
+            "model.layers.7.self_attn",
+        ],
+        [
+            "model.layers.4.swa_attn",
+            "model.layers.5.swa_attn",
+            "model.layers.6.swa_attn",
+            "model.layers.7.swa_attn",
+        ],
+    ]
+
+    for group in projected:
+        assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        assert set(group.kv_cache_spec.kv_cache_specs) == set(group.layer_names)
+        assert list(group.kv_cache_spec.kv_cache_specs) == group.layer_names
+
+    full_group_spec = projected[0].kv_cache_spec
+    assert isinstance(full_group_spec, UniformTypeKVCacheSpecs)
+    page_sizes = full_group_spec.get_page_sizes()
+    assert sorted(page_sizes) == [32768, 65536]
+    kv_cache_config = kv_cache_utils.get_kv_cache_config_from_groups(
+        VllmConfig(model_config=ModelConfig(max_model_len=512)),
+        projected,
+        available_memory=sum(page_sizes) * 2 * 8,
+    )
+
+    assert kv_cache_config.num_blocks == 8
+    tensor_sizes_by_shared_layers = {
+        tuple(tensor.shared_by): tensor.size
+        for tensor in kv_cache_config.kv_cache_tensors
+    }
+    assert tensor_sizes_by_shared_layers == {
+        (
+            "model.layers.4.self_attn",
+            "model.layers.4.swa_attn",
+        ): 32768 * 8,
+        (
+            "model.layers.5.self_attn",
+            "model.layers.5.swa_attn",
+        ): 65536 * 8,
+        (
+            "model.layers.6.self_attn",
+            "model.layers.6.swa_attn",
+        ): 32768 * 8,
+        (
+            "model.layers.7.self_attn",
+            "model.layers.7.swa_attn",
+        ): 65536 * 8,
+    }
+    assert kv_cache_config.kv_cache_groups == projected
+
+
 def test_merge_kv_cache_spec():
     same_layer_specs = [
         new_kv_cache_spec(num_kv_heads=32),
@@ -1920,6 +2020,46 @@ def new_mla_spec(cache_dtype_str=None):
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
     )
+
+
+def new_dsv4_mla_spec(
+    block_size: int,
+    num_kv_heads: int,
+    head_size: int = 64,
+    dtype: torch.dtype = torch.float16,
+) -> MLAAttentionSpec:
+    return MLAAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        model_version="deepseek_v4",
+    )
+
+
+def new_dsv4_swa_mla_spec(
+    block_size: int,
+    num_kv_heads: int,
+    sliding_window: int,
+    head_size: int = 64,
+    dtype: torch.dtype = torch.float16,
+) -> SlidingWindowMLASpec:
+    return SlidingWindowMLASpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        sliding_window=sliding_window,
+        model_version="deepseek_v4",
+    )
+
+
+def make_dsv4_uniform_group(
+    specs: dict[str, KVCacheSpec],
+) -> UniformTypeKVCacheSpecs:
+    group = UniformTypeKVCacheSpecs.from_specs(specs)
+    assert group is not None
+    return group
 
 
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():

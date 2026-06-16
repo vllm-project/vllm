@@ -102,6 +102,14 @@ def _topk_softplus_sqrt_torch(
     return topk_weights, topk_indices
 
 
+def _topk_softplus_sqrt_op_available() -> bool:
+    try:
+        getattr(torch.ops._moe_C, "topk_softplus_sqrt")
+    except AttributeError:
+        return False
+    return True
+
+
 def vllm_topk_softplus_sqrt(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -115,7 +123,7 @@ def vllm_topk_softplus_sqrt(
 ) -> tuple[torch.Tensor, ...]:
     from vllm.platforms import current_platform
 
-    if current_platform.is_xpu():
+    if current_platform.is_xpu() or not _topk_softplus_sqrt_op_available():
         return _topk_softplus_sqrt_torch(
             topk_weights,
             topk_indices,
