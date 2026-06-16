@@ -413,19 +413,15 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         """
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
-        using_kv_transfer_with_hybrid = (
-            not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
-            and vllm_config.kv_transfer_config is not None
-        )
 
-        if cache_config.enable_prefix_caching or using_kv_transfer_with_hybrid:
+        if cache_config.enable_prefix_caching:
             if cache_config.mamba_cache_mode == "none":
                 cache_config.mamba_cache_mode = (
                     "all" if model_config.supports_mamba_prefix_caching else "align"
                 )
                 logger.warning(
                     "Mamba cache mode is set to '%s' for %s by default "
-                    "when prefix caching or kv transfer is enabled",
+                    "when prefix caching is enabled",
                     cache_config.mamba_cache_mode,
                     model_config.architecture,
                 )
