@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
+import threading
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -148,6 +149,25 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
             region.total_size_bytes / 1e9,
         )
         region.is_pinned = True
+
+def pin_cpu_tensors(cpu_tensors: list[torch.Tensor]) -> None:
+    """Register a CPU tensor as CUDA pinned memory via cudaHostRegister."""
+
+    for tensor in cpu_tensors:
+        base_ptr = tensor.data_ptr()
+        total_size_bytes = tensor.numel() * tensor.element_size()
+        result = torch.cuda.cudart().cudaHostRegister(base_ptr, total_size_bytes, 0)
+        if result.value != 0:
+            logger.warning(
+                "cudaHostRegister failed for CPU tensor (code=%d) — "
+                "transfers will still work but may be slower (unpinned DMA)",
+                result,
+            )
+        else:
+            logger.debug(
+                "cudaHostRegister CPU tensor %.2f GB",
+                total_size_bytes / 1e9,
+            )
 
 
 def _new_descriptor_buffers(
@@ -481,9 +501,11 @@ class CPUOffloadingWorker(OffloadingWorker):
         mmap_region: SharedOffloadRegion | None = None,
     ):
         pin_memory = PIN_MEMORY
+        async_pin_memory = pin_memory and current_platform.is_cuda_alike()
+        self.pin_thread: threading.Thread | None = None
+        
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
-        if mmap_region is not None and pin_memory:
-            pin_mmap_region(mmap_region)
+        self._mmap_region = mmap_region
 
         gpu_tensors: list[torch.Tensor] = []
         cpu_tensors: list[torch.Tensor] = []
@@ -502,10 +524,9 @@ class CPUOffloadingWorker(OffloadingWorker):
                     (num_cpu_blocks, cpu_page_size_bytes),
                     dtype=torch.int8,
                     device="cpu",
-                    pin_memory=pin_memory,
                 )
-                logger.debug(
-                    "torch.zeros pinned tensor %d×%d (%.2f GB): %.3f s",
+                logger.info(
+                    "torch.zeros tensor %d×%d (%.2f GB): %.3f s",
                     num_cpu_blocks,
                     cpu_page_size_bytes,
                     num_cpu_blocks * cpu_page_size_bytes / 1e9,
@@ -514,6 +535,27 @@ class CPUOffloadingWorker(OffloadingWorker):
 
             gpu_tensors.append(gpu_tensor)
             cpu_tensors.append(cpu_tensor)
+
+        if pin_memory:
+            if mmap_region is not None:
+                pin_fn = pin_mmap_region
+                pin_args = (mmap_region,)
+                pin_thread_name = "MmapPinThread"
+            else:
+                pin_fn = pin_cpu_tensors
+                pin_args = (cpu_tensors,)
+                pin_thread_name = "CPUTensorsPinThread"
+
+            if async_pin_memory:
+                self.pin_thread = threading.Thread(
+                    target=pin_fn,
+                    args=pin_args,
+                    name=pin_thread_name,
+                )
+                self.pin_thread.start()
+                logger.info("Starting to pin memory in background...")
+            else:
+                pin_fn(*pin_args)
 
         self._store_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
@@ -531,7 +573,10 @@ class CPUOffloadingWorker(OffloadingWorker):
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=False,
         )
-
+        
+        if self.pin_thread is not None:
+            self.pin_thread.join()
+            logger.info("Background pin memory finished.")
     def submit_store(
         self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
     ) -> bool:
