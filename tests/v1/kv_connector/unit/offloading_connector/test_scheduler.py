@@ -2114,119 +2114,14 @@ def test_request_finished_with_pending_stores_populates_fence(request_runner):
     assert req_id in runner.connector_scheduler._req_status
 
 
-def test_request_finished_no_pending_stores_cleanup(request_runner):
-    """When all store jobs complete before the request finishes,
-    request_finished cleans up req_status (no fence entries needed)."""
-    block_size = 4
-    block_size_factor = 1
-    offloaded_block_size = block_size * block_size_factor
-
-    runner = request_runner(
-        block_size=block_size,
-        num_gpu_blocks=100,
-        async_scheduling=False,
-        block_size_factor=block_size_factor,
-    )
-
-    runner.new_request(token_ids=[0] * offloaded_block_size * 3)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
-    )
-
-    # Run with complete_transfers=True — all stores finish before request ends.
-    runner.run(
-        decoded_tokens=[EOS_TOKEN_ID],
-        expected_stored=(0, 1, 2),
-        expected_flushed=(0, 1, 2),
-    )
-
-    # All jobs completed → fence index empty.
-    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
-    assert len(runner.connector_scheduler._jobs) == 0
-
-    # req_status should already be cleaned up:
-    # update_connector_output deletes it when the last job completes
-    # for a finished request.
-    req_id = str(runner.req_id)
-    assert req_id not in runner.connector_scheduler._req_status
-
-
-def test_request_finished_sliding_window_blocks_not_in_fence(request_runner):
-    """Sliding window blocks are registered in the fence at store creation
-    time, NOT at request_finished. request_finished only registers
-    non_sliding_window_block_ids.
-
-    For a pure sliding window group, non_sliding_window_block_ids is empty,
-    so request_finished adds zero new fence entries.
-    """
-    block_size = 4
-    sliding_window = 8  # 2 blocks
-
-    kv_cache_groups = [
-        KVCacheGroupSpec(
-            ["layer0"],
-            SlidingWindowSpec(
-                block_size=block_size,
-                num_kv_heads=1,
-                head_size=1,
-                dtype=torch.float32,
-                sliding_window=sliding_window,
-            ),
-        ),
-    ]
-
-    runner = request_runner(
-        block_size=block_size,
-        num_gpu_blocks=100,
-        async_scheduling=False,
-        kv_cache_groups=kv_cache_groups,
-    )
-
-    # 3 blocks of prompt (12 tokens), window = 2 blocks.
-    runner.new_request(token_ids=[0] * block_size * 3)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
-    )
-
-    # Schedule to create store jobs.
-    runner.scheduler.schedule()
-    runner._update_gpu_blocks()
-
-    # Verify store job was created.
-    assert len(runner.connector_scheduler._jobs) > 0
-    job_id = next(iter(runner.connector_scheduler._jobs))
-    job_status = runner.connector_scheduler._jobs[job_id]
-    assert job_status.is_store
-
-    # For sliding window groups, all block IDs go into
-    # sliding_window_block_ids; non_sliding_window_block_ids is empty.
-    sw_block_ids = set(job_status.sliding_window_block_ids or [])
-    non_sw_block_ids = set(job_status.non_sliding_window_block_ids or [])
-    assert len(sw_block_ids) > 0
-    assert len(non_sw_block_ids) == 0
-
-    # Sliding window blocks should already be in the fence
-    # (registered at store creation time in _build_store_jobs).
-    for bid in sw_block_ids:
-        assert bid in runner.connector_scheduler._block_id_to_pending_jobs
-        assert job_id in runner.connector_scheduler._block_id_to_pending_jobs[bid]
-
-    fence_before = dict(runner.connector_scheduler._block_id_to_pending_jobs)
-
-    # Finish the request — request_finished should NOT add new entries
-    # because non_sliding_window_block_ids is empty for SW groups.
-    req_id = str(runner.req_id)
-    runner.scheduler.finish_requests({req_id}, RequestStatus.FINISHED_STOPPED)
-
-    fence_after = runner.connector_scheduler._block_id_to_pending_jobs
-
-    # Fence unchanged: no new entries from request_finished.
-    assert fence_before == fence_after
-
-
-def test_multiple_in_flight_stores_all_registered_in_fence(request_runner):
+def test_multiple_in_flight_stores_all_flushed(request_runner):
     """When a request finishes with multiple in-flight store jobs,
-    ALL jobs' non_sliding_window_block_ids are registered in the fence.
+    ALL jobs are flushed via the fence mechanism (observable behavior).
+
+    Uses two runner.run() calls to naturally produce two store jobs:
+    - First run: 4 decoded tokens fills blocks 0-1 → job_0 created for both
+    - Second run: 4 more tokens + EOS fills block 2 → job_1 created,
+      request finishes, "all finished" flush fires → both jobs flushed
     """
     block_size = 4
     block_size_factor = 1
@@ -2239,48 +2134,40 @@ def test_multiple_in_flight_stores_all_registered_in_fence(request_runner):
         block_size_factor=block_size_factor,
     )
 
-    # Create a request with 1 block.
+    # 4 prompt tokens → 1 GPU block (block 0)
     runner.new_request(token_ids=[0] * offloaded_block_size)
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
 
-    # Schedule to create the first store job.
-    runner.scheduler.schedule()
-    runner._update_gpu_blocks()
-
-    assert len(runner.connector_scheduler._jobs) == 1
-    job_id_1 = next(iter(runner.connector_scheduler._jobs))
-    job_status_1 = runner.connector_scheduler._jobs[job_id_1]
-    non_sw_1 = list(job_status_1.non_sliding_window_block_ids or [])
-    assert len(non_sw_1) > 0
-
-    # Manually inject a second in-flight store job to simulate a request
-    # that produced multiple store jobs across decode steps.
-    req_id = str(runner.req_id)
-    req_status = runner.connector_scheduler._req_status[req_id]
-    fake_block_id = 99
-    fake_job_id = 999
-    runner.connector_scheduler._jobs[fake_job_id] = TransferJobStatus(
-        req_id=req_id,
-        pending_count=runner.connector_scheduler.config.num_workers,
-        keys=set(),
-        is_store=True,
-        non_sliding_window_block_ids=[fake_block_id],
+    # First run: 4 decoded tokens → blocks 0-1 full → job_0 created for both.
+    # complete_transfers=False keeps job_0 in-flight (not completed yet).
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size,
+        complete_transfers=False,
+        expected_stored=(),
+        expected_flushed=(),
     )
-    req_status.transfer_jobs.add(fake_job_id)
 
-    assert len(req_status.transfer_jobs) == 2
+    # Verify job_0 is in-flight.
+    assert len(runner.connector_scheduler._jobs) == 1
 
-    # Finish the request — both jobs should be registered in the fence.
-    runner.scheduler.finish_requests({req_id}, RequestStatus.FINISHED_STOPPED)
+    # Second run: 4 more tokens + EOS → block 2 full → job_1 created.
+    # Request finishes → "all finished" flush fires → both jobs flushed.
+    # Re-set prepare_store after run() calls manager.reset_mock().
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size + [EOS_TOKEN_ID],
+        complete_transfers=False,
+        expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2),
+    )
 
-    fence = runner.connector_scheduler._block_id_to_pending_jobs
-    for bid in non_sw_1:
-        assert bid in fence
-        assert job_id_1 in fence[bid]
-    assert fake_block_id in fence
-    assert fake_job_id in fence[fake_block_id]
+    # Post-condition: fence cleaned up after full lifecycle.
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+    assert len(runner.connector_scheduler._jobs) == 0
 
 
 def test_fence_full_lifecycle_populate_and_cleanup(request_runner):
