@@ -925,6 +925,7 @@ async fn client_fail_closes_when_main_output_path_receives_dp_control() {
     .await;
     assert_eq!(client.engine_identities()[0], b"engine-0");
     assert!(client.ready_responses()[0].max_model_len > 0);
+    assert_eq!(client.vllm_version(), "test-vllm-version");
 
     let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
     let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
@@ -1218,6 +1219,86 @@ async fn dropping_a_live_stream_triggers_abort() {
     let first = timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
     assert_eq!(first.new_token_ids, vec![99]);
     drop(stream);
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn dropping_multiple_live_streams_aborts_all_in_a_burst() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-burst".to_vec();
+    let request_ids = ["req-1", "req-2", "req-3"];
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                for _ in 0..3 {
+                    let add = recv_engine_message(dealer).await;
+                    assert_eq!(add[0].as_ref(), &[0x00]);
+                }
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        outputs: vec![
+                            request_output("req-1", vec![99], None),
+                            request_output("req-2", vec![99], None),
+                            request_output("req-3", vec![99], None),
+                        ],
+                        ..Default::default()
+                    },
+                )
+                .await;
+
+                let abort =
+                    timeout(Duration::from_secs(1), recv_engine_message(dealer)).await.unwrap();
+                assert_eq!(abort[0].as_ref(), &[0x01]);
+                let ids: Vec<String> = rmp_serde::from_slice(&abort[1]).unwrap();
+                assert_eq!(
+                    ids,
+                    vec![
+                        "req-1".to_string(),
+                        "req-2".to_string(),
+                        "req-3".to_string()
+                    ]
+                );
+                assert!(
+                    timeout(Duration::from_millis(100), recv_engine_message(dealer)).await.is_err()
+                );
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    // Open every request first so all three adds reach the engine before it
+    // emits outputs, then drain the first token from each stream.
+    let mut streams = Vec::new();
+    for id in request_ids {
+        streams.push(client.call(sample_request_with_id(id)).await.unwrap());
+    }
+    for stream in streams.iter_mut() {
+        let first = timeout(Duration::from_secs(1), stream.next()).await.unwrap().unwrap().unwrap();
+        assert_eq!(first.new_token_ids, vec![99]);
+    }
+    // Drop the whole burst back-to-back so the abort worker can batch them.
+    drop(streams);
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();
@@ -1858,7 +1939,7 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
 
     let (shutdown_tx_0, engine_task_0) = spawn_mock_engine_task(
         handshake_address.clone(),
-        b"engine-0".to_vec(),
+        EngineId::from_engine_index(0).into_frame().to_vec(),
         |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
@@ -1912,7 +1993,7 @@ async fn multi_engine_abort_is_grouped_and_utility_fans_out_to_all_engines() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let (shutdown_tx_1, engine_task_1) = spawn_mock_engine_task(
         handshake_address.clone(),
-        b"engine-1".to_vec(),
+        EngineId::from_engine_index(1).into_frame().to_vec(),
         |dealer, push| {
             Box::pin(async move {
                 let utility = recv_engine_message(dealer).await;
@@ -2364,6 +2445,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let inline_prompt_frames = lines.next().expect("missing inline prompt logprobs fixture line");
     let multipart_prompt_frames =
         lines.next().expect("missing multipart prompt logprobs fixture line");
+    let ready_response_hex = lines.next().expect("missing ready response fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2472,6 +2554,23 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             .new_prompt_logprobs_tensors
             .as_ref()
             .expect("multipart prompt logprobs decoded"),
+    );
+
+    let map_keys = |bytes: &[u8]| -> BTreeSet<String> {
+        match decode_value(bytes) {
+            Value::Map(entries) => entries
+                .into_iter()
+                .filter_map(|(key, _)| key.as_str().map(str::to_owned))
+                .collect(),
+            other => panic!("ready response should encode as a map, got {other:?}"),
+        }
+    };
+    let python_ready_keys = map_keys(&hex::decode(ready_response_hex).unwrap());
+    let rust_ready_keys =
+        map_keys(&rmp_serde::to_vec_named(&crate::mock_engine::default_ready_response()).unwrap());
+    assert_eq!(
+        rust_ready_keys, python_ready_keys,
+        "EngineCoreReadyResponse drifted from the Python dataclass",
     );
 }
 

@@ -75,6 +75,8 @@ llama3_8b = ModelFusionInfo(
     model_name="meta-llama/Llama-3.1-8B-Instruct",
     matches=lambda n_layers: Matches(
         # AR+RMSNorm fused in model code; compiler catches 1 leftover.
+        # NOTE: manual fusion consumes the AR pattern before the compiler's
+        # sequence_parallel / async_tp / aiter passes run, so those drop to 0.
         ar_rms_fusion=1,
     ),
 )
@@ -132,6 +134,7 @@ qwen3_a3b = ModelFusionInfo(
     matches=lambda n_layers: Matches(
         norm_rope_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
+        aiter_ar_rms_fusion=n_layers * 2,
         sequence_parallel=n_layers * 2 + 1,
         async_tp=n_layers * 2,
     ),
@@ -207,6 +210,7 @@ gpt_oss_20b = ModelFusionInfo(
     model_name="openai/gpt-oss-20b",
     matches=lambda n_layers: Matches(
         ar_rms_fusion=n_layers * 2 + 1,
+        aiter_ar_rms_fusion=n_layers + 1,
         sequence_parallel=n_layers * 2 + 1,
         async_tp=n_layers * 2,
     ),

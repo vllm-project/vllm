@@ -32,7 +32,8 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's CUTLASS wrapper."""
 
     def input_quant_key(self) -> QuantKey | None:
-        """This kernel supports dynamic quantization of the input."""
+        """This kernel supports dynamic quantization of the input. By
+        convention, pre-quantized blockscales must use the swizzled layout."""
         return kNvfp4Dynamic
 
     @classmethod

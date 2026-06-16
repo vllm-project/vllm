@@ -28,6 +28,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
+    resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -171,6 +172,7 @@ class RequestRunner:
         block_size_factor: int = 1,
         async_scheduling: bool = True,
         kv_cache_groups: list[KVCacheGroupSpec] | None = None,
+        extra_config_overrides: dict[str, Any] | None = None,
     ):
         assert block_size_factor == 1 or kv_cache_groups is None, (
             "block_size_factor > 1 requires all groups to have the same "
@@ -194,9 +196,13 @@ class RequestRunner:
         extra_config: dict[str, Any] = {
             "spec_name": "MockOffloadingSpec",
             "spec_module_path": "tests.v1.kv_connector.unit.offloading_connector.utils",  # noqa: E501
+            # Preserve legacy behavior for tests; new opt-in tests override.
+            "offload_prompt_only": False,
         }
         if block_size_factor > 1:
             extra_config["block_size"] = block_size * block_size_factor
+        if extra_config_overrides:
+            extra_config.update(extra_config_overrides)
 
         vllm_config.kv_transfer_config = KVTransferConfig(
             kv_connector="OffloadingConnector",
@@ -225,13 +231,18 @@ class RequestRunner:
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         self.num_kv_groups = len(kv_cache_config.kv_cache_groups)
 
+        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
+        )
+
         scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
         self.scheduler = scheduler_cls(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             log_stats=True,
             structured_output_manager=StructuredOutputManager(vllm_config),
-            block_size=block_size,
+            block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
         )
 
         self.worker_connector = OffloadingConnector(
@@ -313,10 +324,14 @@ class RequestRunner:
         self,
         token_ids: list[int],
         kv_transfer_params: dict | None = None,
+        skip_reading_prefix_cache: bool = False,
     ):
         self.req_id += 1
 
-        sampling_params = SamplingParams(max_tokens=1000)
+        sampling_params = SamplingParams(
+            max_tokens=1000,
+            skip_reading_prefix_cache=skip_reading_prefix_cache or None,
+        )
         sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
         req = Request(
@@ -593,6 +608,7 @@ def request_runner():
         async_scheduling,
         block_size_factor=1,
         kv_cache_groups=None,
+        extra_config_overrides=None,
     ):
         runner = RequestRunner(
             block_size=block_size,
@@ -600,6 +616,7 @@ def request_runner():
             block_size_factor=block_size_factor,
             async_scheduling=async_scheduling,
             kv_cache_groups=kv_cache_groups,
+            extra_config_overrides=extra_config_overrides,
         )
         runners.append(runner)
         return runner

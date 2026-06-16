@@ -78,11 +78,11 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
     def input_quant_key(self) -> QuantKey | None:
         """The activation quant key this kernel can consume pre-quantized.
 
-        Manual fusion uses this to decide whether to hoist activation quant
-        out of ``apply_weights`` into a fused [some operations] + quant kernel.
-        Return ``None`` when the kernel needs in-kernel quantization (custom
-        padding/swizzling, dynamic scales, etc.). A non-``None`` key requires
-        ``apply_weights`` to consume the activation via ``as_quantized_activation``.
+        Manual fusion uses this to decide whether to hoist activation
+        quantization out of apply_weights into an upstream fused kernel.
+        Return None when the kernel needs in-kernel quantization (custom
+        padding or swizzling, dynamic scales, etc.). Kernels that return a
+        key must consume the activation via as_quantized_activation.
         """
         return None
 
@@ -157,7 +157,7 @@ class FP8ScaledMMLinearKernel(
         out_dtype = orig_dtype if maybe_out_dtype is None else maybe_out_dtype
 
         x_2d_q = x_2d
-        if x_data.dtype != fp8_dtype:
+        if qa is None:
             x_2d_q, x_s = self.quant_fp8(x_2d, x_s, x_s_ub)
         return self.apply_scaled_mm(
             A=x_2d_q,
