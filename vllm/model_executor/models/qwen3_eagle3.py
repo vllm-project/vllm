@@ -178,10 +178,10 @@ class Qwen3Eagle3Model(nn.Module):
                 aux_ids = getattr(self.config, "eagle_aux_hidden_state_layer_ids", None)
                 num_aux_features = len(aux_ids) if aux_ids is not None else 3
             self.num_aux_layers = num_aux_features
-            if hasattr(self.config, "target_hidden_size"):
-                fc_input_size = self.config.target_hidden_size * num_aux_features
-            else:
-                fc_input_size = self.config.hidden_size * num_aux_features
+            target_hidden_size = getattr(
+                self.config, "target_hidden_size", self.config.hidden_size
+            )
+            fc_input_size = target_hidden_size * num_aux_features
             if self.norm_before_fc:
                 self.input_norm = RMSNorm(
                     fc_input_size,
@@ -189,6 +189,18 @@ class Qwen3Eagle3Model(nn.Module):
                 )
             else:
                 self.input_norm = None
+
+            use_fc_norm = getattr(self.config, "fc_norm", False)
+            if use_fc_norm:
+                self.fc_norm = nn.ModuleList(
+                    [
+                        RMSNorm(target_hidden_size, eps=self.config.rms_norm_eps)
+                        for _ in range(num_aux_features)
+                    ]
+                )
+            else:
+                self.fc_norm = None
+
             self.fc = ReplicatedLinear(
                 input_size=fc_input_size,
                 output_size=self.config.hidden_size,
@@ -198,6 +210,8 @@ class Qwen3Eagle3Model(nn.Module):
                 prefix=maybe_prefix(prefix, "fc"),
                 return_bias=False,
             )
+
+        self.norm_output = getattr(self.config, "norm_output", False)
         self.norm = RMSNorm(
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
@@ -226,7 +240,11 @@ class Qwen3Eagle3Model(nn.Module):
                 residual=residual,
             )
         hidden_states, hidden_prenorm = self.norm(hidden_states, residual)
-        return hidden_states, hidden_prenorm
+
+        # norm_output variant uses the post-norm hidden states.
+        aux_output = hidden_states if self.norm_output else hidden_prenorm
+
+        return hidden_states, aux_output
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -381,6 +399,16 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
 
         if self.model.norm_before_fc:
             hidden_states = self.model.input_norm(hidden_states)
+
+        # `norm_before_fc` adds a single RMSNorm before the FC layer, whereas `fc_norm`
+        # applies separate RMSNorms to each chunk of the hidden states.
+        if self.model.fc_norm is not None:
+            chunks = hidden_states.chunk(self.model.num_aux_layers, dim=-1)
+            hidden_states = torch.cat(
+                [norm(chunk) for norm, chunk in zip(self.model.fc_norm, chunks)],
+                dim=-1,
+            )
+
         return self.model.fc(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
