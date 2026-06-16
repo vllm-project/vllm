@@ -1503,6 +1503,11 @@ class CompilationConfig:
                 f" or cudagraph_capture_sizes ({self.cudagraph_capture_sizes})"
             )
 
+        # REMOVE
+        print(f"multiple_of: {multiple_of}")
+        print(f"self.cudagraph_capture_sizes: {self.cudagraph_capture_sizes}")
+        print(f"rounded_sizes: {rounded_sizes}")
+
         self.max_cudagraph_capture_size = rounded_sizes[-1]
         self.cudagraph_capture_sizes = rounded_sizes
 

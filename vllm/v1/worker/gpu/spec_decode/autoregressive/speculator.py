@@ -76,7 +76,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 1,
+            # self.num_speculative_steps + 1,
+            3,  # REVERT
         )
 
         # PIECEWISE cudagraphs are not supported for draft decodes.
@@ -213,6 +214,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             input_batch.num_tokens,
             max_query_len,
         )
+
+        # REMOVE
+        print("draft prefill")
+
         prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
             num_reqs,
@@ -255,6 +260,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.max_num_reqs,
             advance_draft_positions=self.advance_draft_positions,
         )
+
+        # REMOVE
+        print("draft decode")
 
         # Each request produces exactly 1 token per draft generation step,
         # enabling FULL graph replay.

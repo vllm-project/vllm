@@ -468,7 +468,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            decode_query_len=self.decode_query_len,
+            # decode_query_len=self.decode_query_len,
+            decode_query_len=3,  # REVERT
             lora_capture_cases=self.lora_capture_cases,
         )
         if self.speculator is not None:
@@ -1140,6 +1141,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
 
+        # REMOVE
+        print("target model")
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,

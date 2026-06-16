@@ -197,6 +197,19 @@ class CudaGraphManager:
         )
         descs_by_mode = defaultdict(list)
 
+        # REMOVE
+        print(f"capture_sizes: {capture_sizes}")
+        print(
+            f"max_decode_tokens: {max_decode_tokens}, \
+                self.max_num_reqs: {self.max_num_reqs}, \
+                self.decode_query_len: {self.decode_query_len}"
+        )
+        print(
+            f"decode_mode: {decode_mode}, mixed_mode: {mixed_mode}, \
+                separate_decode_routine: {separate_decode_routine}"
+        )
+        print(f"self.cudagraph_mode: {self.cudagraph_mode}")
+
         for num_tokens, num_active_loras in product(
             capture_sizes, self.lora_capture_cases
         ):
@@ -349,7 +362,18 @@ class CudaGraphManager:
                     uniform_token_count,
                     effective_loras,
                 ):
+                    # REMOVE
+                    print(
+                        f"uniform_token_count: {uniform_token_count}, \
+                        cg_mode: {desc.cg_mode}"
+                    )
                     return desc
+        # REMOVE
+        print(
+            f"uniform_token_count: {uniform_token_count}, \
+                cg_mode: {CUDAGraphMode.NONE}"
+        )
+
         return BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE,
             num_tokens=num_tokens,
