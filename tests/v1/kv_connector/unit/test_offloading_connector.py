@@ -111,7 +111,7 @@ class MockSubscriber:
         self.sub.close()
 
 
-def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> None:
+def _wait_for_prefix_cache_reset(llm: LLM) -> None:
     """Wait for async offload transfers to finish so prefix cache can reset.
 
     The GPU-to-CPU offload runs on a CUDA stream asynchronously. While blocks
@@ -119,14 +119,10 @@ def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> Non
     ``False``. Between retries we send a dummy single-token prefill to force
     the engine to step, which polls the worker for completed transfers and
     frees GPU blocks.
-
-    Args:
-        llm: The LLM instance to reset.
-        reset_connector: If True, also reset the KV connector state.
     """
     _dummy_params = SamplingParams(max_tokens=1)
     deadline = time.monotonic() + _RESET_CACHE_TIMEOUT
-    while not llm.reset_prefix_cache(reset_connector=reset_connector):
+    while not llm.reset_prefix_cache():
         if time.monotonic() > deadline:
             raise TimeoutError(
                 "reset_prefix_cache did not succeed within "
@@ -141,9 +137,7 @@ def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> Non
         )
 
 
-def _latency_test(
-    llm: LLM, subscriber: MockSubscriber | None, reset_connector: bool = False
-):
+def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
     sampling_params = SamplingParams(max_tokens=1)
 
     num_times_cpu_better_than_cold = 0
@@ -173,7 +167,7 @@ def _latency_test(
 
         # Wait for the async CPU offload to finish, then reset prefix cache
         # so the next generate() must reload from CPU rather than GPU.
-        _wait_for_prefix_cache_reset(llm, reset_connector=reset_connector)
+        _wait_for_prefix_cache_reset(llm)
 
         # Verify CPU stored events arrived (offload is done before we
         # attempt to load from CPU).
@@ -549,7 +543,7 @@ def test_fs_tiering_offloading(tmp_path) -> None:
         topic=kv_events_config.topic,
     )
     try:
-        _latency_test(llm, subscriber, reset_connector=True)
+        _latency_test(llm, subscriber)
         _accuracy_test(llm, subscriber)
     finally:
         subscriber.close()

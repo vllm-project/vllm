@@ -68,18 +68,18 @@ class HarmonyParser(DelegatingParser):
     def __init__(self, tokenizer, tools=None, *args, **kwargs):
         super().__init__(tokenizer, tools, *args, **kwargs)
 
-        if self._reasoning_parser and not isinstance(
-            self._reasoning_parser, GptOssReasoningParser
+        if self.reasoning_parser and not isinstance(
+            self.reasoning_parser, GptOssReasoningParser
         ):
             raise ValueError(
                 "Harmony requires GptOssReasoningParser, "
-                f"got {self._reasoning_parser.__class__.__name__}."
+                f"got {self.reasoning_parser.__class__.__name__}."
             )
 
-        if self._tool_parser and not isinstance(self._tool_parser, GptOssToolParser):
+        if self.tool_parser and not isinstance(self.tool_parser, GptOssToolParser):
             raise ValueError(
                 "Harmony requires GptOssToolParser, "
-                f"got {self._tool_parser.__class__.__name__}."
+                f"got {self.tool_parser.__class__.__name__}."
             )
 
         self._harmony_parser = get_streamable_parser_for_assistant()
@@ -209,11 +209,11 @@ class HarmonyParser(DelegatingParser):
                 segment.channel, segment.recipient
             )
             match segment_type:
-                case _SegmentType.REASONING:
+                case _SegmentType.REASONING if self.reasoning_parser:
                     combined_reasoning += segment.delta
                 case _SegmentType.CONTENT:
                     combined_content += segment.delta
-                case _SegmentType.TOOL:
+                case _SegmentType.TOOL if self.tool_parser:
                     assert segment.recipient is not None
                     if prev_recipient != segment.recipient:
                         tool_name = extract_function_from_recipient(segment.recipient)
@@ -233,13 +233,20 @@ class HarmonyParser(DelegatingParser):
                         self._next_tool_call_index += 1
                         prev_recipient = segment.recipient
                     elif segment.delta:
-                        tool_call_index = self._next_tool_call_index - 1
-                        tool_messages.append(
-                            DeltaToolCall(
-                                index=tool_call_index,
-                                function=DeltaFunctionCall(arguments=segment.delta),
+                        idx = self._next_tool_call_index - 1
+                        if tool_messages:
+                            tool_msg = tool_messages[-1]
+                            assert tool_msg.index == idx
+                            fn = tool_msg.function
+                            assert fn is not None and fn.arguments is not None
+                            fn.arguments += segment.delta
+                        else:
+                            tool_messages.append(
+                                DeltaToolCall(
+                                    index=idx,
+                                    function=DeltaFunctionCall(arguments=segment.delta),
+                                )
                             )
-                        )
 
         if not combined_content and not combined_reasoning and not tool_messages:
             return None
