@@ -2,21 +2,25 @@ name: vllm_ci
 job_dirs:
   - ".buildkite/amd_workload"
 run_all_patterns:
-  - "docker/Dockerfile"
+  - "docker/Dockerfile.rocm"
+  - "docker/Dockerfile.rocm_base"
+  - "docker/ci-rocm.hcl"
+  - "docker/docker-bake-rocm.hcl"
+  - ".buildkite/amd_workload/amd_image_build.yaml"
+  - ".buildkite/amd_workload/amd_workload.yaml"
+  - ".buildkite/scripts/ci-bake-rocm.sh"
+  - ".buildkite/scripts/hardware_ci/run-amd-test.py"
+  - ".buildkite/scripts/hardware_ci/run-amd-test.sh"
   - "CMakeLists.txt"
   - "requirements/common.txt"
-  - "requirements/cuda.txt"
-  - "requirements/kv_connectors.txt"
-  - "requirements/build/cuda.txt"
-  - "requirements/test/cuda.txt"
+  - "requirements/rocm.txt"
+  - "requirements/build/rocm.txt"
+  - "requirements/test/rocm.txt"
   - "setup.py"
   - "csrc/"
   - "cmake/"
 run_all_exclude_patterns:
-  - "docker/Dockerfile."
   - "csrc/cpu/"
-  - "csrc/rocm/"
-  - "cmake/hipify.py"
   - "cmake/cpu_extension.cmake"
 registries: public.ecr.aws/q9t5s3a7
 repositories:
