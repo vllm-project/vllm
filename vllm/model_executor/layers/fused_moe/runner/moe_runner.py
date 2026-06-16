@@ -254,6 +254,7 @@ class MoERunner(MoERunnerInterface):
         routed_input_transform: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
         routed_scaling_factor: float = 1.0,
+        reduce_results: bool = True,
     ):
         super().__init__()
         self.moe_config = moe_config
@@ -265,6 +266,7 @@ class MoERunner(MoERunnerInterface):
         self.shared_expert_gate = shared_expert_gate
         self.routed_experts = routed_experts
         self.enable_dbo = enable_dbo
+        self.reduce_results = reduce_results
 
         # When both gates are present and FSE is enabled, fuse their
         # weight matrices into [num_experts + num_shared, hidden] so one
@@ -420,6 +422,15 @@ class MoERunner(MoERunnerInterface):
         * If we have SP (TP=N, DP=M, EP), there is a separate AG step handled
           in the model.
         """
+        # A combine kernel that already reduces the fused output is
+        # incompatible with deferring the all-reduce (reduce_results=False,
+        # e.g. fusing it into a subsequent GemmaRMSNorm): the deferred
+        # all-reduce would double-reduce the fused output.
+        assert not (self._fused_output_is_reduced and not self.reduce_results), (
+            "reduce_results=False is incompatible with a combine kernel that "
+            "already reduces the fused output (e.g. DeepEP/Mori/NIXL/"
+            "FlashInfer-NVLink all2all backends)."
+        )
         if (
             shared_output is not None
             and not self.moe_config.is_sequence_parallel
@@ -447,6 +458,7 @@ class MoERunner(MoERunnerInterface):
             not self.moe_config.is_sequence_parallel
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
             and not self._fused_output_is_reduced
+            and self.reduce_results
         ):
             states = tensor_model_parallel_all_reduce(states)
 

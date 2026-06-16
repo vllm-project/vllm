@@ -193,6 +193,7 @@ class MiniMaxM3MoE(nn.Module):
         layer_id: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -259,6 +260,7 @@ class MiniMaxM3MoE(nn.Module):
             shared_experts=self.shared_experts,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
+            reduce_results=reduce_results,
         )
 
     @staticmethod
@@ -642,13 +644,12 @@ class MiniMaxM3DecoderLayer(nn.Module):
         layer_id = int(prefix.split(sep=".")[-1])
         self.layer_id = layer_id
 
-        # Complete the preceding dense MLP's deferred all-reduce
-        # (reduce_results=False), fused into this layer's input_layernorm.
-        # Disable this fusion when PP is set
+        # Complete the preceding FFN's deferred all-reduce (its down_proj / MoE
+        # combine ran with reduce_results=False), fused into this layer's
+        # input_layernorm. Both dense and MoE FFNs defer under PP==1, so every
+        # non-first layer fuses; disable when PP>1 (FFNs reduce themselves).
         self.fuse_input_allreduce = (
-            layer_id > 0
-            and not _is_moe_layer(config, layer_id - 1)
-            and vllm_config.parallel_config.pipeline_parallel_size == 1
+            layer_id > 0 and vllm_config.parallel_config.pipeline_parallel_size == 1
         )
 
         is_sparse_attention_layer = (
@@ -681,6 +682,12 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 layer_id=layer_id,
                 quant_config=quant_config,
                 prefix=f"{prefix}.block_sparse_moe",
+                # Defer the MoE all-reduce only when it can be fused into a
+                # following GemmaRMSNorm
+                reduce_results=(
+                    vllm_config.parallel_config.pipeline_parallel_size > 1
+                    or is_mtp_block
+                ),
             )
         else:
             self.mlp = MiniMaxM3MLP(
@@ -758,6 +765,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         self.norm = MiniMAXGemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+        # The final decoder layer has no next layer, so its deferred all-reduce is
+        # completed here in the model norm.
+        self.fuse_final_allreduce = (
+            vllm_config.parallel_config.pipeline_parallel_size == 1
+        )
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -781,7 +794,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 aux_hidden_states, idx + 1, hidden_states, residual
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if self.fuse_final_allreduce and residual is not None:
+            hidden_states, _ = fused_allreduce_gemma_rms_norm(
+                hidden_states, residual, self.norm
+            )
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

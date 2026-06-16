@@ -140,6 +140,7 @@ def FusedMoE(
     apply_routed_scale_to_output: bool = False,
     zero_expert_type: str | None = None,
     hash_indices_table: torch.Tensor | None = None,
+    reduce_results: bool = True,
     runner_cls: type[MoERunner] | None = None,
     runner_args: dict[str, Any] | None = None,
     routed_experts_cls: type[RoutedExperts] | None = None,
@@ -198,6 +199,9 @@ def FusedMoE(
                                       output instead of topk_weights
         zero_expert_type: Type of zero expert handling
         hash_indices_table: Hash table for expert indices
+        reduce_results: Whether to all-reduce the final output across TP/EP
+            ranks. Set to False to defer the all-reduce (e.g. to fuse it into
+            a subsequent GemmaRMSNorm).
         runner_cls: Custom MoERunner class (None = use default MoERunner)
         runner_args: Additional arguments for runner constructor
         routed_experts_cls: Custom RoutedExperts class (None = use default)
@@ -385,6 +389,7 @@ def FusedMoE(
         routed_scaling_factor=routed_scaling_factor
         if apply_routed_scale_to_output
         else 1.0,
+        reduce_results=reduce_results,
         **runner_args if runner_args is not None else {},
     )
 
