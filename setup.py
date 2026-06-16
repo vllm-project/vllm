@@ -1211,6 +1211,13 @@ setup(
     rust_extensions=rust_extensions,
     install_requires=get_requirements(),
     extras_require={
+        # vllm[device-...] pulls in the associated torch extra.
+        # https://github.com/ROCm/TheRock/blob/main/RELEASES.md#multi-arch-releases
+        **{
+            f"device-{arch}": [f"torch[device-{arch}]"]
+            for arch in os.environ.get("PYTORCH_ROCM_ARCH", "").split(";")
+            if arch
+        },
         # AMD Zen CPU optimizations via zentorch
         "zen": ["zentorch==2.11.0.0"],
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],

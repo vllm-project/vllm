@@ -131,9 +131,15 @@ jobs:
           cat constraints.txt
           uv pip install --system \
             -c constraints.txt \
-            dist/*.whl \
-            pytest pytest-timeout numpy \
-            tblib transformers huggingface_hub sentencepiece pillow \
+            "$(echo dist/vllm-*.whl)[device-gfx1151]" \
+            "huggingface_hub" \
+            "numpy" \
+            "pillow" \
+            "pytest" \
+            "pytest-timeout" \
+            "sentencepiece" \
+            "tblib" \
+            "transformers" \
             --index-url ${{ env.PYTORCH_INDEX_URL }} \
             --extra-index-url https://pypi.org/simple/ \
             --index-strategy unsafe-best-match \
