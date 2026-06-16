@@ -29,7 +29,7 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     PlaceholderRange,
 )
-from vllm.multimodal.processing import PromptInsertion
+from vllm.multimodal.processing import BaseMultiModalProcessor, PromptInsertion
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
 
 pytestmark = pytest.mark.cpu_test
@@ -72,6 +72,58 @@ def _dummy_items(
             for modality, size_by_key in size_by_key_modality.items()
         }
     )
+
+
+class _RecordingProcessorCache:
+
+    def __init__(self, cached_hashes: set[str]) -> None:
+        self.cached_hashes = cached_hashes
+        self.touched_hashes: list[str] = []
+
+    def is_cached(self, mm_hashes: list[str]) -> list[bool]:
+        return [mm_hash in self.cached_hashes for mm_hash in mm_hashes]
+
+    def touch_sender_cache_item(self, mm_hash: str) -> None:
+        self.touched_hashes.append(mm_hash)
+
+
+class _FakeProcessorInfo:
+
+    @staticmethod
+    def parse_mm_data(mm_data, validate: bool = True):
+        del validate
+        return mm_data
+
+
+class _FakeBaseProcessor(BaseMultiModalProcessor):
+
+    def _get_mm_fields_config(self, hf_inputs, hf_processor_mm_kwargs):
+        raise NotImplementedError
+
+    def _get_prompt_updates(
+        self,
+        mm_items,
+        hf_processor_mm_kwargs,
+        out_mm_kwargs,
+    ):
+        raise NotImplementedError
+
+
+
+def test_get_cache_missing_items_touches_cached_items():
+    processor = object.__new__(_FakeBaseProcessor)
+    processor.info = _FakeProcessorInfo()
+    cache = _RecordingProcessorCache({"cached"})
+
+    mm_is_cached, mm_missing_items = processor._get_cache_missing_items(
+        cache,
+        {"image": ["cached-data", "missing-data"]},
+        {"image": ["cached", "missing"]},
+    )
+
+    assert mm_is_cached == {"image": [True, False]}
+    assert mm_missing_items == {"image": ["missing-data"]}
+    assert cache.touched_hashes == ["cached"]
 
 
 @pytest.mark.parametrize(

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+import time
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, Sequence
@@ -969,6 +971,11 @@ class MultiModalProcessingInfo(NamedTuple):
     prompt_updates: MultiModalPromptUpdates
 
 
+class MultiModalCachedApplyResult(NamedTuple):
+    mm_input: MultiModalInput | None
+    missing_hashes: list[str] | None
+
+
 class BaseMultiModalProcessor(ABC, Generic[_I]):
     """
     Abstract base class to process multi-modal inputs to be used in vLLM.
@@ -988,6 +995,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self.info = info
         self.dummy_inputs = dummy_inputs
         self.cache = cache
+        self._cache_lock = threading.Lock()
 
         self.data_parser = self.info.get_data_parser()
 
@@ -1306,6 +1314,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             modality: cache.is_cached(hashes) for modality, hashes in mm_hashes.items()
         }
 
+        for modality, hashes in mm_hashes.items():
+            for item_hash, item_is_cached in zip(hashes, mm_is_cached[modality]):
+                if item_is_cached:
+                    cache.touch_sender_cache_item(item_hash)
+
         mm_missing_idxs = {
             modality: [
                 idx
@@ -1332,6 +1345,286 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_missing_items = self.info.parse_mm_data(mm_missing_data, validate=False)
 
         return mm_is_cached, mm_missing_items
+
+    @staticmethod
+    def _has_cache_miss(mm_is_cached: MultiModalIsCached) -> bool:
+        return any(
+            not item_is_cached
+            for modality_is_cached in mm_is_cached.values()
+            for item_is_cached in modality_is_cached
+        )
+
+    @staticmethod
+    def _record_elapsed(
+        timing_ctx: TimingContext,
+        stage: str,
+        elapsed: float,
+    ) -> None:
+        if not timing_ctx.enabled:
+            return
+
+        timing_ctx.stage_secs[stage] = timing_ctx.stage_secs.get(stage, 0.0) + elapsed
+
+    @staticmethod
+    def _get_missing_hashes(
+        mm_hashes: MultiModalHashes,
+        mm_is_cached: MultiModalIsCached,
+    ) -> list[str]:
+        return [
+            item_hash
+            for modality, hashes in mm_hashes.items()
+            for item_hash, item_is_cached in zip(
+                hashes,
+                mm_is_cached[modality],
+            )
+            if not item_is_cached
+        ]
+
+    def try_apply_cached_or_get_missing_hashes(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalCachedApplyResult:
+        """Return cached MM input, or missing hashes for single-flight waits.
+
+        ``missing_hashes is None`` means this request cannot use the processor
+        cache fast path and must fall back to the normal processor path.
+        """
+        cache = self.cache
+
+        _, passthrough_data = self._get_hf_mm_data(inputs.mm_data_items)
+        if cache is None or passthrough_data:
+            return MultiModalCachedApplyResult(None, None)
+
+        start = time.perf_counter()
+        mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+        get_mm_hashes_secs = time.perf_counter() - start
+
+        with self._cache_lock:
+            start = time.perf_counter()
+            mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
+                cache=cache,
+                mm_data_items=inputs.mm_data_items,
+                mm_hashes=mm_hashes,
+            )
+            get_cache_missing_items_secs = time.perf_counter() - start
+
+            missing_hashes = self._get_missing_hashes(mm_hashes, mm_is_cached)
+            if missing_hashes:
+                return MultiModalCachedApplyResult(None, missing_hashes)
+
+            self._record_elapsed(
+                timing_ctx,
+                "get_mm_hashes",
+                get_mm_hashes_secs,
+            )
+            self._record_elapsed(
+                timing_ctx,
+                "get_cache_missing_items",
+                get_cache_missing_items_secs,
+            )
+
+            # NOTE: `prompt` does not correspond to the cached MM items, so use
+            # the same prompt-update-disabled path as `_cached_apply_hf_processor`.
+            with timing_ctx.record("apply_hf_processor"):
+                (
+                    prompt_ids,
+                    mm_missing_processed_data,
+                    is_update_applied,
+                ) = self._apply_hf_processor_main(
+                    prompt=inputs.prompt,
+                    mm_items=mm_missing_data_items,
+                    hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
+                    tokenization_kwargs=inputs.tokenization_kwargs,
+                    enable_hf_prompt_update=False,
+                )
+
+            mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
+                mm_missing_processed_data,
+                self._get_mm_fields_config(
+                    mm_missing_processed_data,
+                    inputs.hf_processor_mm_kwargs,
+                ),
+            )
+
+            mm_missing_prompt_updates = self._get_mm_prompt_updates(
+                mm_missing_data_items,
+                inputs.hf_processor_mm_kwargs,
+                mm_missing_kwargs,
+            )
+
+            with timing_ctx.record("merge_mm_kwargs"):
+                mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
+                    cache,
+                    mm_hashes=mm_hashes,
+                    mm_is_cached=mm_is_cached,
+                    mm_missing_kwargs=mm_missing_kwargs,
+                    mm_missing_prompt_updates=mm_missing_prompt_updates,
+                )
+
+        mm_info = MultiModalProcessingInfo(
+            kwargs=mm_kwargs,
+            hashes=mm_hashes,
+            prompt_updates=mm_prompt_updates,
+        )
+
+        mm_input = self._build_mm_input_with_prompt_updates(
+            prompt_ids,
+            inputs,
+            mm_info,
+            is_update_applied,
+            timing_ctx,
+        )
+        return MultiModalCachedApplyResult(mm_input, [])
+
+    def get_cache_missing_hashes(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> list[str] | None:
+        return self.try_apply_cached_or_get_missing_hashes(
+            inputs,
+            timing_ctx,
+        ).missing_hashes
+
+    def try_apply_cached(
+        self,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
+    ) -> MultiModalInput | None:
+        """Process inputs without offloading when every MM item is cached.
+
+        The async renderer uses this as a fast path so cache-hit requests do
+        not wait behind cache-miss requests that are running the expensive HF
+        processor in the renderer executor.  It only succeeds when the request
+        can be served entirely from the processor cache; miss and passthrough
+        cases fall back to the normal executor path.
+        """
+        return self.try_apply_cached_or_get_missing_hashes(
+            inputs,
+            timing_ctx,
+        ).mm_input
+
+
+    def prefill_cache_items(
+        self,
+        inputs: ProcessorInputs,
+        item_hashes: Sequence[str],
+        timing_ctx: TimingContext,
+    ) -> None:
+        """Process selected missing MM items and store them in the cache.
+
+        This is used when a request is waiting on one in-flight missing item
+        but owns another missing item.  The owned item can be preprocessed while
+        the request waits; the request then re-enters the normal cached path.
+        """
+        cache = self.cache
+        if cache is None:
+            return
+
+        selected_hashes = set(item_hashes)
+        if not selected_hashes:
+            return
+
+        with timing_ctx.record("get_mm_hashes"):
+            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+
+        selected_mm_hashes: MultiModalHashes = {}
+        selected_mm_data = dict[str, list[object]]()
+        for modality, hashes in mm_hashes.items():
+            modality_hashes: list[str] = []
+            modality_data: list[object] = []
+            for item_idx, item_hash in enumerate(hashes):
+                if item_hash not in selected_hashes:
+                    continue
+
+                data = inputs.mm_data_items[modality][item_idx]
+                if data is None:
+                    raise ValueError(
+                        f"Cache miss for {modality} at index {item_idx} "
+                        "but data is not provided."
+                    )
+
+                modality_hashes.append(item_hash)
+                modality_data.append(data)
+
+            if modality_hashes:
+                selected_mm_hashes[modality] = modality_hashes
+                selected_mm_data[modality] = modality_data
+
+        if not selected_mm_hashes:
+            return
+
+        with self._cache_lock, timing_ctx.record("get_cache_missing_items"):
+            selected_is_cached = {
+                modality: cache.is_cached(hashes)
+                for modality, hashes in selected_mm_hashes.items()
+            }
+
+        missing_hashes: MultiModalHashes = {}
+        missing_data = dict[str, list[object]]()
+        missing_is_cached: MultiModalIsCached = {}
+        for modality, hashes in selected_mm_hashes.items():
+            modality_missing_hashes: list[str] = []
+            modality_missing_data: list[object] = []
+            for item_hash, data, item_is_cached in zip(
+                hashes,
+                selected_mm_data[modality],
+                selected_is_cached[modality],
+            ):
+                if item_is_cached:
+                    continue
+
+                modality_missing_hashes.append(item_hash)
+                modality_missing_data.append(data)
+
+            if modality_missing_hashes:
+                missing_hashes[modality] = modality_missing_hashes
+                missing_data[modality] = modality_missing_data
+                missing_is_cached[modality] = [False] * len(
+                    modality_missing_hashes
+                )
+
+        if not missing_hashes:
+            return
+
+        missing_items = self.info.parse_mm_data(missing_data, validate=False)
+
+        with timing_ctx.record("apply_hf_processor"):
+            (
+                _,
+                mm_missing_processed_data,
+                _,
+            ) = self._apply_hf_processor_main(
+                prompt=inputs.prompt,
+                mm_items=missing_items,
+                hf_processor_mm_kwargs=inputs.hf_processor_mm_kwargs,
+                tokenization_kwargs=inputs.tokenization_kwargs,
+                enable_hf_prompt_update=False,
+            )
+
+        mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
+            mm_missing_processed_data,
+            self._get_mm_fields_config(
+                mm_missing_processed_data,
+                inputs.hf_processor_mm_kwargs,
+            ),
+        )
+
+        mm_missing_prompt_updates = self._get_mm_prompt_updates(
+            missing_items,
+            inputs.hf_processor_mm_kwargs,
+            mm_missing_kwargs,
+        )
+
+        with self._cache_lock, timing_ctx.record("merge_mm_kwargs"):
+            self._merge_mm_kwargs(
+                cache,
+                mm_hashes=missing_hashes,
+                mm_is_cached=missing_is_cached,
+                mm_missing_kwargs=mm_missing_kwargs,
+                mm_missing_prompt_updates=mm_missing_prompt_updates,
+            )
 
     def _recompute_cached_prompt_update(
         self,
@@ -1456,7 +1749,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         with timing_ctx.record("get_mm_hashes"):
             mm_hashes = inputs.get_mm_hashes(self.info.model_id)
 
-        with timing_ctx.record("get_cache_missing_items"):
+        with self._cache_lock, timing_ctx.record("get_cache_missing_items"):
             mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
                 cache=cache,
                 mm_data_items=inputs.mm_data_items,
@@ -1492,7 +1785,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_missing_kwargs,
         )
 
-        with timing_ctx.record("merge_mm_kwargs"):
+        with self._cache_lock, timing_ctx.record("merge_mm_kwargs"):
             mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
                 cache,
                 mm_hashes=mm_hashes,
@@ -1684,6 +1977,22 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             is_update_applied,
         ) = self._cached_apply_hf_processor(inputs, timing_ctx)
 
+        return self._build_mm_input_with_prompt_updates(
+            prompt_ids,
+            inputs,
+            mm_info,
+            is_update_applied,
+            timing_ctx,
+        )
+
+    def _build_mm_input_with_prompt_updates(
+        self,
+        prompt_ids: list[int],
+        inputs: ProcessorInputs,
+        mm_info: MultiModalProcessingInfo,
+        is_update_applied: bool,
+        timing_ctx: TimingContext,
+    ) -> MultiModalInput:
         # NOTE: tokenization_kwargs are not required to init processor
         with timing_ctx.record("apply_prompt_updates"):
             prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
