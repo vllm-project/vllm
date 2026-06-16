@@ -70,6 +70,7 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
         "Qwen3ForCausalLM",
         "DeepseekV2ForCausalLM",
         "Qwen2MoeForCausalLM",
+        "GraniteMoeForCausalLM",
         "LlamaForCausalLM",
         "MistralForCausalLM",
     }
@@ -966,15 +967,6 @@ class VllmConfig:
                         "Async scheduling is not compatible with "
                         "disable_padded_drafter_batch=True."
                     )
-            if (
-                self.model_config is not None
-                and self.model_config.enable_prompt_embeds
-                and self.model_config.is_multimodal_model
-            ):
-                raise ValueError(
-                    "Async scheduling is not yet supported with prompt embeds "
-                    "for multimodal models."
-                )
             if not executor_supports_async_sched:
                 raise ValueError(
                     f"`{executor_backend}` does not support async scheduling yet."
@@ -1016,16 +1008,6 @@ class VllmConfig:
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend. ",
                     executor_backend,
-                )
-                self.scheduler_config.async_scheduling = False
-            elif (
-                self.model_config is not None
-                and self.model_config.enable_prompt_embeds
-                and self.model_config.is_multimodal_model
-            ):
-                logger.warning_once(
-                    "Async scheduling is not yet supported with prompt embeds "
-                    "for multimodal models and will be disabled."
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -1101,20 +1083,26 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
-        # DeepSeek V4's model classes don't carry @support_torch_compile —
+        # For model classes don't carry @support_torch_compile —
         # the breakable cudagraph is the supported PIECEWISE path. Auto-enable
         # it unless the user has explicitly opted out via the env var.
         if (
             self.model_config is not None
             and "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
             and any(
-                a in ("DeepseekV4ForCausalLM", "DeepSeekV4MTPModel")
+                a
+                in (
+                    "DeepseekV4ForCausalLM",
+                    "DeepSeekV4MTPModel",
+                    "MiniMaxM3SparseForCausalLM",
+                    "MiniMaxM3SparseForConditionalGeneration",
+                )
                 for a in self.model_config.architectures
             )
         ):
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
             logger.info_once(
-                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1 for DeepSeek V4. "
+                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
 
@@ -1451,12 +1439,14 @@ class VllmConfig:
             assert a2a_backend in [
                 "deepep_low_latency",
                 "deepep_high_throughput",
+                "nixl_ep",
             ], (
-                "Microbatching currently only supports the deepep_low_latency and "
-                f"deepep_high_throughput all2all backend. {a2a_backend} is not "
-                "supported. To fix use --all2all-backend=deepep_low_latency or "
-                "--all2all-backend=deepep_high_throughput and install the DeepEP"
-                " kernels."
+                "Microbatching currently only supports the deepep_low_latency, "
+                "deepep_high_throughput, and nixl_ep all2all backends. "
+                f"{a2a_backend} is not supported. To fix use "
+                "--all2all-backend=deepep_low_latency, "
+                "--all2all-backend=deepep_high_throughput, or "
+                "--all2all-backend=nixl_ep and install the matching kernels."
             )
 
             if not self.model_config.disable_cascade_attn:
