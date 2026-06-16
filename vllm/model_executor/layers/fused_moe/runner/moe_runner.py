@@ -546,6 +546,33 @@ class MoERunner(MoERunnerInterface):
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
 
+        # When the event-based two-stream overlap is active
+        # (`VLLM_MOE_SHARED_EXPERTS_TWO_STREAM=1`) AND the runtime configuration
+        # selects MULTI_STREAM_OVERLAPPED for this input, enqueue the
+        # shared-expert launch onto the aux stream BEFORE the
+        # routed-expert kernels are enqueued on the default stream. This
+        # widens the overlap window so the routed FP4 BMM (the heavy
+        # kernel chain) runs concurrently with the small shared-expert
+        # NVJet GEMMs on the GPU under CUDA graph capture. With the
+        # legacy `wait_stream` path we keep the original ordering
+        # (launch shared AFTER the routed kernels) for bit-identical
+        # fallback behaviour.
+        shared_started_early = False
+        if (
+            self._shared_experts is not None
+            and shared_experts_input is not None
+            and self._shared_experts._use_events
+            and self._shared_experts._determine_shared_experts_order(
+                shared_experts_input
+            )
+            == SharedExpertsOrder.MULTI_STREAM_OVERLAPPED
+        ):
+            self._maybe_apply_shared_experts(
+                shared_experts_input,
+                SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
+            )
+            shared_started_early = True
+
         if self.routed_experts.quant_method.is_monolithic:
             # Monolithic kernels: pass router_logits to routed_experts
             fused_out = self.routed_experts.forward_monolithic(
@@ -570,10 +597,20 @@ class MoERunner(MoERunnerInterface):
                 shared_experts_input=shared_experts_input,
             )
 
-        self._maybe_apply_shared_experts(
-            shared_experts_input,
-            SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
-        )
+        if not shared_started_early:
+            # Legacy `wait_stream`-based path: launch shared experts AFTER
+            # the routed-expert kernels (matches the original ordering).
+            self._maybe_apply_shared_experts(
+                shared_experts_input,
+                SharedExpertsOrder.MULTI_STREAM_OVERLAPPED,
+            )
+        else:
+            # Default stream waits on the shared-expert
+            # `post_event` before the caller reads `shared_output`. This
+            # join captures the full routed-expert work as parallel with
+            # the shared-expert work in the CUDA graph DAG.
+            assert self._shared_experts is not None
+            self._shared_experts.join_event_overlap()
 
         return (
             self._shared_experts.output if self._shared_experts is not None else None,
