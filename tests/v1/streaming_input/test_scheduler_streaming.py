@@ -150,40 +150,75 @@ class TestStreamingScheduler(unittest.TestCase):
         # Again, output tokens are cleared first, so max_tokens = 0 + 10 = 10
         assert session.max_tokens == 10
 
+    @staticmethod
+    def _make_capped_session(scheduler, waiting_for_chunk=True):
+        """Session at 1020/1024 tokens plus a 10-token chunk that crosses
+        max_model_len when applied. With waiting_for_chunk the next add_request
+        commences the chunk (the guarded branch); otherwise the session stays
+        WAITING and add_request queues the chunk."""
+        session = DummyRequest(request_id="session", prompt_token_ids=list(range(1020)))
+        session.num_computed_tokens = len(session.prompt_token_ids)
+        scheduler.add_request(session)
+        if waiting_for_chunk:
+            session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
+        chunk = DummyRequest(request_id="session", prompt_token_ids=list(range(10)))
+        chunk.sampling_params = SamplingParams(max_tokens=10)
+        return session, chunk
+
     def test_add_request_session_finishes_at_max_model_len(self):
         # Guard in add_request: when a streaming chunk pushes a live session's
         # accumulated tokens to max_model_len, the session must finish as
         # FINISHED_LENGTH_CAPPED instead of crashing later in the model runner.
         scheduler = create_scheduler()  # max_model_len = 1024
-        session = DummyRequest(
-            request_id="session", prompt_token_ids=list(range(1020))
-        )
-        session.num_computed_tokens = len(session.prompt_token_ids)
-        scheduler.add_request(session)
-        # Put the session into the "waiting for next chunk" state so the next
-        # add_request commences the chunk (the guarded branch).
-        session.status = RequestStatus.WAITING_FOR_STREAMING_REQ
-
-        chunk = DummyRequest(request_id="session", prompt_token_ids=list(range(10)))
-        chunk.sampling_params = SamplingParams(max_tokens=10)
+        session, chunk = self._make_capped_session(scheduler)
         scheduler.add_request(chunk)  # 1020 + 10 = 1030 >= 1024
 
         assert session.num_tokens >= scheduler.max_model_len
         assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
+    def test_add_request_max_model_len_notifies_client(self):
+        # A session finished from inside add_request() (length-capped) is freed
+        # scheduler-side, but finish_requests has no `outputs` dict there, so the
+        # client must still learn it ended. The finish is buffered and emitted as
+        # an EngineCoreOutput with finish_reason=LENGTH in the next
+        # update_from_output -- without this the websocket hangs forever.
+        scheduler = create_scheduler()  # max_model_len = 1024
+        session, chunk = self._make_capped_session(scheduler)
+        client_index = session.client_index
+        scheduler.add_request(chunk)  # 1020 + 10 >= 1024 -> length-capped
+
+        assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        # The finish is buffered for the client (not lost).
+        assert ("session", FinishReason.LENGTH) in [
+            (rid, reason) for _, rid, reason in scheduler._streaming_finish_outputs
+        ]
+
+        # The next step's update_from_output emits it to the client and drains.
+        scheduler_output = scheduler.schedule()
+        mro = ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        eco_dict = scheduler.update_from_output(scheduler_output, mro)
+
+        assert client_index in eco_dict
+        finish_outputs = [
+            o for o in eco_dict[client_index].outputs if o.request_id == "session"
+        ]
+        assert len(finish_outputs) == 1
+        assert finish_outputs[0].finish_reason == FinishReason.LENGTH
+        # Buffer drained (no duplicate emission on the following step).
+        assert scheduler._streaming_finish_outputs == []
+
     def test_handle_stopped_request_finishes_at_max_model_len(self):
         # Guard in _handle_stopped_request: applying a queued streaming chunk
         # that crosses max_model_len finishes the session gracefully.
         scheduler = create_scheduler()  # max_model_len = 1024
-        session = DummyRequest(
-            request_id="session", prompt_token_ids=list(range(1020))
-        )
-        session.num_computed_tokens = len(session.prompt_token_ids)
-        scheduler.add_request(session)
-        # Session still WAITING (not WAITING_FOR_STREAMING_REQ), so add_request
-        # enqueues the chunk onto the streaming queue.
-        chunk = DummyRequest(request_id="session", prompt_token_ids=list(range(10)))
-        chunk.sampling_params = SamplingParams(max_tokens=10)
+        session, chunk = self._make_capped_session(scheduler, waiting_for_chunk=False)
         scheduler.add_request(chunk)
         assert len(session.streaming_queue) == 1
 
@@ -566,7 +601,9 @@ class TestStreamingScheduler(unittest.TestCase):
         eco_cycle2 = eco_dict_cycle2[session.client_index].outputs[0]
         assert eco_cycle2.finish_reason == FinishReason.STOP
         assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
-        assert session in scheduler.waiting
+        # Blocked-waiting statuses (incl. WAITING_FOR_STREAMING_REQ) are queued
+        # in skipped_waiting, not waiting (see _enqueue_waiting_request).
+        assert session in scheduler.skipped_waiting
         assert session._all_token_ids == [1, 2, 3, 10, STOP_TOKEN]
 
         # CRITICAL ASSERTION: Cached prompt_token_ids STILL must not have changed
