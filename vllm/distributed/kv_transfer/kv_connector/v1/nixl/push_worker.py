@@ -80,6 +80,10 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
 
+        # Heartbeat handshakes to a PP-sharded producer must be notif-only,
+        # like the PUSH_REG path.
+        self._hb_handshake_notif_only = True
+
         # Push-specific state.
         # P-side: outgoing WRITE handles awaiting completion, keyed by
         # request_id. Mutated by writer (submit) and main thread
@@ -275,18 +279,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         and the request is re-queued onto ``_reg_send_inbox`` once it
         completes (at which point ``_ensure_handshake`` returns ``None`` and we
         send directly)."""
+        remote_pp_size = reg_data.get("remote_pp_size", 1)
         fut = self._ensure_handshake(
             reg_data["remote_engine_id"],
             reg_data["remote_host"],
             reg_data["remote_port"],
             reg_data["remote_tp_size"],
+            pp_size=remote_pp_size,
+            # D never addresses P memory in push mode; just load P's agents.
+            notif_agents_only=remote_pp_size > 1,
         )
         if fut is None:
             self._do_send_reg_notif(req_id, reg_data)
             return
 
         def _on_handshake(
-            f: Future[dict[int, str]],
+            f: Future[dict[int | tuple[int, int], str]],
             rid: str = req_id,
             rd: dict[str, Any] = reg_data,
         ) -> None:
@@ -683,12 +691,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
             # Not tracked as a P-side send/process for this notif.
             if req_id not in self._reqs_to_send and req_id not in self._reqs_to_process:
-                if req_id in self._recving_metadata:
-                    # D-side: P signalled push completion. The transfer was
-                    # driven entirely by P (we don't own a NIXL handle here),
-                    # so materialise an empty entry in ``_recving_transfers``
-                    # and let ``_pop_done_transfers`` report it done on the
-                    # next ``get_finished``.
+                if (meta := self._recving_metadata.get(req_id)) is not None:
+                    # D-side: P signalled push completion. Each of the
+                    # producer's pp_size stages sends one notif; wait for all.
+                    self.consumer_notification_counts_by_req[req_id] += 1
+                    if self.consumer_notification_counts_by_req[req_id] < meta.pp_size:
+                        continue
+                    del self.consumer_notification_counts_by_req[req_id]
+                    # P drove the transfer (we own no NIXL handle), so
+                    # materialise an empty ``_recving_transfers`` entry for
+                    # ``_pop_done_transfers`` to report done.
                     self._recving_transfers.setdefault(req_id, [])
                 else:
                     # Not tracked on either side (lease may have expired

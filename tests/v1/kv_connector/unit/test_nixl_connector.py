@@ -408,11 +408,10 @@ def test_kv_transfer_handshake(dist_init):
         decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
         expected_agent_metadata = decoder.decode(metadata.agent_metadata_bytes)
 
-        # The scheduler connector expects metadata to be in
-        # dict[int, KVConnectorHandshakeMetadata], where the first key is
-        # the dp_rank, the second key is the tp_rank.
+        # The scheduler connector expects metadata keyed by
+        # (pp_rank, tp_rank).
         scheduler_connector = scheduler.get_kv_connector()
-        scheduler_connector.set_xfer_handshake_metadata({0: metadata})
+        scheduler_connector.set_xfer_handshake_metadata_pp_aware({(0, 0): metadata})
 
         # Simulate a request that finishes prefill, which returns
         # corresponding NixlConnectorMetadata for decode instance.
@@ -502,7 +501,13 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         )
 
     def _nixl_handshake(
-        self, host: str, port: int, remote_tp_size: int, expected_engine_id: str
+        self,
+        host: str,
+        port: int,
+        remote_tp_size: int,
+        expected_engine_id: str,
+        remote_pp_size: int = 1,
+        notif_agents_only: bool = False,
     ) -> dict[int, str]:
         # Mimic slow _nixl_handshake, as well as bypass zmq communication.
         time.sleep(self._hand_shake_latency)
