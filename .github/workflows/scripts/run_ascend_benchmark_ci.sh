@@ -744,73 +744,28 @@ run_runner_npu_preflight_once() {
     return "$manager_rc"
   fi
 
-  # Verify device_count > 0 from the JSON output
-  local device_count
-  device_count="$(echo "$manager_output" | "$PYTHON_BIN" -c "
+  # Verify device_count and allocation result from the JSON output.
+  # The runtime check prints pretty JSON, so parse stdin as a full JSON document.
+  local selected_device
+  selected_device="$(printf '%s\n' "$manager_output" | "$PYTHON_BIN" -c "
 import json, sys
-for line in sys.stdin:
-    line = line.strip()
-    if not line or not line.startswith('{'):
-        continue
-    try:
-        data = json.loads(line)
-        probe = data.get('torch_npu_probe', {})
-        dc = probe.get('device_count')
-        if dc and int(dc) > 0:
-            print(dc)
-            raise SystemExit(0)
-    except (json.JSONDecodeError, SystemExit) as e:
-        if isinstance(e, SystemExit):
-            raise
-    except Exception:
-        pass
-raise SystemExit(1)
+try:
+    data = json.load(sys.stdin)
+except json.JSONDecodeError as exc:
+    print(f'failed to parse runtime check JSON: {exc}', file=sys.stderr)
+    raise SystemExit(1)
+probe = data.get('torch_npu_probe', {})
+dc = probe.get('device_count')
+if not isinstance(dc, int) or dc <= 0:
+    print(f'torch.npu.device_count() returned {dc!r}', file=sys.stderr)
+    raise SystemExit(1)
+if not probe.get('allocation_ok'):
+    print(f'torch_npu allocation check failed: {probe.get("error")}', file=sys.stderr)
+    raise SystemExit(1)
+print(probe.get('selected_device') or 'npu:0')
 " 2>/dev/null)" || return 1
 
-  if [[ -z "$device_count" ]] || [[ "$device_count" -le 0 ]]; then
-    echo "torch.npu.device_count() returned 0 or could not be parsed" >&2
-    return 1
-  fi
-
-  # Run device selection and torch.zeros allocation check
-  "$PYTHON_BIN" - "$device_count" <<'PY'
-import os
-import sys
-import torch
-import torch_npu  # noqa: F401
-
-device_count = int(sys.argv[1])
-preferred_device = os.environ.get("VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE", "npu:0")
-preferred_index = 0
-if ":" in preferred_device:
-  try:
-    preferred_index = int(preferred_device.rsplit(":", 1)[1])
-  except ValueError:
-    preferred_index = 0
-
-candidate_devices = [
-  f"npu:{(preferred_index + offset) % device_count}"
-  for offset in range(device_count)
-]
-
-print("torch_npu import ok=True")
-for device in candidate_devices:
-  print(f"preflight device={device}")
-  try:
-    torch.npu.set_device(device)
-    _ = torch.zeros(1, device=device)
-  except Exception as exc:  # noqa: BLE001
-    print(f"preflight failed on {device}: {exc}", file=sys.stderr)
-    continue
-
-  print(f"selected_device={device}")
-  print("torch.zeros preflight ok")
-  break
-else:
-  raise RuntimeError(
-    "torch.npu basic allocation failed on every visible device"
-  )
-PY
+  echo "selected_device=${selected_device}"
 }
 
 ensure_runner_npu_ready() {
