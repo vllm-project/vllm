@@ -560,11 +560,11 @@ class ParakeetForTDTConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         model_config = vllm_config.model_config
-        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        scheduler_config = vllm_config.scheduler_config
         # The V2 model runner uses ParakeetTDTModelState, which keeps the TDT
         # transcript per request id, so concurrency is safe there. Only the V1
         # runner needs the single-request cap (state lives on the model).
-        uses_v2_runner = getattr(vllm_config, "use_v2_model_runner", False)
+        uses_v2_runner = vllm_config.use_v2_model_runner
         if (
             not uses_v2_runner
             and scheduler_config is not None

@@ -411,10 +411,10 @@ class ParakeetForTDT(nn.Module, SupportsTranscription, SupportsMultiModal):
     supports_transcription_only = True
     supported_languages = PARAKEET_SUPPORTED_LANGUAGES
     no_space_languages: set[str] = set()
-    # The config hook marks this as a single-request stateful decoder and
-    # enforces eager execution. Future V2 support should move this into a
-    # ParakeetModelState using ModelState.prepare_inputs() and
-    # prepare_dummy_inputs(), matching the Whisper model-state pattern.
+    # The config hook enforces eager execution. Under the V1 runner the forced
+    # decoder state lives on this module, capping max_num_seqs to 1; the V2
+    # runner uses ParakeetTDTModelState (see get_model_state_cls) for per-request
+    # state, which lifts that cap.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "encoder.": "model.encoder.",

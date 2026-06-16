@@ -714,9 +714,10 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `WhisperForConditionalGeneration` | Whisper | `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc. | | |
 
 !!! note
-    `ParakeetForTDT` supports batched transcription requests. Its decoder path
-    is request-stateful, so CUDA graph replay and speculative decoding are not
-    supported for this model.
+    `ParakeetForTDT` runs its forced-decoder path in eager mode, so CUDA graph
+    capture and speculative decoding are not supported. It serves one request at
+    a time under the default model runner; the V2 model runner
+    (`VLLM_USE_V2_MODEL_RUNNER=1`) enables concurrent transcription.
 
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
 
