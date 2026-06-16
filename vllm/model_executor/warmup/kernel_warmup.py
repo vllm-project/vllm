@@ -15,6 +15,10 @@ import torch
 import vllm.envs as envs
 from vllm.compilation.caching import aot_compile_hash_factors
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.cutedsl_jit_monitor import (
+    install_cutedsl_jit_monitor,
+    mark_cutedsl_startup_complete,
+)
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.platforms import current_platform
@@ -54,6 +58,8 @@ def _resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
 
 
 def kernel_warmup(worker: "Worker"):
+    install_cutedsl_jit_monitor()
+
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
         envs.VLLM_USE_DEEP_GEMM
@@ -108,6 +114,8 @@ def kernel_warmup(worker: "Worker"):
             force_attention=True,
             create_mixed_batch=True,
         )
+
+    mark_cutedsl_startup_complete()
 
 
 # TODO: remove once FlashInfer upstream fixes the persistent file cache
