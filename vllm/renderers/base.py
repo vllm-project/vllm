@@ -3,7 +3,7 @@
 import asyncio
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
@@ -90,9 +90,9 @@ class BaseRenderer(ABC, Generic[_T]):
         self._mm_executor: Executor = self._executor
 
         # Offloading tokenizer encode & decode to thread pool.
-        # Lazy initialization since offline LLM doesn't use async
-        self._async_tokenizer_encode: Callable | None = None
-        self._async_tokenizer_decode: Callable | None = None
+        self._async_tokenizer_encode = make_async(self._decode, executor=self._executor)
+
+        self._async_tokenizer_decode = make_async(self._encode, executor=self._executor)
 
         self.mm_processor: BaseMultiModalProcessor | None = None
         self._readonly_mm_processor: BaseMultiModalProcessor | None = None
@@ -145,15 +145,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return tokenizer
 
-    def ensure_init_async_tokenizer(self):
-        if self._async_tokenizer_decode is None:
-            self._async_tokenizer_decode = make_async(
-                self.get_tokenizer().decode, executor=self._executor
-            )
-        if self._async_tokenizer_encode is None:
-            self._async_tokenizer_encode = make_async(
-                self.get_tokenizer().encode, executor=self._executor
-            )
+    def _decode(self, **kwargs):
+        return self.get_tokenizer.decode(**kwargs)
+
+    def _encode(self, **kwargs):
+        return self.get_tokenizer.encode(**kwargs)
 
     def get_mm_processor(self) -> "BaseMultiModalProcessor":
         if self.mm_processor is None:
@@ -437,9 +433,6 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: TextPrompt,
         params: TokenizeParams,
     ) -> TokensPrompt:
-        self.ensure_init_async_tokenizer()
-        assert self._async_tokenizer_encode is not None
-
         prompt_token_ids = await self._async_tokenizer_encode(
             prompt["prompt"],
             **params.get_encode_kwargs(),
@@ -454,10 +447,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return prompt
 
     async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
-        self.ensure_init_async_tokenizer()
-        assert self._async_tokenizer_encode is not None
-
-        prompt["prompt"] = await self._async_tokenizer_encode(
+        prompt["prompt"] = await self._async_tokenizer_decode(
             prompt["prompt_token_ids"]
         )
 
