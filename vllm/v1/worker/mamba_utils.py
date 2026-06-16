@@ -56,6 +56,7 @@ def postprocess_mamba_fused_kernel(
     block_size: tl.constexpr,
     # COPY_BLOCK_SIZE: fixed tuning parameter for memory copy loop
     COPY_BLOCK_SIZE: tl.constexpr,
+    CONV_STATE_DIM_FIRST: tl.constexpr,
 ):
     """
     Fused GPU kernel for postprocess_mamba that computes decisions AND performs
@@ -133,11 +134,8 @@ def postprocess_mamba_fused_kernel(
     if src_block_idx == dest_block_idx and accept_token_bias == 0:
         return
 
-    # DS conv tails are strided across dim rows, so copy each row here.
-    dim_rows = tl.load(state_dim_row_count_ptr + state_idx)
-    is_ds_conv = is_conv_state and dim_rows > 0
-
-    if is_ds_conv:
+    if CONV_STATE_DIM_FIRST and is_conv_state:
+        dim_rows = tl.load(state_dim_row_count_ptr + state_idx)
         row_stride = tl.load(state_dim_row_stride_ptr + state_idx)
         per_row_bytes = (conv_width - accept_token_bias).to(tl.int64) * state_elem_size
         bias_bytes = accept_token_bias.to(tl.int64) * state_elem_size
@@ -460,7 +458,12 @@ class MambaSpecDecodeGPUContext:
                         or copy_func is get_temporal_copy_spec
                     ), f"unexpected copy func: {copy_func}"
                     if copy_func is get_conv_copy_spec:
-                        if is_conv_state_dim_first() and state.dim() > 2:
+                        if state.dim() != 3:
+                            raise ValueError(
+                                "Expected 3D conv state cache, got "
+                                f"shape {tuple(state.shape)}"
+                            )
+                        if is_conv_state_dim_first():
                             # DS layout: state_len is the slide axis.
                             self.state_conv_widths[idx] = state.size(2)
                             self.state_inner_sizes[idx] = 1
@@ -469,13 +472,9 @@ class MambaSpecDecodeGPUContext:
                                 state.stride(1) * state.element_size()
                             )
                         else:
-                            # SD layout (num_blocks, state_len, dim) or 2D.
-                            conv_w = state.size(1) if state.dim() > 1 else 0
-                            self.state_conv_widths[idx] = conv_w
-                            if state.dim() > 2:
-                                self.state_inner_sizes[idx] = state.stride(1)
-                            else:
-                                self.state_inner_sizes[idx] = 1
+                            # SD layout: dim is contiguous.
+                            self.state_conv_widths[idx] = state.size(1)
+                            self.state_inner_sizes[idx] = state.stride(1)
                     else:
                         # Temporal state: inner_size = natural elements per
                         # block (prod of inner dims).  The kernel uses this
@@ -562,6 +561,7 @@ class MambaSpecDecodeGPUContext:
             num_reqs,
             block_size=self.block_size,
             COPY_BLOCK_SIZE=1024,
+            CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
         )
 
 
