@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import partial
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -17,6 +19,11 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
+if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
+        AiterCustomAllreduce,
+    )
+
 logger = init_logger(__name__)
 
 # Max number of tokens supported by the Lamport fused allreduce+RMSNorm kernel.
@@ -25,33 +32,10 @@ MINIMAX_QK_NORM_MAX_TOKEN_NUM = 2048
 
 _MINIMAX_FUSED_AR_RMS_QK = getattr(torch.ops._C, "minimax_allreduce_rms_qk", None)
 
-# Cached probe: does the installed AITER build expose custom_fused_qknorm_ar?
-_AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE: bool | None = None
 
-
-def _aiter_has_custom_fused_qknorm_ar() -> bool:
-    global _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE
-    if _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE is None:
-        if not current_platform.is_rocm():
-            _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE = False
-        else:
-            try:
-                from aiter.dist.device_communicators.custom_all_reduce import (
-                    CustomAllreduce as _AiterCustomAllreduce,
-                )
-
-                _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE = hasattr(
-                    _AiterCustomAllreduce, "custom_fused_qknorm_ar"
-                )
-            except ImportError:
-                _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE = False
-    return _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE
-
-
-def _get_aiter_custom_all_reduce():
-    from vllm._aiter_ops import rocm_aiter_ops
-
-    if not rocm_aiter_ops.is_enabled():
+def _get_aiter_custom_all_reduce() -> "AiterCustomAllreduce | None":
+    """Return the active AITER custom-allreduce, or None if it is unavailable."""
+    if not rocm_aiter_ops.is_custom_all_reduce_enabled():
         return None
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
     if aiter_ar is None or getattr(aiter_ar, "disabled", False):
@@ -274,7 +258,7 @@ def _minimax_qk_norm_fusion(
     if (
         tp_world > 1
         and num_tokens <= MINIMAX_QK_NORM_MAX_TOKEN_NUM
-        and _aiter_has_custom_fused_qknorm_ar()
+        and rocm_aiter_ops.has_custom_fused_qknorm_ar()
     ):
         pack_size = 16 // qkv.element_size()
         warp_work_size = 32 * pack_size
@@ -282,11 +266,11 @@ def _minimax_qk_norm_fusion(
             aiter_ar = _get_aiter_custom_all_reduce()
             if aiter_ar is not None:
                 try:
-                    q_out, k_out, _ = aiter_ar.custom_fused_qknorm_ar(
+                    q_out, k_out, _ = aiter_ar.aiter_ca.custom_fused_qknorm_ar(
                         qkv, q_weight, k_weight, eps
                     )
                     return q_out, k_out
-                except RuntimeError:
+                except (RuntimeError, AttributeError):
                     logger.warning_once(
                         "AITER custom_fused_qknorm_ar failed, "
                         "falling back to unfused path."
