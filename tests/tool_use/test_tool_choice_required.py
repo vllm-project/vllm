@@ -5,10 +5,11 @@ from copy import deepcopy
 
 import pytest
 import regex as re
-from openai.types.responses import FunctionTool, WebSearchTool
+from openai.types.responses import FunctionTool, ToolChoiceFunction, WebSearchTool
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionToolsParam,
 )
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
@@ -392,3 +393,27 @@ class TestNonFunctionToolsSkipped:
         any_of = schema["items"]["anyOf"]
         assert len(any_of) == 1
         assert any_of[0]["properties"]["name"]["enum"] == ["get_weather"]
+
+
+class TestForcedNamedToolChoiceEmptyParams:
+    """A forced named tool_choice with missing/empty parameters must still
+    constrain the generated arguments to a JSON object, like the
+    `tool_choice="required"` path, instead of leaving them unconstrained."""
+
+    @pytest.mark.parametrize("params", [None, {}])
+    def test_chat_empty_params_constrains_object(self, params):
+        tool = ChatCompletionToolsParam.model_validate(
+            {"type": "function", "function": {"name": "ping", "parameters": params}}
+        )
+        choice = ChatCompletionNamedToolChoiceParam.model_validate(
+            {"type": "function", "function": {"name": "ping"}}
+        )
+        schema = get_json_schema_from_tools(choice, [tool])
+        assert schema == {"type": "object", "properties": {}}
+
+    @pytest.mark.parametrize("params", [None, {}])
+    def test_responses_empty_params_constrains_object(self, params):
+        tool = FunctionTool(type="function", name="ping", parameters=params)
+        choice = ToolChoiceFunction(type="function", name="ping")
+        schema = get_json_schema_from_tools(choice, [tool])
+        assert schema == {"type": "object", "properties": {}}
