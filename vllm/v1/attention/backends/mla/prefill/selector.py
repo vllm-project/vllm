@@ -64,6 +64,8 @@ def _get_mla_prefill_backend_priorities(
     Returns:
         List of backends in priority order (highest priority first).
     """
+    from vllm.platforms import current_platform
+
     if device_capability.major == 10:  # Blackwell
         return [
             MLAPrefillBackendEnum.FLASH_ATTN,
@@ -71,17 +73,20 @@ def _get_mla_prefill_backend_priorities(
             MLAPrefillBackendEnum.FLASHINFER,
             MLAPrefillBackendEnum.TOKENSPEED_MLA,
         ]
-    elif device_capability.major == 9 and device_capability.minor == 5:  # gfx950
-        # AITER ASM is preferred with FP8 KV cache.
-        # Will fall through to FA if not using FP8 KV.
-        return [
-            MLAPrefillBackendEnum.AITER_ASM,
-            MLAPrefillBackendEnum.FLASH_ATTN,
-        ]
-    else:  # Hopper (SM90) and older
-        return [
-            MLAPrefillBackendEnum.FLASH_ATTN,
-        ]
+    elif current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx950
+
+        if on_gfx950():
+            # AITER ASM is preferred with FP8 KV cache.
+            # Will fall through to FA if not using FP8 KV.
+            return [
+                MLAPrefillBackendEnum.AITER_ASM,
+                MLAPrefillBackendEnum.FLASH_ATTN,
+            ]
+    # Hopper (SM90) and older
+    return [
+        MLAPrefillBackendEnum.FLASH_ATTN,
+    ]
 
 
 def get_mla_prefill_backend(
