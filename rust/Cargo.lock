@@ -5804,6 +5804,7 @@ dependencies = [
  "enum-as-inner",
  "expect-test",
  "futures",
+ "parking_lot",
  "rmp-serde",
  "serde",
  "serde_json",
