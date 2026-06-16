@@ -516,6 +516,15 @@ jobs:
           dirname "$PYTHON_BIN" >> "$GITHUB_PATH"
           "$PYTHON_BIN" --version
 
+      - name: Install ascend-runtime-manager from fresh checkout
+        run: |
+          # Remove any stale editable install so hust_ascend_manager_run()
+          # picks up the freshly checked-out copy instead of a pre-installed
+          # version baked into the runner image.
+          "${PYTHON_BIN}" -m pip uninstall -y hust-ascend-manager 2>/dev/null || true
+          "${PYTHON_BIN}" -m pip install --no-deps -e "$GITHUB_WORKSPACE/ascend-runtime-manager"
+          "${PYTHON_BIN}" -c "import hust_ascend_manager.doctor; print('hust-ascend-manager loaded from:', hust_ascend_manager.doctor.__file__)"
+
       - name: Acquire Ascend hardware lock
         run: bash .github/workflows/scripts/acquire_ascend_hardware_lock.sh
 
