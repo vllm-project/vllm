@@ -1130,14 +1130,17 @@ class VllmConfig:
                     return self.quant_config.has_blocked_weights()
             return False
 
+        def maybe_enable_quant_fp8_custom_op():
+            custom_ops = self.compilation_config.custom_ops
+            if "+quant_fp8" not in custom_ops and "-quant_fp8" not in custom_ops:
+                custom_ops.append("+quant_fp8")
+
         # Enable quant_fp8 CUDA ops (TODO disable in follow up)
         # On H100 the CUDA kernel is faster than
         # native implementation
         # https://github.com/vllm-project/vllm/issues/25094
         if has_blocked_weights():
-            custom_ops = self.compilation_config.custom_ops
-            if "-quant_fp8" not in custom_ops:
-                custom_ops.append("+quant_fp8")
+            maybe_enable_quant_fp8_custom_op()
 
         current_platform.apply_config_platform_defaults(self)
 
@@ -1560,9 +1563,7 @@ class VllmConfig:
         # native implementation
         # https://github.com/vllm-project/vllm/issues/25094
         if has_blocked_weights():
-            custom_ops = self.compilation_config.custom_ops
-            if "-quant_fp8" not in custom_ops:
-                custom_ops.append("+quant_fp8")
+            maybe_enable_quant_fp8_custom_op()
 
         self._verify_kv_transfer_compat()
         # Log the custom passes that are enabled

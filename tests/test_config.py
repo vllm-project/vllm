@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
+    DeviceConfig,
     KernelConfig,
     ModelConfig,
     ParallelConfig,
@@ -1379,6 +1380,33 @@ def test_fusion_pass_op_priority():
     cfg4 = VllmConfig(model_config=ModelConfig("Qwen/Qwen3-4B-FP8"))
     assert "+quant_fp8" in cfg4.compilation_config.custom_ops
     assert cfg4.compilation_config.pass_config.fuse_norm_quant
+
+
+@pytest.mark.skip_global_cleanup
+def test_blocked_fp8_enables_quant_fp8_custom_op_once():
+    class FakeBlockedQuantConfig:
+        weight_block_size = (128, 128)
+
+    cfg = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        quant_config=FakeBlockedQuantConfig(),
+        compilation_config=CompilationConfig(backend="inductor"),
+    )
+
+    assert cfg.compilation_config.custom_ops.count("+quant_fp8") == 1
+    assert cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+
+    cfg = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        quant_config=FakeBlockedQuantConfig(),
+        compilation_config=CompilationConfig(
+            backend="inductor", custom_ops=["-quant_fp8"]
+        ),
+    )
+
+    assert "+quant_fp8" not in cfg.compilation_config.custom_ops
+    assert "-quant_fp8" in cfg.compilation_config.custom_ops
+    assert not cfg.compilation_config.is_custom_op_enabled("quant_fp8")
 
 
 def test_scheduler_config_init():
