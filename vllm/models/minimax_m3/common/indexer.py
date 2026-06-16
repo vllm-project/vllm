@@ -349,6 +349,7 @@ class MiniMaxM3IndexerImpl(nn.Module):
         score_type: str = "max",
         cache_config: CacheConfig | None = None,
         indexer_kv_dtype: IndexerKVDType = "bf16",
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.num_kv_heads = num_kv_heads
@@ -361,6 +362,9 @@ class MiniMaxM3IndexerImpl(nn.Module):
         self.num_index_heads = num_index_heads
         self.index_head_dim = index_head_dim
         self.indexer_kv_dtype = indexer_kv_dtype
+        # Shared, stable-address top-k output buffer (set by the model for the
+        # cudagraph-safe MSA impl); None -> impl allocates fresh (eager).
+        self.topk_indices_buffer = topk_indices_buffer
         # Owns the side cache (registers itself in the static forward context).
         self.index_cache = MiniMaxM3IndexerCache(
             head_dim=index_head_dim,
@@ -500,6 +504,7 @@ class MiniMaxM3Indexer(nn.Module):
         score_type: str = "max",
         cache_config: CacheConfig | None = None,
         indexer_kv_dtype: IndexerKVDType = "bf16",
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         impl_cls = select_indexer_impl_cls(
@@ -519,6 +524,7 @@ class MiniMaxM3Indexer(nn.Module):
             score_type=score_type,
             cache_config=cache_config,
             indexer_kv_dtype=indexer_kv_dtype,
+            topk_indices_buffer=topk_indices_buffer,
         )
 
     @property

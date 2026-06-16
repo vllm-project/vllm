@@ -709,16 +709,25 @@ def minimax_m3_index_topk(
     topk: int,
     init_blocks: int,
     local_blocks: int,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Select index top-k from a precomputed score tensor."""
+    """Select index top-k from a precomputed score tensor.
+
+    When ``out`` is provided (a ``[num_idx_heads, >=total_q, topk]`` buffer), the
+    result is written into ``out[:, :total_q, :]`` instead of a fresh tensor --
+    used to keep the top-k output at a stable address for cudagraph capture.
+    """
     num_idx_heads = score.shape[0]
     batch = cu_seqlens_q.shape[0] - 1
     total_q = score.shape[1]
-    topk_idx = torch.empty(
-        (num_idx_heads, total_q, topk),
-        dtype=torch.int32,
-        device=score.device,
-    )
+    if out is not None:
+        topk_idx = out[:, :total_q, :]
+    else:
+        topk_idx = torch.empty(
+            (num_idx_heads, total_q, topk),
+            dtype=torch.int32,
+            device=score.device,
+        )
     # block_size_q == 1 -> query blocks coincide with query tokens.
     grid_topk = (max_query_len, batch, num_idx_heads)
     _topk_index_kernel[grid_topk](
