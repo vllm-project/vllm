@@ -1707,6 +1707,62 @@ class rocm_aiter_ops:
 
     @classmethod
     @if_aiter_supported
+    def has_fused_rope_mla_kv_cache(cls) -> bool:
+        """Check whether AITER exposes the fused RoPE+MLA KV-cache Triton kernel."""
+        try:
+            from aiter import fused_qk_rope_concat_and_cache_mla  # noqa: F401
+
+            return True
+        except (ImportError, AttributeError):
+            return False
+
+    @classmethod
+    @if_aiter_supported
+    def fused_rope_and_mla_kv_cache_write(
+        cls,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        kv_c: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        q_out: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        q_scale: torch.Tensor,
+        positions: torch.Tensor,
+        cos_cache: torch.Tensor,
+        sin_cache: torch.Tensor,
+        is_neox: bool = True,
+        is_nope_first: bool = False,
+    ) -> None:
+        """Dispatch to aiter.fused_qk_rope_concat_and_cache_mla.
+
+        Note: In production, the fusion path goes through
+        MLARoPEKVCacheCatFusionPass at compile time via
+        ops.concat_and_cache_mla_rope_fused. This function is
+        infrastructure for tests and follow-on PRs.
+        """
+        from aiter import fused_qk_rope_concat_and_cache_mla
+
+        fused_qk_rope_concat_and_cache_mla(
+            q_nope=q_nope,
+            q_pe=q_pe,
+            kv_c=kv_c,
+            k_pe=k_pe,
+            kv_cache=kv_cache,
+            q_out=q_out,
+            slot_mapping=slot_mapping,
+            k_scale=k_scale,
+            q_scale=q_scale,
+            positions=positions,
+            cos_cache=cos_cache,
+            sin_cache=sin_cache,
+            is_neox=is_neox,
+            is_nope_first=is_nope_first,
+        )
+
+    @classmethod
+    @if_aiter_supported
     def is_mha_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._MHA_ENABLED
 
