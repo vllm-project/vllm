@@ -174,9 +174,7 @@ class TestIsReasoningEnd:
 
     def test_prompt_tool_example_before_generation_think_not_end(self, parser):
         """Tool examples before the generation <think> must not end reasoning."""
-        assert not parser.is_reasoning_end(
-            [_TOOL_CALL_ID, _TEXT_ID, _THINK_START_ID]
-        )
+        assert not parser.is_reasoning_end([_TOOL_CALL_ID, _TEXT_ID, _THINK_START_ID])
 
     def test_paired_tool_call_not_end(self, parser):
         """Paired <tool_call>...</tool_call> (from template) is NOT end."""
