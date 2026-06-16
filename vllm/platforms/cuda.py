@@ -6,6 +6,7 @@ pynvml. However, it should not initialize cuda context.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 from collections.abc import Callable
@@ -20,6 +21,9 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C_stable_libtorch  # noqa
+
+with contextlib.suppress(ImportError):
+    import vllm._qutlass_C  # noqa: F401
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
