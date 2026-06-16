@@ -199,7 +199,7 @@ def is_fa_version_supported(fa_version: int) -> bool:
 
 def flash_attn_supports_kv_cache_dtype(kv_cache_dtype: str = "fp8_e4m3") -> bool:
     if current_platform.is_xpu():
-        return True
+        return kv_cache_dtype in ("fp8", "fp8_e4m3")
     fa_version = get_flash_attn_version()
     if kv_cache_dtype == "fp8_e5m2":
         return fa_version == 4
