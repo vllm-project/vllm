@@ -42,6 +42,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     JsonSchemaResponseFormat,
     ResponseFormat,
     StreamOptions,
+    UsageInfo,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import sanitize_message
@@ -57,21 +58,25 @@ def wrap_data_with_event(data: str, event: str):
     return f"event: {event}\ndata: {data}\n\n"
 
 
-def _cache_read_input_tokens(usage) -> int | None:
-    """Map vLLM's cached prompt tokens to Anthropic's ``cache_read_input_tokens``.
+def _cache_read_kwargs(usage: UsageInfo | None) -> dict[str, int]:
+    """Build the ``cache_read_input_tokens`` kwarg for ``AnthropicUsage``.
 
     vLLM only accounts for cache *reads* (prefix-cache hits), surfaced via
     ``UsageInfo.prompt_tokens_details.cached_tokens``; it has no separate
     cache-creation accounting, so ``cache_creation_input_tokens`` is left unset.
     ``prompt_tokens_details`` is only populated when the server is started with
-    ``--enable-prompt-tokens-details``; otherwise this returns ``None``.
+    ``--enable-prompt-tokens-details``.
+
+    Returns an empty dict when the count is unavailable so the field stays unset
+    (and is dropped by ``exclude_unset=True``) instead of serializing as
+    ``"cache_read_input_tokens": null``.
     """
     if usage is None:
-        return None
+        return {}
     details = getattr(usage, "prompt_tokens_details", None)
-    if details is None:
-        return None
-    return details.cached_tokens
+    if details is None or details.cached_tokens is None:
+        return {}
+    return {"cache_read_input_tokens": details.cached_tokens}
 
 
 class AnthropicServingMessages(OpenAIServingChat):
@@ -527,7 +532,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             usage=AnthropicUsage(
                 input_tokens=generator.usage.prompt_tokens,
                 output_tokens=generator.usage.completion_tokens,
-                cache_read_input_tokens=_cache_read_input_tokens(generator.usage),
+                **_cache_read_kwargs(generator.usage),
             ),
             kv_transfer_params=generator.kv_transfer_params,
         )
@@ -713,9 +718,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         if origin_chunk.usage
                                         else 0,
                                         output_tokens=0,
-                                        cache_read_input_tokens=(
-                                            _cache_read_input_tokens(origin_chunk.usage)
-                                        ),
+                                        **_cache_read_kwargs(origin_chunk.usage),
                                     ),
                                 ),
                             )
@@ -741,9 +744,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     output_tokens=origin_chunk.usage.completion_tokens
                                     if origin_chunk.usage
                                     else 0,
-                                    cache_read_input_tokens=_cache_read_input_tokens(
-                                        origin_chunk.usage
-                                    ),
+                                    **_cache_read_kwargs(origin_chunk.usage),
                                 ),
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
