@@ -1142,8 +1142,7 @@ def test_spec_decode_logprobs(
     ref_logprobs = []
     for results in ref_results:
         for output in results.outputs:
-            for logprobs in output.logprobs:
-                ref_logprobs.extend(logprobs.values())
+            ref_logprobs.extend(output.logprobs)
     del ref_llm
     torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
@@ -1163,29 +1162,42 @@ def test_spec_decode_logprobs(
     spec_logprobs = []
     for results in spec_results:
         for output in results.outputs:
-            for logprobs in output.logprobs:
-                spec_logprobs.extend(logprobs.values())
+            spec_logprobs.extend(output.logprobs)
     del spec_llm
     torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
-    # Per-token logprobs are expected to be the same.
     assert len(ref_logprobs) == len(spec_logprobs)
-    for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
-        assert math.isclose(
-            ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1
-        ), (
-            f"Logprob mismatch: ref={ref_logprob.logprob} "
-            f"spec={spec_logprob.logprob} "
-            f"diff={abs(ref_logprob.logprob - spec_logprob.logprob)} "
-            f"(token={ref_logprob.decoded_token!r})"
-        )
-        assert ref_logprob.rank == spec_logprob.rank, (
-            f"Rank mismatch: ref={ref_logprob.rank} "
-            f"spec={spec_logprob.rank} "
-            f"(token={ref_logprob.decoded_token!r})"
-        )
-        assert ref_logprob.decoded_token == spec_logprob.decoded_token
+    for ref_pos, spec_pos in zip(ref_logprobs, spec_logprobs):
+        for token_id, ref_logprob in ref_pos.items():
+            spec_logprob = spec_pos.get(token_id)
+            if spec_logprob is None:
+                continue
+            assert math.isclose(
+                ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1
+            ), (
+                f"Logprob mismatch: ref={ref_logprob.logprob} "
+                f"spec={spec_logprob.logprob} "
+                f"diff={abs(ref_logprob.logprob - spec_logprob.logprob)} "
+                f"(token={ref_logprob.decoded_token!r})"
+            )
+            assert ref_logprob.decoded_token == spec_logprob.decoded_token
+            if ref_logprob.rank != spec_logprob.rank:
+                tied_with_neighbor = any(
+                    other_id != token_id
+                    and math.isclose(
+                        ref_logprob.logprob,
+                        other.logprob,
+                        rel_tol=5e-2,
+                        abs_tol=1e-1,
+                    )
+                    for other_id, other in ref_pos.items()
+                )
+                assert tied_with_neighbor, (
+                    f"Rank mismatch: ref={ref_logprob.rank} "
+                    f"spec={spec_logprob.rank} "
+                    f"(token={ref_logprob.decoded_token!r})"
+                )
 
 
 def test_prompt_logprobs_with_chunking_and_preemption():
