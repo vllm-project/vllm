@@ -347,6 +347,7 @@ joblib==1.4.2
     #   scikit-learn
 jsonschema==4.23.0
     # via
+    #   -c requirements/common.txt
     #   hypothesis-jsonschema
     #   mistral-common
     #   ray

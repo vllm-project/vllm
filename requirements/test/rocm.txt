@@ -426,6 +426,8 @@ joblib==1.5.3
     #   scikit-learn
 jsonschema==4.26.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   hypothesis-jsonschema
     #   mcp
     #   mistral-common

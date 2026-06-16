@@ -108,7 +108,9 @@ fn build_router_with_options(
             state.clone(),
             middleware::track_server_load,
         ))
-        .layer(from_fn(middleware::track_http_metrics));
+        .layer(from_fn(middleware::track_http_metrics))
+        .layer(middleware::cors_layer(&state.cors))
+        .layer(from_fn(middleware::strip_cors_on_no_origin));
 
     if enable_api_key_auth {
         router = router.layer(from_fn_with_state(
