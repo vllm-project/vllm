@@ -94,11 +94,16 @@ def _gemma_fused_add_rmsnorm_kernel(
 
 
 def _num_warps(block_n: int) -> int:
-    if block_n >= 4096:
+    # Tuned on BMG/Xe2: for the M3 hidden sizes (block_n up to 4096) 16 warps
+    # over-subscribes a single row and regresses vs 8; only the very widest
+    # rows benefit from 16.
+    if block_n >= 8192:
         return 16
-    if block_n >= 1024:
+    if block_n >= 2048:
         return 8
-    return 4
+    if block_n >= 512:
+        return 4
+    return 2
 
 
 def gemma_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
