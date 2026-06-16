@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.parser.engine.registered_adapters import (
     Gemma4Parser,
+    NemotronV3Parser,
     Qwen3Parser,
 )
 
@@ -486,11 +487,22 @@ def _build_gemma4(scenario: Scenario, validate: bool = True) -> Sample:
     return sample
 
 
+def _build_nemotron_v3(scenario: Scenario, validate: bool = True) -> Sample:
+    return _build_qwen3(
+        scenario,
+        name="nemotron_v3",
+        parser_cls=NemotronV3Parser,
+        strip_trailing_ws=True,
+        validate=validate,
+    )
+
+
 # ── Registry and public API ──────────────────────────────────────────
 
 _BUILDERS: dict[str, Any] = {
     "qwen3": _build_qwen3,
     "gemma4": _build_gemma4,
+    "nemotron_v3": _build_nemotron_v3,
 }
 
 
