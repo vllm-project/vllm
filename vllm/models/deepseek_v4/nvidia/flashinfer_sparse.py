@@ -46,7 +46,11 @@ def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
 
 
 class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
-    """FlashInfer backend using the DSv4 sparse metadata/cache layout."""
+    """FlashInfer backend using the DSv4 sparse metadata/cache layout.
+
+    Inheriting from the FlashMLA V4 backend reuses its
+    ``DeepseekV4FlashMLAMetadata`` builder.
+    """
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [

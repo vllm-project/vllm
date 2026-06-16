@@ -36,6 +36,10 @@ logger = init_logger(__name__)
 
 
 def kernel_warmup(worker: "Worker"):
+    from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
+        minimax_m3_msa_warmup,
+    )
+
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
     # layer per token; warm them across token sizes first so the first real
     # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).
@@ -61,6 +65,8 @@ def kernel_warmup(worker: "Worker"):
         model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
+
+    minimax_m3_msa_warmup(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune

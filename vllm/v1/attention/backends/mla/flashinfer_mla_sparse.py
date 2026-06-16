@@ -99,6 +99,7 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
         from vllm.config import get_current_vllm_config

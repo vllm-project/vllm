@@ -55,11 +55,6 @@ except ImportError:
     SafetensorsStreamer = runai_model_streamer.placeholder_attr("SafetensorsStreamer")
 
 try:
-    import gguf
-except ImportError:
-    gguf = PlaceholderModule("gguf")
-
-try:
     from fastsafetensors import SafeTensorsFileLoader, SingleGroup
 except ImportError:
     fastsafetensors = PlaceholderModule("fastsafetensors")
@@ -77,30 +72,13 @@ logger = init_logger(__name__)
 temp_dir = tempfile.gettempdir()
 
 
-def enable_hf_transfer():
-    """automatically activates hf_transfer"""
-    if "HF_HUB_ENABLE_HF_TRANSFER" not in os.environ:
-        try:
-            # enable hf hub transfer if available
-            import hf_transfer  # type: ignore # noqa
-
-            huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
-        except ImportError:
-            pass
-
-
 def enable_xet_high_performance():
     """automatically activates xet high performance mode"""
     if "HF_XET_HIGH_PERFORMANCE" not in os.environ:
         huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
 
 
-if hasattr(huggingface_hub.constants, "HF_XET_HIGH_PERFORMANCE"):
-    # Transformers v5
-    enable_xet_high_performance()
-else:
-    # Transformers v4
-    enable_hf_transfer()
+enable_xet_high_performance()
 
 
 class DisabledTqdm(tqdm):
@@ -266,10 +244,6 @@ def get_quant_config(
     if model_config.quantization is None:
         raise ValueError("Model quantization method is not specified in the config.")
     quant_cls = get_quantization_config(model_config.quantization)
-
-    # GGUF doesn't have config file
-    if model_config.quantization == "gguf":
-        return quant_cls()
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
@@ -452,52 +426,6 @@ def get_sparse_attention_config(
     logger.info("Loaded sparse attention config from %s", config_file)
 
     return config
-
-
-def download_gguf(
-    repo_id: str,
-    quant_type: str,
-    cache_dir: str | None = None,
-    revision: str | None = None,
-    ignore_patterns: str | list[str] | None = None,
-) -> str:
-    # Use patterns that snapshot_download can handle directly
-    # Patterns to match:
-    # - *-{quant_type}.gguf (root)
-    # - *-{quant_type}-*.gguf (root sharded)
-    # - */*-{quant_type}.gguf (subdir)
-    # - */*-{quant_type}-*.gguf (subdir sharded)
-    allow_patterns = [
-        f"*-{quant_type}.gguf",
-        f"*-{quant_type}-*.gguf",
-        f"*/*-{quant_type}.gguf",
-        f"*/*-{quant_type}-*.gguf",
-    ]
-
-    # Use download_weights_from_hf which handles caching and downloading
-    folder = download_weights_from_hf(
-        model_name_or_path=repo_id,
-        cache_dir=cache_dir,
-        allow_patterns=allow_patterns,
-        revision=revision,
-        ignore_patterns=ignore_patterns,
-    )
-
-    # Find the downloaded file(s) in the folder
-    local_files = []
-    for pattern in allow_patterns:
-        # Convert pattern to glob pattern for local filesystem
-        glob_pattern = os.path.join(folder, pattern)
-        local_files.extend(glob.glob(glob_pattern))
-
-    if not local_files:
-        raise ValueError(
-            f"Downloaded GGUF files not found in {folder} for quant_type {quant_type}"
-        )
-
-    # Sort to ensure consistent ordering (prefer non-sharded files)
-    local_files.sort(key=lambda x: (x.count("-"), x))
-    return local_files[0]
 
 
 @instrument(span_name="Download weights - HF")
@@ -1254,118 +1182,6 @@ def multi_thread_pt_weights_iterator(
             del state
 
 
-def get_gguf_extra_tensor_names(
-    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
-) -> list[str]:
-    reader = gguf.GGUFReader(gguf_file)
-    expected_gguf_keys = set(gguf_to_hf_name_map.keys())
-    exact_gguf_keys = set([tensor.name for tensor in reader.tensors])
-    extra_keys = expected_gguf_keys - exact_gguf_keys
-    return [gguf_to_hf_name_map[key] for key in extra_keys]
-
-
-def get_gguf_weight_type_map(
-    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
-) -> dict[str, str]:
-    """
-    Return GGUF mapped weight's name and its quant type
-    """
-    reader = gguf.GGUFReader(gguf_file)
-    return {
-        gguf_to_hf_name_map[tensor.name]: tensor.tensor_type.name
-        for tensor in reader.tensors
-        if tensor.name in gguf_to_hf_name_map
-    }
-
-
-def gguf_quant_weights_iterator(
-    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
-) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """
-    Iterate over the quant weights in the model gguf files and convert
-    them to torch tensors.
-    Be careful of the order of yielding weight types and weights data,
-    we have to yield all weight types first before yielding any weights.
-    Otherwise it would cause issue when loading weights with for packed
-    layer with different quant types.
-    """
-
-    reader = gguf.GGUFReader(gguf_file)
-
-    for tensor in reader.tensors:
-        if tensor.name in gguf_to_hf_name_map:
-            weight_type = tensor.tensor_type
-            name = gguf_to_hf_name_map[tensor.name]
-
-            if weight_type.name not in ("F32", "BF16", "F16"):
-                weight_type_name = name.replace("weight", "qweight_type")
-                weight_type = torch.tensor(weight_type)
-                yield weight_type_name, weight_type
-
-    for tensor in reader.tensors:
-        if tensor.name in gguf_to_hf_name_map:
-            weight = tensor.data
-            weight_type = tensor.tensor_type
-            name = gguf_to_hf_name_map[tensor.name]
-            if weight_type.name not in ("F32", "BF16", "F16"):
-                name = name.replace("weight", "qweight")
-            if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
-                # BF16 is currently the only "quantization" type that isn't
-                # actually quantized but is read as a raw byte tensor.
-                # Reinterpret as `torch.bfloat16` tensor.
-                weight = weight.view(np.uint16)
-                if reader.byte_order == "S":
-                    # GGUF endianness != system endianness
-                    weight = weight.byteswap()
-                param = torch.tensor(weight).view(torch.bfloat16)
-            else:
-                param = torch.tensor(weight)
-            yield name, param
-
-
-def gguf_quant_weights_iterator_multi(
-    gguf_files: list[str], gguf_to_hf_name_map: dict[str, str]
-) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """
-    Iterate over the quant weights across multiple GGUF shard files
-    and convert them to torch tensors.
-
-    Like gguf_quant_weights_iterator, we yield all weight types first
-    before yielding any weights data to avoid issues with packed layers
-    that have different quant types.
-    """
-    readers = [gguf.GGUFReader(f) for f in gguf_files]
-
-    # First pass: yield all weight types across all shards
-    for reader in readers:
-        for tensor in reader.tensors:
-            if tensor.name in gguf_to_hf_name_map:
-                weight_type = tensor.tensor_type
-                name = gguf_to_hf_name_map[tensor.name]
-                if weight_type.name not in ("F32", "BF16", "F16"):
-                    weight_type_name = name.replace("weight", "qweight_type")
-                    weight_type = torch.tensor(weight_type)
-                    yield weight_type_name, weight_type
-
-    # Second pass: yield all weight data across all shards
-    for reader in readers:
-        for tensor in reader.tensors:
-            if tensor.name in gguf_to_hf_name_map:
-                weight = tensor.data
-                weight_type = tensor.tensor_type
-                name = gguf_to_hf_name_map[tensor.name]
-                if weight_type.name not in ("F32", "BF16", "F16"):
-                    name = name.replace("weight", "qweight")
-                if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
-                    weight = weight.view(np.uint16)
-                    if reader.byte_order == "S":
-                        weight = weight.byteswap()
-                    param = torch.tensor(weight).view(torch.bfloat16)
-                else:
-                    param = torch.tensor(weight)
-                yield name, param
-
-
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
     """convert PySafeSlice object from safetensors to torch.Tensor
 
@@ -1648,8 +1464,10 @@ def maybe_remap_moe_expert_param_name(
 
     Checkpoint weights have names like:
         layers.0.mlp.experts.w13_weight
+        layers.0.feed_forward.experts.w2_input_scale
     But actual parameters are now:
         layers.0.mlp.experts.routed_experts.w13_weight
+        layers.0.feed_forward.experts.routed_experts.w2_input_scale
 
     This function inserts 'routed_experts.' into the path when needed.
 
@@ -1662,11 +1480,11 @@ def maybe_remap_moe_expert_param_name(
         otherwise the original name
     """
     # Only remap if this looks like an expert parameter
-    if ".mlp.experts." not in name:
+    if ".experts." not in name:
         return name
 
     # Skip if already has routed_experts
-    if ".mlp.experts.routed_experts." in name:
+    if ".experts.routed_experts." in name:
         return name
 
     # Expert parameter patterns to check
@@ -1700,8 +1518,8 @@ def maybe_remap_moe_expert_param_name(
     if not is_expert_param:
         return name
 
-    # Try inserting routed_experts
-    new_name = name.replace(".mlp.experts.", ".mlp.experts.routed_experts.")
+    # Try inserting routed_experts after .experts.
+    new_name = name.replace(".experts.", ".experts.routed_experts.", 1)
 
     # Only use the new name if it exists in the model
     if new_name in params_dict:

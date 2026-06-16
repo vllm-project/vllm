@@ -338,22 +338,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",
         min_transformers_version="5.9.0",
     ),
-    "InternLMForCausalLM": _HfExamplesInfo(
-        "internlm/internlm-chat-7b", trust_remote_code=True
-    ),
     "InternLM2ForCausalLM": _HfExamplesInfo(
         "internlm/internlm2-chat-7b", trust_remote_code=True
-    ),
-    "InternLM2VEForCausalLM": _HfExamplesInfo(
-        "OpenGVLab/Mono-InternVL-2B",
-        trust_remote_code=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": (
-                "Custom config cannot be loaded with Transformers "
-                "v5 because `vision_config` is not always set"
-            )
-        },
     ),
     "InternLM3ForCausalLM": _HfExamplesInfo(
         "internlm/internlm3-8b-instruct", trust_remote_code=True
@@ -434,6 +420,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "MiniMaxAI/MiniMax-M2",
         trust_remote_code=True,
     ),
+    "MiniMaxM3SparseForCausalLM": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "Ministral3ForCausalLM": _HfExamplesInfo("mistralai/Ministral-3-3B-Instruct-2512"),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
@@ -503,14 +494,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Plamo3ForCausalLM": _HfExamplesInfo(
         "pfnet/plamo-3-nict-2b-base",
-        trust_remote_code=True,
-    ),
-    "QWenLMHeadModel": _HfExamplesInfo(
-        "Qwen/Qwen-7B-Chat",
-        max_transformers_version="4.53",
-        transformers_version_reason={
-            "hf": "HF model uses remote code that is not compatible with latest Transformers"  # noqa: E501
-        },
         trust_remote_code=True,
     ),
     "Qwen2ForCausalLM": _HfExamplesInfo(
@@ -586,16 +569,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),
-    "XverseForCausalLM": _HfExamplesInfo(
-        "xverse/XVERSE-7B-Chat",
-        tokenizer="meta-llama/Llama-2-7b",
-        trust_remote_code=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": "XVERSE tokenizer is incompatible with transformers v5 "
-            "(add_prefix_space / prepend_scheme mismatch).",
-        },
-    ),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
     "MiMoV2FlashForCausalLM": _HfExamplesInfo(
@@ -610,7 +583,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
-    "ErnieModel": _HfExamplesInfo("shibing624/text2vec-base-chinese-sentence"),
     "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
         "naver/splade-v3",
         hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
@@ -740,9 +712,6 @@ _REWARD_EXAMPLE_MODELS = {
 
 _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForTokenClassification": _HfExamplesInfo("boltuix/NeuroBERT-NER"),
-    "ErnieForTokenClassification": _HfExamplesInfo(
-        "gyr66/Ernie-3.0-base-chinese-finetuned-ner"
-    ),
     "ModernBertForTokenClassification": _HfExamplesInfo(
         "disham993/electrical-ner-ModernBERT-base"
     ),
@@ -751,9 +720,6 @@ _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForSequenceClassification": _HfExamplesInfo(
         "cross-encoder/ms-marco-MiniLM-L-6-v2"
-    ),
-    "ErnieForSequenceClassification": _HfExamplesInfo(
-        "Forrest20231206/ernie-3.0-base-zh-cls",
     ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "nie3e/sentiment-polish-gpt2-small"
@@ -916,6 +882,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "FuyuForCausalLM": _HfExamplesInfo("adept/fuyu-8b"),
     "Gemma3ForConditionalGeneration": _HfExamplesInfo("google/gemma-3-4b-it"),
+    "DiffusionGemmaForBlockDiffusion": _HfExamplesInfo(
+        "google/diffusiongemma-26B-A4B-it",
+        trust_remote_code=True,
+    ),
     "Gemma4ForConditionalGeneration": _HfExamplesInfo(
         "google/gemma-4-E2B-it",
         min_transformers_version="5.5.0",
@@ -1134,6 +1104,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "MiniMaxAI/MiniMax-VL-01",
         trust_remote_code=True,
     ),
+    "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
         extras={"fp8": "nm-testing/Mistral-Small-3.1-24B-Instruct-2503-FP8-dynamic"},
@@ -1304,16 +1279,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "baidu/Qianfan-OCR",
         min_transformers_version="5.6.0",
     ),
-    "QwenVLForConditionalGeneration": _HfExamplesInfo(
-        "Qwen/Qwen-VL",
-        extras={"chat": "Qwen/Qwen-VL-Chat"},
-        trust_remote_code=True,
-        max_transformers_version="4.53.3",
-        transformers_version_reason={
-            "hf": "HF model uses deprecated imports which have been removed."
-        },  # noqa: E501
-        hf_overrides={"architectures": ["QwenVLForConditionalGeneration"]},
-    ),
     "Qwen2AudioForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen2-Audio-7B-Instruct"
     ),
@@ -1459,6 +1424,14 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
+    ),
+    "DFlashQwen3NextDraftModel": _HfExamplesInfo(
+        "Qwen/Qwen3-Coder-Next",
+        speculative_model="z-lab/Qwen3-Coder-Next-DFlash",
+        use_original_num_layers=True,  # DFlash requires all layers
+        max_model_len=8192,  # Reduce for CI
+        max_num_seqs=32,
+        min_transformers_version="4.56.3",  # Required for Qwen3Next
     ),
     # [Eagle]
     "EagleCohereForCausalLM": _HfExamplesInfo(
@@ -1636,6 +1609,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "XiaomiMiMo/MiMo-V2.5-Omni",
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-V2.5-Omni",
+        is_available_online=False,
+    ),
+    "MiniMaxM3MTP": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
         is_available_online=False,
     ),
     "NemotronHMTPModel": _HfExamplesInfo(
