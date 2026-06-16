@@ -496,11 +496,6 @@ def apply_patch(monkeypatch: pytest.MonkeyPatch):
 
 @create_new_process_for_each_test()
 def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
-    # Keep this e2e on the default conv-state layout.
-    monkeypatch.delenv("VLLM_SSM_CONV_STATE_LAYOUT", raising=False)
-    from vllm.model_executor.layers.mamba import mamba_utils as model_mamba_utils
-
-    model_mamba_utils.get_conv_state_layout.cache_clear()
     run_ref_mamba_state_in_subprocess()
     apply_patch(monkeypatch)
     prompt_dataset = datasets.load_dataset("heheda/a_long_article")
