@@ -8,6 +8,7 @@ import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._ops import OpOverload
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -40,8 +41,16 @@ if silu_and_mul_nvfp4_quant_supported:
     FUSED_OPS[kNvfp4Dynamic] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
 
 if current_platform.is_cuda_alike():
-    FUSED_OPS[kFp8Dynamic128Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
-    FUSED_OPS[kFp8Dynamic64Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
+    if envs.VLLM_USE_TRITON_ACT_QUANT:
+        FUSED_OPS[kFp8Dynamic128Sym] = (
+            torch.ops.vllm.silu_and_mul_per_block_quant_triton.default
+        )
+        FUSED_OPS[kFp8Dynamic64Sym] = (
+            torch.ops.vllm.silu_and_mul_per_block_quant_triton.default
+        )
+    else:
+        FUSED_OPS[kFp8Dynamic128Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
+        FUSED_OPS[kFp8Dynamic64Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
 
 
 class ActivationQuantPattern(VllmPatternReplacement):
