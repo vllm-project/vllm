@@ -357,6 +357,17 @@ class XPUPlatform(Platform):
         return torch.xpu.device_count()
 
     @classmethod
+    def verify_quantization(cls, quant: str) -> None:
+        super().verify_quantization(quant)
+        if quant == "awq":
+            if not envs.VLLM_USE_TRITON_AWQ:
+                logger.warning(
+                    "Using AWQ quantization with XPU, but VLLM_USE_TRITON_AWQ"
+                    " is not set, enabling VLLM_USE_TRITON_AWQ."
+                )
+            os.environ["VLLM_USE_TRITON_AWQ"] = "1"
+
+    @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
         if dtype == torch.bfloat16:  # noqa: SIM102
             device_name = cls.get_device_name().lower()
