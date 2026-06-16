@@ -38,6 +38,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         max_model_len: Some(
                             512,
                         ),
+                        max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
                         chat_template: None,
@@ -132,6 +133,29 @@ fn serve_args_forward_disable_log_stats_to_managed_engine() {
 
     let config = args.to_managed_engine_config(5555);
     assert_eq!(config.python_args, vec!["--disable-log-stats"]);
+}
+
+#[test]
+fn serve_args_forward_max_logprobs_to_frontend_and_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--max-logprobs",
+        "-1",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.max_logprobs, Some(-1));
+
+    let frontend_config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert_eq!(frontend_config.max_logprobs, Some(-1));
+
+    let engine_config = args.to_managed_engine_config(5555);
+    assert_eq!(engine_config.python_args, vec!["--max-logprobs", "-1"]);
 }
 
 #[test]
@@ -388,6 +412,7 @@ fn frontend_args_accept_json() {
                         renderer: Auto,
                         language_model_only: false,
                         max_model_len: None,
+                        max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
                         chat_template: None,
@@ -431,6 +456,7 @@ fn frontend_args_json_applies_defaults() {
     assert_eq!(args.runtime.reasoning_parser, ParserSelection::Auto);
     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
     assert_eq!(args.runtime.max_model_len, None);
+    assert_eq!(args.runtime.max_logprobs, None);
     assert_eq!(args.runtime.shutdown_timeout, 0);
 }
 
@@ -446,7 +472,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_model_len":8192,"shutdown_timeout":3}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","language_model_only":true,"max_model_len":8192,"max_logprobs":-1,"shutdown_timeout":3}"#,
     ])
     .unwrap();
 
@@ -465,6 +491,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
     assert!(args.runtime.language_model_only);
     assert_eq!(args.runtime.max_model_len, Some(8192));
+    assert_eq!(args.runtime.max_logprobs, Some(-1));
     assert_eq!(args.runtime.shutdown_timeout, 3);
 }
 
@@ -792,6 +819,7 @@ fn serve_args_accept_handshake_aliases() {
                         renderer: Auto,
                         language_model_only: false,
                         max_model_len: None,
+                        max_logprobs: None,
                         grpc_port: None,
                         shutdown_timeout: 0,
                         chat_template: None,
@@ -917,6 +945,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
+            max_logprobs: None,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
@@ -985,6 +1014,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
+            max_logprobs: None,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
@@ -1068,6 +1098,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
+            max_logprobs: None,
             api_server_options: ApiServerOptions {
                 enable_log_requests: false,
                 enable_prompt_tokens_details: false,
