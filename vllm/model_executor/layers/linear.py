@@ -46,6 +46,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "UnquantizedLinearMethod",
     "CompressedTensorsLinearMethod",
     "CompressedTensorsLinearTransformMethod",
+    "QutlassNvFP4LinearMethod",
     "AWQMarlinLinearMethod",
     "AWQLinearMethod",
     "AutoGPTQLinearMethod",
@@ -695,10 +696,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         loaded_weight: torch.Tensor,
         loaded_shard_id: tuple[int, ...] | int | None = None,
     ):
-        # If param is a BasevLLMParameter, delegate to weight_loader_v2
-        if isinstance(param, BasevLLMParameter):
-            return self.weight_loader_v2(param, loaded_weight, loaded_shard_id)
-
         self.validate_shard_id(loaded_shard_id)
         # Special case for GGUF
         # initialize GGUF param after we know the quantize type
@@ -1192,10 +1189,6 @@ class QKVParallelLinear(ColumnParallelLinear):
         loaded_weight: torch.Tensor,
         loaded_shard_id: str | None = None,
     ):
-        # If param is a BasevLLMParameter, delegate to weight_loader_v2
-        if isinstance(param, BasevLLMParameter):
-            return self.weight_loader_v2(param, loaded_weight, loaded_shard_id)
-
         self.validate_shard_id(loaded_shard_id)
         # Special case for GGUF
         # initialize GGUF param after we know the quantize type

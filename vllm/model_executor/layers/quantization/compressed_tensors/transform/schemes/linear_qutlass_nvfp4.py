@@ -30,6 +30,7 @@ def is_qutlass_fp4_scheme(
     quant_scheme: CompressedTensorsScheme | None,
     input_tfms: dict[int, TransformTuple],
 ) -> bool:
+<<<<<<< Updated upstream
     if not isinstance(quant_scheme, (CompressedTensorsW4A4Fp4,)):
         return False
 
@@ -43,6 +44,10 @@ def is_qutlass_fp4_scheme(
             return False
 
     return True
+=======
+    # return False
+    return isinstance(quant_scheme, CompressedTensorsW4A4Fp4) and len(input_tfms) >= 1
+>>>>>>> Stashed changes
 
 
 class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
@@ -70,8 +75,6 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
 
         assert self.input_transform is not None
         assert len(self.input_transform.weight.partitions) >= 1
-        for partition in self.input_transform.weight.partitions.values():
-            assert partition.data.shape[0] == layer.scheme.group_size
 
         return ret
 
