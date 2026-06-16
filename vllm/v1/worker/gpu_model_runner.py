@@ -4570,6 +4570,22 @@ class GPUModelRunner(
 
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
+                # PCP_DUMP: log greedy token (argmax) per sampled position to
+                # localize the batched correctness bug. Prefill logits are
+                # cache-independent, so pcp=1 (standard path) and pcp=2 (PCP
+                # path) must agree. Compare the two runs:
+                #  - prefill-step (large n_tok) argmax differs -> prefill
+                #    attention / restore_idx / scatter-back bug.
+                #  - only decode-step (small n_tok) differs -> decode/KV bug.
+                import os as _os
+
+                if _os.environ.get("PCP_DUMP") and self.pcp_rank == 0:
+                    logger.warning(
+                        "PCP_DUMP argmax pcp=%d n_tok=%d %s",
+                        self.pcp_world_size,
+                        num_tokens_unpadded,
+                        logits.argmax(dim=-1).tolist()[:48],
+                    )
             else:
                 # Rare case.
                 assert not self.is_pooling_model
