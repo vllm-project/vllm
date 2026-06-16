@@ -268,6 +268,23 @@ void _dequant_gemm_accum_small_M(
   _dequant_gemm_accum_small_M<M, N, ldb, sym_quant_act>(C, A, scales_a, qzeros_a, B, scales_b, qzeros_b, K, lda, ldc);
 #endif
 
+template <int64_t N, int64_t ldb>
+inline int32_t load_uint4_vnni(const uint8_t* __restrict__ B, int64_t k, int64_t n) {
+  // B is packed as [_block_k / 4, N / 2, 4] for VNNI4. Each byte stores two
+  // columns from adjacent 8-column groups for one K lane.
+  constexpr int64_t n_group_size = 8;
+  constexpr int64_t vnni_size = 4;
+  static_assert(N % (2 * n_group_size) == 0);
+
+  int64_t n_group = n / n_group_size;
+  int64_t ni = n % n_group_size;
+  int64_t ki = k % vnni_size;
+  int64_t k_base = k - ki;
+  int64_t packed_n = (n_group / 2) * n_group_size + ni;
+  uint8_t packed = B[k_base * ldb + packed_n * vnni_size + ki];
+  return (n_group % 2 == 0) ? (packed & 0x0f) : ((packed >> 4) & 0x0f);
+}
+
 template <int64_t N, int64_t ldb, bool sym_quant_act>
 void _dequant_gemm_accum(
     float* C,
@@ -321,7 +338,24 @@ void _dequant_gemm_accum(
   } else
 #endif
   {
-    TORCH_CHECK(false, "tinygemm_kernel: scalar path not implemented!");
+    for (int64_t m = 0; m < M; ++m) {
+      for (int64_t n = 0; n < N; ++n) {
+        int32_t acc = 0;
+        for (int64_t k = 0; k < K; ++k) {
+          int32_t b = load_uint4_vnni<N, ldb>(B, k, n) - qzeros_b[n];
+          if constexpr (sym_quant_act) {
+            const int8_t* A_s8 = reinterpret_cast<const int8_t*>(A);
+            acc += static_cast<int32_t>(A_s8[m * lda + k]) * b;
+          } else {
+            acc += static_cast<int32_t>(A[m * lda + k]) * b;
+          }
+        }
+        if constexpr (!sym_quant_act) {
+          acc -= qzeros_a[m] * compensation[n];
+        }
+        C[m * ldc + n] += static_cast<float>(acc) * scales_a[m] * scales_b[n];
+      }
+    }
   }
 }
 
@@ -496,9 +530,11 @@ void _da8w4_linear_impl(
         store_out<out_dtype, BLOCK_N>(C_tmp, output + mci * block_m * N + nc * BLOCK_N, m_size, N /*lda*/);
       }
     }
+#if defined(CPU_CAPABILITY_AVX512)
     if (use_brgemm) {
       at::native::cpublas::brgemm_release();
     }
+#endif
   });
 }
 

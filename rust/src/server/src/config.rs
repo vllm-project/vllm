@@ -1,7 +1,9 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
+use educe::Educe;
 use serde::Serialize;
 use serde_json::Value;
 use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
@@ -32,8 +34,20 @@ pub enum CoordinatorMode {
     External { address: String },
 }
 
+/// HTTP/API-server behavior switches that affect route-layer responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub struct ApiServerOptions {
+    /// Log a summary line for each completed request.
+    pub enable_log_requests: bool,
+    /// When `true`, include prompt token cache details in response usage.
+    pub enable_prompt_tokens_details: bool,
+    /// When `true`, set `X-Request-Id` on every HTTP response.
+    pub enable_request_id_headers: bool,
+}
+
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Educe, Clone, PartialEq, Eq, Serialize)]
+#[educe(Debug)]
 pub struct Config {
     /// Frontend-to-engine transport setup.
     pub transport_mode: TransportMode,
@@ -63,10 +77,15 @@ pub struct Config {
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
-    /// Log a summary line for each completed request.
-    pub enable_log_requests: bool,
-    /// When `true`, set `X-Request-Id` on every HTTP response.
-    pub enable_request_id_headers: bool,
+    /// Optional maximum number of top log probabilities accepted by the
+    /// frontend. `None` delegates to the text layer default.
+    pub max_logprobs: Option<i32>,
+    /// HTTP/API-server behavior switches.
+    pub api_server_options: ApiServerOptions,
+    /// API keys accepted as bearer tokens for guarded routes.
+    #[serde(skip_serializing)]
+    #[educe(Debug(method(fmt_redacted_api_keys)))]
+    pub api_keys: Vec<String>,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
     /// cache usage).
     pub disable_log_stats: bool,
@@ -82,6 +101,14 @@ impl Config {
     /// startup.
     pub fn validate(&self) -> Result<()> {
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
+        if let Some(max_logprobs) = self.max_logprobs
+            && max_logprobs < -1
+        {
+            bail!(
+                "max_logprobs must be non-negative or -1, got {}",
+                max_logprobs
+            );
+        }
 
         Ok(())
     }
@@ -113,4 +140,20 @@ impl Config {
             }),
         }
     }
+}
+
+struct RedactedApiKeys<'a>(&'a [String]);
+
+impl fmt::Debug for RedactedApiKeys<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0.is_empty() {
+            f.debug_list().finish()
+        } else {
+            write!(f, "[<redacted>; {}]", self.0.len())
+        }
+    }
+}
+
+fn fmt_redacted_api_keys(api_keys: &[String], f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fmt::Debug::fmt(&RedactedApiKeys(api_keys), f)
 }

@@ -33,6 +33,68 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
   // TODO: Remove this once ROCm upgrade to torch 2.11.
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+
+  // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
+  ops.def(
+      "machete_supported_schedules("
+      "   ScalarType a_type,"
+      "   int b_type,"
+      "   ScalarType? maybe_group_scales_type,"
+      "   ScalarType? maybe_group_zeros_type,"
+      "   ScalarType? maybe_channel_scales_type,"
+      "   ScalarType? maybe_token_scales_type,"
+      "   ScalarType? maybe_out_type"
+      ") -> str[]");
+  ops.def(
+      "machete_mm("
+      "   Tensor A,"
+      "   Tensor B,"
+      "   int b_type,"
+      "   ScalarType? out_type,"
+      "   Tensor? group_scales,"
+      "   Tensor? group_zeros,"
+      "   int?    group_size,"
+      "   Tensor? channel_scales,"
+      "   Tensor? token_scales,"
+      "   str?    schedule"
+      ") -> Tensor");
+  ops.def(
+      "machete_prepack_B("
+      "   Tensor B,"
+      "   ScalarType a_type,"
+      "   int b_type,"
+      "   ScalarType? group_scales_type"
+      ") -> Tensor");
+  // conditionally compiled so impl registration is in source file
+
+  // Marlin GEMM
+  ops.def(
+      "marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
+      "Tensor? b_bias_or_none,Tensor b_scales, "
+      "Tensor? a_scales, Tensor? global_scale, Tensor? b_zeros_or_none, "
+      "Tensor? "
+      "g_idx_or_none, Tensor? perm_or_none, Tensor workspace, int b_type_id, "
+      "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
+      "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
+  // conditionally compiled so impl registrations are in source file
+
+  // gptq_marlin repack from GPTQ.
+  ops.def(
+      "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, "
+      "SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
+  // conditionally compiled so impl registrations are in source file
+
+  // awq_marlin repack from AWQ.
+  ops.def(
+      "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
+      "SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
+  // conditionally compiled so impl registrations are in source file
+
+  // preprocess W-int4A-fp8 weight for marlin kernel
+  ops.def(
+      "marlin_int4_fp8_preprocess(Tensor qweight, "
+      "Tensor? qzeros_or_none, bool inplace) -> Tensor");
+  // conditionally compiled so impl registrations are in source file
 #endif
 
 #ifndef USE_ROCM
@@ -246,6 +308,22 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "awq_dequantize(Tensor _kernel, Tensor _scaling_factors, "
       "Tensor _zeros, SymInt split_k_iters, int thx, int thy) -> Tensor");
 
+  // Expert-specialization mxfp8 blockscaled grouped quantization (SM100+).
+  ops.def(
+      "mxfp8_experts_quant("
+      " Tensor input, Tensor problem_sizes, Tensor expert_offsets,"
+      " Tensor blockscale_offsets, Tensor! quant_output, Tensor! scale_factor)"
+      " -> ()");
+  // conditionally compiled so impl registration is in source file
+
+  // Expert-specialization mxfp8 blockscaled grouped GEMM (SM100+).
+  ops.def(
+      "cutlass_mxfp8_grouped_mm("
+      " Tensor a, Tensor b, Tensor sfa, Tensor sfb, Tensor! out,"
+      " Tensor problem_sizes, Tensor expert_offsets, Tensor blockscale_offsets)"
+      " -> ()");
+  // conditionally compiled so impl registration is in source file
+
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
   // conditionally compiled so impl registration is in source file
   ops.def(
@@ -383,6 +461,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "float eps) -> (Tensor, Tensor)");
 #endif
 
+  // Horizontally-fused MiniMax-M3 QK-norm + partial NeoX RoPE + KV-insert.
+  ops.def(
+      "fused_minimax_m3_qknorm_rope_kv_insert("
+      "Tensor! qkv, Tensor q_norm_weight, Tensor k_norm_weight, "
+      "Tensor cos_sin_cache, Tensor positions, int num_heads, "
+      "int num_kv_heads, int rotary_dim, float eps, "
+      "Tensor? index_q_norm_weight, Tensor? index_k_norm_weight, "
+      "int num_index_heads, "
+      "Tensor? slot_mapping, Tensor? index_slot_mapping, "
+      "Tensor!? kv_cache, Tensor!? index_cache, "
+      "int block_size, Tensor!? q_out, Tensor!? index_q_out) -> ()");
+
   // Apply repetition penalties to logits in-place.
   ops.def(
       "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
@@ -410,9 +500,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
 
   // SwiGLU activation with input clamping.
+  // alpha scales the sigmoid (gate * sigmoid(alpha * gate)); beta is added to
+  // the up half (up + beta). Defaults alpha=1.0, beta=0.0 give silu(gate)*up.
   ops.def(
-      "silu_and_mul_with_clamp(Tensor! result, Tensor input, float limit) "
-      "-> ()");
+      "silu_and_mul_with_clamp(Tensor! result, Tensor input, float limit, "
+      "float alpha=1.0, float beta=0.0) -> ()");
 
   // Activation function used in GeGLU with `none` approximation.
   ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
@@ -478,34 +570,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 
   // Post processing for GPTQ.
   ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
-
-  // Dequantization for GGML.
-  ops.def(
-      "ggml_dequantize(Tensor W, int type, SymInt m, SymInt n, ScalarType? "
-      "dtype) -> Tensor");
-
-  // mmvq kernel for GGML.
-  ops.def(
-      "ggml_mul_mat_vec_a8(Tensor W, Tensor X, int type, SymInt row) "
-      "-> Tensor");
-
-  // mmq kernel for GGML.
-  ops.def(
-      "ggml_mul_mat_a8(Tensor W, Tensor X, int type, SymInt row) -> Tensor");
-
-  // moe kernel for GGML.
-  ops.def(
-      "ggml_moe_a8(Tensor X, Tensor W, "
-      "Tensor sorted_token_ids, Tensor expert_ids, Tensor "
-      "num_tokens_post_padded, "
-      "int type, SymInt row, SymInt top_k, SymInt tokens) -> Tensor");
-
-  ops.def(
-      "ggml_moe_a8_vec(Tensor X, Tensor W, "
-      "Tensor topk_ids, int top_k, "
-      "int type, SymInt row, SymInt tokens) -> Tensor");
-
-  ops.def("ggml_moe_get_block_size(int type) -> int");
 
   // Mamba selective scan kernel
   ops.def(
@@ -629,6 +693,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("minimax_allreduce_rms", TORCH_BOX(&minimax_allreduce_rms));
   ops.impl("minimax_allreduce_rms_qk", TORCH_BOX(&minimax_allreduce_rms_qk));
 #endif
+  ops.impl("fused_minimax_m3_qknorm_rope_kv_insert",
+           TORCH_BOX(&fused_minimax_m3_qknorm_rope_kv_insert));
 
   // Sampler kernels (shared CUDA/ROCm)
   ops.impl("apply_repetition_penalties_",
@@ -663,12 +729,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("gptq_gemm", TORCH_BOX(&gptq_gemm));
   ops.impl("gptq_shuffle", TORCH_BOX(&gptq_shuffle));
 
-  // GGML kernels
-  ops.impl("ggml_dequantize", TORCH_BOX(&ggml_dequantize));
-  ops.impl("ggml_mul_mat_vec_a8", TORCH_BOX(&ggml_mul_mat_vec_a8));
-  ops.impl("ggml_mul_mat_a8", TORCH_BOX(&ggml_mul_mat_a8));
-  ops.impl("ggml_moe_a8", TORCH_BOX(&ggml_moe_a8));
-  ops.impl("ggml_moe_a8_vec", TORCH_BOX(&ggml_moe_a8_vec));
+  // Mamba kernels
   ops.impl("selective_scan_fwd", TORCH_BOX(&selective_scan_fwd));
 
   ops.impl("paged_attention_v1", TORCH_BOX(&paged_attention_v1));
@@ -712,9 +773,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CompositeExplicitAutograd, ops) {
   ops.impl("cutlass_scaled_mm_supports_fp4",
            TORCH_BOX(&cutlass_scaled_mm_supports_fp4));
 #endif
-
-  // GGML block size lookup (no tensor args)
-  ops.impl("ggml_moe_get_block_size", TORCH_BOX(&ggml_moe_get_block_size));
 }
 
 // Cache ops

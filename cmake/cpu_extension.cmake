@@ -166,6 +166,10 @@ elseif (S390_FOUND)
         "-mtune=native")
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
     message(STATUS "RISC-V detected")
+    if(DEFINED VLLM_RVV_VLEN AND NOT VLLM_RVV_VLEN GREATER 0)
+        message(FATAL_ERROR
+            "VLLM_RVV_VLEN must be a positive integer; got '${VLLM_RVV_VLEN}'")
+    endif()
     # VLLM_RVV_VLEN selects the target VLEN. Auto-detected from /proc/cpuinfo
     # by default; override with -DVLLM_RVV_VLEN=128 or -DVLLM_RVV_VLEN=256.
     if(NOT DEFINED VLLM_RVV_VLEN)
@@ -189,8 +193,7 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
                 "RISC-V RVV is available but VLEN could not be auto-detected. "
                 "Please specify VLEN explicitly:\n"
                 "  -DVLLM_RVV_VLEN=128   (for VLEN=128 hardware)\n"
-                "  -DVLLM_RVV_VLEN=256   (for VLEN=256 hardware, e.g. Spacemit X100)\n"
-                "  -DVLLM_RVV_VLEN=0     (force scalar, no RVV)")
+                "  -DVLLM_RVV_VLEN=256   (for VLEN=256 hardware, e.g. Spacemit X100)")
         endif()
     endif()
     if(VLLM_RVV_VLEN AND VLLM_RVV_VLEN GREATER 0)
@@ -219,7 +222,7 @@ endif()
 
 
 # Build oneDNN for GEMM kernels
-if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
+if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND OR RVV_FP16_FOUND OR RVV_BF16_FOUND)
     # Fetch and build Arm Compute Library (ACL) as oneDNN's backend for AArch64
     # TODO [fadara01]: remove this once ACL can be fetched and built automatically as a dependency of oneDNN
     set(ONEDNN_AARCH64_USE_ACL OFF CACHE BOOL "")
@@ -432,6 +435,12 @@ endif()
 if(USE_ONEDNN)
     set(VLLM_EXT_SRC
         "csrc/cpu/dnnl_kernels.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    set(VLLM_EXT_SRC
+        "csrc/cpu/sgl-kernels/gemm_int4.cpp"
         ${VLLM_EXT_SRC})
 endif()
 

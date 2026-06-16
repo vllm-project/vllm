@@ -130,6 +130,9 @@ def _fwd_kernel_ep_scatter_2(
     HIDDEN_SIZE_PAD: tl.constexpr,
     SCALE_HIDDEN_SIZE: tl.constexpr,
     SCALE_HIDDEN_SIZE_PAD: tl.constexpr,
+    PACK_UE8M0: tl.constexpr,
+    SCALE_PACKED_SIZE: tl.constexpr,
+    SCALE_PACKED_SIZE_PAD: tl.constexpr,
 ):
     start_token_id = tl.program_id(0)
     grid_num = tl.num_programs(0)
@@ -137,16 +140,47 @@ def _fwd_kernel_ep_scatter_2(
     offset_in = tl.arange(0, HIDDEN_SIZE_PAD)
     mask = offset_in < HIDDEN_SIZE
 
-    offset_in_s = tl.arange(0, SCALE_HIDDEN_SIZE_PAD)
-    mask_s = offset_in_s < SCALE_HIDDEN_SIZE
-
     output_tensor_stride0 = output_tensor_stride0.to(tl.int64)
+
+    if PACK_UE8M0:
+        # One int32 per 4 consecutive 32-wide UE8M0 groups, stored MN-major.
+        offs_pk = tl.arange(0, SCALE_PACKED_SIZE_PAD)
+        mask_pk = offs_pk < SCALE_PACKED_SIZE
+    else:
+        offset_in_s = tl.arange(0, SCALE_HIDDEN_SIZE_PAD)
+        mask_s = offset_in_s < SCALE_HIDDEN_SIZE
 
     for token_id in range(start_token_id, total_token_num, grid_num):
         to_copy = tl.load(recv_x + token_id * recv_x_stride0 + offset_in, mask=mask)
-        to_copy_s = tl.load(
-            recv_x_scale + token_id * recv_x_scale_stride0 + offset_in_s, mask=mask_s
-        )
+
+        if PACK_UE8M0:
+            # Pack 4 UE8M0 bytes into one int32 (byte j = group 4*pk+j).
+            base_s = recv_x_scale + token_id * recv_x_scale_stride0
+            g0, g1 = offs_pk * 4, offs_pk * 4 + 1
+            g2, g3 = offs_pk * 4 + 2, offs_pk * 4 + 3
+            b0 = tl.load(
+                base_s + g0 * recv_x_scale_stride1, mask=g0 < SCALE_HIDDEN_SIZE
+            )
+            b1 = tl.load(
+                base_s + g1 * recv_x_scale_stride1, mask=g1 < SCALE_HIDDEN_SIZE
+            )
+            b2 = tl.load(
+                base_s + g2 * recv_x_scale_stride1, mask=g2 < SCALE_HIDDEN_SIZE
+            )
+            b3 = tl.load(
+                base_s + g3 * recv_x_scale_stride1, mask=g3 < SCALE_HIDDEN_SIZE
+            )
+            packed_s = (
+                b0.to(tl.int32)
+                | (b1.to(tl.int32) << 8)
+                | (b2.to(tl.int32) << 16)
+                | (b3.to(tl.int32) << 24)
+            )
+        else:
+            to_copy_s = tl.load(
+                recv_x_scale + token_id * recv_x_scale_stride0 + offset_in_s,
+                mask=mask_s,
+            )
 
         for topk_index in tl.range(0, topk_num, 1, num_stages=4):
             expert_id = tl.load(recv_topk + token_id * recv_topk_stride0 + topk_index)
@@ -164,11 +198,21 @@ def _fwd_kernel_ep_scatter_2(
                 output_tensor_ptr = (
                     output_tensor + dest_token_index_i64 * output_tensor_stride0
                 )
+                tl.store(output_tensor_ptr + offset_in, to_copy, mask=mask)
+
                 output_tensor_scale_ptr = (
                     output_tensor_scale + dest_token_index * output_tensor_scale_stride0
                 )
-                tl.store(output_tensor_ptr + offset_in, to_copy, mask=mask)
-                tl.store(output_tensor_scale_ptr + offset_in_s, to_copy_s, mask=mask_s)
+                if PACK_UE8M0:
+                    tl.store(
+                        output_tensor_scale_ptr + offs_pk * output_tensor_scale_stride1,
+                        packed_s,
+                        mask=mask_pk,
+                    )
+                else:
+                    tl.store(
+                        output_tensor_scale_ptr + offset_in_s, to_copy_s, mask=mask_s
+                    )
 
 
 @torch.no_grad()
@@ -183,9 +227,11 @@ def ep_scatter(
     output_tensor_scale: torch.Tensor,
     m_indices: torch.Tensor,
     output_index: torch.Tensor,
+    block_size: int = 128,
+    pack_ue8m0: bool = False,
 ):
     BLOCK_E = 128  # token num of per expert is aligned to 128
-    BLOCK_D = 128  # block size of quantization
+    BLOCK_D = block_size  # block size of activation-scale quantization
     num_warps = 8
     num_experts = num_recv_tokens_per_expert.shape[0]
     hidden_size = recv_x.shape[1]
@@ -194,6 +240,10 @@ def ep_scatter(
 
     assert m_indices.shape[0] % BLOCK_E == 0
     assert expert_start_loc.shape[0] == num_experts
+
+    # pack_ue8m0: scatter packs 4 UE8M0 bytes per int32; else copies scales as-is.
+    scale_hidden_size = hidden_size // BLOCK_D
+    scale_packed_size = (scale_hidden_size + 3) // 4 if pack_ue8m0 else 1
 
     _fwd_kernel_ep_scatter_1[(grid,)](
         num_recv_tokens_per_expert,
@@ -234,8 +284,11 @@ def ep_scatter(
         num_warps=num_warps,
         HIDDEN_SIZE=hidden_size,
         HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size),
-        SCALE_HIDDEN_SIZE=hidden_size // BLOCK_D,
-        SCALE_HIDDEN_SIZE_PAD=triton.next_power_of_2(hidden_size // BLOCK_D),
+        SCALE_HIDDEN_SIZE=scale_hidden_size,
+        SCALE_HIDDEN_SIZE_PAD=triton.next_power_of_2(scale_hidden_size),
+        PACK_UE8M0=pack_ue8m0,
+        SCALE_PACKED_SIZE=scale_packed_size,
+        SCALE_PACKED_SIZE_PAD=triton.next_power_of_2(scale_packed_size),
     )
     return
 
@@ -352,6 +405,7 @@ def deepgemm_moe_permute(
     expert_map: torch.Tensor | None,
     expert_tokens_meta: mk.ExpertTokensMetadata | None,
     aq_out: torch.Tensor | None = None,
+    block_size: int | None = None,
 ):
     assert aq.ndim == 2
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
@@ -359,6 +413,10 @@ def deepgemm_moe_permute(
     device = aq.device
 
     block_m, block_k = get_mk_alignment_for_contiguous_layout()
+    # The activation-scale group size may differ from the M/K tile alignment
+    # (e.g. MXFP8 uses a 32-element scale group while block_k stays 128).
+    if block_size is not None:
+        block_k = block_size
 
     M_sum = compute_aligned_M(
         M=topk_ids.size(0),
@@ -376,9 +434,21 @@ def deepgemm_moe_permute(
     if aq_out is None:
         aq_out = torch.empty((M_sum, H), device=device, dtype=aq.dtype)
 
-    aq_scale_out = torch.empty(
-        (M_sum, H // block_k), device=device, dtype=torch.float32
-    )
+    # uint8 UE8M0 (MXFP8) -> scatter packs into DeepGEMM's int32 MN-major
+    # TMA-aligned layout; float32 (FP8/FP4) scattered row-major as-is.
+    pack_ue8m0 = aq_scale.dtype == torch.uint8
+    sf_k = H // block_k
+    if pack_ue8m0:
+        packed_sf_k = (sf_k + 3) // 4
+        tma_aligned_mn = round_up(M_sum, 4)
+        aq_scale_out = torch.empty_strided(
+            (M_sum, packed_sf_k),
+            (1, tma_aligned_mn),
+            device=device,
+            dtype=torch.int32,
+        )
+    else:
+        aq_scale_out = torch.empty((M_sum, sf_k), device=device, dtype=torch.float32)
 
     # DeepGEMM uses negative values in m_indices (here expert_ids) to mark
     # completely invalid / padded blocks that should be skipped. We always
@@ -412,6 +482,8 @@ def deepgemm_moe_permute(
         output_tensor_scale=aq_scale_out,
         m_indices=expert_ids,
         output_index=inv_perm,
+        block_size=block_k,
+        pack_ue8m0=pack_ue8m0,
     )
 
     return aq_out, aq_scale_out, expert_ids, inv_perm
