@@ -150,7 +150,17 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Worker-side state (set by register_kv_caches).
         self._kv_cache: torch.Tensor | None = None
+
+        # Identify which KV cache group holds the hidden-states layer.
+        # Must be set at init (not register_kv_caches) because the scheduler-
+        # side connector uses it in request_finished_all_groups but never
+        # calls register_kv_caches.
         self._hs_group_idx: int = 0
+        if self._kv_cache_config is not None:
+            for i, group in enumerate(self._kv_cache_config.kv_cache_groups):
+                if any("cache_only_layers" in n for n in group.layer_names):
+                    self._hs_group_idx = i
+                    break
         # Only TP rank 0 writes hidden states to disk; other TP ranks no-op.
         # Set in register_kv_caches (after distributed init).
         self._is_tp_rank_zero: bool = True
@@ -259,6 +269,12 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             f"Expected 1 CacheOnlyAttentionLayer, got {len(self.cache_layers)}"
         )
         self._kv_cache = kv_caches[self.cache_layers[0]]
+
+        # Bind the allocated KV cache to the CacheOnlyAttentionLayer.
+        # bind_kv_cache() runs before the draft model is loaded, so the
+        # layer still holds its empty placeholder tensor.
+        for name, layer in layers.items():
+            layer.kv_cache = kv_caches[name]
 
         # Find the KV cache group index for hidden states
         if self._kv_cache_config is not None:
