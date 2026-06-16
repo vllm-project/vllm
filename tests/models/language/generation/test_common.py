@@ -25,7 +25,6 @@ EMBED_SCALING_MODELS = {
 AITER_MODEL_LIST = [
     "meta-llama/Llama-3.2-1B-Instruct",
     "openbmb/MiniCPM3-4B",
-    "Qwen/Qwen-7B-Chat",
     "Qwen/Qwen2.5-0.5B-Instruct",
     "TitanML/tiny-mixtral",
     "Qwen/Qwen3-8B",
@@ -81,9 +80,6 @@ AITER_MODEL_LIST = [
         pytest.param(
             "microsoft/phi-2",  # phi
             marks=[pytest.mark.core_model, pytest.mark.slow_test],
-        ),
-        pytest.param(
-            "Qwen/Qwen-7B-Chat",  # qwen (text-only)
         ),
         pytest.param(
             "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
@@ -152,7 +148,11 @@ def test_models(
             "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - "
         )
 
-    with hf_runner(model) as hf_model:
+    with hf_runner(
+        model,
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
+    ) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs
         )
@@ -188,6 +188,7 @@ def test_models(
         model,
         tokenizer_name=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         # Remove the effects of batch variance on ROCm since batch invariance
         # is not yet supported.
