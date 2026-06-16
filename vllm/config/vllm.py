@@ -70,6 +70,7 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
         "Qwen3ForCausalLM",
         "DeepseekV2ForCausalLM",
         "Qwen2MoeForCausalLM",
+        "GraniteMoeForCausalLM",
         "LlamaForCausalLM",
         "MistralForCausalLM",
     }
@@ -966,15 +967,6 @@ class VllmConfig:
                         "Async scheduling is not compatible with "
                         "disable_padded_drafter_batch=True."
                     )
-            if (
-                self.model_config is not None
-                and self.model_config.enable_prompt_embeds
-                and self.model_config.is_multimodal_model
-            ):
-                raise ValueError(
-                    "Async scheduling is not yet supported with prompt embeds "
-                    "for multimodal models."
-                )
             if not executor_supports_async_sched:
                 raise ValueError(
                     f"`{executor_backend}` does not support async scheduling yet."
@@ -1016,16 +1008,6 @@ class VllmConfig:
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend. ",
                     executor_backend,
-                )
-                self.scheduler_config.async_scheduling = False
-            elif (
-                self.model_config is not None
-                and self.model_config.enable_prompt_embeds
-                and self.model_config.is_multimodal_model
-            ):
-                logger.warning_once(
-                    "Async scheduling is not yet supported with prompt embeds "
-                    "for multimodal models and will be disabled."
                 )
                 self.scheduler_config.async_scheduling = False
             else:
