@@ -353,6 +353,14 @@ def gemma4_config() -> ParserEngineConfig:
                 ParserState.REASONING,
                 (EventType.REASONING_START,),
             ),
+            # No-op: if we pre-initialised the engine to REASONING from the
+            # prompt (see ``adjust_initial_state_from_prompt``) but the model
+            # still emits its own ``<|channel>`` opener, swallow it instead
+            # of leaking it as TEXT_CHUNK.
+            (ParserState.REASONING, "THINK_START"): Transition(
+                ParserState.REASONING,
+                (),
+            ),
             (ParserState.REASONING, "THINK_END"): Transition(
                 ParserState.CONTENT,
                 (EventType.REASONING_END,),
@@ -518,33 +526,25 @@ class Gemma4Parser(ParserEngine):
                 return True
         return True
 
-    def _prompt_ends_in_open_reasoning(self, input_ids: Sequence[int]) -> bool:
-        """Detect a prompt that ends inside an open ``<|channel>`` block.
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        """Pre-initialise the engine to ``REASONING`` when the prompt does
+        not already end with reasoning concluded.
 
-        The Gemma4 chat template can leave the prompt ending in
-        ``<|channel>thought\\n`` (e.g. after a final tool response with
-        ``enable_thinking=True``). In that case the first generated tokens
-        are reasoning but no ``<|channel>`` will appear in the delta.
+        This covers the post-tool-response continuation case where the chat
+        template leaves the prompt ending inside an open ``<|channel>``
+        block (issue #45834). It is also safe in the common new-turn case
+        where the model itself emits ``<|channel>`` first: the no-op
+        ``(REASONING, THINK_START)`` transition swallows it, and the
+        ``thought\n`` prefix in the first reasoning chunk is stripped by
+        ``_events_to_delta`` as it already is in the default flow.
         """
-        start_id = self._reasoning_start_token_id
-        end_id = self._reasoning_end_token_id
-        if start_id is None or end_id is None:
-            return False
-        for i in range(len(input_ids) - 1, -1, -1):
-            tid = input_ids[i]
-            if tid == start_id:
-                return True
-            if tid == end_id:
-                return False
-        return False
-
-    def prepare_streaming_for_prompt(self, prompt_token_ids: Sequence[int]) -> None:
-        if not self._prompt_ends_in_open_reasoning(prompt_token_ids):
+        if self.is_reasoning_end(list(prompt_token_ids)):
             return
-        self.initialize_streaming(initial_state=ParserState.REASONING)
-        # ``thought\n`` is already in the prompt and will not appear in the
-        # generated deltas, so there is nothing left to strip.
-        self._prefix_stripped = True
+        self._engine.reset(initial_state=ParserState.REASONING)
+        # Prevent a later default ``initialize_streaming()`` (e.g. from
+        # ``ParserEngineReasoningAdapter.extract_reasoning_streaming``) from
+        # clobbering this with ``CONTENT``.
+        self._streaming_initialized = True
 
     def _events_to_delta(
         self,

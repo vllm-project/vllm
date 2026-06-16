@@ -166,13 +166,8 @@ class ParserEngine(Parser):
             self._streaming_initialized = True
             self._reset(initial_state=initial_state)
 
-    def prepare_streaming_for_prompt(self, prompt_token_ids: Sequence[int]) -> None:
-        """Hook called once with the prompt token ids before streaming starts.
-
-        Default is a no-op; subclasses can override to pre-initialise the
-        streaming engine when the prompt leaves the parser in a non-default
-        state (e.g. an open reasoning channel).
-        """
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        """See :meth:`ReasoningParser.adjust_initial_state_from_prompt`."""
         return
 
     def finish_streaming(self) -> DeltaMessage | None:
@@ -376,8 +371,11 @@ class ParserEngine(Parser):
         finished: bool,
     ) -> DeltaMessage | None:
         if not self._prompt_streaming_prepared and prompt_token_ids is not None:
+            # NOTE: call the hook BEFORE setting the flag, because the hook
+            # may invoke ``_reset`` (e.g. via ``initialize_streaming``) which
+            # clears ``_prompt_streaming_prepared``.
+            self.adjust_initial_state_from_prompt(prompt_token_ids)
             self._prompt_streaming_prepared = True
-            self.prepare_streaming_for_prompt(prompt_token_ids)
         self._check_skip_tool_parsing(request)
         events = self._feed(delta_text, delta_token_ids)
         if finished:
