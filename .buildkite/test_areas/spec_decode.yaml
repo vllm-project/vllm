@@ -39,7 +39,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -78,7 +78,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       timeout_in_minutes: 65
       depends_on:
       - image-build-amd
@@ -103,7 +103,7 @@ steps:
     - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       timeout_in_minutes: 50
       depends_on:
       - image-build-amd

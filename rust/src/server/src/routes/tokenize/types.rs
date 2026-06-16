@@ -83,6 +83,7 @@ impl TokenizeChatRequest {
             },
             tools: convert_tools(self.tools)?,
             tool_choice: ChatToolChoice::Auto,
+            parallel_tool_calls: true,
             decode_options: TextDecodeOptions::default(),
             intermediate: false,
             priority: 0,
@@ -134,10 +135,11 @@ impl Normalizable for DetokenizeRequest {}
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::routes::openai::utils::types::{ChatMessage, MessageContent};
     use serde_json::json;
     use vllm_chat::ChatTool;
+
+    use super::*;
+    use crate::routes::openai::utils::types::{ChatMessage, MessageContent};
 
     #[test]
     fn tokenize_request_converts_openai_tools() {
