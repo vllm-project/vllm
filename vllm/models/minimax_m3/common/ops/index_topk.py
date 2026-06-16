@@ -317,6 +317,7 @@ def _decode_index_score_kernel(
     BLOCK_SIZE_Q: tl.constexpr,
     num_kv_chunks,
     USE_PDL: tl.constexpr,
+    USE_DOT: tl.constexpr,
 ):
     BLOCK_SIZE_HQ: tl.constexpr = num_idx_heads * BLOCK_SIZE_Q
     pid_r = tl.program_id(0)
@@ -373,7 +374,14 @@ def _decode_index_score_kernel(
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
         )  # [N,D]
-        kq = tl.dot(k, q)  # [N,HQ]
+        if USE_DOT:
+            kq = tl.dot(k, q)  # [N,HQ]
+        else:
+            # Intel Triton's tl.dot requires the output dim >= 16, but it equals
+            # num_idx_heads (4 for MiniMax-M3); reduce over the head dim instead.
+            kq = tl.sum(
+                k[:, :, None].to(tl.float32) * q[None, :, :].to(tl.float32), axis=1
+            )  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
         score = tl.max(kq, axis=0)  # [HQ]
         is_visible_block = blk < num_blocks_q
@@ -831,6 +839,7 @@ def minimax_m3_index_decode(
         BLOCK_SIZE_Q=BLOCK_SIZE_Q,
         num_kv_chunks=num_kv_chunks,
         USE_PDL=use_pdl,
+        USE_DOT=not current_platform.is_xpu(),
         **score_kwargs,
     )
 
