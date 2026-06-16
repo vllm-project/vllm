@@ -224,6 +224,17 @@ class CohereEmbedRequest(BaseModel):
     max_tokens: int | None = None
     priority: int = 0
 
+    @model_validator(mode="after")
+    def validate_input_fields(self):
+        input_fields = (self.texts, self.images, self.inputs)
+        provided_fields = [field for field in input_fields if field is not None]
+        if len(provided_fields) != 1 or not provided_fields[0]:
+            raise ValueError(
+                "Exactly one of texts, images, or inputs must be provided, "
+                "and it must be non-empty"
+            )
+        return self
+
 
 # ---------------------------------------------------------------------------
 # Cohere /v2/embed — response models

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import enum
+import functools
 import os
 import platform
 import sys
@@ -30,6 +31,7 @@ else:
 logger = init_logger(__name__)
 
 
+@functools.cache
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(platform.uname()).lower()
@@ -752,11 +754,13 @@ class Platform:
     def is_pin_memory_available(cls) -> bool:
         """Checks whether pin memory is available on the current platform."""
         if in_wsl():
-            # Pinning memory in WSL is not supported.
             # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
+            # Pinned memory support under WSL depends on the vendor and driver
+            # version. Conservative default: return False. Platform subclasses
+            # that can verify support (e.g. CudaPlatformBase) override this.
             logger.warning(
                 "Using 'pin_memory=False' as WSL is detected. "
-                "This may slow down the performance."
+                "This may slow down performance."
             )
             return False
         return True
