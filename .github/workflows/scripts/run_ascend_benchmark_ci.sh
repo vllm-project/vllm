@@ -722,7 +722,34 @@ cleanup() {
 }
 
 run_runner_npu_preflight_once() {
-  "$PYTHON_BIN" - <<'PY'
+  # Strip conda/mamba env library paths from LD_LIBRARY_PATH before running
+  # the preflight.  The shell may inherit conda env library paths (e.g.
+  # /root/miniconda3/envs/vllm-hust-dev/lib) from the container's activation
+  # that shadow CANN driver libs (libstdc++, libc_sec.so, etc.).
+  # use_single_ascend_env.sh overrides LD_LIBRARY_PATH with build_env_dict()
+  # exports, but the conda paths may persist if the shell was initialised
+  # before the override.
+  local clean_ld_path="${LD_LIBRARY_PATH:-}"
+  if [[ -n "$clean_ld_path" ]]; then
+    local _clean_ld=""
+    local _entry
+    IFS=':' read -ra _ld_entries <<< "$clean_ld_path"
+    for _entry in "${_ld_entries[@]}"; do
+      [[ -z "$_entry" ]] && continue
+      case "$_entry" in
+        */conda/*|*/miniconda*|*/anaconda*|*/mambaforge*|*/miniforge*|*/envs/*)
+          continue ;;
+      esac
+      if [[ -n "$_clean_ld" ]]; then
+        _clean_ld="${_clean_ld}:${_entry}"
+      else
+        _clean_ld="$_entry"
+      fi
+    done
+    clean_ld_path="$_clean_ld"
+  fi
+
+  env LD_LIBRARY_PATH="$clean_ld_path" "$PYTHON_BIN" - <<'PY'
 import importlib.util
 import os
 import sys
