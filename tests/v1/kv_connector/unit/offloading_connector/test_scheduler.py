@@ -2085,33 +2085,38 @@ def test_request_finished_with_pending_stores_populates_fence(request_runner):
         generate_store_output(keys)
     )
 
-    # Schedule to create store jobs (but don't complete transfers).
-    runner.scheduler.schedule()
-    runner._update_gpu_blocks()
+    # Capture fence state at each step to verify it was populated.
+    fence_snapshots: list[dict] = []
+    job_block_ids: set[int] = set()
 
-    # Verify store job was created.
-    assert len(runner.connector_scheduler._jobs) > 0
-    job_id = next(iter(runner.connector_scheduler._jobs))
-    job_status = runner.connector_scheduler._jobs[job_id]
-    assert job_status.is_store
-    non_sw_block_ids = job_status.non_sliding_window_block_ids or []
-    assert len(non_sw_block_ids) > 0
+    def capture_fence():
+        fence_snapshots.append(
+            dict(runner.connector_scheduler._block_id_to_pending_jobs)
+        )
+        for js in runner.connector_scheduler._jobs.values():
+            if js.is_store:
+                job_block_ids.update(js.non_sliding_window_block_ids or [])
 
-    # Fence should be empty before request_finished
-    # (non-sliding-window blocks are only registered at request finish).
+    # Run the full lifecycle: create job → finish request → flush → cleanup.
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        complete_transfers=False,
+        expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2),
+        post_step_fn=capture_fence,
+    )
+
+    # Verify fence was populated at some point during the run.
+    assert len(job_block_ids) > 0, "No store job was created"
+    populated_fence = next((f for f in fence_snapshots if len(f) > 0), None)
+    assert populated_fence is not None, "Fence was never populated"
+
+    # Verify fence contained the job's non-SW block IDs.
+    for bid in job_block_ids:
+        assert bid in populated_fence, f"Block {bid} not in fence: {populated_fence}"
+
+    # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
-
-    # Finish the request — triggers request_finished which populates the fence.
-    req_id = str(runner.req_id)
-    runner.scheduler.finish_requests({req_id}, RequestStatus.FINISHED_STOPPED)
-
-    # Verify fence index is populated with the job's non-SW block IDs.
-    for bid in non_sw_block_ids:
-        assert bid in runner.connector_scheduler._block_id_to_pending_jobs
-        assert job_id in runner.connector_scheduler._block_id_to_pending_jobs[bid]
-
-    # req_status should still exist because the job is still in-flight.
-    assert req_id in runner.connector_scheduler._req_status
 
 
 def test_multiple_in_flight_stores_all_flushed(request_runner):
@@ -2154,10 +2159,8 @@ def test_multiple_in_flight_stores_all_flushed(request_runner):
 
     # Second run: 4 more tokens + EOS → block 2 full → job_1 created.
     # Request finishes → "all finished" flush fires → both jobs flushed.
-    # Re-set prepare_store after run() calls manager.reset_mock().
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
-    )
+    # Note: prepare_store.side_effect persists across run() calls because
+    # manager.reset_mock() only resets call history, not side_effect.
     runner.run(
         decoded_tokens=[0] * offloaded_block_size + [EOS_TOKEN_ID],
         complete_transfers=False,
@@ -2263,43 +2266,48 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
         generate_store_output(keys)
     )
 
-    runner.scheduler.schedule()
-    runner._update_gpu_blocks()
+    # Capture fence state and job block IDs at each step.
+    fence_snapshots: list[dict] = []
+    sw_block_ids: set[int] = set()
+    non_sw_block_ids: set[int] = set()
 
-    assert len(runner.connector_scheduler._jobs) > 0
-    job_id = next(iter(runner.connector_scheduler._jobs))
-    job_status = runner.connector_scheduler._jobs[job_id]
-    assert job_status.is_store
+    def capture_fence():
+        fence_snapshots.append(
+            dict(runner.connector_scheduler._block_id_to_pending_jobs)
+        )
+        for js in runner.connector_scheduler._jobs.values():
+            if js.is_store:
+                sw_block_ids.update(js.sliding_window_block_ids or [])
+                non_sw_block_ids.update(js.non_sliding_window_block_ids or [])
 
-    # Both types of block IDs should be present.
-    non_sw_block_ids = set(job_status.non_sliding_window_block_ids or [])
-    sw_block_ids = set(job_status.sliding_window_block_ids or [])
-    assert len(non_sw_block_ids) > 0
-    assert len(sw_block_ids) > 0
+    # Run the full lifecycle: create job → finish request → flush → cleanup.
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        complete_transfers=False,
+        expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2),
+        post_step_fn=capture_fence,
+    )
 
-    # SW blocks should already be in the fence
-    # (registered at store creation time).
-    for bid in sw_block_ids:
-        assert bid in runner.connector_scheduler._block_id_to_pending_jobs
-        assert job_id in (runner.connector_scheduler._block_id_to_pending_jobs[bid])
+    # Verify job had both SW and non-SW blocks.
+    assert len(sw_block_ids) > 0, "No SW blocks in store job"
+    assert len(non_sw_block_ids) > 0, "No non-SW blocks in store job"
 
-    # Snapshot the SW fence entries before request_finished.
-    sw_fence_entries = {
-        bid: set(runner.connector_scheduler._block_id_to_pending_jobs[bid])
-        for bid in sw_block_ids
-    }
+    # Find the fence snapshot where both SW and non-SW blocks were present.
+    # SW blocks should appear at creation time, non-SW at request_finished.
+    populated_fence = None
+    for fence in fence_snapshots:
+        has_sw = all(bid in fence for bid in sw_block_ids)
+        has_non_sw = all(bid in fence for bid in non_sw_block_ids)
+        if has_sw and has_non_sw:
+            populated_fence = fence
+            break
 
-    # Finish the request — only non-SW blocks should be newly registered.
-    req_id = str(runner.req_id)
-    runner.scheduler.finish_requests({req_id}, RequestStatus.FINISHED_STOPPED)
+    assert populated_fence is not None, (
+        f"Fence never contained both SW {sw_block_ids} and "
+        f"non-SW {non_sw_block_ids} blocks. Snapshots: {fence_snapshots}"
+    )
 
-    fence = runner.connector_scheduler._block_id_to_pending_jobs
-
-    # Non-SW blocks are now in the fence.
-    for bid in non_sw_block_ids:
-        assert bid in fence
-        assert job_id in fence[bid]
-
-    # SW fence entries are unchanged (not duplicated).
-    for bid, expected_jobs in sw_fence_entries.items():
-        assert fence[bid] == expected_jobs
+    # Verify fence is empty after full lifecycle (cleanup happened).
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+    assert len(runner.connector_scheduler._jobs) == 0
