@@ -25,6 +25,7 @@ from vllm.config.attention import IndexerKVDType
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_decode,
@@ -46,6 +47,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
 )
+
+logger = init_logger(__name__)
 
 
 class MiniMaxM3IndexerBackend(AttentionBackend):
@@ -468,23 +471,39 @@ def select_indexer_impl_cls(
             f"indexer_kv_dtype={indexer_kv_dtype!r} needs the (not-yet-added) "
             "CuteDSL indexer impl."
         )
-    if (
-        current_platform.is_cuda()
-        and current_platform.is_device_capability_family(100)
+    is_sm100 = (
+        current_platform.is_cuda() and current_platform.is_device_capability_family(100)
+    )
+    use_msa = (
+        is_sm100
         and topk_blocks in (4, 8, 16, 32)
         and indexer_kv_dtype in ("bf16", "fp8", "fp8_e4m3")
-    ):
+    )
+    if use_msa:
         # Lazy import so AMD / non-SM100 never import fmha_sm100.
         from vllm.models.minimax_m3.nvidia.indexer_msa import (
             MiniMaxM3IndexerMSAImpl,
         )
 
+        logger.info_once(
+            "MiniMax M3 indexer: selected MSA (fmha_sm100 score + Triton top-k) "
+            "[topk_blocks=%d, indexer_kv_dtype=%s]",
+            topk_blocks,
+            indexer_kv_dtype,
+        )
         return MiniMaxM3IndexerMSAImpl
     if indexer_kv_dtype != "bf16":
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
             "Triton indexer impl."
         )
+    logger.info_once(
+        "MiniMax M3 indexer: selected Triton (no fmha_sm100) "
+        "[topk_blocks=%d, indexer_kv_dtype=%s, sm100=%s]",
+        topk_blocks,
+        indexer_kv_dtype,
+        is_sm100,
+    )
     return MiniMaxM3IndexerTritonImpl
 
 
