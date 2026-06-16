@@ -9,7 +9,7 @@ use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
-use crate::protocol::{EngineCoreEventType, EngineCoreOutput};
+use crate::protocol::{EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput};
 use crate::transport::ConnectedEngine;
 
 pub type OutputSender = mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>;
@@ -287,6 +287,34 @@ impl RequestRegistry {
             .into_values()
             .map(|tracked| tracked.sender)
             .collect()
+    }
+
+    /// Finalize client-initiated aborts: remove each request and push a
+    /// terminal output with `finish_reason = Abort` down its stream before the
+    /// sender drops. Returns the request ids that were still active.
+    pub fn abort_many<'a>(
+        &mut self,
+        request_ids: impl IntoIterator<Item = &'a String>,
+        timestamp: f64,
+    ) -> Vec<String> {
+        let mut aborted = Vec::new();
+        for request_id in request_ids {
+            let Some((sender, engine_id)) = self.remove(request_id) else {
+                continue;
+            };
+            let output = EngineCoreStreamOutput {
+                engine_index: engine_id.engine_index().unwrap_or(0),
+                timestamp,
+                output: EngineCoreOutput {
+                    request_id: request_id.clone(),
+                    finish_reason: Some(EngineCoreFinishReason::Abort),
+                    ..EngineCoreOutput::default()
+                },
+            };
+            let _ = sender.send(Ok(output));
+            aborted.push(request_id.clone());
+        }
+        aborted
     }
 
     /// Remove one request from the local registry. Returns the tracked entry if

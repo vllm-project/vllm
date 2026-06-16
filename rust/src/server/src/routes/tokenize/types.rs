@@ -83,6 +83,7 @@ impl TokenizeChatRequest {
             },
             tools: convert_tools(self.tools)?,
             tool_choice: ChatToolChoice::Auto,
+            parallel_tool_calls: true,
             decode_options: TextDecodeOptions::default(),
             intermediate: false,
             priority: 0,
