@@ -24,17 +24,18 @@ dp_ep_configs=(
 # We assume HMA enabled by default.
 hybrid_ssm_configs=(
   "VLLM_SSM_CONV_STATE_LAYOUT=DS GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=ibm-granite/granite-4.0-h-tiny VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192,--trust-remote-code"
-  # TODO: (NickLucche) Address async scheduling issue with TP>1 separately as this may impact other models.
-  "VLLM_SSM_CONV_STATE_LAYOUT=DS PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=ibm-granite/granite-4.0-h-tiny VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192,--trust-remote-code,--no-async-scheduling"
+  "VLLM_SSM_CONV_STATE_LAYOUT=DS PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=ibm-granite/granite-4.0-h-tiny VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192,--trust-remote-code"
   # GDN (Qwen3.5)
   "VLLM_SSM_CONV_STATE_LAYOUT=DS GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B"
-  "VLLM_SSM_CONV_STATE_LAYOUT=DS PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B VLLM_SERVE_EXTRA_ARGS=--no-async-scheduling"
+  "VLLM_SSM_CONV_STATE_LAYOUT=DS PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=Qwen/Qwen3.5-0.8B"
 )
 sw_attn_configs=(
   # NOTE: gemma3 does not work with FlashInfer
   "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=google/gemma-3-4b-it VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192" # SW model
   "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=google/gemma-3-4b-it PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192"
   "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=google/gemma-3-4b-it PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1 VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192"
+  # Gemma4: SW + cross-layer KV sharing
+  "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=google/gemma-4-E2B-it VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192"
 )
 
 # Select config array based on DP_EP env var
@@ -75,7 +76,11 @@ run_tests() {
 # Set backend
 label="default backend"
 cmdline_args=""
-if [[ -n "${ROCM_ATTN:-}" ]]; then
+if [[ -n "${ATTENTION_BACKEND:-}" ]]; then
+  echo "ATTENTION_BACKEND is set, running with --attention-backend ${ATTENTION_BACKEND}"
+  label="${ATTENTION_BACKEND} backend"
+  cmdline_args=" --attention-backend ${ATTENTION_BACKEND} "
+elif [[ -n "${ROCM_ATTN:-}" ]]; then
   echo "ROCM_ATTN is set, running with --attention-backend ROCM_ATTN"
   label="ROCM_ATTN backend"
   cmdline_args=" --attention-backend ROCM_ATTN "
