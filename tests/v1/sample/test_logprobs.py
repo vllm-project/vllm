@@ -22,7 +22,12 @@ from vllm import SamplingParams
 from vllm.config.model import LogprobsMode
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.exceptions import VLLMValidationError
+from vllm.logprobs import append_logprobs_for_next_position, create_sample_logprobs
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.sample.logprob import (
+    LogprobTokenIdsState,
+    compute_topk_logprobs,
+)
 
 from ...conftest import HfRunner, VllmRunner
 
@@ -47,6 +52,191 @@ ROCM_DETERMINISM_KWARGS: dict = (
     if current_platform.is_rocm()
     else {}
 )
+requires_accelerator = pytest.mark.skipif(
+    current_platform.is_cpu(), reason="compute_topk_logprobs requires an accelerator"
+)
+
+
+def _make_logprob_token_ids_state(
+    token_ids_by_req: list[list[int]],
+    device: torch.device,
+) -> LogprobTokenIdsState:
+    state = LogprobTokenIdsState(len(token_ids_by_req), device)
+    for req_idx, token_ids in enumerate(token_ids_by_req):
+        state.add_request(req_idx, SamplingParams(logprob_token_ids=token_ids))
+    state.apply_staged_writes()
+    return state
+
+
+def _append_logprobs_row(result, row_idx: int, num_logprobs: int):
+    request_logprobs = create_sample_logprobs(flat_logprobs=False)
+    append_logprobs_for_next_position(
+        request_logprobs,
+        result.logprob_token_ids[row_idx].cpu().tolist(),
+        result.logprobs[row_idx].cpu().tolist(),
+        itertools.repeat(None),
+        result.selected_token_ranks[row_idx].cpu().tolist(),
+        num_logprobs,
+    )
+    return request_logprobs[0]
+
+
+@requires_accelerator
+def test_compute_topk_logprobs_fast_path_dedups_sampled_token() -> None:
+    device = torch.device(current_platform.device_type)
+    logits = torch.tensor(
+        [[0.0, 9.0, 8.0, 7.0, 6.0], [9.0, 8.0, 7.0, 6.0, 5.0]],
+        dtype=torch.float32,
+        device=device,
+    )
+    sampled_token_ids = torch.tensor([1, 0], dtype=torch.int64, device=device)
+
+    result = compute_topk_logprobs(logits, 2, sampled_token_ids)
+
+    expected = torch.tensor([[1, 2, 3], [0, 1, 2]], dtype=torch.int64)
+    assert torch.equal(result.logprob_token_ids.cpu(), expected)
+
+
+@requires_accelerator
+def test_compute_topk_logprobs_fast_path_preserves_topk_without_duplicate() -> None:
+    device = torch.device(current_platform.device_type)
+    logits = torch.tensor(
+        [[9.0, 8.0, 7.0, 6.0, 0.0]],
+        dtype=torch.float32,
+        device=device,
+    )
+    sampled_token_ids = torch.tensor([4], dtype=torch.int64, device=device)
+
+    result = compute_topk_logprobs(logits, 3, sampled_token_ids)
+
+    expected = torch.tensor([[4, 0, 1, 2]], dtype=torch.int64)
+    assert torch.equal(result.logprob_token_ids.cpu(), expected)
+
+
+@requires_accelerator
+def test_compute_topk_logprobs_reports_true_rank_after_dedup() -> None:
+    device = torch.device(current_platform.device_type)
+    logits = torch.tensor(
+        [[9.0, 8.0, 7.0, 6.0]],
+        dtype=torch.float32,
+        device=device,
+    )
+    sampled_token_ids = torch.tensor([0], dtype=torch.int64, device=device)
+
+    result = compute_topk_logprobs(logits, 2, sampled_token_ids)
+
+    expected_ids = torch.tensor([[0, 1, 2]], dtype=torch.int64)
+    expected_ranks = torch.tensor([[1, 2, 3]], dtype=torch.int64)
+    assert torch.equal(result.logprob_token_ids.cpu(), expected_ids)
+    assert torch.equal(result.selected_token_ranks.cpu(), expected_ranks)
+
+    logprobs = _append_logprobs_row(result, 0, 2)
+    assert logprobs[0].rank == 1
+    assert logprobs[1].rank == 2
+    assert logprobs[2].rank == 3
+
+
+@requires_accelerator
+def test_compute_topk_logprobs_preserves_rank_when_sampled_token_outside_topk() -> None:
+    device = torch.device(current_platform.device_type)
+    logits = torch.tensor(
+        [[9.0, 8.0, 7.0, 6.0]],
+        dtype=torch.float32,
+        device=device,
+    )
+    sampled_token_ids = torch.tensor([3], dtype=torch.int64, device=device)
+
+    result = compute_topk_logprobs(logits, 2, sampled_token_ids)
+
+    expected_ids = torch.tensor([[3, 0, 1]], dtype=torch.int64)
+    expected_ranks = torch.tensor([[4, 1, 2]], dtype=torch.int64)
+    assert torch.equal(result.logprob_token_ids.cpu(), expected_ids)
+    assert torch.equal(result.selected_token_ranks.cpu(), expected_ranks)
+
+    logprobs = _append_logprobs_row(result, 0, 2)
+    assert logprobs[3].rank == 4
+    assert logprobs[0].rank == 1
+    assert logprobs[1].rank == 2
+
+
+@requires_accelerator
+def test_compute_topk_logprobs_custom_path_dedups_topk_rows() -> None:
+    device = torch.device(current_platform.device_type)
+    logits = torch.tensor(
+        [[0.0, 9.0, 8.0, 7.0, 6.0], [0.0, 9.0, 8.0, 7.0, 6.0]],
+        dtype=torch.float32,
+        device=device,
+    )
+    sampled_token_ids = torch.tensor([1, 1], dtype=torch.int64, device=device)
+    state = _make_logprob_token_ids_state([[], [2, 4]], device)
+    expanded_idx_mapping = torch.tensor([0, 1], dtype=torch.int32, device=device)
+
+    result = compute_topk_logprobs(
+        logits,
+        2,
+        sampled_token_ids,
+        logprob_token_ids_state=state,
+        expanded_idx_mapping=expanded_idx_mapping,
+        max_per_req_token_ids=2,
+    )
+
+    expected = torch.tensor([[1, 2, 3], [1, 2, 4]], dtype=torch.int64)
+    assert torch.equal(result.logprob_token_ids.cpu(), expected)
+    expected_ranks = torch.tensor([[1, 2, 3], [1, 2, 4]], dtype=torch.int64)
+    assert torch.equal(result.selected_token_ranks.cpu(), expected_ranks)
+
+
+@requires_accelerator
+def test_compute_topk_logprobs_custom_path_preserves_per_request_tokens() -> None:
+    device = torch.device(current_platform.device_type)
+    logits = torch.tensor(
+        [[9.0, 8.0, 7.0, 6.0, 5.0]],
+        dtype=torch.float32,
+        device=device,
+    )
+    sampled_token_ids = torch.tensor([0], dtype=torch.int64, device=device)
+    state = _make_logprob_token_ids_state([[3, 4]], device)
+    expanded_idx_mapping = torch.tensor([0], dtype=torch.int32, device=device)
+
+    result = compute_topk_logprobs(
+        logits,
+        2,
+        sampled_token_ids,
+        logprob_token_ids_state=state,
+        expanded_idx_mapping=expanded_idx_mapping,
+        max_per_req_token_ids=2,
+    )
+
+    expected = torch.tensor([[0, 3, 4]], dtype=torch.int64)
+    assert torch.equal(result.logprob_token_ids.cpu(), expected)
+
+
+@requires_accelerator
+def test_compute_topk_logprobs_num_logprobs_zero() -> None:
+    device = torch.device(current_platform.device_type)
+    logits = torch.tensor(
+        [[9.0, 8.0, 7.0, 6.0, 5.0]],
+        dtype=torch.float32,
+        device=device,
+    )
+    sampled_token_ids = torch.tensor([0], dtype=torch.int64, device=device)
+
+    fast_result = compute_topk_logprobs(logits, 0, sampled_token_ids)
+    assert torch.equal(
+        fast_result.logprob_token_ids.cpu(), torch.tensor([[0]], dtype=torch.int64)
+    )
+
+    state = _make_logprob_token_ids_state([[3, 4]], device)
+    expanded_idx_mapping = torch.tensor([0], dtype=torch.int32, device=device)
+    custom_result = compute_topk_logprobs(
+        logits,
+        0,
+        sampled_token_ids,
+        logprob_token_ids_state=state,
+        expanded_idx_mapping=expanded_idx_mapping,
+        max_per_req_token_ids=2,
+    )
+    assert torch.equal(custom_result.logprob_token_ids.cpu(), torch.tensor([[0, 3, 4]]))
 
 
 @pytest.fixture(

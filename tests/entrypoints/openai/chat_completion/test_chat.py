@@ -143,6 +143,39 @@ async def test_some_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name",
+    [MODEL_NAME],
+)
+async def test_top_logprobs_chat_has_no_duplicate_tokens(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    messages = [
+        {"role": "system", "content": "you are a helpful assistant"},
+        {"role": "user", "content": "what is 1+1?"},
+    ]
+
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=5,
+        temperature=0.0,
+        logprobs=True,
+        top_logprobs=5,
+    )
+
+    choice = chat_completion.choices[0]
+    assert choice.logprobs is not None
+    assert choice.logprobs.content is not None
+    for logprob_content in choice.logprobs.content:
+        top_logprob_tokens = [
+            top_logprob.token for top_logprob in logprob_content.top_logprobs
+        ]
+        assert len(top_logprob_tokens) == len(set(top_logprob_tokens))
+        assert top_logprob_tokens.count(logprob_content.token) <= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
     [MODEL_NAME, "zephyr-lora"],
 )
 async def test_too_many_chat_logprobs(client: openai.AsyncOpenAI, model_name: str):
