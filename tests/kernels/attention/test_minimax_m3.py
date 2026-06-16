@@ -475,6 +475,13 @@ def test_msa_indexer_impl_matches_triton(topk, monkeypatch):
     msa_impl.index_cache.kv_cache = index_cache
     triton_impl.index_cache.kv_cache = index_cache
 
+    # Exercise the shared persistent top-k buffer: the MSA impl must write both
+    # decode ([:, :nd]) and prefill ([:, nd:]) into it and return views of it.
+    nd = sum(q for q in batch.query_lens if q <= 1)
+    msa_impl.topk_indices_buffer = torch.full(
+        (num_idx_heads, num_tokens, topk), -2, dtype=torch.int32, device=device
+    )
+
     attn_metadata = {
         msa_impl.index_cache.prefix: msa_builder.build(0, common),
         triton_impl.index_cache.prefix: triton_builder.build(0, common),
@@ -487,6 +494,10 @@ def test_msa_indexer_impl_matches_triton(topk, monkeypatch):
     assert msa_prefill is not None and tri_prefill is not None
     _assert_topk_indices_equal_unordered(msa_decode, tri_decode)
     _assert_topk_indices_equal_unordered(msa_prefill, tri_prefill)
+    # decode/prefill outputs are views into the one persistent buffer.
+    buf = msa_impl.topk_indices_buffer
+    assert msa_decode.data_ptr() == buf[:, :nd, :].data_ptr()
+    assert msa_prefill.data_ptr() == buf[:, nd:, :].data_ptr()
 
 
 @pytest.mark.parametrize(
