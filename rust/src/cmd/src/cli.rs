@@ -23,8 +23,8 @@ use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
-    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode,
-    ParserSelection, RendererSelection,
+    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
+    HttpListenerMode, ParserSelection, RendererSelection,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
@@ -83,6 +83,13 @@ pub enum Command {
     /// frontend.
     Serve(ServeArgs),
 }
+
+/// A JSON-encoded list of strings, matching Python's `json.loads` CLI type for
+/// the CORS list arguments (e.g. `--allowed-origins '["*"]'`). Parsing the whole
+/// value as one item keeps clap from treating the field as a repeated flag.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct JsonStringList(pub Vec<String>);
 
 /// Runtime arguments shared by the external-engine and managed-engine paths.
 #[serde_as]
@@ -220,6 +227,30 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub served_model_name: Vec<String>,
 
+    /// CORS allowed origins as a JSON list. `["*"]` allows any origin.
+    #[arg(long, value_parser = parse_json::<JsonStringList>, value_name = "JSON", default_value = r#"["*"]"#)]
+    #[serde(default = "default_cors_wildcard")]
+    pub allowed_origins: JsonStringList,
+
+    /// CORS allowed methods as a JSON list. `["*"]` allows the standard set.
+    #[arg(long, value_parser = parse_json::<JsonStringList>, value_name = "JSON", default_value = r#"["*"]"#)]
+    #[serde(default = "default_cors_wildcard")]
+    pub allowed_methods: JsonStringList,
+
+    /// CORS allowed request headers as a JSON list. `["*"]` mirrors the request.
+    #[arg(long, value_parser = parse_json::<JsonStringList>, value_name = "JSON", default_value = r#"["*"]"#)]
+    #[serde(default = "default_cors_wildcard")]
+    pub allowed_headers: JsonStringList,
+
+    /// Allow CORS credentials (cookies, authorization headers).
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub allow_credentials: bool,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -264,6 +295,7 @@ impl SharedRuntimeArgs {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
         let api_server_options = self.api_server_options();
+        let cors = self.cors_config();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -288,6 +320,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
+            cors,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
@@ -309,6 +342,7 @@ impl SharedRuntimeArgs {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
         let api_server_options = self.api_server_options();
+        let cors = self.cors_config();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -332,6 +366,7 @@ impl SharedRuntimeArgs {
             chat_template_content_format: self.chat_template_content_format,
             max_logprobs: self.max_logprobs,
             api_server_options,
+            cors,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
@@ -346,10 +381,23 @@ impl SharedRuntimeArgs {
             enable_request_id_headers: self.enable_request_id_headers,
         }
     }
+
+    fn cors_config(&self) -> CorsConfig {
+        CorsConfig {
+            allow_origins: self.allowed_origins.0.clone(),
+            allow_methods: self.allowed_methods.0.clone(),
+            allow_headers: self.allowed_headers.0.clone(),
+            allow_credentials: self.allow_credentials,
+        }
+    }
 }
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
+}
+
+fn default_cors_wildcard() -> JsonStringList {
+    JsonStringList(vec!["*".to_string()])
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
