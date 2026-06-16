@@ -984,6 +984,8 @@ class GptOssModel(nn.Module, EagleModelMixin):
             if is_pp_missing_parameter(name, self):
                 continue
 
+            routed_name = name.replace(".mlp.experts.", ".mlp.experts.routed_experts.")
+
             if ".w13_weight" in name:
                 # Handle MLP gate and up projection weights
                 # Extract gate and up projection parts
@@ -993,10 +995,10 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     narrow_weight = weight[:, :, 2 * tp_rank_start : 2 * tp_rank_end]
 
                 narrow_weight = narrow_weight.permute(0, 2, 1).contiguous()
-                param = params_dict[name]
+                param = params_dict[routed_name]
 
                 param.copy_(narrow_weight)
-                loaded_params.add(name)
+                loaded_params.add(routed_name)
                 continue
             elif ".w2_weight" in name:
                 # Handle MLP down projection weights
@@ -1005,10 +1007,10 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 else:
                     narrow_weight = weight[:, tp_rank_start:tp_rank_end, :]
                 narrow_weight = narrow_weight.permute(0, 2, 1).contiguous()
-                param = params_dict[name]
+                param = params_dict[routed_name]
 
                 param.copy_(narrow_weight)
-                loaded_params.add(name)
+                loaded_params.add(routed_name)
                 continue
             elif ".w13_bias" in name:
                 # Handle MLP gate and up projection biases
@@ -1018,9 +1020,9 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 else:
                     narrow_weight = weight[:, 2 * tp_rank_start : 2 * tp_rank_end]
 
-                param = params_dict[name]
+                param = params_dict[routed_name]
                 param.copy_(narrow_weight)
-                loaded_params.add(name)
+                loaded_params.add(routed_name)
                 continue
             elif ".w2_bias" in name:
                 # Handle MLP down projection bias
@@ -1030,9 +1032,9 @@ class GptOssModel(nn.Module, EagleModelMixin):
                     # (only load on rank 0 to avoid duplication)
                     if tp_rank != 0:
                         weight.zero_()
-                param = params_dict[name]
+                param = params_dict[routed_name]
                 param.copy_(weight)
-                loaded_params.add(name)
+                loaded_params.add(routed_name)
                 continue
             elif "sinks" in name:
                 # Handle attention sinks (distributed across ranks)
