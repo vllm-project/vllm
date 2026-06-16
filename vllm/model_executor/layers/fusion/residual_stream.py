@@ -138,13 +138,19 @@ def finalize_norm(
     when it defers, FULL otherwise), so the gate is a declared state rather than a
     ``fuse_allreduce`` flag check.
     """
-    out, _ = fused_ar_rms_norm_quant(
-        hidden,
-        residual,
-        norm,
-        consumer_linear=None,
-        do_allreduce=(
-            incoming is Scatter.PARTIAL and get_tensor_model_parallel_world_size() > 1
-        ),
+    do_allreduce = (
+        incoming is Scatter.PARTIAL and get_tensor_model_parallel_world_size() > 1
     )
+    # Mirror ``_reduce_norm``: only a plain RMSNorm can go through the fused
+    # kernel (which asserts ``type(norm) is RMSNorm``). A variant final norm
+    # (e.g. GemmaRMSNorm) reduces if owed, then runs eager -- so finalize_norm
+    # is safe for any model, not just RMSNorm ones.
+    if type(norm) is RMSNorm:
+        out, _ = fused_ar_rms_norm_quant(
+            hidden, residual, norm, consumer_linear=None, do_allreduce=do_allreduce
+        )
+        return out
+    if do_allreduce:
+        hidden = tensor_model_parallel_all_reduce(hidden)
+    out, _ = norm(hidden, residual)
     return out
