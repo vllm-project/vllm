@@ -423,6 +423,8 @@ class Gemma4Parser(ParserEngine):
         tools: list[Tool] | None = None,
         **kwargs,
     ) -> None:
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        self._thinking_enabled = chat_kwargs.get("enable_thinking", True)
         super().__init__(
             tokenizer,
             tools,
@@ -509,12 +511,12 @@ class Gemma4Parser(ParserEngine):
             if tool_call_id is not None and tid == tool_call_id:
                 return True
             if new_turn_id is not None and tid == new_turn_id:
-                return False
+                return not self._thinking_enabled
             if tool_response_id is not None and tid == tool_response_id:
-                return False
+                return not self._thinking_enabled
             if end_id is not None and tid == end_id:
                 return True
-        return self._reasoning_ended
+        return True
 
     def _events_to_delta(
         self,
