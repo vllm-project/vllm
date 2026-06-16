@@ -187,3 +187,79 @@ Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono chan
 
 - [openai_realtime_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_client.py) - Upload and transcribe an audio file
 - [openai_realtime_microphone_client.py](https://github.com/vllm-project/vllm/tree/main/examples/speech_to_text/realtime/openai_realtime_microphone_client.py) - Gradio demo for live microphone transcription
+
+### Serving a sliding-window realtime model (Voxtral)
+
+For a sliding-window realtime model such as `Voxtral-Mini-4B-Realtime-2602`, per-stream
+KV memory is bounded by the attention window, not by `--max-model-len`. This gives two
+operator levers.
+
+**Concurrency: narrow the window.** The decoder's sliding window sets per-stream KV cost,
+so narrowing it lets more streams fit in KV:
+
+```bash
+vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --tokenizer-mode mistral \
+  --hf-overrides '{"text_config":{"sliding_window":512},"audio_config":{"sliding_window":256}}' \
+  --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
+```
+
+Per-stream KV (in blocks) plateaus at, per KV group (decoder + audio encoder):
+
+```text
+blocks_per_stream = cdiv(min(sliding_window - 1 + max_num_batched_tokens, max_model_len), block_size) + 1
+```
+
+so the number of streams that fit in KV is `num_gpu_blocks / Σ blocks_per_stream`, and
+`num_gpu_blocks` scales with VRAM. vLLM logs this at startup as
+`Maximum concurrency for ... tokens per request: Nx`.
+
+!!! note
+    That `Nx` is a KV-admission ceiling (how many streams *fit* in KV), not measured
+    throughput, and it is computed for requests that fill `max_model_len` -- a realtime
+    session's KV plateaus at the sliding window instead, so for streaming the `Nx`
+    understates stream capacity and the per-stream formula above is the number to size
+    against. Real capacity is `min(KV at the window, compute, max_num_seqs)`; on small
+    GPUs compute saturates first (real-time falls behind) while VRAM stays flat.
+    Narrowing the window trades a little transcription fidelity for KV headroom, so
+    measure on your audio.
+
+!!! note
+    Narrowing the window also shrinks the encoder cache budget, so a server configured
+    this way rejects long **one-shot** clips on `/v1/audio/transcriptions` with a 400
+    (`exceeds the pre-allocated encoder cache size`) that the default config would accept.
+    Streaming sessions are unaffected (audio arrives in small chunks). Serve long offline
+    clips from a default (non-overridden) server, or raise the window.
+
+**Duration: `--max-model-len` and unbounded streaming.** For realtime, `--max-model-len`
+also acts as a duration cap (about 1 text token per 80 ms of audio, so the 131072 default is ~2 h 55).
+A session that reaches it is finished gracefully (`FINISHED_LENGTH_CAPPED`) so the client can
+reconnect. To run **indefinitely at constant VRAM**, enable RoPE re-anchoring:
+
+```bash
+  --enable-realtime-unbounded --realtime-reanchor-margin-tokens 4096
+```
+
+- `--enable-realtime-unbounded` (default off): periodically re-anchors the RoPE position clock
+  so the absolute counter never reaches `max_model_len`. Requires a **non-fp8** KV cache, a
+  sliding-window decoder, **prefix caching off** (`--no-enable-prefix-caching`), CUDA, and
+  plain RoPE with `rope_theta=1e6` (Voxtral/Ministral); rejected at startup otherwise.
+- `--realtime-reanchor-margin-tokens` (default 4096): re-anchor this many tokens before the cap.
+  Must be smaller than `max_model_len - sliding_window`.
+
+**Fitting on a 16 GiB GPU.** The model plus a full `PIECEWISE` cudagraph capture leaves little
+room for KV on 16 GiB. The capture set scales with `--max-num-seqs`, so the default (256)
+captures large batch graphs you will never use and can OOM at startup. Set `--max-num-seqs` to
+your real concurrency (for example 16). `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` also
+helps: it switches the allocator to growable segments, cuts fragmentation, and frees roughly
+1 GiB on a 16 GiB card, with no effect on results. A working unbounded config on a 16 GiB
+RTX 4090 Laptop, validated at 4 concurrent real-time streams (wall/audio 1.00, flat VRAM
+~14.3 GiB, transcripts complete and identical across streams):
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 \
+  --tokenizer-mode mistral \
+  --hf-overrides '{"text_config":{"sliding_window":512},"audio_config":{"sliding_window":256}}' \
+  --max-model-len 4096 --no-enable-prefix-caching --max-num-seqs 16 \
+  --enable-realtime-unbounded --realtime-reanchor-margin-tokens 2048 \
+  --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
+```
