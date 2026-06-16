@@ -29,6 +29,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.parser.engine.registered_adapters import (
+    DeepSeekV4Parser,
     Gemma4Parser,
     Glm47MoeParser,
     KimiK2Parser,
@@ -644,6 +645,98 @@ def _build_seed_oss(scenario: Scenario, validate: bool = True) -> Sample:
     return sample
 
 
+# ── DeepSeek V4 (DSML tool format) ──────────────────────────────────
+
+_DSML = "｜DSML｜"
+_DSV4_VOCAB: dict[str, int] = {
+    "<think>": 128821,
+    "</think>": 128822,
+    f"<{_DSML}tool_calls>": 128823,
+    f"</{_DSML}tool_calls>": 128824,
+}
+
+
+def _dsv4_param_text(key: str, value: Any) -> str:
+    is_string = isinstance(value, str)
+    if is_string:
+        val_str = value
+    elif isinstance(value, bool):
+        val_str = "true" if value else "false"
+    elif isinstance(value, (int, float)):
+        val_str = str(value)
+    else:
+        val_str = json.dumps(value, ensure_ascii=False)
+    string_attr = "true" if is_string else "false"
+    return (
+        f'<{_DSML}parameter name="{key}" string="{string_attr}">'
+        f"{val_str}</{_DSML}parameter>\n"
+    )
+
+
+def _dsv4_tool_text(tc: ToolCallSpec) -> str:
+    parts = [f'<{_DSML}invoke name="{tc.name}">\n']
+    for key, value in tc.arguments.items():
+        parts.append(_dsv4_param_text(key, value))
+    parts.append(f"</{_DSML}invoke>\n")
+    return "".join(parts)
+
+
+def _dsv4_segments(scenario: Scenario, thinking: bool) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+
+    if thinking:
+        if scenario.reasoning is not None:
+            segs.append((scenario.reasoning, False))
+        if scenario.content is not None or scenario.tool_calls:
+            segs.append(("</think>", True))
+    else:
+        if scenario.reasoning is not None:
+            segs.append(("<think>", True))
+            segs.append((scenario.reasoning, False))
+            segs.append(("</think>", True))
+
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+
+    if scenario.tool_calls:
+        segs.append((f"<{_DSML}tool_calls>", True))
+        parts = ["\n"]
+        for tc in scenario.tool_calls:
+            parts.append(_dsv4_tool_text(tc))
+        segs.append(("".join(parts), False))
+        segs.append((f"</{_DSML}tool_calls>", True))
+
+    return segs
+
+
+def _build_deepseek_v4(scenario: Scenario, validate: bool = True) -> Sample:
+    thinking = scenario.reasoning is not None
+    chat_kwargs = {"thinking": True} if thinking else None
+
+    if thinking:
+        expected_reasoning: str | None = scenario.reasoning or ""
+    else:
+        expected_reasoning = None
+
+    sample = _make_sample(
+        sample_id=f"deepseek_v4-{scenario.id}",
+        description=scenario.description,
+        vocab=_DSV4_VOCAB,
+        segments=_dsv4_segments(scenario, thinking),
+        expected_reasoning=expected_reasoning,
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+        chat_template_kwargs=chat_kwargs,
+    )
+    if validate:
+        kwargs = {}
+        if chat_kwargs:
+            kwargs["chat_template_kwargs"] = chat_kwargs
+        _validate_sample(sample, DeepSeekV4Parser, **kwargs)
+    return sample
+
+
 # ── GLM-4.7 MoE (XML tool format, starts in REASONING) ──────────────
 
 _GLM47_MOE_VOCAB: dict[str, int] = {
@@ -811,13 +904,14 @@ _KIMI_K2_SCENARIOS = [
 # ── Registry and public API ──────────────────────────────────────────
 
 _BUILDERS: dict[str, Any] = {
-    "qwen3": _build_qwen3,
+    "deepseek_v4": _build_deepseek_v4,
     "gemma4": _build_gemma4,
     "minimax_m2": _build_minimax_m2,
     "nemotron_v3": _build_nemotron_v3,
     "seed_oss": _build_seed_oss,
     "glm47_moe": _build_glm47_moe,
     "kimi_k2": _build_kimi_k2,
+    "qwen3": _build_qwen3,
 }
 
 

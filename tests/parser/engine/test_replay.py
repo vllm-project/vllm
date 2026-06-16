@@ -20,6 +20,7 @@ import pytest
 from tests.parser.engine.replay_harness import (
     DUMMY_TOOLS,
     MockTokenizer,
+    Sample,
     _test_request,
     assert_no_terminal_leakage,
     assert_parse_output,
@@ -100,6 +101,14 @@ def _discover_parsers() -> list[_ParserInfo]:
 
 _PARSERS = _discover_parsers()
 
+
+def _make_parser(parser_cls: type[ParserEngine], tokenizer, sample: Sample, **extra):
+    kwargs = dict(extra)
+    if sample.chat_template_kwargs:
+        kwargs["chat_template_kwargs"] = sample.chat_template_kwargs
+    return parser_cls(tokenizer, sample.tools, **kwargs)
+
+
 _ENGINE_PARSERS: dict[str, type[ParserEngine]] = {
     f"{p.name}_engine": p.parser_cls for p in _PARSERS
 }
@@ -123,7 +132,7 @@ class TestReplayWithHoldback:
 
     def test_replay(self, parser_cls, sample, terminals, chunk_size, holdback):
         tokenizer = make_mock_tokenizer(sample)
-        parser = parser_cls(tokenizer, sample.tools)
+        parser = _make_parser(parser_cls, tokenizer, sample)
         deltas = replay_streaming(
             parser,
             sample.tokens,
@@ -160,7 +169,7 @@ class TestTextHoldback:
 
     def test_replay(self, parser_cls, sample, terminals, delay):
         tokenizer = make_mock_tokenizer(sample)
-        parser = parser_cls(tokenizer, sample.tools)
+        parser = _make_parser(parser_cls, tokenizer, sample)
         deltas = replay_with_text_holdback(
             parser,
             sample.tokens,
@@ -190,7 +199,7 @@ class TestReplay:
 
     def test_replay(self, parser_cls, sample, terminals, chunk_size):
         tokenizer = make_mock_tokenizer(sample)
-        parser = parser_cls(tokenizer, sample.tools)
+        parser = _make_parser(parser_cls, tokenizer, sample)
         deltas = replay_streaming(
             parser,
             sample.tokens,
@@ -227,7 +236,7 @@ class TestDeferralFinish:
 
     def test_misaligned_last_delta_with_finish(self, parser_cls, sample, tool_end_text):
         tokenizer = make_mock_tokenizer(sample)
-        parser = parser_cls(tokenizer, sample.tools)
+        parser = _make_parser(parser_cls, tokenizer, sample)
 
         request = _test_request()
 

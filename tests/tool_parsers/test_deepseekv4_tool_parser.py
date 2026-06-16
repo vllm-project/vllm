@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Unit tests for DeepSeekV4ToolParser."""
+"""Unit tests for DeepSeekV4EngineToolParser."""
 
 import json
 from unittest.mock import MagicMock
@@ -17,7 +17,9 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     FunctionDefinition,
 )
 from vllm.tool_parsers import ToolParserManager
-from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
+from vllm.tool_parsers.deepseekv4_engine_tool_parser import (
+    DeepSeekV4EngineToolParser,
+)
 
 MOCK_TOKENIZER = MagicMock()
 MOCK_TOKENIZER.get_vocab.return_value = {}
@@ -67,8 +69,8 @@ def sample_tools() -> list[ChatCompletionToolsParam]:
     ]
 
 
-def make_parser(tools=None) -> DeepSeekV4ToolParser:
-    return DeepSeekV4ToolParser(MOCK_TOKENIZER, tools=tools)
+def make_parser(tools=None) -> DeepSeekV4EngineToolParser:
+    return DeepSeekV4EngineToolParser(MOCK_TOKENIZER, tools=tools)
 
 
 def make_request(tools=None) -> MagicMock:
@@ -84,7 +86,7 @@ def build_tool_call(func_name: str, params: dict[str, str]) -> str:
     return f'{TC_START}\n{INV_START}{func_name}">\n{param_strs}{INV_END}\n{TC_END}'
 
 
-def stream(parser: DeepSeekV4ToolParser, full_text: str, chunk_size: int = 7):
+def stream(parser: DeepSeekV4EngineToolParser, full_text: str, chunk_size: int = 7):
     deltas = []
     previous_text = ""
     for start in range(0, len(full_text), chunk_size):
@@ -120,7 +122,9 @@ def reconstruct_args(deltas, tool_index: int = 0) -> str:
 
 
 def test_registered():
-    assert ToolParserManager.get_tool_parser("deepseek_v4") is DeepSeekV4ToolParser
+    assert (
+        ToolParserManager.get_tool_parser("deepseek_v4") is DeepSeekV4EngineToolParser
+    )
 
 
 def test_extract_tool_calls():
@@ -285,7 +289,7 @@ def test_extract_tool_calls_arguments_wrapper():
         },
     )
 
-    parser = DeepSeekV4ToolParser(mock_tokenizer, tools=[tool])
+    parser = DeepSeekV4EngineToolParser(mock_tokenizer, tools=[tool])
     request = MagicMock()
     request.tools = [tool]
 
