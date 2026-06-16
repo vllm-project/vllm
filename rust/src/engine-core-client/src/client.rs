@@ -490,6 +490,10 @@ impl EngineCoreClient {
             return Ok(());
         }
 
+        // Finalize the consumer streams first, before the engine round-trip.
+        let all_request_ids: Vec<String> = abortable.values().flatten().cloned().collect();
+        self.inner.abort_requests_locally(&all_request_ids);
+
         for (engine_id, request_ids) in abortable {
             self.inner.do_abort_requests(&engine_id, &request_ids).await?;
         }
