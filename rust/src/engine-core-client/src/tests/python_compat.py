@@ -10,6 +10,7 @@
 # ]
 # ///
 
+from dataclasses import dataclass
 from enum import Enum, IntEnum
 
 import msgpack
@@ -337,6 +338,28 @@ multipart_prompt_logprobs = engine_outputs_wire(
     )
 )
 
+
+@dataclass
+class EngineCoreReadyResponse:
+    max_model_len: int
+    num_gpu_blocks: int
+    block_size: int
+    dp_stats_address: str | None
+    dtype: str
+    vllm_version: str
+    kv_cache_size_tokens: int | None = None
+    kv_cache_max_concurrency: float | None = None
+
+
+ready_response = EngineCoreReadyResponse(
+    max_model_len=32768,
+    num_gpu_blocks=1000,
+    block_size=16,
+    dp_stats_address=None,
+    dtype="float32",
+    vllm_version="0.0.0",
+)
+
 print(msgspec.msgpack.encode(request).hex())
 print(msgpack.packb(multimodal_request_wire, use_bin_type=True).hex())
 print(msgspec.msgpack.encode(outputs).hex())
@@ -354,3 +377,4 @@ print(
         for frame in encode_output_frames(multipart_prompt_logprobs, size_threshold=1)
     )
 )
+print(msgspec.msgpack.encode(ready_response).hex())

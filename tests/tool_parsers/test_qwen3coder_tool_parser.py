@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
+    FunctionDefinition,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -113,6 +114,23 @@ def sample_tools(request):
                 parameters=AREA_PARAMS,
             ),
         ]
+
+
+def _with_strict(
+    tools: list[ChatCompletionToolsParam],
+) -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type=t.type,
+            function=FunctionDefinition(
+                name=t.function.name,
+                description=t.function.description,
+                parameters=t.function.parameters,
+                strict=True,
+            ),
+        )
+        for t in tools
+    ]
 
 
 def _as_chat_completion_tools(
@@ -1323,10 +1341,11 @@ def test_get_vllm_registry_structural_tag_returns_structural_tag(
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
     request_tools = _as_chat_completion_tools(sample_tools)
+    strict_tools = _with_strict(request_tools)
     req = ChatCompletionRequest(
         messages=[],
         model="m",
-        tools=request_tools,
+        tools=strict_tools,
         tool_choice="auto",
     )
     tag = qwen3_tool_parser.get_structural_tag(req)
@@ -1364,10 +1383,11 @@ def test_adjust_request_auto_uses_vllm_registry_structural_tag(
         tool_parser_cls = Qwen3EngineToolParser
 
     request_tools = _as_chat_completion_tools(sample_tools)
+    strict_tools = _with_strict(request_tools)
     req = ChatCompletionRequest(
         messages=[],
         model="m",
-        tools=request_tools,
+        tools=strict_tools,
         tool_choice="auto",
         include_reasoning=include_reasoning,
     )
