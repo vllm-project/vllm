@@ -7,6 +7,10 @@ from unittest import mock
 
 import pytest
 
+from vllm.model_executor.warmup.kernel_warmup import (
+    _warmup_slot_mapping,
+    _warmup_zero_kv_blocks,
+)
 from vllm.triton_utils import jit_monitor
 
 
@@ -238,3 +242,82 @@ class TestTritonJitHookIntegration:
         w.assert_called()
         msg = w.call_args[0][0] % w.call_args[0][1:]
         assert "_add_kernel" in msg
+
+
+# ------------------------------------------------------------------
+# Unit tests for infrastructure kernel warmup helpers (no GPU needed)
+# ------------------------------------------------------------------
+
+
+def _make_worker(*, has_zeroer=True, zeroer_meta=True, has_block_tables=True):
+    """Build a minimal fake Worker / model_runner for warmup helper tests."""
+    zeroer = None
+    if has_zeroer:
+        zeroer = SimpleNamespace(_meta=object() if zeroer_meta else None)
+        zeroer.zero_block_ids = mock.MagicMock()
+
+    block_tables = None
+    if has_block_tables:
+        block_tables = SimpleNamespace()
+        block_tables.compute_slot_mapping = mock.MagicMock()
+
+    runner = SimpleNamespace(
+        _kv_block_zeroer=zeroer,
+        input_batch=SimpleNamespace(block_table=block_tables)
+        if has_block_tables
+        else None,
+        device="cpu",
+    )
+    if not has_zeroer:
+        del runner._kv_block_zeroer
+
+    return SimpleNamespace(model_runner=runner), zeroer, block_tables
+
+
+class TestWarmupZeroKvBlocks:
+    def test_calls_zero_block_ids(self):
+        worker, zeroer, _ = _make_worker()
+        _warmup_zero_kv_blocks(worker)
+        zeroer.zero_block_ids.assert_called_once_with([0])
+
+    def test_noop_when_no_zeroer(self):
+        worker, _, _ = _make_worker(has_zeroer=False)
+        # Should not raise
+        _warmup_zero_kv_blocks(worker)
+
+    def test_noop_when_zeroer_meta_is_none(self):
+        worker, zeroer, _ = _make_worker(zeroer_meta=False)
+        _warmup_zero_kv_blocks(worker)
+        zeroer.zero_block_ids.assert_not_called()
+
+    def test_exception_is_swallowed(self):
+        worker, zeroer, _ = _make_worker()
+        zeroer.zero_block_ids.side_effect = RuntimeError("boom")
+        # Must not propagate
+        _warmup_zero_kv_blocks(worker)
+
+
+class TestWarmupSlotMapping:
+    def test_calls_compute_slot_mapping(self):
+        worker, _, block_tables = _make_worker()
+        _warmup_slot_mapping(worker)
+        block_tables.compute_slot_mapping.assert_called_once()
+        call_kwargs = block_tables.compute_slot_mapping.call_args
+        assert call_kwargs.kwargs["num_reqs"] == 1
+
+    def test_noop_when_no_input_batch(self):
+        worker, _, _ = _make_worker(has_block_tables=False)
+        # input_batch exists but block_table attr is None-like; also test
+        # without input_batch entirely.
+        worker.model_runner.input_batch = None
+        _warmup_slot_mapping(worker)
+
+    def test_noop_when_no_block_table(self):
+        worker, _, _ = _make_worker()
+        worker.model_runner.input_batch.block_table = None
+        _warmup_slot_mapping(worker)
+
+    def test_exception_is_swallowed(self):
+        worker, _, block_tables = _make_worker()
+        block_tables.compute_slot_mapping.side_effect = RuntimeError("boom")
+        _warmup_slot_mapping(worker)
