@@ -403,6 +403,7 @@ fn frontend_args_accept_json() {
                     coordinator_address: Some(
                         "tcp://127.0.0.1:7000",
                     ),
+                    engine_start_index: 0,
                     engine_count: 1,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
@@ -1063,8 +1064,10 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
         "ipc:///tmp/output.sock",
         "--coordinator-address",
         "tcp://127.0.0.1:7000",
+        "--engine-start-index",
+        "3",
         "--engine-count",
-        "2",
+        "1",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
     ])
@@ -1080,7 +1083,8 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             transport_mode: Bootstrapped {
                 input_address: "ipc:///tmp/input.sock",
                 output_address: "ipc:///tmp/output.sock",
-                engine_count: 2,
+                engine_start_index: 3,
+                engine_count: 1,
                 ready_timeout: 600s,
             },
             coordinator_mode: External {
