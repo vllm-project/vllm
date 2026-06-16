@@ -274,7 +274,7 @@ class SingleTypeKVCacheManager(ABC):
         self.new_block_ids = []
         return ids
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(self, request: Request, num_tokens: int) -> int:
         """
         Cache the blocks for the request.
 
@@ -287,7 +287,7 @@ class SingleTypeKVCacheManager(ABC):
         num_full_blocks = num_tokens // self.block_size
 
         if num_cached_blocks >= num_full_blocks:
-            return
+            return 0
 
         self.block_pool.cache_full_blocks(
             request=request,
@@ -299,6 +299,7 @@ class SingleTypeKVCacheManager(ABC):
         )
 
         self.num_cached_block[request.request_id] = num_full_blocks
+        return num_full_blocks - num_cached_blocks
 
     def free(self, request_id: str) -> None:
         """
@@ -1049,9 +1050,9 @@ class MambaManager(SingleTypeKVCacheManager):
         """
         return num_computed_tokens - 1
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(self, request: Request, num_tokens: int) -> int:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
-        super().cache_blocks(request, num_tokens)
+        num_newly_cached_blocks = super().cache_blocks(request, num_tokens)
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if num_cached_blocks_after > num_cached_blocks_before:
             for block in self.req_to_blocks[request.request_id][
@@ -1061,6 +1062,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     continue
                 assert block.block_hash is not None
                 self.cached_blocks_this_step.add(block.block_hash)
+        return num_newly_cached_blocks
 
     def new_step_starts(self) -> None:
         self.cached_blocks_this_step.clear()
@@ -1080,7 +1082,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # requests, so  `new_computed_blocks` should always be empty.
         assert len(new_computed_blocks) == 0
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(self, request: Request, num_tokens: int) -> int:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so this method is not relevant.
         raise ValueError("Should not be called as prefix caching is disabled.")

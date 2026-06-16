@@ -712,6 +712,8 @@ def test_triton_convert_req_index_to_global_index_with_prefill_workspace(block_s
         (torch.tensor([1, 1, 1]), 10, [(0, 3)]),
         # Large buffer
         (torch.tensor([4, 4, 4]), 100, [(0, 3)]),
+        # Greedy behavior: do not group by simple cumulative buckets
+        (torch.tensor([2, 4, 2]), 5, [(0, 1), (1, 2), (2, 3)]),
     ],
 )
 def test_split_prefill_chunks(seq_lens, max_buf, expected):

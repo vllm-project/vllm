@@ -64,14 +64,26 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
         )
-
     elif isinstance(generator, ChatCompletionResponse):
+        response_headers = {
+            **dict(metrics_header(metrics_header_format) or {}),
+            **handler.build_routing_headers(request.model),
+        }
         return JSONResponse(
             content=generator.model_dump(),
-            headers=metrics_header(metrics_header_format),
+            headers=response_headers,
         )
 
-    return StreamingResponse(content=generator, media_type="text/event-stream")
+    response_headers = {
+        **dict(metrics_header(metrics_header_format) or {}),
+        **handler.build_routing_headers(request.model),
+    }
+
+    return StreamingResponse(
+        content=generator,
+        media_type="text/event-stream",
+        headers=response_headers,
+    )
 
 
 @router.post(

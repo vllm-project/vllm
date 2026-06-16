@@ -117,6 +117,7 @@ class Scheduler(SchedulerInterface):
             self.kv_events_config.enable_kv_cache_events
             or self.kv_events_config.prefix_cache_upload_endpoint is not None
         )
+        self.available_kv_cache_memory_bytes: int | None = None
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.
@@ -1993,6 +1994,7 @@ class Scheduler(SchedulerInterface):
             num_waiting_reqs=len(self.waiting),
             num_skipped_waiting_reqs=len(self.skipped_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
+            available_kv_cache_memory_bytes=self.available_kv_cache_memory_bytes,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             structured_output_cache_stats=structured_output_cache_stats,

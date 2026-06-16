@@ -63,8 +63,6 @@ class InputBatch:
     # [num_reqs] CPU upper bound on seq_lens (see CommonAttentionMetadata).
     seq_lens_cpu_upper_bound: torch.Tensor
     # [num_reqs]
-    seq_lens_cpu_upper_bound: torch.Tensor
-    # [num_reqs]
     dcp_local_seq_lens: torch.Tensor | None
 
     # [num_tokens_after_padding]
