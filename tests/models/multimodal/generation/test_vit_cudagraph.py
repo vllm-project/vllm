@@ -197,7 +197,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
                 model_arch="DeepseekOCRForCausalLM",
             ),
         },
-        skip=True,  # TODO: Re-enable this once CI OOM issues are resolved.
+        skip=True,  # TODO: Re-enable this once OOM issues are resolved on CI.
     ),
 }
 
