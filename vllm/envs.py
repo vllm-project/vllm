@@ -88,6 +88,7 @@ if TYPE_CHECKING:
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
+    VLLM_TRITON_USE_TD: bool | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -591,6 +592,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Unset disables the check. See `torch.cuda.set_sync_debug_mode`.
     "VLLM_GPU_SYNC_CHECK": env_with_choices(
         "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"]
+    ),
+    # Tri-state TD toggle for Triton kernels generally (not just attention):
+    # unset -> auto (on for XPU); ``1`` forces on; ``0`` forces off.
+    "VLLM_TRITON_USE_TD": lambda: {"1": True, "0": False}.get(
+        os.getenv("VLLM_TRITON_USE_TD", "").strip()
     ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
