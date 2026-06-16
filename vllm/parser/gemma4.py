@@ -518,6 +518,34 @@ class Gemma4Parser(ParserEngine):
                 return True
         return True
 
+    def _prompt_ends_in_open_reasoning(self, input_ids: Sequence[int]) -> bool:
+        """Detect a prompt that ends inside an open ``<|channel>`` block.
+
+        The Gemma4 chat template can leave the prompt ending in
+        ``<|channel>thought\\n`` (e.g. after a final tool response with
+        ``enable_thinking=True``). In that case the first generated tokens
+        are reasoning but no ``<|channel>`` will appear in the delta.
+        """
+        start_id = self._reasoning_start_token_id
+        end_id = self._reasoning_end_token_id
+        if start_id is None or end_id is None:
+            return False
+        for i in range(len(input_ids) - 1, -1, -1):
+            tid = input_ids[i]
+            if tid == start_id:
+                return True
+            if tid == end_id:
+                return False
+        return False
+
+    def prepare_streaming_for_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        if not self._prompt_ends_in_open_reasoning(prompt_token_ids):
+            return
+        self.initialize_streaming(initial_state=ParserState.REASONING)
+        # ``thought\n`` is already in the prompt and will not appear in the
+        # generated deltas, so there is nothing left to strip.
+        self._prefix_stripped = True
+
     def _events_to_delta(
         self,
         events: list[SemanticEvent],

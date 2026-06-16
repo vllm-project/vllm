@@ -60,6 +60,9 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser_engine.is_reasoning_end(list(input_ids))
 
+    def prepare_streaming_for_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        self._parser_engine.prepare_streaming_for_prompt(prompt_token_ids)
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return self._parser_engine.extract_content_ids(input_ids)
 

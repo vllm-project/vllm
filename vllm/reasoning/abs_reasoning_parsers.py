@@ -187,6 +187,18 @@ class ReasoningParser:
         """Adjust request parameters; override in subclasses as needed."""
         return request
 
+    def prepare_streaming_for_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        """Hook called once at the start of streaming with the prompt tokens.
+
+        Lets a parser pre-initialise streaming state based on the prompt — for
+        example, when the chat template leaves the prompt inside an open
+        reasoning channel and the engine's default initial state would
+        otherwise misclassify the first generated tokens as content.
+
+        Default is a no-op; override in subclasses as needed.
+        """
+        return
+
     def prepare_structured_tag(
         self,
         original_tag: str | None,

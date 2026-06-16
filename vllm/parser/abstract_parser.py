@@ -758,6 +758,11 @@ class DelegatingParser(Parser):
                 prompt_token_ids
             ):
                 state.reasoning_ended = True
+            else:
+                # Reasoning is still open at the end of the prompt; let the
+                # reasoning parser pre-initialise its streaming state so the
+                # first generated tokens are classified correctly.
+                self._reasoning_parser.prepare_streaming_for_prompt(prompt_token_ids)
 
         current_text, current_token_ids = state.advance(delta_text, delta_token_ids)
         delta_message: DeltaMessage | None = None
