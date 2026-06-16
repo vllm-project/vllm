@@ -914,6 +914,9 @@ def fp8_w8a16_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and fp8 weights.
@@ -939,6 +942,9 @@ def fp8_w8a16_moe_quant_config(
             None,
             w2_bias,
         ),
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -993,15 +999,24 @@ def int4_w4afp8_moe_quant_config(
 def biased_moe_quant_config(
     w1_bias: torch.Tensor | None,
     w2_bias: torch.Tensor | None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for unquantized activations with biases.
+
+    gemm1_alpha/gemm1_beta/gemm1_clamp_limit carry the SwiGLU gate params
+    through to the fused activation kernel (e.g. swigluoai_uninterleave).
     """
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(),
         _a2=FusedMoEQuantDesc(),
         _w1=FusedMoEQuantDesc(bias=w1_bias),
         _w2=FusedMoEQuantDesc(bias=w2_bias),
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -1282,6 +1297,8 @@ class FusedMoEConfig:
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
     # cannot silently select one and drop the clamp.
     swiglu_limit: float | None = None
+    swiglu_alpha: float | None = None
+    swiglu_beta: float | None = None
 
     max_capture_size: int = 0
 
