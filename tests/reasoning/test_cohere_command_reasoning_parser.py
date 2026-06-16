@@ -11,7 +11,6 @@ from typing import Any
 
 import pytest
 from pydantic import ValidationError
-from transformers import AutoTokenizer
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -119,9 +118,38 @@ REASONING_CASES = [
 ]
 
 
+class MockCohereTokenizer:
+    """Minimal byte-level stand-in for the Cohere tokenizer.
+
+    ``encode``/``decode`` round-trip through UTF-8 bytes so splitting a
+    multi-byte character (e.g. an emoji) across "tokens" reproduces the
+    trailing U+FFFD buffering that real streaming exhibits. Cohere special
+    tokens map to distinct synthetic ids; everything else shares a default id.
+    ``adjust_request`` only needs the token ids, not real tokenization.
+    """
+
+    _SPECIAL_TOKEN_IDS = {
+        "<|START_THINKING|>": -1,
+        "<|END_THINKING|>": -2,
+        "<|CHATBOT_TOKEN|>": -3,
+    }
+
+    def convert_tokens_to_ids(self, token: str) -> int:
+        return self._SPECIAL_TOKEN_IDS.get(token, 0)
+
+    def get_vocab(self) -> dict[str, int]:
+        return {}
+
+    def encode(self, text: str, add_special_tokens: bool = False) -> list[int]:
+        return list(text.encode("utf-8"))
+
+    def decode(self, ids: list[int], skip_special_tokens: bool = False) -> str:
+        return bytes(ids).decode("utf-8", errors="replace")
+
+
 @pytest.fixture(scope="module")
-def tokenizer():
-    return AutoTokenizer.from_pretrained("CohereLabs/command-a-plus-05-2026-w4a4")
+def tokenizer() -> MockCohereTokenizer:
+    return MockCohereTokenizer()
 
 
 @pytest.fixture
@@ -286,16 +314,6 @@ VALID_STRUCTURAL_TAG = {
 }
 
 
-class _StubTokenizer:
-    """Stub: ``adjust_request`` does not tokenize; only needs token ids."""
-
-    def convert_tokens_to_ids(self, token: str) -> int:
-        return 12345
-
-    def get_vocab(self) -> dict[str, int]:
-        return {}
-
-
 def _model_config(arch: str) -> SimpleNamespace:
     return SimpleNamespace(
         architecture=arch,
@@ -331,34 +349,29 @@ def _content_types(tag_json: str) -> set[str]:
 
 
 @pytest.fixture(scope="module")
-def stub_tokenizer() -> _StubTokenizer:
-    return _StubTokenizer()
-
-
-@pytest.fixture(scope="module")
-def parser(stub_tokenizer: _StubTokenizer) -> CohereCommand4ReasoningParser:
+def parser(tokenizer: MockCohereTokenizer) -> CohereCommand4ReasoningParser:
     """Parser configured with a supported Cohere architecture."""
     return CohereCommand4ReasoningParser(
-        stub_tokenizer,
+        tokenizer,
         model_config=_model_config("Cohere2ForCausalLM"),
     )
 
 
 @pytest.fixture(scope="module")
 def parser_no_model_config(
-    stub_tokenizer: _StubTokenizer,
+    tokenizer: MockCohereTokenizer,
 ) -> CohereCommand4ReasoningParser:
     """Parser with no ``model_config`` (cannot resolve architecture)."""
-    return CohereCommand4ReasoningParser(stub_tokenizer, model_config=None)
+    return CohereCommand4ReasoningParser(tokenizer, model_config=None)
 
 
 @pytest.fixture(scope="module")
 def parser_unsupported_arch(
-    stub_tokenizer: _StubTokenizer,
+    tokenizer: MockCohereTokenizer,
 ) -> CohereCommand4ReasoningParser:
     """Parser configured with an architecture that has no structural tag style."""
     return CohereCommand4ReasoningParser(
-        stub_tokenizer,
+        tokenizer,
         model_config=_model_config("LlamaForCausalLM"),
     )
 
