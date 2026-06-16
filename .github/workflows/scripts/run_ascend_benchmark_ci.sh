@@ -722,45 +722,54 @@ cleanup() {
 }
 
 run_runner_npu_preflight_once() {
-  # Strip conda/mamba env library paths from LD_LIBRARY_PATH before running
-  # the preflight.  The shell may inherit conda env library paths (e.g.
-  # /root/miniconda3/envs/vllm-hust-dev/lib) from the container's activation
-  # that shadow CANN driver libs (libstdc++, libc_sec.so, etc.).
-  # use_single_ascend_env.sh overrides LD_LIBRARY_PATH with build_env_dict()
-  # exports, but the conda paths may persist if the shell was initialised
-  # before the override.
-  local clean_ld_path="${LD_LIBRARY_PATH:-}"
-  if [[ -n "$clean_ld_path" ]]; then
-    local _clean_ld=""
-    local _entry
-    IFS=':' read -ra _ld_entries <<< "$clean_ld_path"
-    for _entry in "${_ld_entries[@]}"; do
-      [[ -z "$_entry" ]] && continue
-      case "$_entry" in
-        */conda/*|*/miniconda*|*/anaconda*|*/mambaforge*|*/miniforge*|*/envs/*)
-          continue ;;
-      esac
-      if [[ -n "$_clean_ld" ]]; then
-        _clean_ld="${_clean_ld}:${_entry}"
-      else
-        _clean_ld="$_entry"
-      fi
-    done
-    clean_ld_path="$_clean_ld"
+  # Use hust-ascend-manager runtime check for the NPU probe. This runs the
+  # torch_npu probe in a controlled subprocess environment (build_env_dict()
+  # exports + PYTHONNOUSERSITE=1) which prevents conda library shadowing and
+  # other environment contamination that cause 'path string is NULL' errors.
+  local manager_output
+  manager_output="$(hust-ascend-manager runtime check \
+    --repo "$WORKSPACE_ROOT" \
+    --python "$PYTHON_BIN" \
+    --require-npu --json 2>&1)" || return 1
+
+  echo "$manager_output"
+
+  # Verify device_count > 0 from the JSON output
+  local device_count
+  device_count="$(echo "$manager_output" | "$PYTHON_BIN" -c "
+import json, sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line or not line.startswith('{'):
+        continue
+    try:
+        data = json.loads(line)
+        probe = data.get('torch_npu_probe', {})
+        dc = probe.get('device_count')
+        if dc and int(dc) > 0:
+            print(dc)
+            raise SystemExit(0)
+    except (json.JSONDecodeError, SystemExit) as e:
+        if isinstance(e, SystemExit):
+            raise
+    except Exception:
+        pass
+raise SystemExit(1)
+" 2>/dev/null)" || return 1
+
+  if [[ -z "$device_count" ]] || [[ "$device_count" -le 0 ]]; then
+    echo "torch.npu.device_count() returned 0 or could not be parsed" >&2
+    return 1
   fi
 
-  env LD_LIBRARY_PATH="$clean_ld_path" "$PYTHON_BIN" - <<'PY'
-import importlib.util
+  # Run device selection and torch.zeros allocation check
+  "$PYTHON_BIN" - "$device_count" <<'PY'
 import os
 import sys
-
 import torch
-
-if importlib.util.find_spec("torch_npu") is None:
-    raise RuntimeError("torch_npu is not installed in the benchmark environment")
-
 import torch_npu  # noqa: F401
 
+device_count = int(sys.argv[1])
 preferred_device = os.environ.get("VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE", "npu:0")
 preferred_index = 0
 if ":" in preferred_device:
@@ -768,10 +777,6 @@ if ":" in preferred_device:
     preferred_index = int(preferred_device.rsplit(":", 1)[1])
   except ValueError:
     preferred_index = 0
-
-device_count = int(torch.npu.device_count())
-if device_count <= 0:
-  raise RuntimeError("torch.npu.device_count() returned 0")
 
 candidate_devices = [
   f"npu:{(preferred_index + offset) % device_count}"
