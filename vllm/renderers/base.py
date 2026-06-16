@@ -145,7 +145,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return tokenizer
 
-    def ensure_async_tokenizer(self):
+    def ensure_init_async_tokenizer(self):
         if self._async_tokenizer_decode is None:
             self._async_tokenizer_decode = make_async(
                 self.get_tokenizer().decode, executor=self._executor
@@ -438,7 +438,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: TextPrompt,
         params: TokenizeParams,
     ) -> TokensPrompt:
-        self.ensure_async_tokenizer()
+        self.ensure_init_async_tokenizer()
         assert self._async_tokenizer_encode is not None
 
         prompt_token_ids = await self._async_tokenizer_encode(
@@ -455,7 +455,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return prompt
 
     async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
-        self.ensure_async_tokenizer()
+        self.ensure_init_async_tokenizer()
         assert self._async_tokenizer_encode is not None
 
         prompt["prompt"] = await self._async_tokenizer_encode(
