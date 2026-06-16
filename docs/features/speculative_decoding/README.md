@@ -18,6 +18,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [Hidden State Extraction](extract_hidden_states.md)
 - [Custom Proposer Backend (Experimental)](#custom-proposer-backend-experimental)
 - [Dynamic Speculative Decoding](dynamic_speculative_decoding.md)
+- [Adaptive K (Online)](adaptive_k.md)
 
 ## Method Selection at a Glance
 
@@ -35,6 +36,7 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | Suffix decoding | Low to medium gain | Medium gain | No extra draft model; dynamic speculation depth. |
 | Custom Proposer | Varies | Varies | Bring your own proposer class (experimental). |
 | Dynamic Speculative Decoding | High gain | Higher than base SD method | Useful for RL or workload with fluctuating QPS |
+| Adaptive K | High gain | Higher than base SD method | Online, zero-config; uses DSD infrastructure |
 
 For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)

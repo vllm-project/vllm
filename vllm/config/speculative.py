@@ -220,13 +220,22 @@ class SpeculativeConfig:
     # Adaptive K configuration (Leviathan 2023)
     enable_adaptive_k: bool = False
     """If True, dynamically adjust the number of speculative tokens per step
-    based on the per-position acceptance rate."""
+    using per-position conditional acceptance rates and an online cost model.
+    Picks K that maximises E_acc(K) / (K * c_draft + 1) each step.
+    No profiling required — works with any draft/target pair."""
     adaptive_k_ema_alpha: float = Field(default=0.3, ge=0.0, le=1.0)
-    """EMA smoothing factor for per-position acceptance rates."""
-    adaptive_k_c_draft: float = Field(default=0.1, gt=0.0)
-    """Estimated cost ratio of draft forward to target forward."""
-    adaptive_k_min_tokens: int = Field(default=1, ge=1)
-    """Minimum speculative tokens to generate."""
+    """EMA smoothing factor for per-position conditional acceptance rates.
+    Lower = smoother, higher = faster adaptation."""
+    adaptive_k_c_draft: float = Field(default=0.05, gt=0.0)
+    """Cost ratio: draft forward time / target forward time.
+    Typical: ~0.02-0.05 for EAGLE, ~0.05-0.10 for draft models."""
+    adaptive_k_min_tokens: int = Field(default=0, ge=0)
+    """Minimum spec tokens. 0 allows disabling speculation when utility < 1."""
+    adaptive_k_cooldown_steps: int = Field(default=4, ge=1)
+    """Steps to wait after a K change before recomputing, preventing thrash."""
+    adaptive_k_bs_penalty: float = Field(default=0.002, ge=0.0)
+    """Per-request penalty on c_draft: c_eff = c_draft * (1 + penalty * BS).
+    0 = no batch-size correction. Typical: 0.001-0.005."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:

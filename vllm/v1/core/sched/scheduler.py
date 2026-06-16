@@ -252,11 +252,15 @@ class Scheduler(SchedulerInterface):
             self._adaptive_k_ema_alpha = speculative_config.adaptive_k_ema_alpha
             self._adaptive_k_c_draft = speculative_config.adaptive_k_c_draft
             self._adaptive_k_min_tokens = speculative_config.adaptive_k_min_tokens
+            self._adaptive_k_bs_penalty = speculative_config.adaptive_k_bs_penalty
+            self._cooldown_steps = speculative_config.adaptive_k_cooldown_steps
         else:
             self._enable_adaptive_k = False
             self._adaptive_k_ema_alpha = 0.3
-            self._adaptive_k_c_draft = 0.1
-            self._adaptive_k_min_tokens = 1
+            self._adaptive_k_c_draft = 0.05
+            self._adaptive_k_min_tokens = 0
+            self._adaptive_k_bs_penalty = 0.002
+            self._cooldown_steps = 4
         # Per-position EMA and per-step accumulators.
         self._per_position_ema: list[float] | None = None
         self._pos_accepted: list[int] | None = None
@@ -265,8 +269,10 @@ class Scheduler(SchedulerInterface):
         self._alpha_prior: float = 0.75
         # Anti-thrashing cooldown.
         self._adaptive_k_cooldown: int = 0
-        self._cooldown_steps: int = 3
         self._previous_adaptive_k: int = self.num_spec_tokens
+        # Online c_draft tracking (draft/target step counts).
+        self._draft_steps: int = 0
+        self._target_steps: int = 0
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -435,6 +441,12 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+
+        # Adaptive K: compute now so KV lookahead can be zeroed if K=0.
+        _adaptive_k_step = self._compute_adaptive_k()
+        _prev_lookahead = self.num_lookahead_tokens
+        if _adaptive_k_step == 0:
+            self.num_lookahead_tokens = 0
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -1089,11 +1101,14 @@ class Scheduler(SchedulerInterface):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
-            adaptive_k_for_step=self._compute_adaptive_k(),
+            adaptive_k_for_step=_adaptive_k_step,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
+
+        # Restore lookahead tokens after adaptive K=0 step.
+        self.num_lookahead_tokens = _prev_lookahead
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1511,13 +1526,6 @@ class Scheduler(SchedulerInterface):
         if self._enable_adaptive_k and self._pos_accepted is None:
             self._pos_accepted = [0] * self.num_spec_tokens
             self._pos_reached = [0] * self.num_spec_tokens
-        kv_connector_stats: KVConnectorStats | None = (
-            kv_connector_output.kv_connector_stats if kv_connector_output else None
-        )
-        if kv_connector_stats and self.connector:
-            kv_stats = self.connector.get_kv_connector_stats()
-            if kv_stats:
-                kv_connector_stats = kv_connector_stats.aggregate(kv_stats)
 
         failed_kv_load_req_ids = None
         if kv_connector_output and kv_connector_output.invalid_block_ids:
@@ -1587,17 +1595,24 @@ class Scheduler(SchedulerInterface):
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
                 num_rejected = num_draft_tokens - num_accepted
                 if self._enable_adaptive_k:
-                    actual_k = scheduler_output.adaptive_k_for_step or num_draft_tokens
+                    actual_k_temp = scheduler_output.adaptive_k_for_step
+                    actual_k = (
+                        actual_k_temp if actual_k_temp is not None else num_draft_tokens
+                    )
                     limit = min(
                         actual_k,
                         num_draft_tokens,
                         num_accepted + 1,
                         self.num_spec_tokens,
                     )
-                    for j in range(limit):
-                        self._pos_reached[j] += 1
-                        if j < num_accepted:
-                            self._pos_accepted[j] += 1
+                    if self._pos_reached is None or self._pos_accepted is None:
+                        pass
+                    else:
+                        for j in range(limit):
+                            self._pos_reached[j] += 1
+                            if j < num_accepted:
+                                self._pos_accepted[j] += 1
+                    self._draft_steps += actual_k
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
@@ -1846,6 +1861,8 @@ class Scheduler(SchedulerInterface):
         if self._enable_adaptive_k and self._pos_accepted is not None:
             if self._per_position_ema is None:
                 self._per_position_ema = [self._alpha_prior] * self.num_spec_tokens
+            if self._pos_reached is None:
+                return engine_core_outputs
             for j in range(self.num_spec_tokens):
                 if self._pos_reached[j] > 0:
                     raw = self._pos_accepted[j] / self._pos_reached[j]
@@ -1855,44 +1872,60 @@ class Scheduler(SchedulerInterface):
             for j in range(self.num_spec_tokens):
                 self._pos_accepted[j] = 0
                 self._pos_reached[j] = 0
+            self._target_steps += 1
 
         return engine_core_outputs
 
     def _compute_adaptive_k(self) -> int:
-        """Select K maximising speedup using per-position EMA acceptance."""
+        """Select K maximising speedup using per-position EMA acceptance.
+        K=0 disables speculation when expected utility falls below 1."""
         alphas = self._per_position_ema
         if alphas is None or not self._enable_adaptive_k:
             return self.num_spec_tokens
-
-        c_draft = self._adaptive_k_c_draft
-        min_k = max(1, self._adaptive_k_min_tokens)
-        max_k = self.num_spec_tokens
 
         prev_k = self._previous_adaptive_k
 
         # Cooldown: skip recomputation after a change.
         if self._adaptive_k_cooldown > 0:
             self._adaptive_k_cooldown -= 1
-            return prev_k
+            return max(0, prev_k)
+
+        # Online c_draft: measured ratio scales the user-configured value.
+        total_draft = max(self._draft_steps, 1)
+        total_target = max(self._target_steps, 1)
+        scale = total_draft / total_target
+        c_eff_per_token = self._adaptive_k_c_draft * scale
+
+        # Batch-size penalty (Cascade/TurboSpec: cost grows with batch).
+        batch_size = len(self.running)
+        c_eff_per_token *= 1.0 + self._adaptive_k_bs_penalty * batch_size
+
+        min_k = self._adaptive_k_min_tokens
+        max_k = self.num_spec_tokens
 
         best_k = prev_k
-        best_sp = 0.0
-        for k in range(min_k, max_k + 1):
+        best_utility = 1.0  # K=0 baseline
+        for k in range(max(min_k, 1), max_k + 1):
             prod = 1.0
             e_total = 1.0
             for i in range(min(k, len(alphas))):
                 a = max(0.001, min(0.999, alphas[i]))
                 prod *= a
                 e_total += prod
-            sp = e_total / (k * c_draft + 1.0)
-            if sp > best_sp:
-                best_sp = sp
+            utility = e_total / (k * c_eff_per_token + 1.0)
+            if utility > best_utility:
+                best_utility = utility
                 best_k = k
+
+        # K=0: disable speculation when utility < 1
+        # (Saxena et al., MLSys 2026, Theorem 4.2).
+        if best_utility < 1.0 and min_k == 0:
+            best_k = 0
 
         if best_k != prev_k:
             self._previous_adaptive_k = best_k
             self._adaptive_k_cooldown = self._cooldown_steps
-        return max(min_k, min(best_k, max_k))
+        return best_k
 
     @staticmethod
     def _is_blocked_waiting_status(status: RequestStatus) -> bool:
