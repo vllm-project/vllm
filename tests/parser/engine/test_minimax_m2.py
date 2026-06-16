@@ -39,6 +39,21 @@ def parser(mock_tokenizer):
     return MinimaxM2Parser(mock_tokenizer)
 
 
+def make_tools(*names: str):
+    return [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name=name,
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                },
+            ),
+        )
+        for name in names
+    ]
+
+
 class TestNonStreaming:
     def test_no_tool_calls(self, parser, mock_request):
         result = parser.extract_tool_calls(
@@ -94,6 +109,7 @@ class TestNonStreaming:
             )
         ]
         parser = MinimaxM2Parser(mock_tokenizer, tools=tools)
+        mock_request.tools = tools
 
         result = parser.extract_tool_calls(
             '<minimax:tool_call><invoke name="forecast">'
@@ -106,6 +122,40 @@ class TestNonStreaming:
         assert json.loads(result.tool_calls[0].function.arguments) == {
             "days": 5,
             "include_hourly": True,
+        }
+
+    def test_invalid_tool_name_is_rejected(self, mock_tokenizer, mock_request):
+        tools = make_tools("search")
+        parser = MinimaxM2Parser(mock_tokenizer)
+        mock_request.tools = tools
+
+        result = parser.extract_tool_calls(
+            '<minimax:tool_call><invoke name="img_gen">'
+            '<parameter name="prompt">a cat</parameter>'
+            "</invoke></minimax:tool_call>",
+            mock_request,
+        )
+
+        assert result.tools_called is False
+        assert result.tool_calls == []
+
+    def test_mixed_tool_names_only_return_valid(self, mock_tokenizer, mock_request):
+        tools = make_tools("search")
+        parser = MinimaxM2Parser(mock_tokenizer)
+        mock_request.tools = tools
+
+        result = parser.extract_tool_calls(
+            "<minimax:tool_call>"
+            '<invoke name="img_gen"><parameter name="prompt">cat</parameter></invoke>'
+            '<invoke name="search"><parameter name="query">news</parameter></invoke>'
+            "</minimax:tool_call>",
+            mock_request,
+        )
+
+        assert result.tools_called is True
+        assert [tc.function.name for tc in result.tool_calls] == ["search"]
+        assert json.loads(result.tool_calls[0].function.arguments) == {
+            "query": "news",
         }
 
 
@@ -147,6 +197,45 @@ class TestStreaming:
             if tc.function and tc.function.name
         ]
         assert tool_names == ["a", "b"]
+
+    def test_streaming_invoke_prefix_split_before_quote(self, parser, mock_request):
+        results = simulate_tool_streaming(
+            parser,
+            mock_request,
+            [
+                "<minimax:tool_call>",
+                "<invoke name=",
+                '"get_weather">',
+                '<parameter name="city">Seattle</parameter>',
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+
+        assert collect_function_name(results) == "get_weather"
+        assert json.loads(collect_tool_arguments(results)) == {
+            "city": "Seattle",
+        }
+
+    def test_streaming_invalid_tool_name_is_rejected(
+        self, mock_tokenizer, mock_request
+    ):
+        tools = make_tools("search")
+        parser = MinimaxM2Parser(mock_tokenizer)
+        mock_request.tools = tools
+
+        results = simulate_tool_streaming(
+            parser,
+            mock_request,
+            [
+                "<minimax:tool_call>",
+                '<invoke name="img_gen">',
+                '<parameter name="prompt">cat</parameter>',
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+
+        assert collect_function_name(results) is None
+        assert collect_tool_arguments(results) == ""
 
 
 class TestReasoning:
