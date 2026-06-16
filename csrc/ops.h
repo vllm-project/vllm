@@ -50,7 +50,8 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
-void silu_and_mul_clamp(torch::Tensor& out, torch::Tensor& input, double limit);
+void silu_and_mul_clamp(torch::Tensor& out, torch::Tensor& input, double limit,
+                        double alpha = 1.0, double beta = 0.0);
 
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);
@@ -102,4 +103,7 @@ void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
 void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                    int64_t quant_level, bool cast_bf2half = false);
 int64_t qr_max_size();
+
+// TODO: Remove this once ROCm upgrade to torch 2.11.
+torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 #endif

@@ -55,6 +55,26 @@ def step3_vl_chat_template(content: str) -> str:
 
 
 MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
+    "llama4": VitCudagraphTestConfig(
+        model="meta-llama/Llama-4-Scout-17B-16E-Instruct",
+        modalities=["image"],
+        image_prompt=(
+            "<|begin_of_text|><|header_start|>user<|header_end|>\n\n"
+            "<|image|>What is in this image?<|eot|>"
+            "<|header_start|>assistant<|header_end|>\n\n"
+        ),
+        max_model_len=4096,
+        max_tokens=32,
+        max_num_seqs=2,
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="Llama4ForConditionalGeneration",
+            ),
+        },
+        marks=[pytest.mark.core_model],
+    ),
     "internvl": VitCudagraphTestConfig(
         model="OpenGVLab/InternVL3-1B",
         num_video_frames=8,
@@ -134,6 +154,28 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             "hf_overrides": partial(
                 dummy_hf_overrides,
                 model_arch="StepVLForConditionalGeneration",
+            ),
+        },
+    ),
+    "glm4_1v": VitCudagraphTestConfig(
+        model="zai-org/GLM-4.1V-9B-Thinking",
+        image_prompt=(
+            "[gMASK]<sop><|system|>\nYou are a helpful assistant.<|user|>\n"
+            "<|begin_of_image|><|image|><|end_of_image|>"
+            "What is in this image?<|assistant|>assistant\n"
+        ),
+        video_prompt=(
+            "[gMASK]<sop><|system|>\nYou are a helpful assistant.<|user|>\n"
+            "<|begin_of_video|><|video|><|end_of_video|>"
+            "Describe this video in one sentence<|assistant|>assistant\n"
+        ),
+        needs_video_metadata=True,
+        marks=[pytest.mark.core_model],
+        vllm_runner_kwargs={
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="Glm4vForConditionalGeneration",
             ),
         },
     ),
