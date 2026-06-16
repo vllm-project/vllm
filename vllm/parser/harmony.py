@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple
 
+from openai_harmony import StreamState
+
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
@@ -23,13 +25,16 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.logger import init_logger
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 
 if TYPE_CHECKING:
     from openai_harmony import Message, Role
-    from openai_harmony import StreamState as HarmonyStreamState
+
+
+logger = init_logger(__name__)
 
 
 class _SegmentType(Enum):
@@ -87,7 +92,7 @@ class HarmonyParser(DelegatingParser):
         self._num_processed_messages = 0
 
     @property
-    def state(self) -> HarmonyStreamState:
+    def state(self) -> StreamState:
         return self._harmony_parser.state
 
     @property
@@ -183,6 +188,28 @@ class HarmonyParser(DelegatingParser):
 
         reasoning = "\n".join(reasoning_parts) or None
         content = "\n".join(content_parts) or None
+
+        # Detect a malformed assistant turn that produced no deliverable output
+        # and left the parser in a non-terminal state (e.g. a 'final' channel
+        # missing the <|message|> delimiter, which traps the body in the header).
+        # ``not self.current_content`` excludes legitimate mid-content
+        # truncation, where the partial body is recovered above.
+        if (
+            content is None
+            and not tool_calls
+            and not self.current_content
+            and self.state != StreamState.EXPECT_START
+        ):
+            logger.warning(
+                "Harmony parser ended in a non-terminal state (%s) with no "
+                "content or tool calls; %d generated token(s) produced no "
+                "deliverable output. This usually indicates a malformed "
+                "assistant turn, e.g. a 'final' channel missing the "
+                "<|message|> delimiter.",
+                self.state,
+                len(model_output_token_ids),
+            )
+
         return reasoning, content, tool_calls or None
 
     def parse_delta(

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import logging
 from collections.abc import Sequence
 
 import pytest
@@ -362,6 +363,35 @@ class TestParse:
         assert reasoning == "I'm thinking."
         assert content == "I'm in the middle of answering"
         assert tool_calls is None
+
+    def test_malformed_final_missing_message_delimiter(
+        self, harmony_parser, chat_request, caplog_vllm
+    ):
+        # gpt-oss occasionally omits the <|message|> delimiter after
+        # <|channel|>final, trapping the answer body in the header and leaving
+        # the parser in a non-terminal state. vLLM must surface this instead of
+        # silently returning content=None with finish_reason="stop".
+        caplog_vllm.set_level(logging.WARNING, logger="vllm.parser.harmony")
+
+        reasoning, content, tool_calls = harmony_parser.parse(
+            "",
+            chat_request,
+            model_output_token_ids=encode_output(
+                "<|channel|>analysis<|message|>thinking<|end|>"
+                "<|start|>assistant<|channel|>final "
+                '{"answer": "hi"}<|return|>'
+            ),
+        )
+
+        assert reasoning == "thinking"
+        # Recovering the trapped body is out of scope for Option A; it is still
+        # dropped, but the parser must no longer stay silent about it.
+        assert content is None
+        assert tool_calls is None
+        assert any(
+            "non-terminal state" in record.getMessage()
+            for record in caplog_vllm.records
+        )
 
     @pytest.mark.parametrize(
         ("harmony_str", "expected_content"),
