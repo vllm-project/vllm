@@ -127,6 +127,11 @@ pub struct SharedRuntimeArgs {
     /// `config.json`.
     #[arg(long)]
     pub max_model_len: Option<u32>,
+    /// Maximum number of log probabilities to return when `logprobs` is
+    /// specified in sampling parameters. `-1` means no cap.
+    #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
+    #[serde(default)]
+    pub max_logprobs: Option<i32>,
     /// TCP port for the gRPC Generate service. When not set, no gRPC server is
     /// started.
     #[arg(long)]
@@ -281,6 +286,7 @@ impl SharedRuntimeArgs {
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
+            max_logprobs: self.max_logprobs,
             api_server_options,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
@@ -324,6 +330,7 @@ impl SharedRuntimeArgs {
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
+            max_logprobs: self.max_logprobs,
             api_server_options,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
@@ -467,7 +474,10 @@ impl ServeArgs {
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
             self.runtime.max_model_len,
+            self.runtime.max_logprobs,
             self.runtime.language_model_only,
+            self.runtime.disable_log_stats,
+            self.runtime.shutdown_timeout,
             handshake_port,
         )
     }

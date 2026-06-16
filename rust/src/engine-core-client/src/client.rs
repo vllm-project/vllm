@@ -442,9 +442,10 @@ impl EngineCoreClient {
         );
 
         let request_id = req.request_id.clone();
+        let lora_name = req.lora_request.as_ref().map(|lora| lora.lora_name.clone());
         let data_parallel_rank = req.data_parallel_rank;
         let (engine_id, rx) =
-            self.inner.register_request(request_id.clone(), data_parallel_rank)?;
+            self.inner.register_request(request_id.clone(), lora_name, data_parallel_rank)?;
 
         let result: Result<()> = async {
             if let Some(coordinator) = self.coordinator.as_ref() {
@@ -488,6 +489,10 @@ impl EngineCoreClient {
         if abortable.is_empty() {
             return Ok(());
         }
+
+        // Finalize the consumer streams first, before the engine round-trip.
+        let all_request_ids: Vec<String> = abortable.values().flatten().cloned().collect();
+        self.inner.abort_requests_locally(&all_request_ids);
 
         for (engine_id, request_ids) in abortable {
             self.inner.do_abort_requests(&engine_id, &request_ids).await?;
