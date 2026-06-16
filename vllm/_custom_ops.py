@@ -23,7 +23,6 @@ if TYPE_CHECKING:
 
     def register_fake(fn):
         return lambda name: fn
-
 else:
     try:
         from torch.library import register_fake
