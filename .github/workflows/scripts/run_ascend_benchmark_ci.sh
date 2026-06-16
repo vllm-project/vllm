@@ -722,53 +722,57 @@ cleanup() {
 }
 
 run_runner_npu_preflight_once() {
-  "$PYTHON_BIN" - <<'PY'
-import importlib.util
+  # Use hust-ascend-manager runtime check for the NPU probe. This runs the
+  # torch_npu probe in a controlled subprocess environment (build_env_dict()
+  # exports + PYTHONNOUSERSITE=1) which prevents conda library shadowing and
+  # other environment contamination that cause 'path string is NULL' errors.
+  if ! command -v hust-ascend-manager >/dev/null 2>&1; then
+    echo "[preflight] hust-ascend-manager not found in PATH" >&2
+    return 127
+  fi
+
+  local manager_output
+  local manager_rc
+  manager_output="$(hust-ascend-manager runtime check \
+    --repo "$WORKSPACE_ROOT" \
+    --python "$PYTHON_BIN" \
+    --require-npu --json 2>&1)"
+  manager_rc=$?
+  echo "$manager_output"
+  if [[ "$manager_rc" -ne 0 ]]; then
+    echo "[preflight] hust-ascend-manager runtime check failed (exit $manager_rc)" >&2
+    return "$manager_rc"
+  fi
+
+  # Verify device_count and allocation result from the JSON output.
+  # The runtime check prints pretty JSON, so parse stdin as a full JSON document.
+  local selected_device
+  selected_device="$(MANAGER_OUTPUT="$manager_output" "$PYTHON_BIN" - <<'PY'
+import json
 import os
 import sys
 
-import torch
+try:
+    data = json.loads(os.environ["MANAGER_OUTPUT"])
+except json.JSONDecodeError as exc:
+    print(f"failed to parse runtime check JSON: {exc}", file=sys.stderr)
+    raise SystemExit(1)
 
-if importlib.util.find_spec("torch_npu") is None:
-    raise RuntimeError("torch_npu is not installed in the benchmark environment")
+probe = data.get("torch_npu_probe", {})
+device_count = probe.get("device_count")
+if not isinstance(device_count, int) or device_count <= 0:
+    print(f"torch.npu.device_count() returned {device_count!r}", file=sys.stderr)
+    raise SystemExit(1)
 
-import torch_npu  # noqa: F401
+if not probe.get("allocation_ok"):
+    print(f"torch_npu allocation check failed: {probe.get('error')}", file=sys.stderr)
+    raise SystemExit(1)
 
-preferred_device = os.environ.get("VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE", "npu:0")
-preferred_index = 0
-if ":" in preferred_device:
-  try:
-    preferred_index = int(preferred_device.rsplit(":", 1)[1])
-  except ValueError:
-    preferred_index = 0
-
-device_count = int(torch.npu.device_count())
-if device_count <= 0:
-  raise RuntimeError("torch.npu.device_count() returned 0")
-
-candidate_devices = [
-  f"npu:{(preferred_index + offset) % device_count}"
-  for offset in range(device_count)
-]
-
-print("torch_npu import ok=True")
-for device in candidate_devices:
-  print(f"preflight device={device}")
-  try:
-    torch.npu.set_device(device)
-    _ = torch.zeros(1, device=device)
-  except Exception as exc:  # noqa: BLE001
-    print(f"preflight failed on {device}: {exc}", file=sys.stderr)
-    continue
-
-  print(f"selected_device={device}")
-  print("torch.zeros preflight ok")
-  break
-else:
-  raise RuntimeError(
-    "torch.npu basic allocation failed on every visible device"
-  )
+print(probe.get("selected_device") or "npu:0")
 PY
+  )" || return 1
+
+  echo "selected_device=${selected_device}"
 }
 
 ensure_runner_npu_ready() {
