@@ -114,11 +114,11 @@ class FullAttentionSpec(AttentionSpec):
         max_model_len = vllm_config.model_config.max_model_len
         dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
         pcp_world_size = vllm_config.parallel_config.prefill_context_parallel_size
-        dycp_word_size = vllm_config.parallel_config.dp_per_domain
-        # Note(hc): each dcp rank only need save
-        # (max_model_len//dcp_world_size) tokens locally.
-        if dcp_world_size * pcp_world_size * dycp_word_size > 1:
-            max_model_len = cdiv(max_model_len, dcp_world_size * pcp_world_size * dycp_word_size)
+        cp_world_size = dcp_world_size * pcp_world_size
+        # Each DCP/PCP rank only needs to save its local shard. Do not include
+        # dp_per_domain here until DyCP KV ownership is fully supported.
+        if cp_world_size > 1:
+            max_model_len = cdiv(max_model_len, cp_world_size)
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
     @classmethod
