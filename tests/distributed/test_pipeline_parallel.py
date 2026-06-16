@@ -124,8 +124,6 @@ TEXT_GENERATION_MODELS = {
     "EleutherAI/pythia-1.4b": PPTestSettings.fast(),
     "ibm/PowerLM-3b": PPTestSettings.fast(),
     "ibm/PowerMoE-3b": PPTestSettings.fast(),
-    # Uses Llama
-    # "internlm/internlm-chat-7b": PPTestSettings.fast(),
     "internlm/internlm2-chat-7b": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "pfnet/plamo-2-1b": PPTestSettings.fast(),
@@ -152,15 +150,11 @@ TEXT_GENERATION_MODELS = {
     "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(
         multi_node_only=True, load_format="dummy"
     ),
-    "Qwen/Qwen-7B-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2.5-0.5B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
     "upstage/solar-pro-preview-instruct": PPTestSettings.fast(load_format="dummy"),
-    # FIXME: Cannot load tokenizer in latest transformers version.
-    # Need to use tokenizer from `meta-llama/Llama-2-7b-chat-hf`
-    # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(),
     # [Encoder-only]
     # TODO: Implement PP
     # "facebook/bart-base": PPTestSettings.fast(),

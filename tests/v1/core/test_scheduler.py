@@ -15,6 +15,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -1849,6 +1850,8 @@ def create_scheduler_with_priority(
         enable_chunked_prefill=True,
         is_encoder_decoder=model_config.is_encoder_decoder,
         policy="priority",  # Enable priority scheduling
+        # Ensure admission/preemption mechanics are deterministic
+        watermark=0.0,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -2568,6 +2571,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.vllm_config.model_config.enable_return_routed_experts = False
     scheduler.enable_return_routed_experts = False
     scheduler.recompute_kv_load_failures = False
+    scheduler.defer_block_free = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 
@@ -3988,6 +3992,87 @@ def test_delayed_kv_connector_free_keeps_scheduler_active():
     assert not scheduler.has_finished_requests()
 
 
+def test_scheduler_kv_connector_stats():
+    """Test worker-side, scheduler-side, and combined KV connector stats."""
+
+    class GenericKVConnectorStats(KVConnectorStats):
+        def reset(self):
+            self.data = {}
+
+        def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+            self.data.update(other.data)
+            return self
+
+        def reduce(self) -> dict[str, int | float]:
+            return {}
+
+        def is_empty(self) -> bool:
+            return not self.data
+
+    test_cases = (
+        ({"worker": 1}, None, {"worker": 1}),
+        (None, {"scheduler": 2}, {"scheduler": 2}),
+        ({"worker": 1}, {"scheduler": 2}, {"worker": 1, "scheduler": 2}),
+    )
+
+    for worker_data, scheduler_data, expected_data in test_cases:
+        scheduler = create_scheduler()
+        worker_stats = (
+            GenericKVConnectorStats(data=worker_data) if worker_data else None
+        )
+        scheduler_stats = (
+            GenericKVConnectorStats(data=scheduler_data) if scheduler_data else None
+        )
+        scheduler.connector = Mock()
+        scheduler.connector.get_kv_connector_stats.return_value = (
+            scheduler_stats if worker_stats is None else None
+        )
+        scheduler.connector.take_events.return_value = []
+
+        def update_connector_output(
+            kv_connector_output: KVConnectorOutput,
+            scheduler=scheduler,
+            scheduler_stats=scheduler_stats,
+        ):
+            scheduler.connector.get_kv_connector_stats.return_value = scheduler_stats
+
+        scheduler.connector.update_connector_output.side_effect = (
+            update_connector_output
+        )
+
+        model_output = ModelRunnerOutput(
+            req_ids=["req_0"],
+            req_id_to_index={"req_0": 0},
+            sampled_token_ids=[[123]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[None],
+            kv_connector_output=KVConnectorOutput(kv_connector_stats=worker_stats)
+            if worker_stats
+            else None,
+        )
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=None,
+            num_scheduled_tokens={"req_0": 1},
+            total_num_scheduled_tokens=1,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[0],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
+
+        engine_core_outputs = scheduler.update_from_output(
+            scheduler_output, model_output
+        )
+
+        final_stats = next(
+            iter(engine_core_outputs.values())
+        ).scheduler_stats.kv_connector_stats
+        assert final_stats == expected_data
+
+
 # ==============================================================================
 # Variable-length encoder cross-attention block allocation tests
 # ==============================================================================
@@ -4349,6 +4434,180 @@ def test_eagle3_mm_encoder_cache_with_shift():
         f"shifted_end={scheduled_end_with_shift}) overlapping MM at "
         f"{start_pos}. The fix must schedule encoder inputs."
     )
+
+
+def test_free_encoder_inputs_respects_unconfirmed_placeholders():
+    """Regression test for issue #38551 (rollback path): under async
+    scheduling with speculative decoding, num_computed_tokens is advanced
+    optimistically and can be rolled back when in-flight draft tokens are
+    rejected. Freeing an encoder input as soon as num_computed_tokens passes
+    the end of its placeholder range allows a later rollback to rewind back
+    into the range, after which the worker's MM-embedding gather reads an
+    evicted entry and crashes the engine with "Encoder cache miss". The
+    scheduler must retain the input until the *confirmed* progress
+    (num_computed_tokens - num_output_placeholders) passes the range end, so
+    that no pending rejection can rewind into the range."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        num_speculative_tokens=3,
+    )
+    mm_start_pos = 50
+    mm_length = 100
+    mm_positions = [
+        [PlaceholderRange(offset=mm_start_pos, length=mm_length)],
+    ]
+    request = create_requests(
+        num_requests=1,
+        num_tokens=mm_start_pos + mm_length + 100,
+        mm_positions=mm_positions,
+    )[0]
+    manager = scheduler.encoder_cache_manager
+    manager.allocate(request, 0)
+    mm_end = mm_start_pos + mm_length
+
+    # One optimistically-scheduled in-flight step advanced num_computed_tokens
+    # by 1 sampled + 3 draft tokens; none are confirmed yet, so all 4 are
+    # still output placeholders that a rejection could rewind.
+    request.num_output_placeholders = 4
+
+    # Optimistic progress reaches the end of the MM range, but the confirmed
+    # position (mm_end + 1 - 4) is still inside it: a rejection could rewind
+    # back into the range, so the entry must be retained.
+    request.num_computed_tokens = mm_end + 1
+    scheduler._free_encoder_inputs(request)
+    assert manager.get_cached_input_ids(request) == {0}
+
+    # Confirmed position still inside the range.
+    request.num_computed_tokens = mm_end + 3
+    scheduler._free_encoder_inputs(request)
+    assert manager.get_cached_input_ids(request) == {0}
+
+    # Confirmed position (mm_end + 4 - 4) now reaches the range end: even if
+    # every unconfirmed token is rejected, progress cannot rewind into the
+    # range, so the entry is freed.
+    request.num_computed_tokens = mm_end + 4
+    scheduler._free_encoder_inputs(request)
+    assert manager.get_cached_input_ids(request) == set()
+
+
+def test_free_encoder_inputs_unchanged_without_spec_decode():
+    """Without speculative decoding, encoder inputs are freed as soon as
+    num_computed_tokens passes the placeholder range, as before."""
+    scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
+    mm_positions = [[PlaceholderRange(offset=50, length=100)]]
+    request = create_requests(
+        num_requests=1,
+        num_tokens=250,
+        mm_positions=mm_positions,
+    )[0]
+    manager = scheduler.encoder_cache_manager
+    manager.allocate(request, 0)
+
+    request.num_computed_tokens = 149
+    scheduler._free_encoder_inputs(request)
+    assert manager.get_cached_input_ids(request) == {0}
+
+    request.num_computed_tokens = 150
+    scheduler._free_encoder_inputs(request)
+    assert manager.get_cached_input_ids(request) == set()
+
+
+def test_encoder_cache_retained_across_preemption_and_resume():
+    """Regression guard for issue #38551 (preemption path).
+
+    A request preempted under KV pressure resets num_computed_tokens to 0
+    and drops its encoder references (scheduler._preempt_request calls
+    encoder_cache_manager.free). Because that only moves the entry into
+    `freeable` (it is not evicted), the worker still holds it: the scheduler
+    must NOT report the mm_hash as freed. On resume, re-requesting the
+    encoder input must pull the still-cached entry back out of `freeable`
+    without scheduling a recompute, keeping the scheduler and worker
+    consistent. The spec-rollback retention margin does not gate this path,
+    so it is covered separately here."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        num_speculative_tokens=3,
+    )
+    mm_positions = [[PlaceholderRange(offset=50, length=100)]]
+    request = create_requests(
+        num_requests=1,
+        num_tokens=250,
+        mm_hashes_list=[["img_a"]],
+        mm_positions=mm_positions,
+    )[0]
+    manager = scheduler.encoder_cache_manager
+    mm_hash = request.mm_features[0].identifier
+
+    # Prefill scheduled and computed the encoder input; it is pinned.
+    manager.allocate(request, 0)
+    assert manager.get_cached_input_ids(request) == {0}
+
+    # Preemption drops the request's encoder references (scheduler.py:
+    # _preempt_request -> encoder_cache_manager.free) and resets progress.
+    manager.free(request)
+    request.num_computed_tokens = 0
+    # The entry is now ref-free but only `freeable` (not evicted): the
+    # worker still holds it, so nothing must be reported as freed.
+    assert mm_hash in manager.cached
+    assert mm_hash in manager.freeable
+    assert manager.get_freed_mm_hashes() == []
+
+    # Resume re-requests the encoder output. The still-cached entry is pulled
+    # back out of `freeable` with no recompute and no worker-side free.
+    assert manager.check_and_update_cache(request, 0) is True
+    assert mm_hash not in manager.freeable
+    assert manager.get_cached_input_ids(request) == {0}
+    assert manager.get_freed_mm_hashes() == []
+
+
+def test_encoder_cache_recomputed_when_evicted_during_preemption():
+    """Companion to the retention case (issue #38551, preemption path).
+
+    If a preempted request's retained encoder entry IS evicted under memory
+    pressure before it resumes, the scheduler reports the mm_hash as freed
+    (so the worker drops it) and a resume must schedule a recompute rather
+    than assume the worker still holds it. check_and_update_cache must
+    return False so the encoder input is re-scheduled."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        num_speculative_tokens=3,
+    )
+    mm_positions = [[PlaceholderRange(offset=50, length=100)]]
+    request = create_requests(
+        num_requests=1,
+        num_tokens=250,
+        mm_hashes_list=[["img_a"]],
+        mm_positions=mm_positions,
+    )[0]
+    manager = scheduler.encoder_cache_manager
+    mm_hash = request.mm_features[0].identifier
+
+    manager.allocate(request, 0)
+    # Preemption drops references; the entry becomes freeable.
+    manager.free(request)
+    request.num_computed_tokens = 0
+    assert mm_hash in manager.freeable
+
+    # A new request with a different image hits memory pressure and evicts
+    # the freeable entry to make room.
+    other = create_requests(
+        num_requests=1,
+        num_tokens=250,
+        mm_hashes_list=[["img_b"]],
+        mm_positions=mm_positions,
+        req_ids=["1"],
+    )[0]
+    manager.num_free_slots = 50  # force eviction of the freeable entry
+    assert manager.can_allocate(
+        other, 0, encoder_compute_budget=10_000, num_embeds_to_schedule=0
+    )
+
+    # The evicted entry is reported to the worker, which drops it.
+    assert mm_hash not in manager.cached
+    assert manager.get_freed_mm_hashes() == [mm_hash]
+
+    # On resume the original request must recompute (cache miss is correct).
+    assert manager.check_and_update_cache(request, 0) is False
 
 
 @pytest.mark.parametrize("use_kv_connector", [False, True])
