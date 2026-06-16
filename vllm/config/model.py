@@ -42,6 +42,7 @@ from vllm.transformers_utils.config import (
     uses_mrope,
     uses_xdrope_dim,
 )
+from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
