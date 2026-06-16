@@ -1176,9 +1176,8 @@ class FlexAttentionImpl(AttentionImpl):
             key_cache, value_cache = kv_cache.split(hs, dim=-1)
 
             # Flatten (num_blocks, block_size) into a single token dim.
-            # The transposed views are non-contiguous, so use reshape.
-            key_cache = key_cache.reshape(-1, self.num_kv_heads, self.head_size)
-            value_cache = value_cache.reshape(-1, self.num_kv_heads, self.head_size)
+            key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)
+            value_cache = value_cache.view(-1, self.num_kv_heads, self.head_size)
             query, key_tensor, value_tensor = map(
                 lambda x: self.view_as_4d(x).permute(0, 2, 1, 3),
                 (query, key_cache, value_cache),
