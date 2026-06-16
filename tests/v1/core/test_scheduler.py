@@ -5016,6 +5016,86 @@ def test_priority_preemption_at_max_num_seqs_blocked_skipped():
     assert len(scheduler.running) == 1
 
 
+def test_priority_preemption_at_kv_cache_pressure_e2e():
+    """Test that under KV cache pressure, a higher-priority waiting request
+    preempts a lower-priority running request to free blocks.
+
+    Scenario:
+    - block_size = 16, num_blocks = 5 (4 usable after null block).
+    - lo1 (priority 5, 32 tokens) runs first → 2 blocks used. Decode → 33
+      tokens (needs 3rd block on next schedule).
+    - hi (priority 0, 32 tokens) arrives in the waiting queue.
+    - lo1's 3rd block is allocated (3 used), hi can't fit (needs 2 blocks,
+      only 1 free) → hi preempts lo1 and takes the slot.
+    """
+    block_size = 16
+    num_blocks = 5  # 1 null → 4 usable
+    num_tokens = block_size * 2  # 32 tokens = 2 blocks
+
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=3,
+        max_num_batched_tokens=200,
+        num_blocks=num_blocks,
+        block_size=block_size,
+    )
+
+    # --- Phase 1: low-priority request starts running ---
+    lo1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        num_tokens=num_tokens,
+        req_ids=["lo1"],
+    )[0]
+    scheduler.add_request(lo1)
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == 1
+    assert lo1 in scheduler.running
+
+    # Decode: lo1 now has 33 tokens (needs 3rd block next time).
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=["lo1"],
+            req_id_to_index={"lo1": 0},
+            sampled_token_ids=[[100]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    # --- Phase 2: high-priority waiting request arrives ---
+    hi = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],
+        arrival_times=[2.0],
+        num_tokens=num_tokens,
+        req_ids=["hi"],
+    )[0]
+    scheduler.add_request(hi)
+
+    # schedule(): lo1 gets its 3rd block (3 used, 1 free).  hi needs
+    # 2 blocks but only 1 is free → block allocation fails for hi.
+    # With the new KV-cache preemption, hi (priority 0) preempts
+    # lo1 (priority 5) to free blocks.
+    output = scheduler.schedule()
+
+    # lo1 should be preempted.
+    lo1_req = scheduler.requests["lo1"]
+    assert lo1_req.status == RequestStatus.PREEMPTED, (
+        f"Expected lo1 to be preempted, got {lo1_req.status}"
+    )
+
+    # hi should be in the running queue.
+    hi_req = scheduler.requests["hi"]
+    assert hi_req.status == RequestStatus.RUNNING, (
+        f"Expected hi to be running, got {hi_req.status}"
+    )
+    assert hi_req in scheduler.running
+
+
 def test_async_load_reservation_prevents_wedge_e2e():
     """Same wedge scenario as PR #40968's lateral-preemption e2e test, but
     resolved by reservation-based admission control instead of preemption.
