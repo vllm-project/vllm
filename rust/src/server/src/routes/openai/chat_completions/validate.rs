@@ -92,13 +92,6 @@ pub(super) fn validate_request_compat(
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
-    if request.parallel_tool_calls.is_some() {
-        bail_invalid_request!(
-            param = "parallel_tool_calls",
-            "parallel_tool_calls is not supported."
-        );
-    }
-
     reject_non_default(
         request.length_penalty.as_ref(),
         "length_penalty",
@@ -120,12 +113,6 @@ pub(super) fn validate_request_compat(
         "thinking_token_budget",
         "thinking_token_budget is not supported.",
     )?;
-    if !request.include_reasoning {
-        bail_invalid_request!(
-            param = "include_reasoning",
-            "include_reasoning is not supported."
-        );
-    }
     reject_non_default(
         request.media_io_kwargs.as_ref(),
         "media_io_kwargs",
@@ -141,15 +128,6 @@ pub(super) fn validate_request_compat(
         "repetition_detection",
         "repetition_detection is not supported.",
     )?;
-
-    if let Some(options) = &request.stream_options
-        && options.continuous_usage_stats.is_some()
-    {
-        bail_invalid_request!(
-            param = "stream_options",
-            "continuous_usage_stats is not supported."
-        );
-    }
 
     Ok(())
 }
@@ -310,6 +288,17 @@ mod tests {
 
         validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
             .expect("reasoning_effort should be accepted");
+    }
+
+    #[test]
+    fn validate_request_compat_accepts_include_reasoning_false() {
+        let request = ChatCompletionRequest {
+            include_reasoning: false,
+            ..base_request()
+        };
+
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("include_reasoning=false should be accepted");
     }
 
     #[test]

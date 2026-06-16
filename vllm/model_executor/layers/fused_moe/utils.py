@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
 from math import prod
 
 import torch
@@ -32,7 +31,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 @triton.jit
@@ -315,6 +313,8 @@ def moe_kernel_quantize_input(
                 "moe_kernel_quantize_input does not support quant_dtype='mxfp8' MOE "
                 "quantization emulation. Please open an issue."
             )
+        # Non-swizzled (M, K/32) uint8 UE8M0 scales; deepgemm_moe_permute packs
+        # them for DeepGEMM, TRTLLM takes them as-is.
         return _mxfp8_e4m3_quantize(
             A,
             A_scale,
@@ -366,14 +366,6 @@ def normalize_batched_scales_shape(
             scales = scales.view(num_experts, -1, scales.size(-1))
 
     return scales
-
-
-# Torch custom ops can't deal with outputs aliasing inputs so we need to
-# disable inplace for torch >= 2.9.
-# See https://github.com/vllm-project/vllm/issues/26378
-@functools.cache
-def disable_inplace() -> bool:
-    return is_torch_equal_or_newer("2.9")
 
 
 @triton.jit

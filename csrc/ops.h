@@ -31,29 +31,6 @@ torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
   return new_tensor;
 }
 
-void paged_attention_v1(
-    torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
-    torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
-    torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
-    int64_t max_seq_len, const std::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, torch::Tensor& k_scale,
-    torch::Tensor& v_scale, const int64_t tp_rank,
-    const int64_t blocksparse_local_blocks,
-    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step);
-
-void paged_attention_v2(
-    torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
-    torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
-    torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
-    torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
-    int64_t max_seq_len, const std::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, torch::Tensor& k_scale,
-    torch::Tensor& v_scale, const int64_t tp_rank,
-    const int64_t blocksparse_local_blocks,
-    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step);
-
 // rms_norm and fused_add_rms_norm declarations also exist in
 // csrc/libtorch_stable/ops.h (torch::stable ABI for CUDA). They remain here
 // because the CPU build still uses these torch::Tensor declarations.
@@ -62,18 +39,6 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
-
-torch::Tensor fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-    torch::Tensor const& q_in, torch::Tensor const& kv, torch::Tensor& k_cache,
-    torch::Tensor const& slot_mapping, torch::Tensor const& position_ids,
-    torch::Tensor const& cos_sin_cache, int64_t q_head_padded, double eps,
-    int64_t cache_block_size);
-
-void silu_and_mul_per_block_quant(torch::Tensor& out,
-                                  torch::Tensor const& input,
-                                  torch::Tensor& scales, int64_t group_size,
-                                  std::optional<torch::Tensor> scale_ub,
-                                  bool is_scale_transposed);
 
 // rotary_embedding also exist in csrc/libtorch_stable/ops.h (torch::stable
 // ABI for CUDA). It remains here because the CPU build still uses these
@@ -85,7 +50,8 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
-void silu_and_mul_clamp(torch::Tensor& out, torch::Tensor& input, double limit);
+void silu_and_mul_clamp(torch::Tensor& out, torch::Tensor& input, double limit,
+                        double alpha = 1.0, double beta = 0.0);
 
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);
@@ -113,8 +79,6 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
                         torch::Tensor const& seq_lens,
                         torch::Tensor const& page_table, double scale);
 
-torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
-
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor const& scale,
                               std::optional<torch::Tensor> const& azp);
@@ -130,24 +94,6 @@ torch::Tensor dynamic_4bit_int_moe_cpu(
     int64_t activation_kind);
 
 using fptr_t = int64_t;
-fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
-                      torch::Tensor& rank_data, int64_t rank,
-                      bool fully_connected);
-void all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
-                fptr_t reg_buffer, int64_t reg_buffer_sz_bytes);
-void dispose(fptr_t _fa);
-int64_t meta_size();
-void register_buffer(fptr_t _fa, const std::vector<int64_t>& fake_ipc_ptrs);
-std::tuple<std::vector<int64_t>, std::vector<int64_t>>
-get_graph_buffer_ipc_meta(fptr_t _fa);
-void register_graph_buffers(fptr_t _fa,
-                            const std::vector<std::vector<int64_t>>& handles,
-                            const std::vector<std::vector<int64_t>>& offsets);
-std::tuple<int64_t, torch::Tensor> allocate_shared_buffer_and_handle(
-    int64_t size);
-int64_t open_mem_handle(torch::Tensor& mem_handle);
-void free_shared_buffer(int64_t buffer);
-
 #ifdef USE_ROCM
 fptr_t init_custom_qr(int64_t rank, int64_t world_size,
                       std::optional<int64_t> qr_max_size = std::nullopt);
@@ -157,16 +103,7 @@ void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
 void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                    int64_t quant_level, bool cast_bf2half = false);
 int64_t qr_max_size();
-#endif
 
-#ifndef USE_ROCM
-torch::Tensor minimax_allreduce_rms(torch::Tensor const& input,
-                                    torch::Tensor const& norm_weight,
-                                    torch::Tensor workspace, int64_t const rank,
-                                    int64_t const nranks, double const eps);
-std::tuple<torch::Tensor, torch::Tensor> minimax_allreduce_rms_qk(
-    torch::Tensor qkv, torch::Tensor const& norm_weight_q,
-    torch::Tensor const& norm_weight_k, torch::Tensor workspace,
-    int64_t const q_size, int64_t const kv_size, int64_t const rank,
-    int64_t const nranks, double const eps);
+// TODO: Remove this once ROCm upgrade to torch 2.11.
+torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 #endif
