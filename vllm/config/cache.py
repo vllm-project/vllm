@@ -32,6 +32,7 @@ CacheDType = Literal[
     "int8_per_token_head",
     "fp8_per_token_head",
     "nvfp4",
+    "kvarn_k4v2_g128",
 ]
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
