@@ -172,9 +172,9 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         qo_tile_cnt = (
             cdiv(self._max_num_batched_tokens, _FP8_PREFILL_TILE_Q) + max_num_seqs - 1
         )
-        cu_num = torch.cuda.get_device_properties(
-            torch.accelerator.current_device()
-        ).multi_processor_count
+        from vllm.platforms import current_platform
+
+        cu_num = current_platform.num_compute_units()
         assert cu_num == 256
         max_num_partial_tiles = qo_tile_cnt + cu_num
 
