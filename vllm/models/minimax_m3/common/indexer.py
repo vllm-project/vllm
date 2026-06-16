@@ -31,6 +31,7 @@ from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_score,
     minimax_m3_index_topk,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -120,16 +121,20 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         backend_cls: type[AttentionBackend] = MiniMaxM3IndexerBackend,
     ) -> None:
         super().__init__()
-        if indexer_kv_dtype != "bf16":
+        if indexer_kv_dtype in ("fp8", "fp8_e4m3"):
+            cache_dtype = torch.float8_e4m3fn
+        elif indexer_kv_dtype == "bf16":
+            cache_dtype = torch.bfloat16
+        else:
             raise NotImplementedError(
-                f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported yet "
-                "for the MiniMax M3 indexer cache (only 'bf16')."
+                f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
+                "MiniMax M3 indexer cache (only 'bf16' or 'fp8'/'fp8_e4m3')."
             )
         self.kv_cache = torch.tensor([])
         self.head_dim = head_dim
         self.indexer_kv_dtype = indexer_kv_dtype
-        # Storage dtype for the side cache (bf16 today; quantized layouts later).
-        self.dtype = torch.bfloat16
+        # Side-cache storage dtype: bf16, or e4m3 for the fp8 score path.
+        self.dtype = cache_dtype
         self.prefix = prefix
         self.cache_config = cache_config
         # Impl-chosen backend -> each impl gets its own builder (get_attn_backend).
@@ -438,18 +443,33 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
 
 def select_indexer_impl_cls(
     *,
+    topk_blocks: int,
     indexer_kv_dtype: IndexerKVDType = "bf16",
 ) -> type[MiniMaxM3IndexerImpl]:
-    """Pick the indexer impl off the index-cache dtype.
+    """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
-    The SM100 MSA indexer score path is disabled for now; use the local Triton
-    indexer. If re-enabled, add a NVIDIA-specific ``MiniMaxM3IndexerImpl`` here.
+    On Blackwell (SM100) with ``topk_blocks`` in ``(4, 8, 16, 32)`` (matching the
+    main MSA attend), the fmha_sm100 score path + Triton top-k is used for both
+    bf16 and fp8 index caches. Everything else falls back to the Triton indexer
+    (bf16 only).
     """
     if indexer_kv_dtype in ("mxfp4", "nvfp4"):
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} needs the (not-yet-added) "
             "CuteDSL indexer impl."
         )
+    if (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and topk_blocks in (4, 8, 16, 32)
+        and indexer_kv_dtype in ("bf16", "fp8", "fp8_e4m3")
+    ):
+        # Lazy import so AMD / non-SM100 never import fmha_sm100.
+        from vllm.models.minimax_m3.nvidia.indexer_msa import (
+            MiniMaxM3IndexerMSAImpl,
+        )
+
+        return MiniMaxM3IndexerMSAImpl
     if indexer_kv_dtype != "bf16":
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
@@ -483,6 +503,7 @@ class MiniMaxM3Indexer(nn.Module):
     ) -> None:
         super().__init__()
         impl_cls = select_indexer_impl_cls(
+            topk_blocks=topk_blocks,
             indexer_kv_dtype=indexer_kv_dtype,
         )
         self.impl = impl_cls(

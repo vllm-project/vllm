@@ -576,7 +576,12 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
         q = qkv.new_empty((num_tokens, self.q_size))
-        index_q = qkv.new_empty((num_tokens, self.index_q_size))
+        # index_q matches the index-K cache dtype (e4m3 for the fp8 score path);
+        # the fused kernel emits fp8 directly when this buffer is e4m3.
+        index_q = qkv.new_empty(
+            (num_tokens, self.index_q_size),
+            dtype=self.indexer.index_cache.dtype,
+        )
         ops.fused_minimax_m3_qknorm_rope_kv_insert(
             qkv,
             self.q_norm.weight,
