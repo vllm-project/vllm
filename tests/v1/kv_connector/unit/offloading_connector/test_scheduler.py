@@ -244,6 +244,79 @@ def test_request_preemption(request_runner, async_scheduling: bool):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+def test_no_offload_call_after_on_request_finished(
+    request_runner, async_scheduling: bool
+):
+    """on_request_finished is not issued before a per-request offload
+    call.
+
+    A request can finish while its GPU->primary store is still in flight; the
+    later worker completion then drives complete_store. The scheduler defers
+    on_request_finished until the request is finished AND has no in-flight
+    transfer jobs, so complete_store is observed BEFORE on_request_finished,
+    and it is called exactly once.
+    """
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        block_size_factor=block_size_factor,
+    )
+
+    # Record the order of per-request connector calls on the (mocked) manager.
+    # The external list survives manager.reset_mock() between run() calls.
+    calls: list[tuple[str, str]] = []
+    runner.manager.on_request_finished.side_effect = lambda req_context: calls.append(
+        ("on_request_finished", req_context.req_id)
+    )
+    runner.manager.complete_store.side_effect = (
+        lambda keys, req_context, *args, **kwargs: calls.append(
+            ("complete_store", req_context.req_id)
+        )
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    # Decode a couple of blocks, keeping every transfer in flight
+    # (complete_transfers=False) so no store completes while the request runs.
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
+    runner.run(decoded_tokens=[0], complete_transfers=False)
+    runner.run(
+        decoded_tokens=[0] * (2 * offloaded_block_size),
+        complete_transfers=False,
+    )
+
+    # Terminate the request with its stores still in flight, then keep stepping
+    # (completing transfers) until the deferred on_request_finished hook fires.
+    # Use _run() (not run()) here: we only care about call ordering, and run()'s
+    # expected_stored/flushed assertions would require mode-specific block tuples
+    # over a drain that spans a variable number of steps under async scheduling.
+    runner._run([EOS_TOKEN_ID], False)
+    for _ in range(5):
+        if any(c[0] == "on_request_finished" for c in calls):
+            break
+        runner._run([], True)
+
+    req_id = str(runner.req_id)
+
+    # on_request_finished is issued exactly once.
+    assert calls.count(("on_request_finished", req_id)) == 1, calls
+
+    finished_idx = calls.index(("on_request_finished", req_id))
+    store_indices = [i for i, c in enumerate(calls) if c == ("complete_store", req_id)]
+
+    # All of the request's complete_store calls must precede its single
+    # on_request_finished.
+    assert store_indices, calls
+    assert max(store_indices) < finished_idx, calls
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
 def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling: bool):
     block_size = 4
     block_size_factor = 3
