@@ -20,6 +20,7 @@ import msgspec.msgpack
 import zmq
 import zmq.asyncio
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
@@ -394,7 +395,9 @@ class BackgroundResources:
         logger.debug_once("[shutdown] MPClient: background resource cleanup start")
         self.engine_dead = True
         if self.engine_manager is not None:
-            self.engine_manager.shutdown()
+            self.engine_manager.shutdown(
+                timeout=envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+            )
         if self.coordinator is not None:
             self.coordinator.shutdown()
 
