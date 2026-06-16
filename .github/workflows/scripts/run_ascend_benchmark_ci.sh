@@ -726,13 +726,33 @@ run_runner_npu_preflight_once() {
   # torch_npu probe in a controlled subprocess environment (build_env_dict()
   # exports + PYTHONNOUSERSITE=1) which prevents conda library shadowing and
   # other environment contamination that cause 'path string is NULL' errors.
+  if ! command -v hust-ascend-manager >/dev/null 2>&1; then
+    echo "[preflight] hust-ascend-manager not found in PATH; falling back to direct Python probe" >&2
+    "$PYTHON_BIN" - <<'PY'
+import importlib.util, os, sys, torch
+if importlib.util.find_spec("torch_npu") is None:
+    raise RuntimeError("torch_npu is not installed")
+import torch_npu  # noqa: F401
+dc = int(torch.npu.device_count())
+if dc <= 0:
+    raise RuntimeError("torch.npu.device_count() returned 0")
+print(f"device_count={dc}")
+PY
+    return $?
+  fi
+
   local manager_output
+  local manager_rc
   manager_output="$(hust-ascend-manager runtime check \
     --repo "$WORKSPACE_ROOT" \
     --python "$PYTHON_BIN" \
-    --require-npu --json 2>&1)" || return 1
-
+    --require-npu --json 2>&1)"
+  manager_rc=$?
   echo "$manager_output"
+  if [[ "$manager_rc" -ne 0 ]]; then
+    echo "[preflight] hust-ascend-manager runtime check failed (exit $manager_rc)" >&2
+    return "$manager_rc"
+  fi
 
   # Verify device_count > 0 from the JSON output
   local device_count
