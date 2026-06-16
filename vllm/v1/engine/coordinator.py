@@ -8,7 +8,6 @@ import weakref
 
 import msgspec.msgpack
 import zmq
-import re
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
@@ -113,8 +112,6 @@ class DPCoordinator:
                 "front_publish_address": front_publish_address,
                 "back_output_address": back_output_address,
                 "back_publish_address": back_publish_address,
-                # After bind on 0.0.0.0, rewrite tcp endpoints for remote engines.
-                "advertise_host": host,
                 "zmq_addr_pipe": child_zmq_addr_pipe,
                 "enable_wave_coordination": enable_wave_coordination,
             },
@@ -167,24 +164,11 @@ class DPCoordinatorProc:
         self.enable_wave_coordination = enable_wave_coordination
 
     @staticmethod
-    def _advertise_zmq_endpoint(endpoint: str, advertise_host: str | None) -> str:
-        """Map bind address (e.g. tcp://0.0.0.0:port) to client-visible address.
-
-        Upstream #37452 reports LAST_ENDPOINT after bind; snapshot binds on
-        0.0.0.0 for cross-node listen. Remote engines must connect to
-        data_parallel_master_ip, matching snapshot_bak behavior.
-        """
-        if advertise_host is None or not endpoint.startswith("tcp://"):
-            return endpoint
-        return re.sub(r"\d+\.\d+\.\d+\.\d+", advertise_host, endpoint)
-
-    @staticmethod
     def run_coordinator(
         engine_count: int,
         front_publish_address: str,
         back_output_address: str,
         back_publish_address: str,
-        advertise_host: str | None = None,
         zmq_addr_pipe=None,
         min_stats_update_interval_ms: int = 100,
         enable_wave_coordination: bool = True,
@@ -200,7 +184,6 @@ class DPCoordinatorProc:
                 back_output_address,
                 back_publish_address,
                 zmq_addr_pipe,
-                advertise_host=advertise_host,
             )
         except KeyboardInterrupt:
             logger.info("DP Coordinator process exiting")
@@ -214,15 +197,7 @@ class DPCoordinatorProc:
         back_output_address: str,
         back_publish_address: str,
         zmq_addr_pipe=None,
-        advertise_host: str | None = None,
     ):
-        front_publish_address = re.sub(r"\d+\.\d+\.\d+\.\d+", "0.0.0.0", front_publish_address)
-        back_output_address = re.sub(r"\d+\.\d+\.\d+\.\d+", "0.0.0.0", back_output_address)
-        back_publish_address = re.sub(r"\d+\.\d+\.\d+\.\d+", "0.0.0.0", back_publish_address)
-        logger.info(
-            "[snapshot] coordinator bind on 0.0.0.0, advertise tcp as %s",
-            advertise_host,
-        )
         decoder = MsgpackDecoder(EngineCoreOutputs)
 
         # For tracking request wave progression.
@@ -257,16 +232,13 @@ class DPCoordinatorProc:
         ):
             if zmq_addr_pipe is not None:
                 try:
-                    bound_endpoints = (
-                        publish_front.getsockopt(zmq.LAST_ENDPOINT).decode(),
-                        output_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
-                        publish_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                    zmq_addr_pipe.send(
+                        (
+                            publish_front.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                            output_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                            publish_back.getsockopt(zmq.LAST_ENDPOINT).decode(),
+                        )
                     )
-                    advertised_endpoints = tuple(
-                        self._advertise_zmq_endpoint(ep, advertise_host)
-                        for ep in bound_endpoints
-                    )
-                    zmq_addr_pipe.send(advertised_endpoints)
                 finally:
                     zmq_addr_pipe.close()
             # Wait until all engines subscribe.

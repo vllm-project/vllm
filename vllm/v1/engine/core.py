@@ -1562,8 +1562,7 @@ class EngineCoreProc(EngineCore):
             )
             max_reuse_bufs = len(sockets) + 1
 
-            flag = True
-            while flag:
+            while True:
                 output = self.output_queue.get()
                 if output == EngineCoreProc.ENGINE_CORE_THREAD_FINISH:
                     logger.info(f"[snapshot] engine core output thread received ENGINE_CORE_THREAD_FINISH, stop output thread")
@@ -1705,7 +1704,7 @@ class EngineCoreProc(EngineCore):
         self.collective_rpc("aclrt_snapshot_process_unlock")
 
     def resume(self, data_parallel_master_ip:str|None = None, model_path=None):
-        # 刷新和coordinate的连接
+        # re-create I/O thread, refreshing the connection to the DP coordinator
         logger.info(f"[snapshot] [engine] " + "-"*20 + "stop input and output thread" + "-"*20)
         self.output_queue.put(EngineCoreProc.ENGINE_CORE_THREAD_FINISH)
         self.input_thread.join(timeout=9999)
@@ -1713,24 +1712,14 @@ class EngineCoreProc(EngineCore):
 
         logger.info(f"[snapshot] [engine] " + "-"*20 + "start input and output thread" + "-"*20)
         self.vllm_config.parallel_config.data_parallel_master_ip = data_parallel_master_ip
-        # coordinator_* only when DP Coordinator ZMQ is used; skip re.sub if unset or no new IP.
-        if (
-            self.addresses.coordinator_input is not None
-            and data_parallel_master_ip is not None
-        ):
+
+        if self.addresses.coordinator_input is not None and data_parallel_master_ip is not None:
             self.addresses.coordinator_input = re.sub(
-                r"\d+\.\d+\.\d+\.\d+",
-                data_parallel_master_ip,
-                self.addresses.coordinator_input,
+                r"\d+\.\d+\.\d+\.\d+", data_parallel_master_ip, self.addresses.coordinator_input,
             )
-        if (
-            self.addresses.coordinator_output is not None
-            and data_parallel_master_ip is not None
-        ):
+        if self.addresses.coordinator_output is not None and data_parallel_master_ip is not None:
             self.addresses.coordinator_output = re.sub(
-                r"\d+\.\d+\.\d+\.\d+",
-                data_parallel_master_ip,
-                self.addresses.coordinator_output,
+                r"\d+\.\d+\.\d+\.\d+", data_parallel_master_ip, self.addresses.coordinator_output,
             )
 
         ready_event = threading.Event()
@@ -1757,8 +1746,7 @@ class EngineCoreProc(EngineCore):
         )
         self.output_thread.start()
 
-        # Don't complete handshake until DP coordinator ready message is
-        # received.
+        # Don't complete handshake until DP coordinator ready message is received.
         while not ready_event.wait(timeout=10):
             if not self.input_thread.is_alive():
                 raise RuntimeError("Input socket thread died during startup")
@@ -1813,15 +1801,11 @@ class EngineCoreProc(EngineCore):
         self.collective_rpc("recapture_graph")
 
         # Refresh worker side_channel_host to new pod IP (P and D).
-        logger.info(
-            f"[snapshot] [engine] " + "-" * 20 + "rebuild_kv_transfer_engine_after_resume" + "-" * 20
-        )
+        logger.info(f"[snapshot] [engine] " + "-" * 20 + "rebuild_kv_transfer_engine_after_resume" + "-" * 20)
         self.collective_rpc("rebuild_kv_transfer_engine_after_resume", args=(local_ip,))
 
         # Refresh scheduler-side KV state in engine core (P and D).
-        logger.info(
-            f"[snapshot] [engine] " + "-" * 20 + "snapshot_refresh_scheduler_after_resume" + "-" * 20
-        )
+        logger.info(f"[snapshot] [engine] " + "-" * 20 + "snapshot_refresh_scheduler_after_resume" + "-" * 20)
         _refresh_scheduler_after_resume(self, local_ip)
 
 
