@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+# No-op change to trigger CI for testing the dedicated pre-commit pipeline step.
+
 from unittest.mock import MagicMock, patch
 
 import pytest
