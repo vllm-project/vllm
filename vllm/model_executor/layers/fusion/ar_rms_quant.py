@@ -71,6 +71,21 @@ def _to_nvfp4_qa(
     )
 
 
+def _kernel_residual_buffers(
+    x: torch.Tensor, residual: torch.Tensor | None
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+    """(kernel_residual, norm_out, out_residual) for the flashinfer fused-AR kernel.
+
+    With no prior residual, a zero residual makes the add a no-op and the AR'd
+    input (left in ``x``) becomes the downstream residual, so ``norm_out`` needs
+    its own buffer. Otherwise the kernel adds and writes the norm in place into
+    ``residual``.
+    """
+    if residual is None:
+        return torch.zeros_like(x), torch.empty_like(x), x
+    return residual, None, residual
+
+
 # FlashInfer fused kernels for AR + add + RMSNorm + activation-quant.
 
 
@@ -83,16 +98,7 @@ def _flashinfer_ar_rms_fp8(
 ) -> tuple[QuantizedActivation, torch.Tensor]:
     assert flashinfer_trtllm_fused_allreduce_norm is not None
     out_q = torch.empty(x.shape, dtype=current_platform.fp8_dtype(), device=x.device)
-    if residual is None:
-        # Zero residual makes the add a no-op; the AR'd input (left in x)
-        # becomes the downstream residual, so norm_out needs its own buffer.
-        kernel_residual, norm_out, out_residual = (
-            torch.zeros_like(x),
-            torch.empty_like(x),
-            x,
-        )
-    else:
-        kernel_residual, norm_out, out_residual = residual, None, residual
+    kernel_residual, norm_out, out_residual = _kernel_residual_buffers(x, residual)
     flashinfer_trtllm_fused_allreduce_norm(
         allreduce_in=x,
         residual=kernel_residual,
@@ -121,16 +127,7 @@ def _flashinfer_ar_rms_nvfp4(
     assert flashinfer_trtllm_fused_allreduce_norm is not None
     from vllm._custom_ops import create_fp4_output_tensors
 
-    if residual is None:
-        # Zero residual makes the add a no-op; the AR'd input (left in x)
-        # becomes the downstream residual, so norm_out needs its own buffer.
-        kernel_residual, norm_out, out_residual = (
-            torch.zeros_like(x),
-            torch.empty_like(x),
-            x,
-        )
-    else:
-        kernel_residual, norm_out, out_residual = residual, None, residual
+    kernel_residual, norm_out, out_residual = _kernel_residual_buffers(x, residual)
     m, n = x.shape
     out_q, scale_out = create_fp4_output_tensors(
         m, n, x.device, is_sf_swizzled_layout=True
@@ -169,16 +166,7 @@ def _flashinfer_ar_rms(
     max_token_num: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert flashinfer_trtllm_fused_allreduce_norm is not None
-    if residual is None:
-        # Zero residual makes the add a no-op; the AR'd input (left in x)
-        # becomes the downstream residual, so norm_out needs its own buffer.
-        kernel_residual, norm_out, out_residual = (
-            torch.zeros_like(x),
-            torch.empty_like(x),
-            x,
-        )
-    else:
-        kernel_residual, norm_out, out_residual = residual, None, residual
+    kernel_residual, norm_out, out_residual = _kernel_residual_buffers(x, residual)
     flashinfer_trtllm_fused_allreduce_norm(
         allreduce_in=x,
         residual=kernel_residual,

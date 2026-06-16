@@ -24,8 +24,8 @@ flag -- the single source of truth -- so there is no separate fusion flag:
 A second all-reduce is impossible by construction (``FULL`` never reduces), and a
 non-RMSNorm ``norm`` (eagle Identity) is tolerated.
 
-Scope: plain all-reduce only. Sequence-parallelism is sketched (``Scatter.SHARD``
-+ reduce-scatter/all-gather in ``_reduce_norm``) but not implemented.
+Scope: plain all-reduce only. Sequence-parallelism (a future token-shard state
+with reduce-scatter/all-gather transitions) is out of scope.
 """
 
 from enum import Enum, auto
@@ -48,7 +48,6 @@ class Scatter(Enum):
 
     FULL = auto()  # replicated / already all-reduced
     PARTIAL = auto()  # per-rank partial sum; owes exactly one all-reduce
-    # SHARD = auto()  # sequence-parallel token shard (future: RS/AG transitions)
 
 
 class ResidualStream:
@@ -79,7 +78,7 @@ class ResidualStream:
     ) -> NormOut:
         do_allreduce = incoming is Scatter.PARTIAL and self.tp_size > 1
         # PARTIAL -> all-reduce + add + norm + (quant); FULL -> norm only.
-        # An SP build would branch here on Scatter.SHARD to a
+        # An SP build would add a token-shard branch here for a
         # reduce-scatter+norm (and all-gather) transition instead.
         if type(norm) is RMSNorm:
             return fused_ar_rms_norm_quant(
@@ -126,7 +125,7 @@ class ResidualStream:
 
 
 def finalize_norm(
-    norm: RMSNorm,
+    norm: torch.nn.Module,
     hidden: torch.Tensor,
     residual: torch.Tensor,
     *,

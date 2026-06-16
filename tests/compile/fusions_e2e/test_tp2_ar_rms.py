@@ -44,6 +44,8 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
     # qwen3 & dsv3 should still fuse AR+rms even though group quant is not yet supported
+    # llama3_8b_fp8 is omitted: it is migrated to manual fusion, so its rms+quant is
+    # done in model code and the compiler AR+RMS pass has nothing left to match.
     [
         llama4_scout_fp8,
         qwen3_a3b_fp8,
