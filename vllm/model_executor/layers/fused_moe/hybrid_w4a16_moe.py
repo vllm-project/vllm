@@ -364,13 +364,6 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
         gemm2_out = _resize_cache(workspace2, (num_slots, K))
 
         if use_triton:
-            # The Triton kernel skips padding blocks (expert_ids == -1),
-            # leaving those slots unwritten.  Zero gemm1_out so the
-            # activation doesn't see garbage/NaN in padding rows.
-            # Note: gemm2_out aliases workspace2 (same as gemm1_out),
-            # so only zero gemm1_out here; gemm2_out is zeroed after
-            # activation completes.
-            gemm1_out.zero_()
             from vllm.model_executor.layers.fused_moe.fused_moe import (
                 invoke_fused_moe_kernel_hybrid_triton,
             )
@@ -427,12 +420,8 @@ class HybridW4A16MoEExperts(mk.FusedMoEExpertsModular):
                 align_block_size_m=block_size_m,
             )
 
-            # Activation
-            apply_moe_activation(activation, act_out, gemm1_out)
-
-            # Zero padding slots in gemm2_out (aliases workspace2, same
-            # storage as gemm1_out which is no longer needed).
-            gemm2_out.zero_()
+            # Activation (only the [0:P] real rows; padding rows unread)
+            apply_moe_activation(activation, act_out[:P], gemm1_out[:P])
 
             # GEMM 2 (Triton prefill path)
             # act_out is in slot-space (GEMM1 wrote at sorted_token_ids
