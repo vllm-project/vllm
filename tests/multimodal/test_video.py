@@ -139,6 +139,12 @@ def test_video_processor_from_model_repo(
     # --- Alignment check with HF VideoProcessor.sample_frames ---
     processor = AutoVideoProcessor.from_pretrained(model_repo, trust_remote_code=True)
 
+    # Qwen2-VL ships no default fps/num_frames in its processor config, so the
+    # HF sampler needs an explicit target rate; match the loader default (2).
+    hf_sample_kwargs = (
+        {"fps": 2} if processor.fps is None and processor.num_frames is None else {}
+    )
+
     fps_list = [1, 2, 30, 60]
     duration_list = [10, 60, 600]
     for fps, duration_secs in itertools.product(fps_list, duration_list):
@@ -157,7 +163,7 @@ def test_video_processor_from_model_repo(
             fps=vllm_meta["fps"],
             duration=vllm_meta["duration"],
         )
-        hf_indices = processor.sample_frames(hf_metadata)
+        hf_indices = processor.sample_frames(hf_metadata, **hf_sample_kwargs)
         vllm_indices = np.array(vllm_meta["frames_indices"])
         np.testing.assert_array_equal(
             hf_indices,

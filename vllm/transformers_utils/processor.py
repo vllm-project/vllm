@@ -18,6 +18,7 @@ from transformers.audio_utils import AudioInput
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
 from transformers.image_utils import ImageInput
+from transformers.models.auto.video_processing_auto import VIDEO_PROCESSOR_MAPPING_NAMES
 from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import VideoInput
@@ -156,14 +157,6 @@ def get_processor_cls_name_from_config(
     return None
 
 
-# Models whose preprocessor config omits ``video_processor_type`` but which
-# do have a known HF video processor, keyed by ``model_type`` from config.json.
-_MODEL_TYPE_TO_VIDEO_PROCESSOR: dict[str, str] = {
-    "qwen2_vl": "Qwen2VLVideoProcessor",
-    "qwen2_5_vl": "Qwen2VLVideoProcessor",
-}
-
-
 def get_video_processor_cls_name_from_config(
     processor_name: str,
     revision: str | None = "main",
@@ -179,15 +172,13 @@ def get_video_processor_cls_name_from_config(
             return config["video_processor_type"]
 
     # Some models ship no explicit ``video_processor_type`` in their
-    # preprocessor config. Fall back to a ``model_type`` -> video processor
-    # class mapping so these still resolve to their registered loader instead
-    # of the generic opencv fallback. We keep an explicit map rather than
-    # reusing transformers' ``VIDEO_PROCESSOR_MAPPING_NAMES`` because the
-    # latter is silently nulled out when torchvision is unavailable and would
-    # also pull in unrelated model types.
+    # preprocessor config. Fall back to transformers' ``model_type`` -> video
+    # processor mapping so these still resolve to their registered loader
+    # instead of the generic opencv fallback. The mapping is ``None`` for a
+    # given type when torchvision is unavailable; callers then use opencv.
     model_config = get_hf_file_to_dict("config.json", processor_name, revision=revision)
     if model_config and "model_type" in model_config:
-        return _MODEL_TYPE_TO_VIDEO_PROCESSOR.get(model_config["model_type"])
+        return VIDEO_PROCESSOR_MAPPING_NAMES.get(model_config["model_type"])
     return None
 
 
