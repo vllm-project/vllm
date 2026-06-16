@@ -1102,33 +1102,13 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
-        # Handle KV-cache quantization first (same as base class).
-        if isinstance(layer, (Attention, MLAAttention)):
-            return self.KVCacheMethodCls(self)
-
         # When lm_head is excluded but checkpoint has NVFP4 tensors,
         # use the special unquantized method that registers placeholders.
-        if self.is_layer_excluded(prefix):
-            if isinstance(layer, (LinearBase, ParallelLMHead)):
-                return ModelOptNvFp4UnquantizedLMHeadMethod(self)
-            return None
-
-        # Vision modules are never quantized.
-        if (
-            "vision_tower" in prefix
-            or "vision_model" in prefix
-            or "vit_large_projector" in prefix
+        if self.is_layer_excluded(prefix) and isinstance(
+            layer, (LinearBase, ParallelLMHead)
         ):
-            return UnquantizedLinearMethod()
-
-        # Quantized linear layers.
-        if isinstance(layer, (LinearBase, ParallelLMHead)):
-            quant_method = self.LinearMethodCls(self)
-            if getattr(quant_method, "backend", "") == "marlin":
-                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-            return quant_method
-
-        return None
+            return ModelOptNvFp4UnquantizedLMHeadMethod(self)
+        return super().get_quant_method(layer, prefix)
 
 
 class ModelOptNvFp4LinearMethod(LinearMethodBase):
