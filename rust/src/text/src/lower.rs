@@ -313,7 +313,7 @@ mod tests {
         SamplingLimits {
             max_model_len: 1_000_000,
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
-            model_vocab_size: Some(1000),
+            model_vocab_size: 1000,
             tokenizer_vocab_size: 2000,
         }
     }
@@ -442,7 +442,7 @@ mod tests {
             vec![1500],
             sample_sampling_hints(),
             SamplingLimits {
-                model_vocab_size: Some(2000),
+                model_vocab_size: 2000,
                 tokenizer_vocab_size: 1000,
                 ..sample_sampling_limits()
             },
@@ -455,7 +455,7 @@ mod tests {
             vec![1500],
             sample_sampling_hints(),
             SamplingLimits {
-                model_vocab_size: Some(1000),
+                model_vocab_size: 1000,
                 tokenizer_vocab_size: 2000,
                 ..sample_sampling_limits()
             },
@@ -468,7 +468,7 @@ mod tests {
             vec![2000],
             sample_sampling_hints(),
             SamplingLimits {
-                model_vocab_size: Some(1000),
+                model_vocab_size: 1000,
                 tokenizer_vocab_size: 2000,
                 ..sample_sampling_limits()
             },
@@ -764,32 +764,6 @@ mod tests {
     }
 
     #[test]
-    fn lower_sampling_params_uses_tokenizer_vocab_when_model_vocab_is_unknown() {
-        let error = lower_sampling_params_with_limits(
-            SamplingParams {
-                logprobs: Some(-1),
-                ..Default::default()
-            },
-            SamplingLimits {
-                max_logprobs: 1500,
-                model_vocab_size: None,
-                tokenizer_vocab_size: 2000,
-                ..sample_sampling_limits()
-            },
-        )
-        .unwrap_err();
-
-        assert!(matches!(
-            error,
-            Error::Logprobs(LogprobsError::TooManyCount {
-                parameter: "logprobs",
-                requested: 2000,
-                max_allowed: 1500,
-            })
-        ));
-    }
-
-    #[test]
     fn lower_sampling_params_rejects_invalid_logprob_token_ids() {
         let error = lower_sampling_params_with_limits(
             SamplingParams {
@@ -872,21 +846,6 @@ mod tests {
                 vocab_size: 1000,
             }) if token_ids == vec![1000]
         ));
-    }
-
-    #[test]
-    fn lower_sampling_params_skips_logit_bias_range_when_model_vocab_is_unknown() {
-        lower_sampling_params_with_limits(
-            SamplingParams {
-                logit_bias: Some(HashMap::from([(1_000_000, 1.0)])),
-                ..Default::default()
-            },
-            SamplingLimits {
-                model_vocab_size: None,
-                ..sample_sampling_limits()
-            },
-        )
-        .expect("logit_bias range check is skipped without model vocab size");
     }
 
     #[test]
