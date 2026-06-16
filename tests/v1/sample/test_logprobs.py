@@ -1138,8 +1138,7 @@ def test_spec_decode_logprobs(
     ref_results = ref_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
     )
-    # Collect per-position top-k logprob dicts (keyed by token id) from the
-    # reference LLM.
+    # Collect logprobs outputs from reference LLM.
     ref_logprobs = []
     for results in ref_results:
         for output in results.outputs:
@@ -1159,6 +1158,7 @@ def test_spec_decode_logprobs(
     spec_results = spec_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
     )
+    # Collect logprobs outputs from spec decode LLM.
     spec_logprobs = []
     for results in spec_results:
         for output in results.outputs:
