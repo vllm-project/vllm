@@ -430,8 +430,8 @@ class AttentionScheduler {
     const int32_t max_num_q_token_per_iter = max_num_q_per_iter / q_head_per_kv;
     const int64_t default_tile_size = calcu_default_tile_size(
         cache_size, input.head_dim, input.elem_size, input.q_buffer_elem_size,
-        input.logits_buffer_elem_size, input.output_buffer_elem_size,
-        max_num_q_per_iter, max_num_q_per_iter);
+        input.logits_buffer_elem_size, sizeof(float), max_num_q_per_iter,
+        max_num_q_per_iter);
     const int32_t default_tile_token_num = default_tile_size / q_head_per_kv;
     const int32_t split_kv_q_token_num_threshold =
         input.enable_kv_split ? 1 : 0;
@@ -671,22 +671,30 @@ class AttentionScheduler {
     metadata_ptr->effective_thread_num = effective_thread_num;
 
     {
-      // when q_tile_size = max_num_q_per_iter, requires max
-      // attention_scratchpad_size
+      // Size for the largest q-head tile that the runtime can use.
+      // The runtime rounds q_head_tile_size and passes it into sc.update(),
+      // so sizing only for max_num_q_per_iter can under-allocate here.
       AttentionScratchPad sc(0, *metadata_ptr, 0x0);
+      const int32_t max_q_head_tile_size = default_tile_size;
+      const bool one_round = max_q_head_tile_size <= max_num_q_per_iter;
       int64_t n = AttentionScheduler::calcu_tile_size_with_constant_q(
           cache_size, input.head_dim, input.elem_size, input.q_buffer_elem_size,
-          input.logits_buffer_elem_size, input.output_buffer_elem_size,
-          max_num_q_per_iter, kv_len_alignment, max_num_q_per_iter, true);
+          input.logits_buffer_elem_size, sizeof(float), max_num_q_per_iter,
+          kv_len_alignment, max_q_head_tile_size, one_round);
+      // Attention partial outputs are accumulated in float, independent of the
+      // final attention output dtype.
       sc.update(input.head_dim, input.q_buffer_elem_size,
-                input.logits_buffer_elem_size, input.output_buffer_elem_size,
-                max_num_q_per_iter, max_num_q_per_iter, n);
+                input.logits_buffer_elem_size, sizeof(float),
+                max_num_q_per_iter, max_q_head_tile_size, n);
       metadata_ptr->attention_scratchpad_size_per_thread =
           ((sc.get_thread_scratchpad_size() + 63) / 64) * 64;
 
+      // Split-KV reduction can use GQA for one-token split tails even when
+      // the scheduler falls back to MHA. Size for the maximum q heads a
+      // runtime split can process, which is enforced by max_num_q_per_iter.
       sc.update(0, metadata_ptr->reduction_split_num, input.head_dim,
-                q_head_per_kv * split_kv_q_token_num_threshold,
-                input.output_buffer_elem_size);
+                max_num_q_per_iter * split_kv_q_token_num_threshold,
+                sizeof(float));
       metadata_ptr->reduction_scratchpad_size_per_kv_head =
           ((sc.get_reduction_scratchpad_size() + 63) / 64) * 64;
     }
