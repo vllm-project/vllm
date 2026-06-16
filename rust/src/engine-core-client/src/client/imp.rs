@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
@@ -124,6 +125,20 @@ impl ClientInner {
         request_ids: impl IntoIterator<Item = &'a String>,
     ) -> Vec<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>> {
         self.request_reg.lock().finish_many(request_ids)
+    }
+
+    /// Finalize client-initiated aborts by pushing a terminal `Abort` output
+    /// down each request's stream and removing it from the registry. Returns
+    /// the request ids that were still active. See [`RequestRegistry::abort_many`].
+    pub fn abort_requests_locally<'a>(
+        &self,
+        request_ids: impl IntoIterator<Item = &'a String>,
+    ) -> Vec<String> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        self.request_reg.lock().abort_many(request_ids, timestamp)
     }
 
     /// Apply one scheduler stats update for the given engine to the local
