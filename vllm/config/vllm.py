@@ -764,6 +764,23 @@ class VllmConfig:
 
         apply_recursive(self, defaults)
 
+    def _maybe_override_dynamic_sd_cudagraph_mode(self) -> None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or not speculative_config.uses_dynamic_speculative_decoding()
+            or not self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+        ):
+            return
+
+        logger.warning_once(
+            "Dynamic speculative decoding changes the target verification "
+            "length at runtime. Overriding cudagraph_mode from %s to "
+            "PIECEWISE for reliability.",
+            self.compilation_config.cudagraph_mode.name,
+        )
+        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
 
@@ -949,6 +966,15 @@ class VllmConfig:
                         "Async scheduling is not compatible with "
                         "disable_padded_drafter_batch=True."
                     )
+            if (
+                self.model_config is not None
+                and self.model_config.enable_prompt_embeds
+                and self.model_config.is_multimodal_model
+            ):
+                raise ValueError(
+                    "Async scheduling is not yet supported with prompt embeds "
+                    "for multimodal models."
+                )
             if not executor_supports_async_sched:
                 raise ValueError(
                     f"`{executor_backend}` does not support async scheduling yet."
@@ -990,6 +1016,16 @@ class VllmConfig:
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend. ",
                     executor_backend,
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
+                self.model_config is not None
+                and self.model_config.enable_prompt_embeds
+                and self.model_config.is_multimodal_model
+            ):
+                logger.warning_once(
+                    "Async scheduling is not yet supported with prompt embeds "
+                    "for multimodal models and will be disabled."
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -1065,20 +1101,26 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
-        # DeepSeek V4's model classes don't carry @support_torch_compile —
+        # For model classes don't carry @support_torch_compile —
         # the breakable cudagraph is the supported PIECEWISE path. Auto-enable
         # it unless the user has explicitly opted out via the env var.
         if (
             self.model_config is not None
             and "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
             and any(
-                a in ("DeepseekV4ForCausalLM", "DeepSeekV4MTPModel")
+                a
+                in (
+                    "DeepseekV4ForCausalLM",
+                    "DeepSeekV4MTPModel",
+                    "MiniMaxM3SparseForCausalLM",
+                    "MiniMaxM3SparseForConditionalGeneration",
+                )
                 for a in self.model_config.architectures
             )
         ):
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
             logger.info_once(
-                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1 for DeepSeek V4. "
+                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
 
@@ -1152,6 +1194,8 @@ class VllmConfig:
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
                 "optimization level defaults."
             )
+
+        self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
@@ -1413,12 +1457,14 @@ class VllmConfig:
             assert a2a_backend in [
                 "deepep_low_latency",
                 "deepep_high_throughput",
+                "nixl_ep",
             ], (
-                "Microbatching currently only supports the deepep_low_latency and "
-                f"deepep_high_throughput all2all backend. {a2a_backend} is not "
-                "supported. To fix use --all2all-backend=deepep_low_latency or "
-                "--all2all-backend=deepep_high_throughput and install the DeepEP"
-                " kernels."
+                "Microbatching currently only supports the deepep_low_latency, "
+                "deepep_high_throughput, and nixl_ep all2all backends. "
+                f"{a2a_backend} is not supported. To fix use "
+                "--all2all-backend=deepep_low_latency, "
+                "--all2all-backend=deepep_high_throughput, or "
+                "--all2all-backend=nixl_ep and install the matching kernels."
             )
 
             if not self.model_config.disable_cascade_attn:
@@ -2004,6 +2050,9 @@ class VllmConfig:
                 unsupported.append("ngram/ngram_gpu speculative decoding")
             elif speculative_config.method not in ("eagle", "eagle3", "mtp", "dflash"):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
+
+            if speculative_config.uses_dynamic_speculative_decoding():
+                unsupported.append("dynamic speculative decoding")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle)
             # DFlash uses parallel drafting natively in V2 via DFlashSpeculator.

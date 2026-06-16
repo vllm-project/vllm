@@ -461,6 +461,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "float eps) -> (Tensor, Tensor)");
 #endif
 
+  // Horizontally-fused MiniMax-M3 QK-norm + partial NeoX RoPE + KV-insert.
+  ops.def(
+      "fused_minimax_m3_qknorm_rope_kv_insert("
+      "Tensor! qkv, Tensor q_norm_weight, Tensor k_norm_weight, "
+      "Tensor cos_sin_cache, Tensor positions, int num_heads, "
+      "int num_kv_heads, int rotary_dim, float eps, "
+      "Tensor? index_q_norm_weight, Tensor? index_k_norm_weight, "
+      "int num_index_heads, "
+      "Tensor? slot_mapping, Tensor? index_slot_mapping, "
+      "Tensor!? kv_cache, Tensor!? index_cache, "
+      "int block_size, Tensor!? q_out, Tensor!? index_q_out) -> ()");
+
   // Apply repetition penalties to logits in-place.
   ops.def(
       "apply_repetition_penalties_(Tensor! logits, Tensor prompt_mask, "
@@ -488,9 +500,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
 
   // SwiGLU activation with input clamping.
+  // alpha scales the sigmoid (gate * sigmoid(alpha * gate)); beta is added to
+  // the up half (up + beta). Defaults alpha=1.0, beta=0.0 give silu(gate)*up.
   ops.def(
-      "silu_and_mul_with_clamp(Tensor! result, Tensor input, float limit) "
-      "-> ()");
+      "silu_and_mul_with_clamp(Tensor! result, Tensor input, float limit, "
+      "float alpha=1.0, float beta=0.0) -> ()");
 
   // Activation function used in GeGLU with `none` approximation.
   ops.def("gelu_and_mul(Tensor! out, Tensor input) -> ()");
@@ -688,6 +702,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("minimax_allreduce_rms", TORCH_BOX(&minimax_allreduce_rms));
   ops.impl("minimax_allreduce_rms_qk", TORCH_BOX(&minimax_allreduce_rms_qk));
 #endif
+  ops.impl("fused_minimax_m3_qknorm_rope_kv_insert",
+           TORCH_BOX(&fused_minimax_m3_qknorm_rope_kv_insert));
 
   // Sampler kernels (shared CUDA/ROCm)
   ops.impl("apply_repetition_penalties_",
