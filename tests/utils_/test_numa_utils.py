@@ -130,3 +130,49 @@ def test_parallel_config_validates_numa_bind_nodes():
 def test_parallel_config_rejects_invalid_numa_bind_cpus(cpuset):
     with pytest.raises(ValueError, match="numa_bind_cpus"):
         ParallelConfig(numa_bind_cpus=[cpuset])
+
+
+def _fake_numactl_run(rejected_args):
+    """Fake ``numactl`` that fails when any of ``rejected_args`` is present."""
+
+    def run(cmd, *args, **kwargs):
+        arg_str = " ".join(cmd[1:-1])
+        ok = not any(bad in arg_str for bad in rejected_args)
+        return SimpleNamespace(returncode=0 if ok else 1)
+
+    return run
+
+
+def test_configure_subprocess_numa_fallback(monkeypatch):
+    import multiprocessing
+
+    monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/numactl")
+    monkeypatch.setattr(numa_utils.envs, "VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    node_config = _make_config(numa_bind=True, numa_bind_nodes=[0])
+
+    monkeypatch.setattr(numa_utils.subprocess, "run", _fake_numactl_run([]))
+    with numa_utils.configure_subprocess(node_config, local_rank=0):
+        assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == "--cpunodebind=0 --membind=0"
+
+    membind_fails = _fake_numactl_run(["--membind="])
+    monkeypatch.setattr(numa_utils.subprocess, "run", membind_fails)
+    with numa_utils.configure_subprocess(node_config, local_rank=0):
+        assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == "--cpunodebind=0"
+
+    cpu_config = _make_config(
+        numa_bind=True,
+        numa_bind_nodes=[0],
+        numa_bind_cpus=["0-3"],
+    )
+    with numa_utils.configure_subprocess(cpu_config, local_rank=0):
+        assert os.environ[numa_utils._NUMACTL_ARGS_ENV] == "--physcpubind=0-3"
+
+    before = multiprocessing.spawn.get_executable()
+    monkeypatch.setattr(
+        numa_utils.subprocess,
+        "run",
+        _fake_numactl_run(["--cpunodebind=", "--membind="]),
+    )
+    with numa_utils.configure_subprocess(node_config, local_rank=0):
+        assert multiprocessing.spawn.get_executable() == before
+        assert numa_utils._NUMACTL_ARGS_ENV not in os.environ
