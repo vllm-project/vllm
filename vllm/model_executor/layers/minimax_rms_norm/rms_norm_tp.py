@@ -6,6 +6,7 @@ from functools import partial
 import torch
 from torch import nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -25,32 +26,8 @@ MINIMAX_QK_NORM_MAX_TOKEN_NUM = 2048
 
 _MINIMAX_FUSED_AR_RMS_QK = getattr(torch.ops._C, "minimax_allreduce_rms_qk", None)
 
-# Cached probe: does the installed AITER build expose custom_fused_qknorm_ar?
-_AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE: bool | None = None
-
-
-def _aiter_has_custom_fused_qknorm_ar() -> bool:
-    global _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE
-    if _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE is None:
-        if not current_platform.is_rocm():
-            _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE = False
-        else:
-            try:
-                from aiter.dist.device_communicators.custom_all_reduce import (
-                    CustomAllreduce as _AiterCustomAllreduce,
-                )
-
-                _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE = hasattr(
-                    _AiterCustomAllreduce, "custom_fused_qknorm_ar"
-                )
-            except ImportError:
-                _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE = False
-    return _AITER_CUSTOM_FUSED_QKNORM_AR_AVAILABLE
-
 
 def _get_aiter_custom_all_reduce():
-    from vllm._aiter_ops import rocm_aiter_ops
-
     if not rocm_aiter_ops.is_enabled():
         return None
     aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
@@ -274,7 +251,7 @@ def _minimax_qk_norm_fusion(
     if (
         tp_world > 1
         and num_tokens <= MINIMAX_QK_NORM_MAX_TOKEN_NUM
-        and _aiter_has_custom_fused_qknorm_ar()
+        and rocm_aiter_ops.has_custom_fused_qknorm_ar()
     ):
         pack_size = 16 // qkv.element_size()
         warp_work_size = 32 * pack_size
