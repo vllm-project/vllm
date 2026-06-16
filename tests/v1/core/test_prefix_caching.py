@@ -5,6 +5,7 @@
 import copy
 from collections.abc import Callable
 from math import lcm
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -21,7 +22,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.v1.core.block_pool import BlockHashToBlockMap, BlockPool
-from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashWithGroupId,
@@ -33,6 +34,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
     make_block_hash_with_group_id,
 )
+from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -1021,6 +1023,66 @@ def test_prefill_hybrid_model_mamba_align():
     assert len(blocks.get_block_ids()) == 2  # full_attn + mamba groups
 
     manager.free(req0)
+
+
+def test_hybrid_cache_mamba_align_shared_prefix_detection():
+    """Test shared prefix detection heuristic for mamba align cache mode
+
+    HybridKVCacheCoordinator returns num_uncached_common > 0 when a shared
+    uncached prefix is detected. With mamba_align cache, _mamba_block_aligned_split
+    enforces scheduling aligned with the common prefix.
+    """
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 30, ["full", "mamba_align"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    hash_fn = sha256
+
+    # Request: 3 blocks
+    prefix = [i for i in range(3) for _ in range(block_size)]
+    req_0 = make_request("0", prefix, block_size, hash_fn)
+    computed_blocks, num_computed = manager.get_computed_blocks(req_0)
+    num_uncached_common = manager.coordinator.num_uncached_common_prefix_tokens
+    assert num_computed == 0  # nothing cached yet
+    assert num_uncached_common == 0
+    manager.allocate_slots(req_0, 3 * block_size, 0, computed_blocks)
+
+    # Request: 3 blocks (shared with above) + 7 different tokens
+    req_1 = make_request("1", prefix + [100] * 7, block_size, hash_fn)
+    computed_blocks, num_computed = manager.get_computed_blocks(req_1)
+    num_uncached_common = manager.coordinator.num_uncached_common_prefix_tokens
+    assert num_computed == 3 * block_size  # we should observe a 3-block cache hit
+    assert num_uncached_common == 0
+    manager.allocate_slots(req_1, 7, 3 * block_size, computed_blocks)
+
+    # Request: 3 blocks, but only 2 blocks shared (replace the last token in 3rd block):
+    req_2 = make_request("2", prefix[:-1] + [101], block_size, hash_fn)
+    computed_blocks, num_computed = manager.get_computed_blocks(req_2)
+    num_uncached_common = manager.coordinator.num_uncached_common_prefix_tokens
+    assert num_computed == 0  # mamba_align doesn't cache intermediate blocks
+    assert num_uncached_common == 2 * block_size  # heuristic detects a shared prefix
+
+    # Next, validate scheduler logic for num_uncached_common_prefix_tokens > 0
+    # Create minimal mock with just the needed attributes
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size), use_eagle=False
+    )
+    num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
+        self=mock,
+        request=req_2,
+        num_new_tokens=3 * block_size,
+        num_uncached_common_prefix_tokens=num_uncached_common,
+    )
+    assert num_new_tokens_adjusted == 2 * block_size  # adjust to the common prefix
+
+    manager.allocate_slots(req_2, 3 * block_size, 0, computed_blocks)
+    # Cleanup
+    manager.free(req_0)
+    manager.free(req_1)
+    manager.free(req_2)
 
 
 def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
@@ -3455,6 +3517,180 @@ def test_can_fit_full_sequence_full_attention_still_gates_oversized():
     req = make_request("oversized", list(range(prompt_len)), block_size, sha256)
 
     assert manager.allocate_slots(req, block_size, full_sequence_must_fit=True) is None
+
+
+def test_cache_hit_local_and_external():
+    # Regression test for #33775: when a request hits the local prefix cache
+    # in one KV cache group and needs external (connector) blocks in another,
+    # the external allocation of an earlier group must not evict the local
+    # cache-hit blocks of a later group. Otherwise the same physical block can
+    # be handed out twice, producing duplicate block IDs / ref_cnt corruption.
+    block_size = 16
+    kv_cache_config = make_kv_cache_config_hybrid_model(block_size, 31, 100)
+    del kv_cache_config.kv_cache_groups[2:]
+    req_id = "test"
+    manager = make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    top_blocks = []
+    head = manager.block_pool.free_block_queue.fake_free_list_head
+    for _ in range(10):
+        top_blocks.append(head.next_free_block)
+        head = head.next_free_block
+    cache_hit = KVCacheBlocks((top_blocks[:5], top_blocks[5:]))
+
+    manager.allocate_slots(
+        make_request(req_id, [0] * (8 * block_size), block_size, sha256),
+        16,
+        5 * block_size,
+        cache_hit,
+        0,
+        2 * block_size,
+    )
+
+    req_blocks = manager.get_blocks(req_id)
+    req_block_ids = req_blocks.get_block_ids()
+    all_block_ids = req_block_ids[0] + req_block_ids[1]
+    assert len(set(all_block_ids)) == len(all_block_ids), "Block IDs are not unique"
+
+
+def _take_free_blocks(manager: KVCacheManager, num_blocks: int) -> list[KVCacheBlock]:
+    """Grab the first ``num_blocks`` blocks at the head of the free queue
+    without removing them. These ref_cnt==0 blocks stand in for evictable
+    cache-hit blocks left behind by a previous (e.g. preempted) request, and
+    sitting at the head guarantees a later group's external ``get_new_blocks``
+    would contend for them on unpatched code (issue #33775)."""
+    blocks: list[KVCacheBlock] = []
+    head = manager.block_pool.free_block_queue.fake_free_list_head
+    for _ in range(num_blocks):
+        head = head.next_free_block
+        blocks.append(head)
+    return blocks
+
+
+def _assert_no_double_allocation(manager: KVCacheManager, req_id: str) -> None:
+    """No physical block may be handed out twice across groups, and every
+    block referenced by the request must have a live ref_cnt."""
+    block_ids = manager.get_blocks(req_id).get_block_ids()
+    flat = [block_id for group in block_ids for block_id in group]
+    assert len(set(flat)) == len(flat), "Block IDs are not unique across groups"
+    null_id = manager.block_pool.null_block.block_id
+    for block_id in flat:
+        if block_id == null_id:
+            continue
+        assert manager.block_pool.blocks[block_id].ref_cnt >= 1, (
+            f"block {block_id} referenced by the request has ref_cnt 0"
+        )
+
+
+def _two_phase_block_size(manager: KVCacheManager) -> int:
+    return manager.kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
+
+
+def _cross_group_cache_hit(
+    manager: KVCacheManager,
+    req_id: str,
+    num_groups: int,
+    local_blocks_per_group: int = 5,
+    num_external_blocks: int = 2,
+    num_new_blocks: int = 1,
+) -> Request:
+    """Allocate ``req_id`` with a per-group local prefix hit plus external
+    (connector) computed tokens, driving the coordinator's two-phase path.
+    Returns the allocated request so callers can free it (e.g. to preempt)."""
+    block_size = _two_phase_block_size(manager)
+    hit_blocks = _take_free_blocks(manager, num_groups * local_blocks_per_group)
+    cache_hit = KVCacheBlocks(
+        tuple(
+            hit_blocks[i * local_blocks_per_group : (i + 1) * local_blocks_per_group]
+            for i in range(num_groups)
+        )
+    )
+    prompt_blocks = local_blocks_per_group + num_external_blocks + num_new_blocks
+    request = make_request(
+        req_id, [0] * (prompt_blocks * block_size), block_size, sha256
+    )
+    manager.allocate_slots(
+        request,
+        num_new_blocks * block_size,
+        local_blocks_per_group * block_size,
+        cache_hit,
+        0,
+        num_external_blocks * block_size,
+    )
+    return request
+
+
+def _make_two_phase_manager(num_groups: int) -> KVCacheManager:
+    assert num_groups in (2, 3)
+    block_size = 16
+    kv_cache_config = make_kv_cache_config_hybrid_model(block_size, 31, 100)
+    del kv_cache_config.kv_cache_groups[num_groups:]
+    return make_kv_cache_manager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+
+def test_cache_hit_local_and_external_three_groups():
+    # Scenario 1 (issue #33775): SWA + full attention with *three* KV cache
+    # groups (1 full + 2 sliding-window). A local prefix hit in some groups
+    # combined with external (connector) blocks in others must not let one
+    # group's external `get_new_blocks` evict another group's not-yet-touched
+    # cache-hit blocks, which would hand the same physical block out twice.
+    manager = _make_two_phase_manager(num_groups=3)
+    _cross_group_cache_hit(manager, "test", num_groups=3)
+    _assert_no_double_allocation(manager, "test")
+
+
+def test_cache_hit_local_and_external_three_groups_preempt_and_reallocate():
+    # Scenario 2: the same 3-group hybrid config, but the request is preempted
+    # (freed) and then reallocated. After the free, the coordinator must treat
+    # the request as new again so external blocks are re-allocated, and the
+    # two-phase ordering must still prevent cross-group double allocation when
+    # reallocating against the now-evictable cache-hit blocks.
+    manager = _make_two_phase_manager(num_groups=3)
+
+    request = _cross_group_cache_hit(manager, "test", num_groups=3)
+    _assert_no_double_allocation(manager, "test")
+
+    # Preempt: free the request; its blocks return to the pool (full ones stay
+    # cached/evictable) and the coordinator forgets it.
+    manager.free(request)
+    assert manager.get_blocks("test").get_block_ids() == ([], [], [])
+
+    # Reallocate the same request id against fresh cache-hit blocks taken from
+    # the current free-queue head, mirroring a preempted request being
+    # scheduled again. Because the request is no longer known, the coordinator
+    # re-arms `is_new_request` and re-runs external allocation, which must still
+    # not double-allocate across groups.
+    _cross_group_cache_hit(manager, "test", num_groups=3)
+    _assert_no_double_allocation(manager, "test")
+    assert manager.get_blocks("test").get_block_ids() != ([], [], [])
+
+
+def test_cache_hit_local_and_external_two_groups_preempt_and_reallocate():
+    # Scenario 3: the minimal 2-group hybrid config (1 full + 1 sliding-window)
+    # exercised through the same preempt -> reallocate cycle as scenario 2.
+    manager = _make_two_phase_manager(num_groups=2)
+
+    request = _cross_group_cache_hit(manager, "test", num_groups=2)
+    _assert_no_double_allocation(manager, "test")
+
+    manager.free(request)
+    assert manager.get_blocks("test").get_block_ids() == ([], [])
+
+    _cross_group_cache_hit(manager, "test", num_groups=2)
+    _assert_no_double_allocation(manager, "test")
+    assert manager.get_blocks("test").get_block_ids() != ([], [])
 
 
 def test_swa_free_split_keeps_cached_tail_ahead_of_scratch(monkeypatch):

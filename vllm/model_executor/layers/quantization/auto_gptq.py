@@ -16,6 +16,7 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
+    FusedMoEExpertsModular,
     FusedMoEMethodBase,
     FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
@@ -640,8 +641,11 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
 
-        device = layer.w13_qweight.device
-        layer.workspace = marlin_make_workspace_new(device, 4)
+        if self.experts_cls is not None and issubclass(
+            self.experts_cls, FusedMoEExpertsModular
+        ):
+            device = layer.w13_qweight.device
+            layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
@@ -660,8 +664,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_g_idx,
             w13_g_idx_sort_indices,
             w2_g_idx_sort_indices,
-            _w13_qzeros,
-            _w2_qzeros,
+            w13_qzeros,
+            w2_qzeros,
             w13_input_global_scale,
             w2_input_global_scale,
             w13_bias,
@@ -689,6 +693,10 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w2_g_idx", w2_g_idx)
         replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
         replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
+        if w13_qzeros is not None:
+            replace_parameter(layer, "w13_qzeros", w13_qzeros)
+        if w2_qzeros is not None:
+            replace_parameter(layer, "w2_qzeros", w2_qzeros)
         if w13_input_global_scale is not None:
             if hasattr(layer, "w13_input_global_scale"):
                 replace_parameter(
@@ -735,8 +743,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             is_k_full=self.is_k_full,
             w13_g_idx=layer.w13_g_idx,
             w2_g_idx=layer.w2_g_idx,
-            w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
+            w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None),
+            w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None),
             routing_tables=layer._expert_routing_tables(),
         )
 
@@ -750,12 +758,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_scale=layer.w2_scales,
             weight_bits=self.quant_config.weight_bits,
             group_size=self.quant_config.group_size,
-            w1_zp=getattr(layer, "w13_qzeros", None)
-            if not self.quant_config.is_sym
-            else None,
-            w2_zp=getattr(layer, "w2_qzeros", None)
-            if not self.quant_config.is_sym
-            else None,
+            w1_zp=getattr(layer, "w13_qzeros", None),
+            w2_zp=getattr(layer, "w2_qzeros", None),
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
         )
@@ -793,4 +797,28 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             expert_map=layer.expert_map,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+        )
+
+    def apply_monolithic(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
+            hidden_states=x,
+            w1=layer.w13_qweight,
+            w2=layer.w2_qweight,
+            router_logits=router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
         )

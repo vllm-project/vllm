@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
@@ -52,12 +53,12 @@ def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
 class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
     """Shares the FlashMLA V4 metadata/cache pipeline; swaps the attention impl.
 
-    Inheriting from the FlashMLA V4 backend reuses its
-    ``DeepseekV4FlashMLAMetadata`` builder (which the V4 sparse-index
-    pipeline needs — the V3.2 FlashInfer builder lacks the ``c128a_*`` fields),
-    256-token blocks, head_size 512, and the (num_blocks, block_size, 512) cache
-    shape for non-``fp8_ds_mla`` dtypes.
+    Inheriting from the FlashMLA V4 backend reuses its ``DeepseekV4FlashMLAMetadata``
+    builder.
     """
+
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16", "fp8"]
 
     @staticmethod
     def get_name() -> str:

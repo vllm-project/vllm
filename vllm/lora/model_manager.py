@@ -1052,7 +1052,7 @@ class LoRAModelManager:
         """Narrow a flat expert-major sub-module list to this rank's experts.
 
         ``new_module_names`` is produced by
-        ``FusedMoE.make_expert_params_mapping`` and is ordered
+        ``fused_moe_make_expert_params_mapping`` and is ordered
         ``[e=0,w1, e=0,w2, e=0,w3, e=1,w1, ...]`` (non-gated MoE has 2
         entries per expert instead of 3). When the module is a 2D
         ``FusedMoEWithLoRA`` with EP enabled, we slice the list to the
