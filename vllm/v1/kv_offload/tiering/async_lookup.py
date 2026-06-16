@@ -33,6 +33,7 @@ lookup() is a pure OrderedDict operation.
 
 import queue
 import threading
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -47,6 +48,11 @@ logger = init_logger(__name__)
 class LookupState:
     result: bool | None = None  # True (found), False (not found), None
     request_ids: set[str] = field(default_factory=set)  # requests asking for the lookup
+    submit_time: float = field(default_factory=time.monotonic)
+
+    @property
+    def elapsed_time(self):
+        return time.monotonic() - self.submit_time
 
 
 class AsyncLookupManager(ABC):
@@ -71,8 +77,10 @@ class AsyncLookupManager(ABC):
     def __init__(
         self,
         tier_type: str,
+        lookup_timeout_s: float | None = None,
     ) -> None:
         self._tier_type = tier_type
+        self._lookup_timeout_s = lookup_timeout_s
 
         # key → LookupState; scheduler-owned, no lock needed.
         self._lookup_state: dict[OffloadKey, LookupState] = {}
@@ -142,6 +150,16 @@ class AsyncLookupManager(ABC):
             self._lookup_batch.append((key, req_context))
         state.request_ids.add(req_id)
         self._req_keys.setdefault(req_id, set()).add(key)
+
+        if (
+            state.result is None
+            and self._lookup_timeout_s is not None
+            and state.elapsed_time >= self._lookup_timeout_s
+        ):
+            # Cannot determine lookup within the timeout. It is better to let
+            # the request continue processing on the GPU.
+            return False
+
         return state.result
 
     def flush(self) -> None:
@@ -210,7 +228,6 @@ class AsyncLookupManager(ABC):
             if not batches:
                 continue
 
-            results: list[tuple[OffloadKey, bool]] = []
             for req_context, keys in batches.values():
                 try:
                     hits = self.batch_lookup(keys, req_context)
@@ -223,9 +240,8 @@ class AsyncLookupManager(ABC):
                     )
                     hits = (False for _ in keys)
 
-                for key, hit in zip(keys, hits):
-                    results.append((key, hit))
-
-            # Post the entire batch as one item — no lock needed.
-            if results:
-                self._pending_results.put(results)
+                results = list(zip(keys, hits))
+                if results:
+                    # Post results as soon as possible. we dont want a request
+                    # to wait for other requests.
+                    self._pending_results.put(results)

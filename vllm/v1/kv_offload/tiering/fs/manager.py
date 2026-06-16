@@ -49,8 +49,9 @@ class FsAsyncLookupManager(AsyncLookupManager):
         self,
         tier: "FileSystemTierManager",
         tier_type: str,
+        lookup_timeout_s: float | None = None,
     ) -> None:
-        super().__init__(tier_type=tier_type)
+        super().__init__(tier_type=tier_type, lookup_timeout_s=lookup_timeout_s)
         self._tier = tier
 
     def batch_lookup(
@@ -88,6 +89,7 @@ class FileSystemTierManager(SecondaryTierManager):
         root_dir: str,
         n_read_threads: int = 16,
         n_write_threads: int = 16,
+        lookup_timeout_s: float | None = None,
     ):
         """
         Args:
@@ -98,6 +100,7 @@ class FileSystemTierManager(SecondaryTierManager):
             root_dir: Root directory for block files.
             n_read_threads: Number of read-priority I/O threads.
             n_write_threads: Number of write-priority I/O threads.
+            lookup_timeout_s: Timeout for lookup operations.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
 
@@ -130,7 +133,9 @@ class FileSystemTierManager(SecondaryTierManager):
             thread_name_prefix="vllm_kv_py_fs",
         )
 
-        self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
+        self._lookup_manager = FsAsyncLookupManager(
+            tier=self, tier_type=self.tier_type, lookup_timeout_s=lookup_timeout_s
+        )
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
