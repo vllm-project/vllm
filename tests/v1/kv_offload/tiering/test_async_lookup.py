@@ -20,8 +20,12 @@ def _ctx(req_id: str = "r1") -> ReqContext:
 class InMemoryLookupManager(AsyncLookupManager):
     """Test subclass backed by an in-memory set."""
 
-    def __init__(self, existing_keys: set[OffloadKey] | None = None):
-        super().__init__(tier_type="test")
+    def __init__(
+        self,
+        existing_keys: set[OffloadKey] | None = None,
+        lookup_timeout_s: float | None = None,
+    ):
+        super().__init__(tier_type="test", lookup_timeout_s=lookup_timeout_s)
         self._existing = existing_keys or set()
         self._results_ready = threading.Event()
 
@@ -156,3 +160,41 @@ class TestAsyncLookupManager:
         mgr = InMemoryLookupManager()
         mgr.shutdown()
         assert not mgr._thread.is_alive()
+
+
+def test_lookup_timeout():
+    """
+    Three timeout scenarios tested sequentially:
+    1. Timeout exceeded while result pending: lookup returns False (treated as miss).
+    2. Result arrives before timeout: actual result returned, not timeout-induced False.
+    3. Result arrives after timeout fired: real result is still returned on subsequent
+       lookups; the timeout does not permanently mask the actual result.
+    """
+    # Case 1: timeout exceeded while result is still pending → False.
+    mgr = InMemoryLookupManager(existing_keys={_key(1)}, lookup_timeout_s=10.0)
+    assert mgr.lookup(_key(1), _ctx()) is None  # not yet expired
+    mgr._lookup_state[_key(1)].submit_time -= 11.0  # simulate elapsed time
+    assert mgr.lookup(_key(1), _ctx()) is False  # timeout fires
+    mgr.shutdown()
+
+    # Case 2: result arrives before timeout — actual result returned, not timeout False.
+    mgr = InMemoryLookupManager(existing_keys={_key(1)}, lookup_timeout_s=10.0)
+    mgr.lookup(_key(1), _ctx())
+    mgr.flush()
+    mgr._results_ready.wait()
+    mgr._results_ready.clear()
+    assert mgr.lookup(_key(1), _ctx()) is True  # actual result, not timeout sentinel
+    mgr.shutdown()
+
+    # Case 3: result arrives *after* timeout fired — real result is still returned
+    # on subsequent lookups; the timeout does not permanently mask the result.
+    mgr = InMemoryLookupManager(existing_keys={_key(1)}, lookup_timeout_s=10.0)
+    mgr.lookup(_key(1), _ctx())
+    assert mgr.lookup(_key(1), _ctx()) is None  # pending, timeout not yet expired
+    mgr._lookup_state[_key(1)].submit_time -= 11.0  # simulate timeout expiry
+    assert mgr.lookup(_key(1), _ctx()) is False  # timeout fires
+    mgr.flush()
+    mgr._results_ready.wait()
+    mgr._results_ready.clear()
+    assert mgr.lookup(_key(1), _ctx()) is True  # real result now visible
+    mgr.shutdown()
