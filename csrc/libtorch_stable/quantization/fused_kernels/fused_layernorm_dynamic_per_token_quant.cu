@@ -4,6 +4,20 @@
 #include "../../dispatch_utils.h"
 #include "layernorm_utils.cuh"
 #include "quant_conversions.cuh"
+#include "quantization/w8a8/fp8/common.cuh"
+
+namespace {
+// torch::stable::Tensor does not expose is_floating_point(); check manually.
+inline bool is_stable_tensor_floating_point(
+    torch::stable::Tensor const& tensor) {
+  using ST = torch::headeronly::ScalarType;
+  auto dtype = tensor.scalar_type();
+  return dtype == ST::Float || dtype == ST::Double || dtype == ST::Half ||
+         dtype == ST::BFloat16 || dtype == ST::Float8_e4m3fn ||
+         dtype == ST::Float8_e4m3fnuz || dtype == ST::Float8_e5m2 ||
+         dtype == ST::Float8_e5m2fnuz;
+}
+}  // namespace
 
 namespace vllm {
 
@@ -190,7 +204,8 @@ void rms_norm_dynamic_per_token_quant(
   if (scale_ub.has_value()) {
     STD_TORCH_CHECK(out.scalar_type() == kFp8Type);
   }
-  STD_TORCH_CHECK(weight.scalar_type() == input.scalar_type());
+  STD_TORCH_CHECK(is_stable_tensor_floating_point(weight),
+                  "weight must be a floating point tensor");
   STD_TORCH_CHECK(scales.scalar_type() == torch::headeronly::ScalarType::Float);
   if (residual) {
     STD_TORCH_CHECK(residual->scalar_type() == input.scalar_type());
@@ -289,7 +304,8 @@ void rms_norm_per_block_quant(torch::stable::Tensor& out,
   if (scale_ub.has_value()) {
     STD_TORCH_CHECK(out.scalar_type() == kFp8Type);
   }
-  STD_TORCH_CHECK(weight.scalar_type() == input.scalar_type());
+  STD_TORCH_CHECK(is_stable_tensor_floating_point(weight),
+                  "weight must be a floating point tensor");
   STD_TORCH_CHECK(scales.scalar_type() == torch::headeronly::ScalarType::Float);
   if (residual) {
     STD_TORCH_CHECK(residual->scalar_type() == input.scalar_type());
@@ -314,7 +330,12 @@ void rms_norm_per_block_quant(torch::stable::Tensor& out,
                   "scales buffer too small: need ", num_tokens * num_groups,
                   " elements, got ", scales.numel());
 
-  rms_norm_per_block_quant_dispatch(out, input, weight, scales, group_size,
-                                    var_epsilon, scale_ub, residual,
+  // Upcast weight to input dtype if needed (e.g. fp32 weight + bf16 input).
+  // The cast is a no-op when dtypes already match.
+  auto weight_casted = weight.scalar_type() != input.scalar_type()
+                           ? torch::stable::to(weight, input.scalar_type())
+                           : weight;
+  rms_norm_per_block_quant_dispatch(out, input, weight_casted, scales,
+                                    group_size, var_epsilon, scale_ub, residual,
                                     is_scale_transposed);
 }
