@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -124,9 +125,12 @@ class _EarlyExportReporter:
     def step(self, message: str) -> None:
         self._delegate.step(message)  # type: ignore[attr-defined]
         # kinfer calls reporter.step(f"Created TrainJob: {name}") before waiting.
-        if not self._keep and message.startswith("Created TrainJob: "):
-            trainjob = message.removeprefix("Created TrainJob: ").strip()
-            _export_trainjob_to_gha(trainjob, self._cluster_context)
+        if message.startswith("Created TrainJob: "):
+            self.last_trainjob: str | None = message.removeprefix(
+                "Created TrainJob: "
+            ).strip()
+            if not self._keep:
+                _export_trainjob_to_gha(self.last_trainjob, self._cluster_context)
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._delegate, name)
@@ -203,19 +207,79 @@ def run_eval(args: argparse.Namespace) -> None:
     switch_kube_context(cluster_context)
     client = Kinfer(k8s=KubeClient())
 
+    # Retry parameters for transient deploy failures (resource contention,
+    # gcp-auth-spiffe flakiness, pod timeouts).
+    _DEPLOY_MAX_ATTEMPTS = 3
+    _DEPLOY_RETRY_DELAY_S = 120
+
     trainjob: str | None = None
+    failed_trainjobs: list[str] = []
     try:
         if args.existing_trainjob:
             trainjob = args.existing_trainjob
             logger.info("Using existing TrainJob %s", trainjob)
         else:
+            import regex as _re
+            import requests as _requests
+            from kinfer.errors import DeployFailedError, PodTimeoutError
+
             spec = KinferSpec.from_object(deploy_spec, queue=queue, priority=priority)
-            deploy = client.deployments.deploy_full_pipeline(
-                spec,
-                wait_for_health=True,
-                follow_logs=False,
-                reporter=reporter,
-            )
+            deploy = None
+            last_exc: Exception | None = None
+            for attempt in range(1, _DEPLOY_MAX_ATTEMPTS + 1):
+                try:
+                    deploy = client.deployments.deploy_full_pipeline(
+                        spec,
+                        wait_for_health=True,
+                        follow_logs=False,
+                        reporter=reporter,
+                    )
+                    break
+                except (
+                    DeployFailedError,
+                    PodTimeoutError,
+                    # Port-forward to Ray dashboard dropped during health check.
+                    _requests.exceptions.ConnectionError,
+                ) as exc:
+                    last_exc = exc
+                    # Prefer extracting the TrainJob name from the exception
+                    # message (DeployFailedError / PodTimeoutError embed it).
+                    # Fall back to the reporter's last-seen name for exceptions
+                    # that don't include it (e.g. ConnectionError).
+                    m = _re.search(r"TrainJob[:\s]+(\S+)", str(exc))
+                    failed_tj = (m.group(1) if m else None) or getattr(
+                        reporter, "last_trainjob", None
+                    )
+                    if hasattr(reporter, "last_trainjob"):
+                        reporter.last_trainjob = None  # reset for next attempt
+                    if failed_tj:
+                        failed_trainjobs.append(failed_tj)
+                    logger.warning(
+                        "Deploy attempt %d/%d failed: %s",
+                        attempt,
+                        _DEPLOY_MAX_ATTEMPTS,
+                        exc,
+                    )
+                    if failed_tj:
+                        logger.info("Cleaning up failed TrainJob %s", failed_tj)
+                        try:
+                            client.deployments.delete(failed_tj)
+                        except Exception as del_exc:
+                            logger.warning(
+                                "Cleanup of %s failed (non-fatal): %s",
+                                failed_tj,
+                                del_exc,
+                            )
+                    if attempt < _DEPLOY_MAX_ATTEMPTS:
+                        logger.info(
+                            "Waiting %ds before retry...", _DEPLOY_RETRY_DELAY_S
+                        )
+                        time.sleep(_DEPLOY_RETRY_DELAY_S)
+            if deploy is None:
+                raise RuntimeError(
+                    f"Deploy failed after {_DEPLOY_MAX_ATTEMPTS} attempts."
+                ) from last_exc
+
             trainjob = deploy.trainjob_name
             logger.info("Deployed TrainJob %s (%s)", trainjob, deploy.serving_url)
             # Guarantee GITHUB_ENV export even if the reporter's log-line heuristic
@@ -255,14 +319,18 @@ def run_eval(args: argparse.Namespace) -> None:
                 ci_config=ci_config,
             )
     finally:
-        # trainjob is None if deploy_full_pipeline raised before returning a name;
-        # kinfer is expected to clean up its own partial TrainJob in that case.
-        # Wrap delete in try/except so a teardown failure never masks the original
-        # eval exception — the original propagates, delete failure is logged only.
-        if trainjob and not args.keep_deployment and not args.existing_trainjob:
-            logger.info("Deleting TrainJob %s", trainjob)
+        # Delete the successful TrainJob (after evals) and any TrainJobs created
+        # during failed retry attempts. Wrap each delete so a teardown failure
+        # never masks the original eval exception.
+        to_delete = (
+            [trainjob]
+            if trainjob and not args.keep_deployment and not args.existing_trainjob
+            else []
+        ) + failed_trainjobs
+        for tj in to_delete:
+            logger.info("Deleting TrainJob %s", tj)
             try:
-                client.deployments.delete(trainjob)
+                client.deployments.delete(tj)
             except Exception as exc:
                 logger.warning("TrainJob deletion failed (non-fatal): %s", exc)
 
@@ -331,8 +399,8 @@ def main() -> None:
     eval_parser.add_argument(
         "--eval-timeout",
         type=float,
-        default=14400.0,
-        help="Seconds to wait for a single eval suite (default: 14400 = 4h)",
+        default=21600.0,
+        help="Seconds to wait for a single eval suite (default: 21600 = 6h)",
     )
     eval_parser.add_argument(
         "--keep-deployment",

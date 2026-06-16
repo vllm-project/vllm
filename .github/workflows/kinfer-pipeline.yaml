@@ -82,7 +82,8 @@ jobs:
     # 2h per suite + headroom for deploy, queue wait, and multiple suites.
     # depot-ubuntu-24.04 runner: Depot CLI auto-authenticates (no DEPOT_TOKEN needed),
     # which is required for deploy_full_pipeline to build the kinfer runtime image.
-    timeout-minutes: 480
+    # Budget: 3 deploy retries × 2h + 6h eval + 3h buffer = 15h.
+    timeout-minutes: 900
     name: kinfer eval ${{ inputs.models }} on ${{ inputs.device }}
     permissions:
       contents: read
@@ -139,6 +140,10 @@ jobs:
           # DEPOT_PROJECT_ID takes priority over any depot.json on disk.
           DEPOT_PROJECT_ID: rkhjmshqw9
           RUN_TIMESTAMP: ${{ inputs.run_timestamp }}
+          # 2h per deploy attempt. Failures are usually fast (SPIFFE/connection
+          # issues) but weight pulls on loaded clusters can take >1h.
+          # Budget: 3 retries × 7200s + 21600s eval = ~43200s < job timeout.
+          KINFER_HEALTH_TIMEOUT_SECONDS: 7200
         run: |
           set -eo pipefail
           python tests/cohere/scripts/run_kinfer_eval.py eval \

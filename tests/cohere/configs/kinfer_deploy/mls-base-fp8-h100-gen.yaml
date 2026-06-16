@@ -10,8 +10,8 @@
 # cluster.image is the only field overridden at runtime (injected nightly build SHA).
 ci:
   cluster_context: cw-us-east-04-prod
-  queue: pre-training-queue
-  priority: dev-medium-eval-priority
+  queue: model-efficiency-ci-queue
+  priority: dev-low-eval-priority
 
 version: 1
 
