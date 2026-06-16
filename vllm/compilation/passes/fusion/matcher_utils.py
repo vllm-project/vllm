@@ -93,6 +93,8 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         use_flashinfer: bool = False,
         match_rocm_aiter: bool | None = None,
         enabled: bool | None = None,
+        rope_dim_offset: int = 0,
+        inverse: bool = False,
     ) -> None:
         if enabled is None:
             enabled = RotaryEmbedding.enabled()
@@ -107,6 +109,8 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         self.q_size = self.num_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
         self.rotary_dim = head_size
+        self.rope_dim_offset = rope_dim_offset
+        self.inverse = inverse
         if use_flashinfer:
             self.rotary_op = FLASHINFER_ROTARY_OP
         elif match_rocm_aiter:
@@ -136,6 +140,8 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
             head_size=self.head_size,
             cos_sin_cache=cos_sin_cache,
             is_neox=self.is_neox,
+            rope_dim_offset=self.rope_dim_offset,
+            inverse=self.inverse,
         )
         query_out = result[1]
         key_out = result[2] if len(result) > 2 else None

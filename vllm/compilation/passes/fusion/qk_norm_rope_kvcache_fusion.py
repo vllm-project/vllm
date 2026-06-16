@@ -373,7 +373,7 @@ class Qwen3NextQkNormRopeKvCachePattern:
         if self.attn_output_gate:
             q_gate, k, v = qkv.split([q_size * 2, k_size, v_size], dim=-1)
 
-            q_gate_3d = q_gate.view(-1, num_heads, 2 * head_dim)
+            q_gate_3d = q_gate.view(qkv.shape[0], num_heads, -1)
             q_3d, gate_3d = q_gate_3d.chunk(2, dim=-1)
 
             # ``chunk`` produces a non-contiguous view; the model emits a
@@ -403,7 +403,7 @@ class Qwen3NextQkNormRopeKvCachePattern:
                 positions, q_normed_flat, k_flat, cos_sin_cache
             )
 
-            k_rope_3d = k_rope.view(-1, num_kv_heads, head_dim)
+            k_rope_3d = k_rope.view(qkv.shape[0], num_kv_heads, head_dim)
             v_3d = v.view(-1, num_kv_heads, head_dim_v)
             dummy = torch.ops.vllm.unified_kv_cache_update(k_rope_3d, v_3d, layer_name)
             return dummy, q_rope, k_rope_3d, v_3d, gate_3d
@@ -647,29 +647,7 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
-        # ``torch._inductor.pattern_matcher.fx_to_pattern`` is invoked twice
-        # in the matcher lifecycle: at ``register_replacement`` time it is
-        # called with ``ignore_types=(int, float, list, torch.device,
-        # torch.dtype)`` so int constants in the registered pattern (split
-        # sizes, view dims, head_size, etc.) become ``Ignored()``. At apply
-        # time (``pattern_matcher.py:1548`` in torch 2.10) it is called with
-        # the default empty ``ignore_types``, which preserves the live FX
-        # graph's concrete ``SymInt`` values. Without this wrapper the
-        # apply-time fingerprint never matches the ``Ignored()`` slots in
-        # the registered pattern -- yielding 0 matches for every layer.
-        # Once vLLM moves to torch >= 2.11 this becomes unnecessary, but
-        # the rest of this pass already supports both modes.
-        _orig_fx_to_pat = pm.fx_to_pattern
-
-        def _relaxed_fx_to_pattern(*a, **kw):
-            kw["ignore_types"] = (int, torch.SymInt)
-            return _orig_fx_to_pat(*a, **kw)
-
-        pm.fx_to_pattern = _relaxed_fx_to_pattern
-        try:
-            self.matched_count = self.patterns.apply(graph)
-        finally:
-            pm.fx_to_pattern = _orig_fx_to_pat
+        self.matched_count = self.patterns.apply(graph)
 
         if self.matched_count == 0:
             # The pass-manager already gates on ``is_applicable_for_range``
@@ -677,9 +655,8 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             # so reaching this branch with zero matches means the fusion
             # was enabled (gate / dtype / AITER / kernel availability all
             # passed) and at least one pattern was registered, but nothing
-            # matched the live graph. Likely causes: torch version drift in
-            # ``pm.fx_to_pattern`` (see the ``ignore_types`` relaxation
-            # above), upstream model FX-graph refactor, or an unsupported
+            # matched the live graph. Likely causes: upstream model FX-graph
+            # refactor, or an unsupported
             # combination of compile flags (e.g. prefix caching enabled --
             # the pattern was traced without it).
             logger.warning_once(
