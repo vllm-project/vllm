@@ -58,7 +58,7 @@ pub(crate) fn validate_vocab_range(
     validate_param(
         "stop_token_ids",
         params.stop_token_ids.iter().copied(),
-        limits.stop_token_vocab_size(),
+        limits.model_vocab_size,
     )?;
 
     if let Some(token_ids) = params.allowed_token_ids.as_deref() {
@@ -69,17 +69,19 @@ pub(crate) fn validate_vocab_range(
         )?;
     }
 
-    if let (Some(logit_bias), Some(vocab_size)) =
-        (params.logit_bias.as_ref(), limits.model_vocab_size)
-    {
-        validate_param("logit_bias", logit_bias.keys().copied(), vocab_size)?;
+    if let Some(logit_bias) = params.logit_bias.as_ref() {
+        validate_param(
+            "logit_bias",
+            logit_bias.keys().copied(),
+            limits.model_vocab_size,
+        )?;
     }
 
     if let Some(token_ids) = params.logprob_token_ids.as_deref() {
         validate_param(
             "logprob_token_ids",
             token_ids.iter().copied(),
-            limits.logprobs_vocab_size(),
+            limits.model_vocab_size,
         )?;
     }
 
