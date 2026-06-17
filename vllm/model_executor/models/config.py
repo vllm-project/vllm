@@ -158,6 +158,20 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         if sc is not None and sc.max_num_seqs >= SchedulerConfig.DEFAULT_MAX_NUM_SEQS:
             sc.max_num_seqs = 8
 
+        # Remove the model's generation_config.json cap on max_new_tokens
+        # (256) so DiffusionGemma behaves like every other model: no
+        # server-wide limit, each request controls its own output length
+        # via max_tokens.  Setting to None causes get_diff_sampling_param
+        # to skip this key entirely.
+        model_config = vllm_config.model_config
+        if "max_new_tokens" not in model_config.override_generation_config:
+            model_config.override_generation_config["max_new_tokens"] = None
+            logger.info(
+                "DiffusionGemma: removing server-wide max_new_tokens cap "
+                "from generation_config.json (use "
+                "--override-generation-config to set a custom limit).",
+            )
+
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
