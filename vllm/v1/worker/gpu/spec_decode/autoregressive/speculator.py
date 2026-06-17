@@ -160,6 +160,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
         is_profile: bool = False,
+        all_token_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_tokens = input_batch.num_tokens_after_padding
         num_reqs = input_batch.num_reqs

@@ -308,7 +308,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not load_dummy_weights:
             prepare_communication_buffer_for_model(self.model)
-            if self.speculator is not None:
+            if self.speculator is not None and isinstance(
+                self.speculator, DraftModelSpeculator
+            ):
                 prepare_communication_buffer_for_model(self.speculator.model)
 
         # Initialize the components that require the model.
@@ -624,6 +626,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_attn_for_dummy_run=skip_attn,
                 mm_inputs=mm_inputs,
                 is_profile=is_profile,
+                all_token_ids=self.req_states.all_token_ids.gpu,
             )
 
         assert hidden_states is not None  # Last PP rank always has hidden_states
@@ -1450,6 +1453,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.sampler.sampling_states.temperature.gpu,
                 self.sampler.sampling_states.seeds.gpu,
                 mm_inputs=mm_inputs,
+                all_token_ids=self.req_states.all_token_ids.gpu,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
 
