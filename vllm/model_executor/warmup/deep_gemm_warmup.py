@@ -11,10 +11,10 @@ from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
+from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.fused_moe.deep_gemm_utils import compute_aligned_M
 from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmExperts
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
 from vllm.model_executor.layers.linear import LinearBase
@@ -99,12 +99,13 @@ def _extract_data_from_linear_base_module(
 
 
 def _extract_data_from_fused_moe_module(
-    m: torch.nn.Module,
+    m_: torch.nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """
     Extract weights, weight scales and num_topk from FusedMoE module.
     """
-    assert isinstance(m, FusedMoE)
+    assert isinstance(m_, MoERunner)
+    m = m_.routed_experts
     w13 = m.w13_weight
     w13_s = (
         m.w13_weight_scale_inv
@@ -156,10 +157,11 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     if not (envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM):
         return False
 
-    if not isinstance(module, FusedMoE):
+    if not isinstance(module, MoERunner):
         return False
 
-    moe_quant_config = module.quant_method.get_fused_moe_quant_config(module)
+    quant_method = module._quant_method
+    moe_quant_config = quant_method.get_fused_moe_quant_config(module.routed_experts)
 
     if (
         moe_quant_config is None
@@ -168,7 +170,7 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
     ):
         return False
 
-    moe_kernel = getattr(module.quant_method, "moe_kernel", None)
+    moe_kernel = getattr(quant_method, "moe_kernel", None)
     if moe_kernel is None:
         return False
 

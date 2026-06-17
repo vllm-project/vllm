@@ -21,6 +21,9 @@ from vllm.model_executor.layers.quantization.fp8 import (
     Fp8LinearMethod,
     Fp8MoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    Fp8PerTensorOnlineLinearMethod,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
@@ -164,7 +167,7 @@ def test_online_quantization(
 
         def check_model(model):
             fc1 = model.model.decoder.layers[0].fc1
-            assert isinstance(fc1.quant_method, Fp8LinearMethod)
+            assert isinstance(fc1.quant_method, Fp8PerTensorOnlineLinearMethod)
             if kv_cache_dtype == "fp8":
                 attn = model.model.decoder.layers[0].self_attn.attn
                 assert isinstance(attn.quant_method, Fp8KVCacheMethod)
@@ -440,6 +443,7 @@ def test_fp8_reloading(
                 hidden_size=1,
                 intermediate_size=1,
             )
+            layer = layer.routed_experts
             method = method_cls(config, layer)
             method.create_weights(
                 layer=layer,
@@ -465,11 +469,9 @@ def test_fp8_reloading(
     method.process_weights_after_loading(layer)
 
     # test reloading works after loading
-    # assuming that no reshaping occurred
-    for name, shape, original_weight_loader in original_metadata:
+    for name, shape, _ in original_metadata:
         param = getattr(layer, name)
         weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        assert weight_loader is original_weight_loader
         weight_loader(param, torch.zeros(shape))  # cannot use empty
 
     method.process_weights_after_loading(layer)

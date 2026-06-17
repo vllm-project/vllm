@@ -21,6 +21,11 @@ try:
 except ImportError:
     scipy_signal = PlaceholderModule("scipy").placeholder_attr("signal")  # type: ignore[assignment]
 
+try:
+    import soxr as soxr
+except ImportError:
+    soxr = PlaceholderModule("soxr")  # type: ignore[assignment]
+
 
 # ============================================================
 # Aligned with `librosa.get_duration` function
@@ -230,11 +235,43 @@ def resample_audio_scipy(
     orig_sr: float,
     target_sr: float,
 ) -> npt.NDArray[np.floating]:
-    if orig_sr > target_sr:
-        return scipy_signal.resample_poly(audio, 1, orig_sr // target_sr)
-    elif orig_sr < target_sr:
-        return scipy_signal.resample_poly(audio, target_sr // orig_sr, 1)
-    return audio
+    orig_sr_int = int(round(orig_sr))
+    target_sr_int = int(round(target_sr))
+
+    if orig_sr_int == target_sr_int:
+        return audio
+
+    gcd = math.gcd(orig_sr_int, target_sr_int)
+    return scipy_signal.resample_poly(
+        audio,
+        target_sr_int // gcd,
+        orig_sr_int // gcd,
+        axis=-1,
+    )
+
+
+def resample_audio_soxr(
+    audio: npt.NDArray[np.floating],
+    *,
+    orig_sr: float,
+    target_sr: float,
+) -> npt.NDArray[np.floating]:
+    orig_sr_int = int(round(orig_sr))
+    target_sr_int = int(round(target_sr))
+
+    if orig_sr_int == target_sr_int:
+        return audio
+
+    if audio.ndim == 2:
+        return np.stack(
+            [
+                resample_audio_soxr(ch, orig_sr=orig_sr, target_sr=target_sr)
+                for ch in audio
+            ],
+            axis=0,
+        )
+
+    return soxr.resample(audio, orig_sr_int, target_sr_int)
 
 
 class AudioResampler:
@@ -243,7 +280,7 @@ class AudioResampler:
     def __init__(
         self,
         target_sr: float | None = None,
-        method: Literal["pyav", "scipy"] = "pyav",
+        method: Literal["pyav", "scipy", "soxr"] = "pyav",
     ):
         self.target_sr = target_sr
         self.method = method
@@ -271,10 +308,12 @@ class AudioResampler:
             return resample_audio_scipy(
                 audio, orig_sr=orig_sr, target_sr=self.target_sr
             )
+        elif self.method == "soxr":
+            return resample_audio_soxr(audio, orig_sr=orig_sr, target_sr=self.target_sr)
         else:
             raise ValueError(
                 f"Invalid resampling method: {self.method}. "
-                "Supported methods are 'pyav' and 'scipy'."
+                "Supported methods are 'pyav', 'scipy', and 'soxr'."
             )
 
 

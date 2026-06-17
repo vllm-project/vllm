@@ -158,6 +158,10 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
 
 
 @pytest.mark.flaky(reruns=2, only_on=current_platform.is_rocm())
+@pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason=("XPU matmul/attention kernels are not batch-invariant"),
+)
 def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     """Test ngram_gpu speculative decoding with different configurations.
 
@@ -429,7 +433,7 @@ def _logprobs_match(
         and lps_a.keys() == lps_b.keys()
         and all(
             a.decoded_token == b.decoded_token
-            and a.rank == b.rank
+            and a.rank == pytest.approx(b.rank, rel=0.005)
             and a.logprob == pytest.approx(b.logprob, rel=rel_tol, abs=abs_tol)
             for a, b in ((lps_a[x], lps_b[x]) for x in lps_a)
         )

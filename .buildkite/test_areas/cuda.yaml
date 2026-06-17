@@ -28,3 +28,4 @@ steps:
   commands:
     - pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py
     - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
+    - pytest -v -s v1/cudagraph/test_breakable_cudagraph.py

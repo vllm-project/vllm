@@ -9,6 +9,7 @@
 static const char* PYARGS_PARSE = "KKKK";
 #else
   #include <cstdlib>
+  #include <cstdint>
   #include <cerrno>
   #include <climits>
 
@@ -44,6 +45,29 @@ static unsigned long long get_memcreate_chunk_size() {
 static inline unsigned long long my_min(unsigned long long a,
                                         unsigned long long b) {
   return a < b ? a : b;
+}
+
+static CUresult reserve_rocm_address(CUdeviceptr* d_mem, size_t size,
+                                     size_t alignment) {
+  CUresult status = cuMemAddressReserve(d_mem, size, alignment, 0, 0);
+  if (status == CUresult(0) || alignment == 0) {
+    return status;
+  }
+
+  // Some ROCm stacks can report OOM while reserving VA with an explicit
+  // alignment even when physical VRAM is free. Let HIP choose the default
+  // alignment, then verify that the returned address still satisfies the
+  // requested alignment before accepting it.
+  status = cuMemAddressReserve(d_mem, size, 0, 0, 0);
+  if (status != CUresult(0)) {
+    return status;
+  }
+  if (((std::uintptr_t)(*d_mem) % alignment) == 0) {
+    return status;
+  }
+
+  (void)cuMemAddressFree(*d_mem, size);
+  return hipErrorNotSupported;
 }
 
 static const char* PYARGS_PARSE = "KKKO";
@@ -325,7 +349,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
     return nullptr;
   }
 #else
-  CUDA_CHECK(cuMemAddressReserve(&d_mem, alignedSize, granularity, 0, 0));
+  CUDA_CHECK(reserve_rocm_address(&d_mem, alignedSize, granularity));
   if (error_code != 0) {
     return nullptr;
   }
