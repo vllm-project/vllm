@@ -9,10 +9,16 @@ import pytest
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import (
     simulate_reasoning_streaming,
+    simulate_tool_streaming,
 )
 from vllm.parser.deepseek_v4 import (
+    DSML_INVOKE_END,
+    DSML_INVOKE_NAME_END,
+    DSML_INVOKE_PREFIX,
     DSML_THINK_END,
     DSML_THINK_START,
+    DSML_TOOL_END,
+    DSML_TOOL_START,
     DeepSeekV4Parser,
     _dsml_arg_converter,
     deepseek_v4_config,
@@ -309,3 +315,165 @@ class TestWrapperUnwrapping:
             "get_weather",
         )
         assert json.loads(result) == {"location": "Beijing"}
+
+
+# ── Parallel tool call wrapper unwrapping ───────────────────────────
+
+
+def _make_tool(name, properties):
+    from vllm.entrypoints.openai.chat_completion.protocol import (  # noqa: E501
+        ChatCompletionToolsParam,
+    )
+
+    return ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": name,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+            },
+        },
+    )
+
+
+def _invoke(name, *params):
+    body = "\n".join(_param(n, s, v) for n, s, v in params)
+    return (
+        f"{DSML_INVOKE_PREFIX}{name}{DSML_INVOKE_NAME_END}\n{body}\n{DSML_INVOKE_END}"
+    )
+
+
+def _tool_calls(*invokes):
+    return DSML_TOOL_START + "\n".join(invokes) + DSML_TOOL_END
+
+
+class TestParallelUnwrapping:
+    @pytest.fixture
+    def weather_tool(self):
+        return _make_tool(
+            "get_weather",
+            {
+                "location": {"type": "string"},
+                "unit": {"type": "string"},
+            },
+        )
+
+    @pytest.fixture
+    def time_tool(self):
+        return _make_tool(
+            "get_time",
+            {"timezone": {"type": "string"}},
+        )
+
+    @pytest.mark.parametrize(
+        "weather_args, expected",
+        [
+            (
+                '{"location": "NYC", "unit": "celsius"}',
+                {"location": "NYC", "unit": "celsius"},
+            ),
+            ('{"location": "NYC"}', {"location": "NYC"}),
+        ],
+        ids=["all_props", "subset_props"],
+    )
+    def test_unwrap_parallel_uses_correct_schema(
+        self,
+        mock_tokenizer,
+        mock_request,
+        weather_tool,
+        time_tool,
+        weather_args,
+        expected,
+    ):
+        tools = [weather_tool, time_tool]
+        parser = DeepSeekV4Parser(mock_tokenizer, tools=tools)
+        mock_request.tools = tools
+
+        text = _tool_calls(
+            _invoke("get_weather", ("arguments", "false", weather_args)),
+            _invoke("get_time", ("timezone", "true", "EST")),
+        )
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 2
+        assert result.tool_calls[0].function.name == "get_weather"
+        args0 = json.loads(result.tool_calls[0].function.arguments)
+        assert args0 == expected
+        assert result.tool_calls[1].function.name == "get_time"
+        args1 = json.loads(result.tool_calls[1].function.arguments)
+        assert args1 == {"timezone": "EST"}
+
+    def test_unwrap_parallel_streaming(
+        self, mock_tokenizer, mock_request, weather_tool, time_tool
+    ):
+        tools = [weather_tool, time_tool]
+        parser = DeepSeekV4Parser(mock_tokenizer, tools=tools)
+        mock_request.tools = tools
+
+        chunks = [
+            DSML_TOOL_START,
+            _invoke(
+                "get_weather",
+                ("arguments", "false", '{"location": "NYC"}'),
+            ),
+            _invoke("get_time", ("timezone", "true", "EST")),
+            DSML_TOOL_END,
+        ]
+
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+        final_delta, _ = results[-1]
+        finish_delta = parser.finish_streaming()
+        extracted = parser._build_extracted_result(final_delta, finish_delta)
+
+        assert extracted.tools_called is True
+        assert len(extracted.tool_calls) == 2
+        args0 = json.loads(extracted.tool_calls[0].function.arguments)
+        assert args0 == {"location": "NYC"}
+        args1 = json.loads(extracted.tool_calls[1].function.arguments)
+        assert args1 == {"timezone": "EST"}
+
+    def test_no_unwrap_parallel_when_no_match(
+        self, mock_tokenizer, mock_request, weather_tool, time_tool
+    ):
+        tools = [weather_tool, time_tool]
+        parser = DeepSeekV4Parser(mock_tokenizer, tools=tools)
+        mock_request.tools = tools
+
+        text = _tool_calls(
+            _invoke(
+                "get_weather",
+                ("arguments", "false", '{"unknown_key": "val"}'),
+            ),
+            _invoke("get_time", ("timezone", "true", "EST")),
+        )
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert len(result.tool_calls) == 2
+        args0 = json.loads(result.tool_calls[0].function.arguments)
+        assert args0 == {"arguments": {"unknown_key": "val"}}
+        args1 = json.loads(result.tool_calls[1].function.arguments)
+        assert args1 == {"timezone": "EST"}
+
+    def test_unwrap_single_tool_still_works(self, mock_tokenizer, mock_request):
+        tool = _make_tool("get_weather", {"location": {"type": "string"}})
+        tools = [tool]
+        parser = DeepSeekV4Parser(mock_tokenizer, tools=tools)
+        mock_request.tools = tools
+
+        text = _tool_calls(
+            _invoke(
+                "get_weather",
+                ("arguments", "false", '{"location": "Beijing"}'),
+            ),
+        )
+
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "Beijing"}
