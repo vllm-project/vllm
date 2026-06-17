@@ -1352,12 +1352,12 @@ class OpenPanguSinkAttention(nn.Module):
         quant_config: QuantizationConfig | None,
     ) -> None:
         rope_parameters["partial_rotary_factor"] = self.qk_rope_dim / self.head_dim
-        is_neox_style = True
+        self.rope_interleave = getattr(config, "rope_interleave", True)
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=rope_parameters,
-            is_neox_style=is_neox_style,
+            is_neox_style=(not self.rope_interleave),
         )
 
     def post_weight_load(self) -> None:

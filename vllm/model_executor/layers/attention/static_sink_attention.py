@@ -23,7 +23,6 @@ from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
-    SinkFullAttentionSpec,
     SlidingWindowMLASpec,
 )
 
@@ -55,6 +54,15 @@ def _get_static_sink_attn_impl_override() -> dict[type, type]:
         )
 
         overrides[FlashMLASparseImpl] = FlashMLASparseStaticSinkImpl
+    except ImportError:
+        pass
+    try:
+        from vllm.v1.attention.backends.flash_attn_diffkv import (
+            FlashAttentionDiffKVImpl,
+            FlashAttentionStaticSinkDiffKVImpl,
+        )
+
+        overrides[FlashAttentionDiffKVImpl] = FlashAttentionStaticSinkDiffKVImpl
     except ImportError:
         pass
     return overrides
@@ -121,26 +129,8 @@ class StaticSinkAttention(Attention, CustomOp):
         )
         self.sink_len = sink_len
 
-    def set_sink_kv_block_offset(self, sink_kv_block_offset: int) -> None:
-        self.sink_kv_block_offset = sink_kv_block_offset
-
     def update_sink_kv(self, sink_key, sink_value) -> None:
         self.impl.update_sink_kv(sink_key, sink_value)  # type: ignore[attr-defined]
-
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # Block size may get updated after model loading, refresh it
-        self.block_size = vllm_config.cache_config.block_size
-        # Should not be called for enc-dec or encoder-only attention.
-        assert self.attn_type == AttentionType.DECODER
-
-        return SinkFullAttentionSpec(
-            block_size=self.block_size,
-            num_kv_heads=self.num_kv_heads,
-            head_size=self.head_size,
-            head_size_v=self.head_size_v,
-            sink_len=self.sink_len,
-            dtype=self.kv_cache_torch_dtype,
-        )
 
 
 @CustomOp.register("static_sink_mla_attention")
