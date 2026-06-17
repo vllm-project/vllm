@@ -12,7 +12,8 @@
   #include <torch/csrc/stable/ops.h>
 
 // Requires torch::stable::from_blob with a custom deleter (PyTorch >= 2.11).
-// ROCm _C_stable_libtorch still targets 2.10; see legacy _C for ROCm.
+// ROCm _C_stable_libtorch still targets 2.10; see the legacy declaration in
+// csrc/ops.h (ROCm _C).
 inline torch::stable::Tensor weak_ref_tensor(torch::stable::Tensor& tensor) {
   // Ensure tensor is on CUDA
   STD_TORCH_CHECK(tensor.device().is_cuda(), "Tensor must be on CUDA device");

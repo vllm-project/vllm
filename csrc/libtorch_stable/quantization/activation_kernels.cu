@@ -2,7 +2,7 @@
 
 #include <cmath>
 
-#include "core/math.hpp"
+#include "libtorch_stable/core/math.hpp"
 #include "cuda_compat.h"
 #include "libtorch_stable/dispatch_utils.h"
 #include "quantization/w8a8/fp8/common.cuh"
@@ -656,11 +656,12 @@ void persistent_masked_m_silu_mul_quant(
               BLOCK_COUNT, max_shared_mem_bytes, fp8_t, scale_t, THREAD_COUNT, \
               Idx_t, CEIL_UE8M0, GROUP_SIZE, STAGES>                           \
               <<<grid, block, max_shared_mem_bytes + (E + 1) * 16, stream>>>(  \
-                  reinterpret_cast<__nv_bfloat16*>(input.mutable_data_ptr()),  \
+                  reinterpret_cast<const __nv_bfloat16*>(                      \
+                      input.const_data_ptr()),                                 \
                   y_q.mutable_data_ptr<fp8_t>(),                               \
                   reinterpret_cast<scale_t*>(y_s.mutable_data_ptr()),          \
-                  reinterpret_cast<int32_t*>(                                  \
-                      tokens_per_expert.mutable_data_ptr()),                   \
+                  reinterpret_cast<const int32_t*>(                            \
+                      tokens_per_expert.const_data_ptr()),                     \
                   E, T, H, stride_i_e, stride_i_t, stride_i_h, stride_yq_e,    \
                   stride_yq_t, stride_yq_h, STRIDE_YS_E, STRIDE_YS_T,          \
                   STRIDE_YS_G, STRIDE_YS_P, stride_counts_e);                  \
