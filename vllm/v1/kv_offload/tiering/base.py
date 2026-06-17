@@ -153,6 +153,14 @@ class SecondaryTierManager(ABC):
         """
         pass
 
+    def has_pending_work(self) -> bool:
+        """Whether this tier needs the engine to keep stepping.
+
+        While True, on_schedule_end() and get_finished_jobs() continue
+        to be called even when no requests are scheduled.
+        """
+        return False
+
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Mark blocks as recently used for eviction policy.
