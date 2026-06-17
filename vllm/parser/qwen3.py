@@ -118,7 +118,7 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
             # -- Tool call transitions --
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
-                (EventType.TOOL_CALL_START,),
+                (EventType.REASONING_END, EventType.TOOL_CALL_START),
             ),
             # Fallback: <function= without a preceding <tool_call>
             (ParserState.CONTENT, "FUNC_PREFIX"): Transition(
@@ -206,8 +206,14 @@ class Qwen3Parser(ParserEngine):
             return True
         tool_call_id = self._tool_call_token_id
         tool_call_end_id = self._tool_call_end_token_id
+        reasoning_start_id = self._reasoning_start_token_id
         if tool_call_id is not None:
             for i in range(len(input_ids) - 1, -1, -1):
+                if (
+                    reasoning_start_id is not None
+                    and input_ids[i] == reasoning_start_id
+                ):
+                    return False
                 if input_ids[i] == tool_call_id:
                     if tool_call_end_id is not None and any(
                         input_ids[j] == tool_call_end_id

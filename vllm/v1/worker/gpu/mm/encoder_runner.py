@@ -124,7 +124,7 @@ class EncoderRunner:
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
                 req_start_pos = query_start_loc[i] + start_pos - query_start[i]
-                is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
+                is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] |= (
                     True if is_embed is None else is_embed
                 )
                 mm_embeds.append(mm_embeds_item)

@@ -191,8 +191,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "FunctionGemmaToolParser",
     ),
     "gemma4": (
-        "gemma4_tool_parser",
-        "Gemma4ToolParser",
+        "gemma4_engine_tool_parser",
+        "Gemma4EngineToolParser",
     ),
     "apertus": (
         "apertus_tool_parser",
