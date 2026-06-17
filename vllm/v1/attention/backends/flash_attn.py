@@ -70,6 +70,7 @@ logger = init_logger(__name__)
 # qualifying steps are logged).
 _PCP_DUMP_N = [0]
 _PCP_DUMP_BT = [0]
+_PCP_DUMP_MERGE = [0]
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -1282,6 +1283,23 @@ class FlashAttentionImpl(AttentionImpl):
                 decode_attn_out,
                 decode_lse.transpose(0, 1),
             )
+            # PCP_DUMP (once): dump merged decode attn output for req0 vs req1.
+            # Distinct -> attention+merge fine, bug is downstream in
+            # get_restore_hidden_states. Equal/garbage -> attention/merge bug.
+            import os as _os
+
+            if (
+                _os.environ.get("PCP_DUMP")
+                and num_decodes > 1
+                and _PCP_DUMP_MERGE[0] < 1
+            ):
+                _PCP_DUMP_MERGE[0] += 1
+                logger.warning(
+                    "PCP_DUMP merge_out o0=%s o1=%s rank=%d",
+                    output[0, 0, :4].tolist(),
+                    output[1, 0, :4].tolist(),
+                    self.pcp_rank,
+                )
 
         if num_decode_tokens == attn_metadata.num_actual_tokens:
             return output
