@@ -5,7 +5,7 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
 from functools import cached_property, lru_cache, partial
 from itertools import accumulate
@@ -914,6 +914,26 @@ class BaseMultiModalContentParser(ABC):
         raise NotImplementedError
 
 
+def _use_audio_in_video_for_idx(
+    mm_processor_kwargs: dict[str, Any] | None,
+    video_idx: int,
+) -> bool:
+    if not mm_processor_kwargs:
+        return False
+
+    value = mm_processor_kwargs.get("use_audio_in_video", False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        if video_idx >= len(value):
+            raise ValueError(
+                "use_audio_in_video must contain one boolean per video, "
+                f"but found {len(value)} values for video index {video_idx}."
+            )
+        return bool(value[video_idx])
+    return bool(value)
+
+
 class MultiModalContentParser(BaseMultiModalContentParser):
     def __init__(
         self,
@@ -932,6 +952,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         )
 
         self._mm_processor_kwargs = mm_processor_kwargs
+        self._num_parsed_videos = 0
 
     @property
     def model_config(self) -> ModelConfig:
@@ -1039,6 +1060,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
+        video_idx = self._num_parsed_videos
+        self._num_parsed_videos += 1
+
         video = (
             self._connector.fetch_video(
                 video_url=video_url,
@@ -1052,10 +1076,8 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("video", placeholder)
 
         # Extract audio from video if use_audio_in_video is True
-        if (
-            video_url
-            and self._mm_processor_kwargs
-            and self._mm_processor_kwargs.get("use_audio_in_video", False)
+        if video_url and _use_audio_in_video_for_idx(
+            self._mm_processor_kwargs, video_idx
         ):
             audio = self._connector.fetch_audio(video_url) if video_url else None
             audio_placeholder = self._tracker.add("audio", (audio, uuid))
@@ -1078,6 +1100,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             allowed_media_domains=tracker.allowed_media_domains,
         )
         self._mm_processor_kwargs: dict[str, Any] | None = mm_processor_kwargs
+        self._num_parsed_videos = 0
 
     @property
     def model_config(self) -> ModelConfig:
@@ -1226,16 +1249,17 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return video, uuid
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
+        video_idx = self._num_parsed_videos
+        self._num_parsed_videos += 1
+
         placeholder = self._tracker.add(
             "video", partial(self._video_with_uuid_async, video_url, uuid)
         )
         self._add_placeholder("video", placeholder)
 
         # Extract audio from video if use_audio_in_video is True
-        if (
-            video_url
-            and self._mm_processor_kwargs
-            and self._mm_processor_kwargs.get("use_audio_in_video", False)
+        if video_url and _use_audio_in_video_for_idx(
+            self._mm_processor_kwargs, video_idx
         ):
             audio_placeholder = self._tracker.add(
                 "audio", partial(self._audio_with_uuid_async, video_url, uuid)

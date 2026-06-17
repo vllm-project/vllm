@@ -113,3 +113,50 @@ def test_audio_in_video_cache_correctness(model_id: str, num_videos: int) -> Non
         f"  baseline : {baseline_ids}\n"
         f"  cache-hit: {second_ids}"
     )
+
+
+@pytest.mark.parametrize("model_id", MODELS)
+def test_audio_in_video_per_video_mask_mixed(model_id: str) -> None:
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"audio": 1, "image": 0, "video": 2},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config, cache=None)
+
+    hf_config = processor.info.get_hf_config()
+    video_token_id = hf_config.video_token_id
+    audio_token_id = hf_config.audio_token_id
+
+    mm_data = create_mm_data(num_videos=2)
+    mm_data["audio"] = mm_data["audio"][:1]
+
+    processed = processor(
+        [video_token_id, video_token_id],
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={"use_audio_in_video": [True, False]},
+    )
+
+    prompt_token_ids = processed["prompt_token_ids"]
+    placeholders = processed["mm_placeholders"]
+
+    assert len(placeholders["video"]) == 2
+    assert len(placeholders["audio"]) == 1
+
+    audio_placeholder = placeholders["audio"][0]
+    first_video_placeholder = placeholders["video"][0]
+    second_video_placeholder = placeholders["video"][1]
+
+    assert audio_placeholder.offset == first_video_placeholder.offset
+    assert audio_placeholder.length == first_video_placeholder.length
+
+    first_video_tokens = prompt_token_ids[
+        first_video_placeholder.offset : first_video_placeholder.offset
+        + first_video_placeholder.length
+    ]
+    second_video_tokens = prompt_token_ids[
+        second_video_placeholder.offset : second_video_placeholder.offset
+        + second_video_placeholder.length
+    ]
+
+    assert audio_token_id in first_video_tokens
+    assert audio_token_id not in second_video_tokens
