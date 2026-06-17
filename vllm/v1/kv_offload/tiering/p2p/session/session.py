@@ -192,17 +192,18 @@ class P2PSession:
         self._conn: ControlConnection | None = None
 
         # Client-role state
-        self._inbound: dict[str, _InboundRequestState] = {}  # kv_Request_id -> req
+        self._inbound: dict[str, _InboundRequestState] = {}  # kv_request_id -> req
         self._completed_loads: list[LoadResult] = []
-        self._send_ready = False
-        self._queued: list[dict] = []
+        self._send_ready = False  # True after the peer acked our ConnectMsg
+        self._queued: list[
+            dict
+        ] = []  # Msgs waiting to be send on connection establishment
 
         # Server-role state
-        self._outbound: dict[str, _OutboundRequestState] = {}
+        self._outbound: dict[str, _OutboundRequestState] = {}  # kv_request_id -> req
         self._inflight: dict[int, _InflightXfer] = {}  # transfer_id → xfer
         self._store_jobs: dict[int, float] = {}  # job_id → submitted_at
         self._pending_aborts: dict[str, float] = {}  # kv_request_id → start
-        self._remote_registered = False
 
         if conn is not None:
             self.attach_connection(conn)
@@ -540,7 +541,29 @@ class P2PSession:
                 exc,
             )
 
+    def _protocol_error(self, reason: str) -> None:
+        """Log a protocol violation and disconnect.
+
+        Best-effort sends ``DisconnectMsg`` so the peer learns why we're
+        going away, then marks the connection dead. The manager reaps
+        the session on the next poll via ``alive``.
+        """
+        logger.error(
+            "P2PSession %s: protocol error: %s — disconnecting",
+            self.peer_id,
+            reason,
+        )
+        if self._conn is not None:
+            with contextlib.suppress(Exception):
+                self._conn.send({TYPE_KEY: DisconnectMsg.TYPE})
+            self._conn.mark_dead()
+
     def _dispatch_message(self, msg: dict) -> None:
+        # Drop messages buffered before disconnect: a poll batch can
+        # contain msg-after-DisconnectMsg, and dispatching them would
+        # mutate state on a dead session.
+        if self._conn is not None and not self._conn.alive:
+            return
         msg_type = msg.get(TYPE_KEY) if isinstance(msg, dict) else None
         if msg_type == ConnectMsg.TYPE:
             self._on_connect(msg)
@@ -569,6 +592,12 @@ class P2PSession:
         # Validation failures here mean an incompatible or malicious peer.
         # Mark the connection dead so the manager reaps the session;
         # don't call add_remote_peer or send connect_ack.
+        if self._send_ready:
+            # We've already received connect_ack, so the handshake is
+            # complete. A second connect from the peer is a protocol
+            # violation — re-registering would corrupt transport state.
+            self._protocol_error("duplicate connect after handshake")
+            return
         try:
             ConnectMsg.validate(msg)
             if msg[ConnectMsg.BLOCK_LEN] != self._local_block_len:
@@ -597,7 +626,6 @@ class P2PSession:
                 self._conn.mark_dead()
             return
 
-        self._remote_registered = True
         if self._conn is not None:
             self._conn.send(
                 {
@@ -632,6 +660,13 @@ class P2PSession:
             kv_request_id,
             len(block_hashes),
         )
+        existing = self._outbound.get(kv_request_id)
+        if existing is not None and existing.demand_received:
+            # A second fetch for the same kv_request_id would overwrite
+            # `remaining` and leak inflight bookkeeping. Treat as a
+            # protocol violation.
+            self._protocol_error(f"duplicate fetch for kv_request_id={kv_request_id}")
+            return
         req = self._outbound.setdefault(kv_request_id, _OutboundRequestState())
         result = req.add_fetch_demand(block_hashes, block_indexes)
         if result.local_idxs:
