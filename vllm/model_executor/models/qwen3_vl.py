@@ -844,6 +844,7 @@ class Qwen3_VisionTransformer(nn.Module):
         hidden_states = hidden_states + pos_embeds
         hidden_states = hidden_states.unsqueeze(1)
 
+        sp_enabled = False
         seq_len = hidden_states.size(0)
         if self.sp_group is not None and self.sp_size > 1:
             sp_enabled = (

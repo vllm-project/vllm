@@ -56,10 +56,11 @@ class BenchmarkMetrics:
 class VLLMServerManager:
     """Manage vLLM server lifecycle"""
     
-    def __init__(self, model_path: str, tp_size: int = 2, enable_sp: bool = False):
+    def __init__(self, model_path: str, tp_size: int = 2, enable_sp: bool = False, port: int = 8000):
         self.model_path = model_path
         self.tp_size = tp_size
         self.enable_sp = enable_sp
+        self.port = port
         self.process = None
         self.log_file = f"vllm_server_{'sp' if enable_sp else 'baseline'}.log"
         
@@ -69,17 +70,20 @@ class VLLMServerManager:
             logger.warning("Server already running")
             return True
             
+        env = os.environ.copy()
+        env["FLASHINFER_DISABLE_VERSION_CHECK"] = "1"
+            
         cmd = [
             "vllm", "serve", self.model_path,
             "--dtype", "bfloat16",
             "--max-model-len", "16384",
             "--tensor_parallel_size", str(self.tp_size),
-            "--limit-mm-per-prompt", '{"image": 3, "video": 0}'
+            "--limit-mm-per-prompt", '{"image": 3, "video": 0}',
+            "--port", str(self.port)
         ]
         
         if self.enable_sp:
-            cmd.append("--enable_mm_encoder_sp")
-            cmd.append("True")
+            cmd.append("--enable-mm-encoder-sp")
             logger.info("Starting vLLM server with Sequence Parallelism enabled...")
         else:
             logger.info("Starting baseline vLLM server (TP=2, SP=False)...")
@@ -91,7 +95,8 @@ class VLLMServerManager:
                 stdout=f,
                 stderr=subprocess.STDOUT,
                 text=True,
-                preexec_fn=os.setsid if os.name != 'nt' else None
+                preexec_fn=os.setsid if os.name != 'nt' else None,
+                env=env
             )
         
         # Wait for server to be ready
@@ -114,7 +119,7 @@ class VLLMServerManager:
                     for pattern in ready_patterns:
                         if re.search(pattern, content):
                             logger.info(f"Server ready in {time.time() - start_time:.1f}s")
-                            time.sleep(2)  # extra wait for stability
+                            time.sleep(5)  # extra wait for stability
                             return True
             except FileNotFoundError:
                 pass
@@ -148,16 +153,17 @@ class VLLMServerManager:
         
         self.process = None
         logger.info("Server stopped")
-        time.sleep(2)  # Wait for port release
+        time.sleep(3)  # Wait for port release
 
 
 class BenchmarkRunner:
     """Run vLLM benchmark and parse results"""
     
-    def __init__(self, model_path: str, num_prompts: int = 100, max_concurrency: int = 10):
+    def __init__(self, model_path: str, num_prompts: int = 100, max_concurrency: int = 10, port: int = 8000):
         self.model_path = model_path
         self.num_prompts = num_prompts
         self.max_concurrency = max_concurrency
+        self.port = port
         self.output_file = "benchmark_output.txt"
         
     def run(self) -> Optional[BenchmarkMetrics]:
@@ -168,6 +174,7 @@ class BenchmarkRunner:
             "vllm", "bench", "serve",
             "--backend", "openai-chat",
             "--model", self.model_path,
+            "--port", str(self.port),
             "--endpoint", "/v1/chat/completions",
             "--dataset-name", "random-mm",
             "--num-prompts", str(self.num_prompts),
@@ -178,7 +185,7 @@ class BenchmarkRunner:
             "--random-range-ratio", "0.2",
             "--random-mm-base-items-per-request", "2",
             "--random-mm-limit-mm-per-prompt", '{"image": 3, "video": 0}',
-            "--random-mm-bucket-config", '{(256, 256, 1): 0.5, (1280, 1280, 1): 0.5}',
+            "--random-mm-bucket-config", '{(256, 256, 1): 0.25, (720, 720, 1): 0.25, (1080, 1080, 1): 0.25, (2080, 2080, 1): 0.25}',
             "--request-rate", "inf",
             "--ignore-eos",
             "--seed", "42"
@@ -265,10 +272,10 @@ def print_comparison(baseline: BenchmarkMetrics, sp: BenchmarkMetrics):
     logger.info("="*80)
     
     # Header
-    print("\n{:<30} {:>20} {:>20} {:>15}".format(
+    print("\n{:<35} {:>20} {:>20} {:>15}".format(
         "Metric", "Baseline (TP=2)", "With SP (TP=2)", "Speedup"
     ))
-    print("-"*85)
+    print("-"*92)
     
     # Compare metrics
     metrics_to_compare = [
@@ -308,11 +315,11 @@ def print_comparison(baseline: BenchmarkMetrics, sp: BenchmarkMetrics):
                 'symbol': change_symbol
             }
             
-            print("{:<30} {:>20.2f} {:>20.2f} {:>14.2f}x {}".format(
+            print("{:<35} {:>20.2f} {:>20.2f} {:>14.2f}x {}".format(
                 label, baseline_val, sp_val, speedup, change_symbol
             ))
         else:
-            print("{:<30} {:>20} {:>20} {:>15}".format(
+            print("{:<35} {:>20} {:>20} {:>15}".format(
                 label, "N/A", "N/A", "N/A"
             ))
     
@@ -375,6 +382,7 @@ def main():
     NUM_PROMPTS = 100
     MAX_CONCURRENCY = 10
     TP_SIZE = 2
+    PORT = 3456
     
     # Test Sequence Parallelism
     sp_test = [
@@ -390,13 +398,13 @@ def main():
         logger.info(f"{'='*60}\n")
         
         # Start server
-        server = VLLMServerManager(MODEL_PATH, TP_SIZE, enable_sp)
+        server = VLLMServerManager(MODEL_PATH, TP_SIZE, enable_sp, PORT)
         if not server.start():
             logger.error(f"Failed to start {test_name} server")
             continue
         
         # Run benchmark
-        benchmark = BenchmarkRunner(MODEL_PATH, NUM_PROMPTS, MAX_CONCURRENCY)
+        benchmark = BenchmarkRunner(MODEL_PATH, NUM_PROMPTS, MAX_CONCURRENCY, PORT)
         metrics = benchmark.run()
         
         if metrics is None:
@@ -410,9 +418,8 @@ def main():
         server.stop()
         
         # Add wait between tests
-        if enable_sp:
-            logger.info("Waiting before final cleanup...")
-            time.sleep(10)
+        logger.info("Waiting before next test...")
+        time.sleep(10)
     
     # Compare results
     if len(results) == 2:

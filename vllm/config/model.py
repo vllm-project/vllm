@@ -675,7 +675,6 @@ class ModelConfig:
                 )
                 mm_encoder_tp_mode = "weights"
 
-            # Auto-enable SP for whitelisted multimodal models unless user explicitly disabled it.
             # For non-whitelisted models, force-disable SP to avoid potential issues.
             SP_WHITELIST = {
                 "Qwen3VLForConditionalGeneration",
