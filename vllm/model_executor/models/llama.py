@@ -365,6 +365,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
 
         self.config = config
         self.quant_config = quant_config
