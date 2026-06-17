@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import prod
 from typing import Any, cast
 
@@ -47,6 +47,12 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             continue
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if spec := attn_module.get_kv_cache_spec(vllm_config):
+            if isinstance(spec, AttentionSpec):
+                backend = attn_module.get_attn_backend()
+                spec = replace(
+                    spec,
+                    indexes_kv_by_block_stride=backend.indexes_kv_by_block_stride(),
+                )
             kv_cache_spec[layer_name] = spec
     return kv_cache_spec
 

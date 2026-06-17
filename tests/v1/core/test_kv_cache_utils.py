@@ -117,7 +117,7 @@ def new_kv_cache_spec(
     page_size_padded=None,
     sliding_window=None,
     attention_chunk_size=None,
-    supports_padded_kv_pages=False,
+    indexes_kv_by_block_stride=False,
 ):
     return FullAttentionSpec(
         block_size=block_size,
@@ -127,7 +127,7 @@ def new_kv_cache_spec(
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
         attention_chunk_size=attention_chunk_size,
-        supports_padded_kv_pages=supports_padded_kv_pages,
+        indexes_kv_by_block_stride=indexes_kv_by_block_stride,
     )
 
 
@@ -138,7 +138,7 @@ def new_sliding_window_spec(
     dtype=torch.float32,
     page_size_padded=None,
     sliding_window=1,
-    supports_padded_kv_pages=False,
+    indexes_kv_by_block_stride=False,
 ):
     return SlidingWindowSpec(
         block_size=block_size,
@@ -147,7 +147,7 @@ def new_sliding_window_spec(
         dtype=dtype,
         page_size_padded=page_size_padded,
         sliding_window=sliding_window,
-        supports_padded_kv_pages=supports_padded_kv_pages,
+        indexes_kv_by_block_stride=indexes_kv_by_block_stride,
     )
 
 
@@ -2354,7 +2354,7 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
         num_kv_heads=1,
         head_size=192,
         dtype=torch.bfloat16,
-        supports_padded_kv_pages=True,
+        indexes_kv_by_block_stride=True,
     )
     draft_spec = new_sliding_window_spec(
         block_size=16,
@@ -2362,7 +2362,7 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
         head_size=128,
         dtype=torch.bfloat16,
         sliding_window=1024,
-        supports_padded_kv_pages=True,
+        indexes_kv_by_block_stride=True,
     )
 
     unified_specs = kv_cache_utils.unify_kv_cache_spec_page_size(
@@ -2381,17 +2381,17 @@ def test_unify_kv_cache_page_size_uses_padding_for_non_divisible_sizes():
 
 
 def test_unify_kv_cache_page_size_padding_requires_backend_support():
-    """Padding is gated on the backend declaring ``supports_padded_kv_pages``.
+    """Padding is gated on the backend declaring ``indexes_kv_by_block_stride``.
 
     A backend that does not support the strided padded-page view must raise
-    rather than silently padding (and mis-reading KV at runtime).
+    rather than silently padding (and misreading KV at runtime).
     """
     target_spec = new_kv_cache_spec(
         block_size=16,
         num_kv_heads=1,
         head_size=192,
         dtype=torch.bfloat16,
-        supports_padded_kv_pages=True,
+        indexes_kv_by_block_stride=True,
     )
     # The non-divisible draft layer needs padding but its backend does not
     # support the strided padded-page view -> must raise, not silently pad.
@@ -2401,7 +2401,7 @@ def test_unify_kv_cache_page_size_padding_requires_backend_support():
         head_size=128,
         dtype=torch.bfloat16,
         sliding_window=1024,
-        supports_padded_kv_pages=False,
+        indexes_kv_by_block_stride=False,
     )
     specs = {"target_attn": target_spec, "draft_attn": draft_spec}
 

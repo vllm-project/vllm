@@ -65,13 +65,6 @@ class AttentionBackend(ABC):
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
 
-    # Whether this backend correctly reads a KV cache whose physical pages are
-    # padded to a larger page size via a strided view (see
-    # ``unify_kv_cache_spec_page_size``). Only safe for backends that index KV
-    # blocks through the cache tensor's actual stride. Conservatively False;
-    # enable per-backend once validated.
-    supports_padded_kv_pages: ClassVar[bool] = False
-
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(1)]
@@ -207,6 +200,27 @@ class AttentionBackend(ABC):
             return default_block_size
 
         return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
+
+    @classmethod
+    def indexes_kv_by_block_stride(cls) -> bool:
+        try:
+            kv_cache_stride_order = cls.get_kv_cache_stride_order(
+                include_num_layers_dimension=False
+            )
+            layered_kv_cache_stride_order = cls.get_kv_cache_stride_order(
+                include_num_layers_dimension=True
+            )
+        except (AttributeError, NotImplementedError):
+            return False
+
+        # Check that attention backend includes a layers dimension.
+        if len(layered_kv_cache_stride_order) != len(kv_cache_stride_order) + 1:
+            return False
+
+        # stride_order[0] == 0 means num_layers stays first in physical
+        # layout (identity permutation), so indexing by block stride is
+        # not supported.
+        return layered_kv_cache_stride_order[0] != 0
 
     @classmethod
     def is_mla(cls) -> bool:

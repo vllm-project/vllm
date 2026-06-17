@@ -72,11 +72,6 @@ class FlashAttentionBackend(AttentionBackend):
         "float16",
         "bfloat16",
     ]
-    # FlashAttention indexes paged KV through the cache tensor's block stride
-    # (via block_table), so it reads padded physical pages correctly. This is
-    # the only backend validated for the padded-page strided view; the DiffKV
-    # subclass inherits it. See unify_kv_cache_spec_page_size.
-    supports_padded_kv_pages: ClassVar[bool] = True
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
