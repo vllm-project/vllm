@@ -84,6 +84,92 @@ def _mxfp8_e4m3_quantize_torch(
     return x_fp8, scales_uint8
 
 
+def _mxfp8_quant_triton_kernel():
+    """Lazily-built Triton kernel: per-32-block E8M0 scale + FP8-E4M3 quant.
+
+    Fuses what ``_mxfp8_e4m3_quantize_torch`` does in several elementwise passes
+    into one launch. Each program handles ``[BLOCK_M, 32]`` (one MX block).
+    """
+    from vllm.triton_utils import tl, triton
+
+    @triton.jit
+    def _kernel(
+        x_ptr,
+        xq_ptr,
+        s_ptr,
+        M,
+        K,
+        sxm,
+        sxk,
+        sqm,
+        sqk,
+        ssm,
+        ssk,
+        BLOCK_M: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)
+        pid_b = tl.program_id(1)  # which 32-element block along K
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_k = pid_b * 32 + tl.arange(0, 32)
+        m_mask = offs_m < M
+        x = tl.load(
+            x_ptr + offs_m[:, None] * sxm + offs_k[None, :] * sxk,
+            mask=m_mask[:, None],
+            other=0.0,
+        ).to(tl.float32)
+        amax = tl.maximum(tl.max(tl.abs(x), axis=1), 1e-30)  # [BLOCK_M]
+        sb = tl.floor(tl.log2(amax)) + 127.0
+        sb = tl.minimum(tl.maximum(sb, 0.0), 254.0)
+        descale = tl.exp2(sb - 127.0)
+        xq = (x / descale[:, None]).to(xq_ptr.dtype.element_ty)
+        tl.store(
+            xq_ptr + offs_m[:, None] * sqm + offs_k[None, :] * sqk,
+            xq,
+            mask=m_mask[:, None],
+        )
+        tl.store(s_ptr + offs_m * ssm + pid_b * ssk, sb.to(tl.uint8), mask=m_mask)
+
+    return _kernel
+
+
+_MXFP8_QUANT_KERNEL = None
+
+
+def _mxfp8_e4m3_quantize_triton(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused 2D MXFP8 quant (non-swizzled, row-major [M, K//32] scales)."""
+    from vllm.triton_utils import triton
+
+    global _MXFP8_QUANT_KERNEL
+    if _MXFP8_QUANT_KERNEL is None:
+        _MXFP8_QUANT_KERNEL = _mxfp8_quant_triton_kernel()
+
+    M, K = x.shape
+    x = x.contiguous()
+    xq = torch.empty((M, K), dtype=MXFP8_VALUE_DTYPE, device=x.device)
+    scales = torch.empty(
+        (M, K // MXFP8_BLOCK_SIZE), dtype=MXFP8_SCALE_DTYPE, device=x.device
+    )
+    BLOCK_M = 64
+    grid = (triton.cdiv(M, BLOCK_M), K // MXFP8_BLOCK_SIZE)
+    _MXFP8_QUANT_KERNEL[grid](
+        x,
+        xq,
+        scales,
+        M,
+        K,
+        x.stride(0),
+        x.stride(1),
+        xq.stride(0),
+        xq.stride(1),
+        scales.stride(0),
+        scales.stride(1),
+        BLOCK_M=BLOCK_M,
+    )
+    return xq, scales
+
+
 def _mxfp8_e4m3_quantize_impl(
     x: torch.Tensor,
     is_sf_swizzled_layout: bool = False,
@@ -102,6 +188,17 @@ def _mxfp8_e4m3_quantize_impl(
         if x_scales.ndim == 1 and x.ndim == 2 and not is_sf_swizzled_layout:
             x_scales = x_scales.view(x.size(0), -1)
         return x_q, x_scales
+
+    # ROCm: a single fused Triton kernel beats the multi-pass torch path for the
+    # common 2D, non-swizzled activation-quant case (used by the native MX
+    # linear/MoE). Falls back to torch otherwise (3D weights, swizzled layout).
+    if (
+        current_platform.is_rocm()
+        and not is_sf_swizzled_layout
+        and x.ndim == 2
+        and x.shape[-1] % MXFP8_BLOCK_SIZE == 0
+    ):
+        return _mxfp8_e4m3_quantize_triton(x)
 
     return _mxfp8_e4m3_quantize_torch(x, is_sf_swizzled_layout)
 
