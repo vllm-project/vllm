@@ -739,6 +739,17 @@ class P2PSession:
     def _on_abort_fetch(self, msg: dict) -> None:
         AbortFetchMsg.validate(msg)
         kv_request_id = msg[AbortFetchMsg.KV_REQUEST_ID]
+        # Abort for an unknown id may be a benign race/duplicate or a
+        # real protocol violation; we don't track completed ids, so warn.
+        if kv_request_id not in self._outbound and not self._has_inflight_for(
+            kv_request_id
+        ):
+            logger.warning(
+                "P2PSession %s: abort_fetch for unknown kv_request_id=%s "
+                "(no outbound or inflight state); benign race or stale",
+                self.peer_id,
+                kv_request_id,
+            )
         # Idempotent: receiving AbortFetchMsg again before we've sent the
         # ack just triggers another drain attempt without resetting the
         # deadline.
