@@ -132,7 +132,9 @@ class WhisperModelState(ModelState):
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
         whisper_attn_metadata = WhisperAttnMetadata(
-            self._get_encoder_seq_lens(input_batch.req_ids, attn_groups, for_capture)
+            self._get_encoder_seq_lens(
+                input_batch.req_ids, attn_groups, for_capture, num_reqs
+            )
         )
 
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
@@ -166,8 +168,8 @@ class WhisperModelState(ModelState):
         req_ids: list[str],
         attn_groups: list[list[AttentionGroup]],
         for_capture: bool,
+        num_reqs: int,
     ) -> dict[int, tuple[torch.Tensor, np.ndarray]]:
-        num_reqs = len(req_ids)
         encoder_seq_lens_np = np.zeros(num_reqs, dtype=np.int32)
         if not for_capture:
             # During normal execution, use actual encoder lengths.
