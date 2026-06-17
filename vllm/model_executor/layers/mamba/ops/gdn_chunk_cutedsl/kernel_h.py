@@ -295,13 +295,12 @@ class Sm100ChunkHKernel:
                 cute.arch.mbarrier_wait(wh_in_mbar + stage_id, parity)
                 _tcgen05.fence_after_thread_sync()
 
-                with cute.arch.elect_one():
-                    for i in cutlass.range_constexpr(K_dim // 64):
-                        for j in cutlass.range_constexpr(64 // 16):
-                            hdesc0 = hdesc0_base | ((i * V_dim * 128 + j * 32) >> 4)
-                            wdesc0 = wdesc0_base | ((i * BT * 128 + j * 32) >> 4)
-                            _tcgen05.mma_f16(wh_tmem, hdesc0, wdesc0, wh_idesc, True)
-                    _tcgen05.commit(wh_done_mbar + stage_id)
+                for i in cutlass.range_constexpr(K_dim // 64):
+                    for j in cutlass.range_constexpr(64 // 16):
+                        hdesc0 = hdesc0_base | ((i * V_dim * 128 + j * 32) >> 4)
+                        wdesc0 = wdesc0_base | ((i * BT * 128 + j * 32) >> 4)
+                        _tcgen05.mma_f16(wh_tmem, hdesc0, wdesc0, wh_idesc, True)
+                _tcgen05.commit(wh_done_mbar + stage_id)
 
                 ##### 2nd MMA: H_new = H + V_new.T @ K #####
                 Kaddr0 = sK[None, None, stage_id].iterator.toint()
@@ -310,12 +309,11 @@ class Sm100ChunkHKernel:
                 cute.arch.mbarrier_wait(vk_in_mbar + stage_id, parity)
                 _tcgen05.fence_after_thread_sync()
 
-                with cute.arch.elect_one():
-                    for k in cutlass.range_constexpr(BT // 16):
-                        vtmem0 = v_tmem_base + k * 8
-                        kdesc0 = kdesc0_base | ((k * 16 * 128) >> 4)
-                        _tcgen05.mma_ts_f16(vk_tmem, vtmem0, kdesc0, vk_idesc, True)
-                    _tcgen05.commit(vk_done_mbar + stage_id)
+                for k in cutlass.range_constexpr(BT // 16):
+                    vtmem0 = v_tmem_base + k * 8
+                    kdesc0 = kdesc0_base | ((k * 16 * 128) >> 4)
+                    _tcgen05.mma_ts_f16(vk_tmem, vtmem0, kdesc0, vk_idesc, True)
+                _tcgen05.commit(vk_done_mbar + stage_id)
 
                 stage_id = (stage_id + 1) % num_stages
                 if stage_id == 0:
@@ -331,13 +329,12 @@ class Sm100ChunkHKernel:
                 cute.arch.mbarrier_wait(wh_in_mbar + stage_id, parity)
                 _tcgen05.fence_after_thread_sync()
 
-                with cute.arch.elect_one():
-                    for i in cutlass.range_constexpr(K_dim // 64):
-                        for j in cutlass.range_constexpr(64 // 16):
-                            htmem = h_tmem_base + i * 32 + j * 8
-                            wdesc = wdesc_base | ((i * BT * 128 + j * 32) >> 4)
-                            _tcgen05.mma_ts_f16(wh_tmem, htmem, wdesc, wh_idesc, True)
-                    _tcgen05.commit(wh_done_mbar + stage_id)
+                for i in cutlass.range_constexpr(K_dim // 64):
+                    for j in cutlass.range_constexpr(64 // 16):
+                        htmem = h_tmem_base + i * 32 + j * 8
+                        wdesc = wdesc_base | ((i * BT * 128 + j * 32) >> 4)
+                        _tcgen05.mma_ts_f16(wh_tmem, htmem, wdesc, wh_idesc, True)
+                _tcgen05.commit(wh_done_mbar + stage_id)
 
                 ##### 2nd MMA: H_new = H + V_new.T @ K #####
                 Kaddr = sK[None, None, stage_id].iterator.toint()
@@ -346,12 +343,11 @@ class Sm100ChunkHKernel:
                 cute.arch.mbarrier_wait(vk_in_mbar + stage_id, parity)
                 _tcgen05.fence_after_thread_sync()
 
-                with cute.arch.elect_one():
-                    for k in cutlass.range_constexpr(BT // 16):
-                        vtmem = v_tmem_base + k * 8
-                        kdesc = kdesc_base | ((k * 16 * 128) >> 4)
-                        _tcgen05.mma_ts_f16(vk_tmem, vtmem, kdesc, vk_idesc, True)
-                    _tcgen05.commit(vk_done_mbar + stage_id)
+                for k in cutlass.range_constexpr(BT // 16):
+                    vtmem = v_tmem_base + k * 8
+                    kdesc = kdesc_base | ((k * 16 * 128) >> 4)
+                    _tcgen05.mma_ts_f16(vk_tmem, vtmem, kdesc, vk_idesc, True)
+                _tcgen05.commit(vk_done_mbar + stage_id)
 
                 stage_id = (stage_id + 1) % num_stages
                 if stage_id == 0:

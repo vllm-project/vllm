@@ -276,18 +276,17 @@ class Sm100ChunkUWKernel:
                 cute.arch.mbarrier_wait(tma_mbar + stage_id, parity)
                 _tcgen05.fence_after_thread_sync()
 
-                with cute.arch.elect_one():
-                    for i in cutlass.range_constexpr(K_dim // 64):
-                        for j in cutlass.range_constexpr(64 // 16):
-                            kdesc = kdesc_base | ((i * BT * 128 + j * 32) >> 4)
-                            _tcgen05.mma_f16(
-                                kkt_tmem,
-                                kdesc,
-                                kdesc,
-                                kkt_idesc,
-                                (i > 0) or (j > 0),
-                            )
-                    _tcgen05.commit(mma_kkt_mbar + stage_id)
+                for i in cutlass.range_constexpr(K_dim // 64):
+                    for j in cutlass.range_constexpr(64 // 16):
+                        kdesc = kdesc_base | ((i * BT * 128 + j * 32) >> 4)
+                        _tcgen05.mma_f16(
+                            kkt_tmem,
+                            kdesc,
+                            kdesc,
+                            kkt_idesc,
+                            (i > 0) or (j > 0),
+                        )
+                _tcgen05.commit(mma_kkt_mbar + stage_id)
 
                 ##### U/W MMA: U = Ab @ V, W = Abg @ K #####
                 vaddr = sV[None, None, stage_id].iterator.toint()
@@ -299,20 +298,15 @@ class Sm100ChunkUWKernel:
                 cute.arch.mbarrier_wait(inv_mbar + stage_id, parity)
                 _tcgen05.fence_after_thread_sync()
 
-                with cute.arch.elect_one():
-                    for i in cutlass.range_constexpr(BT // 16):
-                        _tcgen05.mma_ts_f16(
-                            W_tmem, Abg_tmem + i * 8, kdesc, w_idesc, i > 0
-                        )
-                        kdesc += (16 * 128) >> 4
-                    _tcgen05.commit(mma_w_mbar + stage_id)
+                for i in cutlass.range_constexpr(BT // 16):
+                    _tcgen05.mma_ts_f16(W_tmem, Abg_tmem + i * 8, kdesc, w_idesc, i > 0)
+                    kdesc += (16 * 128) >> 4
+                _tcgen05.commit(mma_w_mbar + stage_id)
 
-                    for i in cutlass.range_constexpr(BT // 16):
-                        _tcgen05.mma_ts_f16(
-                            U_tmem, Ab_tmem + i * 8, vdesc, u_idesc, i > 0
-                        )
-                        vdesc += (16 * 128) >> 4
-                    _tcgen05.commit(mma_u_mbar + stage_id)
+                for i in cutlass.range_constexpr(BT // 16):
+                    _tcgen05.mma_ts_f16(U_tmem, Ab_tmem + i * 8, vdesc, u_idesc, i > 0)
+                    vdesc += (16 * 128) >> 4
+                _tcgen05.commit(mma_u_mbar + stage_id)
 
                 stage_id = (stage_id + 1) % num_stages
                 if stage_id == 0:

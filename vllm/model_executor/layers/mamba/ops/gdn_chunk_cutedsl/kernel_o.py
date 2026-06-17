@@ -302,40 +302,37 @@ class Sm100ChunkOKernel:
                 cute.arch.mbarrier_wait(qk_full_mbar + stage_id, tma_parity)
                 _tcgen05.fence_after_thread_sync()
 
-                with cute.arch.elect_one():
-                    for i in cutlass.range_constexpr(K_dim // BT):
-                        for j in cutlass.range_constexpr(BT // 16):
-                            qdesc = qdesc_base | ((i * BT * 128 + j * 32) >> 4)
-                            kdesc = kdesc_base | ((i * BT * 128 + j * 32) >> 4)
-                            _tcgen05.mma_f16(
-                                qk_tmem, qdesc, kdesc, qk_idesc, (i > 0) or (j > 0)
-                            )
-                    _tcgen05.commit(qk_mbar)
+                for i in cutlass.range_constexpr(K_dim // BT):
+                    for j in cutlass.range_constexpr(BT // 16):
+                        qdesc = qdesc_base | ((i * BT * 128 + j * 32) >> 4)
+                        kdesc = kdesc_base | ((i * BT * 128 + j * 32) >> 4)
+                        _tcgen05.mma_f16(
+                            qk_tmem, qdesc, kdesc, qk_idesc, (i > 0) or (j > 0)
+                        )
+                _tcgen05.commit(qk_mbar)
 
                 ##### 2nd MMA: Q @ H.T #####
                 cute.arch.mbarrier_wait(hv_full_mbar + stage_id, tma_parity)
                 _tcgen05.fence_after_thread_sync()
-                with cute.arch.elect_one():
-                    for i in cutlass.range_constexpr(K_dim // BT):
-                        for j in cutlass.range_constexpr(BT // 16):
-                            qdesc = qdesc_base | ((i * BT * 128 + j * 32) >> 4)
-                            hdesc = hdesc_base | ((i * V_dim * 128 + j * 32) >> 4)
-                            _tcgen05.mma_f16(
-                                qh_tmem, qdesc, hdesc, qh_idesc, (i > 0) or (j > 0)
-                            )
-                    _tcgen05.commit(qk_empty_mbar + stage_id)
+                for i in cutlass.range_constexpr(K_dim // BT):
+                    for j in cutlass.range_constexpr(BT // 16):
+                        qdesc = qdesc_base | ((i * BT * 128 + j * 32) >> 4)
+                        hdesc = hdesc_base | ((i * V_dim * 128 + j * 32) >> 4)
+                        _tcgen05.mma_f16(
+                            qh_tmem, qdesc, hdesc, qh_idesc, (i > 0) or (j > 0)
+                        )
+                _tcgen05.commit(qk_empty_mbar + stage_id)
 
                 ##### 3rd MMA: P @ V #####
                 # stalled by mask(QK)
                 cute.arch.mbarrier_wait(mask_mbar, mask_parity)
                 _tcgen05.fence_after_thread_sync()
-                with cute.arch.elect_one():
-                    for i in cutlass.range_constexpr(BT // 16):
-                        vdesc = vdesc_base | ((i * 16 * 128) >> 4)
-                        _tcgen05.mma_ts_f16(
-                            out_tmem, p_tmem + i * 8, vdesc, pv_idesc, i > 0
-                        )
-                    _tcgen05.commit(pv_mma_mbar + stage_id)
+                for i in cutlass.range_constexpr(BT // 16):
+                    vdesc = vdesc_base | ((i * 16 * 128) >> 4)
+                    _tcgen05.mma_ts_f16(
+                        out_tmem, p_tmem + i * 8, vdesc, pv_idesc, i > 0
+                    )
+                _tcgen05.commit(pv_mma_mbar + stage_id)
 
                 stage_id = (stage_id + 1) % num_stages
                 if stage_id == 0:
