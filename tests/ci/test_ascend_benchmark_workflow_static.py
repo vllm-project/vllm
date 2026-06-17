@@ -156,6 +156,23 @@ def test_l3_benchmark_publish_preflight_runs_before_benchmark():
     assert "GITHUB_SNAPSHOT_SYNC_VERIFIED_COMMIT" in text[summary_step:]
 
 
+def test_l2_targeted_scenario_registry_is_covered_by_parser_tests():
+    parser_script = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/scripts/parse_ascend_comment_command.py"
+    ).read_text(encoding="utf-8")
+    parser_tests = (
+        Path(__file__).resolve().parent / "test_parse_ascend_comment_command.py"
+    ).read_text(encoding="utf-8")
+    registry_tests = (
+        Path(__file__).resolve().parent / "test_ascend_targeted_scenarios.py"
+    ).read_text(encoding="utf-8")
+
+    assert "load_targeted_scenario_registry" in parser_script
+    assert "test_parse_group_command_maps_to_supported_group" in parser_tests
+    assert "test_load_targeted_scenario_registry_from_repo_file" in registry_tests
+
+
 def test_issue_comment_non_pr_and_fork_pr_are_not_allowed_by_parser_tests():
     parser_tests = (
         Path(__file__).resolve().parent / "test_parse_ascend_comment_command.py"

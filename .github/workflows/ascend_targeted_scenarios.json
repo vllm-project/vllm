@@ -1,0 +1,26 @@
+{
+  "scenarios": {
+    "random-online": {
+      "aliases": ["random"],
+      "description": "Low-cost random prompt preview benchmark"
+    },
+    "sharegpt-online": {
+      "aliases": ["sharegpt"],
+      "description": "ShareGPT preview benchmark with explicit dataset and constraints"
+    }
+  },
+  "groups": {
+    "smoke": {
+      "scenario": "random-online",
+      "description": "Default low-cost smoke benchmark"
+    },
+    "random": {
+      "scenario": "random-online",
+      "description": "Random prompt preview benchmark"
+    },
+    "sharegpt": {
+      "scenario": "sharegpt-online",
+      "description": "ShareGPT preview benchmark"
+    }
+  }
+}

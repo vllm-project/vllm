@@ -9,20 +9,11 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from ascend_targeted_scenarios import load_targeted_scenario_registry
 
-SCENARIO_ALIASES = {
-    "random": "random-online",
-    "random-online": "random-online",
-    "sharegpt": "sharegpt-online",
-    "sharegpt-online": "sharegpt-online",
-}
-GROUP_SCENARIOS = {
-    "smoke": "random-online",
-    "random": "random-online",
-    "sharegpt": "sharegpt-online",
-}
-SUPPORTED_SCENARIOS = sorted(set(SCENARIO_ALIASES.values()))
-SUPPORTED_GROUPS = sorted(GROUP_SCENARIOS)
+TARGETED_SCENARIOS = load_targeted_scenario_registry()
+SUPPORTED_SCENARIOS = TARGETED_SCENARIOS.supported_scenarios
+SUPPORTED_GROUPS = TARGETED_SCENARIOS.supported_groups
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 ALLOWED_AUTHOR_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
 ALLOWED_SHAREGPT_PATH_PREFIXES = ("/data/", "/mnt/data/")
@@ -227,14 +218,14 @@ def parse_comment_command(comment_body: str) -> AscendCommentCommand | None:
         raise ValueError("/ascend official is reserved for future formal leaderboard runs and is not supported yet")
 
     if args.action == "smoke":
-        scenario = "random-online"
+        scenario = TARGETED_SCENARIOS.resolve_group("smoke")
     elif args.action == "group":
-        scenario = GROUP_SCENARIOS.get(args.group)
+        scenario = TARGETED_SCENARIOS.resolve_group(args.group)
         if scenario is None:
             supported = ", ".join(SUPPORTED_GROUPS)
             raise ValueError(f"unsupported benchmark group {args.group!r}; supported: {supported}")
     else:
-        scenario = SCENARIO_ALIASES.get(args.scenario)
+        scenario = TARGETED_SCENARIOS.resolve_scenario(args.scenario)
     if scenario is None:
         supported = ", ".join(SUPPORTED_SCENARIOS)
         raise ValueError(f"unsupported benchmark scenario {args.scenario!r}; supported: {supported}")
