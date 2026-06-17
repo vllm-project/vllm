@@ -906,3 +906,86 @@ class TestPushPipelineParallel:
         # Sliced down to this worker's layer window (regions [2:4]).
         assert meta.kv_caches_base_addr == [12, 13]
         assert meta.block_lens == [block_len, block_len]
+
+
+class TestPushWriterMlaReplication:
+    """MLA latent KV is replicated across D's TP ranks, so when D_TP > P_TP
+    (``tp_ratio < 0``) the producer must *WRITE* the latent into every D rank
+    it handshook -- not write one and merely notify the rest, which would
+    leave the un-written ranks decoding against stale KV."""
+
+    @staticmethod
+    def _mla_worker_writing_to(d_ranks):
+        from types import SimpleNamespace
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
+            TPMapping,
+        )
+
+        engine_id = "decode-engine"
+        w = _StubWriterWorker.fresh()
+        w.use_mla = True
+        w.nixl_wrapper = MagicMock()
+        w.transfer_topo = MagicMock()
+        w.transfer_topo.get_engine_info.return_value = SimpleNamespace(
+            remote_tp_size=len(d_ranks),
+            remote_block_size=16,
+            remote_physical_blocks_per_logical=1,
+        )
+        # D_TP > P_TP => negative ratio (one P rank feeds |ratio| D ranks).
+        w.transfer_topo.tp_ratio.return_value = -len(d_ranks)
+        # The tp-mapping collapses MLA to a single source rank (correct for
+        # the pull/read direction); the push path must fan it back out.
+        w.tp_mappings = {
+            engine_id: TPMapping(
+                source_ranks_per_group=((0,),),
+                all_source_ranks=(0,),
+                rank_to_attention_slot={0: 0},
+                rank_offset_factor=0,
+            )
+        }
+        w._logical_to_remote_kernel_block_ids = lambda block_ids, ratio: block_ids
+        w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
+        w.src_xfer_handles_by_block_size = {16: 2000}
+        w._remote_agents = {engine_id: {r: f"agent-{r}" for r in d_ranks}}
+        return w, engine_id
+
+    def test_mla_hetero_tp_writes_every_d_rank(self):
+        from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+            RemoteMeta,
+            ReqMeta,
+        )
+
+        w, engine_id = self._mla_worker_writing_to(d_ranks=(0, 1))
+
+        written: list[int] = []
+
+        def _fake_xfer(**kw):
+            rank = kw["read_spec"].remote_rank
+            written.append(rank)
+            return 1000 + rank  # in-flight handle, as the real method returns
+
+        w._xfer_blocks = _fake_xfer
+
+        meta = ReqMeta(
+            local_block_ids=([100, 101],),
+            local_physical_block_ids=([100, 101],),
+            tp_size=1,
+            remote=RemoteMeta(
+                block_ids=([200, 201],),
+                host="",
+                port=0,
+                engine_id=engine_id,
+                request_id="d-req",
+            ),
+        )
+
+        w._xfer_blocks_for_req(req_id="p-req", meta=meta)
+
+        # Every handshook D rank must receive a real WRITE of the latent...
+        assert sorted(written) == [0, 1]
+        # ...and no rank may be fobbed off with a bare completion notif.
+        assert w.nixl_wrapper.send_notif.call_count == 0
+        # All of the request's WRITE handles must be tracked together, so the
+        # engine thread never sees a partial set and double-frees the request.
+        assert sorted(w._sending_transfers["p-req"]) == [1000, 1001]

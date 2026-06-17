@@ -528,8 +528,21 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         ]
 
         if self.use_mla and tp_ratio < 0:
+            # MLA latent is replicated across D's TP ranks: the tp-mapping
+            # collapses to one rank (fine for reads), but push must WRITE every
+            # D rank or the rest decode stale KV; only the dst differs per rank.
             assert len(read_specs) == 1
+            base_spec = read_specs[0]
+            read_specs = [
+                ReadSpec(
+                    remote_rank=rank,
+                    local_block_ids=base_spec.local_block_ids,
+                    remote_block_ids=base_spec.remote_block_ids,
+                )
+                for rank in self.dst_xfer_side_handles[meta.remote.engine_id]
+            ]
 
+        handles: list[int] = []
         for i, spec in enumerate(read_specs):
             remote_block_size = remote_info.remote_block_size
             logger.debug(
@@ -552,7 +565,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 spec.remote_rank
             ]
 
-            self._xfer_blocks(
+            handle = self._xfer_blocks(
                 read_spec=spec,
                 request_id=req_id,
                 dst_engine_id=meta.remote.engine_id,
@@ -560,13 +573,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
             )
+            if handle is not None:
+                handles.append(handle)
 
-        if self.use_mla and tp_ratio < 0 and read_specs:
-            notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
-            remote_agents = self._remote_agents[meta.remote.engine_id]
-            for rank_to_notify, agent in remote_agents.items():
-                if rank_to_notify != read_specs[0].remote_rank:
-                    self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+        # Publish all the request's WRITE handles in one locked update: a
+        # partial set would let ``_pop_done_transfers`` finish the request
+        # early, then double-report it as the remaining writes land.
+        if handles:
+            with self._sending_transfers_lock:
+                self._sending_transfers[req_id].extend(handles)
 
     def _xfer_blocks(
         self,
@@ -576,8 +591,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
-    ):
-        """Post a WRITE point-to-point xfer request."""
+    ) -> int | None:
+        """Post a WRITE point-to-point xfer request.
+
+        Returns the in-flight transfer handle (so the caller can track all of
+        a request's handles atomically), or ``None`` if nothing was submitted.
+        """
         assert self.transfer_topo is not None
         remote_rank = read_spec.remote_rank
         local_block_ids = read_spec.local_block_ids
@@ -605,7 +624,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         if len(local_block_ids) == 0:
             logger.warning("No blocks to push for request %s", request_id)
-            return
+            return None
 
         # Align per-group block counts for push.
         local_block_ids = list(local_block_ids)
@@ -645,9 +664,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 notif_msg=notif_id,
             )
             self.nixl_wrapper.transfer(handle)
-            # Track push WRITE handles so P can free blocks once done.
-            with self._sending_transfers_lock:
-                self._sending_transfers[request_id].append(handle)
+            # Caller tracks the handle (atomically with the request's other
+            # writes) so P can free blocks once all of them are done.
+            return handle
         except Exception as e:
             self._log_failure(
                 failure_type="transfer_setup_failed",
@@ -664,6 +683,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             if handle is not None:
                 self.nixl_wrapper.release_xfer_handle(handle)
             self.xfer_stats.record_failed_transfer()
+            return None
 
     # --- Notification handling on engine main thread ------------------ #
 
