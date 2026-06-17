@@ -3,6 +3,7 @@
 """Abstract base class for MLA prefill backends."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
 import torch
@@ -19,6 +20,20 @@ if TYPE_CHECKING:
     )
 
 
+@dataclass(frozen=True, kw_only=True)
+class MLADimensions:
+    qk_nope_head_dim: int
+    qk_rope_head_dim: int
+    v_head_dim: int
+
+    def __str__(self) -> str:
+        return (
+            f"(qk_nope_head_dim={self.qk_nope_head_dim}, "
+            f"qk_rope_head_dim={self.qk_rope_head_dim}, "
+            f"v_head_dim={self.v_head_dim})"
+        )
+
+
 class MLAPrefillBackend(ABC):
     """Abstract base class for MLA prefill backends."""
 
@@ -26,7 +41,7 @@ class MLAPrefillBackend(ABC):
         torch.float16,
         torch.bfloat16,
     ]
-    requires_r1_mla_dimensions: ClassVar[bool] = False
+    supported_mla_dimensions: ClassVar[list[MLADimensions]] = []
 
     @staticmethod
     @abstractmethod
@@ -71,10 +86,14 @@ class MLAPrefillBackend(ABC):
         if not cls.is_available():
             invalid_reasons.append("required dependencies not available")
 
-        if cls.requires_r1_mla_dimensions and not selector_config.is_r1_compatible:
+        if (
+            cls.supported_mla_dimensions
+            and selector_config.mla_dimensions not in cls.supported_mla_dimensions
+        ):
+            supported = ", ".join(str(dims) for dims in cls.supported_mla_dimensions)
             invalid_reasons.append(
-                "model does not have DeepSeek R1 MLA dimensions "
-                "(qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128)"
+                "Model does not have supported MLA dimensions "
+                f"(got {selector_config.mla_dimensions}; supported: {supported})"
             )
 
         return invalid_reasons
