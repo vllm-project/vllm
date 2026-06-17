@@ -182,6 +182,22 @@ def find_tool_properties(
     return {}
 
 
+def find_tool_name(
+    tools: list[Tool] | None,
+    tool_name: str,
+) -> bool:
+    """Return whether a function tool with *tool_name* exists."""
+    if not tools:
+        return False
+    for tool in tools:
+        if not _is_function_tool(tool):
+            continue
+        name, _ = _extract_tool_info(tool)
+        if name == tool_name:
+            return True
+    return False
+
+
 def _get_tool_schema_from_tool(tool: Tool) -> dict:
     name, params = _extract_tool_info(tool)
     params = params if params else {"type": "object", "properties": {}}
