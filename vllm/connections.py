@@ -3,6 +3,7 @@
 
 import asyncio
 import functools
+import ssl
 import time
 from collections.abc import Callable, Coroutine, Mapping, MutableMapping
 from pathlib import Path
@@ -10,7 +11,9 @@ from typing import Any, ParamSpec, TypeVar
 
 import aiohttp
 import requests
-from urllib3.util import parse_url
+from requests.adapters import HTTPAdapter
+from urllib3.poolmanager import PoolManager
+from urllib3.util import Url, parse_url
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -197,6 +200,83 @@ def _async_retry(
     return wrapper  # type: ignore[return-value]
 
 
+class SSRFSafeClient(requests.Session):
+    """Wrapper class of the request.Session client that sends requests
+    using the pre-validated IP obtained for the original domain used in the URL.
+    This client is used when the --forbid-media-private-networks-access flag is
+    enforced to prevent TOCTOU DNS rebinding SSRF bypass.
+    """
+
+    def __init__(self, url: str, pre_validated_ip: str, *args, **kwargs):
+        self.pre_validated_ip = pre_validated_ip
+        # Extract hostname and scheme to be injected into adapter
+        self.parsed_url = parse_url(url)
+        self.scheme = self.parsed_url.scheme
+        self.original_hostname = self.parsed_url.hostname or self.parsed_url.host or ""
+
+        # Initialize requests.session
+        super().__init__(*args, **kwargs)
+
+        # Enforce original host headers on that session
+        self._update_headers()
+        # Mount original-host-aware custom adapter for that session session
+        self._setup_adapter()
+
+    # Monky-patch the client.request of the request.Session object. This ensure
+    # that all the helpers methods of the client (GET, OPTIONS, etc ...) will
+    # use the pre-validated-ip instead of the original domain.
+    def request(self, method: str, url: str, *args, **kwargs):  # type: ignore
+        # Reconstruct the url, replacing the hostname with the pre-validated IP address
+        ip_url = self._get_ip_url(self.parsed_url, self.pre_validated_ip)
+        return super().request(method, ip_url, *args, **kwargs)
+
+    def _setup_adapter(self):
+        is_ssl = self.scheme == "https"
+        adapter = SSRFSafeAdapter(self.original_hostname, is_ssl)
+        # Mount a custom adapter to the schema matching the url.
+        # For https requests, the adapter will ensure https certificate is
+        # checked against cn=original_hostname and not the ip present in url.
+        self.mount(f"{self.scheme}://", adapter)
+
+    def _update_headers(self):
+        # Send request with proper Host header (original hostname)
+        self.headers.update(
+            {
+                "Host": self.original_hostname,
+            }
+        )
+
+    @staticmethod
+    def _get_ip_url(parsed_url, ip_to_enforce):
+        return Url(
+            scheme=parsed_url.scheme,
+            auth=parsed_url.auth,
+            host=ip_to_enforce,
+            port=parsed_url.port,
+            path=parsed_url.path,
+            query=parsed_url.query,
+            fragment=parsed_url.fragment,
+        )
+
+
+class SSRFSafeAdapter(HTTPAdapter):
+    """Adapter that connects to an IP address
+    but validates TLS for the original host.
+    """
+
+    def __init__(self, original_hostname, is_ssl, *args, **kwargs):
+        self.original_hostname = original_hostname
+        self.is_ssl = is_ssl
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["server_hostname"] = self.original_hostname
+        if self.is_ssl:
+            context = ssl.create_default_context()
+            kwargs["ssl_context"] = context
+        self.poolmanager = PoolManager(*args, **kwargs)
+
+
 class HTTPConnection:
     """Helper class to send HTTP requests."""
 
@@ -213,6 +293,11 @@ class HTTPConnection:
             self._sync_client = requests.Session()
 
         return self._sync_client
+
+    def get_sync_ssrf_safe_client(
+        self, url: str, pre_validated_ip: str
+    ) -> SSRFSafeClient:
+        return SSRFSafeClient(url, pre_validated_ip)
 
     # NOTE: We intentionally use an async function even though it is not
     # required, so that the client is only accessible inside async event loop
@@ -241,10 +326,15 @@ class HTTPConnection:
         timeout: float | None = None,
         extra_headers: Mapping[str, str] | None = None,
         allow_redirects: bool = True,
+        pre_validated_ip: str | None = None,
     ):
         self._validate_http_url(url)
 
         client = self.get_sync_client()
+        if pre_validated_ip:
+            # If a pre-validated IP has been provided, we use a custom client
+            # to enforce that IP and prevent DNS rebinding
+            client = self.get_sync_ssrf_safe_client(url, pre_validated_ip)
         extra_headers = extra_headers or {}
 
         return client.get(
@@ -262,8 +352,12 @@ class HTTPConnection:
         timeout: float | None = None,
         extra_headers: Mapping[str, str] | None = None,
         allow_redirects: bool = True,
+        pre_validated_ip: str | None = None,
     ):
         self._validate_http_url(url)
+
+        # TODO: if a pre-validated IP is provided, build a custom
+        # aiohttp.TCPConnector with custom resolver that returns the pre-validated IP
 
         client = await self.get_async_client()
         extra_headers = extra_headers or {}
@@ -277,10 +371,18 @@ class HTTPConnection:
 
     @_sync_retry
     def get_bytes(
-        self, url: str, *, timeout: float | None = None, allow_redirects: bool = True
+        self,
+        url: str,
+        *,
+        timeout: float | None = None,
+        allow_redirects: bool = True,
+        pre_validated_ip: str | None = None,
     ) -> bytes:
         with self.get_response(
-            url, timeout=timeout, allow_redirects=allow_redirects
+            url,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+            pre_validated_ip=pre_validated_ip,
         ) as r:
             r.raise_for_status()
 
@@ -293,9 +395,13 @@ class HTTPConnection:
         *,
         timeout: float | None = None,
         allow_redirects: bool = True,
+        pre_validated_ip: str | None = None,
     ) -> bytes:
         async with await self.get_async_response(
-            url, timeout=timeout, allow_redirects=allow_redirects
+            url,
+            timeout=timeout,
+            allow_redirects=allow_redirects,
+            pre_validated_ip=pre_validated_ip,
         ) as r:
             r.raise_for_status()
 
