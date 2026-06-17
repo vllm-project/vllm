@@ -68,6 +68,7 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
 )
@@ -749,6 +750,7 @@ class Qwen3NextForCausalLM(
     SupportsPP,
     QwenNextMixtureOfExperts,
     IsHybrid,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {
         "qkv_proj": [
