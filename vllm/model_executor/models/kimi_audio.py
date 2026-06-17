@@ -4,7 +4,7 @@
 """Inference-only Kimi-Audio model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, cast
 
 import numpy as np
 import torch
@@ -19,6 +19,7 @@ from vllm.inputs import PromptType, TokensPrompt
 from vllm.model_executor.model_loader import DefaultModelLoader
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
     SupportsMultiModal,
     SupportsPP,
     SupportsTranscription,
@@ -89,11 +90,11 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
         model_path = vllm_config.model_config.model
 
         # Load WhisperConfig from the subfolder
-        whisper_config = HFWhisperConfig.from_pretrained(
-            model_path,
-            subfolder=KIMIA_WHISPER_SUBFOLDER,
-            revision=vllm_config.model_config.revision,
-        )
+        revision = vllm_config.model_config.revision
+        kwargs: dict[str, Any] = {"subfolder": KIMIA_WHISPER_SUBFOLDER}
+        if revision is not None:
+            kwargs["revision"] = revision
+        whisper_config = HFWhisperConfig.from_pretrained(model_path, **kwargs)
 
         super().__init__(
             vllm_config=vllm_config.with_hf_config(whisper_config),
@@ -120,7 +121,7 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
                     continue
 
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader")  # noqa: B009
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -258,7 +259,7 @@ class KimiAudioMultiModalProcessor(BaseMultiModalProcessor[KimiAudioProcessingIn
         """Call the HuggingFace processor."""
         # Convert mm_data format: {'audios': [...]} -> {'audio': ...}
         mm_data = dict(mm_data)
-        audios = mm_data.pop("audios", [])
+        audios = cast(list[Any], mm_data.pop("audios", []))
 
         # Convert audio format: [(array, sr), ...] -> [array, ...]
         # KimiAudioProcessor expects raw numpy arrays
@@ -450,9 +451,16 @@ class KimiAudioForConditionalGeneration(
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
-        self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors
+    def make_empty_intermediate_tensors(
+        self,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> IntermediateTensors:
+        fn = getattr(  # noqa: B009
+            self.language_model, "make_empty_intermediate_tensors"
         )
+        return fn(batch_size, dtype, device)
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object
@@ -461,6 +469,7 @@ class KimiAudioForConditionalGeneration(
         if whisper_input_features is None:
             return None
 
+        assert isinstance(whisper_input_features, torch.Tensor)
         return {"whisper_input_features": whisper_input_features}
 
     def _process_audio_input(
@@ -469,11 +478,14 @@ class KimiAudioForConditionalGeneration(
         input_features = audio_input["whisper_input_features"]
 
         # KimiAudioWhisperEncoder expects list of tensors
+        encoder_input: torch.Tensor | tuple[torch.Tensor, ...]
         if input_features.dim() == 3:
-            input_features = input_features.unbind(dim=0)
+            encoder_input = input_features.unbind(dim=0)
+        else:
+            encoder_input = input_features
 
         # Run through Whisper encoder
-        audio_features = self.audio_tower(input_features)
+        audio_features = self.audio_tower(encoder_input)
 
         # Reshape for 4x downsampling (Whisper outputs at 50Hz, need 12.5Hz)
         B, T, D = audio_features.shape
@@ -488,7 +500,7 @@ class KimiAudioForConditionalGeneration(
         audio_embeds = self.multi_modal_projector(audio_features)
         return audio_embeds
 
-    def embed_multimodal(self, **kwargs: object) -> list[torch.Tensor] | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         if audio_input is None:
             return []
@@ -507,7 +519,7 @@ class KimiAudioForConditionalGeneration(
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: tuple[torch.Tensor, ...] | None = None,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -519,7 +531,8 @@ class KimiAudioForConditionalGeneration(
         which is correctly computed per pipeline stage.
         """
         # Get text embeddings
-        inputs_embeds = self.language_model.model.embed_tokens(input_ids)
+        inner_model = getattr(self.language_model, "model")  # noqa: B009
+        inputs_embeds = inner_model.embed_tokens(input_ids)
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             return inputs_embeds
@@ -540,7 +553,7 @@ class KimiAudioForConditionalGeneration(
         # In PP, audio_embeds count should match is_multimodal.sum()
         # For now, use embeddings sequentially
         # (works for non-PP, PP needs vLLM infra fix)
-        num_mm_tokens = is_multimodal.sum().item()
+        num_mm_tokens = int(is_multimodal.sum().item())
         num_audio_embeds = audio_embeds.shape[0]
 
         # Use the minimum of available embeddings and positions
@@ -572,17 +585,19 @@ class KimiAudioForConditionalGeneration(
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
+        *,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> IntermediateTensors | None:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        hidden_states = self.language_model.model(
+        inner_model = getattr(self.language_model, "model")  # noqa: B009
+        hidden_states = inner_model(
             input_ids,
             positions,
-            intermediate_tensors,
+            intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
 
@@ -592,7 +607,10 @@ class KimiAudioForConditionalGeneration(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        return self.language_model.compute_logits(hidden_states)
+        compute_logits = getattr(  # noqa: B009
+            self.language_model, "compute_logits"
+        )
+        return compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights, skipping MIMO layers (TTS-only) for ASR."""
