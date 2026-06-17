@@ -466,6 +466,10 @@ jobs:
 
           clone_with_retry "$TARGET_REPO_URL" "$GITHUB_WORKSPACE" "$TARGET_REPO_SHA"
 
+      - name: L3 benchmark publication preflight
+        shell: bash
+        run: bash .github/workflows/scripts/l3_benchmark_publish_preflight.sh
+
       - name: Deepen clone for fork-point detection
         if: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
         shell: bash
@@ -1161,6 +1165,9 @@ jobs:
           snapshot_sync_branch = os.environ.get('GITHUB_SNAPSHOT_SYNC_BRANCH', '').strip()
           snapshot_sync_submission_path = os.environ.get('GITHUB_SNAPSHOT_SYNC_SUBMISSION_PATH', '').strip()
           snapshot_sync_snapshot_path = os.environ.get('GITHUB_SNAPSHOT_SYNC_SNAPSHOT_PATH', '').strip()
+          l3_publish_preflight = os.environ.get('L3_BENCHMARK_PUBLISH_PREFLIGHT', '').strip()
+          l3_publish_target = os.environ.get('L3_BENCHMARK_PUBLISH_TARGET', '').strip()
+          l3_publish_credential = os.environ.get('L3_BENCHMARK_PUBLISH_CREDENTIAL', '').strip()
 
           result_root.mkdir(parents=True, exist_ok=True)
 
@@ -1284,6 +1291,11 @@ jobs:
 
           if benchmark_repo_publish_enabled:
             publication_lines = ['','### L3 Benchmark Repository Publication']
+            publication_lines.append(f"- Preflight: `{l3_publish_preflight or 'unknown'}`")
+            if l3_publish_target:
+              publication_lines.append(f"- Publish target: `{l3_publish_target}`")
+            if l3_publish_credential:
+              publication_lines.append(f"- Credential type: `{l3_publish_credential}`")
             publication_lines.append(f"- Sync status: `{snapshot_sync_status or 'unknown'}`")
             if snapshot_sync_repo or snapshot_sync_branch:
               publication_lines.append(

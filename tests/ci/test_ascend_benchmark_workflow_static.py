@@ -136,6 +136,24 @@ def test_workflow_dispatch_publish_inputs_are_split():
     assert "github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && '1' || '0'" not in text
 
 
+def test_l3_benchmark_publish_preflight_runs_before_benchmark():
+    text = workflow_text()
+
+    preflight_step = text.index("      - name: L3 benchmark publication preflight")
+    checkout_step = text.index("      - name: Checkout target repo with retry")
+    benchmark_repo_checkout_step = text.index("      - name: Checkout benchmark repo")
+    benchmark_step = text.index("      - name: Runner health preflight (before benchmark)")
+    summary_step = text.index("      - name: Build benchmark summary artifacts")
+
+    assert "bash .github/workflows/scripts/l3_benchmark_publish_preflight.sh" in text
+    assert checkout_step < preflight_step
+    assert preflight_step < benchmark_repo_checkout_step
+    assert preflight_step < benchmark_step
+    assert "L3_BENCHMARK_PUBLISH_PREFLIGHT" in text[summary_step:]
+    assert "L3_BENCHMARK_PUBLISH_TARGET" in text[summary_step:]
+    assert "L3_BENCHMARK_PUBLISH_CREDENTIAL" in text[summary_step:]
+
+
 def test_issue_comment_non_pr_and_fork_pr_are_not_allowed_by_parser_tests():
     parser_tests = (
         Path(__file__).resolve().parent / "test_parse_ascend_comment_command.py"
