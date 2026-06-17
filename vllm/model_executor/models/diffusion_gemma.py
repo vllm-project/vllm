@@ -1098,6 +1098,7 @@ class DiffusionGemmaModelState(ModelState):
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
             causal=causal,
         )
 

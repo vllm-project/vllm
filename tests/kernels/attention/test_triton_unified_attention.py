@@ -100,6 +100,7 @@ def _make_triton_metadata(
     num_heads: int,
     head_size: int,
     is_all_pure_prefill: bool,
+    causal: bool | torch.Tensor = True,
 ) -> TritonAttentionMetadata:
     head_size_padded = next_power_of_2(head_size)
     return TritonAttentionMetadata(
@@ -119,6 +120,7 @@ def _make_triton_metadata(
         ),
         softmax_segm_max=torch.empty((1, num_heads, 16), dtype=torch.float32),
         softmax_segm_expsum=torch.empty((1, num_heads, 16), dtype=torch.float32),
+        causal=causal,
         use_cascade=False,
         common_prefix_len=0,
         cu_prefix_query_lens=None,
@@ -191,6 +193,154 @@ def test_triton_attn_nvfp4_pure_prefill_uses_raw_kv(monkeypatch) -> None:
     assert called["q"].data_ptr() == query.data_ptr()
     assert called["k"].data_ptr() == key.data_ptr()
     assert called["v"].data_ptr() == value.data_ptr()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 Triton path is CUDA")
+@pytest.mark.parametrize("causal", [True, False])
+@torch.inference_mode()
+def test_triton_attn_nvfp4_pure_prefill_scalar_causal_uses_context_attention(
+    monkeypatch, causal: bool | torch.Tensor
+) -> None:
+    torch.set_default_device(DEVICE_TYPE)
+
+    num_tokens = 4
+    num_query_heads = 4
+    num_kv_heads = 2
+    head_size = 128
+    block_size = 16
+    dtype = torch.bfloat16
+    metadata = _make_triton_metadata(
+        num_tokens,
+        num_query_heads,
+        head_size,
+        is_all_pure_prefill=True,
+        causal=causal,
+    )
+    query = torch.randn(num_tokens, num_query_heads, head_size, dtype=dtype)
+    key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=dtype)
+    value = torch.randn_like(key)
+    output = torch.empty_like(query)
+    layer = SimpleNamespace(
+        _q_scale=torch.tensor(1.0),
+        _k_scale=torch.tensor(1.0),
+        _v_scale=torch.tensor(1.0),
+    )
+    impl = TritonAttentionImpl(
+        num_heads=num_query_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="nvfp4",
+    )
+    kv_cache = torch.empty(
+        1,
+        2,
+        block_size,
+        num_kv_heads,
+        nvfp4_kv_cache_full_dim(head_size),
+        dtype=torch.uint8,
+    )
+    called = {}
+
+    def fake_context_attention_fwd(**kwargs):
+        called["is_causal"] = kwargs["is_causal"]
+        called["q"] = kwargs["q"]
+        called["k"] = kwargs["k"]
+        called["v"] = kwargs["v"]
+        kwargs["o"].zero_()
+
+    def fail_unified_attention(**kwargs):
+        raise AssertionError("scalar-causal pure prefill should not read FP4 cache")
+
+    monkeypatch.setattr(
+        triton_attn_backend, "context_attention_fwd", fake_context_attention_fwd
+    )
+    monkeypatch.setattr(
+        triton_attn_backend, "unified_attention", fail_unified_attention
+    )
+
+    result = impl.forward(layer, query, key, value, kv_cache, metadata, output=output)
+
+    assert result is output
+    assert called["is_causal"] is causal
+    assert called["q"].data_ptr() == query.data_ptr()
+    assert called["k"].data_ptr() == key.data_ptr()
+    assert called["v"].data_ptr() == value.data_ptr()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 Triton path is CUDA")
+@torch.inference_mode()
+def test_triton_attn_nvfp4_pure_prefill_per_seq_causal_disables_raw_current(
+    monkeypatch,
+) -> None:
+    torch.set_default_device(DEVICE_TYPE)
+
+    num_tokens = 4
+    num_query_heads = 4
+    num_kv_heads = 2
+    head_size = 128
+    block_size = 16
+    dtype = torch.bfloat16
+    causal = torch.tensor([False], dtype=torch.bool, device=DEVICE_TYPE)
+    metadata = _make_triton_metadata(
+        num_tokens,
+        num_query_heads,
+        head_size,
+        is_all_pure_prefill=True,
+        causal=causal,
+    )
+    query = torch.randn(num_tokens, num_query_heads, head_size, dtype=dtype)
+    key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=dtype)
+    value = torch.randn_like(key)
+    output = torch.empty_like(query)
+    layer = SimpleNamespace(
+        _q_scale=torch.tensor(1.0),
+        _k_scale=torch.tensor(1.0),
+        _v_scale=torch.tensor(1.0),
+    )
+    impl = TritonAttentionImpl(
+        num_heads=num_query_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="nvfp4",
+    )
+    kv_cache = torch.empty(
+        1,
+        2,
+        block_size,
+        num_kv_heads,
+        nvfp4_kv_cache_full_dim(head_size),
+        dtype=torch.uint8,
+    )
+    called = {}
+
+    def fail_context_attention_fwd(**kwargs):
+        raise AssertionError("per-seq causal requires unified attention")
+
+    def fake_unified_attention(**kwargs):
+        called["causal"] = kwargs["causal"]
+        called["raw_k"] = kwargs["raw_k"]
+        called["raw_v"] = kwargs["raw_v"]
+        kwargs["out"].zero_()
+
+    monkeypatch.setattr(
+        triton_attn_backend, "context_attention_fwd", fail_context_attention_fwd
+    )
+    monkeypatch.setattr(
+        triton_attn_backend, "unified_attention", fake_unified_attention
+    )
+
+    result = impl.forward(layer, query, key, value, kv_cache, metadata, output=output)
+
+    assert result is output
+    assert called["causal"] is causal
+    assert called["raw_k"] is None
+    assert called["raw_v"] is None
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 Triton path is CUDA")
@@ -337,7 +487,9 @@ def test_triton_attn_nvfp4_kv_sharing_uses_cache(
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 Triton path is CUDA")
 @torch.inference_mode()
-def test_triton_attn_nvfp4_mm_prefix_uses_raw_current_kv(monkeypatch) -> None:
+def test_triton_attn_nvfp4_mm_prefix_pure_prefill_disables_raw_current(
+    monkeypatch,
+) -> None:
     torch.set_default_device(DEVICE_TYPE)
 
     num_tokens = 4
@@ -400,8 +552,8 @@ def test_triton_attn_nvfp4_mm_prefix_uses_raw_current_kv(monkeypatch) -> None:
     assert result is output
     assert called["kv_quant_mode"] == KVQuantMode.NVFP4
     assert called["mm_prefix_range"] is metadata.mm_prefix_range_tensor
-    assert called["raw_k"] is key
-    assert called["raw_v"] is value
+    assert called["raw_k"] is None
+    assert called["raw_v"] is None
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 Triton path is CUDA")

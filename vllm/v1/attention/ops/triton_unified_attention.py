@@ -1102,6 +1102,7 @@ def kernel_unified_attention(
                     elif USE_RAW_CURRENT_KV and tile_start + TILE_SIZE > context_len:
                         # Boundary tile: prefix lanes come from the FP4 cache,
                         # current-chunk lanes come from raw K/V.
+                        prefix_tile_mask = tile_mask & (seq_offset < context_len)
                         # K : (HEAD_SIZE, TILE_SIZE)
                         K_fp4 = _load_k_tile_nvfp4(
                             key_cache_ptr,
@@ -1112,7 +1113,7 @@ def kernel_unified_attention(
                             kv_head_idx,
                             offs_d,
                             dim_mask,
-                            tile_mask,
+                            prefix_tile_mask,
                             stride_k_cache_0,
                             stride_k_cache_1,
                             stride_k_cache_2,
@@ -1136,7 +1137,7 @@ def kernel_unified_attention(
                             kv_head_idx,
                             offs_d,
                             dim_mask,
-                            tile_mask,
+                            prefix_tile_mask,
                             stride_v_cache_0,
                             stride_v_cache_1,
                             stride_v_cache_2,
@@ -1150,7 +1151,6 @@ def kernel_unified_attention(
                             HEAD_SIZE_PADDED,
                             Q,
                         )
-                        current_tile_mask = tile_mask & (seq_offset >= context_len)
                         K_raw = _load_k_tile_raw_current(
                             raw_key_ptr,
                             context_len,
@@ -1159,7 +1159,7 @@ def kernel_unified_attention(
                             kv_head_idx,
                             offs_d,
                             dim_mask,
-                            current_tile_mask,
+                            tile_mask,
                             stride_raw_k_0,
                             stride_raw_k_1,
                             stride_raw_k_2,
@@ -1173,14 +1173,14 @@ def kernel_unified_attention(
                             kv_head_idx,
                             offs_d,
                             dim_mask,
-                            current_tile_mask,
+                            tile_mask,
                             stride_raw_v_0,
                             stride_raw_v_1,
                             stride_raw_v_2,
                             Q,
                         )
-                        K = tl.where(current_tile_mask[None, :], K_raw, K_fp4)
-                        V = tl.where(current_tile_mask[:, None], V_raw, V_fp4)
+                        K = K_fp4 + K_raw
+                        V = V_fp4 + V_raw
                     else:
                         # Prefix-only or raw-current disabled: read packed FP4.
                         # K : (HEAD_SIZE, TILE_SIZE)

@@ -662,6 +662,9 @@ class TritonAttentionImpl(AttentionImpl):
             self.kv_sharing_target_layer_name is not None
             or getattr(layer, "kv_sharing_target_layer_name", None) is not None
         )
+        pure_prefill_causal: bool | None = (
+            attn_metadata.causal if isinstance(attn_metadata.causal, bool) else None
+        )
         if (
             self._kv_quant_mode == KVQuantMode.NVFP4
             and not uses_shared_kv_cache
@@ -674,6 +677,7 @@ class TritonAttentionImpl(AttentionImpl):
             and self.sinks is None
             and mm_prefix_range_tensor is None
             and self.chunk_lookback == -1
+            and pure_prefill_causal is not None
         ):
             context_attention_fwd(
                 q=query[:num_actual_tokens],
@@ -683,7 +687,7 @@ class TritonAttentionImpl(AttentionImpl):
                 b_start_loc=attn_metadata.query_start_loc,
                 b_seq_len=attn_metadata.seq_lens,
                 max_input_len=attn_metadata.max_query_len,
-                is_causal=True,
+                is_causal=pure_prefill_causal,
                 softmax_scale=self.scale,
                 softcap=self.logits_soft_cap,
                 sliding_window_q=self.sliding_window[0],
@@ -759,6 +763,9 @@ class TritonAttentionImpl(AttentionImpl):
             and not uses_shared_kv_cache
             and key is not None
             and value is not None
+            and key.shape[0] == num_actual_tokens
+            and value.shape[0] == num_actual_tokens
+            and not attn_metadata.is_all_pure_prefill
             and max_seqlen_q > 1
             and not attn_metadata.is_decode_only
         )
