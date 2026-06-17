@@ -17,12 +17,22 @@ class DraftTokensHandler:
         self.req_ids: list[str] = []
         self.draft_tokens_np: np.ndarray | None = None
         self.num_draft_tokens: int = 0
+        self._num_valid_drafts_per_req: list[int] = []
 
     def set_draft_tokens(
         self, input_batch: InputBatch, draft_tokens: torch.Tensor
     ) -> None:
         self.req_ids = input_batch.req_ids
         self.num_draft_tokens = draft_tokens.shape[1]
+
+        # Compute per-request number of *actual* (non-zero) draft tokens.
+        # Ngram speculator uses 0 as sentinel for "no draft found";
+        # Eagle/MTP always produce k non-zero tokens.
+        draft_np = draft_tokens.cpu().numpy()
+        self._num_valid_drafts_per_req = [
+            int((row != 0).sum()) for row in draft_np
+        ]
+
         if not input_batch.has_structured_output_reqs:
             # No draft token validation needs to be performed by
             # the scheduler for this batch.
@@ -46,8 +56,12 @@ class DraftTokensHandler:
             self.copy_event.synchronize()
             draft_token_ids = self.draft_tokens_np.tolist()
         else:
-            # This case only happens when async scheduling is disabled.
-            draft_token_ids = [[-1] * self.num_draft_tokens for _ in self.req_ids]
+            # Generate sentinel (-1) tokens only for the ACTUAL number of
+            # drafts per request. Requests with 0 drafts (e.g. ngram no-match)
+            # produce an empty list, which the scheduler correctly skips.
+            draft_token_ids = [
+                [-1] * n for n in self._num_valid_drafts_per_req
+            ]
         return DraftTokenIds(self.req_ids, draft_token_ids)
 
 

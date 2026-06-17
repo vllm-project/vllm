@@ -30,5 +30,11 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
         )
 
         return EagleSpeculator(vllm_config, device)
+    elif speculative_config.method == "ngram":
+        from vllm.v1.worker.gpu.spec_decode.ngram.speculator import (
+            NgramSpeculator,
+        )
+
+        return NgramSpeculator(vllm_config, device)
     else:
         raise NotImplementedError(f"{speculative_config.method} is not supported yet.")
