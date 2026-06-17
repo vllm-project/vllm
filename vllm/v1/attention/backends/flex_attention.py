@@ -22,9 +22,10 @@ from torch.nn.attention.flex_attention import (
 )
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_quantized_kv_cache, is_torch_equal_or_newer
@@ -807,6 +808,13 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.persistent_physical_to_logical = None
         self.persistent_kv_indices = None
 
+        self.custom_logical_mask_mod: _mask_mod_signature | None = None
+        if self._uses_full_cudagraphs():
+            layers = get_layers_from_vllm_config(
+                vllm_config, Attention, self.layer_names
+            )
+            self.custom_logical_mask_mod = self._maybe_get_custom_mask_mod(layers)
+
     @staticmethod
     def _get_block_sizes(
         attn_cfg,
@@ -852,6 +860,21 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         return self.build(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
+
+    def _maybe_get_custom_mask_mod(self, layers) -> _mask_mod_signature | None:
+        mask_mods = {
+            getattr(layer, "logical_mask_mod", None) for layer in layers.values()
+        }
+        if len(mask_mods) > 1:
+            raise ValueError(
+                f"Found differing mask mods {mask_mods}, "
+                "cannot use alternating mask mods w/ full CUDA graphs"
+            )
+        return next(iter(mask_mods), None)
+
+    def _uses_full_cudagraphs(self) -> bool:
+        mode = self.vllm_config.compilation_config.cudagraph_mode
+        return mode is not None and mode.has_full_cudagraphs()
 
     def build(
         self,
@@ -924,9 +947,16 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             else causal_mask_mod
         )
 
+        sliding_window = None
+        if self._uses_full_cudagraphs():
+            if self.custom_logical_mask_mod is not None:
+                logical_mask_mod = self.custom_logical_mask_mod
+            sliding_window = getattr(self.kv_cache_spec, "sliding_window", None)
+
         out = FlexAttentionMetadata(
             causal=common_attn_metadata.causal,
             logical_mask_mod=logical_mask_mod,
+            sliding_window=sliding_window,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
