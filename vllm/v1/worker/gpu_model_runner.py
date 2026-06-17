@@ -4559,9 +4559,48 @@ class GPUModelRunner(
                     )
 
                 if self.pcp_world_size > 1:
+                    # PCP_DUMP: dump req0/req1 hidden states BEFORE and AFTER
+                    # get_restore_hidden_states on a decode step. merge already
+                    # made every rank identical & correct, so if pre-restore
+                    # h[0]!=h[1] but the post-restore argmax is wrong for req1+,
+                    # get_restore's prefill-zigzag restore_idx is scrambling the
+                    # decode hidden states.
+                    import os as _os
+
+                    _pre_n = getattr(self, "_pcp_restore_n", 0)
+                    _do_dump = (
+                        _os.environ.get("PCP_DUMP")
+                        and self.pcp_rank == 0
+                        and hidden_states.shape[0] <= 8
+                        and _pre_n < 2
+                    )
+                    if _do_dump:
+                        self._pcp_restore_n = _pre_n + 1
+                        _h0_pre = hidden_states[0, :4].tolist()
+                        _h1_pre = (
+                            hidden_states[1, :4].tolist()
+                            if hidden_states.shape[0] > 1
+                            else None
+                        )
+                    else:
+                        _h0_pre = _h1_pre = None
                     hidden_states = self.pcp_manager.get_restore_hidden_states(
                         hidden_states
                     )
+                    if _do_dump:
+                        logger.warning(
+                            "PCP_DUMP restore_chk pre h0=%s h1=%s | post "
+                            "h0=%s h1=%s logits_idx=%s",
+                            _h0_pre,
+                            _h1_pre,
+                            hidden_states[0, :4].tolist(),
+                            hidden_states[1, :4].tolist()
+                            if hidden_states.shape[0] > 1
+                            else None,
+                            logits_indices[:4].tolist()
+                            if logits_indices is not None
+                            else None,
+                        )
                     if aux_hidden_states is not None:
                         aux_hidden_states = [
                             self.pcp_manager.get_restore_hidden_states(t)
