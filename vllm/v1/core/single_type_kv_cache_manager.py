@@ -510,12 +510,7 @@ class SingleTypeKVCacheManager(ABC):
         # range), so we must cap to the number of blocks that currently exist for
         # this request.
         num_skipped_blocks = min(num_skipped_blocks, len(blocks))
-
-        # Reuse skipped local blocks in order:
-        #   scratch blocks: no prefix-cache value, reuse first.
-        #   cached blocks: reusable prefix-cache value, reuse last.
-        removed_cached_blocks: list[KVCacheBlock] = []
-        removed_uncached_blocks: list[KVCacheBlock] = []
+        removed_blocks: list[KVCacheBlock] = []
         # Because the block starts from index 0, the num_skipped_block-th block
         # corresponds to index num_skipped_blocks - 1.
         for i in range(num_skipped_blocks - 1, -1, -1):
@@ -524,16 +519,9 @@ class SingleTypeKVCacheManager(ABC):
                 # should also have been set to null blocks by the previous calls
                 # to this function.
                 break
-            if blocks[i].block_hash is None:
-                removed_uncached_blocks.append(blocks[i])
-            else:
-                removed_cached_blocks.append(blocks[i])
+            removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
-        # `prepend=True` makes uncached scratch blocks the next allocation
-        # candidates, while cached blocks stay behind them as best-effort
-        # prefix-cache entries.
-        self.block_pool.free_blocks(removed_cached_blocks)
-        self.block_pool.free_blocks(removed_uncached_blocks, prepend=True)
+        self.block_pool.free_blocks(removed_blocks)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
@@ -782,22 +770,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 mask[i - start_block] = True
 
         return mask
-
-    def free(self, request_id: str) -> None:
-        # similar to remove_skipped_blocks(), prepend the uncached blocks
-        # and append the cached blocks to the free queue
-        req_blocks = self.req_to_blocks.pop(request_id, [])
-        if req_blocks:
-            cached_blocks: list[KVCacheBlock] = []
-            uncached_blocks: list[KVCacheBlock] = []
-            for block in reversed(req_blocks):
-                if block.block_hash is None:
-                    uncached_blocks.append(block)
-                else:
-                    cached_blocks.append(block)
-            self.block_pool.free_blocks(cached_blocks)
-            self.block_pool.free_blocks(uncached_blocks, prepend=True)
-        self.num_cached_block.pop(request_id, None)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """

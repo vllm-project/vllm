@@ -33,6 +33,10 @@ class KeyMetadata:
     dcp_rank: int
     pp_rank: int
     group_id: int = 0
+    # Optional namespace prepended to every key. Lets separate deployments
+    # share one Mooncake master without colliding on identical block hashes.
+    # Empty (the default) keeps keys byte-identical to the unprefixed format.
+    cache_prefix: str = ""
 
 
 @dataclass(order=True)
@@ -45,6 +49,7 @@ class PoolKey:
     def __hash__(self):
         return hash(
             (
+                self.key_metadata.cache_prefix,
                 self.key_metadata.model_name,
                 self.key_metadata.tp_rank,
                 self.key_metadata.pcp_rank,
@@ -56,7 +61,13 @@ class PoolKey:
         )
 
     def to_string(self) -> str:
+        prefix = (
+            f"{self.key_metadata.cache_prefix}@"
+            if self.key_metadata.cache_prefix
+            else ""
+        )
         return (
+            f"{prefix}"
             f"{self.key_metadata.model_name}"
             f"@tp_rank:{self.key_metadata.tp_rank}"
             f"@pcp{self.key_metadata.pcp_rank}"
