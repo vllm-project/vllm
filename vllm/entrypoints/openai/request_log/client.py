@@ -189,13 +189,15 @@ def make_record(
     """
     request_id: str | None = None
     rendered_prompts: list[str | None] | None = None
+    raw_output_texts: list[str] | None = None
     client_info: dict[str, Any] | None = None
     if raw_request is not None:
         request_id = raw_request.headers.get("X-Request-Id")
-        if not request_id:
-            meta = getattr(raw_request.state, "request_metadata", None)
-            if meta is not None:
+        meta = getattr(raw_request.state, "request_metadata", None)
+        if meta is not None:
+            if not request_id:
                 request_id = getattr(meta, "request_id", None)
+            raw_output_texts = getattr(meta, "raw_output_texts", None)
         rendered_prompts = getattr(raw_request.state, "rendered_prompts", None)
         client = raw_request.client
         ua = raw_request.headers.get("user-agent")
@@ -218,6 +220,7 @@ def make_record(
         "client": client_info,
         "request": request_dict,
         "rendered_prompts": rendered_prompts,
+        "raw_output_texts": raw_output_texts,
         "response": response,
         "error": error,
     }

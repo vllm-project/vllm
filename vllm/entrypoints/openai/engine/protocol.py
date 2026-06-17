@@ -111,6 +111,10 @@ class UsageInfo(OpenAIBaseModel):
 class RequestResponseMetadata(BaseModel):
     request_id: str
     final_usage_info: UsageInfo | None = None
+    # Raw model output text, one entry per choice, captured before the
+    # reasoning parser / tool parser strip or rewrite anything. The
+    # request-log hub uses this to record the unprocessed generation.
+    raw_output_texts: list[str] | None = None
 
 
 class JsonSchemaResponseFormat(OpenAIBaseModel):

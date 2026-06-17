@@ -679,6 +679,10 @@ class OpenAIServingChat(OpenAIServing):
 
         # Always track previous_texts for comprehensive output logging
         previous_texts = [""] * num_choices
+        # Pristine model output (pre-parser) per choice, for the
+        # request-log hub. Always populated, regardless of which
+        # parser branches run below.
+        raw_output_texts = [""] * num_choices
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
@@ -811,6 +815,11 @@ class OpenAIServingChat(OpenAIServing):
                 for output in res.outputs:
                     i = output.index
                     tool_parser = tool_parsers[i]
+                    # Accumulate the raw, unparsed model output. Done
+                    # here (before any parser branch) so the captured
+                    # text is independent of reasoning / tool extraction.
+                    if output.text:
+                        raw_output_texts[i] += output.text
 
                     if (
                         reasoning_parser
@@ -1362,6 +1371,7 @@ class OpenAIServingChat(OpenAIServing):
                 completion_tokens=num_completion_tokens,
                 total_tokens=num_prompt_tokens + num_completion_tokens,
             )
+            request_metadata.raw_output_texts = raw_output_texts
 
             # Log complete streaming response if output logging is enabled
             if self.enable_log_outputs and self.request_logger:
@@ -1415,6 +1425,12 @@ class OpenAIServingChat(OpenAIServing):
             return self.create_error_response(e)
 
         assert final_res is not None
+
+        # Capture raw model output before any parser strips/rewrites it,
+        # so the request-log hub can persist the pristine generation.
+        request_metadata.raw_output_texts = [
+            output.text for output in final_res.outputs
+        ]
 
         choices: list[ChatCompletionResponseChoice] = []
         if self.tool_call_id_type == "kimi_k2":
