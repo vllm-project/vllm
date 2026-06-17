@@ -335,6 +335,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "hpcai-tech/grok-1", trust_remote_code=True
     ),
     "Grok1ForCausalLM": _HfExamplesInfo("xai-org/grok-2", trust_remote_code=True),
+    "HrmTextForCausalLM": _HfExamplesInfo(
+        "sapientinc/HRM-Text-1B",
+        min_transformers_version="5.9.0",
+    ),
     "HunYuanDenseV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-7B-Instruct"),
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
@@ -591,7 +595,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiMoV2ForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2.5-Pro", trust_remote_code=True
     ),
-    "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst"),
 }
 
 _EMBEDDING_EXAMPLE_MODELS = {
