@@ -309,6 +309,12 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
+        # GLM-DSA (GLM-5/5.1/5.2) recurses a single MTP layer for num_spec>1
+        # and must recycle the post-final-norm hidden into the next draft
+        # step (matches the MTP head's seed/training distribution). Capture
+        # GLM-ness here, before model_type is normalized to deepseek_mtp
+        # below (after which V3/V3.2/GLM are indistinguishable).
+        hf_config.mtp_recycle_post_norm = hf_config.model_type == "glm_moe_dsa"
         if hf_config.model_type in (
             "deepseek_v3",
             "deepseek_v32",

@@ -66,6 +66,9 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
+        # GLM-DSA (GLM-5/5.1/5.2) recycles the post-final-norm hidden into
+        # the next draft step; set via SpeculativeConfig.hf_config_override.
+        self.recycle_post_norm = getattr(config, "mtp_recycle_post_norm", False)
         quant_config = vllm_config.quant_config
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -119,7 +122,13 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             hidden_states=hidden_states,
             residual=None,
         )
-        hidden_states = residual + hidden_states
+        hidden_states = residual + hidden_states  # pre-final-norm (logits hidden)
+        if self.recycle_post_norm:
+            # Recycle the post-final-norm hidden into the next draft step.
+            # compute_logits applies shared_head (== final norm) to the
+            # pre-norm element, so logits and the recycled hidden each get
+            # exactly one final-norm. Matches SGLang's deepseek_nextn.
+            return hidden_states, self.shared_head(hidden_states)
         return hidden_states
 
 
