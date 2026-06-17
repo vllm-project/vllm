@@ -42,15 +42,30 @@ class MockAudioFlamingo3Processor:
         self.audio_token_id = 12345
         self.max_audio_len = 60
         self.feature_extractor = MockFeatureExtractor()
+        self.tokenizer = self._tokenize
 
-    def __call__(self, text=None, audios=None, **kwargs):
-        return {"input_ids": [1, 2, 3], "input_features": [np.zeros((3000, 80))]}
+    def __call__(self, text=None, audio=None, **kwargs):
+        return {
+            "input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long),
+            "input_features": torch.zeros((3, 80, 3000)),
+            "input_features_mask": torch.ones((3, 3000), dtype=torch.long),
+        }
+
+    def _tokenize(self, text, **kwargs):
+        return {"input_ids": torch.tensor([[1, 2, 3]], dtype=torch.long)}
 
 
 class MockFeatureExtractor:
     def __init__(self):
         self.sampling_rate = 16000
         self.chunk_length = 30
+        self.hop_length = 160
+
+    def __call__(self, audios, **kwargs):
+        return {
+            "input_features": torch.zeros((len(audios), 80, 3000)),
+            "attention_mask": torch.ones((len(audios), 3000), dtype=torch.long),
+        }
 
 
 @pytest.fixture
@@ -60,6 +75,9 @@ def mock_ctx():
     ctx = MagicMock()
     ctx.get_hf_config.return_value = config
     ctx.get_hf_processor.return_value = MockAudioFlamingo3Processor()
+    ctx.call_hf_processor.side_effect = lambda processor, data, kwargs: processor(
+        **data, **kwargs
+    )
     ctx.model_config.hf_config = config
     return ctx
 
@@ -89,21 +107,14 @@ def test_audio_chunk_counting(mock_ctx):
     mm_data = {"audio": [audio_1, audio_2]}
     prompt = "<|user|>Listen.<|end|>"
 
-    from vllm.multimodal.processing import BaseMultiModalProcessor
+    processed = processor._call_hf_processor(prompt, mm_data, {}, {})
 
-    def mock_base_call(self, prompt, mm_data, mm_kwargs, tok_kwargs):
-        return {"input_ids": [1, 2, 3], "input_features": torch.randn(1, 80, 3000)}
+    chunk_counts = processed["chunk_counts"]
 
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(BaseMultiModalProcessor, "_call_hf_processor", mock_base_call)
-
-        processed = processor._call_hf_processor(prompt, mm_data, {}, {})
-
-        chunk_counts = processed["chunk_counts"]
-
-        assert chunk_counts[0].item() == 1
-        assert chunk_counts[1].item() == 2
-        assert len(chunk_counts) == 2
+    assert chunk_counts[0].item() == 1
+    assert chunk_counts[1].item() == 2
+    assert len(chunk_counts) == 2
+    assert processed["feature_attention_mask"].shape == (3, 3000)
 
 
 def test_dummy_data_generation(mock_ctx):
