@@ -273,6 +273,7 @@ class Step3p5MTPProposer(EagleProposer):
 
     def propose(
         self,
+        num_speculative_tokens: int,
         target_token_ids: torch.Tensor,
         target_positions: torch.Tensor,
         target_hidden_states: torch.Tensor,
@@ -286,6 +287,7 @@ class Step3p5MTPProposer(EagleProposer):
         | list[dict[str, torch.Tensor]]
         | None = None,
     ) -> torch.Tensor:
+        self.num_speculative_tokens = num_speculative_tokens
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
 

@@ -216,14 +216,32 @@ def test_streaming_emits_incremental_argument_chunks():
     }
 
 
+def _with_strict(
+    tools: list[ChatCompletionToolsParam],
+) -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type=t.type,
+            function=FunctionDefinition(
+                name=t.function.name,
+                description=t.function.description,
+                parameters=t.function.parameters,
+                strict=True,
+            ),
+        )
+        for t in tools
+    ]
+
+
 def test_get_vllm_registry_structural_tag_returns_structural_tag(
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
     parser = make_parser()
+    strict_tools = _with_strict(sample_tools)
     req = ChatCompletionRequest(
         messages=[],
         model="m",
-        tools=sample_tools,
+        tools=strict_tools,
         tool_choice="auto",
     )
     tag = parser.get_structural_tag(req)
