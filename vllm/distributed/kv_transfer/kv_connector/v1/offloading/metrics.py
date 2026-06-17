@@ -30,6 +30,14 @@ class _TransferMetricName:
     STORE_SIZE = "vllm:kv_offload_store_size"
 
 
+class _ConnectorMetricName:
+    """Connector-side metrics emitted by scheduler-side offloading code."""
+
+    LOOKUP_SYNC_DELAY = "vllm:kv_offload_lookup_sync_delay_seconds"
+    LOOKUP_ASYNC_DELAY = "vllm:kv_offload_lookup_async_delay_seconds"
+    ALLOCATION_FAILURE = "vllm:kv_offload_allocation_failure"
+
+
 class _TransferType:
     """Transfer direction labels for deprecated CPU offload metrics."""
 
@@ -73,6 +81,24 @@ def get_connector_metric_definitions() -> dict[str, OffloadingMetricMetadata]:
         _TransferMetricName.STORE_SIZE: OffloadingHistogramMetadata(
             documentation="Histogram of KV offload store operation size, in bytes.",
             buckets=TRANSFER_SIZE_BUCKETS,
+        ),
+        _ConnectorMetricName.LOOKUP_SYNC_DELAY: OffloadingHistogramMetadata(
+            documentation=(
+                "Histogram of the time spent in a single offload lookup call, "
+                "in seconds."
+            ),
+        ),
+        _ConnectorMetricName.LOOKUP_ASYNC_DELAY: OffloadingHistogramMetadata(
+            documentation=(
+                "Histogram of time between a request's offload lookup first "
+                "deferring and the following lookup resolving, or request "
+                "finish, in seconds."
+            ),
+        ),
+        _ConnectorMetricName.ALLOCATION_FAILURE: OffloadingCounterMetadata(
+            documentation=(
+                "Number of KV offload store allocation attempts that failed."
+            ),
         ),
     }
 
@@ -223,7 +249,7 @@ class OffloadingConnectorStats(KVConnectorStats):
     def increase_counter(
         self,
         counter_name: str,
-        counter_increase_value: int | float,
+        counter_increase_value: int | float = 1,
         labelvalues: tuple[str, ...] = (),
     ) -> None:
         """Increase a counter on the stats payload."""

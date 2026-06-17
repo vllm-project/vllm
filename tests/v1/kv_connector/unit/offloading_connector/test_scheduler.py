@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -11,6 +12,10 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+    _ConnectorMetricName,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
@@ -30,6 +35,71 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.request import RequestStatus
+
+
+def test_scheduler_reports_allocation_failure(request_runner):
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    runner.new_request(token_ids=[0] * 4)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    stats = runner.connector_scheduler.get_stats()
+    assert stats is not None
+    assert stats.reduce()[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
+
+
+def test_scheduler_reports_lookup_sync_delay(request_runner):
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    runner.new_request(token_ids=[1] * 4)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    stats = runner.connector_scheduler.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_count"] == 1
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_sum"] > 0
+
+
+def test_scheduler_reports_lookup_async_delay_on_finish():
+    """A lookup that defers and never resolves before the request finishes
+    still reports its async delay, measured up to request_finished."""
+    scheduler = object.__new__(OffloadingConnectorScheduler)
+    scheduler.manager = MagicMock(spec=OffloadingManager)
+    scheduler.manager.get_stats.return_value = None
+    scheduler._connector_stats = OffloadingConnectorStats()
+
+    request = SimpleNamespace(request_id="req-0")
+    req_status = SimpleNamespace(
+        req_context=None,
+        transfer_jobs=set(),
+        first_lookup_time=time.monotonic() - 0.01,
+    )
+    scheduler._req_status = {request.request_id: req_status}
+
+    is_async, kv_params = scheduler.request_finished(request)
+
+    assert is_async is False
+    assert kv_params is None
+    assert req_status.first_lookup_time is None
+
+    stats = scheduler.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_ASYNC_DELAY}_count"] == 1
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_ASYNC_DELAY}_sum"] > 0
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])

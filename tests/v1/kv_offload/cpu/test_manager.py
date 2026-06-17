@@ -224,6 +224,29 @@ def test_cpu_manager_reports_cache_usage_gauge():
     check_usage_stats(manager, 0.0)
 
 
+def test_cpu_manager_reports_allocation_size_histogram():
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+
+    stats = manager.get_stats()
+
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count"] == 2
+    assert reduced[f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_sum"] == 3
+
+    # The cache-usage gauge is always reported, so get_stats() never returns
+    # None, but the histogram has nothing new once its samples are consumed.
+    second_stats = manager.get_stats()
+    assert second_stats is not None
+    assert f"{CPUOffloadingMetrics.CPU_ALLOCATION_SIZE}_count" not in (
+        second_stats.reduce()
+    )
+
+
 def test_cpu_manager():
     """
     Tests CPUOffloadingManager with lru policy.
