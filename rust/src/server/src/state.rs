@@ -137,7 +137,7 @@ impl AppState {
         self.model_path.as_deref()
     }
 
-    /// Snapshot the loaded LoRA adapters for `/v1/models` cards.
+    /// Snapshot the loaded LoRA adapters in load order, for `/v1/models` cards.
     pub async fn served_lora_requests(&self) -> Vec<LoraRequest> {
         self.lora_manager.served_lora_requests().await
     }

@@ -1146,31 +1146,38 @@ async fn list_models_base_card_includes_metadata() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn list_models_lora_card_includes_metadata() {
+async fn list_models_lists_loras_in_load_order() {
+    // Load out of lexicographic order; the list must preserve load order, not sort.
     let (mut app, _engine_task) = test_admin_app_with_engine_script(|dealer, push| {
         boxed_test_future(async move {
-            let utility = recv_engine_message(dealer).await;
-            let payload = decode_value(&utility[1]).expect("decode utility payload");
-            let call_id = payload.as_array().expect("utility array")[1].as_u64().expect("call id");
-            send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+            for _ in 0..2 {
+                let utility = recv_engine_message(dealer).await;
+                let payload = decode_value(&utility[1]).expect("decode utility payload");
+                let call_id =
+                    payload.as_array().expect("utility array")[1].as_u64().expect("call id");
+                send_outputs(push, utility_outputs(call_id, utility_result_value(true))).await;
+            }
         })
     })
     .await;
 
-    let response = app
-        .call(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/load_lora_adapter")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({ "lora_name": "adapter-a", "lora_path": "org/adapter-a" }).to_string(),
-                ))
-                .expect("build request"),
-        )
-        .await
-        .expect("call app");
-    assert_eq!(response.status(), StatusCode::OK);
+    for name in ["zebra", "alpha"] {
+        let path = format!("org/{name}");
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/load_lora_adapter")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({ "lora_name": name, "lora_path": path }).to_string(),
+                    ))
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 
     let models = app
         .call(Request::builder().uri("/v1/models").body(Body::empty()).expect("build request"))
@@ -1179,11 +1186,13 @@ async fn list_models_lora_card_includes_metadata() {
     let body = to_bytes(models.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
 
-    let lora_card = json["data"][1].as_object().expect("lora card object");
-    assert_eq!(lora_card["id"], "adapter-a");
-    assert_eq!(lora_card["root"], "org/adapter-a");
-    assert_eq!(lora_card["parent"], "Qwen/Qwen1.5-0.5B-Chat");
+    assert_eq!(json["data"][0]["id"], "Qwen/Qwen1.5-0.5B-Chat");
+    assert_eq!(json["data"][1]["id"], "zebra");
+    assert_eq!(json["data"][2]["id"], "alpha");
     // `max_model_len` must be emitted as null on LoRA cards, not omitted.
+    let lora_card = json["data"][1].as_object().expect("lora card object");
+    assert_eq!(lora_card["root"], "org/zebra");
+    assert_eq!(lora_card["parent"], "Qwen/Qwen1.5-0.5B-Chat");
     assert!(lora_card.contains_key("max_model_len") && lora_card["max_model_len"].is_null());
 }
 
