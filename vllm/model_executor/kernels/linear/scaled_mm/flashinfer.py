@@ -50,6 +50,20 @@ class FlashInferFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if compute_capability is not None and compute_capability < 100:
             return False, "requires compute capability 100 and above."
 
+        # The FlashInfer bmm_fp8 path resolves backend="auto" to the cuDNN
+        # fp8_gemm_sm100 kernel, which is only valid on datacenter Blackwell
+        # (sm_10x). On the consumer/workstation Blackwell family (sm_12x: RTX
+        # PRO / GeForce RTX 50 / GB10) cuDNN's FP8 GEMM heuristic returns too
+        # few execution plans, so the autotuner-selected plan index can be out
+        # of range and raises "Plan index N is invalid" at runtime. Fall back
+        # to CUTLASS there. See https://github.com/flashinfer-ai/flashinfer/issues/3566
+        if compute_capability is not None and compute_capability >= 120:
+            return False, (
+                "FlashInfer FP8 bmm is unsupported on the sm_12x "
+                "(consumer/workstation Blackwell) family; "
+                "see flashinfer-ai/flashinfer#3566."
+            )
+
         return True, None
 
     @classmethod
