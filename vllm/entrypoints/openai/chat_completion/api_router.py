@@ -15,7 +15,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.orca_metrics import metrics_header
-from vllm.entrypoints.openai.request_log.aggregate import aggregate_chat_stream
 from vllm.entrypoints.openai.request_log.client import (
     make_record,
     stream_logging_wrapper,
@@ -73,8 +72,6 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
                 make_record(
                     raw_request=raw_request,
                     endpoint="/v1/chat/completions",
-                    request_obj=request,
-                    response=None,
                     received_at=received_at,
                     error=generator.model_dump(),
                 )
@@ -89,8 +86,6 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
                 make_record(
                     raw_request=raw_request,
                     endpoint="/v1/chat/completions",
-                    request_obj=request,
-                    response=generator.model_dump(),
                     received_at=received_at,
                 )
             )
@@ -103,10 +98,8 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
         generator = stream_logging_wrapper(
             generator,
             hub=request_log_hub,
-            aggregator=aggregate_chat_stream,
             raw_request=raw_request,
             endpoint="/v1/chat/completions",
-            request_obj=request,
             received_at=received_at,
         )
     return StreamingResponse(content=generator, media_type="text/event-stream")

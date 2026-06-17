@@ -115,6 +115,11 @@ class RequestResponseMetadata(BaseModel):
     # reasoning parser / tool parser strip or rewrite anything. The
     # request-log hub uses this to record the unprocessed generation.
     raw_output_texts: list[str] | None = None
+    # Resolved SamplingParams (or BeamSearchParams) the engine was given
+    # for this request, serialized to a plain dict. Captured for the
+    # request-log hub so the saved record is enough to re-run / replay
+    # the request with identical sampling.
+    sampling_params: dict[str, Any] | None = None
 
 
 class JsonSchemaResponseFormat(OpenAIBaseModel):

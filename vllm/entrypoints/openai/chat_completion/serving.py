@@ -413,6 +413,18 @@ class OpenAIServingChat(OpenAIServing):
                         self.default_sampling_params,
                     )
 
+                # Capture the resolved sampling params for the
+                # request-log hub. Single-prompt chat: this only runs
+                # once per request, so we just overwrite.
+                if i == 0:
+                    from vllm.entrypoints.openai.request_log.client import (
+                        serialize_sampling_params,
+                    )
+
+                    request_metadata.sampling_params = serialize_sampling_params(
+                        sampling_params
+                    )
+
                 self._log_inputs(
                     sub_request_id,
                     engine_prompt,
@@ -680,9 +692,10 @@ class OpenAIServingChat(OpenAIServing):
         # Always track previous_texts for comprehensive output logging
         previous_texts = [""] * num_choices
         # Pristine model output (pre-parser) per choice, for the
-        # request-log hub. Always populated, regardless of which
-        # parser branches run below.
-        raw_output_texts = [""] * num_choices
+        # request-log hub. We accumulate as a list of fragments and
+        # ``"".join`` once at the end to avoid O(n²) string realloc on
+        # very long generations.
+        raw_output_fragments: list[list[str]] = [[] for _ in range(num_choices)]
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
@@ -819,7 +832,7 @@ class OpenAIServingChat(OpenAIServing):
                     # here (before any parser branch) so the captured
                     # text is independent of reasoning / tool extraction.
                     if output.text:
-                        raw_output_texts[i] += output.text
+                        raw_output_fragments[i].append(output.text)
 
                     if (
                         reasoning_parser
@@ -1371,7 +1384,9 @@ class OpenAIServingChat(OpenAIServing):
                 completion_tokens=num_completion_tokens,
                 total_tokens=num_prompt_tokens + num_completion_tokens,
             )
-            request_metadata.raw_output_texts = raw_output_texts
+            request_metadata.raw_output_texts = [
+                "".join(parts) for parts in raw_output_fragments
+            ]
 
             # Log complete streaming response if output logging is enabled
             if self.enable_log_outputs and self.request_logger:

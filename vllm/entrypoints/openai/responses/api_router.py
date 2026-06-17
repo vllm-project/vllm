@@ -10,9 +10,6 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.request_log.aggregate import (
-    aggregate_responses_stream,
-)
 from vllm.entrypoints.openai.request_log.client import (
     make_record,
     stream_logging_wrapper,
@@ -84,8 +81,6 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
                 make_record(
                     raw_request=raw_request,
                     endpoint="/v1/responses",
-                    request_obj=request,
-                    response=None,
                     received_at=received_at,
                     error=generator.model_dump(),
                 )
@@ -99,8 +94,6 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
                 make_record(
                     raw_request=raw_request,
                     endpoint="/v1/responses",
-                    request_obj=request,
-                    response=generator.model_dump(),
                     received_at=received_at,
                 )
             )
@@ -111,10 +104,8 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
         sse_stream = stream_logging_wrapper(
             sse_stream,
             hub=request_log_hub,
-            aggregator=aggregate_responses_stream,
             raw_request=raw_request,
             endpoint="/v1/responses",
-            request_obj=request,
             received_at=received_at,
         )
     return StreamingResponse(content=sse_stream, media_type="text/event-stream")

@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import contextlib
-import json
 import multiprocessing as mp
 import os
 import tempfile
@@ -13,6 +12,7 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
+import msgspec
 import zmq
 
 import vllm.envs as envs
@@ -27,6 +27,37 @@ from vllm.entrypoints.openai.request_log.writer_proc import writer_main
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+# Reusable encoder for the hot-path log() call. msgpack is C-implemented
+# and on par with pickle for our payload shape, while staying within the
+# project's "no pickle" policy and the safer-by-default trust boundary.
+_MSGPACK_ENCODER = msgspec.msgpack.Encoder()
+
+
+def serialize_sampling_params(params: Any) -> dict[str, Any] | None:
+    """Convert a ``SamplingParams`` / ``BeamSearchParams`` instance into a
+    plain dict suitable for inclusion in a jsonl record.
+
+    The inputs are msgspec.Struct subclasses. We use ``msgspec.to_builtins``
+    with an ``enc_hook`` that falls back to ``str`` so unknown / callable
+    fields (e.g. ``logits_processors``) don't blow up the whole encode.
+    Returns ``None`` if conversion fails for any reason — never raises,
+    so a logging hiccup can't impact the request path.
+    """
+    if params is None:
+        return None
+    try:
+        return msgspec.to_builtins(params, enc_hook=str)
+    except Exception:
+        try:
+            # Last-ditch fallback: msgspec dataclasses expose dataclasses-style
+            # __struct_fields__ that we can dump field-by-field.
+            return {
+                name: getattr(params, name, None)
+                for name in getattr(params, "__struct_fields__", ())
+            }
+        except Exception:
+            return None
 
 
 def _resolve_log_path(args, rank: int, total_ranks: int) -> str | None:
@@ -126,15 +157,18 @@ class RequestLoggerHub:
         return cls(socket_addr, process, ctx, sock, output_path)
 
     def log(self, record: dict[str, Any]) -> None:
-        """Best-effort, non-blocking push of a single jsonl record."""
+        """Best-effort, non-blocking push of a single jsonl record.
+
+        We serialize with ``msgspec.msgpack`` here — C-implemented, fast
+        — and let the writer subprocess do the (slower) ``json.dumps``
+        so the cost stays off the API server's event loop.
+        """
         if self._closed:
             return
         try:
-            payload = json.dumps(record, ensure_ascii=False, default=str).encode(
-                "utf-8"
-            )
-        except (TypeError, ValueError):
-            logger.exception("request log: failed to serialize record")
+            payload = _MSGPACK_ENCODER.encode(record)
+        except (msgspec.EncodeError, TypeError):
+            logger.exception("request log: failed to encode record")
             return
         try:
             self._sock.send_multipart([FRAME_RECORD, payload], flags=zmq.NOBLOCK)
@@ -174,22 +208,26 @@ def make_record(
     *,
     raw_request,
     endpoint: str,
-    request_obj,
-    response: Any,
     received_at: float,
     error: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble one jsonl record ready to be ``hub.log()``-ed.
 
-    ``request_id`` prefers the inbound ``X-Request-Id`` header so that
-    records correlate 1:1 with the caller's own id. If the header is
-    absent we fall back to the vLLM-side id stashed on
-    ``raw_request.state.request_metadata.request_id`` (e.g.
-    ``chatcmpl-…`` / ``cmpl-…``), which is auto-generated per request.
+    The record only carries the *raw* input/output (rendered prompt, model
+    output before any parser) plus minimal metadata. The original request
+    body and the structured response are intentionally NOT persisted —
+    they can be reconstructed from the raw text if needed and are too
+    expensive to serialize on the hot path.
+
+    ``request_id`` prefers the inbound ``X-Request-Id`` header so records
+    correlate 1:1 with the caller's own id. If the header is absent we
+    fall back to ``raw_request.state.request_metadata.request_id`` (the
+    auto-generated ``chatcmpl-…`` / ``cmpl-…``).
     """
     request_id: str | None = None
     rendered_prompts: list[str | None] | None = None
     raw_output_texts: list[str] | None = None
+    sampling_params: dict[str, Any] | None = None
     client_info: dict[str, Any] | None = None
     if raw_request is not None:
         request_id = raw_request.headers.get("X-Request-Id")
@@ -198,6 +236,7 @@ def make_record(
             if not request_id:
                 request_id = getattr(meta, "request_id", None)
             raw_output_texts = getattr(meta, "raw_output_texts", None)
+            sampling_params = getattr(meta, "sampling_params", None)
         rendered_prompts = getattr(raw_request.state, "rendered_prompts", None)
         client = raw_request.client
         ua = raw_request.headers.get("user-agent")
@@ -207,21 +246,15 @@ def make_record(
                 "user_agent": ua,
             }
 
-    if hasattr(request_obj, "model_dump"):
-        request_dict = request_obj.model_dump(exclude_none=True)
-    else:
-        request_dict = request_obj
-
     return {
         "request_id": request_id,
         "endpoint": endpoint,
         "received_at": received_at,
         "completed_at": time.time(),
         "client": client_info,
-        "request": request_dict,
+        "sampling_params": sampling_params,
         "rendered_prompts": rendered_prompts,
         "raw_output_texts": raw_output_texts,
-        "response": response,
         "error": error,
     }
 
@@ -230,33 +263,29 @@ async def stream_logging_wrapper(
     generator: AsyncIterator[str],
     *,
     hub: RequestLoggerHub,
-    aggregator,
     raw_request,
     endpoint: str,
-    request_obj,
     received_at: float,
 ) -> AsyncIterator[str]:
-    """Wrap an SSE generator so that every chunk is captured for logging.
+    """Wrap an SSE generator so the request log fires once at stream end.
 
-    The aggregator is called once at the end (whether the stream finished
-    cleanly or was cut off by an exception) to produce the response dict.
+    We do not collect the SSE chunks themselves — the raw model output is
+    captured upstream into ``request_metadata.raw_output_texts`` by the
+    serving layer, and ``make_record`` reads it back. This wrapper just
+    waits for the generator to finish (or be aborted) and writes one
+    record.
     """
-    chunks: list[str] = []
     try:
         async for chunk in generator:
-            chunks.append(chunk)
             yield chunk
     finally:
         try:
-            response = aggregator(chunks)
             hub.log(
                 make_record(
                     raw_request=raw_request,
                     endpoint=endpoint,
-                    request_obj=request_obj,
-                    response=response,
                     received_at=received_at,
                 )
             )
         except Exception:
-            logger.exception("request log: failed to aggregate/push stream")
+            logger.exception("request log: failed to push stream record")

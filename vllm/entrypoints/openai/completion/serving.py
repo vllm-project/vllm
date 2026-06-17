@@ -187,6 +187,18 @@ class OpenAIServingCompletion(OpenAIServing):
                         self.default_sampling_params,
                     )
 
+                # Capture the resolved sampling params for the request-log
+                # hub on the first prompt of this batch (multi-prompt
+                # completion shares the same sampling config).
+                if i == 0:
+                    from vllm.entrypoints.openai.request_log.client import (
+                        serialize_sampling_params,
+                    )
+
+                    request_metadata.sampling_params = serialize_sampling_params(
+                        sampling_params
+                    )
+
                 request_id_item = f"{request_id}-{i}"
 
                 self._log_inputs(

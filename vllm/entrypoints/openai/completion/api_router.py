@@ -15,9 +15,6 @@ from vllm.entrypoints.openai.completion.protocol import (
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.orca_metrics import metrics_header
-from vllm.entrypoints.openai.request_log.aggregate import (
-    aggregate_completion_stream,
-)
 from vllm.entrypoints.openai.request_log.client import (
     make_record,
     stream_logging_wrapper,
@@ -75,8 +72,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                 make_record(
                     raw_request=raw_request,
                     endpoint="/v1/completions",
-                    request_obj=request,
-                    response=None,
                     received_at=received_at,
                     error=generator.model_dump(),
                 )
@@ -90,8 +85,6 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
                 make_record(
                     raw_request=raw_request,
                     endpoint="/v1/completions",
-                    request_obj=request,
-                    response=generator.model_dump(),
                     received_at=received_at,
                 )
             )
@@ -104,10 +97,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         generator = stream_logging_wrapper(
             generator,
             hub=request_log_hub,
-            aggregator=aggregate_completion_stream,
             raw_request=raw_request,
             endpoint="/v1/completions",
-            request_obj=request,
             received_at=received_at,
         )
     return StreamingResponse(content=generator, media_type="text/event-stream")

@@ -10,12 +10,14 @@ that fsync/disk pressure cannot block the API server's request path.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import signal
 import sys
 from multiprocessing.synchronize import Event as MpEvent
 from pathlib import Path
 
+import msgspec
 import zmq
 
 from vllm.entrypoints.openai.request_log.proto import (
@@ -24,6 +26,31 @@ from vllm.entrypoints.openai.request_log.proto import (
     FSYNC_EVERY_N_RECORDS,
     POLL_INTERVAL_MS,
 )
+
+# Reusable msgpack decoder for the hot-path payload conversion.
+_MSGPACK_DECODER = msgspec.msgpack.Decoder()
+
+
+def _record_payload_to_jsonl(payload: bytes, log) -> bytes | None:
+    """Decode an msgpack record and re-encode as a single jsonl line.
+
+    Doing the JSON serialization on the writer side keeps the (often
+    expensive) ``json.dumps`` call off the API server's event loop.
+    Returns ``None`` if the payload cannot be decoded, in which case the
+    record is dropped with a log message.
+    """
+    try:
+        record = _MSGPACK_DECODER.decode(payload)
+    except (msgspec.DecodeError, ValueError) as e:
+        log(f"failed to decode record: {e}")
+        return None
+    try:
+        return (
+            json.dumps(record, ensure_ascii=False, default=str).encode("utf-8") + b"\n"
+        )
+    except (TypeError, ValueError) as e:
+        log(f"failed to json-encode record: {e}")
+        return None
 
 
 def _install_signal_handlers(stop_flag: list[bool]) -> None:
@@ -109,9 +136,11 @@ def writer_main(
                     if tag != FRAME_RECORD:
                         _log(f"dropping unknown tag {tag!r}")
                         continue
+                    line = _record_payload_to_jsonl(payload, _log)
+                    if line is None:
+                        continue
                     try:
-                        out.write(payload)
-                        out.write(b"\n")
+                        out.write(line)
                         pending_records += 1
                         if pending_records >= FSYNC_EVERY_N_RECORDS:
                             out.flush()
@@ -128,8 +157,9 @@ def writer_main(
                             continue
                         tag, payload = parts
                         if tag == FRAME_RECORD:
-                            out.write(payload)
-                            out.write(b"\n")
+                            line = _record_payload_to_jsonl(payload, _log)
+                            if line is not None:
+                                out.write(line)
                 out.flush()
     finally:
         with contextlib.suppress(Exception):
