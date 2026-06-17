@@ -252,9 +252,9 @@ class RayExecutorV2(MultiprocExecutor):
         """Pick the torch.distributed TCPStore port for this engine.
 
         Co-located DP engines choosing this port with a shared random search
-        collide intermittently. See #28498. Seeding by node-local DP rank
-        gives each a disjoint window. Non-DP engines and full windows fall
-        back to a random port.
+        collide intermittently. Seeding by node-local DP rank gives each a
+        disjoint window. Non-DP engines and full windows fall back to a
+        random port.
         """
         if local_dp_rank is None:
             return get_open_port()

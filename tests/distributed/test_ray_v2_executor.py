@@ -98,7 +98,7 @@ def assert_executor(executor, tp_size, pp_size):
 
 def test_select_tcpstore_port_seeds_disjoint_windows(monkeypatch):
     """Co-located DP engines scan distinct, adjacent port windows, so two
-    engines on a node cannot pick the same TCPStore port (#28498)."""
+    engines on a node cannot pick the same TCPStore port."""
     requested = []
 
     def fake_get_open_port(start_port, max_attempts):
