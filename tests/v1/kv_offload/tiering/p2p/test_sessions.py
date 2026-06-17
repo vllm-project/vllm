@@ -746,6 +746,73 @@ class TestFinishRequestServerSide:
         session.finish_request("never-existed")
         assert len(conn._sent) == before
 
+    def test_finish_request_no_inflight_emits_store_failure(self):
+        """finish_request with a stored-but-unmatched job and no inflight ->
+        TransferDoneMsg(success=False) AND deferred
+        StoreResult(success=False) for the submit_store'd job, instead of
+        the 30s _STORE_TIMEOUT_S path."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        # Decoder demanded b"demand"; we never stored it.
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"demand"],
+                FetchMsg.BLOCK_INDEXES: [5],
+            }
+        )
+        session.poll()
+        # We did submit_store a different block — goes to available, never
+        # matches demand. Without the shortcut, job 42 sits in _store_jobs
+        # for _STORE_TIMEOUT_S.
+        session.add_stored_blocks("req-1", [b"unrelated"], [0], job_id=42)
+        assert session._outbound["req-1"].pending_job_ids == {42}
+
+        session.finish_request("req-1")
+
+        # Peer notified immediately with success=False (remaining > 0).
+        msg = self._last_transfer_done(conn)
+        assert msg is not None
+        assert msg[TransferDoneMsg.SUCCESS] is False
+        assert "req-1" not in session._outbound
+
+        # Local store job surfaces on the next poll, success=False.
+        _, stores = session.poll()
+        assert StoreResult(job_id=42, success=False) in stores
+        assert 42 not in session._store_jobs
+
+    def test_finish_request_remaining_zero_emits_success_via_inflight(self):
+        """Deferred-via-inflight path: finish_request with inflight, last
+        transfer drains remaining to 0 -> TransferDoneMsg(success=True)
+        AND StoreResult(success=True)."""
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [10],
+            }
+        )
+        session.poll()
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=7)
+        # finish_request races with the inflight transfer.
+        session.finish_request("req-1")
+        assert "req-1" in session._outbound  # deferred
+
+        # Last inflight completes -> _finalize_outbound(success=True) fires.
+        tid = next(iter(transport._transfers))
+        transport._poll_done.append(tid)
+        _, stores = session.poll()
+
+        msg = self._last_transfer_done(conn)
+        assert msg is not None
+        assert msg[TransferDoneMsg.SUCCESS] is True
+        assert StoreResult(job_id=7, success=True) in stores
+        assert "req-1" not in session._outbound
+
 
 # ---------------------------------------------------------------------------
 # Bidirectional — the case the unification is meant to fix

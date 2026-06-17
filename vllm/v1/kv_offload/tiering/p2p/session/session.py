@@ -109,6 +109,11 @@ class _OutboundRequestState:
     )  # key → remote_block_idx: blocks peer wants, awaiting supply
     remaining: int = 0  # blocks that need to be transferred to client
     finishing: bool = False  # Signal finish request ASAP
+    # Job IDs that submit_store'd blocks for this request and have not
+    # yet emitted a StoreResult. The terminal-finalize helper drains
+    # this set; poll-done and poll-failed discard entries as their
+    # StoreResults fire.
+    pending_job_ids: set[int] = field(default_factory=set)
 
     def add_stored_blocks(
         self,
@@ -117,6 +122,7 @@ class _OutboundRequestState:
         job_id: int,
     ) -> _MatchResult:
         """Add locally-stored blocks. Returns matched pairs."""
+        self.pending_job_ids.add(job_id)
         local_idxs: list[int] = []
         remote_idxs: list[int] = []
         for block_hash, local_idx in zip(block_hashes, block_ids):
@@ -204,6 +210,10 @@ class P2PSession:
         self._inflight: dict[int, _InflightXfer] = {}  # transfer_id → xfer
         self._store_jobs: dict[int, float] = {}  # job_id → submitted_at
         self._pending_aborts: dict[str, float] = {}  # kv_request_id → start
+        # StoreResults queued by _finalize_outbound for the next poll
+        # tick to surface. Mirrors the deferred-result pattern used for
+        # load timeouts.
+        self._pending_store_results: list[StoreResult] = []
 
         if conn is not None:
             self.attach_connection(conn)
@@ -321,17 +331,49 @@ class P2PSession:
             return
         if self._has_inflight_for(kv_request_id):
             return
-        del self._outbound[kv_request_id]
+        # Remaining > 0 here: if it had hit 0, the poll-done success
+        # branch would have already popped _outbound and we'd have
+        # returned at `req is None` above. Helper derives success from
+        # remaining and emits StoreResult(success=False) for any
+        # leftover pending jobs.
+        self._finalize_outbound(kv_request_id)
+
+    def _has_inflight_for(self, kv_request_id: str) -> bool:
+        return any(x.kv_request_id == kv_request_id for x in self._inflight.values())
+
+    def _finalize_outbound(
+        self,
+        kv_request_id: str,
+        success: bool | None = None,
+    ) -> None:
+        """Pop the outbound state and emit terminal results.
+
+        Called when no further work will happen for this kv_request_id
+        on the server side: either request_finish has fired and there
+        are no inflight transfers, or the last inflight just completed
+        while finishing.
+
+        If ``success`` is None, derive it from ``req.remaining == 0``.
+        The same flag is used for both the peer's TransferDoneMsg and
+        the StoreResult(s) emitted for any leftover pending job_ids.
+        """
+        req = self._outbound.pop(kv_request_id, None)
+        if req is None:
+            return
+        if success is None:
+            success = req.remaining == 0
+        for job_id in req.pending_job_ids:
+            self._store_jobs.pop(job_id, None)
+            self._pending_store_results.append(
+                StoreResult(job_id=job_id, success=success)
+            )
         self._send(
             {
                 TYPE_KEY: TransferDoneMsg.TYPE,
                 TransferDoneMsg.KV_REQUEST_ID: kv_request_id,
-                TransferDoneMsg.SUCCESS: False,
+                TransferDoneMsg.SUCCESS: success,
             }
         )
-
-    def _has_inflight_for(self, kv_request_id: str) -> bool:
-        return any(x.kv_request_id == kv_request_id for x in self._inflight.values())
 
     # ------------------------------------------------------------------
     # Public API — server role
@@ -439,6 +481,10 @@ class P2PSession:
     def _collect_store_results(self) -> list[StoreResult]:
         results: list[StoreResult] = self._timeout_pending_store_jobs()
 
+        if self._pending_store_results:
+            results.extend(self._pending_store_results)
+            self._pending_store_results.clear()
+
         poll_result = self._transport.poll()
 
         for tid in poll_result.done:
@@ -459,33 +505,21 @@ class P2PSession:
                     tid,
                 )
                 continue
+            req = self._outbound.get(xfer.kv_request_id)
             for job_id in xfer.job_ids:
                 self._store_jobs.pop(job_id, None)
                 results.append(StoreResult(job_id=job_id, success=True))
-            req = self._outbound.get(xfer.kv_request_id)
+                if req is not None:
+                    req.pending_job_ids.discard(job_id)
             if req is not None and req.demand_received:
                 req.remaining -= xfer.block_count
                 assert req.remaining >= 0, (
                     f"remaining went negative for kv_request_id={xfer.kv_request_id}"
                 )
                 if req.remaining == 0:
-                    del self._outbound[xfer.kv_request_id]
-                    self._send(
-                        {
-                            TYPE_KEY: TransferDoneMsg.TYPE,
-                            TransferDoneMsg.KV_REQUEST_ID: xfer.kv_request_id,
-                            TransferDoneMsg.SUCCESS: True,
-                        }
-                    )
+                    self._finalize_outbound(xfer.kv_request_id, success=True)
                 elif req.finishing and not self._has_inflight_for(xfer.kv_request_id):
-                    del self._outbound[xfer.kv_request_id]
-                    self._send(
-                        {
-                            TYPE_KEY: TransferDoneMsg.TYPE,
-                            TransferDoneMsg.KV_REQUEST_ID: xfer.kv_request_id,
-                            TransferDoneMsg.SUCCESS: False,
-                        }
-                    )
+                    self._finalize_outbound(xfer.kv_request_id, success=False)
 
         failed_kv_request_ids: set[str] | None = None
         for tid in poll_result.failed:
@@ -503,9 +537,12 @@ class P2PSession:
             if failed_kv_request_ids is None:
                 failed_kv_request_ids = set()
             failed_kv_request_ids.add(xfer.kv_request_id)
+            req_for_xfer = self._outbound.get(xfer.kv_request_id)
             for job_id in xfer.job_ids:
                 self._store_jobs.pop(job_id, None)
                 results.append(StoreResult(job_id=job_id, success=False))
+                if req_for_xfer is not None:
+                    req_for_xfer.pending_job_ids.discard(job_id)
             req = self._outbound.pop(xfer.kv_request_id, None)
             if req is not None and req.demand_received:
                 self._send(
@@ -697,14 +734,7 @@ class P2PSession:
         # fetch arrived. If so, finalize once we know what was
         # demanded — fully satisfied → success, else early-fail.
         if req.finishing and not self._has_inflight_for(kv_request_id):
-            del self._outbound[kv_request_id]
-            self._send(
-                {
-                    TYPE_KEY: TransferDoneMsg.TYPE,
-                    TransferDoneMsg.KV_REQUEST_ID: kv_request_id,
-                    TransferDoneMsg.SUCCESS: req.remaining == 0,
-                }
-            )
+            self._finalize_outbound(kv_request_id)
 
     def _on_abort_fetch(self, msg: dict) -> None:
         AbortFetchMsg.validate(msg)
