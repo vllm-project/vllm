@@ -1152,16 +1152,20 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 assert attn_metadata.decode_metadata is not None
                 decode_max_query_len = attn_metadata.decode_metadata.max_query_len
 
-                # Use unified_attention for speculative decoding (multi-token),
-                # sliding window, or sinks
-                # (pa_fwd_asm and paged_attention_v1 don't support sinks)
+                # Speculative decoding (multi-token), sliding window, or
+                # sinks need a dedicated decode path: the default kernels
+                # below (paged_attention_v1) don't support sinks and assume
+                # single-token decode. Dispatch to the appropriate kernel:
+                # pa_fwd_asm for the shuffle KV layout, flash_attn_with_kvcache
+                # for non-causal decode, otherwise varlen unified_attention.
                 if (
                     self.sliding_window[0] != -1
                     or decode_max_query_len > 1
                     or self.sinks is not None
                 ):
                     if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-                        # MTP + shuffle KV: route multi-query decode to aiter.pa_fwd_asm.
+                        # MTP + shuffle KV: route multi-query decode to
+                        # aiter.pa_fwd_asm.
                         assert attn_metadata.causal, (
                             "Shuffle KV layout with multi-token decode "
                             "requires causal attention."
