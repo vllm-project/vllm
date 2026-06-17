@@ -16,6 +16,7 @@ from vllm.model_executor.kernels.linear import (
 )
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
+    FusedMoEExpertsModular,
     FusedMoEMethodBase,
     FusedMoEQuantConfig,
     FusedMoeWeightScaleSupported,
@@ -485,8 +486,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
             weight_key,
-            may_have_zp=True,
-            may_have_bias=True,
         )
 
     def create_weights(
@@ -642,26 +641,19 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
 
-        device = layer.w13_qweight.device
-        layer.workspace = marlin_make_workspace_new(device, 4)
+        if self.experts_cls is not None and issubclass(
+            self.experts_cls, FusedMoEExpertsModular
+        ):
+            device = layer.w13_qweight.device
+            layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
-        def replace_or_register(name: str, val: torch.Tensor | None):
-            if val is None:
-                return
-
-            if hasattr(layer, name):
-                replace_parameter(layer, name, val)
-            else:
-                layer.register_parameter(
-                    name, torch.nn.Parameter(val, requires_grad=False)
-                )
-
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
-        assert not is_a_8bit or self.quant_config.quant_type.size_bits == 8, (
-            "W8A8-INT8 is not supported by marlin kernel."
-        )
+        if is_a_8bit:
+            assert self.quant_config.quant_type.size_bits == 8, (
+                "W8A8-INT8 is not supported by marlin kernel."
+            )
 
         (
             w13,
@@ -691,8 +683,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_g_idx=layer.w2_g_idx,
             w13_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
-            w13_qzeros=getattr(layer, "w13_qzeros", None),
-            w2_qzeros=getattr(layer, "w2_qzeros", None),
         )
 
         replace_parameter(layer, "w13_qweight", w13)
@@ -703,12 +693,42 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         replace_parameter(layer, "w2_g_idx", w2_g_idx)
         replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
         replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
-        replace_or_register("w13_input_global_scale", w13_input_global_scale)
-        replace_or_register("w2_input_global_scale", w2_input_global_scale)
-        replace_or_register("w13_bias", w13_bias)
-        replace_or_register("w2_bias", w2_bias)
-        replace_or_register("w13_qzeros", w13_qzeros)
-        replace_or_register("w2_qzeros", w2_qzeros)
+        if w13_qzeros is not None:
+            replace_parameter(layer, "w13_qzeros", w13_qzeros)
+        if w2_qzeros is not None:
+            replace_parameter(layer, "w2_qzeros", w2_qzeros)
+        if w13_input_global_scale is not None:
+            if hasattr(layer, "w13_input_global_scale"):
+                replace_parameter(
+                    layer, "w13_input_global_scale", w13_input_global_scale
+                )
+            else:
+                layer.register_parameter(
+                    "w13_input_global_scale",
+                    torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
+                )
+        if w2_input_global_scale is not None:
+            if hasattr(layer, "w2_input_global_scale"):
+                replace_parameter(layer, "w2_input_global_scale", w2_input_global_scale)
+            else:
+                layer.register_parameter(
+                    "w2_input_global_scale",
+                    torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
+                )
+        if w13_bias is not None:
+            if hasattr(layer, "w13_bias"):
+                replace_parameter(layer, "w13_bias", w13_bias)
+            else:
+                layer.register_parameter(
+                    "w13_bias", torch.nn.Parameter(w13_bias, requires_grad=False)
+                )
+        if w2_bias is not None:
+            if hasattr(layer, "w2_bias"):
+                replace_parameter(layer, "w2_bias", w2_bias)
+            else:
+                layer.register_parameter(
+                    "w2_bias", torch.nn.Parameter(w2_bias, requires_grad=False)
+                )
 
         self._setup_kernel(layer)
 
@@ -723,8 +743,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             is_k_full=self.is_k_full,
             w13_g_idx=layer.w13_g_idx,
             w2_g_idx=layer.w2_g_idx,
-            w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
+            w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None),
+            w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None),
             routing_tables=layer._expert_routing_tables(),
         )
 
@@ -738,12 +758,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_scale=layer.w2_scales,
             weight_bits=self.quant_config.weight_bits,
             group_size=self.quant_config.group_size,
-            w1_zp=getattr(layer, "w13_qzeros", None)
-            if not self.quant_config.is_sym
-            else None,
-            w2_zp=getattr(layer, "w2_qzeros", None)
-            if not self.quant_config.is_sym
-            else None,
+            w1_zp=getattr(layer, "w13_qzeros", None),
+            w2_zp=getattr(layer, "w2_qzeros", None),
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
         )
@@ -781,4 +797,28 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             expert_map=layer.expert_map,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
+        )
+
+    def apply_monolithic(
+        self,
+        layer: RoutedExperts,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
+            hidden_states=x,
+            w1=layer.w13_qweight,
+            w2=layer.w2_qweight,
+            router_logits=router_logits,
+            activation=layer.activation,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            num_expert_group=layer.num_expert_group,
+            topk_group=layer.topk_group,
+            e_score_correction_bias=layer.e_score_correction_bias,
+            routed_scaling_factor=layer.routed_scaling_factor,
         )

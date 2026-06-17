@@ -23,9 +23,6 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
     MarlinExpertsBase,
 )
-from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
-    TritonWNA16Experts,
-)
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
     TrtLlmMxint4ExpertsMonolithic,
 )
@@ -34,8 +31,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_act_int8_process_scales,
     marlin_moe_permute_scales,
     marlin_permute_bias,
-    marlin_zero_points,
     moe_awq_to_marlin_zero_points,
+    moe_packed_to_marlin_zero_points,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -48,8 +45,8 @@ logger = init_logger(__name__)
 class WNA16MoEBackend(Enum):
     MARLIN = "MARLIN"
     BATCHED_MARLIN = "BATCHED_MARLIN"
+    CPU = "CPU"
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
-    TRITON = "TRITON"
     XPU = "XPU"
 
 
@@ -63,50 +60,42 @@ def backend_to_kernel_cls(
         return [BatchedMarlinExperts]
     elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
         return [TrtLlmMxint4ExpertsMonolithic]
-    elif backend == WNA16MoEBackend.TRITON:
-        return [TritonWNA16Experts]
     elif backend == WNA16MoEBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
             XPUExpertsWNA16,
         )
 
         return [XPUExpertsWNA16]
+    elif backend == WNA16MoEBackend.CPU:
+        from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+            CPUExpertsInt4,
+        )
+
+        return [CPUExpertsInt4]
     else:
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
 
-def _get_priority_backends(
-    may_have_zp: bool, may_have_bias: bool
-) -> list[WNA16MoEBackend]:
+def _get_priority_backends() -> list[WNA16MoEBackend]:
     """
     Get available backends in priority order based on platform and config.
     """
+    if current_platform.is_cpu():
+        return [WNA16MoEBackend.CPU]
     if current_platform.is_xpu():
         return [WNA16MoEBackend.XPU]
 
-    _AVAILABLE_BACKENDS = []
-
-    if not may_have_zp and not may_have_bias:
-        _AVAILABLE_BACKENDS.append(WNA16MoEBackend.FLASHINFER_TRTLLM)
-
-    # Marlin supports ZP and bias
-    _AVAILABLE_BACKENDS += [
+    _AVAILABLE_BACKENDS = [
+        WNA16MoEBackend.FLASHINFER_TRTLLM,
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ]
-    return _AVAILABLE_BACKENDS
-
-    if not may_have_bias:
-        _AVAILABLE_BACKENDS.append(WNA16MoEBackend.TRITON)
-
     return _AVAILABLE_BACKENDS
 
 
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
-    may_have_zp: bool,
-    may_have_bias: bool,
 ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
     """Select the WNA16 MoE backend.
 
@@ -157,7 +146,7 @@ def select_wna16_moe_backend(
         raise ValueError(_make_log_unsupported(backend, reason))
 
     # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _get_priority_backends(may_have_zp, may_have_bias)
+    AVAILABLE_BACKENDS = _get_priority_backends()
 
     for backend in AVAILABLE_BACKENDS:
         activation_key = None  # always BF16 activation for WNA16 MoE
@@ -230,18 +219,21 @@ def make_wna16_moe_kernel(
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
         maybe_make_prepare_finalize,
     )
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        CPUExpertsInt4,
+    )
     from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
         XPUExpertsWNA16,
     )
 
-    # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts
-    # and BatchedMarlinExperts
+    # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts,
+    # BatchedMarlinExperts, XPUExpertsWNA16, and CPUExpertsInt4
     assert experts_cls in (
         MarlinExperts,
         BatchedMarlinExperts,
-        TritonWNA16Experts,
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
+        CPUExpertsInt4,
     )
 
     is_monolithic = experts_cls.is_monolithic()
@@ -256,7 +248,6 @@ def make_wna16_moe_kernel(
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
-    logger.info_once("Using %s", experts_cls.__name__, scope="local")
 
     extra_args: dict[str, Any] = {}
     if issubclass(experts_cls, MarlinExpertsBase):
@@ -426,8 +417,6 @@ def _process_weights_marlin(
     w2_input_global_scale: torch.Tensor | None = None
     w13_bias_out: torch.Tensor | None = None
     w2_bias_out: torch.Tensor | None = None
-    w13_qzeros_out: torch.Tensor | None = None
-    w2_qzeros_out: torch.Tensor | None = None
 
     # --- FP8 weight / scale adjustment ---
     if input_dtype == torch.float8_e4m3fn:
@@ -521,29 +510,28 @@ def _process_weights_marlin(
                 marlin_w2_scales
             )
 
+    # --- Permute zero points ---
+    if w13_qzeros is not None and w2_qzeros is not None:
+        w13_qzeros = moe_packed_to_marlin_zero_points(
+            w13_qzeros,
+            size_k=w13_qzeros.shape[1],
+            size_n=w13_qzeros.shape[2] * pack_factor,
+            num_bits=num_bits,
+            is_a_8bit=is_a_8bit,
+        )
+        w2_qzeros = moe_packed_to_marlin_zero_points(
+            w2_qzeros,
+            size_k=w2_qzeros.shape[1],
+            size_n=w2_qzeros.shape[2] * pack_factor,
+            num_bits=num_bits,
+            is_a_8bit=is_a_8bit,
+        )
+
     # --- Permute bias ---
     if w13_bias is not None:
         w13_bias_out = marlin_permute_bias(w13_bias)
     if w2_bias is not None:
         w2_bias_out = marlin_permute_bias(w2_bias)
-
-    if w13_qzeros is not None:
-        w13_qzeros_out = marlin_zero_points(
-            w13_qzeros,
-            size_k=layer.intermediate_size_per_partition,
-            size_n=w13_qzeros.shape[2],
-            num_bits=num_bits,
-            is_a_8bit=is_a_8bit,
-        )
-
-    if w2_qzeros is not None:
-        w2_qzeros_out = marlin_zero_points(
-            w2_qzeros,
-            size_k=w2_qzeros.shape[1] * group_size_or_pack_factor,
-            size_n=w2_qzeros.shape[2],
-            num_bits=num_bits,
-            is_a_8bit=is_a_8bit,
-        )
 
     return (
         marlin_w13_qweight,
@@ -554,8 +542,8 @@ def _process_weights_marlin(
         w2_g_idx,
         w13_g_idx_sort_indices,
         w2_g_idx_sort_indices,
-        w13_qzeros_out,
-        w2_qzeros_out,
+        w13_qzeros,
+        w2_qzeros,
         w13_input_global_scale,
         w2_input_global_scale,
         w13_bias_out,
@@ -708,6 +696,117 @@ def _process_awq_weights_marlin(
     )
 
 
+def _process_weights_cpu(
+    quant_config: QuantizationConfig | QuantizationArgs | None,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_g_idx: torch.Tensor | None = None,
+    w2_g_idx: torch.Tensor | None = None,
+    w13_qzeros: torch.Tensor | None = None,
+    w2_qzeros: torch.Tensor | None = None,
+    w13_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+) -> tuple[
+    torch.Tensor,  # w13_qweight
+    torch.Tensor,  # w2_qweight
+    torch.Tensor,  # w13_scales
+    torch.Tensor,  # w2_scales
+    torch.Tensor | None,  # w13_g_idx
+    torch.Tensor | None,  # w2_g_idx
+    torch.Tensor | None,  # w13_g_idx_sort_indices
+    torch.Tensor | None,  # w2_g_idx_sort_indices
+    torch.Tensor | None,  # w13_qzeros
+    torch.Tensor | None,  # w2_qzeros
+    torch.Tensor | None,  # w13_input_global_scale
+    torch.Tensor | None,  # w2_input_global_scale
+    torch.Tensor | None,  # w13_bias
+    torch.Tensor | None,  # w2_bias
+]:
+    """CPU INT4 W4A16 weight post-processing."""
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        prepare_int4_moe_layer_for_cpu,
+    )
+    from vllm.model_executor.layers.quantization.auto_gptq import (
+        AutoGPTQConfig,
+    )
+    from vllm.model_executor.layers.quantization.awq_marlin import (
+        AWQMarlinConfig,
+    )
+
+    # Detect packing format.
+    # AWQ: qweight is [E, K, 2*N//8] (packed along output/N dim).
+    # GPTQ: qweight is [E, K//8, 2*N] (packed along input/K dim).
+    # compressed-tensors: qweight is [E, K//8, 2*N] (packed along input/K dim).
+    if isinstance(quant_config, AWQMarlinConfig):
+        # AWQ: K is stored unpacked in dim 1.
+        cpu_quant_algo = ops.CPUQuantAlgo.AWQ
+    elif isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
+        # GPTQ / compressed-tensors: K//8 is stored packed in dim 1.
+        if isinstance(quant_config, AutoGPTQConfig) and quant_config.desc_act:
+            raise NotImplementedError(
+                "CPU WNA16 MoE backend does not support GPTQ with "
+                "desc_act=True. The fused MoE kernel has no g_idx "
+                "reordering support."
+            )
+        cpu_quant_algo = ops.CPUQuantAlgo.GPTQ
+    else:
+        raise TypeError(
+            "CPU WNA16 MoE backend requires AWQMarlinConfig, AutoGPTQConfig "
+            f"or QuantizationArgs, got {type(quant_config).__name__}."
+        )
+
+    # Determine zero points for repacking.
+    w13_zeros: torch.Tensor | None = None
+    w2_zeros: torch.Tensor | None = None
+    if w13_qzeros is not None:
+        w13_zeros = (
+            w13_qzeros.data.view(torch.int32)
+            if w13_qzeros.dtype != torch.int32
+            else w13_qzeros.data
+        )
+    if w2_qzeros is not None:
+        w2_zeros = (
+            w2_qzeros.data.view(torch.int32)
+            if w2_qzeros.dtype != torch.int32
+            else w2_qzeros.data
+        )
+
+    (
+        blocked_w13,
+        blocked_w2,
+        blocked_s13,
+        blocked_s2,
+        blocked_z13,
+        blocked_z2,
+    ) = prepare_int4_moe_layer_for_cpu(
+        w13,
+        w2,
+        w13_scale,
+        w2_scale,
+        quant_algo=cpu_quant_algo,
+        w13_zeros=w13_zeros,
+        w2_zeros=w2_zeros,
+    )
+    return (
+        blocked_w13,
+        blocked_w2,
+        blocked_s13,
+        blocked_s2,
+        w13_g_idx,
+        w2_g_idx,
+        None,  # w13_g_idx_sort_indices (unused on CPU)
+        None,  # w2_g_idx_sort_indices (unused on CPU)
+        blocked_z13,
+        blocked_z2,
+        None,  # w13_input_global_scale
+        None,  # w2_input_global_scale
+        w13_bias.to(torch.float32) if w13_bias is not None else None,
+        w2_bias.to(torch.float32) if w2_bias is not None else None,
+    )
+
+
 def _process_weights_xpu(
     layer: torch.nn.Module,
     quant_config: QuantizationConfig,
@@ -823,9 +922,6 @@ def convert_to_wna16_moe_kernel_format(
         from vllm.model_executor.layers.quantization.awq_marlin import (
             AWQMarlinConfig,
         )
-        from vllm.model_executor.layers.quantization.moe_wna16 import (
-            MoeWNA16Config,
-        )
 
         if isinstance(quant_config, AWQMarlinConfig):
             if w13_qzeros is None or w2_qzeros is None:
@@ -860,17 +956,11 @@ def convert_to_wna16_moe_kernel_format(
             pack_factor = 32 // quant_config.num_bits
             group_size = quant_config.group_size
             actorder = quant_config.actorder
-        elif isinstance(quant_config, MoeWNA16Config):
-            num_bits = quant_config.weight_bits
-            pack_factor = quant_config.bit8_pack_factor
-            group_size = quant_config.group_size
-            actorder = None
         else:
             raise TypeError(
                 "Marlin WNA16 MoE backend requires AutoGPTQConfig, AWQMarlinConfig or "
                 f"QuantizationArgs, got {type(quant_config).__name__}."
             )
-
         if w13_g_idx is None or w2_g_idx is None:
             raise ValueError("GPTQ Marlin MoE requires g_idx tensors.")
         return _process_weights_marlin(
@@ -891,36 +981,17 @@ def convert_to_wna16_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
-    elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
-        return _process_weights_flashinfer(
+    elif backend == WNA16MoEBackend.CPU:
+        return _process_weights_cpu(
+            quant_config,
             w13,
             w2,
             w13_scale,
             w2_scale,
             w13_g_idx,
             w2_g_idx,
-            w13_bias,
-            w2_bias,
-        )
-    elif backend == WNA16MoEBackend.TRITON:
-        # Convert from int32 to uint8 format for Triton kernel.
-        # This changes the shape from (E, N, K // 8) to (E, N, K // 2) for int4,
-        # which matches what the Triton kernel expects.
-        w13_uint8 = w13.view(torch.uint8)
-        w2_uint8 = w2.view(torch.uint8)
-        return (
-            w13_uint8,
-            w2_uint8,
-            w13_scale,
-            w2_scale,
-            None,
-            None,
-            None,
-            None,
             w13_qzeros,
             w2_qzeros,
-            None,
-            None,
             w13_bias,
             w2_bias,
         )
