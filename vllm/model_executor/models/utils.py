@@ -44,6 +44,7 @@ class WeightsMapper:
 
     If a key maps to a value of `None`, the corresponding weight is ignored."""
 
+    orig_to_new_renamings: list[Any] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
@@ -52,6 +53,10 @@ class WeightsMapper:
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
         return WeightsMapper(
+            orig_to_new_renamings=[
+                *self.orig_to_new_renamings,
+                *other.orig_to_new_renamings,
+            ],
             orig_to_new_regex={**self.orig_to_new_regex, **other.orig_to_new_regex},
             orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
             orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
@@ -59,6 +64,9 @@ class WeightsMapper:
         )
 
     def _map_name(self, key: str) -> str | None:
+        for renaming in self.orig_to_new_renamings:
+            key, _ = renaming.rename_source_key(key)
+
         for pattern, new_key in self.orig_to_new_regex.items():
             if pattern.search(key):
                 if new_key is None:

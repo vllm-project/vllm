@@ -43,6 +43,7 @@ use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::{build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora};
+use crate::config::{ApiServerOptions, CorsConfig};
 use crate::state::AppState;
 
 fn request_output(
@@ -148,6 +149,14 @@ fn assert_adapter_a_lora_request(request: &EngineCoreRequest) {
 
 fn sse_data_payloads(text: &str) -> Vec<&str> {
     text.lines().filter_map(|line| line.strip_prefix("data: ")).collect()
+}
+
+fn sse_json_payloads(text: &str) -> Vec<serde_json::Value> {
+    sse_data_payloads(text)
+        .into_iter()
+        .filter(|payload| *payload != "[DONE]")
+        .map(|payload| serde_json::from_str(payload).expect("sse json payload"))
+        .collect()
 }
 
 type TestFuture<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
@@ -787,8 +796,12 @@ async fn test_app_with_request_id_headers() -> (axum::Router, MockEngineTask) {
     )
     .await;
     let app = build_router(Arc::new(
-        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
-            .with_request_id_headers(true),
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_server_options(
+            ApiServerOptions {
+                enable_request_id_headers: true,
+                ..Default::default()
+            },
+        ),
     ));
     (app, engine_task)
 }
@@ -804,6 +817,35 @@ async fn test_app_with_api_keys(api_keys: Vec<String>) -> (axum::Router, MockEng
         AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat).with_api_keys(api_keys),
     ));
     (app, engine_task)
+}
+
+async fn test_app_with_cors_and_keys(
+    cors: CorsConfig,
+    api_keys: Vec<String>,
+) -> (axum::Router, MockEngineTask) {
+    let (chat, engine_task) = test_models_with_engine_outputs_and_backend(
+        b"engine-openai-cors",
+        default_stream_output_specs(),
+        Arc::new(FakeChatBackend::new()),
+    )
+    .await;
+    let app = build_router(Arc::new(
+        AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat)
+            .with_cors(cors)
+            .with_api_keys(api_keys),
+    ));
+    (app, engine_task)
+}
+
+async fn test_app_with_cors(cors: CorsConfig) -> (axum::Router, MockEngineTask) {
+    test_app_with_cors_and_keys(cors, vec![]).await
+}
+
+fn header_value<'a>(response: &'a axum::response::Response, name: &str) -> Option<&'a str> {
+    response
+        .headers()
+        .get(name)
+        .map(|value| value.to_str().expect("header is valid utf-8"))
 }
 
 async fn test_health_app_with_engine_script<F>(
@@ -1197,6 +1239,273 @@ async fn api_key_auth_allows_unguarded_route_without_token() {
         .expect("call app");
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_default_simple_request_allows_any_origin() {
+    let (mut app, _engine_task) = test_app_with_cors(CorsConfig::default()).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("origin", "http://example.com")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        header_value(&response, "access-control-allow-origin"),
+        Some("*")
+    );
+    // Wildcard origins without credentials emit no `Vary` (Starlette parity).
+    assert_eq!(header_value(&response, "vary"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_default_preflight_returns_explicit_methods_and_max_age() {
+    let (mut app, _engine_task) = test_app_with_cors(CorsConfig::default()).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/chat/completions")
+                .header("origin", "http://example.com")
+                .header("access-control-request-method", "POST")
+                .header("access-control-request-headers", "content-type")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    // `*` methods expand to the explicit method list, matching Starlette
+    // (never the literal `*`).
+    assert_eq!(
+        header_value(&response, "access-control-allow-methods"),
+        Some("DELETE,GET,HEAD,OPTIONS,PATCH,POST,PUT")
+    );
+    assert_eq!(
+        header_value(&response, "access-control-max-age"),
+        Some("600")
+    );
+    // `*` headers mirror the requested headers.
+    assert_eq!(
+        header_value(&response, "access-control-allow-headers"),
+        Some("content-type")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_no_origin_request_has_no_cors_headers() {
+    let (mut app, _engine_task) = test_app_with_cors(CorsConfig::default()).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/health")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(header_value(&response, "access-control-allow-origin"), None);
+    assert_eq!(header_value(&response, "vary"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_explicit_origin_allowed_reflects_origin_with_vary() {
+    let cors = CorsConfig {
+        allow_origins: vec!["http://allowed.com".to_string()],
+        ..CorsConfig::default()
+    };
+    let (mut app, _engine_task) = test_app_with_cors(cors).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("origin", "http://allowed.com")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(
+        header_value(&response, "access-control-allow-origin"),
+        Some("http://allowed.com")
+    );
+    assert_eq!(header_value(&response, "vary"), Some("origin"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_explicit_origin_disallowed_omits_allow_origin() {
+    let cors = CorsConfig {
+        allow_origins: vec!["http://allowed.com".to_string()],
+        ..CorsConfig::default()
+    };
+    let (mut app, _engine_task) = test_app_with_cors(cors).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("origin", "http://evil.com")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(header_value(&response, "access-control-allow-origin"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_wildcard_with_credentials_reflects_origin_without_panic() {
+    let cors = CorsConfig {
+        allow_credentials: true,
+        ..CorsConfig::default()
+    };
+    let (mut app, _engine_task) = test_app_with_cors(cors).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("origin", "http://example.com")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    // `*` + credentials reflects the request origin instead of `*` (Starlette
+    // parity, and avoids tower-http's wildcard+credentials panic).
+    assert_eq!(
+        header_value(&response, "access-control-allow-origin"),
+        Some("http://example.com")
+    );
+    assert_eq!(
+        header_value(&response, "access-control-allow-credentials"),
+        Some("true")
+    );
+    assert_eq!(header_value(&response, "vary"), Some("origin"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_unauthorized_response_has_no_cors_headers() {
+    let (mut app, _engine_task) =
+        test_app_with_cors_and_keys(CorsConfig::default(), vec!["secret".to_string()]).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("GET")
+                .uri("/v1/models")
+                .header("origin", "http://example.com")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    // Auth sits outside CORS, so a 401 carries no CORS headers.
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(header_value(&response, "access-control-allow-origin"), None);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_preflight_bypasses_auth_and_returns_cors_headers() {
+    let (mut app, _engine_task) =
+        test_app_with_cors_and_keys(CorsConfig::default(), vec!["secret".to_string()]).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/chat/completions")
+                .header("origin", "http://example.com")
+                .header("access-control-request-method", "POST")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        header_value(&response, "access-control-allow-origin"),
+        Some("*")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_explicit_methods_preflight_returns_that_list() {
+    let cors = CorsConfig {
+        allow_methods: vec!["GET".to_string(), "POST".to_string()],
+        ..CorsConfig::default()
+    };
+    let (mut app, _engine_task) = test_app_with_cors(cors).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/chat/completions")
+                .header("origin", "http://example.com")
+                .header("access-control-request-method", "POST")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    // Explicit methods are emitted verbatim, not expanded and not `*`.
+    assert_eq!(
+        header_value(&response, "access-control-allow-methods"),
+        Some("GET,POST")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn cors_explicit_headers_union_safelisted_headers() {
+    let cors = CorsConfig {
+        allow_headers: vec!["X-Custom".to_string()],
+        ..CorsConfig::default()
+    };
+    let (mut app, _engine_task) = test_app_with_cors(cors).await;
+    let response = app
+        .call(
+            Request::builder()
+                .method("OPTIONS")
+                .uri("/v1/chat/completions")
+                .header("origin", "http://example.com")
+                .header("access-control-request-method", "POST")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    // Explicit headers are unioned with the safelisted set, lowercased + sorted.
+    assert_eq!(
+        header_value(&response, "access-control-allow-headers"),
+        Some("accept,accept-language,content-language,content-type,x-custom")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1662,6 +1971,85 @@ async fn http_metrics_record_list_models_requests() {
         ),
         1.0
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn request_metrics_use_served_model_name_label() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-openai-served-model-metrics".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                send_outputs(
+                    push,
+                    engine_outputs_for_request(&request.request_id, default_stream_output_specs()),
+                )
+                .await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("served-model-metrics")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec![
+            "served-model-metrics".to_string(),
+            "served-model-alias".to_string(),
+        ],
+        chat,
+    )));
+    let before = METRICS.render().unwrap();
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "served-model-alias",
+                        "stream": false,
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+
+    let after = METRICS.render().unwrap();
+    assert_eq!(
+        metric_delta(
+            &before,
+            &after,
+            "vllm:request_success_total",
+            Some("model_name=\"served-model-metrics\",engine=\"0\",finished_reason=\"stop\""),
+        ),
+        1.0
+    );
+    engine_task.await.expect("mock engine task");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2334,6 +2722,60 @@ async fn include_usage_adds_final_usage_chunk_before_done() {
     assert_eq!(usage_chunk["usage"]["prompt_tokens"], 22);
     assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
     assert_eq!(usage_chunk["usage"]["total_tokens"], 25);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stream_continuous_usage_stats_adds_usage_to_chat_chunks() {
+    let (app, engine_task) = test_app_with_stream_output_specs(default_stream_output_specs()).await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "stream": true,
+                        "stream_options": {
+                            "include_usage": true,
+                            "continuous_usage_stats": true
+                        },
+                        "messages": [{"role": "user", "content": "hello"}]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_json_payloads(&text);
+
+    assert!(
+        payloads.iter().all(|payload| payload.get("usage").is_some()),
+        "{text}"
+    );
+    assert!(
+        payloads.iter().any(|payload| {
+            payload["choices"].as_array().is_some_and(|choices| !choices.is_empty())
+                && payload["usage"]["completion_tokens"] == json!(1)
+        }),
+        "{text}"
+    );
+    let usage_chunk = payloads
+        .iter()
+        .find(|payload| payload["choices"] == json!([]))
+        .expect("final usage chunk");
+    assert_eq!(usage_chunk["usage"]["prompt_tokens"], 22);
+    assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3431,6 +3873,59 @@ async fn completions_happy_path_returns_sse_stream() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn completions_stream_continuous_usage_stats_adds_usage_to_chunks() {
+    let (app, engine_task) = test_app_with_stream_output_specs(default_stream_output_specs()).await;
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "prompt": "hello",
+                        "stream": true,
+                        "stream_options": {
+                            "include_usage": true,
+                            "continuous_usage_stats": true
+                        }
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let text = String::from_utf8(body.to_vec()).expect("utf8 body");
+    let payloads = sse_json_payloads(&text);
+
+    assert!(
+        payloads.iter().all(|payload| payload.get("usage").is_some()),
+        "{text}"
+    );
+    assert!(
+        payloads.iter().any(|payload| {
+            payload["choices"].as_array().is_some_and(|choices| !choices.is_empty())
+                && payload["usage"]["completion_tokens"] == json!(1)
+        }),
+        "{text}"
+    );
+    let usage_chunk = payloads
+        .iter()
+        .find(|payload| payload["choices"] == json!([]))
+        .expect("final usage chunk");
+    assert_eq!(usage_chunk["usage"]["completion_tokens"], 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn completions_echo_stream_emits_separate_prompt_chunk() {
     let (app, engine_task) = test_app_with_engine_handle().await;
     let response = app
@@ -4428,6 +4923,111 @@ async fn is_paused_route_returns_json_payload() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn abort_requests_route_returns_ok_for_well_formed_body() {
+    let (app, engine_task) =
+        test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/abort_requests")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"request_ids":["req-1","req-2"]}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn abort_requests_route_rejects_missing_request_ids() {
+    let (app, engine_task) =
+        test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/abort_requests")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    assert_eq!(json["error"]["param"], "request_ids");
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn abort_requests_route_rejects_malformed_json() {
+    let (app, engine_task) =
+        test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/abort_requests")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"request_ids": "#))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json["error"]["type"], "invalid_request_error");
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn abort_requests_route_accepts_empty_id_list() {
+    let (app, engine_task) =
+        test_admin_app_with_engine_script(|_dealer, _push| boxed_test_future(async move {})).await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/abort_requests")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"request_ids":[]}"#))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.abort_and_join().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
     let (chat, engine_task) = test_chat_with_engine_handle().await;
     let app = build_router_with_dev_mode(
@@ -4446,6 +5046,7 @@ async fn admin_routes_are_hidden_when_dev_mode_is_disabled() {
         ("POST", "/pause"),
         ("POST", "/resume"),
         ("POST", "/collective_rpc"),
+        ("POST", "/abort_requests"),
         ("POST", "/reset_prefix_cache"),
         ("POST", "/reset_mm_cache"),
         ("POST", "/reset_encoder_cache"),
