@@ -513,8 +513,6 @@ class EngineCore:
         # need to update draft token ids here.
         if self.check_for_draft_tokens and not self.async_scheduling and model_executed:
             draft_token_ids = self.model_executor.take_draft_token_ids()
-            with open("/home/log.txt", "a") as f:
-                f.write(f"[NgramSpeculator.propose] draft_token_ids={draft_token_ids}\n")
             if draft_token_ids is not None:
                 self.scheduler.update_draft_token_ids(draft_token_ids)
 
