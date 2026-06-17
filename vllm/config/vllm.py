@@ -70,6 +70,7 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
         "Qwen3ForCausalLM",
         "DeepseekV2ForCausalLM",
         "Qwen2MoeForCausalLM",
+        "GraniteMoeForCausalLM",
         "LlamaForCausalLM",
         "MistralForCausalLM",
     }
@@ -128,13 +129,7 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if TP > 1, PP == 1, Hopper/Blackwell, and flashinfer installed.
-
-    Gated off for PP > 1: the fused op's GPU-side peer-signal spin-wait
-    assumes byte-identical kernel launches across TP peers, but concurrent
-    independent warmup of multiple TP subgroups lets ranks pick divergent
-    FlashInfer launch configs and deadlock.
-    """
+    """Enable if TP > 1 and Hopper/Blackwell and flashinfer installed."""
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
@@ -147,7 +142,6 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 
     return (
         cfg.parallel_config.tensor_parallel_size > 1
-        and cfg.parallel_config.pipeline_parallel_size == 1
         and current_platform.is_cuda()
         and has_flashinfer()
         and (
@@ -966,15 +960,6 @@ class VllmConfig:
                         "Async scheduling is not compatible with "
                         "disable_padded_drafter_batch=True."
                     )
-            if (
-                self.model_config is not None
-                and self.model_config.enable_prompt_embeds
-                and self.model_config.is_multimodal_model
-            ):
-                raise ValueError(
-                    "Async scheduling is not yet supported with prompt embeds "
-                    "for multimodal models."
-                )
             if not executor_supports_async_sched:
                 raise ValueError(
                     f"`{executor_backend}` does not support async scheduling yet."
@@ -1016,16 +1001,6 @@ class VllmConfig:
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend. ",
                     executor_backend,
-                )
-                self.scheduler_config.async_scheduling = False
-            elif (
-                self.model_config is not None
-                and self.model_config.enable_prompt_embeds
-                and self.model_config.is_multimodal_model
-            ):
-                logger.warning_once(
-                    "Async scheduling is not yet supported with prompt embeds "
-                    "for multimodal models and will be disabled."
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -2043,6 +2018,14 @@ class VllmConfig:
             and self.parallel_config.tensor_parallel_size > 1
         ):
             unsupported.append("sequence parallelism")
+
+        # V2 does not implement the external_launcher (torchrun) PP-output
+        # broadcast that V1 uses to keep all ranks in sync (broadcast_pp_output).
+        if (
+            self.parallel_config.distributed_executor_backend == "external_launcher"
+            and self.parallel_config.pipeline_parallel_size > 1
+        ):
+            unsupported.append("pipeline parallelism with external_launcher")
 
         if speculative_config is not None:
             # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet

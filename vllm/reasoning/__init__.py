@@ -101,8 +101,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "MistralReasoningParser",
     ),
     "nemotron_v3": (
-        "nemotron_v3_reasoning_parser",
-        "NemotronV3ReasoningParser",
+        "nemotron_v3_engine_reasoning_parser",
+        "NemotronV3ParserReasoningAdapter",
     ),
     "olmo3": (
         "olmo3_reasoning_parser",
