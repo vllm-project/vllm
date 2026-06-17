@@ -121,6 +121,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 block_table=block_table[:num_decodes],
                 max_seq_len=common_attn_metadata.max_seq_len,
                 decode_query_len=decode_query_len,
+                max_decode_query_len=self.max_decode_query_len,
             )
 
         prefill: MiniMaxM3IndexerMSAPrefillMetadata | None = None
@@ -211,8 +212,8 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
                 self.init_blocks,
                 self.local_blocks,
                 self.num_kv_heads,
-                self.scale,
                 d.decode_query_len,
+                d.max_decode_query_len,
                 out=buf,
             )
 
