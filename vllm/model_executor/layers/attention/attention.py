@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn as nn
@@ -169,12 +169,13 @@ def _init_kv_cache_quant(
             # declares a kv_cache_scheme; weight-only ones declare none and must
             # keep fp8_e5m2, the only fp8 KV dtype usable on Ampere.
             from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+                CompressedTensorsConfig,
                 CompressedTensorsKVCacheMethod,
             )
 
-            if (
-                not isinstance(quant_method, CompressedTensorsKVCacheMethod)
-                or quant_method.quant_config.kv_cache_scheme is not None
+            if not isinstance(quant_method, CompressedTensorsKVCacheMethod) or (
+                cast(CompressedTensorsConfig, quant_method.quant_config).kv_cache_scheme
+                is not None
             ):
                 raise ValueError(
                     "fp8_e5m2 kv-cache is not supported with fp8 checkpoints."
