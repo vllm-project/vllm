@@ -14,7 +14,10 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import (
+    METRIC_CPU_ALLOCATION_SIZE,
+    CPULoadStoreSpec,
+)
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 
@@ -185,6 +188,22 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     stats = manager.get_stats()
     assert stats is not None
     assert stats.reduce()[STORES_SKIPPED] == 0
+
+
+def test_cpu_manager_reports_allocation_size_histogram():
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+
+    stats = manager.get_stats()
+
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{METRIC_CPU_ALLOCATION_SIZE}_count"] == 2
+    assert reduced[f"{METRIC_CPU_ALLOCATION_SIZE}_sum"] == 3
+    assert manager.get_stats() is None
 
 
 def test_cpu_manager():

@@ -18,7 +18,11 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
 )
-from vllm.v1.kv_offload.cpu.common import METRIC_STORES_SKIPPED, CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import (
+    METRIC_CPU_ALLOCATION_SIZE,
+    METRIC_STORES_SKIPPED,
+    CPULoadStoreSpec,
+)
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
@@ -62,6 +66,7 @@ class CPUOffloadingManager(OffloadingManager):
         self.store_threshold: int = store_threshold
         self.max_tracker_size: int = max_tracker_size
         self.stores_skipped_in_current_batch: int = 0
+        self.allocation_sizes_in_current_batch: list[int] = []
 
         # Number of block references. It is ordered so can evict the LRU entry in O(1).
         self.counts: OrderedDict[OffloadKey, int] | None = (
@@ -165,6 +170,7 @@ class CPUOffloadingManager(OffloadingManager):
         keys_to_store = [k for k in keys if self._policy.get(k) is None]
 
         if not keys_to_store:
+            self.allocation_sizes_in_current_batch.append(0)
             return PrepareStoreOutput(
                 keys_to_store=[],
                 store_spec=self._get_load_store_spec([], []),
@@ -195,6 +201,7 @@ class CPUOffloadingManager(OffloadingManager):
             )
 
         blocks = self._allocate_blocks(keys_to_store)
+        self.allocation_sizes_in_current_batch.append(len(keys_to_store))
         assert len(blocks) == len(keys_to_store), (
             "Block pool did not allocate the expected number of blocks"
         )
@@ -261,13 +268,16 @@ class CPUOffloadingManager(OffloadingManager):
             self.events.clear()
 
     def get_stats(self) -> OffloadingConnectorStats | None:
-        if self.store_threshold < 2:
-            return None
-
         stats = OffloadingConnectorStats()
-        stats.increase_counter(
-            METRIC_STORES_SKIPPED,
-            self.stores_skipped_in_current_batch,
-        )
-        self.stores_skipped_in_current_batch = 0
-        return stats
+        for allocation_size in self.allocation_sizes_in_current_batch:
+            stats.observe_histogram(METRIC_CPU_ALLOCATION_SIZE, allocation_size)
+        self.allocation_sizes_in_current_batch.clear()
+
+        if self.store_threshold >= 2:
+            stats.increase_counter(
+                METRIC_STORES_SKIPPED,
+                self.stores_skipped_in_current_batch,
+            )
+            self.stores_skipped_in_current_batch = 0
+
+        return None if stats.is_empty() else stats

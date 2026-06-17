@@ -31,13 +31,19 @@ Example configuration:
 }
 """
 
+from typing import Any
+
 import torch
 from typing_extensions import override
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.kv_offload.base import CanonicalKVCaches, OffloadingManager
+from vllm.v1.kv_offload.base import (
+    CanonicalKVCaches,
+    OffloadingManager,
+    OffloadingMetricMetadata,
+)
 from vllm.v1.kv_offload.cpu.gpu_worker import CpuGpuOffloadingHandlers
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
@@ -64,6 +70,25 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
     """
 
     BLOCK_SIZE_ALIGNMENT = SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT
+
+    @classmethod
+    def build_metric_definitions(
+        cls, extra_config: dict[str, Any]
+    ) -> dict[str, OffloadingMetricMetadata]:
+        metrics = super().build_metric_definitions(extra_config)
+        secondary_tier_configs = extra_config.get("secondary_tiers", [])
+        if not isinstance(secondary_tier_configs, list):
+            return metrics
+
+        for tier_config in secondary_tier_configs:
+            if not isinstance(tier_config, dict):
+                continue
+            tier_type = tier_config.get("type")
+            if not tier_type:
+                continue
+            tier_cls = SecondaryTierFactory.get_tier_class(tier_type)
+            metrics.update(tier_cls.build_metric_definitions(tier_config))
+        return metrics
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, kv_cache_config)

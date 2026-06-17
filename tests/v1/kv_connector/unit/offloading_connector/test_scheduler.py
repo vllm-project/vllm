@@ -12,6 +12,9 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    _ConnectorMetricName,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
 )
@@ -30,6 +33,42 @@ from vllm.v1.kv_offload.base import (
     get_offload_block_hash,
 )
 from vllm.v1.request import RequestStatus
+
+
+def test_scheduler_reports_allocation_failure(request_runner):
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    runner.new_request(token_ids=[0] * 4)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    stats = runner.connector_scheduler.get_stats()
+    assert stats is not None
+    assert stats.reduce()[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
+
+
+def test_scheduler_reports_lookup_delay_on_finish(request_runner):
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    runner.new_request(token_ids=[1] * 4)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    stats = runner.connector_scheduler.get_stats()
+    assert stats is not None
+    reduced = stats.reduce()
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_DELAY}_count"] == 1
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_DELAY}_sum"] >= 0
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])

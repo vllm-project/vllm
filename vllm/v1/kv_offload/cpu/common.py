@@ -5,6 +5,7 @@ from typing_extensions import override
 from vllm.v1.kv_offload.base import BlockIDsLoadStoreSpec
 
 METRIC_STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
+METRIC_CPU_ALLOCATION_SIZE = "vllm:kv_offload_cpu_allocation_size"
 
 
 class CPULoadStoreSpec(BlockIDsLoadStoreSpec):

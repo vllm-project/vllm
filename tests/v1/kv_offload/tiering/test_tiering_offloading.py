@@ -17,21 +17,33 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+)
 from vllm.v1.kv_offload.base import (
+    OffloadingCounterMetadata,
     OffloadKey,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.tiering.base import (
+    JobMetadata,
+    JobResult,
+    SecondaryTierManager,
+)
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
+from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
 )
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
+_TEST_TIER_METRIC = "vllm:kv_offload_test_tier_bytes"
 
 
 def _mock_mmap_region(num_blocks: int, row_bytes: int = 16):
@@ -61,6 +73,84 @@ def count_hits(manager, keys: list[OffloadKey]) -> int | None:
             break
         count += 1
     return count
+
+
+class MetricsSecondaryTierManager(SecondaryTierManager):
+    """Test-only secondary tier that declares and emits one labeled metric."""
+
+    @classmethod
+    def build_metric_definitions(cls, extra_config):
+        return {
+            _TEST_TIER_METRIC: OffloadingCounterMetadata(
+                documentation="Number of bytes served by the test tier.",
+                labelnames=("tier",),
+            )
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.stats: OffloadingConnectorStats | None = None
+
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+        return False
+
+    def submit_store(self, job_metadata: JobMetadata) -> None:
+        return
+
+    def submit_load(self, job_metadata: JobMetadata) -> None:
+        return
+
+    def get_finished_jobs(self) -> Iterable[JobResult]:
+        return ()
+
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
+
+    def get_stats(self) -> OffloadingConnectorStats | None:
+        stats = self.stats
+        self.stats = None
+        return stats
+
+
+def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
+    monkeypatch.setitem(
+        SecondaryTierFactory._registry,
+        "test_metrics",
+        lambda: MetricsSecondaryTierManager,
+    )
+
+    metrics = TieringOffloadingSpec.build_metric_definitions(
+        {"secondary_tiers": [{"type": "test_metrics"}]}
+    )
+
+    metadata = metrics[_TEST_TIER_METRIC]
+    assert metadata.documentation == "Number of bytes served by the test tier."
+    assert metadata.labelnames == ("tier",)
+
+
+def test_tiering_manager_aggregates_secondary_stats():
+    mock_region = _mock_mmap_region(5)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_blocks=5, mmap_region=mock_region
+    )
+    secondary_tier = MetricsSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="test_metrics",
+    )
+    secondary_stats = OffloadingConnectorStats()
+    secondary_stats.increase_counter(_TEST_TIER_METRIC, 7, ("test_metrics",))
+    secondary_tier.stats = secondary_stats
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=[secondary_tier],
+    )
+
+    stats = manager.get_stats()
+
+    assert stats is not None
+    assert stats.data["data"][_TEST_TIER_METRIC][("test_metrics",)] == 7
+    assert manager.get_stats() is None
 
 
 class TestExampleSecondaryTierManager:
