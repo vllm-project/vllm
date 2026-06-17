@@ -87,7 +87,6 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
                     request_obj=request,
                     response=None,
                     received_at=received_at,
-                    stream=bool(getattr(request, "stream", False)),
                     error=generator.model_dump(),
                 )
             )
@@ -103,7 +102,6 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
                     request_obj=request,
                     response=generator.model_dump(),
                     received_at=received_at,
-                    stream=False,
                 )
             )
         return JSONResponse(content=generator.model_dump())

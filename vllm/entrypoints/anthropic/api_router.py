@@ -66,7 +66,7 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
     received_at = time.time()
     request_log_hub = getattr(raw_request.app.state, "request_log_hub", None)
 
-    def _log_record(*, response, stream, error=None):
+    def _log_record(*, response, error=None):
         if request_log_hub is None:
             return
         request_log_hub.log(
@@ -76,7 +76,6 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
                 request_obj=request,
                 response=response,
                 received_at=received_at,
-                stream=stream,
                 error=error,
             )
         )
@@ -87,11 +86,7 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         error = base_server.create_error_response(
             message="The model does not support Messages API"
         )
-        _log_record(
-            response=None,
-            stream=bool(request.stream),
-            error=error.model_dump(),
-        )
+        _log_record(response=None, error=error.model_dump())
         return translate_error_response(error)
 
     try:
@@ -104,28 +99,20 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
                 message=str(e),
             )
         )
-        _log_record(
-            response=None,
-            stream=bool(request.stream),
-            error=err.model_dump(),
-        )
+        _log_record(response=None, error=err.model_dump())
         return JSONResponse(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
             content=err.model_dump(),
         )
 
     if isinstance(generator, ErrorResponse):
-        _log_record(
-            response=None,
-            stream=bool(request.stream),
-            error=generator.model_dump(),
-        )
+        _log_record(response=None, error=generator.model_dump())
         return translate_error_response(generator)
 
     elif isinstance(generator, AnthropicMessagesResponse):
         resp = generator.model_dump(exclude_none=True)
         logger.debug("Anthropic Messages Response: %s", resp)
-        _log_record(response=resp, stream=False)
+        _log_record(response=resp)
         return JSONResponse(content=resp)
 
     if request_log_hub is not None:

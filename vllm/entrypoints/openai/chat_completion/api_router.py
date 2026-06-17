@@ -76,7 +76,6 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
                     request_obj=request,
                     response=None,
                     received_at=received_at,
-                    stream=bool(request.stream),
                     error=generator.model_dump(),
                 )
             )
@@ -93,7 +92,6 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
                     request_obj=request,
                     response=generator.model_dump(),
                     received_at=received_at,
-                    stream=False,
                 )
             )
         return JSONResponse(

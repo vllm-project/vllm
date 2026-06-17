@@ -177,20 +177,26 @@ def make_record(
     request_obj,
     response: Any,
     received_at: float,
-    stream: bool,
     error: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Assemble one jsonl record ready to be ``hub.log()``-ed."""
+    """Assemble one jsonl record ready to be ``hub.log()``-ed.
+
+    ``request_id`` prefers the inbound ``X-Request-Id`` header so that
+    records correlate 1:1 with the caller's own id. If the header is
+    absent we fall back to the vLLM-side id stashed on
+    ``raw_request.state.request_metadata.request_id`` (e.g.
+    ``chatcmpl-…`` / ``cmpl-…``), which is auto-generated per request.
+    """
     request_id: str | None = None
     rendered_prompts: list[str | None] | None = None
-    if raw_request is not None:
-        meta = getattr(raw_request.state, "request_metadata", None)
-        if meta is not None:
-            request_id = getattr(meta, "request_id", None)
-        rendered_prompts = getattr(raw_request.state, "rendered_prompts", None)
-
     client_info: dict[str, Any] | None = None
     if raw_request is not None:
+        request_id = raw_request.headers.get("X-Request-Id")
+        if not request_id:
+            meta = getattr(raw_request.state, "request_metadata", None)
+            if meta is not None:
+                request_id = getattr(meta, "request_id", None)
+        rendered_prompts = getattr(raw_request.state, "rendered_prompts", None)
         client = raw_request.client
         ua = raw_request.headers.get("user-agent")
         if client is not None or ua is not None:
@@ -207,7 +213,6 @@ def make_record(
     return {
         "request_id": request_id,
         "endpoint": endpoint,
-        "stream": stream,
         "received_at": received_at,
         "completed_at": time.time(),
         "client": client_info,
@@ -248,7 +253,6 @@ async def stream_logging_wrapper(
                     request_obj=request_obj,
                     response=response,
                     received_at=received_at,
-                    stream=True,
                 )
             )
         except Exception:
