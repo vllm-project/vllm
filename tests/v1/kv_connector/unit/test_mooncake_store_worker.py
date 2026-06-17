@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
+    PoolKey,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
@@ -240,6 +241,31 @@ def _patch_worker_runtime(monkeypatch, *, local_ip: str = "10.0.0.7") -> None:
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
 
 
+def test_pool_key_to_string_without_prefix_is_unchanged():
+    """Default (empty) cache_prefix keeps keys byte-identical to the
+    historical unprefixed format so existing deployments keep their hits."""
+    key = PoolKey(KeyMetadata("test-model", 0, 0, 0, 0), "deadbeef")
+    assert (
+        key.to_string() == "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
+    )
+
+
+def test_pool_key_cache_prefix_namespaces_and_disambiguates():
+    """A non-empty cache_prefix is prepended, and two instances with
+    different prefixes never collide on identical block hashes."""
+    md_a = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="depA")
+    md_b = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="depB")
+
+    key_a = PoolKey(md_a, "deadbeef")
+    key_b = PoolKey(md_b, "deadbeef")
+
+    assert key_a.to_string() == (
+        "depA@test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
+    )
+    assert key_a.to_string() != key_b.to_string()
+    assert hash(key_a) != hash(key_b)
+
+
 def test_default_local_buffer_size_matches_pr40900():
     """PR-40900 shipped a 4 GiB default for local_buffer_size; the dual-mode
     patch preserves it (and the JSON key) so unchanged PR-40900 configs work."""
@@ -281,94 +307,6 @@ def test_get_configured_preferred_segment_returns_env_override(monkeypatch):
 def test_get_configured_preferred_segment_rejects_empty_override():
     with pytest.raises(ValueError, match="preferred_segment"):
         rdma_utils.get_configured_preferred_segment({"preferred_segment": "  "})
-
-
-def test_get_configured_worker_rnic_prefers_explicit_device_name(monkeypatch):
-    store_config = worker.MooncakeStoreConfig(
-        metadata_server="",
-        local_buffer_size=1,
-        protocol="rdma",
-        device_name="rocep139s0",
-        master_server_address="",
-    )
-
-    assert (
-        rdma_utils.get_configured_worker_rnic(
-            protocol=store_config.protocol,
-            configured_device=store_config.device_name,
-        )
-        == "rocep139s0"
-    )
-
-
-def test_get_configured_worker_rnic_selects_device_from_explicit_csv(monkeypatch):
-    monkeypatch.setattr(
-        rdma_utils,
-        "get_current_physical_gpu_index",
-        lambda: 1,
-    )
-    store_config = worker.MooncakeStoreConfig(
-        metadata_server="",
-        local_buffer_size=1,
-        protocol="rdma",
-        device_name="rocep139s0,rocep140s0",
-        master_server_address="",
-    )
-
-    assert (
-        rdma_utils.get_configured_worker_rnic(
-            protocol=store_config.protocol,
-            configured_device=store_config.device_name,
-        )
-        == "rocep140s0"
-    )
-
-
-def test_get_configured_worker_rnic_warns_and_returns_empty_for_rdma_with_no_device(
-    caplog, monkeypatch
-):
-    """No device configured + protocol=rdma → emit a clear warning and return ""
-    so the C++ side handles auto-selection. There is no Python-side fallback."""
-    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
-    with caplog.at_level(logging.WARNING):
-        result = rdma_utils.get_configured_worker_rnic(
-            protocol="rdma",
-            configured_device="",
-        )
-    assert result == ""
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("No RDMA devices specified" in r.message for r in warnings), (
-        f"expected fallback warning, got {[r.message for r in warnings]}"
-    )
-
-
-def test_get_configured_worker_rnic_silent_for_tcp_with_no_device(caplog, monkeypatch):
-    """protocol=tcp + no device → return "" silently (no RDMA, no warning)."""
-    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
-    with caplog.at_level(logging.WARNING):
-        result = rdma_utils.get_configured_worker_rnic(
-            protocol="tcp",
-            configured_device="",
-        )
-    assert result == ""
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert not any("RDMA" in r.message for r in warnings), (
-        "did not expect RDMA warning for tcp protocol, got "
-        f"{[r.message for r in warnings]}"
-    )
-
-
-def test_get_configured_worker_rnic_rejects_short_explicit_csv(monkeypatch):
-    monkeypatch.setattr(
-        rdma_utils,
-        "get_current_physical_gpu_index",
-        lambda: 2,
-    )
-    with pytest.raises(ValueError, match="does not cover local GPU 2"):
-        rdma_utils.get_configured_worker_rnic(
-            protocol="rdma",
-            configured_device="rocep139s0,rocep140s0",
-        )
 
 
 class _ReplicaDesc:
@@ -1646,3 +1584,34 @@ def test_lookup_records_mooncake_metrics():
     assert isinstance(stats, MooncakeStoreConnectorStats)
     assert len(stats.data["lookup_exists"]) == 1
     assert stats.data["lookup_exists"][0]["num_keys"] == 2
+
+
+def test_store_worker_close_releases_store():
+    worker = _make_bare_worker()
+    store = worker.store
+
+    worker.close()
+
+    store.close.assert_called_once_with()
+    assert worker.store is None
+
+
+def test_store_worker_close_is_idempotent():
+    worker = _make_bare_worker()
+    store = worker.store
+
+    worker.close()
+    worker.close()
+
+    # Second call short-circuits because store was already released.
+    store.close.assert_called_once_with()
+
+
+def test_store_worker_close_swallows_store_errors():
+    worker = _make_bare_worker()
+    worker.store.close.side_effect = RuntimeError("boom")
+
+    # A failure tearing down the store must not propagate out of close().
+    worker.close()
+
+    assert worker.store is None

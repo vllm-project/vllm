@@ -153,6 +153,14 @@ class SecondaryTierManager(ABC):
         """
         pass
 
+    def has_pending_work(self) -> bool:
+        """Whether this tier needs the engine to keep stepping.
+
+        While True, on_schedule_end() and get_finished_jobs() continue
+        to be called even when no requests are scheduled.
+        """
+        return False
+
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Mark blocks as recently used for eviction policy.
@@ -192,6 +200,23 @@ class SecondaryTierManager(ABC):
         deferred work submission.
         """
         return
+
+    @abstractmethod
+    def drain_jobs(self) -> None:
+        """Block until every submitted load/store job has completed or failed.
+
+        After this returns, no tier I/O is touching the primary memoryview,
+        and every submitted job's result is available from `get_finished_jobs()`
+        (yielded by a prior call or queued for the next one). Used by
+        `TieringOffloadingManager.reset_cache` to release primary slots
+        without racing with in-flight transfers.
+
+        Implementations must not abort a mid-flight transfer: a partial copy
+        would corrupt either the primary memoryview or the secondary backing
+        store. Queued (not-yet-started) transfers may be cancelled, but their
+        failure result must still appear in `get_finished_jobs()`.
+        """
+        pass
 
     def shutdown(self) -> None:
         """Release resources held by this tier (threads, connections, etc.)."""
