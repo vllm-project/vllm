@@ -247,6 +247,7 @@ jobs:
       - docker
     timeout-minutes: 60
     env:
+      HOME: ${{ github.workspace }}/.ci-home
       DEFAULT_SYSTEM_ASCEND_BENCHMARK_ROOT_HELPER: /usr/local/bin/run_ascend_benchmark_root_helper.sh
       HF_HUB_DISABLE_TELEMETRY: "1"
       HF_ENDPOINT: ${{ vars.HF_ENDPOINT || 'https://hf-mirror.com' }}
@@ -930,15 +931,31 @@ jobs:
       - name: Cleanup leftover Ascend CI processes
         if: always()
         run: |
-          bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh
+          if [[ -f .github/workflows/scripts/cleanup_ascend_ci_processes.sh ]]; then
+            bash .github/workflows/scripts/cleanup_ascend_ci_processes.sh
+          else
+            echo "Skipping Ascend CI process cleanup because workflow scripts were not checked out."
+          fi
 
       - name: Release Ascend hardware lock
         if: always()
-        run: bash .github/workflows/scripts/release_ascend_hardware_lock.sh
+        run: |
+          if [[ -f .github/workflows/scripts/release_ascend_hardware_lock.sh ]]; then
+            bash .github/workflows/scripts/release_ascend_hardware_lock.sh
+          else
+            echo "Skipping Ascend hardware lock release because workflow scripts were not checked out."
+          fi
 
       - name: Build benchmark summary artifacts
         if: always()
         run: |
+          if [[ -z "${PYTHON_BIN:-}" ]]; then
+            PYTHON_BIN="$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)"
+          fi
+          if [[ -z "${PYTHON_BIN:-}" ]]; then
+            echo "Unable to build benchmark summary because no Python runtime is available." >&2
+            exit 1
+          fi
           "${PYTHON_BIN}" - <<'PY'
           import json
           import os
