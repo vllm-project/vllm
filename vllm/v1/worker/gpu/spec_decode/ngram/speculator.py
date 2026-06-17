@@ -14,10 +14,10 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
 from vllm.v1.worker.gpu.spec_decode.ngram.numba_utils import (
     batch_propose_numba,
 )
+from vllm.v1.worker.gpu.spec_decode.speculator import BaseSpeculator
 
 
 class NgramSpeculator(BaseSpeculator):
@@ -129,14 +129,10 @@ class NgramSpeculator(BaseSpeculator):
         is_profile: bool = False,
         all_token_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        import sys
-
         num_reqs = input_batch.num_reqs
 
         if dummy_run:
-            return torch.zeros(
-                num_reqs, self.k, dtype=torch.int64, device=self.device
-            )
+            return torch.zeros(num_reqs, self.k, dtype=torch.int64, device=self.device)
 
         assert all_token_ids is not None, (
             "all_token_ids is required for NgramSpeculator.propose()"
