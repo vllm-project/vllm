@@ -787,9 +787,9 @@ class VllmConfig:
         logger.warning_once(
             "Dynamic speculative decoding is not supported with data "
             "parallelism because data-parallel ranks can select different "
-            "speculative-token counts. Disabling "
-            "num_speculative_tokens_per_batch_size and falling back to static "
-            "num_speculative_tokens=%d.",
+            "speculative-token counts, causing DP divergence and deadlocks. "
+            "Disabling num_speculative_tokens_per_batch_size and falling back "
+            "to static num_speculative_tokens=%d.",
             speculative_config.num_speculative_tokens,
         )
         speculative_config.num_speculative_tokens_per_batch_size = None
