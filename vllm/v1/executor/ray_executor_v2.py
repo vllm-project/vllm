@@ -247,7 +247,8 @@ class RayExecutorV2(MultiprocExecutor):
             return {"num_gpus": num_devices}
         return {"num_gpus": 0, "resources": {device_key: num_devices}}
 
-    def _select_tcpstore_port(self) -> int:
+    @staticmethod
+    def _select_tcpstore_port(local_dp_rank: int | None, master_port: int) -> int:
         """Pick the torch.distributed TCPStore port for this engine.
 
         Co-located DP engines choosing this port with a shared random search
@@ -255,15 +256,11 @@ class RayExecutorV2(MultiprocExecutor):
         gives each a disjoint window. Non-DP engines and full windows fall
         back to a random port.
         """
-        parallel_config = self.vllm_config.parallel_config
-        local_dp_rank = parallel_config.data_parallel_rank_local
         if local_dp_rank is None:
             return get_open_port()
         # Offset past the DP master port reserved range, one window per rank.
         window = 32
-        start_port = (
-            parallel_config.data_parallel_master_port + 100 + local_dp_rank * window
-        )
+        start_port = master_port + 100 + local_dp_rank * window
         try:
             return _get_open_port(start_port=start_port, max_attempts=window)
         except RuntimeError:
@@ -318,9 +315,12 @@ class RayExecutorV2(MultiprocExecutor):
         # The TCPStore server runs on rank 0's node, so all workers
         # must be able to reach this address.
         dist_ip = bundle_assignments[0]["node_ip"]
-        distributed_init_method = get_distributed_init_method(
-            dist_ip, self._select_tcpstore_port()
+        parallel_config = self.vllm_config.parallel_config
+        port = self._select_tcpstore_port(
+            parallel_config.data_parallel_rank_local,
+            parallel_config.data_parallel_master_port,
         )
+        distributed_init_method = get_distributed_init_method(dist_ip, port)
 
         # Step 4: Create broadcast MessageQueue.
         # Workers on the driver node use shared memory; the rest use TCP.
