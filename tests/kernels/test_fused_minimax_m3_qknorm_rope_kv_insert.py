@@ -19,6 +19,8 @@ import vllm._custom_ops as ops
 
 HEAD_DIM = 128
 ROTARY_DIM = 64
+NORM_ROPE_ATOL = 1.25e-2
+NORM_ROPE_RTOL = 1e-2
 
 
 def _op_available() -> bool:
@@ -47,11 +49,15 @@ def make_cos_sin_cache(max_pos, rotary_dim, base, dtype, device):
 
 def gemma_rmsnorm(x, weight, eps):
     """x: [..., 128]; weight: [128]. Returns original dtype."""
+    return gemma_rmsnorm_float(x, weight, eps).to(x.dtype)
+
+
+def gemma_rmsnorm_float(x, weight, eps):
+    """x: [..., 128]; weight: [128]. Returns fp32."""
     xf = x.float()
     var = xf.pow(2).mean(dim=-1, keepdim=True)
     out = xf * torch.rsqrt(var + eps)
-    out = out * (1.0 + weight.float())
-    return out.to(x.dtype)
+    return out * (1.0 + weight.float())
 
 
 def apply_rope_neox_partial(x, positions, cos_sin_cache, rotary_dim):
@@ -61,6 +67,13 @@ def apply_rope_neox_partial(x, positions, cos_sin_cache, rotary_dim):
     cos_sin_cache: [max_pos, rotary_dim] (cos||sin), read as float (matches the
     kernel, which loads the bf16 cache and converts to fp32).
     """
+    return apply_rope_neox_partial_float(x, positions, cos_sin_cache, rotary_dim).to(
+        x.dtype
+    )
+
+
+def apply_rope_neox_partial_float(x, positions, cos_sin_cache, rotary_dim):
+    """NeoX-style RoPE on the leading rotary_dim dims; rest pass through as fp32."""
     half = rotary_dim // 2
     cs = cos_sin_cache[positions].float()  # [num_tokens, rotary_dim]
     cos = cs[..., :half].unsqueeze(1)  # [nt, 1, half]
@@ -71,10 +84,10 @@ def apply_rope_neox_partial(x, positions, cos_sin_cache, rotary_dim):
     x2 = rot[..., half:]
     o1 = x1 * cos - x2 * sin
     o2 = x2 * cos + x1 * sin
-    out = x.clone()
+    out = x.float().clone()
     out[..., :half] = o1
     out[..., half:rotary_dim] = o2
-    return out.to(x.dtype)
+    return out
 
 
 def norm_rope_ref(x, weight, positions, cos_sin_cache, eps):
@@ -82,6 +95,12 @@ def norm_rope_ref(x, weight, positions, cos_sin_cache, eps):
     normed = gemma_rmsnorm(x, weight, eps)
     roped = apply_rope_neox_partial(normed, positions, cos_sin_cache, ROTARY_DIM)
     return roped
+
+
+def norm_rope_ref_float(x, weight, positions, cos_sin_cache, eps):
+    """[nt, nheads, 128] -> Gemma norm + neox partial rope, kept in fp32."""
+    normed = gemma_rmsnorm_float(x, weight, eps)
+    return apply_rope_neox_partial_float(normed, positions, cos_sin_cache, ROTARY_DIM)
 
 
 # ── Test 1: dense mode (norm+rope only, no index, no insert) ─────────────────
@@ -106,7 +125,16 @@ def test_dense_norm_rope(num_tokens, num_heads, num_kv_heads):
     qkv_orig = qkv.clone()
 
     ops.fused_minimax_m3_qknorm_rope_kv_insert(
-        qkv, q_w, k_w, cos_sin, positions, num_heads, num_kv_heads, ROTARY_DIM, eps
+        qkv,
+        q_w,
+        k_w,
+        cos_sin,
+        positions,
+        num_heads,
+        num_kv_heads,
+        ROTARY_DIM,
+        eps,
+        kv_cache_dtype="auto",
     )
     q_out, k_out, v_out = qkv.split([qsz, kvsz, kvsz], dim=-1)
 
@@ -122,8 +150,8 @@ def test_dense_norm_rope(num_tokens, num_heads, num_kv_heads):
         eps,
     ).view(num_tokens, kvsz)
 
-    torch.testing.assert_close(q_out, q_ref, rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(k_out, k_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(q_out, q_ref, rtol=NORM_ROPE_RTOL, atol=NORM_ROPE_ATOL)
+    torch.testing.assert_close(k_out, k_ref, rtol=NORM_ROPE_RTOL, atol=NORM_ROPE_ATOL)
     # V is untouched.
     torch.testing.assert_close(v_out, v_in, rtol=0, atol=0)
 
@@ -133,7 +161,8 @@ def test_dense_norm_rope(num_tokens, num_heads, num_kv_heads):
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
 @pytest.mark.parametrize("block_size", [16, 64])
-def test_sparse_full(num_tokens, block_size):
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
     torch.manual_seed(1)
     device, dtype, eps = "cuda", torch.bfloat16, 1e-6
     base, max_pos = 5_000_000.0, 4096
@@ -158,12 +187,13 @@ def test_sparse_full(num_tokens, block_size):
     splits = [qsz, kvsz, kvsz, iqsz, iksz]
 
     num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    kv_cache_storage_dtype = torch.uint8 if kv_cache_dtype == "fp8" else dtype
     kv_cache = torch.zeros(
         num_blocks,
         num_kv_heads,
         block_size,
         2 * HEAD_DIM,
-        dtype=dtype,
+        dtype=kv_cache_storage_dtype,
         device=device,
     )
     index_cache = torch.zeros(
@@ -200,11 +230,12 @@ def test_sparse_full(num_tokens, block_size):
         block_size,
         q_out,
         index_q,
+        kv_cache_dtype,
     )
 
     # ── norm+rope parity. q/index_q land in their gather buffers; k/index_k are
     # rewritten in place inside qkv. ──
-    _, k_out, _, _, index_k = qkv.split(splits, dim=-1)
+    _, k_out, v_out, _, index_k = qkv.split(splits, dim=-1)
     q_in, k_in, v_in, iq_orig, ik_orig = qkv_orig.split(splits, dim=-1)
     q_ref = norm_rope_ref(
         q_in.view(num_tokens, num_heads, HEAD_DIM), q_w, positions, cos_sin, eps
@@ -227,25 +258,59 @@ def test_sparse_full(num_tokens, block_size):
         ik_orig.view(num_tokens, 1, HEAD_DIM), ik_w, positions, cos_sin, eps
     ).view(num_tokens, HEAD_DIM)
 
-    torch.testing.assert_close(q_out, q_ref, rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(k_out, k_ref, rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(index_q, iq_ref, rtol=1e-2, atol=1e-2)
-    torch.testing.assert_close(index_k, ik_ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(q_out, q_ref, rtol=NORM_ROPE_RTOL, atol=NORM_ROPE_ATOL)
+    torch.testing.assert_close(k_out, k_ref, rtol=NORM_ROPE_RTOL, atol=NORM_ROPE_ATOL)
+    torch.testing.assert_close(
+        index_q, iq_ref, rtol=NORM_ROPE_RTOL, atol=NORM_ROPE_ATOL
+    )
+    torch.testing.assert_close(
+        index_k, ik_ref, rtol=NORM_ROPE_RTOL, atol=NORM_ROPE_ATOL
+    )
 
     # ── Cache inserts. ──
     # Main cache layout is [num_blocks, num_kv_heads, block_size, 2*head_dim];
     # index cache is [nb, bs, head_dim].
-    idx_flat = index_cache.view(num_blocks * block_size, HEAD_DIM)
     k_ref_h = k_ref.view(num_tokens, num_kv_heads, HEAD_DIM)
     v_ref_h = v_in.view(num_tokens, num_kv_heads, HEAD_DIM)  # v is raw (no norm/rope)
-    for t in range(num_tokens):
-        s = slot_mapping[t].item()
-        b, pos = s // block_size, s % block_size
-        torch.testing.assert_close(
-            kv_cache[b, :, pos, :HEAD_DIM], k_ref_h[t], rtol=1e-2, atol=1e-2
+    if kv_cache_dtype == "fp8":
+        expected_kv_cache = torch.zeros_like(kv_cache)
+        expected_key_cache, expected_value_cache = expected_kv_cache.transpose(
+            1, 2
+        ).split(HEAD_DIM, dim=-1)
+        scale = torch.ones((), device=device)
+        ops.reshape_and_cache_flash(
+            norm_rope_ref_float(
+                k_in.view(num_tokens, num_kv_heads, HEAD_DIM),
+                k_w,
+                positions,
+                cos_sin,
+                eps,
+            ),
+            v_in.view(num_tokens, num_kv_heads, HEAD_DIM).float(),
+            expected_key_cache,
+            expected_value_cache,
+            slot_mapping,
+            kv_cache_dtype,
+            scale,
+            scale,
         )
-        torch.testing.assert_close(
-            kv_cache[b, :, pos, HEAD_DIM:], v_ref_h[t], rtol=0, atol=0
-        )
-        index_s = index_slot_mapping[t].item()
-        torch.testing.assert_close(idx_flat[index_s], ik_ref[t], rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(kv_cache, expected_kv_cache, rtol=0, atol=0)
+    else:
+        for t in range(num_tokens):
+            s = slot_mapping[t].item()
+            b, pos = s // block_size, s % block_size
+            torch.testing.assert_close(
+                kv_cache[b, :, pos, :HEAD_DIM],
+                k_ref_h[t],
+                rtol=NORM_ROPE_RTOL,
+                atol=NORM_ROPE_ATOL,
+            )
+            torch.testing.assert_close(
+                kv_cache[b, :, pos, HEAD_DIM:], v_ref_h[t], rtol=0, atol=0
+            )
+
+    expected_index_cache = torch.zeros_like(index_cache).view(-1, HEAD_DIM)
+    expected_index_cache[index_slot_mapping] = index_k
+    torch.testing.assert_close(
+        index_cache.view(-1, HEAD_DIM), expected_index_cache, rtol=0, atol=0
+    )
