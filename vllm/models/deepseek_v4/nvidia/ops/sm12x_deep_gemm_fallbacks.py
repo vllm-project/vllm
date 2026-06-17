@@ -251,19 +251,30 @@ def _fp8_mqa_logits_topk_triton(
     selected = out[:, :select_k]
     topk_op = _top_k_per_row_prefill_op()
     if topk_op is not None:
+        # top_k_per_row_prefill writes its output as a contiguous [M, select_k]
+        # buffer (it is given the logits strides, not the output strides). When
+        # select_k < out.shape[1] -- i.e. the compressed-KV count is below the
+        # topk width, which happens for short prompts and the early queries of
+        # long prompts -- out[:, :select_k] is non-contiguous (row stride =
+        # out.shape[1]), so writing it as contiguous silently corrupts later
+        # rows and drops their top-k (all -1). Hand the op a contiguous buffer
+        # and copy back.
+        work = selected if selected.is_contiguous() else selected.contiguous()
         topk_op(
             logits,
             cu_seqlen_ks,
             cu_seqlen_ke,
-            selected,
+            work,
             logits.shape[0],
             logits.stride(0),
             logits.stride(1),
             select_k,
         )
-        selected.add_(cu_seqlen_ks[:, None])
-        valid = (selected >= cu_seqlen_ks[:, None]) & (selected < cu_seqlen_ke[:, None])
-        selected.masked_fill_(~valid, -1)
+        work.add_(cu_seqlen_ks[:, None])
+        valid = (work >= cu_seqlen_ks[:, None]) & (work < cu_seqlen_ke[:, None])
+        work.masked_fill_(~valid, -1)
+        if work is not selected:
+            selected.copy_(work)
     else:
         values, indices = torch.topk(logits, select_k, dim=1)
         selected.copy_(indices.to(torch.int32))
