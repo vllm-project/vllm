@@ -9,6 +9,7 @@ use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 
+use crate::config::{ApiServerOptions, CorsConfig};
 use crate::lora::{LoadLoraError, LoraManager, LoraModelResolution, UnloadLoraError};
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
@@ -27,10 +28,10 @@ pub struct AppState {
     served_model_names: Vec<String>,
     /// Shared chat facade used by all requests.
     pub chat: ChatLlm,
-    /// Whether to log a summary line for each completed request.
-    pub enable_log_requests: bool,
-    /// Whether to set X-Request-Id on every HTTP response.
-    pub enable_request_id_headers: bool,
+    /// HTTP/API-server behavior switches.
+    pub api_server_options: ApiServerOptions,
+    /// CORS settings applied to every HTTP response.
+    pub cors: CorsConfig,
     /// Runtime server information returned by `/server_info`, when available.
     server_info: Option<ServerInfoSnapshot>,
     /// SHA-256 hashes of API keys accepted as bearer tokens for guarded routes.
@@ -58,8 +59,8 @@ impl AppState {
         Self {
             served_model_names,
             chat,
-            enable_log_requests: false,
-            enable_request_id_headers: false,
+            api_server_options: ApiServerOptions::default(),
+            cors: CorsConfig::default(),
             server_info: None,
             api_key_hashes: Vec::new(),
             server_load: AtomicU64::new(0),
@@ -67,15 +68,15 @@ impl AppState {
         }
     }
 
-    /// Enable per-request completion logging.
-    pub fn with_log_requests(mut self, enabled: bool) -> Self {
-        self.enable_log_requests = enabled;
+    /// Set HTTP/API-server behavior switches.
+    pub fn with_api_server_options(mut self, options: ApiServerOptions) -> Self {
+        self.api_server_options = options;
         self
     }
 
-    /// Enable X-Request-Id response headers.
-    pub fn with_request_id_headers(mut self, enabled: bool) -> Self {
-        self.enable_request_id_headers = enabled;
+    /// Set the CORS settings applied to every HTTP response.
+    pub fn with_cors(mut self, cors: CorsConfig) -> Self {
+        self.cors = cors;
         self
     }
 

@@ -14,6 +14,7 @@ from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
+    RequestOffloadState,
 )
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
@@ -28,6 +29,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
     get_offload_block_hash,
+    make_offload_key,
 )
 from vllm.v1.request import RequestStatus
 
@@ -1381,3 +1383,734 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
         expected_stored=(2, 3),
         expected_flushed=(2, 3) if not async_scheduling else (),
     )
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
+    """When skip_reading_prefix_cache=True, the offloading connector must not
+    load any blocks from CPU even if a matching prefix is cached there."""
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=async_scheduling,
+        block_size_factor=block_size_factor,
+    )
+
+    # Populate the CPU offload cache with one block.
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2) if not async_scheduling else (),
+    )
+
+    # Reset GPU prefix cache so the next request cannot hit locally.
+    runner.scheduler.reset_prefix_cache()
+
+    # New request with identical tokens but skip_reading_prefix_cache=True.
+    # The offloading connector must not load anything from CPU, but must
+    # still offload the freshly computed blocks (state management intact).
+    runner.new_request(
+        token_ids=[0] * offloaded_block_size,
+        skip_reading_prefix_cache=True,
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_loaded=(),  # no CPU loads must happen
+        expected_stored=(0, 1, 2),  # tokens still offloaded to CPU
+        expected_flushed=(0, 1, 2) if not async_scheduling else (),
+    )
+
+    # The external lookup must have been completely skipped.
+    runner.manager.lookup.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Eagle/MTP test class
+# ---------------------------------------------------------------------------
+
+
+class TestEagle:
+    """Tests for Eagle/MTP speculative decoding support in the offloading
+    connector scheduler — both _lookup() unit tests and integration tests."""
+
+    # -------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------
+
+    @staticmethod
+    def _group_keys(group_idx: int, int_hashes: list[int]) -> list:
+        return [make_offload_key(str(h).encode(), group_idx) for h in int_hashes]
+
+    @staticmethod
+    def _make_req_status(
+        scheduler: OffloadingConnectorScheduler,
+        *,
+        num_tokens: int,
+        num_computed_tokens: int = 0,
+        offload_keys_per_group: list[list[int]],
+    ) -> RequestOffloadState:
+        """Build RequestOffloadState with synthetic offload keys."""
+        req = MagicMock()
+        req.request_id = "test-req"
+        req.num_tokens = num_tokens
+        req.kv_transfer_params = None
+
+        state = RequestOffloadState(
+            config=scheduler.config,
+            req=req,
+            req_context=ReqContext(req_id="test-req"),
+            offloading_context=RequestOffloadingContext(
+                policy=OffloadPolicy.BLOCK_LEVEL
+            ),
+            num_locally_computed_tokens=num_computed_tokens,
+        )
+        for idx, (gs, hashes) in enumerate(
+            zip(state.group_states, offload_keys_per_group)
+        ):
+            gs.offload_keys = TestEagle._group_keys(
+                scheduler.config.kv_group_configs[idx].group_idx, hashes
+            )
+        return state
+
+    # -------------------------------------------------------------------
+    # Lookup unit tests: call _lookup() directly via request_runner
+    # -------------------------------------------------------------------
+
+    def test_full_attn_lookup_pops_one_block(self, request_runner):
+        """Full-attn eagle group with 3 blocks all hit → pop to 2 blocks."""
+        block_size = 4
+        groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=100,
+            async_scheduling=False,
+            kv_cache_groups=groups,
+        )
+        runner.manager.lookup.side_effect = lambda key, req_context: (
+            int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+        )
+        sched = runner.connector_scheduler
+        req_status = self._make_req_status(
+            sched, num_tokens=12, offload_keys_per_group=[[1, 2, 3]]
+        )
+        # 3 hits, pop to 2 → 2 * block_size = 8 tokens loadable
+        assert sched._lookup(req_status) == 8
+
+    def test_full_attn_lookup_single_block_returns_zero(self, request_runner):
+        """Full-attn eagle group with 1 block hit → pop to 0 → returns 0."""
+        block_size = 4
+        groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=100,
+            async_scheduling=False,
+            kv_cache_groups=groups,
+        )
+        runner.manager.lookup.side_effect = lambda key, req_context: (
+            int(get_offload_block_hash(key).decode()) in {1}
+        )
+        sched = runner.connector_scheduler
+        req_status = self._make_req_status(
+            sched, num_tokens=4, offload_keys_per_group=[[1]]
+        )
+        # 1 hit, pop to 0 → new_num_hit_tokens < block_size → return 0
+        assert sched._lookup(req_status) == 0
+
+    def test_full_attn_lookup_no_hits_returns_zero(self, request_runner):
+        """Full-attn eagle group with 0 hits returns 0 before pop."""
+        block_size = 4
+        groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=100,
+            async_scheduling=False,
+            kv_cache_groups=groups,
+        )
+        runner.manager.lookup.return_value = False
+        sched = runner.connector_scheduler
+        req_status = self._make_req_status(
+            sched, num_tokens=8, offload_keys_per_group=[[1, 2]]
+        )
+        assert sched._lookup(req_status) == 0
+
+    def test_sw_lookup_inflates_query_max(self, request_runner):
+        """SW eagle group inflates query_max so _sliding_window_lookup gets
+        one extra key beyond what max_hit_size_tokens alone would yield.
+
+        With block_size=4, W=2, eagle, num_tokens=13, 4 keys all hitting:
+        - max_hit = 13-1 = 12 (SW reduction)
+        - Without inflation: num_blocks = cdiv(12,4) = 3 → only 3 keys
+        - With inflation: query_max = min(12+4, 4*4=16) = 16,
+          num_blocks = cdiv(16,4) = 4 → 4 keys passed to SW
+        - SW finds window of 3 (required=W+1=3) at idx 1 → returns 4
+        - Pop: 4-1=3 → max_hit = min(12, 12) = 12. Result: 12.
+        """
+        block_size = 4
+        sw_blocks = 2
+        groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sw_blocks * block_size,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=100,
+            async_scheduling=False,
+            kv_cache_groups=groups,
+        )
+        runner.manager.lookup.side_effect = lambda key, req_context: (
+            int(get_offload_block_hash(key).decode()) in {1, 2, 3, 4}
+        )
+        sched = runner.connector_scheduler
+
+        captured_keys: list = []
+        orig_sw_lookup = type(sched)._sliding_window_lookup
+
+        def capturing_sw_lookup(self_arg, keys, window, req_context):
+            captured_keys.append(list(keys))
+            return orig_sw_lookup(self_arg, keys, window, req_context)
+
+        sched._sliding_window_lookup = lambda keys, window, req_ctx: (
+            capturing_sw_lookup(sched, keys, window, req_ctx)
+        )
+
+        req_status = self._make_req_status(
+            sched, num_tokens=13, offload_keys_per_group=[[1, 2, 3, 4]]
+        )
+        result = sched._lookup(req_status)
+        assert len(captured_keys) == 1
+        # Inflation bumped from 3 keys (cdiv(12,4)) to 4 keys (cdiv(16,4))
+        assert len(captured_keys[0]) == 4
+        # SW finds window of 3 → returns 4, pop to 3 → 3*4=12
+        assert result == 12
+
+    def test_sw_lookup_requires_extra_window_block(self, request_runner):
+        """SW eagle with W=2 and only 2 keys (both hit) uses prefix fallback.
+
+        Since required_window = W+1 = 3 but only 2 keys are available
+        (inflation is capped by len(offload_keys)), _sliding_window_lookup
+        can never find a window of 3. It falls back to prefix count (2).
+        Pop: 2-1=1 → max_hit = 4. Result: 4 tokens (degraded from full hit).
+        """
+        block_size = 4
+        sw_blocks = 2
+        groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sw_blocks * block_size,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=100,
+            async_scheduling=False,
+            kv_cache_groups=groups,
+        )
+        runner.manager.lookup.side_effect = lambda key, req_context: (
+            int(get_offload_block_hash(key).decode()) in {1, 2}
+        )
+        sched = runner.connector_scheduler
+        req_status = self._make_req_status(
+            sched, num_tokens=9, offload_keys_per_group=[[1, 2]]
+        )
+        # Prefix fallback returns 2, pop to 1 → 1*4 = 4 tokens
+        assert sched._lookup(req_status) == 4
+
+    def test_sw_lookup_w_plus_one_hits_returns_w_blocks(self, request_runner):
+        """SW eagle with W=2, 3 contiguous hits → pop to 2 → returns 2*bs."""
+        block_size = 4
+        sw_blocks = 2
+        groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sw_blocks * block_size,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=100,
+            async_scheduling=False,
+            kv_cache_groups=groups,
+        )
+        runner.manager.lookup.side_effect = lambda key, req_context: (
+            int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+        )
+        sched = runner.connector_scheduler
+        # num_tokens=13 → max_hit=13-1=12, query_max=min(12+4,12)=12
+        # num_blocks=cdiv(12,4)=3, keys=[1,2,3], required_window=3
+        # SW finds window of 3, pop to 2 → 2*4=8
+        req_status = self._make_req_status(
+            sched, num_tokens=13, offload_keys_per_group=[[1, 2, 3]]
+        )
+        assert sched._lookup(req_status) == 8
+
+    def test_eagle_verified_prevents_double_pop(self, request_runner):
+        """Once an eagle group has popped, it doesn't pop again on re-iteration.
+
+        Setup: group 0 = non-eagle full-attn (3 blocks), group 1 = eagle
+        full-attn (3 blocks). Both see all hits. Eagle pops to 2 and tightens
+        max_hit to 8. Group 0 re-runs (convergence) but since eagle_verified
+        contains group 1, it won't pop again — result stays at 8 tokens.
+        """
+        block_size = 4
+        groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=False,
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=2,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=100,
+            async_scheduling=False,
+            kv_cache_groups=groups,
+        )
+        runner.manager.lookup.side_effect = lambda key, req_context: (
+            int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+        )
+        sched = runner.connector_scheduler
+        req_status = self._make_req_status(
+            sched,
+            num_tokens=12,
+            offload_keys_per_group=[[1, 2, 3], [1, 2, 3]],
+        )
+        # Group 0: prefix finds 3 → max_hit=12, num_hit=12
+        # Group 1 (eagle): prefix finds 3, pop to 2 → max_hit=8, num_hit=8
+        # num_hit(8) < prev num_hit(12) AND group IS eagle → no clear
+        # No re-iteration triggered (eagle shrink doesn't trigger re-loop)
+        # Final: 8 tokens
+        assert sched._lookup(req_status) == 8
+
+    def test_non_eagle_tighten_clears_eagle_verified(self, request_runner):
+        """Non-eagle group tightening clears eagle_verified → eagle re-pops.
+
+        Groups: 0=non-eagle full-attn, 1=eagle full-attn.
+        Group 0 has only 1 hit (out of 3 keys) → max_hit tightens to 4.
+        This clears eagle_verified. Group 1 runs with max_hit=4 → only 1
+        key queried, 1 hit, pop to 0 → returns 0.
+        """
+        block_size = 4
+        groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=False,
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=2,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=100,
+            async_scheduling=False,
+            kv_cache_groups=groups,
+        )
+        # Group 0 keys [10,11,12]: only 10 hits.
+        # Group 1 keys [1,2,3]: all hit.
+        runner.manager.lookup.side_effect = lambda key, req_context: (
+            int(get_offload_block_hash(key).decode()) in {10, 1, 2, 3}
+        )
+        sched = runner.connector_scheduler
+        req_status = self._make_req_status(
+            sched,
+            num_tokens=12,
+            offload_keys_per_group=[[10, 11, 12], [1, 2, 3]],
+        )
+        # Group 0 (non-eagle FA): prefix finds 1 hit → max_hit=4, num_hit=4
+        # Group 1 (eagle FA): max_hit=4 → num_blocks=1, keys=[1].
+        #   Finds 1 hit, pop to 0 → new_num_hit = 0 < block_size → return 0
+        assert sched._lookup(req_status) == 0
+
+    def test_eagle_verified_survives_eagle_tighten(self, request_runner):
+        """Eagle group tightening does NOT clear eagle_verified.
+
+        Groups: 0=non-eagle full-attn, 1=eagle full-attn.
+        Group 0 finds 3 hits (max_hit=12). Group 1 finds 3 hits, pops to 2
+        (max_hit=8). Since group 1 IS eagle, eagle_verified is NOT cleared.
+        Result: 8 tokens (eagle only pops once).
+        """
+        block_size = 4
+        groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=False,
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=2,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=100,
+            async_scheduling=False,
+            kv_cache_groups=groups,
+        )
+        runner.manager.lookup.side_effect = lambda key, req_context: (
+            int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+        )
+        sched = runner.connector_scheduler
+        req_status = self._make_req_status(
+            sched,
+            num_tokens=12,
+            offload_keys_per_group=[[1, 2, 3], [1, 2, 3]],
+        )
+        # Group 0: 3 hits → max_hit=12, num_hit=12
+        # Group 1 (eagle): 3 hits, pop to 2 → max_hit=8, num_hit=8
+        # Tightened but IS eagle → no clear. No re-iteration.
+        assert sched._lookup(req_status) == 8
+
+    # -------------------------------------------------------------------
+    # Integration tests: store and load via request_runner
+    # -------------------------------------------------------------------
+
+    @pytest.mark.parametrize("async_scheduling", [True, False])
+    def test_full_attn_store_excludes_trailing_block(
+        self, request_runner, async_scheduling: bool
+    ):
+        """Eagle full-attention group stores all blocks except the trailing
+        one.
+
+        Setup: 2 groups — group 0 is normal full-attention, group 1 is
+        eagle full-attention. With a 3-block prompt, group 1 should store
+        only blocks 0 and 1, skipping block 2 (the volatile tail).
+        """
+        block_size = 4
+        block_size_factor = 1
+        offloaded_block_size = block_size * block_size_factor
+        num_gpu_blocks = 100
+
+        kv_cache_groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=2,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=num_gpu_blocks,
+            async_scheduling=async_scheduling,
+            kv_cache_groups=kv_cache_groups,
+            block_size_factor=block_size_factor,
+        )
+
+        kv_group_configs = runner.connector_scheduler.config.kv_group_configs
+        assert len(kv_group_configs) == 2
+        assert not kv_group_configs[0].is_eagle_group
+        assert kv_group_configs[1].is_eagle_group
+
+        runner.new_request(token_ids=[0] * offloaded_block_size * 3)
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+        runner.run(
+            decoded_tokens=[EOS_TOKEN_ID],
+            expected_stored=(
+                (0, 0),
+                (0, 1),
+                (0, 2),
+                (1, 0),
+                (1, 1),
+            ),
+            expected_flushed=(
+                (0, 0),
+                (0, 1),
+                (0, 2),
+                (1, 0),
+                (1, 1),
+            )
+            if not async_scheduling
+            else (),
+        )
+
+    @pytest.mark.parametrize("async_scheduling", [True, False])
+    def test_sw_store_excludes_trailing_block(
+        self, request_runner, async_scheduling: bool
+    ):
+        """Eagle sliding-window group stores all blocks except the trailing
+        one."""
+        block_size = 4
+        sliding_window = 8
+        num_gpu_blocks = 100
+
+        kv_cache_groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                SlidingWindowSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                    sliding_window=sliding_window,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=num_gpu_blocks,
+            async_scheduling=async_scheduling,
+            kv_cache_groups=kv_cache_groups,
+        )
+
+        kv_group_configs = runner.connector_scheduler.config.kv_group_configs
+        assert len(kv_group_configs) == 1
+        assert kv_group_configs[0].is_eagle_group
+        assert kv_group_configs[0].sliding_window_size_in_blocks == 2
+
+        runner.new_request(token_ids=[0] * block_size * 3)
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+        runner.run(
+            decoded_tokens=[EOS_TOKEN_ID],
+            expected_stored=((0, 0), (0, 1)),
+            expected_flushed=((0, 0), (0, 1)) if not async_scheduling else (),
+        )
+
+    @pytest.mark.parametrize("async_scheduling", [True, False])
+    def test_single_block_nothing_stored(self, request_runner, async_scheduling: bool):
+        """An eagle group with only one block stores nothing: that block is
+        the tail."""
+        block_size = 4
+        block_size_factor = 1
+        offloaded_block_size = block_size * block_size_factor
+        num_gpu_blocks = 100
+
+        kv_cache_groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=num_gpu_blocks,
+            async_scheduling=async_scheduling,
+            kv_cache_groups=kv_cache_groups,
+            block_size_factor=block_size_factor,
+        )
+
+        runner.new_request(token_ids=[0] * offloaded_block_size)
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+        runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=())
+        runner.manager.prepare_store.assert_not_called()
+
+    @pytest.mark.parametrize("async_scheduling", [True, False])
+    def test_full_attn_store_then_load(self, request_runner, async_scheduling: bool):
+        """Eagle group constrains load: convergence tightens both groups.
+
+        Store 3 offloaded blocks per group (eagle group skips tail → stores
+        2). Then a new request loads from CPU. The eagle group's post-pop hit
+        (2) does not tighten below group 0's hit (3), so both groups load
+        normally.
+        """
+        block_size = 4
+        block_size_factor = 1
+        offloaded_block_size = block_size * block_size_factor
+        num_gpu_blocks = 100
+
+        kv_cache_groups = [
+            KVCacheGroupSpec(
+                ["layer0"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["layer1"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=2,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+                is_eagle_group=True,
+            ),
+        ]
+
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=num_gpu_blocks,
+            async_scheduling=async_scheduling,
+            kv_cache_groups=kv_cache_groups,
+            block_size_factor=block_size_factor,
+        )
+
+        runner.new_request(token_ids=[0] * offloaded_block_size * 3)
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+        runner.run(
+            decoded_tokens=[EOS_TOKEN_ID],
+            expected_stored=(
+                (0, 0),
+                (0, 1),
+                (0, 2),
+                (1, 0),
+                (1, 1),
+            ),
+            expected_flushed=(
+                (0, 0),
+                (0, 1),
+                (0, 2),
+                (1, 0),
+                (1, 1),
+            )
+            if not async_scheduling
+            else (),
+        )
+
+        runner.scheduler.reset_prefix_cache()
+
+        runner.new_request(token_ids=[0] * offloaded_block_size * 3 + [1])
+        runner.manager.lookup.return_value = True
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output([])
+        )
+        runner.run(
+            decoded_tokens=[EOS_TOKEN_ID],
+            expected_loaded=(
+                (0, 0),
+                (0, 1),
+                (1, 0),
+                (1, 1),
+            ),
+        )
