@@ -146,12 +146,17 @@ class Qwen3Eagle3Model(nn.Module):
         # Get drafter's quantization config
         self.quant_config = get_draft_quant_config(vllm_config)
 
-        eagle_config = getattr(self.config, "eagle_config", None)
-        if eagle_config is not None and "use_aux_hidden_state" in eagle_config:
+        eagle_config = getattr(self.config, "eagle_config", None) or {}
+        if "use_aux_hidden_state" in eagle_config:
             self.use_aux_hidden_state = eagle_config["use_aux_hidden_state"]
         else:
             self.use_aux_hidden_state = True
-        self.norm_before_fc = getattr(self.config, "norm_before_fc", False)
+        self.norm_before_fc = bool(
+            eagle_config.get(
+                "norm_before_fc", getattr(self.config, "norm_before_fc", False)
+            )
+        )
+        self.fc_input_size = self.config.hidden_size
 
         current_vllm_config = get_current_vllm_config()
 
@@ -175,16 +180,20 @@ class Qwen3Eagle3Model(nn.Module):
         if self.use_aux_hidden_state:
             num_aux_features = getattr(self.config, "num_aux_layers", None)
             if num_aux_features is None:
-                aux_ids = getattr(self.config, "eagle_aux_hidden_state_layer_ids", None)
-                num_aux_features = len(aux_ids) if aux_ids is not None else 3
+                num_aux_features = getattr(self.config, "num_aux_hidden_states", None)
+            if num_aux_features is None:
+                aux_ids = getattr(
+                    self.config, "eagle_aux_hidden_state_layer_ids", None
+                ) or eagle_config.get("eagle_aux_hidden_state_layer_ids")
+                num_aux_features = len(aux_ids) if aux_ids else 3
             self.num_aux_layers = num_aux_features
             target_hidden_size = getattr(
                 self.config, "target_hidden_size", self.config.hidden_size
             )
-            fc_input_size = target_hidden_size * num_aux_features
+            self.fc_input_size = target_hidden_size * num_aux_features
             if self.norm_before_fc:
                 self.input_norm = RMSNorm(
-                    fc_input_size,
+                    self.fc_input_size,
                     eps=self.config.rms_norm_eps,
                 )
             else:
@@ -202,7 +211,7 @@ class Qwen3Eagle3Model(nn.Module):
                 self.fc_norm = None
 
             self.fc = ReplicatedLinear(
-                input_size=fc_input_size,
+                input_size=self.fc_input_size,
                 output_size=self.config.hidden_size,
                 bias=False,
                 params_dtype=vllm_config.model_config.dtype,
@@ -336,15 +345,7 @@ class Eagle3Qwen3ForCausalLM(Qwen3ForCausalLM):
         if self.use_parallel_drafting:
             self.register_buffer(
                 "mask_hidden",
-                torch.zeros(
-                    1,
-                    (
-                        self.model.num_aux_layers
-                        if self.model.use_aux_hidden_state
-                        else 1
-                    )
-                    * self.config.hidden_size,
-                ),
+                torch.zeros(1, self.model.fc_input_size),
                 persistent=False,
             )
 

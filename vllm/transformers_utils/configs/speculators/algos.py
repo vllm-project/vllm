@@ -41,9 +41,8 @@ def update_eagle3(config_dict: dict, pre_trained_config: dict) -> None:
         "llama": "Eagle3LlamaForCausalLM",
     }
     model_type = pre_trained_config.get("model_type", "llama")
-    assert model_type in eagle3_arch_map, (
-        f"Unsupported model_type {model_type} for Eagle3 speculator"
-    )
+    if model_type not in eagle3_arch_map:
+        raise ValueError(f"Unsupported model_type {model_type} for Eagle3 speculator")
     pre_trained_config["architectures"] = [eagle3_arch_map[model_type]]
     if config_dict.get("eagle_aux_hidden_state_layer_ids"):
         pre_trained_config["eagle_aux_hidden_state_layer_ids"] = config_dict[
@@ -79,9 +78,8 @@ def update_peagle(config_dict: dict, pre_trained_config: dict) -> None:
         "llama": "PeagleLlamaForCausalLM",
     }
     model_type = pre_trained_config.get("model_type", "llama")
-    assert model_type in peagle_arch_map, (
-        f"Unsupported model_type {model_type} for PEagle speculator"
-    )
+    if model_type not in peagle_arch_map:
+        raise ValueError(f"Unsupported model_type {model_type} for PEagle speculator")
     pre_trained_config["architectures"] = [peagle_arch_map[model_type]]
     pre_trained_config["pard_token"] = config_dict["mask_token_id"]
     if config_dict.get("eagle_aux_hidden_state_layer_ids"):
