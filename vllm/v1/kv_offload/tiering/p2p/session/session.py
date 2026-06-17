@@ -444,6 +444,20 @@ class P2PSession:
         for tid in poll_result.done:
             xfer = self._inflight.pop(tid, None)
             if xfer is None:
+                # Bug signal: transport reported a transfer we have no
+                # bookkeeping for. Likely a double-completion in the
+                # transport or a stale removal in the session. The
+                # attached job(s) still live in _store_jobs and will be
+                # surfaced as failures by _timeout_pending_store_jobs
+                # after _STORE_TIMEOUT_S, but log loudly so the
+                # underlying bug is findable.
+                logger.error(
+                    "P2PSession %s: transport reported done for unknown "
+                    "transfer_id=%d; attached job(s) will fail via "
+                    "store-timeout instead of completing now",
+                    self.peer_id,
+                    tid,
+                )
                 continue
             for job_id in xfer.job_ids:
                 self._store_jobs.pop(job_id, None)
@@ -477,6 +491,14 @@ class P2PSession:
         for tid in poll_result.failed:
             xfer = self._inflight.pop(tid, None)
             if xfer is None:
+                # See the matching error log in the done branch above.
+                logger.error(
+                    "P2PSession %s: transport reported failed for unknown "
+                    "transfer_id=%d; attached job(s) will fail via "
+                    "store-timeout instead of completing now",
+                    self.peer_id,
+                    tid,
+                )
                 continue
             if failed_kv_request_ids is None:
                 failed_kv_request_ids = set()
