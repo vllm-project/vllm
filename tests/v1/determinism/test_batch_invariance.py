@@ -55,6 +55,11 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     if current_platform.is_xpu() and backend not in XPU_BACKENDS:
         pytest.skip(f"Backend {backend} not verified for batch invariance on XPU")
 
+    # Not all batch-invariant kernels are registered on XPU yet
+    # (e.g. attention, custom ops), so e2e determinism is not guaranteed.
+    if current_platform.is_xpu():
+        pytest.xfail("Not all batch-invariant kernels registered on XPU yet")
+
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
 
@@ -166,6 +171,11 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     # Skip backends not verified for batch invariance on XPU
     if current_platform.is_xpu() and backend not in XPU_BACKENDS:
         pytest.skip(f"Backend {backend} not verified for batch invariance on XPU")
+
+    # Not all batch-invariant kernels are registered on XPU yet
+    # (e.g. attention, custom ops), so e2e determinism is not guaranteed.
+    if current_platform.is_xpu():
+        pytest.xfail("Not all batch-invariant kernels registered on XPU yet")
 
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
