@@ -26,6 +26,10 @@ from vllm.entrypoints.openai.request_log.proto import (
     FSYNC_EVERY_N_RECORDS,
     POLL_INTERVAL_MS,
 )
+from vllm.entrypoints.openai.request_log.rotator import (
+    JsonlRotator,
+    parse_duration,
+)
 
 # Reusable msgpack decoder for the hot-path payload conversion.
 _MSGPACK_DECODER = msgspec.msgpack.Decoder()
@@ -65,6 +69,9 @@ def writer_main(
     socket_addr: str,
     output_path: str,
     ready_event: MpEvent,
+    max_bytes: int = 0,
+    rotate_interval: str | None = None,
+    backup_count: int = 0,
 ) -> None:
     """Subprocess entry point.
 
@@ -73,6 +80,11 @@ def writer_main(
         output_path: jsonl file to append records to.
         ready_event: set once the socket is bound and the file is opened, so
             the parent can know it is safe to start pushing.
+        max_bytes: rotate the output file once it grows past this many bytes;
+            0 disables size-based rotation.
+        rotate_interval: optional duration string (``30s`` / ``5m`` / ``1h`` /
+            ``1d``) or seconds-as-int; rotates on this schedule when set.
+        backup_count: keep at most this many rotated files; 0 keeps all.
     """
 
     # Decouple from any logging config the parent set up; print to stderr.
@@ -100,67 +112,82 @@ def writer_main(
     poller = zmq.Poller()
     poller.register(pull, zmq.POLLIN)
 
-    # Open in binary append mode with line buffering disabled; we manage
-    # flush/fsync manually to balance durability and throughput.
-    try:
-        with open(output_path, "ab", buffering=0) as out:
-            ready_event.set()
-            _log(f"ready, writing to {output_path}")
+    interval_seconds = parse_duration(rotate_interval)
+    rotator = JsonlRotator(
+        output_path,
+        max_bytes=max_bytes,
+        interval_seconds=interval_seconds,
+        backup_count=backup_count,
+    )
+    rotation_desc = []
+    if max_bytes:
+        rotation_desc.append(f"max_bytes={max_bytes}")
+    if interval_seconds:
+        rotation_desc.append(f"interval={interval_seconds:.0f}s")
+    if backup_count:
+        rotation_desc.append(f"backup_count={backup_count}")
+    if rotation_desc:
+        _log(f"rotation: {', '.join(rotation_desc)}")
 
+    # Append-only with optional rotation; ``rotator`` is a file-like
+    # with ``write(bytes)`` / ``flush()`` / ``close()``.
+    try:
+        ready_event.set()
+        _log(f"ready, writing to {output_path}")
+        try:
             pending_records = 0
-            try:
-                while not stop_flag[0]:
-                    try:
-                        events = dict(poller.poll(timeout=POLL_INTERVAL_MS))
-                    except zmq.error.ZMQError:
-                        # interrupted by signal etc.
-                        continue
-                    if pull not in events:
-                        # idle tick: flush whatever we have so far so
-                        # ``tail -f`` works.
-                        if pending_records:
-                            out.flush()
-                            pending_records = 0
-                        continue
-                    try:
-                        parts = pull.recv_multipart(flags=zmq.NOBLOCK)
-                    except zmq.Again:
-                        continue
+            while not stop_flag[0]:
+                try:
+                    events = dict(poller.poll(timeout=POLL_INTERVAL_MS))
+                except zmq.error.ZMQError:
+                    # interrupted by signal etc.
+                    continue
+                if pull not in events:
+                    # idle tick: flush whatever we have so far so
+                    # ``tail -f`` works.
+                    if pending_records:
+                        rotator.flush()
+                        pending_records = 0
+                    continue
+                try:
+                    parts = pull.recv_multipart(flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    continue
+                if len(parts) != 2:
+                    _log(f"dropping malformed message ({len(parts)} frames)")
+                    continue
+                tag, payload = parts
+                if tag == FRAME_SHUTDOWN:
+                    stop_flag[0] = True
+                    break
+                if tag != FRAME_RECORD:
+                    _log(f"dropping unknown tag {tag!r}")
+                    continue
+                line = _record_payload_to_jsonl(payload, _log)
+                if line is None:
+                    continue
+                try:
+                    rotator.write(line)
+                    pending_records += 1
+                    if pending_records >= FSYNC_EVERY_N_RECORDS:
+                        rotator.flush()
+                        pending_records = 0
+                except OSError as e:
+                    _log(f"write failed: {e}")
+        finally:
+            # Drain whatever else is sitting in the queue so we don't
+            # lose records that arrived right before shutdown.
+            with contextlib.suppress(zmq.Again):
+                while True:
+                    parts = pull.recv_multipart(flags=zmq.NOBLOCK)
                     if len(parts) != 2:
-                        _log(f"dropping malformed message ({len(parts)} frames)")
                         continue
                     tag, payload = parts
-                    if tag == FRAME_SHUTDOWN:
-                        stop_flag[0] = True
-                        break
-                    if tag != FRAME_RECORD:
-                        _log(f"dropping unknown tag {tag!r}")
-                        continue
-                    line = _record_payload_to_jsonl(payload, _log)
-                    if line is None:
-                        continue
-                    try:
-                        out.write(line)
-                        pending_records += 1
-                        if pending_records >= FSYNC_EVERY_N_RECORDS:
-                            out.flush()
-                            pending_records = 0
-                    except OSError as e:
-                        _log(f"write failed: {e}")
-            finally:
-                # Drain whatever else is sitting in the queue so we
-                # don't lose records that arrived right before shutdown.
-                with contextlib.suppress(zmq.Again):
-                    while True:
-                        parts = pull.recv_multipart(flags=zmq.NOBLOCK)
-                        if len(parts) != 2:
-                            continue
-                        tag, payload = parts
-                        if tag == FRAME_RECORD:
-                            line = _record_payload_to_jsonl(payload, _log)
-                            if line is not None:
-                                out.write(line)
-                out.flush()
+                    if tag == FRAME_RECORD:
+                        line = _record_payload_to_jsonl(payload, _log)
+                        if line is not None:
+                            rotator.write(line)
+            rotator.close()
     finally:
         with contextlib.suppress(Exception):
             pull.close(linger=0)

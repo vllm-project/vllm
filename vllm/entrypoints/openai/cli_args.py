@@ -151,6 +151,18 @@ class BaseFrontendArgs:
     request path. With multiple API server workers the per-rank suffix
     ``.rank{N}`` is appended automatically. Falls back to the
     ``VLLM_REQUEST_LOG_PATH`` env var; leave both unset to disable."""
+    request_log_max_bytes: int = envs.VLLM_REQUEST_LOG_MAX_BYTES
+    """Rotate the request log file once it grows past this many bytes.
+    Rotated files get a ``.YYYYMMDD-HHMMSS`` suffix. 0 (default) disables
+    size-based rotation."""
+    request_log_rotate_interval: str | None = envs.VLLM_REQUEST_LOG_ROTATE_INTERVAL
+    """If set, rotate the request log periodically. Accepts ``30s`` / ``30m`` /
+    ``1h`` / ``1d`` style suffixes, or a plain integer interpreted as
+    seconds. Time-based and size-based rotation can be combined."""
+    request_log_backup_count: int = envs.VLLM_REQUEST_LOG_BACKUP_COUNT
+    """Keep at most this many rotated files. 0 (default) keeps them all —
+    set this to e.g. 14 if you want a 14-day rolling window with daily
+    rotation."""
     enable_log_deltas: bool = True
     """If set to False, output deltas will not be logged. Relevant only if 
     --enable-log-outputs is set.

@@ -27,6 +27,9 @@ if TYPE_CHECKING:
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
     VLLM_REQUEST_LOG_PATH: str | None = None
+    VLLM_REQUEST_LOG_MAX_BYTES: int = 0
+    VLLM_REQUEST_LOG_ROTATE_INTERVAL: str | None = None
+    VLLM_REQUEST_LOG_BACKUP_COUNT: int = 0
     S3_ACCESS_KEY_ID: str | None = None
     S3_SECRET_ACCESS_KEY: str | None = None
     S3_ENDPOINT_URL: str | None = None
@@ -645,6 +648,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # over ZMQ, so disk pressure does not block the request path.
     "VLLM_REQUEST_LOG_PATH": lambda: os.environ.get("VLLM_REQUEST_LOG_PATH", None)
     or None,
+    # Rotate the request log when it grows past this many bytes.
+    # 0 (default) disables size-based rotation.
+    "VLLM_REQUEST_LOG_MAX_BYTES": lambda: int(
+        os.environ.get("VLLM_REQUEST_LOG_MAX_BYTES", "0")
+    ),
+    # Rotate the request log on a schedule. Accepts "30s" / "30m" / "1h" /
+    # "1d" or a plain integer (seconds). Empty/unset disables time-based
+    # rotation.
+    "VLLM_REQUEST_LOG_ROTATE_INTERVAL": lambda: os.environ.get(
+        "VLLM_REQUEST_LOG_ROTATE_INTERVAL", None
+    )
+    or None,
+    # Keep at most this many rotated files; 0 = unlimited.
+    "VLLM_REQUEST_LOG_BACKUP_COUNT": lambda: int(
+        os.environ.get("VLLM_REQUEST_LOG_BACKUP_COUNT", "0")
+    ),
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID": lambda: os.environ.get("S3_ACCESS_KEY_ID", None),
     "S3_SECRET_ACCESS_KEY": lambda: os.environ.get("S3_SECRET_ACCESS_KEY", None),
@@ -1739,6 +1758,9 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_REQUEST_LOG_PATH",
+        "VLLM_REQUEST_LOG_MAX_BYTES",
+        "VLLM_REQUEST_LOG_ROTATE_INTERVAL",
+        "VLLM_REQUEST_LOG_BACKUP_COUNT",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",

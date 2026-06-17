@@ -108,6 +108,22 @@ class RequestLoggerHub:
         if output_path is None:
             return None
 
+        # Rotation knobs — CLI flag wins, env var is the fallback.
+        max_bytes = int(
+            getattr(args, "request_log_max_bytes", 0)
+            or envs.VLLM_REQUEST_LOG_MAX_BYTES
+            or 0
+        )
+        rotate_interval = (
+            getattr(args, "request_log_rotate_interval", None)
+            or envs.VLLM_REQUEST_LOG_ROTATE_INTERVAL
+        )
+        backup_count = int(
+            getattr(args, "request_log_backup_count", 0)
+            or envs.VLLM_REQUEST_LOG_BACKUP_COUNT
+            or 0
+        )
+
         # Use a per-pid IPC path so multiple workers don't collide.
         sock_name = f"vllm_req_log_{os.getpid()}_{rank}.sock"
         socket_addr = f"ipc://{os.path.join(tempfile.gettempdir(), sock_name)}"
@@ -115,7 +131,14 @@ class RequestLoggerHub:
         ready_event = mp.get_context("spawn").Event()
         process = mp.get_context("spawn").Process(
             target=writer_main,
-            args=(socket_addr, output_path, ready_event),
+            args=(
+                socket_addr,
+                output_path,
+                ready_event,
+                max_bytes,
+                rotate_interval,
+                backup_count,
+            ),
             name=f"vllm-request-log-writer-{rank}",
             daemon=True,
         )
