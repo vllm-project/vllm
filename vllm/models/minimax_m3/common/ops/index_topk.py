@@ -373,7 +373,10 @@ def _decode_index_score_kernel(
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
         )  # [N,D]
-        kq = tl.dot(k, q)  # [N,HQ]
+        # fp32 accumulation is required for the fp8 (e4m3) index cache: q/k are
+        # loaded in their stored dtype (bf16 or e4m3) and the MMA accumulates in
+        # fp32 so the per-block max score is exact for the fp8 indexer too.
+        kq = tl.dot(k, q, out_dtype=tl.float32)  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
         score = tl.max(kq, axis=0)  # [HQ]
         is_visible_block = blk < num_blocks_q
