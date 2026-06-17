@@ -21,8 +21,9 @@ steps:
   - csrc/
   - tests/kernels/core
   - tests/kernels/test_concat_mla_q.py
+  - tests/kernels/test_fused_qk_norm_rope_gate.py
   commands:
-    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py
+    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_fused_qk_norm_rope_gate.py
 
 - label: Kernels MiniMax Reduce RMS Test (2 GPUs)
   key: kernels-minimax-reduce-rms-test-2-gpus
@@ -74,6 +75,19 @@ steps:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
 
+- label: Kernels Attention DiffKV Test (H100)
+  key: kernels-attention-diffkv-test-h100
+  timeout_in_minutes: 20
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/v1/attention/ops/triton_unified_attention_diffkv.py
+  - vllm/v1/attention/backends/triton_attn_diffkv.py
+  - vllm/v1/attention/backends/flash_attn_diffkv.py
+  - tests/kernels/attention/test_triton_unified_attention_diffkv.py
+  commands:
+    - pytest -v -s kernels/attention/test_triton_unified_attention_diffkv.py
+
 - label: Kernels Quantization Test %N
   key: kernels-quantization-test
   timeout_in_minutes: 90
@@ -86,7 +100,7 @@ steps:
   parallelism: 2
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       source_file_dependencies:
       - csrc/quantization/
       - vllm/model_executor/layers/quantization
@@ -223,7 +237,7 @@ steps:
   - vllm/utils/import_utils.py
   - tests/kernels/helion/
   commands:
-    - pip install helion==1.0.0
+    - pip install helion==1.1.0
     - pytest -v -s kernels/helion/
 
  
