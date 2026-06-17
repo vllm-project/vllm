@@ -41,10 +41,14 @@ class _MockCompilationConfig:
         self,
         token_budgets: list[int] | None = None,
         max_mm_items: int = 0,
+        global_token_budgets: list[int] | None = None,
+        local_token_budgets: list[int] | None = None,
     ):
         self.encoder_cudagraph_token_budgets = token_budgets or []
         self.encoder_cudagraph_max_vision_items_per_batch = max_mm_items
         self.encoder_cudagraph_max_frames_per_batch = None
+        self.encoder_cudagraph_global_token_budgets = global_token_budgets or []
+        self.encoder_cudagraph_local_token_budgets = local_token_budgets or []
 
 
 class _MockMultimodalConfig:
@@ -71,8 +75,15 @@ class _MockVllmConfig:
         self,
         token_budgets: list[int] | None = None,
         max_mm_items: int = 0,
+        global_token_budgets: list[int] | None = None,
+        local_token_budgets: list[int] | None = None,
     ):
-        self.compilation_config = _MockCompilationConfig(token_budgets, max_mm_items)
+        self.compilation_config = _MockCompilationConfig(
+            token_budgets,
+            max_mm_items,
+            global_token_budgets=global_token_budgets,
+            local_token_budgets=local_token_budgets,
+        )
         self.model_config = _MockModelConfig()
         self.parallel_config = _MockParallelConfig()
 
@@ -98,6 +109,35 @@ class _MockModel(SupportsEncoderCudaGraph):
         return (self._min_budget, self._max_budget)
 
 
+class _MockDualPathModel(SupportsEncoderCudaGraph):
+    """Minimal mock for dual-path encoder CUDA graph models (e.g. DeepSeek-OCR)."""
+
+    def __init__(
+        self,
+        min_budget: int = 4,
+        max_budget: int = 128,
+        global_token_per_image: int = 272,
+        local_token_per_patch: int = 100,
+    ):
+        self._min_budget = min_budget
+        self._max_budget = max_budget
+        self._global_token_per_image = global_token_per_image
+        self._local_token_per_patch = local_token_per_patch
+
+    def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values"],
+            out_hidden_size=32,
+            enable_dual_path_graph=True,
+            global_token_per_image=self._global_token_per_image,
+            local_token_per_patch=self._local_token_per_patch,
+        )
+
+    def get_encoder_cudagraph_budget_range(self, vllm_config):
+        return (self._min_budget, self._max_budget)
+
+
 def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     """Create a minimal EncoderCudaGraphManager with only token_budgets set.
 
@@ -105,6 +145,11 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     by patching the attributes directly after construction.
     """
     mgr = object.__new__(EncoderCudaGraphManager)
+    mgr.config = EncoderCudaGraphConfig(
+        modalities=["image"],
+        buffer_keys=["pixel_values"],
+        out_hidden_size=32,
+    )
     mgr.token_budgets = sorted(budgets)
     mgr.max_batch_size = 16
     mgr.use_dp = False
@@ -853,9 +898,27 @@ class TestInitInvariantValidation:
         max_mm_items=0,
         min_budget=4,
         max_budget=128,
+        global_token_budgets=None,
+        local_token_budgets=None,
+        dual_path=False,
+        global_token_per_image=272,
+        local_token_per_patch=100,
     ):
-        vllm_config = _MockVllmConfig(token_budgets, max_mm_items)
-        model = _MockModel(min_budget, max_budget)
+        vllm_config = _MockVllmConfig(
+            token_budgets,
+            max_mm_items,
+            global_token_budgets=global_token_budgets,
+            local_token_budgets=local_token_budgets,
+        )
+        if dual_path:
+            model = _MockDualPathModel(
+                min_budget,
+                max_budget,
+                global_token_per_image=global_token_per_image,
+                local_token_per_patch=local_token_per_patch,
+            )
+        else:
+            model = _MockModel(min_budget, max_budget)
         return EncoderCudaGraphManager(
             vllm_config=vllm_config,
             device=torch.device("cpu"),
@@ -947,3 +1010,125 @@ class TestInitInvariantValidation:
 
         with pytest.raises(ValueError, match="must be positive"):
             CompilationConfig(encoder_cudagraph_token_budgets=[-1, 64])
+
+
+# ---------------------------------------------------------------------------
+# Dual-path budget configuration tests
+# ---------------------------------------------------------------------------
+
+
+class TestDualPathBudgetConfig:
+    """User-configurable global/local token budgets for dual-path graphs."""
+
+    def _make_dual_path_mgr(
+        self,
+        token_budgets=None,
+        max_mm_items=8,
+        min_budget=64,
+        max_budget=16384,
+        global_token_budgets=None,
+        local_token_budgets=None,
+        global_token_per_image=272,
+        local_token_per_patch=100,
+    ):
+        vllm_config = _MockVllmConfig(
+            token_budgets=token_budgets,
+            max_mm_items=max_mm_items,
+            global_token_budgets=global_token_budgets,
+            local_token_budgets=local_token_budgets,
+        )
+        model = _MockDualPathModel(
+            min_budget=min_budget,
+            max_budget=max_budget,
+            global_token_per_image=global_token_per_image,
+            local_token_per_patch=local_token_per_patch,
+        )
+        return EncoderCudaGraphManager(
+            vllm_config=vllm_config,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+            model=model,
+        )
+
+    def test_user_global_budgets_used_directly(self):
+        """User-provided global budgets are sorted and used as-is."""
+        mgr = self._make_dual_path_mgr(
+            token_budgets=[256, 512, 1024, 2048],
+            global_token_budgets=[544, 272, 1088],
+        )
+        assert mgr.global_token_budgets == [272, 544, 1088]
+
+    def test_user_local_budgets_used_directly(self):
+        """User-provided local budgets are sorted and used as-is."""
+        mgr = self._make_dual_path_mgr(
+            token_budgets=[256, 512, 1024, 2048],
+            local_token_budgets=[200, 100, 400],
+        )
+        assert mgr.local_token_budgets == [100, 200, 400]
+
+    def test_user_both_budgets_used_directly(self):
+        """Both global and local budgets use user-provided values."""
+        mgr = self._make_dual_path_mgr(
+            token_budgets=[256, 512, 1024, 2048],
+            global_token_budgets=[272, 1088, 2176],
+            local_token_budgets=[200, 800],
+        )
+        assert mgr.global_token_budgets == [272, 1088, 2176]
+        assert mgr.local_token_budgets == [200, 800]
+
+    def test_auto_generate_fallback_when_empty(self):
+        """When both are empty, fall back to auto-generation."""
+        mgr = self._make_dual_path_mgr(
+            token_budgets=[256, 512, 1024, 2048, 16384],
+        )
+        # global: min=272, max=16384 → [272, 544, 1088, 2176, 4352, 8704, 16384]
+        assert mgr.global_token_budgets[0] == 272
+        assert mgr.global_token_budgets[-1] == 16384
+        # local: min=100, max=16384 → [0, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 16384] # noqa: E501
+        assert mgr.local_token_budgets[0] == 0  # auto-inserted for small images
+        assert mgr.local_token_budgets[1] == 100
+        assert mgr.local_token_budgets[-1] == 16384
+
+    def test_user_local_budgets_no_zero_insert(self):
+        """User-provided local budgets do NOT get 0 auto-inserted."""
+        mgr = self._make_dual_path_mgr(
+            token_budgets=[256, 512, 1024, 2048],
+            local_token_budgets=[100, 400],
+        )
+        assert 0 not in mgr.local_token_budgets
+
+    def test_global_user_local_auto(self):
+        """User provides global budgets, local budgets auto-generated."""
+        mgr = self._make_dual_path_mgr(
+            token_budgets=[256, 512, 1024, 2048],
+            global_token_budgets=[272, 544, 1088, 2176],
+        )
+        # global stays as provided
+        assert mgr.global_token_budgets == [272, 544, 1088, 2176]
+        # local auto-generated with 0 inserted
+        assert mgr.local_token_budgets[0] == 0
+
+    def test_local_user_global_auto(self):
+        """User provides local budgets, global budgets auto-generated."""
+        mgr = self._make_dual_path_mgr(
+            token_budgets=[256, 512, 1024, 2048],
+            local_token_budgets=[100, 400, 800],
+        )
+        # local stays as provided
+        assert mgr.local_token_budgets == [100, 400, 800]
+        # global auto-generated
+        assert mgr.global_token_budgets[0] == 272
+
+    def test_global_budgets_negative_validation(self):
+        """Negative values in global budgets raise validation error."""
+        from vllm.config.compilation import CompilationConfig
+
+        with pytest.raises(ValueError, match="must be positive"):
+            CompilationConfig(encoder_cudagraph_global_token_budgets=[-1, 272])
+
+    def test_local_budgets_zero_validation(self):
+        """Zero values in local budgets raise validation error."""
+        from vllm.config.compilation import CompilationConfig
+
+        with pytest.raises(ValueError, match="must be positive"):
+            CompilationConfig(encoder_cudagraph_local_token_budgets=[0, 100])
