@@ -52,6 +52,13 @@ class Fp8MoeBackend(Enum):
     BATCHED_VLLM_CUTLASS = "BATCHED_VLLM_CUTLASS"
     XPU = "XPU"
     CPU = "CPU"
+    # Dequantize-to-BF16 emulation for MXFP8 on devices without a native
+    # MXFP8 MoE kernel (e.g. ROCm). Weights pass through unchanged here.
+    EMULATION = "EMULATION"
+    # MXFP8 MoE via a Triton ``dot_scaled`` kernel that lowers to CDNA4
+    # (gfx950) native MX matrix-core ops. Weights stay in MXFP8 (no load-time
+    # format conversion); the FP8 values + E8M0 scales are consumed directly.
+    NATIVE_MXFP8 = "NATIVE_MXFP8"
 
 
 def _get_priority_backends(
@@ -463,6 +470,10 @@ def convert_to_fp8_moe_kernel_format(
             Fp8MoeBackend.VLLM_CUTLASS,
             Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
             Fp8MoeBackend.XPU,
+            # EMULATION dequantizes weights at runtime; NATIVE_MXFP8 consumes
+            # the MXFP8 weights as-is — neither needs a load-time layout change.
+            Fp8MoeBackend.EMULATION,
+            Fp8MoeBackend.NATIVE_MXFP8,
         ]:
             raise ValueError(f"Unsupported FP8 MoE backend: {fp8_backend.value}")
 
@@ -481,6 +492,8 @@ def make_fp8_moe_quant_config(
     per_act_token_quant: bool = False,
     per_out_ch_quant: bool = False,
     swiglu_limit: float | None = None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Create FusedMoEQuantConfig for the specified FP8 Backend.
@@ -503,6 +516,9 @@ def make_fp8_moe_quant_config(
             w1_bias=w1_bias,
             w2_bias=w2_bias,
             block_shape=block_shape,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=swiglu_limit,
         )
 
     # Flashinfer CUTLASS per-tensor uses single dq scale
@@ -522,10 +538,9 @@ def make_fp8_moe_quant_config(
             g2_alphas=(w2_scale * a2_scale).squeeze(),
             gemm1_clamp_limit=swiglu_limit,
         )
-    # MXFP8 uses "mxfp8" quant_dtype so the prepare step dispatches to
-    # _mxfp8_e4m3_quantize rather than standard FP8 block quantization.
-    # Non-swizzled layout is required since the TRTLLM kernel expects
-    # scales in (num_tokens, hidden_dim // 32) format.
+    # MXFP8 (block [1, 32]) dispatches to the mxfp8 activation quant. Scales are
+    # the non-swizzled (num_tokens, hidden_dim // 32) uint8 UE8M0 layout for all
+    # backends; the DeepGEMM expert permute repacks them for the grouped GEMM.
     if block_shape == [1, 32]:
         return FusedMoEQuantConfig.make(
             "mxfp8",
@@ -537,6 +552,8 @@ def make_fp8_moe_quant_config(
             a2_scale=a2_scale,
             block_shape=block_shape,
             is_scale_swizzled=False,
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
 
@@ -551,6 +568,8 @@ def make_fp8_moe_quant_config(
         block_shape=block_shape,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=swiglu_limit,
     )
 

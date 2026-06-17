@@ -156,24 +156,24 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
         "torchao": TorchAOConfig,
-        "auto-round": INCConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
         "gpt_oss_mxfp4": GptOssMxfp4Config,
         "deepseek_v4_fp8": DeepseekV4FP8Config,
         "humming": HummingConfig,
         "online": OnlineQuantizationConfig,
+        # MiniMax-style checkpoints tag `quant_method: "mxfp8"`; load with the
+        # ModelOpt MXFP8 config (same format). The "mxfp8" online shorthand
+        # below only applies to the `--quantization mxfp8` CLI path.
+        "mxfp8": ModelOptMxFp8Config,
     }
 
-    # Register online shorthands as quantization methods so the user can
-    # specify "LLM(..., quantization='fp8_per_tensor')" as shorthand for
-    # creating a more complicated online quant config object.
+    # Register online shorthands (e.g. "fp8_per_tensor") as quant methods.
+    # setdefault so a shorthand that is also a checkpoint method (e.g. "mxfp8")
+    # keeps its checkpoint config; the shorthand still works via the
+    # `--quantization` CLI path in `resolve_quantization_config`.
     for shorthand in _ONLINE_SHORTHANDS:
-        assert shorthand not in method_to_config, (
-            f"Online quant shorthand {shorthand!r} conflicts with an "
-            f"existing quantization method"
-        )
-        method_to_config[shorthand] = OnlineQuantizationConfig
+        method_to_config.setdefault(shorthand, OnlineQuantizationConfig)
 
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
