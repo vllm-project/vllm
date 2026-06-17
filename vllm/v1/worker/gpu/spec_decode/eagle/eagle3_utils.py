@@ -32,6 +32,39 @@ def set_eagle3_aux_hidden_state_layers(
     eagle3_model.set_aux_hidden_state_layers(aux_layers)
 
 
+def resolve_eagle3_aux_layer_semantics(
+    spec_config: SpeculativeConfig,
+) -> str:
+    """Resolve the EAGLE-3 aux-layer index convention to use.
+
+    Resolution order:
+      1. Explicit `spec_config.eagle_aux_layer_semantics` override.
+      2. `eagle_aux_layer_semantics` declared on the draft model's HF config.
+      3. Default to ``"vllm"`` (historical behavior, indices used as-is).
+    """
+    semantics = getattr(spec_config, "eagle_aux_layer_semantics", None)
+    if semantics is None and spec_config.draft_model_config is not None:
+        hf_config = spec_config.draft_model_config.hf_config
+        semantics = getattr(hf_config, "eagle_aux_layer_semantics", None)
+    return semantics or "vllm"
+
+
+def apply_eagle3_aux_layer_semantics(
+    layer_ids: tuple[int, ...],
+    spec_config: SpeculativeConfig,
+) -> tuple[int, ...]:
+    """Map config-declared aux layer ids onto vLLM's capture slots.
+
+    vLLM captures aux hidden states *after* each decoder layer, so a stored
+    index `k` yields the output of layer `k - 1`. SGLang-trained draft heads
+    declare indices referring to the output of layer `k`, so a `+1` shift is
+    applied to keep both frameworks in sync.
+    """
+    if resolve_eagle3_aux_layer_semantics(spec_config) == "sglang":
+        return tuple(v + 1 for v in layer_ids)
+    return layer_ids
+
+
 def get_eagle3_aux_layers_from_config(
     spec_config: SpeculativeConfig,
 ) -> tuple[int, ...] | None:
@@ -45,5 +78,5 @@ def get_eagle3_aux_layers_from_config(
             # Add 1 to convert DFlash's aux layer id semantics
             layer_ids = [i + 1 for i in (dflash_config.get("target_layer_ids") or [])]
     if layer_ids and isinstance(layer_ids, (list, tuple)):
-        return tuple(layer_ids)
+        return apply_eagle3_aux_layer_semantics(tuple(layer_ids), spec_config)
     return None
