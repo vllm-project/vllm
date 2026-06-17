@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     make_zmq_path,
     make_zmq_socket,
+    zmq_socket_ctx,
 )
 
 if TYPE_CHECKING:
@@ -33,7 +34,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     WriteTask,
     get_port_offset,
     get_role,
-    zmq_ctx,
 )
 
 if TYPE_CHECKING:
@@ -576,7 +576,7 @@ class MoRIIOWrapper:
             path = make_zmq_path("tcp", host, self.notify_port)
             logger.info("Node starting to listen notify from path = %s", path)
 
-            with zmq_ctx(zmq.ROUTER, path) as sock:
+            with zmq_socket_ctx(path, zmq.ROUTER) as sock:
                 while True:
                     try:
                         identity, msg = sock.recv_multipart()
