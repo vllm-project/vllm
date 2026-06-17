@@ -210,9 +210,13 @@ def persistent_masked_m_silu_mul_quant(
         DeepGemmQuantScaleFMT.UE8M0,
     ]
 
-    device_capability = current_platform.get_device_capability(device_id=y.device.index)
-    assert device_capability is not None
-    cuda_arch = device_capability.to_int()
+    # cuda_arch is only consulted on CUDA below; other backends (ROCm, XPU)
+    # take the Triton path regardless, so don't require a device capability.
+    cuda_arch = (
+        current_platform.get_device_capability(device_id=y.device.index).to_int()
+        if current_platform.is_cuda()
+        else 0
+    )
 
     if current_platform.is_cuda() and cuda_arch >= 80:
         torch.ops._C.persistent_masked_m_silu_mul_quant(
