@@ -1208,20 +1208,18 @@ class OffloadingConnectorScheduler:
         # Flush all in-flight jobs
         self._current_batch_jobs_to_flush.update(self._jobs.keys())
 
-        # Reset offloading manager cache
-        self.manager.reset_cache()
-
-        # A finished request may still be tracked here with in-flight jobs.
-        # This reset discards those jobs (_jobs is cleared below, and their
-        # later completions are skipped as stale), so update_connector_output()
-        # will never run the deferred on_request_finished() for it, leaving
-        # the hook uncalled and the _req_status entry leaked. Finalize such
-        # requests here instead. list() snapshots because we delete from
-        # _req_status while iterating.
+        # A finished request may still be tracked here with in-flight jobs that
+        # this reset discards, so its deferred on_request_finished() would never
+        # fire (completions are skipped as stale) and its _req_status entry would
+        # leak. Finalize such requests now, before resetting the manager.
+        # list() snapshots because we delete while iterating.
         for req_id, status in list(self._req_status.items()):
             if status.req.is_finished():
                 self.manager.on_request_finished(status.req_context)
                 del self._req_status[req_id]
+
+        # Reset offloading manager cache
+        self.manager.reset_cache()
 
         # Reset store progress so active requests re-offload from block 0
         for status in self._req_status.values():
