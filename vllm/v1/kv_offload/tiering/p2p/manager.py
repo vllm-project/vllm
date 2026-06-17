@@ -107,6 +107,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._sessions: dict[str, P2PSession] = {}
 
         self._finished_jobs: list[JobResult] = []
+        # kv_request_ids that hit a transport/session failure; On load lookup()
+        # rejects them so the request falls back to local prefill.
         self._failed_req_ids: set[str] = set()
 
         # Concurrency: a re-entrant lock serialises the poller thread
