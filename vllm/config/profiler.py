@@ -59,6 +59,15 @@ class ProfilerConfig:
     torch_profiler_dump_cuda_time_total: bool = True
     """If `True`, dumps total CUDA time in torch profiler traces. Enabled by default."""
 
+    cuda_profiler_control_dp_rank: int = Field(default=0, ge=-1)
+    """Data-parallel rank that controls CUDA profiler API start/stop calls.
+    Set to -1 to let every data-parallel rank call the CUDA profiler API."""
+
+    cuda_profiler_control_worker_rank: int = Field(default=0, ge=-1)
+    """Worker rank, within the selected data-parallel rank, that controls CUDA
+    profiler API start/stop calls. Set to -1 to let every worker in the
+    selected data-parallel rank call the CUDA profiler API."""
+
     torch_profiler_record_shapes: bool = False
     """If `True`, records tensor shapes in the torch profiler. Disabled by default."""
 

@@ -338,8 +338,13 @@ class TorchProfilerWrapper(WorkerProfiler):
 
 
 class CudaProfilerWrapper(WorkerProfiler):
-    def __init__(self, profiler_config: ProfilerConfig) -> None:
+    def __init__(
+        self,
+        profiler_config: ProfilerConfig,
+        enable_cuda_profiler_api: bool = True,
+    ) -> None:
         super().__init__(profiler_config)
+        self.enable_cuda_profiler_api = enable_cuda_profiler_api
         # Note: lazy import to avoid dependency issues if CUDA is not available.
         import torch.cuda.profiler as cuda_profiler
 
@@ -347,11 +352,13 @@ class CudaProfilerWrapper(WorkerProfiler):
 
     @override
     def _start(self) -> None:
-        self._cuda_profiler.start()
+        if self.enable_cuda_profiler_api:
+            self._cuda_profiler.start()
 
     @override
     def _stop(self) -> None:
-        self._cuda_profiler.stop()
+        if self.enable_cuda_profiler_api:
+            self._cuda_profiler.stop()
 
     @override
     def annotate_context_manager(self, name: str):
