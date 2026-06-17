@@ -71,6 +71,7 @@ logger = init_logger(__name__)
 _PCP_DUMP_N = [0]
 _PCP_DUMP_BT = [0]
 _PCP_DUMP_MERGE = [0]
+_PCP_DUMP_WRITE = [0]
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -684,15 +685,27 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     and _PCP_DUMP_N[0] < 20
                 ):
                     _PCP_DUMP_N[0] += 1
+                    # full_ctx = num_computed + decode query_len (~1) = the
+                    # FULL pre-split context per decode req. Compare to
+                    # seqused_k: if seqused_k≈full_ctx the per-rank cache holds
+                    # ~full C (seqused_k correct); if ≈full_ctx/pcp it's the
+                    # sharded half (seqused_k should be the half -- reading
+                    # full would go past the rank's owned cache into PAD).
+                    _full_ctx = (
+                        num_computed_tokens_cpu[:pcp_num_decodes].tolist()
+                        if num_computed_tokens_cpu is not None
+                        else None
+                    )
                     logger.warning(
                         "PCP_DUMP decode_in #%d num_dec=%d qsl=%s "
-                        "seqused_k=%s max_kv=%d rank=%d",
+                        "seqused_k=%s full_ctx=%s max_kv=%d rank=%d",
                         _PCP_DUMP_N[0],
                         pcp_num_decodes,
                         attn_metadata.pcp_query_start_loc[
                             : pcp_num_decodes + 1
                         ].tolist(),
                         decode_context_lens[:pcp_num_decodes].tolist(),
+                        _full_ctx,
                         attn_metadata.pcp_max_decode_context_kv_len,
                         self.pcp_rank,
                     )
@@ -1124,6 +1137,44 @@ class FlashAttentionImpl(AttentionImpl):
                     layer._k_scale,
                     layer._v_scale,
                 )
+                # PCP_DUMP write_chk (decisive): compare the cache AFTER the
+                # prefill write against the computed `key` for EVERY real
+                # prefill token (all heads/dims). maxdiff≈0 -> prefill write is
+                # correct, batched bug is in decode read. maxdiff large -> the
+                # restored (canonical) KV and the padded slot_mapping disagree
+                # on token<->slot order across requests -> cache corruption.
+                # Fire once on a batched prefill (>=2 requests => many tokens).
+                import os as _os
+
+                _umask = pcp_metadata.pcp_unpad_mask[:prefill_end].to(key_cache.device)
+                _canon = torch.nonzero(_umask[prefill_start:prefill_end]).flatten()
+                _n_real = int(_canon.shape[0])
+                if (
+                    _os.environ.get("PCP_DUMP")
+                    and self.pcp_rank == 0
+                    and _n_real > 800
+                    and _PCP_DUMP_WRITE[0] < 1
+                ):
+                    _PCP_DUMP_WRITE[0] = 1
+                    _canon = _canon + prefill_start
+                    _slots = slot_mapping[_canon]
+                    _ok = _slots >= 0
+                    _canon = _canon[_ok]
+                    _slots = _slots[_ok]
+                    _bs = key_cache.shape[1]
+                    _computed = key[_canon].to(torch.float32)
+                    _cached = key_cache[_slots // _bs, _slots % _bs].to(torch.float32)
+                    _diff = (_computed - _cached).abs()
+                    logger.warning(
+                        "PCP_DUMP write_chk n_real=%d n_checked=%d "
+                        "maxdiff=%.5f slot0=%d computed0=%s cached0=%s",
+                        _n_real,
+                        int(_canon.shape[0]),
+                        float(_diff.max()),
+                        int(_slots[0]),
+                        _computed[0, 0, :4].tolist(),
+                        _cached[0, 0, :4].tolist(),
+                    )
             return
 
         # Scatter write into the KV cache using slot_mapping indices.
