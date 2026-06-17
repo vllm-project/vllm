@@ -107,11 +107,12 @@ class FileSystemTierManager(SecondaryTierManager):
         )
         self._block_size: int = primary_kv_view.strides[0]
 
-        # Create file mapper
+        # Opt in; FileMapper enables it only for a parallelism-invariant block.
         self.file_mapper = FileMapper.from_offloading_spec(
             root_dir=root_dir,
             offloading_spec=offloading_spec,
             gpu_blocks_per_file=offloading_spec.block_size_factor,
+            parallel_agnostic=True,
         )
 
         # Write config file
@@ -178,6 +179,10 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
     @override
+    def drain_jobs(self) -> None:
+        """Block until all in-flight transfers in the threadpool finish."""
+        self._pool.wait_idle()
+
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context.req_id)
 
