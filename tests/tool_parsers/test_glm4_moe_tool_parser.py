@@ -33,7 +33,10 @@ def sample_tools():
         ChatCompletionToolsParam(
             function=FunctionDefinition(
                 name="get_weather",
-                parameters={"city": {"type": "string"}},
+                parameters={
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                },
             ),
         ),
     ]
@@ -850,7 +853,9 @@ def test_zero_argument_tool_call(glm4_moe_tool_parser, mock_request):
 
 def test_malformed_tool_call_no_regex_match(glm4_moe_tool_parser, mock_request):
     """Regression: malformed tool_call with no regex match (PR #32321)."""
-    model_output = "<tool_call>   </tool_call>"
+    # Missing closing tag means the regex does not match and the output
+    # should be treated as plain content.
+    model_output = "<tool_call>   "
 
     extracted = glm4_moe_tool_parser.extract_tool_calls(
         model_output, request=mock_request
@@ -858,6 +863,7 @@ def test_malformed_tool_call_no_regex_match(glm4_moe_tool_parser, mock_request):
 
     assert extracted.tools_called is False
     assert extracted.tool_calls == []
+    assert extracted.content == model_output
 
 
 def test_delimiter_preserved_transformers_5x(glm4_moe_tool_parser):
@@ -1493,7 +1499,8 @@ def test_extract_tool_call_without_newline_after_name(glm4_moe_tokenizer):
 
     This is the bug described in PR #42979: GLM-4.7 outputs tool calls
     without a newline between the function name and the first argument tag.
-    Example: get_weather<obs>... instead of get_weather\n<obs>...
+    Example:
+    ``<tool_call>get_weather<arg_key>...</arg_key><arg_value>...</arg_value></tool_call>``
 
     This test fails before the fix (regex requires \n) and passes after.
     """
@@ -1511,8 +1518,11 @@ def test_extract_tool_call_without_newline_after_name(glm4_moe_tokenizer):
     parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
 
-    # Format: function name immediately followed by <obs> tag, no \n
-    model_output = 'get_weather<obs><parameter name="city">Seattle</parameter></obs>'
+    # Format: function name immediately followed by <arg_key>, no \n
+    model_output = (
+        "<tool_call>get_weather<arg_key>city</arg_key>"
+        "<arg_value>Seattle</arg_value></tool_call>"
+    )
 
     extracted = parser.extract_tool_calls(model_output, request=request)
 
@@ -1552,11 +1562,9 @@ def test_string_type_detection_with_anyof(glm4_moe_tokenizer):
     _reset_streaming_state(parser)
 
     chunks = [
-        "configure<obs>",
-        '<parameter name="api_key">sk-',
+        "<tool_call>configure<arg_key>api_key</arg_key><arg_value>sk-",
         "12345678",
-        "</parameter>",
-        "</obs>",
+        "</arg_value></tool_call>",
     ]
 
     current_text = ""
@@ -1603,7 +1611,10 @@ def test_string_type_detection_with_list_types(glm4_moe_tokenizer):
     parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
     request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
 
-    model_output = 'log<obs><parameter name="message">test message</parameter></obs>'
+    model_output = (
+        "<tool_call>log<arg_key>message</arg_key>"
+        "<arg_value>test message</arg_value></tool_call>"
+    )
 
     extracted = parser.extract_tool_calls(model_output, request=request)
 
@@ -1643,15 +1654,16 @@ def test_streaming_no_corruption_for_boolean_values(glm4_moe_tokenizer):
 
     # Simulate a scenario where the model's format changes:
     chunks = [
-        "configure<obs>",
-        '<parameter name="enabled">true</parameter>',
-        "</obs>",
+        "<tool_call>configure<arg_key>enabled</arg_key><arg_value>true</arg_value>",
+        "</tool_call>",
     ]
 
+    current_text = ""
     for chunk in chunks:
+        current_text += chunk
         parser.extract_tool_calls_streaming(
             previous_text="",
-            current_text=chunk,
+            current_text=current_text,
             delta_text=chunk,
             previous_token_ids=[],
             current_token_ids=[],
