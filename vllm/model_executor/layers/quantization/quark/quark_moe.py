@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     backend_to_kernel_cls,
     convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
+    convert_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
@@ -1041,10 +1042,36 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 moe, activation_key=kFp8StaticTensorSym
             )
         elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp4":
-            # W4A4: MXFP4 weights + MXFP4 activations
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-                moe, activation_key=kMxfp4Dynamic
-            )
+            # W4A4: MXFP4 weights + MXFP4 activations.
+            # On ROCm/CDNA there is no native W4A4 MXFP4 MoE kernel that applies
+            # the clamped-OAI SwiGLU (AITER maps SWIGLUOAI -> plain swiglu, no
+            # alpha/limit -> wrong math). Route to the Triton OAITriton MXFP4
+            # kernel (W4A16, bf16 activations) which applies swigluoai_and_mul
+            # with the model's alpha=1.702/limit=7.0 correctly. Weights stay
+            # genuine MXFP4; only the dynamic mxfp4 activation quant is dropped
+            # (bf16 activations are strictly more accurate). This is a real
+            # native Triton kernel, NOT emulation.
+            import os as _os
+
+            if current_platform.is_rocm() and _os.environ.get(
+                "VLLM_M3_FP4_TRITON", "1"
+            ) != "0":
+                self.input_dtype = None
+                self.ocp_mx_scheme = OCP_MX_Scheme.from_quant_dtype(
+                    None, self.weight_dtype
+                )
+                self.mxfp4_backend = Mxfp4MoeBackend.TRITON
+                # Use the MODULAR OAITritonExperts ([1]), not the monolithic
+                # kernel ([0]). The monolithic path runs its own softmax/topk
+                # routing (gpt-oss style); MiniMax-M3 uses sigmoid scoring +
+                # routing bias + routed_scaling_factor, so let vLLM's MoE layer
+                # do the routing and use the kernel only for expert compute.
+                _triton_cls = backend_to_kernel_cls(Mxfp4MoeBackend.TRITON)
+                self.experts_cls = _triton_cls[1] if len(_triton_cls) > 1 else _triton_cls[0]
+            else:
+                self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                    moe, activation_key=kMxfp4Dynamic
+                )
 
         # Validation for unsupported schemes
         if any(
@@ -1071,8 +1098,11 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # If no native backend available, use emulation.
         if self.mxfp4_backend is Mxfp4MoeBackend.NONE:
             self.mxfp4_backend = Mxfp4MoeBackend.EMULATION
-
-        self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
+            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
+        elif self.experts_cls is None:
+            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
+        # else: preserve experts_cls already chosen above (e.g. modular Triton
+        # OAITritonExperts for the MiniMax-M3 ROCm route).
 
         logger.info_once(
             f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"
@@ -1228,6 +1258,22 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         w13_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
 
+        # The gpt-oss converter / OAITriton kernel expect w13 with gate/up rows
+        # *interleaved* ([g0, u0, g1, u1, ...]); gpt-oss checkpoints ship that
+        # way. MiniMax-M3 stores w13 *packed* ([all gates; all ups]) from
+        # MergedColumnParallelLinear, so interleave the rows of w13 weight /
+        # scale / bias before conversion when routing through Triton on ROCm.
+        import os as _os
+
+        _packed_triton = (
+            self.mxfp4_backend in TRITON_BACKENDS
+            and current_platform.is_rocm()
+            and _os.environ.get("VLLM_M3_FP4_TRITON", "1") != "0"
+        )
+        if _packed_triton:
+            self._interleave_w13_rows_(layer)
+            w13_bias = getattr(layer, "w13_bias", None)
+
         # Convert weights to kernel format (handles all backend-specific logic)
         w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
             convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
@@ -1339,6 +1385,39 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 a1_scale=None,
                 a2_scale=None,
                 block_shape=None,
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
+            )
+
+    def _interleave_w13_rows_(self, layer: RoutedExperts) -> None:
+        """Interleave packed w13 rows ([all gates; all ups]) into the
+        gate/up-interleaved layout ([g0, u0, g1, u1, ...]) expected by the
+        gpt-oss converter and OAITriton SwiGLU kernel."""
+
+        def _il(t: torch.Tensor) -> torch.Tensor:
+            n = t.shape[1]
+            half = n // 2
+            gate = t[:, :half]
+            up = t[:, half:]
+            return torch.stack([gate, up], dim=2).reshape(t.shape).contiguous()
+
+        layer.w13_weight = torch.nn.Parameter(
+            _il(layer.w13_weight.data), requires_grad=False
+        )
+        layer.w13_weight_scale = torch.nn.Parameter(
+            _il(layer.w13_weight_scale.data), requires_grad=False
+        )
+        w13_bias = getattr(layer, "w13_bias", None)
+        if w13_bias is not None:
+            half = w13_bias.shape[1] // 2
+            gate_b = w13_bias.data[:, :half]
+            up_b = w13_bias.data[:, half:]
+            layer.w13_bias = torch.nn.Parameter(
+                torch.stack([gate_b, up_b], dim=2)
+                .reshape(w13_bias.shape)
+                .contiguous(),
+                requires_grad=False,
             )
 
     @property
@@ -1363,12 +1442,24 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            activation=layer.activation,
+            activation=self._kernel_activation(layer.activation),
             global_num_experts=layer.global_num_experts,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=layer.expert_map,
             shared_experts_input=shared_experts_input,
         )
+
+    def _kernel_activation(self, activation: MoEActivation) -> MoEActivation:
+        # The Triton OAITriton kernel implements SWIGLUOAI on interleaved
+        # gate/up. The packed-assuming weight converter interleaves MiniMax-M3's
+        # SWIGLUOAI_UNINTERLEAVE weights, so present them to the kernel as
+        # SWIGLUOAI (identical math, alpha=1.702/limit=7.0 defaults).
+        if (
+            self.mxfp4_backend in TRITON_BACKENDS
+            and activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+        ):
+            return MoEActivation.SWIGLUOAI
+        return activation
 
     def apply_monolithic(
         self,
@@ -1384,7 +1475,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             w1=layer.w13_weight,
             w2=layer.w2_weight,
             router_logits=router_logits,
-            activation=layer.activation,
+            activation=self._kernel_activation(layer.activation),
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
