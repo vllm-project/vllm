@@ -19,6 +19,9 @@ The kernel is imported via
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 from vllm.models.deepseek_v4.common.ops import (
     dequantize_and_gather_k_cache,
     quantize_and_insert_k_cache,
@@ -30,9 +33,9 @@ HEAD_DIM = 512
 ROPE_DIM = 64
 NOPE_DIM = HEAD_DIM - ROPE_DIM  # 448
 QUANT_BLOCK = 64
-# Match the C++ SWA-K encoder: FNUZ on gfx942 (FP8_MAX=224), OCP elsewhere (448).
+# Match the C++ SWA-K encoder: FNUZ on gfx942, OCP elsewhere.
 USE_FNUZ = current_platform.is_fp8_fnuz()
-FP8_MAX = 224.0 if USE_FNUZ else 448.0
+_, FP8_MAX = get_fp8_min_max()
 # The kernel emits FNUZ-encoded fp8 bytes on gfx942 (rocm_cvt_float_to_fp8_e4m3)
 # but stores them into float8_e4m3fn-typed tensors, matching vLLM's ROCm cache
 # convention. References must encode under the same scheme and the kernel's

@@ -16,6 +16,10 @@ preparation.
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
 
@@ -164,8 +168,9 @@ def quantize_and_insert_k_cache(
       - Each token: 8 bytes (uint8 scales, 7 real + 1 padding)
     - Padded to multiple of 576
 
-    ``use_fnuz=True`` switches to FNUZ E4M3 (FP8_MAX=224); default OCP
-    (FP8_MAX=448) matches every production caller.
+    ``use_fnuz=True`` selects FNUZ E4M3 cache encoding and is only valid on
+    platforms whose FP8 format is FNUZ. ``use_fnuz=False`` selects OCP E4M3,
+    which is used by OCP-encoded caches even on gfx942.
     """
     assert k.dim() == 2 and k.shape[1] == 512, (
         f"K must be [num_tokens, 512], got {k.shape}"
@@ -182,7 +187,12 @@ def quantize_and_insert_k_cache(
     TOKEN_BF16_DIM = 64
     TOKEN_SCALE_DIM = 8
     QUANT_BLOCK_SIZE = 64
-    FP8_MAX = 224.0 if use_fnuz else 448.0  # FNUZ value matches fp8_utils.py
+    if use_fnuz:
+        if not current_platform.is_fp8_fnuz():
+            raise ValueError("use_fnuz=True requires a platform using FNUZ FP8")
+        _, FP8_MAX = get_fp8_min_max()
+    else:
+        FP8_MAX = torch.finfo(torch.float8_e4m3fn).max
     TOKEN_DATA_SIZE = TOKEN_FP8_DIM + TOKEN_BF16_DIM * 2
 
     grid = (num_tokens,)
