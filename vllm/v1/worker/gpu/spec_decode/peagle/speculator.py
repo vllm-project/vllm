@@ -19,9 +19,6 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.block_table import BlockTables, _compute_slot_mappings_kernel
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
-    prepare_prefill_inputs,
-)
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 
@@ -41,11 +38,8 @@ class PEagleSpeculator(DraftModelSpeculator):
         self.last_token_indices = torch.zeros(
             self.max_num_reqs, dtype=torch.int64, device=device
         )
-
         self.supports_mm_inputs = False
 
-        self.parallel_drafting_token_id: int = 0
-        self.parallel_drafting_hidden_state_tensor: torch.Tensor | None = None
         self._init_parallel_drafting_params()
 
         N = self.num_speculative_steps
@@ -66,7 +60,7 @@ class PEagleSpeculator(DraftModelSpeculator):
         self.peagle_seq_lens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=device
         )
-        self.peagle_is_pard_mask = torch.zeros(
+        self.peagle_is_hidden_masked = torch.zeros(
             max_extended, dtype=torch.bool, device=device
         )
         self.peagle_eagle_idx = torch.zeros(
@@ -208,39 +202,23 @@ class PEagleSpeculator(DraftModelSpeculator):
         num_tokens: int,
         num_rejected: torch.Tensor,
     ) -> int:
-        """Populate peagle_* input buffers and hidden states. Returns num_extended."""
+        """Gather hidden states into peagle buffer. Returns num_extended.
+
+        The peagle_* input/position/mask/idx buffers are already populated by
+        prepare_peagle_inputs (called in propose), so this method only handles
+        the hidden-state gather that requires Python-side tensor ops.
+        """
         N = self.num_speculative_steps
-        prepare_peagle_prefill_inputs(
-            last_token_indices=self.last_token_indices,
-            peagle_input_ids=self.peagle_input_ids,
-            peagle_positions=self.peagle_positions,
-            peagle_query_start_loc=self.peagle_query_start_loc,
-            peagle_seq_lens=self.peagle_seq_lens,
-            peagle_is_pard_mask=self.peagle_is_pard_mask,
-            peagle_is_stale_mask=self.peagle_is_stale_mask,
-            peagle_eagle_idx=self.peagle_eagle_idx,
-            eagle_input_ids=self.input_buffers.input_ids,
-            eagle_positions=self.input_buffers.positions,
-            eagle_query_start_loc=self.input_buffers.query_start_loc,
-            eagle_seq_lens=self.input_buffers.seq_lens,
-            num_rejected=num_rejected,
-            pard_token_id=self.parallel_drafting_token_id,
-            num_speculative_steps=N,
-            max_num_reqs=self.max_num_reqs,
-            num_reqs=num_reqs,
-        )
         # Each request gains N-1 pard slots on top of its Eagle query length.
         num_extended = num_tokens + num_reqs * (N - 1)
 
-        # Eagle positions get target hidden states; pard and stale get mask_hidden.
         assert self.parallel_drafting_hidden_state_tensor is not None
         mask_h = self.parallel_drafting_hidden_state_tensor
         eagle_idx = self.peagle_eagle_idx[:num_extended].long()
-        is_pard = self.peagle_is_pard_mask[:num_extended]
-        is_stale = self.peagle_is_stale_mask[:num_extended]
+        is_hidden_masked = self.peagle_is_hidden_masked[:num_extended]
         self.peagle_hidden_states[:num_extended] = self.hidden_states[eagle_idx]
         torch.where(
-            (is_pard | is_stale).unsqueeze(1),
+            is_hidden_masked.unsqueeze(1),
             mask_h,
             self.peagle_hidden_states[:num_extended],
             out=self.peagle_hidden_states[:num_extended],
@@ -455,16 +433,24 @@ class PEagleSpeculator(DraftModelSpeculator):
             seeds,
         )
 
-        prepare_prefill_inputs(
-            self.last_token_indices,
-            self.current_draft_step,
-            self.input_buffers,
-            input_batch,
-            num_sampled,
-            num_rejected,
-            last_sampled,
-            next_prefill_tokens,
-            self.max_num_reqs,
+        prepare_peagle_inputs(
+            out_input_ids=self.peagle_input_ids,
+            out_positions=self.peagle_positions,
+            out_query_start_loc=self.peagle_query_start_loc,
+            out_seq_lens=self.peagle_seq_lens,
+            out_is_hidden_masked=self.peagle_is_hidden_masked,
+            out_is_stale_mask=self.peagle_is_stale_mask,
+            out_eagle_idx=self.peagle_eagle_idx,
+            last_token_indices=self.last_token_indices,
+            current_draft_step=self.current_draft_step,
+            input_batch=input_batch,
+            num_sampled=num_sampled,
+            num_rejected=num_rejected,
+            last_sampled=last_sampled,
+            next_prefill_tokens=next_prefill_tokens,
+            pard_token_id=self.parallel_drafting_token_id,
+            num_speculative_steps=self.num_speculative_steps,
+            max_num_reqs=self.max_num_reqs,
         )
 
         self._parallel_eagle(
@@ -484,183 +470,182 @@ class PEagleSpeculator(DraftModelSpeculator):
 # PEagle (Parallel Eagle) helpers
 # ---------------------------------------------------------------------------
 @triton.jit
-def _prepare_peagle_prefill_inputs_kernel(
-    # Outputs: extended PEagle buffer
+def _prepare_peagle_inputs_kernel(
+    # ── Outputs: PEagle extended buffer ──────────────────────────────────
     out_input_ids_ptr,  # [max_extended]
     out_positions_ptr,  # [max_extended]
     out_query_start_loc_ptr,  # [max_num_reqs + 1]
     out_seq_lens_ptr,  # [max_num_reqs]
-    out_is_pard_mask_ptr,  # [max_extended] bool
-    out_is_stale_mask_ptr,  # [max_extended] bool
-    out_eagle_idx_ptr,  # [max_extended] int32: extended pos → eagle pos
-    last_token_indices_ptr,  # [max_num_reqs] (mutated: set to last valid eagle pos)
-    # Inputs: from prepare_prefill_inputs
-    eagle_input_ids_ptr,  # [max_num_tokens]
-    eagle_positions_ptr,  # [max_num_tokens]
-    eagle_query_start_loc_ptr,  # [max_num_reqs + 1]
-    eagle_seq_lens_ptr,  # [max_num_reqs]
-    num_rejected_ptr,  # [max_num_reqs]
+    out_is_hidden_masked_ptr,  # [max_extended] bool: is_pard | is_stale
+    out_is_stale_mask_ptr,  # [max_extended] bool: stale only
+    out_eagle_idx_ptr,  # [max_extended] int32: valid eagle pos → target pos
+    last_token_indices_ptr,  # [max_num_reqs]  (output)
+    draft_current_step_ptr,  # scalar           (output: reset to 0)
+    # ── Inputs: directly from target model / input_batch ─────────────────
+    target_input_ids_ptr,
+    target_positions_ptr,
+    target_query_start_loc_ptr,
+    target_seq_lens_ptr,
+    idx_mapping_ptr,
+    last_sampled_ptr,
+    next_prefill_tokens_ptr,
+    num_sampled_ptr,
+    num_rejected_ptr,
     pard_token_id,
     num_speculative_steps,
     max_num_reqs,
-    BLOCK_SIZE: tl.constexpr,
+    BLOCK_SIZE_TOKENS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     num_reqs = tl.num_programs(0)
     N = num_speculative_steps
 
-    eagle_q_start = tl.load(eagle_query_start_loc_ptr + req_idx)
-    eagle_q_end = tl.load(eagle_query_start_loc_ptr + req_idx + 1)
-    eagle_q_len = eagle_q_end - eagle_q_start
+    # ── Per-request metadata ──────────────────────────────────────────────
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+    target_q_start = tl.load(target_query_start_loc_ptr + req_idx)
+    target_q_end = tl.load(target_query_start_loc_ptr + req_idx + 1)
+    target_q_len = target_q_end - target_q_start
+    target_seq_len = tl.load(target_seq_lens_ptr + req_idx)
 
-    # Use adjusted query length to exclude stale (rejected) tokens from the
-    # previous speculative round.
     num_rejected = tl.load(num_rejected_ptr + req_idx)
-    adjusted_q_len = eagle_q_len - num_rejected
+    adjusted_q_len = target_q_len - num_rejected
 
-    # Extended buffer layout per request:
-    #   [stale(num_rejected) | eagle(adjusted_q_len) | pard(N-1)]
+    num_sampled = tl.load(num_sampled_ptr + req_idx)
+    if num_sampled > 0:
+        next_token = tl.load(last_sampled_ptr + req_state_idx).to(tl.int32)
+    else:
+        next_token = tl.load(next_prefill_tokens_ptr + req_state_idx)
+
+    # ── PEagle extended buffer layout per request ─────────────────────────
+    # [valid(adjusted_q_len) | pard(N-1) | stale(num_rejected)]
     #
-    # Placing stale tokens FIRST ensures valid eagle tokens have higher
-    # q_idx values under FlashAttention's relative causal mask, so they
-    # can attend to all required KV positions.
-    out_start = eagle_q_start + req_idx * (N - 1)
-    valid_eagle_start = out_start + num_rejected
+    # Stale tokens come LAST (highest q_idx). Valid tokens start at q_idx 0,
+    # which is correct under FA causal mask when seq_lens = target_seq_len + N - 1:
+    #   valid token at q_offset i can attend to [0, target_seq_len - target_q_len + i]
+    #   = its actual sequence position. Stale tokens over-attend into rejected KV
+    #   positions but their output is always discarded.
+    out_start = target_q_start + req_idx * (N - 1)
+    last_valid_idx = out_start + adjusted_q_len - 1
+    total_tokens = target_q_len + N - 1  # = adjusted_q_len + (N-1) + num_rejected
 
-    # Copy valid eagle input IDs.
-    for i in range(0, adjusted_q_len, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < adjusted_q_len
-        ids = tl.load(eagle_input_ids_ptr + eagle_q_start + block, mask=mask, other=0)
-        tl.store(out_input_ids_ptr + valid_eagle_start + block, ids, mask=mask)
+    # last_pos is the sequence position of the last valid eagle token;
+    # pard tokens continue from last_pos+1.
+    last_pos = tl.load(target_positions_ptr + target_q_start + adjusted_q_len - 1)
 
-    # Fill pard token IDs after valid eagle tokens.
-    for i in range(0, N - 1, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < (N - 1)
-        tl.store(
-            out_input_ids_ptr + valid_eagle_start + adjusted_q_len + block,
-            pard_token_id,
-            mask=mask,
+    # ── Single pass over all token slots in the extended buffer ───────────
+    # Region classification determines behavior at each slot j:
+    #   [0, adjusted_q_len)                  → valid
+    #   [adjusted_q_len, adjusted_q_len+N-1) → pard
+    #   [adjusted_q_len+N-1, total_tokens)   → stale
+    for tok in range(0, total_tokens, BLOCK_SIZE_TOKENS):
+        j = tok + tl.arange(0, BLOCK_SIZE_TOKENS)
+        in_range = j < total_tokens
+
+        is_valid = j < adjusted_q_len
+        is_stale = j >= adjusted_q_len + N - 1
+        is_pard = ~is_valid & ~is_stale
+        is_last_valid = j == adjusted_q_len - 1
+
+        valid_j = j  # offset within valid region (== j)
+        pard_j = j - adjusted_q_len  # offset within pard region
+
+        # input_ids: valid → shifted target ids (next_token at last slot)
+        #            pard  → pard_token_id; stale → don't-care
+        ids_shifted = tl.load(
+            target_input_ids_ptr + target_q_start + 1 + valid_j,
+            mask=in_range & is_valid & ~is_last_valid,
+            other=0,
         )
-
-    # Copy valid eagle positions.
-    for i in range(0, adjusted_q_len, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < adjusted_q_len
-        pos = tl.load(eagle_positions_ptr + eagle_q_start + block, mask=mask, other=0)
-        tl.store(out_positions_ptr + valid_eagle_start + block, pos, mask=mask)
-
-    # Fill pard positions: last valid eagle pos + 1, +2, ...
-    last_pos = tl.load(eagle_positions_ptr + eagle_q_start + adjusted_q_len - 1)
-    for i in range(0, N - 1, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < (N - 1)
-        tl.store(
-            out_positions_ptr + valid_eagle_start + adjusted_q_len + block,
-            last_pos + 1 + block,
-            mask=mask,
+        ids = tl.where(
+            is_last_valid,
+            next_token,
+            tl.where(is_valid, ids_shifted, tl.where(is_pard, pard_token_id, 0)),
         )
+        tl.store(out_input_ids_ptr + out_start + j, ids, mask=in_range)
 
-    # is_stale_mask: True for stale slots [out_start, valid_eagle_start).
-    # is_pard_mask:  False for eagle tokens, True for pard tokens.
-    for i in range(0, num_rejected, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < num_rejected
-        tl.store(out_is_stale_mask_ptr + out_start + block, 1, mask=mask)
-    for i in range(0, adjusted_q_len, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < adjusted_q_len
-        tl.store(out_is_pard_mask_ptr + valid_eagle_start + block, 0, mask=mask)
-        tl.store(out_is_stale_mask_ptr + valid_eagle_start + block, 0, mask=mask)
-    for i in range(0, N - 1, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < (N - 1)
-        tl.store(
-            out_is_pard_mask_ptr + valid_eagle_start + adjusted_q_len + block,
-            1,
-            mask=mask,
+        # positions: valid → direct copy; pard → last_pos+1+pard_j; stale → don't-care
+        pos_from_target = tl.load(
+            target_positions_ptr + target_q_start + valid_j,
+            mask=in_range & is_valid,
+            other=0,
         )
-        tl.store(
-            out_is_stale_mask_ptr + valid_eagle_start + adjusted_q_len + block,
-            0,
-            mask=mask,
+        pos = tl.where(
+            is_valid, pos_from_target, tl.where(is_pard, last_pos + 1 + pard_j, 0)
         )
+        tl.store(out_positions_ptr + out_start + j, pos, mask=in_range)
 
-    # Eagle index mapping: valid eagle positions → original eagle buffer index.
-    # Pard and stale positions map to 0 (placeholder; hidden state overridden).
-    for i in range(0, adjusted_q_len, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < adjusted_q_len
-        tl.store(
-            out_eagle_idx_ptr + valid_eagle_start + block,
-            eagle_q_start + block,
-            mask=mask,
-        )
-    for i in range(0, N - 1, BLOCK_SIZE):
-        block = i + tl.arange(0, BLOCK_SIZE)
-        mask = block < (N - 1)
-        tl.store(
-            out_eagle_idx_ptr + valid_eagle_start + adjusted_q_len + block, 0, mask=mask
-        )
+        # eagle_idx: valid → target buffer coordinate; pard/stale → 0 (don't-care)
+        eagle_idx = tl.where(is_valid, (target_q_start + valid_j).to(tl.int32), 0)
+        tl.store(out_eagle_idx_ptr + out_start + j, eagle_idx, mask=in_range)
 
-    # Update last_token_indices to the last valid eagle token (sampling start).
-    tl.store(last_token_indices_ptr + req_idx, valid_eagle_start + adjusted_q_len - 1)
+        tl.store(out_is_hidden_masked_ptr + out_start + j, ~is_valid, mask=in_range)
+        tl.store(out_is_stale_mask_ptr + out_start + j, is_stale, mask=in_range)
 
-    # Extended query metadata.
+    # ── Per-request scalar outputs ────────────────────────────────────────
+    tl.store(last_token_indices_ptr + req_idx, last_valid_idx)
     tl.store(out_query_start_loc_ptr + req_idx, out_start)
-    eagle_seq_len = tl.load(eagle_seq_lens_ptr + req_idx)
-    tl.store(out_seq_lens_ptr + req_idx, eagle_seq_len - num_rejected + N - 1)
+    tl.store(out_seq_lens_ptr + req_idx, target_seq_len + N - 1)
 
+    # ── Last-request housekeeping ─────────────────────────────────────────
     if req_idx == num_reqs - 1:
-        out_end = out_start + eagle_q_len + N - 1
+        out_end = out_start + total_tokens
         tl.store(out_query_start_loc_ptr + num_reqs, out_end)
-        # Pad remaining entries for CUDA graphs.
-        for i in range(num_reqs + 1, max_num_reqs + 1, BLOCK_SIZE):
-            block = i + tl.arange(0, BLOCK_SIZE)
+        tl.store(draft_current_step_ptr, 0)
+        # Pad query_start_loc, seq_lens, last_token_indices for CUDA graphs.
+        for i in range(num_reqs + 1, max_num_reqs + 1, BLOCK_SIZE_TOKENS):
+            block = i + tl.arange(0, BLOCK_SIZE_TOKENS)
             mask = block < max_num_reqs + 1
             tl.store(out_query_start_loc_ptr + block, out_end, mask=mask)
-        for i in range(num_reqs, max_num_reqs, BLOCK_SIZE):
-            block = i + tl.arange(0, BLOCK_SIZE)
+        for i in range(num_reqs, max_num_reqs, BLOCK_SIZE_TOKENS):
+            block = i + tl.arange(0, BLOCK_SIZE_TOKENS)
             mask = block < max_num_reqs
             tl.store(out_seq_lens_ptr + block, 0, mask=mask)
+            tl.store(last_token_indices_ptr + block, 0, mask=mask)
 
 
-def prepare_peagle_prefill_inputs(
-    last_token_indices: torch.Tensor,
-    peagle_input_ids: torch.Tensor,
-    peagle_positions: torch.Tensor,
-    peagle_query_start_loc: torch.Tensor,
-    peagle_seq_lens: torch.Tensor,
-    peagle_is_pard_mask: torch.Tensor,
-    peagle_is_stale_mask: torch.Tensor,
-    peagle_eagle_idx: torch.Tensor,
-    eagle_input_ids: torch.Tensor,
-    eagle_positions: torch.Tensor,
-    eagle_query_start_loc: torch.Tensor,
-    eagle_seq_lens: torch.Tensor,
+def prepare_peagle_inputs(
+    # Outputs: PEagle extended buffer
+    out_input_ids: torch.Tensor,  # [max_extended]
+    out_positions: torch.Tensor,  # [max_extended]
+    out_query_start_loc: torch.Tensor,  # [max_num_reqs + 1]
+    out_seq_lens: torch.Tensor,  # [max_num_reqs]
+    out_is_hidden_masked: torch.Tensor,  # [max_extended] is_pard | is_stale
+    out_is_stale_mask: torch.Tensor,  # [max_extended] stale only
+    out_eagle_idx: torch.Tensor,  # [max_extended]
+    last_token_indices: torch.Tensor,  # [max_num_reqs]
+    current_draft_step: torch.Tensor,  # scalar
+    # Inputs: directly from target model / input_batch
+    input_batch: "InputBatch",
+    num_sampled: torch.Tensor,
     num_rejected: torch.Tensor,
+    last_sampled: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
     pard_token_id: int,
     num_speculative_steps: int,
     max_num_reqs: int,
-    num_reqs: int,
 ) -> None:
-    _prepare_peagle_prefill_inputs_kernel[(num_reqs,)](
-        peagle_input_ids,
-        peagle_positions,
-        peagle_query_start_loc,
-        peagle_seq_lens,
-        peagle_is_pard_mask,
-        peagle_is_stale_mask,
-        peagle_eagle_idx,
+    num_reqs = input_batch.num_reqs
+    _prepare_peagle_inputs_kernel[(num_reqs,)](
+        out_input_ids,
+        out_positions,
+        out_query_start_loc,
+        out_seq_lens,
+        out_is_hidden_masked,
+        out_is_stale_mask,
+        out_eagle_idx,
         last_token_indices,
-        eagle_input_ids,
-        eagle_positions,
-        eagle_query_start_loc,
-        eagle_seq_lens,
+        current_draft_step,
+        input_batch.input_ids,
+        input_batch.positions,
+        input_batch.query_start_loc,
+        input_batch.seq_lens,
+        input_batch.idx_mapping,
+        last_sampled,
+        next_prefill_tokens,
+        num_sampled,
         num_rejected,
         pard_token_id,
         num_speculative_steps,
         max_num_reqs,
-        BLOCK_SIZE=32,
+        BLOCK_SIZE_TOKENS=32,
     )
