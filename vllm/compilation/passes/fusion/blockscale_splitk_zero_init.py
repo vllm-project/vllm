@@ -109,100 +109,8 @@ class GemmSpec:
     out_op: torch._ops.OpOverload
 
 
-# ---------------------------------------------------------------------------
-# Concrete registries
-# ---------------------------------------------------------------------------
-
-
-def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
-    producers = [
-        ProducerSpec(
-            name="aiter_group_fp8_quant",
-            op=rocm_aiter_ops.get_group_quant_op(),
-            with_zero_init_op=(
-                torch.ops.vllm.rocm_aiter_group_fp8_quant_with_zero_init.default
-            ),
-            pattern_builder=_make_group_quant_producer_pattern,
-            fp8_output_index=0,
-            scales_output_index=1,
-            static_kwargs={"group_size": 128},
-        ),
-        ProducerSpec(
-            name="aiter_rmsnorm_fp8_group_quant",
-            op=rocm_aiter_ops.get_rmsnorm_group_fused_quant_op(),
-            with_zero_init_op=(
-                torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init.default
-            ),
-            pattern_builder=_make_2_input_producer_pattern,
-            fp8_output_index=0,
-            scales_output_index=1,
-            static_kwargs={"group_size": 128},
-            eps_values=RMSNORM_EPS_VALUES,
-        ),
-        ProducerSpec(
-            name="aiter_rmsnorm_with_add_fp8_group_quant",
-            op=rocm_aiter_ops.get_rmsnorm_group_add_fused_quant_op(),
-            with_zero_init_op=(
-                torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init.default
-            ),
-            pattern_builder=_make_2_input_with_residual_producer_pattern,
-            fp8_output_index=0,
-            residual_output_index=1,
-            scales_output_index=2,
-            static_kwargs={"group_size": 128},
-            eps_values=RMSNORM_EPS_VALUES,
-        ),
-        ProducerSpec(
-            name="aiter_act_mul_and_fp8_group_quant",
-            op=rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_op(),
-            with_zero_init_op=(
-                torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init.default
-            ),
-            pattern_builder=_make_act_mul_group_quant_producer_pattern,
-            fp8_output_index=0,
-            scales_output_index=1,
-            static_kwargs={"group_size": 128},
-        ),
-        ProducerSpec(
-            name="aiter_gemma_rmsnorm_fp8_group_quant",
-            op=rocm_aiter_ops.get_gemma_rmsnorm_fp8_group_quant_op(),
-            with_zero_init_op=(
-                torch.ops.vllm.rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init.default
-            ),
-            pattern_builder=_make_2_input_producer_pattern,
-            fp8_output_index=0,
-            scales_output_index=1,
-            static_kwargs={"group_size": 128},
-            eps_values=RMSNORM_EPS_VALUES,
-        ),
-        ProducerSpec(
-            name="aiter_gated_rmsnorm_fp8_group_quant",
-            op=rocm_aiter_ops.get_gated_rmsnorm_fp8_group_quant_op(),
-            with_zero_init_op=(
-                torch.ops.vllm.rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init.default
-            ),
-            pattern_builder=_make_gated_producer_pattern,
-            fp8_output_index=0,
-            scales_output_index=1,
-            static_kwargs={"group_size": 128},
-            eps_values=RMSNORM_EPS_VALUES,
-        ),
-    ]
-    gemms = [
-        GemmSpec(
-            name="aiter_gemm_a8w8_blockscale",
-            op=torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale.default,
-            out_op=torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale_out.default,
-        )
-    ]
-    return producers, gemms
-
-
 __all__ = [
     "BlockScaleSplitKZeroInitFusionPass",
-    "GemmSpec",
-    "ProducerSpec",
-    "build_default_registries",
 ]
 
 
@@ -628,6 +536,95 @@ def _make_gated_producer_pattern(
         example_inputs,
         _make_extra_check(gemm, min_k),
     )
+
+
+# ---------------------------------------------------------------------------
+# Concrete registries
+# ---------------------------------------------------------------------------
+
+
+def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
+    producers = [
+        ProducerSpec(
+            name="aiter_group_fp8_quant",
+            op=rocm_aiter_ops.get_group_quant_op(),
+            with_zero_init_op=(
+                torch.ops.vllm.rocm_aiter_group_fp8_quant_with_zero_init.default
+            ),
+            pattern_builder=_make_group_quant_producer_pattern,
+            fp8_output_index=0,
+            scales_output_index=1,
+            static_kwargs={"group_size": 128},
+        ),
+        ProducerSpec(
+            name="aiter_rmsnorm_fp8_group_quant",
+            op=rocm_aiter_ops.get_rmsnorm_group_fused_quant_op(),
+            with_zero_init_op=(
+                torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init.default
+            ),
+            pattern_builder=_make_2_input_producer_pattern,
+            fp8_output_index=0,
+            scales_output_index=1,
+            static_kwargs={"group_size": 128},
+            eps_values=RMSNORM_EPS_VALUES,
+        ),
+        ProducerSpec(
+            name="aiter_rmsnorm_with_add_fp8_group_quant",
+            op=rocm_aiter_ops.get_rmsnorm_group_add_fused_quant_op(),
+            with_zero_init_op=(
+                torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init.default
+            ),
+            pattern_builder=_make_2_input_with_residual_producer_pattern,
+            fp8_output_index=0,
+            residual_output_index=1,
+            scales_output_index=2,
+            static_kwargs={"group_size": 128},
+            eps_values=RMSNORM_EPS_VALUES,
+        ),
+        ProducerSpec(
+            name="aiter_act_mul_and_fp8_group_quant",
+            op=rocm_aiter_ops.get_act_mul_fused_fp8_group_quant_op(),
+            with_zero_init_op=(
+                torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init.default
+            ),
+            pattern_builder=_make_act_mul_group_quant_producer_pattern,
+            fp8_output_index=0,
+            scales_output_index=1,
+            static_kwargs={"group_size": 128},
+        ),
+        ProducerSpec(
+            name="aiter_gemma_rmsnorm_fp8_group_quant",
+            op=rocm_aiter_ops.get_gemma_rmsnorm_fp8_group_quant_op(),
+            with_zero_init_op=(
+                torch.ops.vllm.rocm_aiter_gemma_rmsnorm_fp8_group_quant_with_zero_init.default
+            ),
+            pattern_builder=_make_2_input_producer_pattern,
+            fp8_output_index=0,
+            scales_output_index=1,
+            static_kwargs={"group_size": 128},
+            eps_values=RMSNORM_EPS_VALUES,
+        ),
+        ProducerSpec(
+            name="aiter_gated_rmsnorm_fp8_group_quant",
+            op=rocm_aiter_ops.get_gated_rmsnorm_fp8_group_quant_op(),
+            with_zero_init_op=(
+                torch.ops.vllm.rocm_aiter_gated_rmsnorm_fp8_group_quant_with_zero_init.default
+            ),
+            pattern_builder=_make_gated_producer_pattern,
+            fp8_output_index=0,
+            scales_output_index=1,
+            static_kwargs={"group_size": 128},
+            eps_values=RMSNORM_EPS_VALUES,
+        ),
+    ]
+    gemms = [
+        GemmSpec(
+            name="aiter_gemm_a8w8_blockscale",
+            op=torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale.default,
+            out_op=torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale_out.default,
+        )
+    ]
+    return producers, gemms
 
 
 class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):

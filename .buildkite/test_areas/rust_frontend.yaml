@@ -16,7 +16,7 @@ steps:
   - tests/benchmarks/test_serve_cli.py
   - tests/entrypoints/openai/chat_completion/test_chat_completion.py
   # - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
-  # - tests/entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py
+
   # - tests/entrypoints/openai/completion/test_prompt_validation.py
   - tests/entrypoints/openai/completion/test_shutdown.py
   # - tests/entrypoints/openai/test_return_token_ids.py
@@ -28,7 +28,7 @@ steps:
   - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure and not (test_bench_serve and not test_bench_serve_chat)"
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py
   # - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not invalid"
-  # - pytest -v -s entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py
+
   # - pytest -v -s entrypoints/openai/completion/test_prompt_validation.py -k "not prompt_embeds"
   - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
   # - pytest -v -s entrypoints/openai/test_return_token_ids.py
@@ -45,19 +45,19 @@ steps:
   - vllm/entrypoints/serve/
   - vllm/v1/engine/
   - tests/utils.py
-  # - tests/entrypoints/rpc/test_collective_rpc.py
+  # - tests/entrypoints/serve/dev/rpc/test_collective_rpc.py
   - tests/entrypoints/serve/disagg/test_serving_tokens.py
   - tests/entrypoints/serve/instrumentator/test_basic.py
   - tests/entrypoints/serve/instrumentator/test_metrics.py
-  # - tests/entrypoints/serve/instrumentator/test_sleep.py
+  # - tests/entrypoints/serve/dev/test_sleep.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  # - pytest -v -s entrypoints/rpc/test_collective_rpc.py
+  # - pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
   - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not show_version and not server_load"
   - pytest -v -s entrypoints/serve/disagg/test_serving_tokens.py -k "not stream and not lora and not test_generate_logprobs and not stop_string_workflow"
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
-  # - pytest -v -s entrypoints/serve/instrumentator/test_sleep.py
+  # - pytest -v -s entrypoints/serve/dev/test_sleep.py
 
 - label: Rust Frontend Core Correctness
   timeout_in_minutes: 30
@@ -99,9 +99,13 @@ steps:
   - vllm/v1/engine/
   - vllm/v1/worker/
   - tests/utils.py
+  - tests/v1/distributed/test_external_lb_dp.py
+  - tests/v1/distributed/test_hybrid_lb_dp.py
   - tests/v1/distributed/test_internal_lb_dp.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - export NCCL_CUMEM_HOST_ENABLE=0
   - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not 4 and not server_info"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not 4 and not server_info"
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not 4 and not server_info"
