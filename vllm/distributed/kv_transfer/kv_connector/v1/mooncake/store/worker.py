@@ -1075,7 +1075,10 @@ class MooncakeStoreWorker:
             self.enable_kv_events = True
 
         self.kv_send_thread: KVCacheStoreSendingThread | None = None
-        self.kv_recv_thread: KVCacheStoreRecvingThread | None = None
+        # Pool of load-receive threads
+        self.kv_recv_threads: list[KVCacheStoreRecvingThread] = []
+        self.num_recv_threads = max(1, envs.VLLM_MOONCAKE_LOAD_RECV_THREADS)
+        self._recv_dispatch_idx = 0
         self.finished_store_req: set[str] = set()
         self._kv_connector_stats_lock = threading.Lock()
         self.kv_connector_stats = MooncakeStoreConnectorStats()
@@ -1220,19 +1223,29 @@ class MooncakeStoreWorker:
             )
             self.kv_send_thread.start()
 
-        ready_event_recving = threading.Event()
-        self.kv_recv_thread = KVCacheStoreRecvingThread(
-            self.store,
-            self.coord,
-            self.token_dbs,
-            self.block_size,
-            self.tp_rank,
-            ready_event_recving,
-            disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
-            record_operation=self._record_kv_connector_operation,
+        self.kv_recv_threads = []
+        ready_events_recving = []
+        for i in range(self.num_recv_threads):
+            ready_event_recving = threading.Event()
+            recv_thread = KVCacheStoreRecvingThread(
+                self.store,
+                self.coord,
+                self.token_dbs,
+                self.block_size,
+                self.tp_rank,
+                ready_event_recving,
+                disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
+                record_operation=self._record_kv_connector_operation,
+            )
+            recv_thread.name = f"KVCacheStoreRecvingThread-{i}"
+            recv_thread.start()
+            self.kv_recv_threads.append(recv_thread)
+            ready_events_recving.append(ready_event_recving)
+        for ready_event_recving in ready_events_recving:
+            ready_event_recving.wait()
+        logger.info(
+            "Started %d Mooncake KV-load receive thread(s)", self.num_recv_threads
         )
-        self.kv_recv_thread.start()
-        ready_event_recving.wait()
 
     def start_load_kv(
         self,
@@ -1267,8 +1280,13 @@ class MooncakeStoreWorker:
 
             load_spec.token_len = load_spec.kvpool_cached_tokens
 
-            assert self.kv_recv_thread is not None
-            self.kv_recv_thread.add_request(request)
+            assert self.kv_recv_threads
+            # Round-robin across the receive-thread pool.
+            recv_thread = self.kv_recv_threads[
+                self._recv_dispatch_idx % len(self.kv_recv_threads)
+            ]
+            self._recv_dispatch_idx += 1
+            recv_thread.add_request(request)
 
         assert self.load_async, "load_async must be True for better performance."
         # Issue stores with CUDA event synchronization
@@ -1295,11 +1313,10 @@ class MooncakeStoreWorker:
             else set()
         )
 
-        done_recving = (
-            self.kv_recv_thread.get_and_clear_finished_requests()
-            if self.load_async and self.kv_recv_thread is not None
-            else set()
-        )
+        done_recving: set[str] = set()
+        if self.load_async:
+            for recv_thread in self.kv_recv_threads:
+                done_recving |= recv_thread.get_and_clear_finished_requests()
 
         logger.debug(
             "Completed send: %d, recv: %d, tp_rank: %d",
@@ -1310,9 +1327,10 @@ class MooncakeStoreWorker:
         return done_sending, done_recving
 
     def get_block_ids_with_load_errors(self) -> set[int]:
-        if self.kv_recv_thread is None:
-            return set()
-        return self.kv_recv_thread.get_and_clear_block_ids_with_load_errors()
+        block_ids: set[int] = set()
+        for recv_thread in self.kv_recv_threads:
+            block_ids |= recv_thread.get_and_clear_block_ids_with_load_errors()
+        return block_ids
 
     def _record_kv_connector_operation(
         self,
