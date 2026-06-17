@@ -1077,6 +1077,14 @@ class SpeculativeConfig:
             == "step3p5_mtp"
         )
 
+    def use_openpangu_v2_mtp(self) -> bool:
+        return (
+            self.method == "mtp"
+            and self.draft_model_config is not None
+            and getattr(self.draft_model_config.hf_config, "model_type", None)
+            == "openpangu_mtp"
+        )
+
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp", "dflash")
 

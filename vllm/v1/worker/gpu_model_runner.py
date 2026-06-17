@@ -190,6 +190,7 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
     update_ngram_gpu_tensors_incremental,
     update_scheduler_for_invalid_drafts,
 )
+from vllm.v1.spec_decode.openpangu_v2 import OpenPanguV2MTPProposer
 from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
@@ -592,6 +593,10 @@ class GPUModelRunner(
                 self.drafter = Gemma4Proposer(self.vllm_config, self.device, self)
             elif self.speculative_config.use_step3p5_mtp():
                 self.drafter = Step3p5MTPProposer(self.vllm_config, self.device, self)
+            elif self.speculative_config.use_openpangu_v2_mtp():
+                self.drafter = OpenPanguV2MTPProposer(
+                    self.vllm_config, self.device, self
+                )
             elif self.speculative_config.use_dflash():
                 self.drafter = DFlashProposer(self.vllm_config, self.device, self)
                 self.use_aux_hidden_state_outputs = True
@@ -2488,8 +2493,10 @@ class GPUModelRunner(
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
-            # Capture per-group block tables for multi-group proposers.
-            if self.speculative_config and isinstance(self.drafter, Step3p5MTPProposer):
+            # Capture per-group metadata for multi-group proposers.
+            if self.speculative_config and hasattr(
+                self.drafter, "set_per_group_attn_metadata"
+            ):
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping
                 )
@@ -2499,10 +2506,6 @@ class GPUModelRunner(
                 self.drafter.set_per_group_block_table(
                     kv_cache_gid, cm.block_table_tensor
                 )
-                if hasattr(self.drafter, "set_per_group_slot_mapping"):
-                    self.drafter.set_per_group_slot_mapping(
-                        kv_cache_gid, cm.slot_mapping
-                    )
 
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 if ubatch_slices is not None:
@@ -5015,7 +5018,10 @@ class GPUModelRunner(
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
+                EagleProposer
+                | DFlashProposer
+                | DraftModelProposer
+                | Gemma4Proposer,
             )
 
             num_reqs = self.input_batch.num_reqs
@@ -6892,7 +6898,10 @@ class GPUModelRunner(
         ):
             assert isinstance(
                 self.drafter,
-                EagleProposer | DFlashProposer | DraftModelProposer | Gemma4Proposer,
+                EagleProposer
+                | DFlashProposer
+                | DraftModelProposer
+                | Gemma4Proposer,
             )
             self.drafter.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
