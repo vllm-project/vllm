@@ -359,6 +359,12 @@ class Executor(ABC):
         if not self.sleeping_tags:
             self.is_sleeping = False
 
+    def suspend(self, model_save_path=None):
+        pass
+
+    def resume(self, data_parallel_master_ip:str|None = None, model_path=None):
+        pass
+
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:

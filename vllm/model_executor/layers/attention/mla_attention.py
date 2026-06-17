@@ -908,9 +908,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
         else:
             # Convert from (L, N, V) to (N, L, V)
-            self.W_UV = W_UV.transpose(0, 1)
+            w_uv = W_UV.transpose(0, 1)
             # Convert from (L, N, P) to (N, P, L)
-            self.W_UK_T = W_UK.permute(1, 2, 0)
+            w_uk_t = W_UK.permute(1, 2, 0)
+            # Register on the layer so W_UV/W_UK_T appear in state_dict
+            # (required for snapshot save/restore; plain attributes are omitted).
+            for name, tensor in (("W_UV", w_uv), ("W_UK_T", w_uk_t)):
+                param = torch.nn.Parameter(tensor, requires_grad=False)
+                if name in self._parameters:
+                    self._parameters[name] = param
+                else:
+                    self.register_parameter(name, param)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]

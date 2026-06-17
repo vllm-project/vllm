@@ -107,6 +107,18 @@ def _split_tensor_dict(
 _group_name_counter: dict[str, int] = {}
 
 
+def _reset_group_name_registry() -> None:
+    """Reset the group name counter and stale group references.
+
+    Must be called before re-creating distributed groups (e.g. after
+    snapshot restore) so that newly created groups receive the same
+    unique names (``tp:0``, ``dp:0``, …) that torch.compiled graphs
+    have already baked in.
+    """
+    _group_name_counter.clear()
+    _groups.clear()
+
+
 def _get_unique_name(name: str) -> str:
     """Get a unique name for the group.
     Example:
@@ -1064,7 +1076,7 @@ class GroupCoordinator:
 
     def destroy(self):
         if hasattr(self, "device_group"):
-            torch.distributed.destroy_process_group(self.device_group)
+            self.device_group._get_backend(torch.device('npu')).abort_hccl_comm("reinit")
             del self.device_group
         if hasattr(self, "cpu_group"):
             torch.distributed.destroy_process_group(self.cpu_group)
@@ -1944,6 +1956,15 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
                 "torch._C._host_emptyCache() only available in Pytorch >=2.5"
             )
 
+# snapshot clean dist env
+def cleanup_dist_env_for_snapshot(shutdown_ray: bool = False):
+    destroy_model_parallel()
+    logger.info("destroy_model_parallel() end")
+    destroy_distributed_environment()
+    _reset_group_name_registry()
+    if shutdown_ray:
+        import ray  # Lazy import Ray
+        ray.shutdown()
 
 def in_the_same_node_as(
     pg: ProcessGroup | StatelessProcessGroup, source_rank: int = 0

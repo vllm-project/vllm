@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
+import socket
 from typing import (
     TYPE_CHECKING,
     Any,
