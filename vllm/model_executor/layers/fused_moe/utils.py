@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -33,6 +34,8 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+
+logger = init_logger(__name__)
 
 
 @triton.jit
@@ -476,25 +479,22 @@ def warn_if_moe_use_td_ineffective(
     """One-shot warning when ``VLLM_TRITON_USE_TD`` is set but ignored.
 
     Fires when the user set the env explicitly and either (a) the active
-    MoE backend is not Triton-family, or (b) the model is quantized (the
-    TD path falls back to the pointer path under any quantization).
+    MoE backend is not the fused Triton kernel, or (b) the model is
+    quantized (the TD path falls back to the pointer path under any
+    quantization).
     """
     global _warned_moe_use_td_ineffective
     if _warned_moe_use_td_ineffective:
         return
     if envs.VLLM_TRITON_USE_TD is None:
         return
-    is_triton = "TRITON" in active_backend.upper()
+    is_triton = active_backend.upper() == "TRITON"
     if is_triton and not is_quantized:
         return
-    import logging
-
-    logger = logging.getLogger("vllm")
     if not is_triton:
         reason = (
             f"the active MoE backend is {active_backend!r}; pass "
-            "`--moe-backend triton` (or `triton_unfused` / `batched_triton`) "
-            "to enable the tensor-descriptor path"
+            "`--moe-backend triton` to enable the tensor-descriptor path"
         )
     else:
         reason = (
