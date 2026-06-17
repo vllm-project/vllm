@@ -291,16 +291,10 @@ def test_no_offload_call_after_on_request_finished(
         complete_transfers=False,
     )
 
-    # Terminate the request with its stores still in flight, then keep stepping
-    # (completing transfers) until the deferred on_request_finished hook fires.
-    # Use _run() (not run()) here: we only care about call ordering, and run()'s
-    # expected_stored/flushed assertions would require mode-specific block tuples
-    # over a drain that spans a variable number of steps under async scheduling.
-    runner._run([EOS_TOKEN_ID], False)
-    for _ in range(5):
-        if any(c[0] == "on_request_finished" for c in calls):
-            break
-        runner._run([], True)
+    # Finish the request and complete its pending stores in one step; the
+    # deferral still applies (request_finished runs before completion
+    # processing), so complete_store is recorded before on_request_finished.
+    runner._run([EOS_TOKEN_ID], True)
 
     req_id = str(runner.req_id)
 
