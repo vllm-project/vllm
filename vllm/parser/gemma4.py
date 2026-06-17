@@ -443,16 +443,22 @@ class Gemma4Parser(ParserEngine):
         self,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> ChatCompletionRequest | ResponsesRequest:
-        """Skip ``skip_special_tokens=False`` when thinking is disabled.
+        """Keep special tokens when thinking or tool calls need them.
 
-        When there are no reasoning channel tokens to preserve,
-        keeping the default prevents tool-call delimiter tokens
-        from leaking into content (e.g. with ``tool_choice="none"``).
+        ``skip_special_tokens`` must stay ``False`` when there is something to
+        preserve: reasoning channel tokens (thinking enabled) or tool-call
+        delimiters (tools active). Otherwise keep the default so stray
+        delimiters do not leak into content (e.g. ``tool_choice="none"`` with
+        thinking disabled).
         """
+        request = super().adjust_request(request)
         chat_template_kwargs = getattr(request, "chat_template_kwargs", None) or {}
-        if not chat_template_kwargs.get("enable_thinking", True):
-            return request
-        return super().adjust_request(request)
+        enable_thinking = chat_template_kwargs.get("enable_thinking", True)
+        has_tools = bool(getattr(request, "tools", None))
+        tools_active = has_tools and request.tool_choice != "none"
+        if not enable_thinking and not tools_active:
+            request.skip_special_tokens = True
+        return request
 
     def _reset(self, initial_state=None) -> None:
         super()._reset(initial_state=initial_state)
