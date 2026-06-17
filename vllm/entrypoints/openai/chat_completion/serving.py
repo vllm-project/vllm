@@ -429,7 +429,7 @@ class OpenAIServingChat(OpenAIServing):
                     )
                 else:
                     reasoning_ended = (
-                        reasoning_parser.is_reasoning_end(prompt_token_ids or [])
+                        self._prompt_ends_reasoning(reasoning_parser, prompt_token_ids)
                         if reasoning_parser
                         else None
                     )
