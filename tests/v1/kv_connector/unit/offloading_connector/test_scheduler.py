@@ -291,10 +291,14 @@ def test_no_offload_call_after_on_request_finished(
         complete_transfers=False,
     )
 
-    # Finish the request and complete its pending stores in one step; the
-    # deferral still applies (request_finished runs before completion
-    # processing), so complete_store is recorded before on_request_finished.
-    runner._run([EOS_TOKEN_ID], True)
+    # Finish the request, completing its pending stores. on_request_finished is
+    # deferred until the stores drain, so it lands after the last complete_store.
+    # 4 offloaded blocks are stored (2 prompt + 2 decode) -> 4 * block_size_factor
+    # GPU blocks.
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=tuple(range(4 * block_size_factor)),
+    )
 
     req_id = str(runner.req_id)
 
