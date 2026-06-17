@@ -71,11 +71,12 @@ def test_video_loader_type_doesnt_exist():
 
 
 @pytest.mark.parametrize(
-    "model_repo, expected_loader_cls",
+    "model_repo, expected_loader_cls, hf_sample_kwargs",
     [
         pytest.param(
             "allenai/Molmo2-4B",
             Molmo2VideoBackend,
+            None,
             marks=pytest.mark.skip(
                 reason="Video processor not aligned, investigate later.",
             ),
@@ -84,29 +85,36 @@ def test_video_loader_type_doesnt_exist():
         pytest.param(
             "zai-org/GLM-4.1V-9B-Thinking",
             DynamicVideoBackend,
+            None,
             id="glm4v",
         ),
         pytest.param(
             "zai-org/GLM-4.6V-Flash",
             GLM46VVideoBackend,
+            None,
             id="glm46v",
         ),
         pytest.param(
             "Qwen/Qwen3-VL-4B-Instruct",
             Qwen3VLVideoBackend,
+            None,
             id="qwen3vl",
         ),
         # Qwen2-VL/Qwen2.5-VL ship no ``video_processor_type`` in their
         # preprocessor config, so resolution relies on the model_type ->
         # video processor fallback in get_video_processor_cls_name_from_config.
+        # They also ship no default fps/num_frames, so the HF sampler needs an
+        # explicit target rate; pass fps=2 to match the loader default.
         pytest.param(
             "Qwen/Qwen2-VL-7B-Instruct",
             Qwen2VLVideoBackend,
+            {"fps": 2},
             id="qwen2vl",
         ),
         pytest.param(
             "Qwen/Qwen2.5-VL-7B-Instruct",
             Qwen2VLVideoBackend,
+            {"fps": 2},
             id="qwen2_5_vl",
         ),
     ],
@@ -114,6 +122,7 @@ def test_video_loader_type_doesnt_exist():
 def test_video_processor_from_model_repo(
     model_repo: str,
     expected_loader_cls: type,
+    hf_sample_kwargs: dict[str, int | float] | None,
 ):
     """Test that a model repo resolves to the correct video loader backend.
 
@@ -139,12 +148,6 @@ def test_video_processor_from_model_repo(
     # --- Alignment check with HF VideoProcessor.sample_frames ---
     processor = AutoVideoProcessor.from_pretrained(model_repo, trust_remote_code=True)
 
-    # Qwen2-VL ships no default fps/num_frames in its processor config, so the
-    # HF sampler needs an explicit target rate; match the loader default (2).
-    hf_sample_kwargs = (
-        {"fps": 2} if processor.fps is None and processor.num_frames is None else {}
-    )
-
     fps_list = [1, 2, 30, 60]
     duration_list = [10, 60, 600]
     for fps, duration_secs in itertools.product(fps_list, duration_list):
@@ -163,7 +166,7 @@ def test_video_processor_from_model_repo(
             fps=vllm_meta["fps"],
             duration=vllm_meta["duration"],
         )
-        hf_indices = processor.sample_frames(hf_metadata, **hf_sample_kwargs)
+        hf_indices = processor.sample_frames(hf_metadata, **(hf_sample_kwargs or {}))
         vllm_indices = np.array(vllm_meta["frames_indices"])
         np.testing.assert_array_equal(
             hf_indices,
