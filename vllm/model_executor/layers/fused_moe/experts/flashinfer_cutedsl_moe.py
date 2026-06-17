@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
-from typing import Literal
-
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -24,43 +21,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cute_dsl_fused_moe_nvfp4,
-    flashinfer_cutedsl_compile_fused_moe_nvfp4,
     has_flashinfer_cutedsl_moe_nvfp4,
 )
-
-
-@dataclass(frozen=True)
-class _FlashInferCuteDSLFusedMoECompileSpec:
-    # Cache key is selected by kernel:
-    # gather=(ab_dtype, sf_dtype, c_dtype, sf_vec_size, tile_size, topk,
-    #         mma_tiler_mn, cluster_shape_mn, vectorized_f32,
-    #         raster_along_m, enable_pdl)
-    # finalize=(sf_vec_size, tile_size, mma_tiler_mn, cluster_shape_mn,
-    #           raster_along_m, enable_pdl)
-    # Problem dimensions are runtime parameters to cute.compile and are not
-    # enumerated here.
-    kernel: Literal["gather", "finalize"]
-    hidden_dim: int
-    intermediate_dim: int
-    topk: int
-    output_dtype: torch.dtype
-    tile_size: int = 128
-    mma_tiler_mn: tuple[int, int] = (128, 128)
-    cluster_shape_mn: tuple[int, int] = (1, 1)
-    enable_pdl: bool = True
-
-    def compile(self) -> None:
-        flashinfer_cutedsl_compile_fused_moe_nvfp4(
-            kernel=self.kernel,
-            hidden_dim=self.hidden_dim,
-            intermediate_dim=self.intermediate_dim,
-            topk=self.topk,
-            output_dtype=self.output_dtype,
-            tile_size=self.tile_size,
-            mma_tiler_mn=self.mma_tiler_mn,
-            cluster_shape_mn=self.cluster_shape_mn,
-            enable_pdl=self.enable_pdl,
-        )
 
 
 class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
@@ -94,43 +56,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
         self.global_num_experts = moe_config.num_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.local_expert_offset = self.ep_rank * self.local_num_experts
-
-    def get_cutedsl_warmup_plan(self, runner: object) -> object | None:
-        del runner
-
-        from vllm.model_executor.warmup.cutedsl_warmup import (
-            CuTeDSLCompileUnit,
-            CuTeDSLWarmupPlan,
-        )
-
-        specs = (
-            _FlashInferCuteDSLFusedMoECompileSpec(
-                kernel="gather",
-                hidden_dim=self.hidden_dim,
-                intermediate_dim=self.intermediate_size_per_partition,
-                topk=self.topk,
-                output_dtype=self.out_dtype,
-            ),
-            _FlashInferCuteDSLFusedMoECompileSpec(
-                kernel="finalize",
-                hidden_dim=self.hidden_dim,
-                intermediate_dim=self.intermediate_size_per_partition,
-                topk=self.topk,
-                output_dtype=self.out_dtype,
-            ),
-        )
-
-        return CuTeDSLWarmupPlan(
-            provider="flashinfer_cutedsl_moe",
-            compile_units=tuple(
-                CuTeDSLCompileUnit(
-                    name=f"flashinfer_cutedsl_moe_{spec.kernel}",
-                    key=spec,
-                    compile=spec.compile,
-                )
-                for spec in specs
-            ),
-        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
