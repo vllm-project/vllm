@@ -70,6 +70,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MambaSpec,
     MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.block_table import BlockTable
@@ -961,7 +962,9 @@ class NixlBaseConnectorWorker:
                     )
                 else:
                     self.block_len_per_layer.append(physical_page_size)
-                is_mla_region = isinstance(layer_spec, MLAAttentionSpec)
+                is_mla_region = isinstance(
+                    layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
+                )
                 self._region_is_mla.append(is_mla_region)
 
                 if not is_mla_region:
