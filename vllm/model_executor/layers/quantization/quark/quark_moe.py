@@ -1339,6 +1339,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 a1_scale=None,
                 a2_scale=None,
                 block_shape=None,
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
             )
 
     @property

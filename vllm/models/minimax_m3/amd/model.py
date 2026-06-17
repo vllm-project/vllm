@@ -924,6 +924,13 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 class MiniMaxM3SparseForCausalLM(nn.Module, SupportsEagle3):
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
 
+    # Lets the quark loader keep a fused qkv_proj/gate_up_proj bf16 when its
+    # constituents are all in the checkpoint `exclude` set (e.g. MiniMax-M3-MXFP4).
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_text_config
@@ -982,6 +989,12 @@ class MiniMaxM3SparseForConditionalGeneration(
     generation to the AMD language-model path.
     """
 
+    # See MiniMaxM3SparseForCausalLM.packed_modules_mapping.
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     # The vision tower runs replicated per rank under ``--mm-encoder-tp-mode
     # data``; ``run_dp_sharded_mrope_vision_model`` shards the work across
     # ranks (see ``_process_image_input`` / ``_process_video_input``).
@@ -993,8 +1006,8 @@ class MiniMaxM3SparseForConditionalGeneration(
             "patch_merge_mlp.": "vision_tower.patch_merge_mlp.",
         },
         orig_to_new_substr={
-            ".mlp.fc1.": ".fc1.",
-            ".mlp.fc2.": ".fc2.",
+            ".mlp.fc1.": ".fc1",
+            ".mlp.fc2.": ".fc2",
         },
     )
 
