@@ -4,9 +4,10 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
+from vllm.model_executor.layers.attention.mla_dcp_qrep import dcp_q_replicated_heads
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
@@ -26,6 +27,8 @@ class MLAModules:
     indexer: torch.nn.Module | None
     is_sparse: bool
     topk_indices_buffer: torch.Tensor | None
+    dcp_q_b_proj: torch.nn.Module | None = None
+    dcp_q_proj: torch.nn.Module | None = None
     indexer_rotary_emb: torch.nn.Module | None = None
 
 
@@ -80,6 +83,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.q_a_layernorm = mla_modules.q_a_layernorm
         self.q_b_proj = mla_modules.q_b_proj
         self.q_proj = mla_modules.q_proj
+        self.dcp_q_b_proj = mla_modules.dcp_q_b_proj
+        self.dcp_q_proj = mla_modules.dcp_q_proj
         self.kv_a_layernorm = mla_modules.kv_a_layernorm
         self.kv_b_proj = mla_modules.kv_b_proj
         self.rotary_emb = mla_modules.rotary_emb
@@ -93,6 +98,12 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         # the topk_tokens buffer written by a previous layer in the same pass.
         # Refer: https://arxiv.org/abs/2603.12201 for more details.
         self.skip_topk = skip_topk
+        self.dcp_world_size = (
+            get_current_vllm_config().parallel_config.decode_context_parallel_size
+        )
+        self.dcp_q_replicate = self.dcp_world_size > 1 and (
+            self.dcp_q_b_proj is not None or self.dcp_q_proj is not None
+        )
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
@@ -110,6 +121,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             kv_b_proj=self.kv_b_proj,
+            dcp_q_replicate=self.dcp_q_replicate,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
@@ -125,6 +137,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
     ) -> torch.Tensor:
         q_c = None
         kv_lora = None
+        q_dcp_replicated = None
 
         if self.q_lora_rank is not None:
             assert self.fused_qkv_a_proj is not None, (
@@ -144,6 +157,9 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
             q_c = self.q_a_layernorm(q_c)
             q = self.q_b_proj(q_c)[0]
+            if self.dcp_q_replicate:
+                assert self.dcp_q_b_proj is not None
+                q_dcp_replicated = self.dcp_q_b_proj(q_c)[0]
         else:
             assert self.kv_a_proj_with_mqa is not None, (
                 "kv_a_proj_with_mqa is required when q_lora_rank is None"
@@ -153,18 +169,36 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             )
             kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
             q = self.q_proj(hidden_states)[0]
+            if self.dcp_q_replicate:
+                assert self.dcp_q_proj is not None
+                q_dcp_replicated = self.dcp_q_proj(hidden_states)[0]
 
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
+        if q_dcp_replicated is not None:
+            q_dcp_replicated = q_dcp_replicated.view(
+                -1,
+                dcp_q_replicated_heads(self.num_heads, self.dcp_world_size),
+                self.qk_head_dim,
+            )
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
         if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
-            )
+            q_pe = q[..., self.qk_nope_head_dim :]
+            if q_dcp_replicated is not None:
+                q_dcp_pe = q_dcp_replicated[..., self.qk_nope_head_dim :]
+                q_pe_all = torch.cat((q_pe, q_dcp_pe), dim=1)
+                q_pe_all, k_pe = self.rotary_emb(positions, q_pe_all, k_pe)
+                q_pe, q_dcp_pe = q_pe_all.split(
+                    [self.num_heads, q_dcp_replicated.shape[1]], dim=1
+                )
+                q_dcp_replicated[..., self.qk_nope_head_dim :] = q_dcp_pe
+            else:
+                q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+            q[..., self.qk_nope_head_dim :] = q_pe
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
@@ -177,6 +211,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+            q_dcp_replicated=q_dcp_replicated,
         )
 
         return self.o_proj(attn_out)[0]

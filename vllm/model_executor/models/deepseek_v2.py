@@ -47,6 +47,13 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention, RSWAAttention
+from vllm.model_executor.layers.attention.mla_dcp_qrep import (
+    dcp_q_group_index,
+    dcp_q_replicate_enabled,
+    dcp_q_replicated_heads,
+    dcp_qrep_replica_map,
+    load_dcp_replicated_column_weight,
+)
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -60,6 +67,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
@@ -988,8 +996,36 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.num_heads = num_heads
         tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
         assert num_heads % tp_size == 0
         self.num_local_heads = num_heads // tp_size
+        self.dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        self.dcp_q_group_idx = dcp_q_group_index(tp_rank, self.dcp_world_size)
+        self.dcp_q_replicate = (
+            dcp_q_replicate_enabled()
+            and self.dcp_world_size > 1
+            and getattr(vllm_config.model_config, "use_mla", True)
+        )
+        self.dcp_q_b_proj = None
+        self.dcp_q_proj = None
+
+        def build_dcp_qrep_replica(
+            source: nn.Module, in_features: int, per_head_out: int, prefix: str
+        ) -> ReplicatedLinear:
+            # qrep replica: unquantized, loads the checkpoint's bf16 DCP-group rows.
+            quant_method = getattr(source, "quant_method", None)
+            if not isinstance(quant_method, UnquantizedLinearMethod):
+                raise NotImplementedError(
+                    f"DCP query replication requires an unquantized {prefix}."
+                )
+            return ReplicatedLinear(
+                in_features,
+                dcp_q_replicated_heads(self.num_local_heads, self.dcp_world_size)
+                * per_head_out,
+                bias=False,
+                quant_config=None,
+                prefix=prefix,
+            )
 
         self.scaling = self.qk_head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
@@ -1023,6 +1059,13 @@ class DeepseekV2MLAAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.q_b_proj",
             )
+            if self.dcp_q_replicate:
+                self.dcp_q_b_proj = build_dcp_qrep_replica(
+                    self.q_b_proj,
+                    self.q_lora_rank,
+                    self.qk_head_dim,
+                    f"{prefix}.dcp_q_b_proj",
+                )
         else:
             self.q_proj = ColumnParallelLinear(
                 proj_input_size,
@@ -1031,6 +1074,13 @@ class DeepseekV2MLAAttention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.q_proj",
             )
+            if self.dcp_q_replicate:
+                self.dcp_q_proj = build_dcp_qrep_replica(
+                    self.q_proj,
+                    proj_input_size,
+                    self.qk_head_dim,
+                    f"{prefix}.dcp_q_proj",
+                )
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank, eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
@@ -1039,6 +1089,13 @@ class DeepseekV2MLAAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj",
         )
+        if self.dcp_q_replicate:
+            self.kv_b_proj = build_dcp_qrep_replica(
+                self.kv_b_proj,
+                self.kv_lora_rank,
+                self.qk_nope_head_dim + self.v_head_dim,
+                f"{prefix}.kv_b_proj",
+            )
         self.o_proj = RowParallelLinear(
             self.num_heads * self.v_head_dim,
             self.hidden_size,
@@ -1141,6 +1198,8 @@ class DeepseekV2MLAAttention(nn.Module):
             indexer_rotary_emb=self.indexer_rope_emb,
             is_sparse=self.is_v32,
             topk_indices_buffer=topk_indices_buffer,
+            dcp_q_b_proj=self.dcp_q_b_proj,
+            dcp_q_proj=self.dcp_q_proj,
         )
 
         self.mla_attn = MultiHeadLatentAttentionWrapper(
@@ -1552,6 +1611,23 @@ class DeepseekV2Model(nn.Module):
         indexer_present_prefixes = {
             n.rsplit(".indexer.", 1)[0] for n in params_dict if ".indexer." in n
         }
+        dcp_world_size = (
+            get_current_vllm_config().parallel_config.decode_context_parallel_size
+        )
+        dcp_q_group_idx = dcp_q_group_index(
+            get_tensor_model_parallel_rank(), dcp_world_size
+        )
+        dcp_q_replicate = dcp_q_replicate_enabled() and dcp_world_size > 1
+        qrep_map = dcp_qrep_replica_map(params_dict) if dcp_q_replicate else {}
+        qrep_replicated_kv_b_names = (
+            {
+                n
+                for n in params_dict
+                if ".self_attn.kv_b_proj." in n and n.endswith(".weight")
+            }
+            if dcp_q_replicate
+            else set()
+        )
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -1723,12 +1799,23 @@ class DeepseekV2Model(nn.Module):
                             continue
 
                         param = params_dict[name]
-                        weight_loader = getattr(
-                            param, "weight_loader", default_weight_loader
-                        )
-                        weight_loader(param, loaded_weight)
+                        if name in qrep_replicated_kv_b_names:
+                            load_dcp_replicated_column_weight(
+                                param, loaded_weight, dcp_q_group_idx
+                            )
+                        else:
+                            weight_loader = getattr(
+                                param, "weight_loader", default_weight_loader
+                            )
+                            weight_loader(param, loaded_weight)
             if name is not None and not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
+                replica = qrep_map.get(name)
+                if replica is not None:
+                    load_dcp_replicated_column_weight(
+                        params_dict[replica], loaded_weight, dcp_q_group_idx
+                    )
+                    loaded_params.add(replica)
 
         return loaded_params
 
