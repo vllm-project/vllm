@@ -32,29 +32,31 @@ def init_tokenizer_and_llm(model_name: str):
     return tokenizer, embedding_layer, llm
 
 
-def get_prompt_embeds(
+def get_prompt_embed_input(
     chat: list[dict[str, str]],
     tokenizer: PreTrainedTokenizer,
     embedding_layer: torch.nn.Module,
-):
+) -> dict[str, object]:
     token_ids = tokenizer.apply_chat_template(
         chat, add_generation_prompt=True, return_tensors="pt", return_dict=True
     ).input_ids
+    token_ids = token_ids.to(embedding_layer.weight.device)
     prompt_embeds = embedding_layer(token_ids).squeeze(0)
-    return prompt_embeds
+    prompt_token_ids = token_ids.squeeze(0).tolist()
+    return {
+        "prompt_embeds": prompt_embeds,
+        "prompt_token_ids": prompt_token_ids,
+        "prompt_is_token_ids": [False] * len(prompt_token_ids),
+    }
 
 
 def single_prompt_inference(
     llm: LLM, tokenizer: PreTrainedTokenizer, embedding_layer: torch.nn.Module
 ):
     chat = [{"role": "user", "content": "Please tell me about the capital of France."}]
-    prompt_embeds = get_prompt_embeds(chat, tokenizer, embedding_layer)
+    prompt_embed_input = get_prompt_embed_input(chat, tokenizer, embedding_layer)
 
-    outputs = llm.generate(
-        {
-            "prompt_embeds": prompt_embeds,
-        }
-    )
+    outputs = llm.generate(prompt_embed_input)
 
     print("\n[Single Inference Output]")
     print("-" * 30)
@@ -72,11 +74,11 @@ def batch_prompt_inference(
         [{"role": "user", "content": "Where is bigger, the moon or the sun?"}],
     ]
 
-    prompt_embeds_list = [
-        get_prompt_embeds(chat, tokenizer, embedding_layer) for chat in chats
+    prompt_embed_inputs = [
+        get_prompt_embed_input(chat, tokenizer, embedding_layer) for chat in chats
     ]
 
-    outputs = llm.generate([{"prompt_embeds": embeds} for embeds in prompt_embeds_list])
+    outputs = llm.generate(prompt_embed_inputs)
 
     print("\n[Batch Inference Outputs]")
     print("-" * 30)
