@@ -2438,6 +2438,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let mut lines = stdout.lines();
     let request_hex = lines.next().expect("missing request fixture line");
+    let defaults_request_hex = lines.next().expect("missing defaults request fixture line");
     let multimodal_request_hex = lines.next().expect("missing multimodal request fixture line");
     let outputs_hex = lines.next().expect("missing outputs fixture line");
     let inline_logprobs_frames = lines.next().expect("missing inline logprobs fixture line");
@@ -2454,6 +2455,42 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
     let expected_request = sample_request();
     assert_eq!(decoded_request, expected_request);
+
+    // All-default sampling params -> empty map; must decode to Python defaults.
+    let defaults_request_bytes = hex::decode(defaults_request_hex).unwrap();
+    let decoded_defaults: EngineCoreRequest =
+        rmp_serde::from_slice(&defaults_request_bytes).unwrap();
+    assert_eq!(decoded_defaults.request_id, "req-defaults");
+    let sampling = decoded_defaults
+        .sampling_params
+        .expect("defaults request carries sampling params");
+    assert_eq!(
+        sampling,
+        EngineCoreSamplingParams {
+            temperature: 1.0,
+            top_p: 1.0,
+            top_k: 0,
+            seed: None,
+            max_tokens: 16,
+            min_tokens: 0,
+            logprobs: None,
+            prompt_logprobs: None,
+            min_p: 0.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            repetition_penalty: 1.0,
+            stop_token_ids: Vec::new(),
+            eos_token_id: None,
+            all_stop_token_ids: BTreeSet::new(),
+            logit_bias: None,
+            allowed_token_ids: None,
+            bad_words_token_ids: None,
+            structured_outputs: None,
+            logprob_token_ids: None,
+            skip_reading_prefix_cache: None,
+            extra_args: None,
+        },
+    );
 
     let decoded_multimodal_request: EngineCoreRequest =
         rmp_serde::from_slice(&multimodal_request_bytes).unwrap();
