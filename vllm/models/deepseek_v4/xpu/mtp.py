@@ -18,7 +18,6 @@ import regex as re
 import torch
 import torch.nn as nn
 
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -39,6 +38,10 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import SharedHead
 from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
 from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v4.common.ops import (
+    fused_mtp_input_rmsnorm,
+    mtp_shared_head_rmsnorm,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -87,6 +90,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.e_proj",
         )
         self.h_proj = ReplicatedLinear(
             config.hidden_size,
@@ -94,6 +98,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             bias=False,
             return_bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.h_proj",
         )
 
         self.hc_eps = config.hc_eps
@@ -133,21 +138,30 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
-        # masking inputs at position 0, as not needed by MTP
-        inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
-        inputs_embeds = self.enorm(inputs_embeds)
-
         # Target stashes pre-hc_head residual as flat (T, hc_mult * D);
-        # reshape to (T, hc_mult, D) — the training-time layout.
+        # reshape to (T, hc_mult, D) — the training-time layout — before
+        # the fused norm pass so both inputs are 3D-friendly.
         previous_hidden_states = previous_hidden_states.view(
             -1, self.hc_mult, self.config.hidden_size
         )
-        previous_hidden_states = self.hnorm(previous_hidden_states)
+        # Fused: mask inputs at position 0 (not needed by MTP), enorm, hnorm.
+        inputs_embeds, previous_hidden_states = fused_mtp_input_rmsnorm(
+            inputs_embeds,
+            positions,
+            previous_hidden_states,
+            self.enorm.weight.data,
+            self.hnorm.weight.data,
+            self.enorm.variance_epsilon,
+            self.hc_mult,
+        )
         hidden_states = self.h_proj(previous_hidden_states) + self.e_proj(
             inputs_embeds
         ).unsqueeze(-2)
         hidden_states, residual, post_mix, res_mix = self.mtp_block(
             positions=positions, x=hidden_states, input_ids=None
+        )
+        hidden_states = self.mtp_block.hc_post(
+            hidden_states, residual, post_mix, res_mix
         )
         # Return the flat pre-hc_head residual so it can be re-fed as the
         # next spec step's `previous_hidden_states` when
@@ -238,13 +252,15 @@ class DeepSeekV4MultiTokenPredictor(nn.Module):
             mtp_layer.rms_norm_eps,
             mtp_layer.hc_eps,
         )
-        logits = self.logits_processor(
-            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
+        hidden_states = mtp_shared_head_rmsnorm(
+            hidden_states,
+            mtp_layer.shared_head.norm.weight.data,
+            mtp_layer.shared_head.norm.variance_epsilon,
         )
+        logits = self.logits_processor(mtp_layer.shared_head.head, hidden_states)
         return logits
 
 
-@support_torch_compile
 class DeepSeekV4MTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -285,11 +301,6 @@ class DeepSeekV4MTP(nn.Module):
             ".emb.tok_emb.weight": ".embed_tokens.weight",
             ".head.weight": ".shared_head.head.weight",
             ".norm.weight": ".shared_head.norm.weight",
-            # Pre-MoE norm + gate are now owned by
-            # ``DeepseekV4MoE.norm_gate`` (see NormGatedLinear).
-            ".ffn_norm.weight": ".ffn.norm_gate.norm.weight",
-            ".ffn.gate.weight": ".ffn.norm_gate.gate.weight",
-            ".ffn.gate.tid2eid": ".ffn.norm_gate.tid2eid",
         }
 
         def _remap_weight_name(name: str) -> str:
@@ -437,11 +448,11 @@ class DeepSeekV4MTP(nn.Module):
                             ".shared_experts.w2", ".shared_experts.down_proj"
                         )
                     if name.endswith(".ffn.gate.bias"):
-                        # ``e_score_correction_bias`` lives on
-                        # ``norm_gate`` directly (not on the inner gate).
+                        # ``e_score_correction_bias`` lives on the gate
+                        # under a different attribute name.
                         name = name.replace(
                             ".ffn.gate.bias",
-                            ".ffn.norm_gate.e_score_correction_bias",
+                            ".ffn.gate.e_score_correction_bias",
                         )
                     param = params_dict[name]
                     weight_loader = getattr(

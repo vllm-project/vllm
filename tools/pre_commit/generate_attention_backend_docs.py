@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 RELEVANT_PATTERNS = [
     "vllm/v1/attention/backends/*.py",
     "vllm/v1/attention/backends/**/*.py",
+    "vllm/models/minimax_m3/common/sparse_attention.py",
     "vllm/model_executor/layers/attention/mla_attention.py",
     "vllm/platforms/cuda.py",
     "tools/pre_commit/generate_attention_backend_docs.py",
@@ -1633,6 +1634,24 @@ def generate_mla_section(
     return "\n".join(lines)
 
 
+def generate_minimax_section(backends: list[dict[str, Any]]) -> str:
+    """Generate the MiniMax M3 sparse attention section."""
+    lines = [
+        "## MiniMax M3 Sparse Attention Backends",
+        "",
+        'Block-sparse GQA backend used by MiniMax M3 sparse ("lightning indexer")',
+        "layers. It is wired in directly by the model and is not part of the",
+        "automatic priority lists above. A lightning indexer scores KV blocks, the",
+        "top-k blocks (plus fixed init/local blocks) are selected, and attention",
+        "attends only to those blocks; index keys live in a separate side cache.",
+        "",
+    ]
+    columns = _build_columns(is_mla=False, has_versions=False)
+    lines.extend(_render_table(columns, backends))
+    lines.append("")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Top-level orchestration
 # ---------------------------------------------------------------------------
@@ -1669,15 +1688,24 @@ def generate_docs() -> str:
     if fi_features:
         all_backends = _expand_flashinfer_variants(all_backends, fi_features)
 
-    # DeepSeek V4 (*_DSV4) decode backends get their own subsection rather than
-    # mixing into the main MLA / standard tables (the ROCm V4 backend isn't
-    # flagged is_mla by the AST heuristic, so filter purely on the name).
+    # DeepSeek V4 (*_DSV4) decode backends and MiniMax M3 sparse backends each
+    # get their own subsection rather than mixing into the main MLA / standard
+    # tables (the ROCm V4 backend isn't flagged is_mla by the AST heuristic, so
+    # filter purely on the name).
     def _is_v4(b: dict[str, Any]) -> bool:
         return b["name"].endswith("_DSV4")
 
+    def _is_minimax(b: dict[str, Any]) -> bool:
+        return not b["is_mla"] and not _is_v4(b) and b["name"].startswith("MINIMAX")
+
     v4_decode_backends = [b for b in all_backends if _is_v4(b)]
+    minimax_backends = [b for b in all_backends if _is_minimax(b)]
     mla_backends = [b for b in all_backends if b["is_mla"] and not _is_v4(b)]
-    non_mla_backends = [b for b in all_backends if not b["is_mla"] and not _is_v4(b)]
+    non_mla_backends = [
+        b
+        for b in all_backends
+        if not b["is_mla"] and not _is_v4(b) and not _is_minimax(b)
+    ]
 
     # Generate documentation
     script_path = "tools/pre_commit/generate_attention_backend_docs.py"
@@ -1725,6 +1753,10 @@ def generate_docs() -> str:
         )
     if footnotes:
         doc_lines.append("\n>\n".join(footnotes) + "\n")
+
+    # Add MiniMax M3 sparse section (separate category after standard GQA)
+    if minimax_backends:
+        doc_lines.append(generate_minimax_section(minimax_backends))
 
     # Add MLA section with prefill and decode backends
     doc_lines.append(
