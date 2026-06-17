@@ -36,29 +36,36 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 
 MODELS = [
-    "OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc",  ##auto_round:auto_gptq
-    "Intel/Qwen2-0.5B-Instruct-int4-sym-AutoRound",  ##auto_round:auto_awq
+    pytest.param(
+        "OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc",
+        id="auto_round:auto_gptq",
+    ),
+    pytest.param(
+        "Intel/Qwen2-0.5B-Instruct-int4-sym-AutoRound",
+        marks=pytest.mark.skipif(
+            not current_platform.is_cuda(),
+            reason="AWQ AutoRound model only supports CUDA backend for now.",
+        ),
+        id="auto_round:auto_awq",
+    ),
 ]
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cpu()
-    and not current_platform.is_xpu()
-    and not current_platform.is_cuda(),
-    reason="only supports CPU/XPU/CUDA backend.",
+    not (
+        current_platform.is_cpu()
+        or current_platform.is_xpu()
+        or current_platform.is_cuda()
+    ),
+    reason="Only supports CPU/XPU/CUDA backend.",
 )
 @pytest.mark.parametrize("model", MODELS)
 def test_auto_round_model(vllm_runner, model):
-    # `auto_round:auto_awq` is not supported on non-CUDA backends.
-    if (
-        model == "Intel/Qwen2-0.5B-Instruct-int4-sym-AutoRound"
-        and not current_platform.is_cuda()
-    ):
-        pytest.skip("AWQ AutoRound model only supported on CUDA backend.")
     with vllm_runner(model, enforce_eager=True) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=8)
+
     assert output
-    print(f"{output[0][1]}")
+    print(output[0][1])
 
 
 # ---------------------------------------------------------------------------
