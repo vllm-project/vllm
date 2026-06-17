@@ -409,7 +409,8 @@ class MambaSpecDecodeGPUContext:
 
                 for state_type_idx, state in enumerate(kv_caches):
                     # Base address
-                    self.state_base_addrs[idx] = state.data_ptr()
+                    import ctypes
+                    self.state_base_addrs[idx] = ctypes.c_int64(state.data_ptr()).value
 
                     # Block stride (bytes between consecutive blocks)
                     # state shape: [num_blocks, ...], stride(0) = elements per block
@@ -469,7 +470,8 @@ class MambaSpecDecodeGPUContext:
         )
         self.block_table_stride_req = int(next(iter(strides)))
         for i, bt in enumerate(block_tables):
-            self.block_table_ptrs[i] = bt.data_ptr()
+            import ctypes
+            self.block_table_ptrs[i] = ctypes.c_int64(bt.data_ptr()).value
 
         self.is_initialized = True
 
@@ -600,8 +602,9 @@ def collect_mamba_copy_meta(
                     state, block_ids, src_block_idx, accept_token_bias + 1
                 )
 
-                src_ptrs_np[offset] = copy_spec.start_addr
-                dst_ptrs_np[offset] = state[dest_block_id].data_ptr()
+                import ctypes
+                src_ptrs_np[offset] = ctypes.c_int64(copy_spec.start_addr).value
+                dst_ptrs_np[offset] = ctypes.c_int64(state[dest_block_id].data_ptr()).value
                 sizes_np[offset] = copy_spec.num_elements * state.element_size()
                 offset += 1
 
