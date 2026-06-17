@@ -660,12 +660,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                         )
 
                         if first_item:
-                            ptd = (
+                            prompt_details = (
                                 origin_chunk.usage.prompt_tokens_details
                                 if origin_chunk.usage
                                 else None
                             )
-                            cached = ptd.cached_tokens if ptd else None
+                            cached = prompt_details.cached_tokens if prompt_details else None
                             chunk = AnthropicStreamEvent(
                                 type="message_start",
                                 message=AnthropicMessagesResponse(
@@ -703,12 +703,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                             stop_reason = self.stop_reason_map.get(
                                 finish_reason or "stop"
                             )
-                            ptd = (
+                            prompt_details = (
                                 origin_chunk.usage.prompt_tokens_details
                                 if origin_chunk.usage
                                 else None
                             )
-                            cached = ptd.cached_tokens if ptd else None
+                            cached = prompt_details.cached_tokens if prompt_details else None
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
                                 delta=AnthropicDelta(stop_reason=stop_reason),
