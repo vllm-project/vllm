@@ -134,13 +134,6 @@ class NgramSpeculator(BaseSpeculator):
         num_reqs = input_batch.num_reqs
 
         if dummy_run:
-            # During dummy/profile runs, there are no real token IDs to match.
-            # Return empty draft tokens.
-            with open("/home/log.txt", "a") as f:
-                f.write(
-                    f"[NgramSpeculator.propose] dummy_run=True, "
-                    f"num_reqs={num_reqs}, k={self.k}, returning zeros\n"
-                )
             return torch.zeros(
                 num_reqs, self.k, dtype=torch.int64, device=self.device
             )
@@ -173,30 +166,6 @@ class NgramSpeculator(BaseSpeculator):
                 n -= 1
             num_tokens_no_spec[i] = n
 
-        # Log input state
-        with open("/home/log.txt", "a") as f:
-            f.write(f"\n{'='*60}\n")
-            f.write(f"[NgramSpeculator.propose] num_reqs={num_reqs}\n")
-            f.write(f"[NgramSpeculator.propose] min_n={self.min_n}, max_n={self.max_n}, k={self.k}\n")
-            f.write(f"[NgramSpeculator.propose] max_model_len={self.max_model_len}\n")
-            f.write(f"[NgramSpeculator.propose] idx_mapping_np={idx_mapping_np.tolist()}\n")
-            f.write(f"[NgramSpeculator.propose] num_sampled_np={num_sampled_np.tolist()}\n")
-            f.write(f"[NgramSpeculator.propose] prefill_len_np={input_batch.prefill_len_np[:num_reqs].tolist()}\n")
-            for i in range(num_reqs):
-                f.write(
-                    f"[NgramSpeculator.propose] req[{i}]: "
-                    f"num_computed_tokens_np={input_batch.num_computed_tokens_np[i]}, "
-                    f"num_tokens_no_spec={num_tokens_no_spec[i]}, "
-                    f"num_sampled_np={num_sampled_np[i]}\n"
-                )
-                # Show token_ids for this request
-                n_toks = int(num_tokens_no_spec[i])
-                tok_slice = token_ids_cpu[i, :n_toks].tolist()
-                f.write(
-                    f"[NgramSpeculator.propose] req[{i}] token_ids[:{n_toks}]="
-                    f"{tok_slice}\n"
-                )
-
         # Determine which requests need ngram proposals.
         valid_indices = []
         for i in range(num_reqs):
@@ -205,9 +174,6 @@ class NgramSpeculator(BaseSpeculator):
             if num_tokens_no_spec[i] >= self.max_model_len:
                 continue
             valid_indices.append(i)
-
-        with open("/home/log.txt", "a") as f:
-            f.write(f"[NgramSpeculator.propose] valid_indices={valid_indices}\n")
 
         # Run numba batch propose.
         if valid_indices:
@@ -222,14 +188,6 @@ class NgramSpeculator(BaseSpeculator):
                 set_num_threads(n_threads)
             else:
                 set_num_threads(1)
-
-            with open("/home/log.txt", "a") as f:
-                f.write(
-                    f"[NgramSpeculator.propose] calling batch_propose_numba: "
-                    f"valid_indices={valid_indices}, "
-                    f"num_tokens_no_spec={num_tokens_no_spec[valid_indices].tolist()}, "
-                    f"n_threads={get_num_threads()}\n"
-                )
 
             # Zero out num_drafts for valid_indices BEFORE calling
             # batch_propose_numba, so that indices without a match
@@ -251,15 +209,6 @@ class NgramSpeculator(BaseSpeculator):
                 self.valid_ngram_num_drafts,
             )
             set_num_threads(original_threads)
-
-            # Log results after numba
-            with open("/home/log.txt", "a") as f:
-                for i in range(num_reqs):
-                    f.write(
-                        f"[NgramSpeculator.propose] after numba req[{i}]: "
-                        f"num_drafts={self.valid_ngram_num_drafts[i]}, "
-                        f"draft_tokens={self.valid_ngram_draft[i, :self.k].tolist()}\n"
-                    )
 
         # Zero out num_drafts for batch indices that were NOT processed.
         # batch_propose_numba only overwrites indices in valid_indices;
