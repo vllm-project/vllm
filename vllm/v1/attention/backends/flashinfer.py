@@ -1513,7 +1513,8 @@ class FlashInferImpl(AttentionImpl):
             stride_order = FlashInferBackend.get_kv_cache_stride_order()
             kv_perm = kv_cache.permute(*stride_order)
             if is_quantized_kv_cache(self.kv_cache_dtype):
-                kv_tuple = kv_perm.split(self.num_kv_heads, dim=1)
+                kv_split_dim = 1 if get_kv_cache_layout() == "HND" else 2
+                kv_tuple = kv_perm.split(self.num_kv_heads, dim=kv_split_dim)
             else:
                 kv_tuple = kv_perm.split(self.head_size, dim=-1)
             output.copy_(attn_metadata.cascade_wrapper.run(query, kv_tuple))
@@ -1549,14 +1550,15 @@ class FlashInferImpl(AttentionImpl):
         hs = self.head_size
         nvfp4_kv_data = None
         nvfp4_kv_block_scales = None
+        kv_split_dim = 1 if get_kv_cache_layout() == "HND" else 2
         if self.is_kvcache_nvfp4:
-            kv_cache_tuple = kv_cache_permute.split(self.num_kv_heads, dim=1)
+            kv_cache_tuple = kv_cache_permute.split(self.num_kv_heads, dim=kv_split_dim)
             k_data, k_sf = nvfp4_split_data_scale(kv_cache_tuple[0])
             v_data, v_sf = nvfp4_split_data_scale(kv_cache_tuple[1])
             nvfp4_kv_data = (k_data, v_data)
             nvfp4_kv_block_scales = (k_sf, v_sf)
         elif is_quantized_kv_cache(self.kv_cache_dtype):
-            kv_cache_tuple = kv_cache_permute.split(self.num_kv_heads, dim=1)
+            kv_cache_tuple = kv_cache_permute.split(self.num_kv_heads, dim=kv_split_dim)
         else:
             kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
 
