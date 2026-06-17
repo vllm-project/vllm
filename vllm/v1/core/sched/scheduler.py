@@ -989,9 +989,9 @@ class Scheduler(SchedulerInterface):
         self.prev_step_scheduled_req_ids.clear()
         self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        # Always drain the per-step new attention block ids so the
-        # manager-side new_block_ids list does not grow unboundedly
-        # (issue #44175); only the kv-cache zeroing path consumes them.
+        # Drain the per-step new attention block ids every step so the
+        # manager-side new_block_ids list does not grow unbounded; only
+        # the kv-cache zeroing path consumes them.
         new_attn_block_ids = self.kv_cache_manager.take_new_block_ids()
         new_block_ids_to_zero = (
             (new_attn_block_ids or None) if self.needs_kv_cache_zeroing else None
