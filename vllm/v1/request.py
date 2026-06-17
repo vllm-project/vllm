@@ -33,17 +33,19 @@ if TYPE_CHECKING:
 class RequestBlockHashes(list["BlockHash"]):
     """Fine-grained hashes with cached larger-block views.
 
-    The list itself stores hashes at the prefix-cache hash block size. The
-    larger-block views are only used when a partially cached block is promoted
-    to a full cache block, where the cache must use the direct full-block hash
-    rather than a hash composed from smaller hashes.
+    The list itself stores hashes at the prefix-cache hash block size. Larger
+    full-block views are computed on demand with ``get_block_hashes``. Partial
+    boundary hashes are computed one boundary at a time with
+    ``get_partial_block_hash``.
     """
 
     def __init__(self, request: "Request") -> None:
         super().__init__()
         self.request_ref = weakref.ref(request)
         self._by_block_size: dict[int, list[BlockHash]] = {}
-        self._partial_by_block_size: dict[int, list[BlockHash]] = {}
+        self._partial_by_block_size_and_num_tokens: dict[
+            tuple[int, int], BlockHash
+        ] = {}
 
     def get_block_hashes(self, block_size: int) -> list["BlockHash"]:
         request = self.request_ref()
@@ -55,23 +57,29 @@ class RequestBlockHashes(list["BlockHash"]):
             self._by_block_size[block_size] = get_block_hashes(request, block_size)
         return self._by_block_size[block_size]
 
-    def get_partial_block_hashes(self, block_size: int) -> list["BlockHash"]:
+    def get_partial_block_hash(self, block_size: int, num_tokens: int) -> "BlockHash":
         request = self.request_ref()
         assert request is not None
-        get_partial_block_hashes = getattr(
-            request._block_hasher, "get_partial_block_hashes", None
+        get_partial_block_hash = getattr(
+            request._block_hasher, "get_partial_block_hash", None
         )
-        if get_partial_block_hashes is None:
-            return self
-        if block_size not in self._partial_by_block_size:
-            self._partial_by_block_size[block_size] = get_partial_block_hashes(
-                request, block_size
+        if get_partial_block_hash is None:
+            if num_tokens % block_size != 0:
+                raise RuntimeError(
+                    "Partial block hashes are required when num_tokens is not "
+                    "aligned to block_size."
+                )
+            return self[num_tokens // block_size - 1]
+        key = (block_size, num_tokens)
+        if key not in self._partial_by_block_size_and_num_tokens:
+            self._partial_by_block_size_and_num_tokens[key] = get_partial_block_hash(
+                request, block_size, num_tokens
             )
-        return self._partial_by_block_size[block_size]
+        return self._partial_by_block_size_and_num_tokens[key]
 
     def clear_cached_views(self) -> None:
         self._by_block_size.clear()
-        self._partial_by_block_size.clear()
+        self._partial_by_block_size_and_num_tokens.clear()
 
 
 @dataclass

@@ -15,7 +15,6 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
-    BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
@@ -254,14 +253,7 @@ class BlockPool:
             # block_size is a multiple of hash_block_size. This happens when
             # different KV cache groups have different block sizes.
             assert block_size % self.hash_block_size == 0
-            # Use direct full-block hashes at block_size. Keep the finer hashes
-            # available for partial-block aliases.
-            block_hashes = BlockHashListWithBlockSize(
-                request.block_hashes.get_block_hashes(block_size),
-                request.block_hashes.get_partial_block_hashes(block_size),
-                self.hash_block_size,
-                block_size,
-            )
+            block_hashes = request.block_hashes.get_block_hashes(block_size)
         assert len(block_hashes) >= num_full_blocks
 
         new_block_hashes = block_hashes[num_cached_blocks:]
@@ -374,7 +366,33 @@ class BlockPool:
         kv_cache_group_id: int,
         block_size: int | None = None,
     ) -> BlockHashWithGroupId | None:
-        """Cache an alias for a block at hash-block granularity."""
+        """Register an additional prefix-cache key for an existing block.
+
+        Prefix-cache lookup is normally one hash key per cached block. A
+        partial-cache entry needs the same memory block to be reachable from a
+        finer-grained hash boundary inside that block. This method records that
+        extra hash key without allocating or copying a new ``KVCacheBlock``.
+
+        The alias is lookup metadata owned by ``block``. If ``block`` already
+        has a primary hash, the alias is also tracked in
+        ``cached_block_hashes_by_block`` so eviction, reset, and promotion can
+        remove every hash key that points to the block.
+
+        Args:
+            request: Request whose token IDs and block hashes define the alias.
+            block: Existing cache block to make reachable by the alias.
+            num_tokens: Prefix length represented by the alias. It must be a
+                positive multiple of ``self.hash_block_size`` and cannot exceed
+                the request's computed block hashes.
+            kv_cache_group_id: KV cache group that owns the alias.
+            block_size: Cache block size for the owning group. When larger than
+                ``self.hash_block_size``, the alias hash is computed from the
+                previous full-block hash plus the current block's partial tail.
+
+        Returns:
+            The hash key with group ID if an alias can be registered; otherwise
+            ``None`` for null blocks or unhashable prefix lengths.
+        """
         if block.is_null:
             return None
 
@@ -392,6 +410,33 @@ class BlockPool:
         already_cached = block.block_hash == block_hash_with_group_id or (
             existing is not None and existing.block_id == block.block_id
         )
+        if (
+            not already_cached
+            and block.block_hash is not None
+            and block.block_hash_num_tokens is not None
+            and block.block_hash_num_tokens < num_hash_blocks * self.hash_block_size
+        ):
+            old_hashes = [block.block_hash]
+            old_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))
+            removed_hashes: list[BlockHashWithGroupId] = []
+            for old_hash in old_hashes:
+                if (
+                    self.cached_block_hash_to_block.pop(old_hash, block.block_id)
+                    is not None
+                ):
+                    removed_hashes.append(old_hash)
+            if self.enable_kv_cache_events:
+                for old_hash in removed_hashes:
+                    self.kv_event_queue.append(
+                        BlockRemoved(
+                            block_hashes=[
+                                maybe_convert_block_hash(get_block_hash(old_hash))
+                            ],
+                            medium=MEDIUM_GPU,
+                            group_idx=get_group_id(old_hash),
+                        )
+                    )
+            block.reset_hash()
         self._insert_block_hash(
             block_hash_with_group_id,
             block,
@@ -445,11 +490,11 @@ class BlockPool:
         if block_size == self.hash_block_size:
             return request.block_hashes[num_hash_blocks - 1]
 
-        get_partial_block_hashes = getattr(
-            request.block_hashes, "get_partial_block_hashes", None
+        get_partial_block_hash = getattr(
+            request.block_hashes, "get_partial_block_hash", None
         )
-        if get_partial_block_hashes is not None:
-            return get_partial_block_hashes(block_size)[num_hash_blocks - 1]
+        if get_partial_block_hash is not None:
+            return get_partial_block_hash(block_size, num_tokens)
         return request.block_hashes[num_hash_blocks - 1]
 
     def get_block_alias_parent_hash_and_start(

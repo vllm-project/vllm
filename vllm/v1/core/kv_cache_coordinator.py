@@ -10,7 +10,6 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
-    BlockHashListWithBlockSize,
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -631,15 +630,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     "Direct block hashes are required when KV cache block size "
                     "differs from hash_block_size."
                 )
-            get_partial_block_hashes = getattr(
-                block_hashes, "get_partial_block_hashes", get_block_hashes
-            )
-            return BlockHashListWithBlockSize(
-                get_block_hashes(kv_cache_spec.block_size),
-                get_partial_block_hashes(kv_cache_spec.block_size),
-                self.hash_block_size,
-                kv_cache_spec.block_size,
-            )
+            return get_block_hashes(kv_cache_spec.block_size)
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_length = max_cache_hit_length
@@ -743,15 +734,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     "Direct block hashes are required when KV cache block size "
                     "differs from hash_block_size."
                 )
-            get_partial_block_hashes = getattr(
-                block_hashes, "get_partial_block_hashes", get_block_hashes
-            )
-            return BlockHashListWithBlockSize(
-                get_block_hashes(kv_cache_spec.block_size),
-                get_partial_block_hashes(kv_cache_spec.block_size),
-                self.hash_block_size,
-                kv_cache_spec.block_size,
-            )
+            return get_block_hashes(kv_cache_spec.block_size)
 
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
