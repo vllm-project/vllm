@@ -1204,6 +1204,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_cache_config,
             )
 
+        input_ids = input_batch.input_ids
         inputs_embeds = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
             # Run MM encoder (if needed) and get multimodal embeddings.
@@ -1222,11 +1223,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             inputs_embeds = self.model_state.get_mm_embeddings(
                 scheduler_output.scheduled_encoder_inputs, input_batch
             )
+            if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
+                input_ids = None
 
         model_inputs = {
-            "input_ids": input_batch.input_ids,
+            "input_ids": input_ids,
             "positions": input_batch.positions,
             "inputs_embeds": inputs_embeds,
+            "intermediate_tensors": None,
             # NOTE: Values returned by `prepare_inputs` will override the default
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
