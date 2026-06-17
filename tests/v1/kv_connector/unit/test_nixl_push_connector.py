@@ -320,6 +320,7 @@ class _StubWriterWorker(NixlPushConnectorWorker):
         w._finished_blocks_inbox = queue.Queue()
         w._pending_completion_notifs = queue.Queue()
         w._evict_finished_inbox = queue.Queue()
+        w._done_sends_inbox = queue.Queue()
         w._push_writer_wake = threading.Event()
         w._push_writer_stop = threading.Event()
         w._push_writer_thread = None
@@ -553,6 +554,48 @@ class TestPushWriterNotifs:
                 break
         assert evicted == ["req-done"]
         assert w._push_writer_wake.is_set()
+
+    def test_get_finished_drains_writer_completed_sends(self):
+        """WRITE completions detected by the writer thread (queued on
+        ``_done_sends_inbox``) are reported as done_sending and evicted, as
+        long as the request is still tracked."""
+        w = _StubWriterWorker.fresh()
+        w._reqs_to_process.add("req-sent")
+        w._reqs_to_send["req-sent"] = 123.0
+        w._done_sends_inbox.put("req-sent")
+
+        with patch.object(
+            NixlPushConnectorWorker.__mro__[1],
+            "get_finished",
+            return_value=(set(), set()),
+        ):
+            done_sending, _ = w.get_finished()
+
+        assert "req-sent" in done_sending
+        # State for the completed send is cleared.
+        assert "req-sent" not in w._reqs_to_process
+        assert "req-sent" not in w._reqs_to_send
+        # Eviction enqueued so the writer drops any leftover matching state.
+        assert w._evict_finished_inbox.get_nowait() == "req-sent"
+
+    def test_get_finished_skips_send_already_finalised_by_lease_expiry(self):
+        """A WRITE that completes after its lease already expired (so the
+        request was finalised by ``super().get_finished`` and removed from the
+        tracking sets) must not be reported again -- reporting a freed request
+        asserts in the scheduler."""
+        w = _StubWriterWorker.fresh()
+        # Not in _reqs_to_process / _reqs_to_send => already finalised.
+        w._done_sends_inbox.put("req-expired")
+
+        with patch.object(
+            NixlPushConnectorWorker.__mro__[1],
+            "get_finished",
+            return_value=(set(), set()),
+        ):
+            done_sending, _ = w.get_finished()
+
+        assert "req-expired" not in done_sending
+        assert w._evict_finished_inbox.qsize() == 0
 
 
 # ----------------------------------------------------------------- #
