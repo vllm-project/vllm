@@ -4580,12 +4580,16 @@ class GPUModelRunner(
                 import os as _os
 
                 if _os.environ.get("PCP_DUMP") and self.pcp_rank == 0:
-                    logger.warning(
-                        "PCP_DUMP argmax pcp=%d n_tok=%d %s",
-                        self.pcp_world_size,
-                        num_tokens_unpadded,
-                        logits.argmax(dim=-1).tolist()[:48],
-                    )
+                    _n = getattr(self, "_pcp_argmax_n", 0)
+                    if _n < 30:
+                        self._pcp_argmax_n = _n + 1
+                        logger.warning(
+                            "PCP_DUMP argmax #%d pcp=%d n_tok=%d %s",
+                            _n + 1,
+                            self.pcp_world_size,
+                            num_tokens_unpadded,
+                            logits.argmax(dim=-1).tolist()[:48],
+                        )
             else:
                 # Rare case.
                 assert not self.is_pooling_model

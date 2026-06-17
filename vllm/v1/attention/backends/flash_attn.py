@@ -66,6 +66,10 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
+# PCP_DEBUG/PCP_DUMP step counter to cap log volume (only the first N
+# qualifying steps are logged).
+_PCP_DUMP_N = [0]
+
 
 class FlashAttentionBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
@@ -666,6 +670,30 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 attn_metadata.pcp_max_decode_context_kv_len = int(
                     decode_context_lens.max().item()
                 )
+                # PCP_DUMP: per-step (not per-layer) dump of the batched decode
+                # inputs. argmax showed decode index 0 correct, 1+ wrong -> one
+                # of these is misaligned for indices >0. Capped to first 20
+                # batched-decode steps to limit log volume.
+                import os as _os
+
+                if (
+                    _os.environ.get("PCP_DUMP")
+                    and pcp_num_decodes > 1
+                    and _PCP_DUMP_N[0] < 20
+                ):
+                    _PCP_DUMP_N[0] += 1
+                    logger.warning(
+                        "PCP_DUMP decode_in #%d num_dec=%d qsl=%s "
+                        "seqused_k=%s max_kv=%d rank=%d",
+                        _PCP_DUMP_N[0],
+                        pcp_num_decodes,
+                        attn_metadata.pcp_query_start_loc[
+                            : pcp_num_decodes + 1
+                        ].tolist(),
+                        decode_context_lens[:pcp_num_decodes].tolist(),
+                        attn_metadata.pcp_max_decode_context_kv_len,
+                        self.pcp_rank,
+                    )
 
         # Compute mm_prefix range tensor if the batch contains
         # multimodal tokens with bidirectional ranges.
@@ -1187,25 +1215,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         if num_decode_tokens > 0:
             assert attn_metadata.pcp_decode_context_kv_lens is not None
-            # PCP_DUMP: dump the per-request decode inputs. argmax showed
-            # decode index 0 is correct but 1+ are wrong for batched -> one of
-            # these is misaligned for indices >0: seqused_k (sharded kv len per
-            # decode req), the cu_seqlens, or the block_table rows.
-            import os as _os
-
-            if _os.environ.get("PCP_DUMP") and num_decodes > 1:
-                _kv = attn_metadata.pcp_decode_context_kv_lens
-                logger.warning(
-                    "PCP_DUMP decode_in num_dec=%d num_dec_tok=%d qsl=%s "
-                    "seqused_k=%s max_kv=%d bt_rows=%s rank=%d",
-                    num_decodes,
-                    num_decode_tokens,
-                    attn_metadata.query_start_loc[: num_decodes + 1].tolist(),
-                    _kv[:num_decodes].tolist(),
-                    attn_metadata.pcp_max_decode_context_kv_len,
-                    tuple(attn_metadata.block_table[:num_decodes].shape),
-                    self.pcp_rank,
-                )
             decode_out = torch.empty_like(output[:num_decode_tokens])
             decode_attn_out, decode_lse = flash_attn_varlen_func(
                 q=query[:num_decode_tokens],
