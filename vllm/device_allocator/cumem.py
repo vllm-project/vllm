@@ -15,10 +15,10 @@ from contextlib import contextmanager
 from typing import Any
 
 import torch
+from utils.torch_utils import PIN_MEMORY
 
 from vllm.device_allocator import AllocationData, HandleType
 from vllm.logger import init_logger
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.system_utils import find_loaded_library
 
 logger = init_logger(__name__)
@@ -196,7 +196,7 @@ class CuMemAllocator:
                     size_in_bytes,
                     dtype=torch.uint8,
                     device="cpu",
-                    pin_memory=is_pin_memory_available(),
+                    pin_memory=PIN_MEMORY,
                 )
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)

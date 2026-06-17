@@ -17,7 +17,7 @@ from cachetools import LRUCache
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 if TYPE_CHECKING:
@@ -126,7 +126,7 @@ def apply_grammar_bitmask(
         (logits.shape[0], grammar_bitmask.shape[1]),
         -1,
         dtype=torch.from_numpy(grammar_bitmask[:0]).dtype,
-        pin_memory=True,
+        pin_memory=PIN_MEMORY,
     )
     sorted_bitmask = sorted_bitmask_tensor.numpy()
     cumulative_index = 0
@@ -153,9 +153,8 @@ def apply_grammar_bitmask(
             # xgrammar expects a python list of indices but it will actually work with
             # a tensor. If we copy the tensor ourselves here we can do it in a
             # non_blocking manner and there should be no cpu sync within xgrammar.
-            pin_memory = is_pin_memory_available()
             index_tensor = torch.tensor(
-                out_indices, dtype=torch.int32, device="cpu", pin_memory=pin_memory
+                out_indices, dtype=torch.int32, device="cpu", pin_memory=PIN_MEMORY
             )
             index_tensor = index_tensor.to(logits.device, non_blocking=True)
 

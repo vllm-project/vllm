@@ -12,10 +12,10 @@ from typing import TYPE_CHECKING
 
 import torch
 from regex import escape as regex_escape
+from utils.torch_utils import PIN_MEMORY
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -101,7 +101,7 @@ class OutlinesBackend(StructuredOutputBackend):
             (max_num_seqs, (self.vocab_size + 31) // 32),
             -1,
             dtype=torch.int32,
-            pin_memory=is_pin_memory_available(),
+            pin_memory=PIN_MEMORY,
         )
 
     def destroy(self):

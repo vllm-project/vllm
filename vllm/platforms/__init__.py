@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 from vllm import envs
 from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import supports_xccl
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
@@ -134,6 +133,8 @@ def xpu_platform_plugin() -> str | None:
     logger.debug("Checking if XPU platform is available.")
     try:
         import torch
+
+        from vllm.utils.torch_utils import supports_xccl
 
         if supports_xccl():
             dist_backend = "xccl"

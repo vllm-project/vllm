@@ -10,6 +10,7 @@ import torch.nn as nn
 from vllm.config.pooler import SequencePoolingType
 from vllm.model_executor.layers.pooler import PoolingParamsUpdate
 from vllm.tasks import PoolingTask
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.pool.metadata import PoolingMetadata
 
 SequencePoolingMethodOutput: TypeAlias = torch.Tensor | list[torch.Tensor]
@@ -74,8 +75,8 @@ class MeanPool(SequencePoolingMethod):
             # early return for empty batch
             return hidden_states.new_empty((0, hidden_size), dtype=torch.float32)
 
-        prompt_lens = prompt_lens_cpu.pin_memory().to(
-            hidden_states.device, dtype=torch.int64, non_blocking=True
+        prompt_lens = async_tensor_h2d(
+            prompt_lens_cpu, device=hidden_states.device, dtype=torch.int64
         )
         # eg. [2, 1, 3] -> [0, 0, 1, 2, 2, 2]
         segment_ids = torch.repeat_interleave(

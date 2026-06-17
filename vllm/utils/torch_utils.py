@@ -3,7 +3,6 @@
 import contextlib
 import importlib.metadata
 import os
-import platform
 import random
 import threading
 from collections.abc import Callable, Collection
@@ -18,6 +17,7 @@ from torch.library import Library, infer_schema
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.platform_utils import is_pin_memory_available
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -68,9 +68,7 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 T = TypeVar("T")
 
 
-# Pin memory in non-WSL case.
-# Logic duplicated here for now to avoid circular import.
-PIN_MEMORY = "microsoft" not in " ".join(platform.uname()).lower()
+PIN_MEMORY = is_pin_memory_available()
 
 
 def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
@@ -606,14 +604,24 @@ def create_kv_caches_with_random(
 
 
 def async_tensor_h2d(
-    data: list,
-    dtype: torch.dtype,
+    data: list | np.ndarray | torch.Tensor,
     device: str | torch.device,
-    pin_memory: bool = PIN_MEMORY,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    """Asynchronously create a tensor and copy it from host to device."""
-    t = torch.tensor(data, dtype=dtype, pin_memory=pin_memory, device="cpu")
-    return t.to(device=device, non_blocking=True)
+    """Copy list/numpy array/tensor async from host to device."""
+    if isinstance(data, np.ndarray):
+        data = torch.from_numpy(data)
+    if isinstance(data, torch.Tensor):
+        t = data.pin_memory() if PIN_MEMORY else data
+    else:
+        t = torch.tensor(data, dtype=dtype, pin_memory=PIN_MEMORY, device="cpu")
+    assert t.is_cpu
+    return t.to(device=device, dtype=dtype, non_blocking=True)
+
+
+def np_to_pinned_tensor(array: np.ndarray) -> torch.Tensor:
+    t = torch.from_numpy(array)
+    return t.pin_memory() if PIN_MEMORY else t
 
 
 def make_ndarray_with_pad(

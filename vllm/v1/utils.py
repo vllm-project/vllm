@@ -25,6 +25,7 @@ from typing import (
 import torch
 import uvloop
 from torch.autograd.profiler import record_function
+from utils.torch_utils import PIN_MEMORY
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -114,7 +115,7 @@ class CpuGpuBuffer:
         *size: int | torch.SymInt,
         dtype: torch.dtype,
         device: torch.device,
-        pin_memory: bool,
+        pin_memory: bool = PIN_MEMORY,
         with_numpy: bool = True,
     ) -> None:
         # these buffers are mutable runtime state, so allocate them as normal
