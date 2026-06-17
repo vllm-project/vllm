@@ -1179,9 +1179,9 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     assert full_event.group_idx == 0
     assert full_event.block_size == 32
     assert full_event.token_ids == list(range(32))
-    assert full_event.block_hashes == [
-        maybe_convert_block_hash(BlockHash(b"".join(hs)))
-    ]
+    # block_size=32 over hash_block_size=8 (scale 4): the chunk is keyed by its
+    # last sub-hash, not the concatenation of all four.
+    assert full_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
 
     assert swa_event.group_idx == 1
     assert swa_event.block_size == 8
