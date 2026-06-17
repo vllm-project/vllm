@@ -16,7 +16,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Context as _, Result};
 use axum::Router;
 use axum::serve::ListenerExt as _;
-pub use config::{ApiServerOptions, Config, CoordinatorMode, HttpListenerMode};
+pub use config::{ApiServerOptions, Config, CoordinatorMode, CorsConfig, HttpListenerMode};
 use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
 use tokio_stream::wrappers::TcpListenerStream;
@@ -90,7 +90,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .context("failed to connect to engine core")?;
 
     let llm = Llm::new(client).with_log_stats(!config.disable_log_stats);
-    let text = TextLlm::new(llm, text_backend);
+    let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
 
     let chat = ChatLlm::new(text, chat_backend)
         .with_tool_call_parser(config.tool_call_parser.clone())
@@ -100,7 +100,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
         AppState::new(served_model_names, chat)
             .with_api_server_options(config.api_server_options)
             .with_server_info(ServerInfoSnapshot::from_config(config))
-            .with_api_keys(config.api_keys.clone()),
+            .with_api_keys(config.api_keys.clone())
+            .with_cors(config.cors.clone()),
     ))
 }
 
