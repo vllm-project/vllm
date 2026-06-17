@@ -110,6 +110,13 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     def finish_streaming(self) -> DeltaMessage | None:
         return self._parser_engine.finish_streaming()
 
+    def get_streaming_fallback_content(
+        self,
+        text: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> str | None:
+        return self._parser_engine.get_streaming_fallback_content(text, request)
+
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         return self._parser_engine.count_reasoning_tokens(token_ids)
 
