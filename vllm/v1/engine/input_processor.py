@@ -15,6 +15,7 @@ from vllm.inputs import (
 )
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
+from vllm.lora.cache_identity import ensure_lora_cache_key
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -255,6 +256,12 @@ class InputProcessor:
     ) -> EngineCoreRequest:
         self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
+
+        # Ensure a content-derived prefix-cache identity is set before block
+        # hashes are computed. Covers offline / direct / resolver-built
+        # LoRARequests that did not pass through the serving load path; requests
+        # already carrying a key (e.g. from /v1/load_lora_adapter) are left as-is.
+        ensure_lora_cache_key(lora_request)
 
         parallel_config = self.vllm_config.parallel_config
         dp_size = parallel_config.data_parallel_size

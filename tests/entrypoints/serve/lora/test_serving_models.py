@@ -102,6 +102,50 @@ async def test_load_lora_adapter_duplicate():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_load_lora_adapter_inplace_reload_updates_cache_key(tmp_path):
+    serving_models = await _async_serving_models_init()
+    adapter = tmp_path / "tenant-adapter"
+    adapter.mkdir()
+    weights = adapter / "adapter_model.safetensors"
+
+    weights.write_bytes(b"ADAPTER_A")
+    await serving_models.load_lora_adapter(
+        LoadLoRAAdapterRequest(lora_name="adapter1", lora_path=str(adapter))
+    )
+    first_lora = serving_models.lora_requests["adapter1"]
+
+    # Same name, SAME path, but different on-disk adapter contents (issue
+    # #42125): in-place reload reuses the lora_int_id, so only a
+    # content-derived identity can separate the two adapter versions.
+    weights.write_bytes(b"ADAPTER_B")
+    await serving_models.load_lora_adapter(
+        LoadLoRAAdapterRequest(
+            lora_name="adapter1", lora_path=str(adapter), load_inplace=True
+        )
+    )
+    second_lora = serving_models.lora_requests["adapter1"]
+
+    assert second_lora.lora_int_id == first_lora.lora_int_id
+    assert second_lora.lora_path == first_lora.lora_path
+    # Different contents -> different identity, so stale prefix-cache blocks
+    # computed with adapter A cannot be reused for adapter B.
+    assert second_lora.lora_cache_key != first_lora.lora_cache_key
+
+    # Reloading identical contents -> identical identity. A deterministic,
+    # content-derived key (not a per-process counter) preserves legitimate
+    # cache reuse and stays reproducible across API-server replicas.
+    weights.write_bytes(b"ADAPTER_A")
+    await serving_models.load_lora_adapter(
+        LoadLoRAAdapterRequest(
+            lora_name="adapter1", lora_path=str(adapter), load_inplace=True
+        )
+    )
+    third_lora = serving_models.lora_requests["adapter1"]
+    assert third_lora.lora_cache_key == first_lora.lora_cache_key
+
+
+@pytest.mark.asyncio
 async def test_unload_lora_adapter_success():
     serving_models = await _async_serving_models_init()
     request = LoadLoRAAdapterRequest(
