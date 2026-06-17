@@ -157,6 +157,35 @@ class Gemma4AudioInputs(TensorSchema):
     ]
 
 
+def stack_audio_input_features(
+    feats: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+    masks: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Normalize Gemma 4 audio inputs to ``([bn, s_max, f], [bn, s_max])``.
+
+    ``input_features_padded`` is a ``MultiModalFieldConfig.batched("audio")``
+    field. When a single prompt carries multiple audio clips of differing
+    MEL-frame length, the ``batched()`` re-pad is a no-op (the per-clip frame
+    counts differ) and the field arrives as a list of per-clip tensors instead
+    of one stacked tensor. Pad each clip to the batch-max frame count and stack;
+    otherwise just drop the singleton batch dim. Without this, a multi-clip
+    audio prompt reaches ``.squeeze(1)`` on a list and raises ``AttributeError``.
+    """
+    if not isinstance(feats, (list, tuple)):
+        return feats.squeeze(1), masks.squeeze(1)
+    feats = [f.squeeze(0) if f.dim() == 3 and f.shape[0] == 1 else f for f in feats]
+    masks = [m.squeeze(0) if m.dim() == 2 and m.shape[0] == 1 else m for m in masks]
+    bn = len(feats)
+    s_max = max(f.shape[-2] for f in feats)
+    fdim = feats[0].shape[-1]
+    out_feats = feats[0].new_zeros((bn, s_max, fdim))
+    out_masks = masks[0].new_zeros((bn, s_max), dtype=torch.bool)
+    for i, (f, m) in enumerate(zip(feats, masks)):
+        out_feats[i, : f.shape[-2]] = f
+        out_masks[i, : m.shape[-1]] = m.to(torch.bool)
+    return out_feats, out_masks
+
+
 Gemma4ImageInputs = Gemma4ImagePixelInputs
 
 
@@ -1469,8 +1498,10 @@ class Gemma4ForConditionalGeneration(
         self,
         audio_input: Gemma4AudioInputs,
     ) -> list[torch.Tensor]:
-        input_features = audio_input["input_features_padded"].squeeze(1)
-        input_features_mask = audio_input["input_features_mask"].squeeze(1)
+        input_features, input_features_mask = stack_audio_input_features(
+            audio_input["input_features_padded"],
+            audio_input["input_features_mask"],
+        )
 
         # Run audio tower — mask convention: True=valid, False=padding.
         audio_outputs = self.audio_tower(input_features, input_features_mask)
