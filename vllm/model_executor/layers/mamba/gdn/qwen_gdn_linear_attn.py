@@ -149,11 +149,16 @@ def _is_libs_cu13_install_intact() -> bool:
 
 def _resolve_gdn_prefill_backend(
     vllm_config: VllmConfig,
-) -> tuple[str, Literal["triton", "flashinfer", "cutedsl"]]:
+) -> tuple[str, Literal["triton", "flashinfer", "flashqla", "cutedsl"]]:
     """Resolve GDN prefill backend.
 
+    FlashQLA's GDN prefill kernel is chosen when:
+    * ``requested in ["flashqla", "auto"]``;
+    * ``platform == cuda``;
+    * Hopper (SM90).
+
     FlashInfer's GDN prefill kernel is chosen when:
-    * ``requested in ["flashinfer", "auto"]``;
+    * ``requested == "flashinfer"``;
     * ``platform == cuda``;
     * one of the following:
       - Hopper (SM90) — no further constraints;
@@ -204,7 +209,9 @@ def _resolve_gdn_prefill_backend(
                 "--no-deps nvidia-cutlass-dsl-libs-cu13"
             )
 
-    if backend in ["flashinfer", "auto"] and supports_flashinfer:
+    if backend in ["flashqla", "auto"] and current_platform.is_device_capability(90):
+        return backend, "flashqla"
+    if backend == "flashinfer" and supports_flashinfer:
         return backend, "flashinfer"
     if backend == "cutedsl" and supports_cutedsl:
         return backend, "cutedsl"
@@ -222,6 +229,7 @@ def _log_gdn_backend_decision(
     )
     chosen = {
         "flashinfer": "FlashInfer",
+        "flashqla": "FlashQLA",
         "cutedsl": "CuteDSL",
         "triton": "Triton/FLA",
     }[active_backend]
@@ -235,6 +243,10 @@ def _log_gdn_backend_decision(
         logger.warning_once(
             "FlashInfer GDN prefill is JIT-compiled; first run may take a "
             "while. Set --gdn-prefill-backend triton to skip JIT.",
+        )
+    if active_backend == "flashqla":
+        logger.warning_once(
+            "FlashQLA GDN prefill currently supports SM90 only.",
         )
 
 
@@ -287,6 +299,42 @@ def fi_chunk_gated_delta_rule(
         return result.unsqueeze(0), None
 
 
+def flashqla_chunk_gated_delta_rule(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    g: torch.Tensor,
+    beta: torch.Tensor,
+    initial_state: torch.Tensor,
+    output_final_state: bool,
+    cu_seqlens: torch.Tensor | None = None,
+    use_qk_l2norm_in_kernel: bool = True,
+):
+    from flash_qla import chunk_gated_delta_rule as chunk_gated_delta_rule_qla
+
+    if use_qk_l2norm_in_kernel:
+        q = l2norm_fwd(q)
+        k = l2norm_fwd(k)
+
+    # vLLM stores recurrent state as [B, H_v, V, K], while FlashQLA expects
+    # [B, H_v, K, V].
+    qla_state = initial_state.transpose(-1, -2).contiguous().to(torch.float32)
+    output, final_state = chunk_gated_delta_rule_qla(
+        q=q.contiguous(),
+        k=k.contiguous(),
+        v=v.contiguous(),
+        g=g.contiguous().to(torch.float32),
+        beta=beta.contiguous().to(torch.float32),
+        initial_state=qla_state,
+        output_final_state=output_final_state,
+        cu_seqlens=cu_seqlens,
+        use_qk_l2norm_in_kernel=False,
+    )
+    if output_final_state and final_state is not None:
+        final_state = final_state.transpose(-1, -2).contiguous()
+    return output, final_state
+
+
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
@@ -295,7 +343,7 @@ class ChunkGatedDeltaRule(CustomOp):
         backend, active_backend = _resolve_gdn_prefill_backend(vllm_config)
         self.gdn_prefill_backend = active_backend
 
-        if backend in ("flashinfer", "cutedsl") and active_backend != backend:
+        if backend in ("flashinfer", "flashqla", "cutedsl") and active_backend != backend:
             logger.warning_once(
                 "GDN prefill backend '%s' is selected but cannot use this "
                 "kernel on the current platform. Falling back to Triton/FLA.",
@@ -305,6 +353,8 @@ class ChunkGatedDeltaRule(CustomOp):
 
         if active_backend == "flashinfer":
             self._forward_method = self.forward_cuda
+        elif active_backend == "flashqla":
+            self._forward_method = self.forward_flashqla
         elif active_backend == "cutedsl":
             self._forward_method = self.forward_cutedsl
         else:
@@ -371,6 +421,39 @@ class ChunkGatedDeltaRule(CustomOp):
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
             core_attn_out=core_attn_out,
         )
+
+    def forward_flashqla(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        g: torch.Tensor,
+        beta: torch.Tensor,
+        initial_state: torch.Tensor,
+        output_final_state: bool,
+        cu_seqlens: torch.Tensor | None = None,
+        chunk_indices: torch.Tensor | None = None,
+        chunk_offsets: torch.Tensor | None = None,
+        use_qk_l2norm_in_kernel: bool = True,
+        core_attn_out: torch.Tensor | None = None,
+    ):
+        del chunk_indices, chunk_offsets
+        o, final_state = flashqla_chunk_gated_delta_rule(
+            q=q,
+            k=k,
+            v=v,
+            g=g,
+            beta=beta,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+            cu_seqlens=cu_seqlens,
+            use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
+        )
+        if core_attn_out is not None:
+            o_flat = o.squeeze(0).reshape(-1)
+            co_flat = core_attn_out.reshape(-1)
+            co_flat[: o_flat.numel()].copy_(o_flat)
+        return o, final_state
 
     def forward_cutedsl(
         self,

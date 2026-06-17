@@ -717,7 +717,7 @@ class EngineArgs:
     )
 
     fail_on_environ_validation: bool = False
-    gdn_prefill_backend: Literal["flashinfer", "triton", "cutedsl"] | None = None
+    gdn_prefill_backend: Literal["flashinfer", "flashqla", "triton", "cutedsl"] | None = None
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
