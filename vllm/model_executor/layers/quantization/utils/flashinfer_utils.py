@@ -121,7 +121,6 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
 
     from flashinfer.fused_moe.core import (
         _maybe_get_cached_w3_w1_permute_indices,
-        convert_to_block_layout,
         get_w2_permute_indices_with_cache,
     )
 
@@ -131,23 +130,49 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     # Reorder rows of W13 and W2 for fused gated activation and convert to the
     # block layout expected by the FlashInfer kernel.
     num_experts = w13_weight.shape[0]
-    device_w13 = w13_weight.device
-    device_w2 = w2_weight.device
 
-    w13_weights_shuffled: list[torch.Tensor] = []
-    w2_weights_shuffled: list[torch.Tensor] = []
+    def _copy_permuted_expert_to_block_layout(
+        out: torch.Tensor,
+        expert_uint8: torch.Tensor,
+        source_indices: torch.Tensor,
+    ) -> None:
+        expert_blocks = expert_uint8.view(
+            expert_uint8.shape[0], out.shape[0], block_k
+        ).permute(1, 0, 2)
+        torch.index_select(
+            expert_blocks,
+            1,
+            source_indices.to(expert_uint8.device),
+            out=out,
+        )
+
+    w13_rows, w13_cols = w13_weight[0].view(torch.uint8).shape
+    w2_rows, w2_cols = w2_weight[0].view(torch.uint8).shape
+    w13_weights_shuffled_tensor = torch.empty(
+        (num_experts, w13_cols // block_k, w13_rows, block_k),
+        dtype=torch.uint8,
+        device=w13_weight.device,
+    )
+    w2_weights_shuffled_tensor = torch.empty(
+        (num_experts, w2_cols // block_k, w2_rows, block_k),
+        dtype=torch.uint8,
+        device=w2_weight.device,
+    )
 
     for i in range(num_experts):
+        w13_expert_uint8 = w13_weight[i].view(torch.uint8)
+
         permute_indices = _maybe_get_cached_w3_w1_permute_indices(
             cache_permute_indices,
-            w13_weight[i].view(torch.uint8),
+            w13_expert_uint8,
             epilogue_tile_m,
         )
-        tmp_weights1 = (
-            w13_weight[i]
-            .clone()
-            .view(torch.uint8)[permute_indices.to(device_w13)]
-            .contiguous()
+        rows = w13_expert_uint8.shape[0]
+        permute_indices = (permute_indices + rows // 2) % rows
+        _copy_permuted_expert_to_block_layout(
+            w13_weights_shuffled_tensor[i],
+            w13_expert_uint8,
+            permute_indices,
         )
 
         permute_indices = get_w2_permute_indices_with_cache(
@@ -155,28 +180,16 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
             w2_weight[i].view(torch.uint8),
             epilogue_tile_m,
         )
-        tmp_weights2 = (
-            w2_weight[i]
-            .clone()
-            .view(torch.uint8)[permute_indices.to(device_w2)]
-            .contiguous()
+        _copy_permuted_expert_to_block_layout(
+            w2_weights_shuffled_tensor[i],
+            w2_weight[i].view(torch.uint8),
+            permute_indices,
         )
 
-        tmp_weights1 = convert_to_block_layout(tmp_weights1.view(torch.uint8), block_k)
-        tmp_weights2 = convert_to_block_layout(tmp_weights2.view(torch.uint8), block_k)
-
-        w13_weights_shuffled.append(tmp_weights1.view(torch.bfloat16))
-        w2_weights_shuffled.append(tmp_weights2.view(torch.bfloat16))
-
-    # Stack weights for all experts and return as BF16 tensors.
-    w13_weights_shuffled_tensor = (
-        torch.stack(w13_weights_shuffled).view(torch.bfloat16).contiguous()
+    return (
+        w13_weights_shuffled_tensor.view(torch.bfloat16),
+        w2_weights_shuffled_tensor.view(torch.bfloat16),
     )
-    w2_weights_shuffled_tensor = (
-        torch.stack(w2_weights_shuffled).view(torch.bfloat16).contiguous()
-    )
-
-    return w13_weights_shuffled_tensor, w2_weights_shuffled_tensor
 
 
 def align_fp4_moe_weights_for_fi(
