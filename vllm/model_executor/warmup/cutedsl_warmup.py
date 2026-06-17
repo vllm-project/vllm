@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import sys
 import time
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -26,10 +26,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 CuTeDSLCompileFn = Callable[[], None]
-CuTeDSLWarmupCoverage = Literal["targeted", "full"]
-CuTeDSLWarmupTokenScope = Literal["rank_local", "data_parallel", "world"]
-_VALID_WARMUP_COVERAGE = {"targeted", "full"}
-_VALID_TOKEN_SCOPES = {"rank_local", "data_parallel", "world"}
 _CUTE_DSL_CACHE_ENABLED_ENV = "FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED"
 _CUTE_DSL_CACHE_DIR_ENV = "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR"
 _CUTEDSL_WARMUP_TARGET_ATTRS = (
@@ -71,24 +67,6 @@ def compile_cutedsl_units(
 
 
 @dataclass(frozen=True)
-class CuTeDSLWarmupContext:
-    """Parallelism context used to scale provider warmup shapes."""
-
-    data_parallel_size: int = 1
-    tensor_parallel_size: int = 1
-    pipeline_parallel_size: int = 1
-    expert_parallel_enabled: bool = False
-
-    @property
-    def world_size(self) -> int:
-        return (
-            self.data_parallel_size
-            * self.tensor_parallel_size
-            * self.pipeline_parallel_size
-        )
-
-
-@dataclass(frozen=True)
 class CuTeDSLWarmupPlan:
     """Warmup work requested by one CuTeDSL integration.
 
@@ -104,72 +82,9 @@ class CuTeDSLWarmupPlan:
     """Concrete compile-only work that does not depend on token sizes."""
 
 
-def _get_cutedsl_warmup_context(runner: "GPUModelRunner") -> CuTeDSLWarmupContext:
-    parallel_config = getattr(runner.vllm_config, "parallel_config", None)
-    return CuTeDSLWarmupContext(
-        data_parallel_size=max(
-            1, int(getattr(parallel_config, "data_parallel_size", 1) or 1)
-        ),
-        tensor_parallel_size=max(
-            1, int(getattr(parallel_config, "tensor_parallel_size", 1) or 1)
-        ),
-        pipeline_parallel_size=max(
-            1, int(getattr(parallel_config, "pipeline_parallel_size", 1) or 1)
-        ),
-        expert_parallel_enabled=bool(
-            getattr(parallel_config, "enable_expert_parallel", False)
-        ),
-    )
-
-
-def get_cutedsl_warmup_token_sizes(
-    runner: "GPUModelRunner",
-    coverage: CuTeDSLWarmupCoverage = "targeted",
-    token_size_scope: CuTeDSLWarmupTokenScope = "rank_local",
-) -> list[int]:
-    if coverage not in _VALID_WARMUP_COVERAGE:
-        raise ValueError(
-            "Invalid CuTeDSL warmup coverage "
-            f"{coverage!r}. Valid coverage values are "
-            f"{sorted(_VALID_WARMUP_COVERAGE)}."
-        )
-    if token_size_scope not in _VALID_TOKEN_SCOPES:
-        raise ValueError(
-            "Invalid CuTeDSL warmup token size scope "
-            f"{token_size_scope!r}. Valid scopes are "
-            f"{sorted(_VALID_TOKEN_SCOPES)}."
-        )
-
-    kernel_config = runner.vllm_config.kernel_config
+def get_cutedsl_warmup_token_sizes(runner: "GPUModelRunner") -> list[int]:
     max_tokens = runner.scheduler_config.max_num_batched_tokens
-    if coverage == "full":
-        token_sizes = _derive_cutedsl_warmup_token_sizes(
-            runner,
-            coverage=coverage,
-            max_tokens=max_tokens,
-        )
-    else:
-        configured_sizes = kernel_config.cutedsl_warmup_token_sizes
-        token_sizes = _normalize_cutedsl_warmup_token_sizes(
-            configured_sizes,
-            max_tokens=max_tokens,
-        )
-        if not token_sizes:
-            token_sizes = _derive_cutedsl_warmup_token_sizes(
-                runner,
-                coverage=coverage,
-                max_tokens=max_tokens,
-            )
-
-    context = _get_cutedsl_warmup_context(runner)
-    return _scale_cutedsl_token_sizes(token_sizes, token_size_scope, context)
-
-
-def _get_cutedsl_warmup_token_sizes(
-    runner: "GPUModelRunner",
-    coverage: CuTeDSLWarmupCoverage = "targeted",
-) -> list[int]:
-    return get_cutedsl_warmup_token_sizes(runner, coverage)
+    return _derive_cutedsl_warmup_token_sizes(runner, max_tokens=max_tokens)
 
 
 def _normalize_cutedsl_warmup_token_sizes(
@@ -189,19 +104,18 @@ def _normalize_cutedsl_warmup_token_sizes(
 def _derive_cutedsl_warmup_token_sizes(
     runner: "GPUModelRunner",
     *,
-    coverage: CuTeDSLWarmupCoverage,
     max_tokens: int,
 ) -> list[int]:
-    if coverage == "full":
-        return list(range(1, max_tokens + 1))
-
     compilation_config = getattr(runner.vllm_config, "compilation_config", None)
     cudagraph_sizes = _normalize_cutedsl_warmup_token_sizes(
         getattr(compilation_config, "cudagraph_capture_sizes", ()) or (),
         max_tokens=max_tokens,
     )
     if cudagraph_sizes:
-        return cudagraph_sizes
+        return _normalize_cutedsl_warmup_token_sizes(
+            (*cudagraph_sizes, max_tokens),
+            max_tokens=max_tokens,
+        )
 
     # Match vLLM's eager/profile warmup shape. Eager startup does not sweep all
     # token sizes; it profiles a single dummy batch at max_num_batched_tokens.
@@ -308,20 +222,6 @@ def _clear_cutedsl_in_memory_caches() -> None:
         logger.warning("Cleared %d CuTeDSL in-memory compile caches.", cleared)
 
 
-def _scale_cutedsl_token_sizes(
-    token_sizes: Sequence[int],
-    scope: CuTeDSLWarmupTokenScope,
-    context: CuTeDSLWarmupContext,
-) -> list[int]:
-    if scope == "rank_local":
-        factor = 1
-    elif scope == "data_parallel":
-        factor = context.data_parallel_size
-    else:
-        factor = context.world_size
-    return [size * factor for size in token_sizes]
-
-
 def _get_world_group_or_none():
     try:
         from vllm.distributed.parallel_state import get_world_group
@@ -411,14 +311,11 @@ def cutedsl_warmup(runner: "GPUModelRunner") -> None:
         return
 
     provider_names = list(dict.fromkeys(plan.provider for plan in plans))
-    context = _get_cutedsl_warmup_context(runner)
 
     logger.info(
-        "Warming up CuTeDSL providers=%s with compile_units=%d, "
-        "parallel_context=%s.",
+        "Warming up CuTeDSL providers=%s with compile_units=%d.",
         provider_names,
         _count_unique_cutedsl_compile_units(plans),
-        context,
     )
 
     start_time = time.perf_counter()

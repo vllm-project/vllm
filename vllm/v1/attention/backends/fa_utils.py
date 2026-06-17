@@ -21,7 +21,6 @@ _ROCM_FLASH_ATTN_AVAILABLE = False
 if current_platform.is_cuda():
     from vllm._custom_ops import reshape_and_cache_flash
     from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
-        compile_flash_attn_varlen_func,
         compile_flash_attn_varlen_func_from_specs,
         flash_attn_varlen_func,
         get_scheduler_metadata,
@@ -33,13 +32,11 @@ elif current_platform.is_xpu():
 
     reshape_and_cache_flash = ops.reshape_and_cache_flash
     flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[assignment]
-    compile_flash_attn_varlen_func = None  # type: ignore[assignment]
     compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
     get_scheduler_metadata = xpu_ops.get_scheduler_metadata  # type: ignore[assignment]
 elif current_platform.is_rocm():
     try:
         from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
-        compile_flash_attn_varlen_func = None  # type: ignore[assignment]
         compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
 
         # Mark that upstream flash-attn is available on ROCm
@@ -52,7 +49,6 @@ elif current_platform.is_rocm():
                 "to be installed. Please install flash-attn first."
             )
 
-        compile_flash_attn_varlen_func = None  # type: ignore[assignment]
         compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
 
     # ROCm doesn't use scheduler metadata (FA3 feature), provide stub
@@ -67,12 +63,12 @@ elif current_platform.is_rocm():
 
 @dataclass(frozen=True)
 class FlashAttentionCuTeDSLCompileSpec:
-    # Cache key is the FA4 varlen compile spec:
-    # (q/k/v/out shapes, q/k/v/out strides, q_dtype, cu_seqlens_q/k shapes,
-    #  seqused_k shape, block_table shape, max_seqlen_q/k, softmax_scale,
-    #  causal, window_size, softcap, return_softmax_lse, fa_version,
-    #  num_splits). Token-size loops in FA4 providers are deliberate because
-    # they produce distinct metadata shapes and max sequence lengths.
+    # FA4's inner compile key is mostly structural plus heuristic-derived
+    # fields: dtype, q/v head dims, GQA ratio, causal, LSE presence,
+    # varlen/paged/sink/descales presence, tile sizes, q_stage, Split-KV,
+    # scheduler flags, arch, and FA log/output-quant tags. Token-size loops in
+    # FA4 providers intentionally cover representative max-seqlen thresholds
+    # because max_seqlen_q/k influence q_stage, Split-KV, and tile heuristics.
     q_shape: tuple[int, ...]
     k_shape: tuple[int, ...]
     v_shape: tuple[int, ...]

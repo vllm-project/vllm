@@ -3,14 +3,12 @@
 """FlashAttention backend for MLA prefill."""
 
 import functools
-import os
 from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 import torch
 
 import vllm.envs as envs
-from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import (
     FlashAttentionCuTeDSLCompileSpec,
@@ -22,20 +20,6 @@ from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-
-logger = init_logger(__name__)
-
-
-def _tensor_values_for_log(value: object) -> object:
-    if not isinstance(value, torch.Tensor):
-        return value
-    if value.numel() > 32:
-        return {
-            "shape": tuple(value.shape),
-            "head": value[:16].detach().cpu().tolist(),
-            "tail": value[-16:].detach().cpu().tolist(),
-        }
-    return value.detach().cpu().tolist()
 
 
 if is_flash_attn_varlen_func_available():
@@ -153,7 +137,6 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         scheduler_config = getattr(runner, "scheduler_config", None)
         max_num_seqs = getattr(scheduler_config, "max_num_seqs", 1)
 
-        context_compiled = False
         for num_tokens in token_sizes:
             for seq_lens in self._get_cutedsl_warmup_seq_lens(
                 num_tokens, max_num_seqs
@@ -165,9 +148,6 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
                         return_softmax_lse=return_softmax_lse,
                     )
 
-                if context_compiled:
-                    continue
-                context_compiled = True
                 yield self._get_cutedsl_context_chunk_compile_spec(
                     seq_lens=seq_lens,
                     dtype=dtype,
@@ -305,15 +285,6 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         if envs.VLLM_BATCH_INVARIANT:
             kwargs["num_splits"] = 1
 
-        if os.environ.get("VLLM_CUTEDSL_LOG_FA4_METADATA") == "1":
-            self._log_cutedsl_fa4_metadata(
-                q=q,
-                k=k,
-                v=maybe_padded_v,
-                return_softmax_lse=return_softmax_lse,
-                kwargs=kwargs,
-            )
-
         attn_out = self.flash_attn_varlen_func(
             q=q,
             k=k,
@@ -375,73 +346,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             num_splits=num_splits,
             fa_version=self.vllm_flash_attn_version,
         )
-        if os.environ.get("VLLM_CUTEDSL_LOG_FA4_METADATA") == "1":
-            self._log_cutedsl_fa4_compile_spec(spec)
         return spec
-
-    def _log_cutedsl_fa4_metadata(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        return_softmax_lse: bool,
-        kwargs: dict[str, object],
-    ) -> None:
-        cu_q = kwargs.get("cu_seqlens_q")
-        cu_k = kwargs.get("cu_seqlens_k")
-        query_start_loc = _tensor_values_for_log(cu_q)
-        key_start_loc = _tensor_values_for_log(cu_k)
-        logger.info(
-            "CUTEDSL_FA4_METADATA "
-            "q_shape=%s k_shape=%s v_shape=%s "
-            "q_stride=%s k_stride=%s v_stride=%s dtype=%s "
-            "return_softmax_lse=%s max_seqlen_q=%s max_seqlen_k=%s "
-            "causal=%s cu_seqlens_q=%s cu_seqlens_k=%s "
-            "fa_version=%s requires_v_padding=%s",
-            tuple(q.shape),
-            tuple(k.shape),
-            tuple(v.shape),
-            q.stride(),
-            k.stride(),
-            v.stride(),
-            q.dtype,
-            return_softmax_lse,
-            kwargs.get("max_seqlen_q"),
-            kwargs.get("max_seqlen_k"),
-            kwargs.get("causal"),
-            query_start_loc,
-            key_start_loc,
-            self.vllm_flash_attn_version,
-            self.requires_v_padding,
-        )
-
-    def _log_cutedsl_fa4_compile_spec(
-        self,
-        spec: FlashAttentionCuTeDSLCompileSpec,
-    ) -> None:
-        logger.info(
-            "CUTEDSL_FA4_METADATA "
-            "q_shape=%s k_shape=%s v_shape=%s "
-            "q_stride=%s k_stride=%s v_stride=%s dtype=%s "
-            "return_softmax_lse=%s max_seqlen_q=%s max_seqlen_k=%s "
-            "causal=%s cu_seqlens_q_shape=%s cu_seqlens_k_shape=%s "
-            "fa_version=%s requires_v_padding=%s",
-            spec.q_shape,
-            spec.k_shape,
-            spec.v_shape,
-            spec.q_stride,
-            spec.k_stride,
-            spec.v_stride,
-            spec.q_dtype,
-            spec.return_softmax_lse,
-            spec.max_seqlen_q,
-            spec.max_seqlen_k,
-            spec.causal,
-            spec.cu_seqlens_q_shape,
-            spec.cu_seqlens_k_shape,
-            spec.fa_version,
-            self.requires_v_padding,
-        )
 
     def run_prefill_new_tokens(
         self,

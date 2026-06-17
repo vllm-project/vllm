@@ -178,22 +178,6 @@ class KernelConfig:
     enable_cutedsl_warmup: bool = False
     """If True, run CuTeDSL-specific warmup during kernel warmup."""
 
-    cutedsl_warmup_token_sizes: list[int] = Field(default_factory=list)
-    """Optional token-count override for CuTeDSL warmup.
-
-    When unset, CuTeDSL warmup derives token sizes from the active vLLM
-    scheduler/compilation config instead of using a hand-picked global list.
-    """
-
-    cutedsl_cache_dir: str | None = None
-    """Root directory for the persistent CuTeDSL cache.
-
-    If unset, CuTeDSL warmup uses ``VLLM_CACHE_ROOT/cutedsl``. When CuTeDSL
-    warmup is disabled and no directory is set, FlashAttention CuTeDSL
-    persistent cache is disabled and the per-process in-memory JIT cache is
-    used.
-    """
-
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 
@@ -255,8 +239,6 @@ class KernelConfig:
         Any future fields that don't affect compilation should be excluded.
         """
         ignored_factors = {
-            "cutedsl_cache_dir",
-            "cutedsl_warmup_token_sizes",
             "enable_cutedsl_warmup",
             "enable_flashinfer_autotune",
             "ir_op_priority",  # handled separately below
@@ -272,15 +254,13 @@ class KernelConfig:
         ``flash_attn.cute.cache_utils``, so this must run during config
         finalization before attention backends import FA4 CuTeDSL modules.
         """
-        if not self.enable_cutedsl_warmup and self.cutedsl_cache_dir is None:
+        if not self.enable_cutedsl_warmup:
             os.environ["FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED"] = "0"
             os.environ.pop("FLASH_ATTENTION_CUTE_DSL_CACHE_DIR", None)
             logger.info("FlashAttention CuTeDSL persistent cache is disabled.")
             return
 
-        cache_root = Path(
-            self.cutedsl_cache_dir or Path(envs.VLLM_CACHE_ROOT) / "cutedsl"
-        ).expanduser()
+        cache_root = (Path(envs.VLLM_CACHE_ROOT) / "cutedsl").expanduser()
         namespace = self._compute_cutedsl_cache_namespace(vllm_config)
         cache_dir = cache_root / namespace
         cache_dir.mkdir(parents=True, exist_ok=True)

@@ -161,10 +161,6 @@ flashinfer_b12x_compile_static_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch",
     "_get_static_kernel",
 )
-flashinfer_b12x_compile_micro_moe = _lazy_import_wrapper(
-    "flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch",
-    "_get_micro_kernel",
-)
 flashinfer_b12x_compile_dynamic_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch",
     "_get_dynamic_kernel",
@@ -1025,7 +1021,6 @@ __all__ = [
     "flashinfer_b12x_fused_moe",
     "flashinfer_b12x_select_moe_backend",
     "flashinfer_b12x_compile_static_moe",
-    "flashinfer_b12x_compile_micro_moe",
     "flashinfer_b12x_compile_dynamic_moe",
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
