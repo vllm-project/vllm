@@ -16,6 +16,7 @@ def server():
         "512",
         "--enforce-eager",
         "--enable-prefix-caching",
+        "--enable-prompt-tokens-details",
         "--served-model-name",
         "claude-3-7-sonnet-latest",
     ]
@@ -57,7 +58,7 @@ async def test_cache_accounting_non_streaming(client: anthropic.AsyncAnthropic):
 
 @pytest.mark.asyncio
 async def test_cache_accounting_streaming(client: anthropic.AsyncAnthropic):
-    """Streaming: final usage in message_delta event should show cache hits."""
+    """Streaming: final usage should show cache hits on second request."""
     system = "You are a helpful assistant."
     messages = [{"role": "user", "content": "What is the capital of Germany?"}]
 
@@ -70,22 +71,14 @@ async def test_cache_accounting_streaming(client: anthropic.AsyncAnthropic):
     )
 
     # second request streaming - should hit cache
-    final_usage = None
     async with client.messages.stream(
         model="claude-3-7-sonnet-latest",
         max_tokens=5,
         system=system,
         messages=messages,
     ) as stream:
-        async for event in stream:
-            if (
-                hasattr(event, "type")
-                and event.type == "message_delta"
-                and hasattr(event, "usage")
-                and event.usage is not None
-            ):
-                final_usage = event.usage
+        final_message = await stream.get_final_message()
 
-    assert final_usage is not None
-    assert hasattr(final_usage, "cache_read_input_tokens")
-    assert final_usage.cache_read_input_tokens > 0
+    assert final_message.usage is not None
+    assert hasattr(final_message.usage, "cache_read_input_tokens")
+    assert final_message.usage.cache_read_input_tokens > 0
