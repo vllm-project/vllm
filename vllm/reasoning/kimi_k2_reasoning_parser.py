@@ -65,6 +65,14 @@ class KimiK2ReasoningParser(ReasoningParser):
                 "tokens in the tokenizer!"
             )
 
+        # Deferred-transition state: set when a boundary token ID arrives but
+        # its text hasn't been flushed by the detokenizer yet (stream-interval
+        # buffering).  _pending_transition defers is_reasoning_end_streaming
+        # until the text actually appears; _emit_transition fires it one delta
+        # later once extract_reasoning_streaming confirms the text is visible.
+        self._pending_transition: bool = False
+        self._emit_transition: bool = False
+
     @property
     def reasoning_start_str(self) -> str | None:
         return self._start_token
@@ -114,6 +122,16 @@ class KimiK2ReasoningParser(ReasoningParser):
 
         # Materialize iterable for membership checks
         delta_ids_set = set(delta_ids)
+
+        # Deferred-transition: extract_reasoning_streaming confirmed text is
+        # visible and set this flag; fire the transition now.
+        if self._emit_transition:
+            self._emit_transition = False
+            return True
+
+        # Boundary token arrived but text not yet flushed; defer.
+        if self._pending_transition:
+            return False
 
         # Check for explicit end token or implicit tool section start in delta
         if self._end_token_id in delta_ids_set:
@@ -209,6 +227,33 @@ class KimiK2ReasoningParser(ReasoningParser):
                 delta_token_ids,
             )
 
+        # Handle deferred transition: boundary token arrived in a previous delta
+        # but its text was buffered.  Now check if the text has been flushed.
+        if self._pending_transition:
+            self._pending_transition = False
+            if self._end_token in delta_text:
+                end_index = delta_text.find(self._end_token)
+                reasoning = delta_text[:end_index]
+                content = delta_text[end_index + len(self._end_token) :]
+                self._emit_transition = True
+                return DeltaMessage(
+                    reasoning=reasoning or None,
+                    content=content if content else None,
+                )
+            if (
+                self._tool_section_start_token_id is not None
+                and self._tool_section_start_token in delta_text
+            ):
+                tool_index = delta_text.find(self._tool_section_start_token)
+                reasoning = delta_text[:tool_index]
+                content = delta_text[tool_index:]
+                self._emit_transition = True
+                return DeltaMessage(reasoning=reasoning or None, content=content)
+            # Text STILL not visible; re-enter deferred state and emit any
+            # visible reasoning text so it is not silently dropped.
+            self._pending_transition = True
+            return DeltaMessage(reasoning=delta_text) if delta_text else None
+
         # If reasoning has already ended in previous tokens, this is content
         if self.is_reasoning_end(previous_token_ids):
             return DeltaMessage(content=delta_text)
@@ -223,8 +268,9 @@ class KimiK2ReasoningParser(ReasoningParser):
         if self._end_token_id in delta_token_ids:
             if self._end_token not in delta_text:
                 # Token ID arrived before text was flushed (stop-sequence buffering).
-                # Wait for the next delta when the text becomes visible.
-                return None
+                # Emit visible reasoning text and defer the transition.
+                self._pending_transition = True
+                return DeltaMessage(reasoning=delta_text) if delta_text else None
             end_index = delta_text.find(self._end_token)
             reasoning = delta_text[:end_index]
             content = delta_text[end_index + len(self._end_token) :]
@@ -235,7 +281,9 @@ class KimiK2ReasoningParser(ReasoningParser):
         if self._tool_section_start_token_id in delta_token_ids:
             if self._tool_section_start_token not in delta_text:
                 # Token ID arrived before text was flushed (stop-sequence buffering).
-                return None
+                # Emit visible reasoning text and defer the transition.
+                self._pending_transition = True
+                return DeltaMessage(reasoning=delta_text) if delta_text else None
             tool_index = delta_text.find(self._tool_section_start_token)
             reasoning = delta_text[:tool_index]
             content = delta_text[tool_index:]
