@@ -7,10 +7,12 @@ from typing import Any, cast
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
+    AttentionBackend,
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
@@ -22,6 +24,9 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
+from vllm.v1.worker.kv_connector_model_runner_mixin import (
+    KVConnectorModelRunnerMixin,
+)
 from vllm.v1.worker.utils import (
     AttentionGroup,
     add_kv_sharing_layers_to_kv_cache_groups,
@@ -350,24 +355,44 @@ def init_kv_cache(
     kv_cache_config: KVCacheConfig,
     attn_groups: list[list[AttentionGroup]],
     device: torch.device,
-    cache_dtype: str,
+    cache_dtype: CacheDType,
     kernel_block_sizes: list[int],
     vllm_config: VllmConfig,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], torch.Tensor | None, type[AttentionBackend] | None]:
     shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
-    kv_cache_raw_tensors = _allocate_kv_cache(
-        kv_cache_config, shared_kv_cache_layers, device
-    )
-    flattened_attn_groups = list(group for groups in attn_groups for group in groups)
-    kv_caches = _reshape_kv_cache(
-        attn_groups=flattened_attn_groups,
-        kv_cache_raw_tensors=kv_cache_raw_tensors,
-        kernel_block_sizes=kernel_block_sizes,
-        cache_dtype=cache_dtype,
-        shared_kv_cache_layers=shared_kv_cache_layers,
-    )
+
+    cross_layers_kv_cache: torch.Tensor | None = None
+    cross_layers_attn_backend: type[AttentionBackend] | None = None
+
+    if KVConnectorModelRunnerMixin.use_uniform_kv_cache(attn_groups, cache_dtype):
+        kv_caches, cross_layers_kv_cache, cross_layers_attn_backend = (
+            KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+                kv_cache_config,
+                attn_groups,
+                cache_dtype,
+                device,
+                kernel_block_sizes,
+            )
+        )
+        for layer_name, target_layer_name in shared_kv_cache_layers.items():
+            kv_caches[layer_name] = kv_caches[target_layer_name]
+    else:
+        kv_cache_raw_tensors = _allocate_kv_cache(
+            kv_cache_config, shared_kv_cache_layers, device
+        )
+        flattened_attn_groups = list(
+            group for groups in attn_groups for group in groups
+        )
+        kv_caches = _reshape_kv_cache(
+            attn_groups=flattened_attn_groups,
+            kv_cache_raw_tensors=kv_cache_raw_tensors,
+            kernel_block_sizes=kernel_block_sizes,
+            cache_dtype=cache_dtype,
+            shared_kv_cache_layers=shared_kv_cache_layers,
+        )
+
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
-    return kv_caches
+    return kv_caches, cross_layers_kv_cache, cross_layers_attn_backend
 
 
 def build_slot_mappings_by_layer(

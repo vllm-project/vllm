@@ -23,6 +23,7 @@ from vllm.v1.outputs import (
 )
 
 if TYPE_CHECKING:
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.core.sched.output import SchedulerOutput
 
 
@@ -46,14 +47,21 @@ class KVConnector:
 
 class ActiveKVConnector(KVConnector):
     def __init__(
-        self, vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+        self,
+        vllm_config: VllmConfig,
+        kv_caches_dict: dict[str, torch.Tensor],
+        cross_layers_kv_cache: torch.Tensor | None = None,
+        cross_layers_attn_backend: "type[AttentionBackend] | None" = None,
     ):
         self.vllm_config = vllm_config
         self.kv_connector = get_kv_transfer_group()
-        # Register kv caches with KV Connector if applicable.
-        # TODO: support cross_layers_kv_cache
-        # (see https://github.com/vllm-project/vllm/pull/27743)
-        self.kv_connector.register_kv_caches(kv_caches_dict)
+        if cross_layers_kv_cache is not None:
+            assert cross_layers_attn_backend is not None
+            self.kv_connector.register_cross_layers_kv_cache(
+                cross_layers_kv_cache, cross_layers_attn_backend
+            )
+        else:
+            self.kv_connector.register_kv_caches(kv_caches_dict)
         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
 
         self._disabled = False
@@ -114,10 +122,18 @@ NO_OP_KV_CONNECTOR = KVConnector()
 
 
 def get_kv_connector(
-    vllm_config: VllmConfig, kv_caches_dict: dict[str, torch.Tensor]
+    vllm_config: VllmConfig,
+    kv_caches_dict: dict[str, torch.Tensor],
+    cross_layers_kv_cache: torch.Tensor | None = None,
+    cross_layers_attn_backend: "type[AttentionBackend] | None" = None,
 ) -> KVConnector:
     if not has_kv_transfer_group():
         # No-op connector.
         return NO_OP_KV_CONNECTOR
 
-    return ActiveKVConnector(vllm_config, kv_caches_dict)
+    return ActiveKVConnector(
+        vllm_config,
+        kv_caches_dict,
+        cross_layers_kv_cache,
+        cross_layers_attn_backend,
+    )
