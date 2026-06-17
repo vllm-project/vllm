@@ -34,11 +34,11 @@ torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
 // rms_norm and fused_add_rms_norm declarations also exist in
 // csrc/libtorch_stable/ops.h (torch::stable ABI for CUDA). They remain here
 // because the CPU build still uses these torch::Tensor declarations.
-void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
-              double epsilon);
+void rms_norm(torch::Tensor& out, torch::Tensor& input,
+              std::optional<torch::Tensor> weight, double epsilon);
 
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
-                        torch::Tensor& weight, double epsilon);
+                        std::optional<torch::Tensor> weight, double epsilon);
 
 // rotary_embedding also exist in csrc/libtorch_stable/ops.h (torch::stable
 // ABI for CUDA). It remains here because the CPU build still uses these
@@ -50,7 +50,8 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
-void silu_and_mul_clamp(torch::Tensor& out, torch::Tensor& input, double limit);
+void silu_and_mul_clamp(torch::Tensor& out, torch::Tensor& input, double limit,
+                        double alpha = 1.0, double beta = 0.0);
 
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);
