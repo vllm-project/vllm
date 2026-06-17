@@ -21,11 +21,6 @@ skip_if_not_cuda = pytest.mark.skipif(
     reason="Requires CUDA and >= Ampere (SM80)",
 )
 
-skip_if_not_xpu = pytest.mark.skipif(
-    not (current_platform.is_xpu() and HAS_TRITON),
-    reason="Requires Intel XPU device with Triton support",
-)
-
 skip_unsupported_device = pytest.mark.skipif(
     not (
         (current_platform.is_cuda() and current_platform.has_device_capability(80))
