@@ -48,8 +48,9 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
             mm_processor_kwargs=params.mm_processor_kwargs,
         )
 
+        # DeepSeek-V4 tokenizer expects 'data' as first positional arg
         prompt_raw = self._apply_chat_template(
-            conversation=conversation,
+            data=conversation,
             messages=messages,
             **params.get_apply_chat_template_kwargs(),
         )
