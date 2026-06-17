@@ -880,7 +880,6 @@ class OpenAIServingChat(OpenAIServing):
                     prompt_tokens=num_prompt_tokens,
                     completion_tokens=completion_tokens,
                     total_tokens=num_prompt_tokens + completion_tokens,
-                    cache_read_input_tokens=num_cached_tokens or 0,
                 )
                 if self.enable_prompt_tokens_details and num_cached_tokens:
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
@@ -1305,7 +1304,6 @@ class OpenAIServingChat(OpenAIServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
-            cache_read_input_tokens=final_res.num_cached_tokens or 0,
         )
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(

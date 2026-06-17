@@ -441,7 +441,6 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_tokens=total_prompt_tokens,
                 completion_tokens=total_completion_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens,
-                cache_read_input_tokens=num_cached_tokens or 0,
             )
 
             if self.enable_prompt_tokens_details and num_cached_tokens:
@@ -579,8 +578,6 @@ class OpenAIServingCompletion(OpenAIServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
-            cache_read_input_tokens=last_final_res.num_cached_tokens or 0
-            if last_final_res else 0,
         )
 
         if (
