@@ -288,6 +288,14 @@ class OffloadingManager(ABC):
         """
         return
 
+    def has_pending_work(self) -> bool:
+        """Whether this manager needs the engine to keep stepping.
+
+        While True, on_schedule_end() and get_finished_jobs() continue
+        to be called even when no requests are scheduled.
+        """
+        return False
+
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
         return
