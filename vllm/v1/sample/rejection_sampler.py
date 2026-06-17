@@ -733,7 +733,7 @@ def rejection_greedy_sample_kernel(
         return
 
     start_idx = (
-        tl.zeros([], dtype=tl.int64)
+        tl.zeros([], dtype=cu_num_draft_tokens_ptr.dtype.element_ty)
         if req_idx == 0
         else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
     )
@@ -793,7 +793,7 @@ def rejection_random_sample_kernel(
         return
 
     start_idx = (
-        tl.zeros([], dtype=tl.int64)
+        tl.zeros([], dtype=cu_num_draft_tokens_ptr.dtype.element_ty)
         if req_idx == 0
         else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
     )
@@ -853,7 +853,7 @@ def expand_kernel(
 ):
     req_idx = tl.program_id(0)
     if req_idx == 0:
-        start_idx = tl.zeros([], dtype=tl.int64)
+        start_idx = tl.zeros([], dtype=cu_num_tokens_ptr.dtype.element_ty)
     else:
         start_idx = tl.load(cu_num_tokens_ptr + req_idx - 1)
     end_idx = tl.load(cu_num_tokens_ptr + req_idx)
@@ -880,7 +880,7 @@ def sample_recovered_tokens_kernel(
 ):
     req_idx = tl.program_id(0)
     start_idx = (
-        tl.zeros([], dtype=tl.int64)
+        tl.zeros([], dtype=cu_num_draft_tokens_ptr.dtype.element_ty)
         if req_idx == 0
         else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
     )
