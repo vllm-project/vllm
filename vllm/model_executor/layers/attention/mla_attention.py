@@ -1680,8 +1680,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 # of `to_list`.
                 chunk_starts = torch.empty(
                     num_chunks, num_prefills, dtype=torch.int32, pin_memory=True
-                )
-                chunk_starts.copy_(
+                ).copy_(
                     torch.arange(num_chunks, dtype=torch.int32)
                     .multiply_(max_context_chunk)
                     .unsqueeze(1)
@@ -1744,8 +1743,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     )
                     local_chunk_starts = torch.empty(
                         num_chunks, num_prefills, dtype=torch.int32, pin_memory=True
-                    )
-                    local_chunk_starts.copy_(
+                    ).copy_(
                         torch.arange(num_chunks, dtype=torch.int32)
                         .multiply_(padded_local_max_context_chunk_across_ranks)
                         .unsqueeze(1)
