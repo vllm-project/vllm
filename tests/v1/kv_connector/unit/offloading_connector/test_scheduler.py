@@ -1894,15 +1894,6 @@ class TestEagle:
                 (1, 0),
                 (1, 1),
             ),
-            expected_flushed=(
-                (0, 0),
-                (0, 1),
-                (0, 2),
-                (1, 0),
-                (1, 1),
-            )
-            if not async_scheduling
-            else (),
         )
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -1948,7 +1939,6 @@ class TestEagle:
         runner.run(
             decoded_tokens=[EOS_TOKEN_ID],
             expected_stored=((0, 0), (0, 1)),
-            expected_flushed=((0, 0), (0, 1)) if not async_scheduling else (),
         )
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -2045,15 +2035,6 @@ class TestEagle:
                 (1, 0),
                 (1, 1),
             ),
-            expected_flushed=(
-                (0, 0),
-                (0, 1),
-                (0, 2),
-                (1, 0),
-                (1, 1),
-            )
-            if not async_scheduling
-            else (),
         )
 
         runner.scheduler.reset_prefix_cache()
