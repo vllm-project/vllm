@@ -423,6 +423,8 @@ class Gemma4Parser(ParserEngine):
         tools: list[Tool] | None = None,
         **kwargs,
     ) -> None:
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        self._thinking_enabled = chat_kwargs.get("enable_thinking", True)
         super().__init__(
             tokenizer,
             tools,
@@ -436,6 +438,27 @@ class Gemma4Parser(ParserEngine):
         self._reasoning_text: str = ""
         self._prefix_stripped: bool = False
         self._is_first_feed: bool = True
+
+    def adjust_request(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        """Keep special tokens when thinking or tool calls need them.
+
+        ``skip_special_tokens`` must stay ``False`` when there is something to
+        preserve: reasoning channel tokens (thinking enabled) or tool-call
+        delimiters (tools active). Otherwise keep the default so stray
+        delimiters do not leak into content (e.g. ``tool_choice="none"`` with
+        thinking disabled).
+        """
+        request = super().adjust_request(request)
+        chat_template_kwargs = getattr(request, "chat_template_kwargs", None) or {}
+        enable_thinking = chat_template_kwargs.get("enable_thinking", True)
+        has_tools = bool(getattr(request, "tools", None))
+        tools_active = has_tools and request.tool_choice != "none"
+        if not enable_thinking and not tools_active:
+            request.skip_special_tokens = True
+        return request
 
     def _reset(self, initial_state=None) -> None:
         super()._reset(initial_state=initial_state)
@@ -494,12 +517,12 @@ class Gemma4Parser(ParserEngine):
             if tool_call_id is not None and tid == tool_call_id:
                 return True
             if new_turn_id is not None and tid == new_turn_id:
-                return False
+                return not self._thinking_enabled
             if tool_response_id is not None and tid == tool_response_id:
-                return False
+                return not self._thinking_enabled
             if end_id is not None and tid == end_id:
                 return True
-        return self._reasoning_ended
+        return True
 
     def _events_to_delta(
         self,
