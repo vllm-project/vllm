@@ -87,7 +87,7 @@ class MooncakeStoreScheduler:
             return 0, False
 
         if self.lookup_async:
-            hit = self.client.get_or_submit(
+            hit = self.client.try_lookup(
                 request.request_id, token_len, request.block_hashes
             )
             if hit is None:

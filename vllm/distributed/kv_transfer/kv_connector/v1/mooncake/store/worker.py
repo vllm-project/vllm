@@ -1579,10 +1579,11 @@ class LookupKeyClient:
         result = int.from_bytes(resp, "big")
         return result
 
-    def get_or_submit(
+    def try_lookup(
         self, req_id: str, token_len: int, block_hashes: list[BlockHash]
     ) -> int | None:
-        """Return a finished lookup result, or non-blocking submit one."""
+        """Non-blocking lookup. Submits on first call; returns None until the
+        result is ready, so the caller retries on a later step."""
         with self.state_lock:
             if req_id in self.results:
                 return self.results.pop(req_id)
