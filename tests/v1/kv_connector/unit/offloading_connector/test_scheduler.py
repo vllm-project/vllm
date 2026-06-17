@@ -262,12 +262,9 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    # With sync scheduling, all-finished flush fires within this run.
-    # With async scheduling, the finish is delayed so flush fires later.
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored=(0, 1, 2),
-        expected_flushed=(0, 1, 2) if not async_scheduling else (),
     )
 
     # start a request to load the first block, but don't complete
@@ -332,7 +329,6 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored=(0, 1, 2),
-        expected_flushed=(0, 1, 2) if not async_scheduling else (),
     )
 
     # start a request to load the first block, but don't complete
@@ -359,7 +355,6 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
     runner.run(
         decoded_tokens=[],
         expected_loaded=(0, 1, 2),
-        expected_flushed=(0, 1, 2),
     )
 
     # assert request is deleted
@@ -774,7 +769,6 @@ def test_request_level_policy_stores_all_blocks(request_runner, async_scheduling
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored=(0, 1, 2),
-        expected_flushed=(0, 1, 2) if not async_scheduling else (),
     )
 
     # Reset GPU prefix cache so the next request must load from CPU.
@@ -841,13 +835,8 @@ def test_fence_at_update_state_after_alloc(request_runner):
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    runner.run(
-        decoded_tokens=[EOS_TOKEN_ID],
-        complete_transfers=False,
-        expected_stored=(0,),
-        expected_flushed=(0,),
-    )
-    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=False)
+    assert runner.connector_scheduler._block_id_to_pending_jobs
 
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * 4)
@@ -858,6 +847,8 @@ def test_fence_at_update_state_after_alloc(request_runner):
     runner.run(
         decoded_tokens=[],
         complete_transfers=False,
+        expected_stored=(0,),
+        expected_flushed=(0,),
     )
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
@@ -877,13 +868,8 @@ def test_fence_at_build_store_jobs(request_runner):
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    runner.run(
-        decoded_tokens=[EOS_TOKEN_ID],
-        complete_transfers=False,
-        expected_stored=(0,),
-        expected_flushed=(0,),
-    )
-    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+    runner.run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=False)
+    assert runner.connector_scheduler._block_id_to_pending_jobs
 
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[1] * 4)
@@ -893,6 +879,8 @@ def test_fence_at_build_store_jobs(request_runner):
     )
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0,),
+        expected_flushed=(0,),
     )
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
 
@@ -966,10 +954,10 @@ def test_max_offload_tokens_validation(request_runner, async_scheduling: bool):
             lambda keys, req_context: generate_store_output(keys)
         )
 
-    # With sync scheduling, the connector flushes completed stores when the
-    # request finishes; async scheduling defers the flush to the next step.
-    flushed_all = all_offsets if not async_scheduling else ()
-    flushed_two = (0, 1, 2, 3, 4, 5) if not async_scheduling else ()
+    # Pending offloads drain via non-blocking stepping, not a flush, so no
+    # blocks are flushed when the request finishes.
+    flushed_all: tuple[int, ...] = ()
+    flushed_two: tuple[int, ...] = ()
 
     # None -> no cap, all 9 offsets stored
     r = make_runner()
@@ -1081,32 +1069,6 @@ def test_offload_prompt_only(request_runner, async_scheduling: bool):
     assert len(offered_keys) == num_prompt_blocks
 
 
-def test_flush_all_jobs_when_no_requests_remain(request_runner):
-    """When all tracked requests are finished, build_connector_meta flushes
-    all pending jobs since there will be no future step to complete them."""
-    block_size = 4
-    block_size_factor = 1
-    offloaded_block_size = block_size * block_size_factor
-
-    runner = request_runner(
-        block_size=block_size,
-        num_gpu_blocks=100,
-        async_scheduling=False,
-        block_size_factor=block_size_factor,
-    )
-
-    runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
-    )
-    runner.run(
-        decoded_tokens=[EOS_TOKEN_ID],
-        complete_transfers=False,
-        expected_stored=(0,),
-        expected_flushed=(0,),
-    )
-
-
 @pytest.mark.parametrize("async_scheduling", [True, False])
 def test_reset_cache(request_runner, async_scheduling: bool):
     """reset_cache flushes in-flight loads, calls manager.reset_cache(), resets
@@ -1131,7 +1093,6 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored=(0, 1, 2),
-        expected_flushed=(0, 1, 2) if not async_scheduling else (),
     )
 
     # Reset GPU prefix cache then start a request that loads from CPU.
@@ -1381,7 +1342,6 @@ def test_stale_sliding_window_block_after_prepare_store_failure(
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored=(2, 3),
-        expected_flushed=(2, 3) if not async_scheduling else (),
     )
 
 
@@ -1409,7 +1369,6 @@ def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         expected_stored=(0, 1, 2),
-        expected_flushed=(0, 1, 2) if not async_scheduling else (),
     )
 
     # Reset GPU prefix cache so the next request cannot hit locally.
@@ -1429,7 +1388,6 @@ def test_skip_reading_prefix_cache(request_runner, async_scheduling: bool):
         decoded_tokens=[EOS_TOKEN_ID],
         expected_loaded=(),  # no CPU loads must happen
         expected_stored=(0, 1, 2),  # tokens still offloaded to CPU
-        expected_flushed=(0, 1, 2) if not async_scheduling else (),
     )
 
     # The external lookup must have been completely skipped.
@@ -1936,15 +1894,6 @@ class TestEagle:
                 (1, 0),
                 (1, 1),
             ),
-            expected_flushed=(
-                (0, 0),
-                (0, 1),
-                (0, 2),
-                (1, 0),
-                (1, 1),
-            )
-            if not async_scheduling
-            else (),
         )
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -1990,7 +1939,6 @@ class TestEagle:
         runner.run(
             decoded_tokens=[EOS_TOKEN_ID],
             expected_stored=((0, 0), (0, 1)),
-            expected_flushed=((0, 0), (0, 1)) if not async_scheduling else (),
         )
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -2087,15 +2035,6 @@ class TestEagle:
                 (1, 0),
                 (1, 1),
             ),
-            expected_flushed=(
-                (0, 0),
-                (0, 1),
-                (0, 2),
-                (1, 0),
-                (1, 1),
-            )
-            if not async_scheduling
-            else (),
         )
 
         runner.scheduler.reset_prefix_cache()

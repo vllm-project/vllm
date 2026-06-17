@@ -106,7 +106,16 @@ def test_dense_norm_rope(num_tokens, num_heads, num_kv_heads):
     qkv_orig = qkv.clone()
 
     ops.fused_minimax_m3_qknorm_rope_kv_insert(
-        qkv, q_w, k_w, cos_sin, positions, num_heads, num_kv_heads, ROTARY_DIM, eps
+        qkv,
+        q_w,
+        k_w,
+        cos_sin,
+        positions,
+        num_heads,
+        num_kv_heads,
+        ROTARY_DIM,
+        eps,
+        kv_cache_dtype="auto",
     )
     q_out, k_out, v_out = qkv.split([qsz, kvsz, kvsz], dim=-1)
 
@@ -133,7 +142,8 @@ def test_dense_norm_rope(num_tokens, num_heads, num_kv_heads):
 
 @pytest.mark.parametrize("num_tokens", [1, 7, 64, 513])
 @pytest.mark.parametrize("block_size", [16, 64])
-def test_sparse_full(num_tokens, block_size):
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
+def test_sparse_full(num_tokens, block_size, kv_cache_dtype):
     torch.manual_seed(1)
     device, dtype, eps = "cuda", torch.bfloat16, 1e-6
     base, max_pos = 5_000_000.0, 4096
@@ -158,8 +168,15 @@ def test_sparse_full(num_tokens, block_size):
     splits = [qsz, kvsz, kvsz, iqsz, iksz]
 
     num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    kv_cache_storage_dtype = torch.uint8 if kv_cache_dtype == "fp8" else dtype
     kv_cache = torch.zeros(
-        num_blocks, 2, block_size, num_kv_heads, HEAD_DIM, dtype=dtype, device=device
+        num_blocks,
+        2,
+        block_size,
+        num_kv_heads,
+        HEAD_DIM,
+        dtype=kv_cache_storage_dtype,
+        device=device,
     )
     index_cache = torch.zeros(
         num_blocks, block_size, HEAD_DIM, dtype=dtype, device=device
@@ -195,11 +212,12 @@ def test_sparse_full(num_tokens, block_size):
         block_size,
         q_out,
         index_q,
+        kv_cache_dtype,
     )
 
     # ── norm+rope parity. q/index_q land in their gather buffers; k/index_k are
     # rewritten in place inside qkv. ──
-    _, k_out, _, _, index_k = qkv.split(splits, dim=-1)
+    _, k_out, v_out, _, index_k = qkv.split(splits, dim=-1)
     q_in, k_in, v_in, iq_orig, ik_orig = qkv_orig.split(splits, dim=-1)
     q_ref = norm_rope_ref(
         q_in.view(num_tokens, num_heads, HEAD_DIM), q_w, positions, cos_sin, eps
@@ -230,15 +248,33 @@ def test_sparse_full(num_tokens, block_size):
     # ── Cache inserts. ──
     # Main cache layout is [num_blocks, 2, block_size, num_kv_heads, head_dim]
     # (the K/V axis sits *before* block_size); index cache is [nb, bs, head_dim].
-    idx_flat = index_cache.view(num_blocks * block_size, HEAD_DIM)
     k_ref_h = k_ref.view(num_tokens, num_kv_heads, HEAD_DIM)
     v_ref_h = v_in.view(num_tokens, num_kv_heads, HEAD_DIM)  # v is raw (no norm/rope)
-    for t in range(num_tokens):
-        s = slot_mapping[t].item()
-        b, pos = s // block_size, s % block_size
-        torch.testing.assert_close(
-            kv_cache[b, 0, pos], k_ref_h[t], rtol=1e-2, atol=1e-2
+    if kv_cache_dtype == "fp8":
+        expected_kv_cache = torch.zeros_like(kv_cache)
+        scale = torch.ones((), device=device)
+        ops.reshape_and_cache_flash(
+            k_out.view(num_tokens, num_kv_heads, HEAD_DIM),
+            v_out.view(num_tokens, num_kv_heads, HEAD_DIM),
+            expected_kv_cache[:, 0],
+            expected_kv_cache[:, 1],
+            slot_mapping,
+            kv_cache_dtype,
+            scale,
+            scale,
         )
-        torch.testing.assert_close(kv_cache[b, 1, pos], v_ref_h[t], rtol=0, atol=0)
-        index_s = index_slot_mapping[t].item()
-        torch.testing.assert_close(idx_flat[index_s], ik_ref[t], rtol=1e-2, atol=1e-2)
+        torch.testing.assert_close(kv_cache, expected_kv_cache, rtol=0, atol=0)
+    else:
+        for t in range(num_tokens):
+            s = slot_mapping[t].item()
+            b, pos = s // block_size, s % block_size
+            torch.testing.assert_close(
+                kv_cache[b, 0, pos], k_ref_h[t], rtol=1e-2, atol=1e-2
+            )
+            torch.testing.assert_close(kv_cache[b, 1, pos], v_ref_h[t], rtol=0, atol=0)
+
+    expected_index_cache = torch.zeros_like(index_cache).view(-1, HEAD_DIM)
+    expected_index_cache[index_slot_mapping] = index_k
+    torch.testing.assert_close(
+        index_cache.view(-1, HEAD_DIM), expected_index_cache, rtol=0, atol=0
+    )
