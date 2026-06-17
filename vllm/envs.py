@@ -7,7 +7,6 @@ import logging
 import os
 import tempfile
 import uuid
-import warnings
 from collections.abc import Callable
 from typing import Annotated, Any, Literal
 
@@ -50,17 +49,6 @@ def _default_dbo_comm_sms() -> int:
 
 def _tpu_pathways_default() -> bool:
     return "proxy" in os.getenv("JAX_PLATFORMS", "").lower()
-
-
-def _warn_deprecated_env(name: str, removal_version: str, replacement: str) -> None:
-    """Emit a FutureWarning if an env var is explicitly set."""
-    if _env_set(name):
-        warnings.warn(
-            f"{name} is deprecated and will be removed in "
-            f"{removal_version}. {replacement}",
-            FutureWarning,
-            stacklevel=2,
-        )
 
 
 def _env_set(name: str) -> bool:
@@ -437,6 +425,10 @@ class ServerSettings(BaseSettings):
             "executor (only applies when TP > 1)."
         ),
     )
+    worker_shutdown_timeout_seconds: int = Field(
+        default=5,
+        description="Timeout in seconds for engine and worker process shutdown.",
+    )
     keep_alive_on_engine_death: bool = Field(
         default=False,
         description=(
@@ -552,6 +544,16 @@ class ServerSettings(BaseSettings):
         default=1,
         description="Regex timeout for use by the vLLM tool parsing plugins.",
     )
+    regex_compilation_timeout_s: int = Field(
+        default=5,
+        description=(
+            "Maximum time in seconds allowed for regex compilation in "
+            "structured output backends (xgrammar, outlines). Prevents ReDoS "
+            "attacks where adversarial patterns cause exponential DFA "
+            "state-space explosion. Set to 0 to disable the timeout (not "
+            "recommended in production)."
+        ),
+    )
     tool_json_error_automatic_retry: bool = Field(
         default=False,
         description=(
@@ -561,11 +563,9 @@ class ServerSettings(BaseSettings):
         ),
     )
     enforce_strict_tool_calling: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "When 1, the model structural tags will be used to enforce the "
-            "model output conforming to the model's tool-calling format and "
-            "schema. Default 0 (off)."
+            "Enforce function parameter schemas in structural-tag based tool calling."
         ),
     )
     custom_scopes_for_profiling: bool = Field(
@@ -1208,6 +1208,23 @@ class MediaSettings(BaseSettings):
             "rejected. Default is 25 MB."
         ),
     )
+    max_audio_decode_duration_s: int = Field(
+        default=600,
+        description=(
+            "Maximum decoded audio duration in seconds. Compressed audio "
+            "files (e.g. OPUS at very low bitrate) can expand into gigabytes "
+            "of float32 PCM. This limit is enforced during decoding so the "
+            "memory is never allocated. Default is 600s (10 minutes)."
+        ),
+    )
+    max_audio_preprocess_workers: int = Field(
+        default_factory=lambda: max(1, min(os.cpu_count() or 1, 2)),
+        description=(
+            "Maximum number of worker threads used for STT preprocessing. "
+            "The default intentionally caps at 2 because that performed best "
+            "in profiling."
+        ),
+    )
     video_loader_backend: str = Field(
         default="opencv",
         description=(
@@ -1346,6 +1363,17 @@ class RocmSettings(BaseSettings):
         description=(
             "Disable aiter ops unless specifically enabled. Acts as a parent "
             "switch to enable the rest of the other operations."
+        ),
+    )
+    mxfp8_emulation_dequant_at_load: bool = Field(
+        default=True,
+        description=(
+            "On hardware without a native MXFP8 kernel (e.g. ROCm gfx942 / "
+            "MI300), the MXFP8 emulation path dequantizes weights "
+            "MXFP8->BF16 once at load time and runs as a BF16 checkpoint. "
+            "Set to 0 to fall back to per-step dequant: keeps the 1-byte "
+            "MXFP8 weights at the cost of dequantizing every forward step. "
+            "Default on."
         ),
     )
     rocm_use_aiter_paged_attn: bool = Field(
@@ -1562,54 +1590,9 @@ class FlashInferSettings(BaseSettings):
             "(Triton for bs>=8) path."
         ),
     )
-    use_flashinfer_moe_fp16: bool = Field(
-        default=False,
-        description="Allow use of FlashInfer BF16 MoE kernels for fused moe ops.",
-    )
-    use_flashinfer_moe_fp8: bool = Field(
-        default=False,
-        description="Allow use of FlashInfer FP8 MoE kernels for fused moe ops.",
-    )
-    use_flashinfer_moe_fp4: bool = Field(
-        default=False,
-        description="Allow use of FlashInfer NVFP4 MoE kernels for fused moe ops.",
-    )
     use_flashinfer_moe_int4: bool = Field(
         default=False,
         description="Allow use of FlashInfer MxInt4 MoE kernels for fused moe ops.",
-    )
-    use_flashinfer_moe_mxfp4_mxfp8: bool = Field(
-        default=False,
-        description=(
-            "If set to 1, use the FlashInfer MXFP8 (activation) x MXFP4 "
-            "(weight) MoE backend."
-        ),
-    )
-    use_flashinfer_moe_mxfp4_mxfp8_cutlass: bool = Field(
-        default=False,
-        description=(
-            "If set to 1, use the FlashInfer CUTLASS backend for MXFP8 "
-            "(activation) x MXFP4 (weight) MoE. This is separate from the "
-            "TRTLLMGEN path controlled by VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8."
-        ),
-    )
-    use_flashinfer_moe_mxfp4_bf16: bool = Field(
-        default=False,
-        description=(
-            "If set to 1, use the FlashInfer BF16 (activation) x MXFP4 "
-            "(weight) MoE backend."
-        ),
-    )
-    flashinfer_moe_backend: Literal["throughput", "latency", "masked_gemm"] = Field(
-        default="latency",
-        description=(
-            "Flashinfer MoE backend for vLLM's fused Mixture-of-Experts "
-            "support. Both require compute capability 10.0 or above. "
-            'Available options: "throughput" -- [default] Uses CUTLASS '
-            "kernels optimized for high-throughput batch inference. "
-            '"latency" -- Uses TensorRT-LLM kernels optimized for low-'
-            "latency inference."
-        ),
     )
     flashinfer_autotune_cache_dir: str | None = Field(
         default=None,
@@ -1670,38 +1653,6 @@ class FlashInferSettings(BaseSettings):
             return json.loads(v)
         return v
 
-    @model_validator(mode="after")
-    def _warn_deprecated_moe_backend_envs(self) -> "FlashInferSettings":
-        moe_backend_msg = (
-            "Use --moe-backend (e.g. flashinfer_trtllm, flashinfer_cutlass)."
-        )
-        for var in (
-            "VLLM_USE_FLASHINFER_MOE_FP16",
-            "VLLM_USE_FLASHINFER_MOE_FP8",
-            "VLLM_USE_FLASHINFER_MOE_FP4",
-            "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
-        ):
-            _warn_deprecated_env(var, "v0.23", moe_backend_msg)
-        _warn_deprecated_env(
-            "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
-            "v0.23",
-            "Use --moe-backend flashinfer_trtllm with "
-            "--quantization_config.moe.activation mxfp8.",
-        )
-        _warn_deprecated_env(
-            "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
-            "v0.23",
-            "Use --moe-backend flashinfer_cutlass with "
-            "--quantization_config.moe.activation mxfp8.",
-        )
-        _warn_deprecated_env(
-            "VLLM_FLASHINFER_MOE_BACKEND",
-            "v0.23",
-            "Use --moe-backend flashinfer_trtllm, flashinfer_cutlass, or "
-            "flashinfer_cutedsl.",
-        )
-        return self
-
 
 class QuantSettings(BaseSettings):
     model_config = _SUB_CONFIG
@@ -1733,10 +1684,6 @@ class QuantSettings(BaseSettings):
             "indexed gemm. If 0, force use grouped gemm. If None, choose "
             "better gemm type automatically."
         ),
-    )
-    mxfp4_use_marlin: bool | None = Field(
-        default=None,
-        description="Whether to use marlin kernel in mxfp4 quantization method.",
     )
     deepepll_nvfp4_dispatch: bool = Field(
         default=False,
@@ -1805,6 +1752,18 @@ class QuantSettings(BaseSettings):
             "kernel; turn this on for better latency on GB200-like systems."
         ),
     )
+    deepep_v2_allow_hybrid_mode: bool = Field(
+        default=True,
+        description="DeepEP v2: enable two-tier NVLink+RDMA hybrid mode.",
+    )
+    deepep_v2_prefer_overlap: bool = Field(
+        default=False,
+        description="DeepEP v2: use fewer SMs at slight throughput cost.",
+    )
+    deepep_v2_allow_multiple_reduction: bool = Field(
+        default=False,
+        description="DeepEP v2: trade precision for transfer size in combine.",
+    )
     dbo_comm_sms: int = Field(
         default_factory=_default_dbo_comm_sms,
         description=(
@@ -1851,40 +1810,6 @@ class QuantSettings(BaseSettings):
             "strategies. Custom routing strategies can be registered by "
             "RoutingSimulator.register_strategy(). Note: custom strategies "
             "may not produce correct model outputs."
-        ),
-    )
-    nvfp4_gemm_backend: (
-        Literal[
-            "flashinfer-b12x",
-            "flashinfer-cudnn",
-            "flashinfer-trtllm",
-            "flashinfer-cutlass",
-            "cutlass",
-            "marlin",
-            "emulation",
-        ]
-        | None
-    ) = Field(
-        default=None,
-        description=(
-            'Supported options: "flashinfer-b12x" -- use flashinfer b12x '
-            'GEMM backend (SM120/121); "flashinfer-cudnn" -- use flashinfer '
-            'cudnn GEMM backend; "flashinfer-trtllm" -- use flashinfer '
-            'trtllm GEMM backend; "flashinfer-cutlass" -- use flashinfer '
-            'cutlass GEMM backend; "cutlass" -- use cutlass GEMM backend; '
-            '"marlin" -- use marlin GEMM backend (for GPUs without native '
-            'FP4 support); "emulation" -- use BF16/FP16 GEMM, dequantizing '
-            "weights and running QDQ on activations (only meant for "
-            "research purposes to run on devices where NVFP4 GEMM kernels "
-            "are not available); <none> -- automatically pick an available "
-            "backend."
-        ),
-    )
-    use_nvfp4_ct_emulations: bool = Field(
-        default=False,
-        description=(
-            "Controls whether or not emulations are used for NVFP4 "
-            "generations on machines < 100 for compressed-tensors models."
         ),
     )
     q_scale_constant: int = Field(
@@ -1952,10 +1877,6 @@ class QuantSettings(BaseSettings):
             "bugs or bad hardware but it may add compute overhead."
         ),
     )
-    use_fbgemm: bool = Field(
-        default=False,
-        description="Flag to enable FBGemm kernels on model execution.",
-    )
     use_oink_ops: bool = Field(
         default=False,
         description=(
@@ -1981,6 +1902,27 @@ class QuantSettings(BaseSettings):
     use_triton_awq: bool = Field(
         default=False,
         description="If set, vLLM will use Triton implementations of AWQ.",
+    )
+    fastsafetensors_queue_size: int = Field(
+        default=0,
+        description=(
+            "Queue size for fastsafetensors ParallelLoader pipelined weight "
+            "loading. Peak load-time VRAM is roughly model_weights + "
+            "(1 + queue_size) * shard_size. Default 0 preserves the "
+            "non-pipelined memory footprint. Set to 1 (or higher) to overlap "
+            "producing the next shard's device buffer with the consumer "
+            "copying the current shard into model params, at the cost of "
+            "`queue_size` extra shard-sized buffers resident at peak."
+        ),
+    )
+    triton_force_first_config: bool = Field(
+        default=False,
+        description=(
+            "If set, monkey-patch triton.runtime.autotuner.Autotuner.run to "
+            "skip benchmarking and select the first valid config. Used to "
+            "eliminate autotuning variability when measuring kernel "
+            "performance."
+        ),
     )
 
     @field_validator("float32_matmul_precision", mode="before")
@@ -2020,17 +1962,6 @@ class QuantSettings(BaseSettings):
             return bool(int(v))
         return v
 
-    @field_validator("mxfp4_use_marlin", mode="before")
-    @classmethod
-    def _parse_mxfp4(cls, v: Any) -> Any:
-        if v is None:
-            return None
-        if isinstance(v, bool):
-            return v
-        if isinstance(v, str):
-            return bool(int(v))
-        return v
-
     @field_validator("triton_attn_use_td", mode="before")
     @classmethod
     def _parse_triton_attn_use_td(cls, v: Any) -> Any:
@@ -2039,30 +1970,6 @@ class QuantSettings(BaseSettings):
         if isinstance(v, str):
             return {"1": True, "0": False}.get(v.strip())
         return v
-
-    @model_validator(mode="after")
-    def _warn_deprecated_backend_envs(self) -> "QuantSettings":
-        _warn_deprecated_env(
-            "VLLM_MXFP4_USE_MARLIN",
-            "v0.23",
-            "Use --moe-backend marlin or --linear-backend marlin.",
-        )
-        _warn_deprecated_env(
-            "VLLM_USE_NVFP4_CT_EMULATIONS",
-            "v0.23",
-            "Use --linear-backend emulation.",
-        )
-        _warn_deprecated_env(
-            "VLLM_NVFP4_GEMM_BACKEND",
-            "v0.23",
-            "Use --linear-backend.",
-        )
-        _warn_deprecated_env(
-            "VLLM_USE_FBGEMM",
-            "v0.23",
-            "Use --linear-backend fbgemm.",
-        )
-        return self
 
 
 class ConnectorSettings(BaseSettings):
@@ -2160,6 +2067,15 @@ class ConnectorSettings(BaseSettings):
         default=False,
         description=(
             "Disable using UVA (Unified Virtual Addressing) for CPU offloading."
+        ),
+    )
+    wsl2_enable_pin_memory: bool = Field(
+        default=False,
+        description=(
+            "On WSL2 with a compatible kernel (>= 4.19.121), pinned memory "
+            "is supported but disabled by default due to a small performance "
+            "regression. Set to 1 when pinned memory or UVA is required "
+            "(e.g. CPU offloading or v2 model runner)."
         ),
     )
     enable_cudagraph_gc: bool = Field(
@@ -2667,6 +2583,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
+        "VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH",
         "VLLM_IMAGE_FETCH_TIMEOUT",
         "VLLM_VIDEO_FETCH_TIMEOUT",
@@ -2678,6 +2595,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
+        "VLLM_MAX_AUDIO_DECODE_DURATION_S",
+        "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",

@@ -158,6 +158,10 @@ def test_with_eagle3_spec_decoding(sample_json_schema, monkeypatch: pytest.Monke
 
 
 @pytest.mark.flaky(reruns=2, only_on=current_platform.is_rocm())
+@pytest.mark.skipif(
+    current_platform.is_xpu(),
+    reason=("XPU matmul/attention kernels are not batch-invariant"),
+)
 def test_with_ngram_gpu_spec_decoding(monkeypatch: pytest.MonkeyPatch):
     """Test ngram_gpu speculative decoding with different configurations.
 
