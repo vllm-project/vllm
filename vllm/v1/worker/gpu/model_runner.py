@@ -468,8 +468,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            # decode_query_len=self.decode_query_len,
-            decode_query_len=3,  # REVERT
+            decode_query_len=self.decode_query_len,
             lora_capture_cases=self.lora_capture_cases,
         )
         if self.speculator is not None:
