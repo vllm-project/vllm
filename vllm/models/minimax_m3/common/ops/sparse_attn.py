@@ -24,6 +24,12 @@ from vllm.triton_utils import tl, triton
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
 
+_FP8_DTYPES = (
+    torch.float8_e4m3fn,
+    torch.float8_e4m3fnuz,
+    torch.float8_e5m2,
+    torch.float8_e5m2fnuz,
+)
 
 _SPARSE_ATTN_NUM_STAGES_KWARG: dict | None = None
 
@@ -456,7 +462,7 @@ def minimax_m3_sparse_attn(
     batch = cu_seqlens_q.shape[0] - 1
     topk = topk_idx.shape[-1]
     gqa_group_size = num_heads // num_kv_heads
-    use_fp8 = kv_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+    use_fp8 = kv_cache.dtype in _FP8_DTYPES
     grid = (max_query_len, num_kv_heads, batch)
     _gqa_sparse_fwd_kernel[grid](
         q,
@@ -513,7 +519,7 @@ def minimax_m3_sparse_attn_decode(
     assert total_q == seq_lens.shape[0] * decode_query_len
     max_topk = topk_idx.shape[-1]
     gqa_group_size = num_heads // num_kv_heads
-    use_fp8 = kv_cache.dtype in (torch.float8_e4m3fn, torch.float8_e5m2)
+    use_fp8 = kv_cache.dtype in _FP8_DTYPES
     use_pdl = current_platform.is_arch_support_pdl()
     # `launch_pdl` is a Triton runtime kwarg only some backends accept (CUDA
     # SM9+); this ROCm Triton rejects it even when False ("Keyword argument
