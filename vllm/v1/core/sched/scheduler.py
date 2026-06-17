@@ -1764,6 +1764,9 @@ class Scheduler(SchedulerInterface):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
+                    # It may have applied a queued chunk and length-capped the
+                    # session (STOP -> LENGTH); re-read the final reason.
+                    finish_reason = request.get_finished_reason()
                     kv_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
