@@ -932,13 +932,15 @@ def test_draft_model_realistic_example():
     assert_draft_model_correctness(args)
 
 
+@pytest.mark.parametrize("use_mrv2", [False, True])
 @single_gpu_only
 # TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
 @pytest.mark.xfail(
     raises=AsyncSchedulingNotEnabledError,
     reason="draft_model does not yet enable async_scheduling: issue #38929",
 )
-def test_draft_model_parallel_drafting():
+def test_draft_model_parallel_drafting(monkeypatch: pytest.MonkeyPatch, use_mrv2: bool):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
         draft_model="amd/PARD-Qwen3-0.6B",

@@ -22,19 +22,27 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     prepare_prefill_inputs,
 )
-from vllm.v1.worker.gpu.spec_decode.eagle.speculator import EagleSpeculator
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 
 
-class PEagleSpeculator(EagleSpeculator):
+class PEagleSpeculator(DraftModelSpeculator):
     """PEagle (Parallel Eagle) speculator.
 
-    Extends EagleSpeculator with single-pass parallel drafting: all N draft
-    tokens are produced in one forward pass by prepending N-1 pard tokens to
-    each request's Eagle input, instead of running N sequential decode steps.
+    all N draft tokens are produced in one forward pass by prepending N-1 pard
+    tokens to each request's Eagle input, instead of running N sequential decode steps.
     """
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        self.hidden_states = torch.zeros(
+            self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
+        )
+        self.current_draft_step = torch.tensor(0, dtype=torch.int64, device=device)
+        self.last_token_indices = torch.zeros(
+            self.max_num_reqs, dtype=torch.int64, device=device
+        )
+
+        self.supports_mm_inputs = False
 
         self.parallel_drafting_token_id: int = 0
         self.parallel_drafting_hidden_state_tensor: torch.Tensor | None = None
@@ -81,14 +89,14 @@ class PEagleSpeculator(EagleSpeculator):
                 "have `pard_token` or `ptd_token_id` in its config.json."
             )
 
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        pass
+
+    def capture(self, attn_states) -> None:
+        pass  # TODO: add CudaGraph support
+
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
-        self._init_parallel_drafting_hidden_state()
-
-    def _init_parallel_drafting_hidden_state(self) -> None:
-        # Extract the mask hidden state from the model for use at pard positions.
-        # For Eagle3 with aux hidden states, project through combine_hidden_states.
-        # If the model has no mask_hidden (e.g., plain Eagle), fall back to zeros.
         if not hasattr(self.model, "mask_hidden"):
             self.parallel_drafting_hidden_state_tensor = torch.zeros(
                 self.hidden_size, dtype=self.dtype, device=self.device
@@ -100,6 +108,15 @@ class PEagleSpeculator(EagleSpeculator):
         else:
             projected = flat_mask
         self.parallel_drafting_hidden_state_tensor = projected.detach().clone()
+
+    def load_draft_model(
+        self,
+        target_model: nn.Module,
+        target_attn_layer_names: set[str],
+    ) -> nn.Module:
+        from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
+
+        return load_eagle_model(target_model, self.vllm_config)
 
     def set_attn(
         self,
@@ -115,124 +132,75 @@ class PEagleSpeculator(EagleSpeculator):
             device=self.device,
         )
 
-    @torch.inference_mode()
-    def propose(
-        self,
-        input_batch: InputBatch,
-        attn_metadata: dict[str, Any],
-        slot_mappings: dict[str, torch.Tensor],
-        # [num_tokens, hidden_size]
-        last_hidden_states: torch.Tensor,
-        # num_layers x [num_tokens, hidden_size]
-        aux_hidden_states: list[torch.Tensor] | None,
-        # [num_reqs]
-        num_sampled: torch.Tensor,
-        # [num_reqs]
-        num_rejected: torch.Tensor,
-        # [max_num_reqs]
-        last_sampled: torch.Tensor,
-        # [max_num_reqs]
-        next_prefill_tokens: torch.Tensor,
-        # [max_num_reqs]
-        temperature: torch.Tensor,
-        # [max_num_reqs]
-        seeds: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor | None = None,
-        dummy_run: bool = False,
-        skip_attn_for_dummy_run: bool = False,
-        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        is_profile: bool = False,
-    ) -> torch.Tensor:
-        num_tokens = input_batch.num_tokens_after_padding
-        num_reqs = input_batch.num_reqs
-        max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
-        self.draft_max_seq_len = min(
-            max_seq_len + self.num_speculative_steps, self.max_model_len
-        )
+    @property
+    def model_returns_tuple(self) -> bool:
+        """
+        Whether the draft model's forward() returns a tuple.
 
-        if aux_hidden_states:
-            assert self.method == "eagle3"
-            hidden_states = self.model.combine_hidden_states(
-                torch.cat(aux_hidden_states, dim=-1)
-            )
-        else:
-            hidden_states = last_hidden_states
-        self.hidden_states[:num_tokens].copy_(hidden_states)
+        True: returns (last_hidden_states, hidden_states) — Eagle, Gemma4 MTP.
+        False: returns a single tensor used for both — standard MTP (DeepSeek).
+        """
+        return True
 
-        self._copy_request_inputs(
-            num_reqs,
-            input_batch.idx_mapping,
-            temperature,
-            seeds,
-        )
-
-        prepare_prefill_inputs(
-            self.last_token_indices,
-            self.current_draft_step,
-            self.input_buffers,
-            input_batch,
-            num_sampled,
-            num_rejected,
-            last_sampled,
-            next_prefill_tokens,
-            self.max_num_reqs,
-        )
-
-        self._parallel_eagle(
-            num_reqs,
-            input_batch.num_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
-            eagle_query_start_loc_np=input_batch.query_start_loc_np,
-            num_rejected=num_rejected,
-            skip_attn=dummy_run and skip_attn_for_dummy_run,
-            is_profile=is_profile,
-            mm_inputs=mm_inputs,
-        )
-        return self.draft_tokens[:num_reqs]
-
-    def _parallel_eagle(
+    def _build_peagle_attn_metadata(
         self,
         num_reqs: int,
+        num_extended: int,
+        max_query_len_extended: int,
+        block_tables: list[torch.Tensor],
+        extended_slot_mappings: torch.Tensor,
+        peagle_qsl_cpu: torch.Tensor,
+    ) -> dict[str, Any] | None:
+        if not self.draft_attn_layer_names:
+            return None
+        return build_attn_metadata(
+            attn_groups=self.attn_groups,
+            num_reqs=num_reqs,
+            num_tokens=num_extended,
+            query_start_loc_gpu=self.peagle_query_start_loc[: num_reqs + 1],
+            query_start_loc_cpu=peagle_qsl_cpu,
+            max_query_len=max_query_len_extended,
+            seq_lens=self.peagle_seq_lens[:num_reqs],
+            max_seq_len=self.draft_max_seq_len,
+            block_tables=block_tables,
+            slot_mappings=extended_slot_mappings,
+            kv_cache_config=self.kv_cache_config,
+        )
+
+    @torch.inference_mode()
+    def _run_model(
+        self,
         num_tokens: int,
+        attn_metadata: dict[str, Any] | None,
+        slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
-        eagle_query_start_loc_np: np.ndarray,
-        num_rejected: torch.Tensor,
-        skip_attn: bool = False,
-        is_profile: bool = False,
+        cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-    ) -> None:
-        """Single-pass forward: generates all N draft tokens at once.
-
-        Extends each request's Eagle input by N-1 pard tokens, runs one
-        forward pass, and samples all N draft tokens simultaneously.
-        """
-        # During profile_run, skip the N-1 pard extension to keep num_tokens
-        # within the model's compile range (1, max_num_batched_tokens).
-        if is_profile:
-            self._run_model(
-                num_tokens,
-                None,
-                None,
-                num_tokens_across_dp,
-                CUDAGraphMode.NONE,
-                mm_inputs,
-            )
-            return
-
-        num_extended = self._prepare_extended_inputs(num_reqs, num_tokens, num_rejected)
-        attn_metadata, slot_mappings_by_layer = self._build_extended_context(
-            num_reqs,
-            num_extended,
-            eagle_query_start_loc_np,
-            skip_attn,
-        )
-        last_hidden_states = self._run_peagle_model(
-            num_extended,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_descriptor = BatchDescriptor(num_tokens=num_tokens)
+        with set_forward_context(
             attn_metadata,
-            slot_mappings_by_layer,
-            num_tokens_across_dp,
-        )
-        self._sample_all_tokens(num_reqs, last_hidden_states)
+            self.vllm_config,
+            num_tokens=num_tokens,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+            num_tokens_across_dp=num_tokens_across_dp,
+            slot_mapping=slot_mappings,
+            batch_descriptor=batch_descriptor,
+        ):
+            inputs_embeds = None
+            model_inputs = dict(
+                input_ids=self.input_buffers.input_ids[:num_tokens],
+                positions=self.input_buffers.positions[:num_tokens],
+                hidden_states=self.hidden_states[:num_tokens],
+                inputs_embeds=inputs_embeds,
+            )
+            ret_hidden_states = self.model(**model_inputs)
+        if self.model_returns_tuple:
+            last_hidden_states, hidden_states = ret_hidden_states
+        else:
+            last_hidden_states = ret_hidden_states
+            hidden_states = ret_hidden_states
+        return last_hidden_states, hidden_states
 
     def _prepare_extended_inputs(
         self,
@@ -392,37 +360,129 @@ class PEagleSpeculator(EagleSpeculator):
                 self.draft_logits,
             )
 
-    def _build_peagle_attn_metadata(
+    def _parallel_eagle(
         self,
         num_reqs: int,
-        num_extended: int,
-        max_query_len_extended: int,
-        block_tables: list[torch.Tensor],
-        extended_slot_mappings: torch.Tensor,
-        peagle_qsl_cpu: torch.Tensor,
-    ) -> dict[str, Any] | None:
-        if not self.draft_attn_layer_names:
-            return None
-        return build_attn_metadata(
-            attn_groups=self.attn_groups,
-            num_reqs=num_reqs,
-            num_tokens=num_extended,
-            query_start_loc_gpu=self.peagle_query_start_loc[: num_reqs + 1],
-            query_start_loc_cpu=peagle_qsl_cpu,
-            max_query_len=max_query_len_extended,
-            seq_lens=self.peagle_seq_lens[:num_reqs],
-            max_seq_len=self.draft_max_seq_len,
-            block_tables=block_tables,
-            slot_mappings=extended_slot_mappings,
-            kv_cache_config=self.kv_cache_config,
+        num_tokens: int,
+        num_tokens_across_dp: torch.Tensor | None,
+        eagle_query_start_loc_np: np.ndarray,
+        num_rejected: torch.Tensor,
+        skip_attn: bool = False,
+        is_profile: bool = False,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+    ) -> None:
+        """Single-pass forward: generates all N draft tokens at once.
+
+        Extends each request's Eagle input by N-1 pard tokens, runs one
+        forward pass, and samples all N draft tokens simultaneously.
+        """
+        # During profile_run, skip the N-1 pard extension to keep num_tokens
+        # within the model's compile range (1, max_num_batched_tokens).
+        if is_profile:
+            self._run_model(
+                num_tokens,
+                None,
+                None,
+                num_tokens_across_dp,
+                CUDAGraphMode.NONE,
+                mm_inputs,
+            )
+            return
+
+        num_extended = self._prepare_extended_inputs(num_reqs, num_tokens, num_rejected)
+        attn_metadata, slot_mappings_by_layer = self._build_extended_context(
+            num_reqs,
+            num_extended,
+            eagle_query_start_loc_np,
+            skip_attn,
         )
+        last_hidden_states = self._run_peagle_model(
+            num_extended,
+            attn_metadata,
+            slot_mappings_by_layer,
+            num_tokens_across_dp,
+        )
+        self._sample_all_tokens(num_reqs, last_hidden_states)
+
+    @torch.inference_mode()
+    def propose(
+        self,
+        input_batch: InputBatch,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
+        # [num_tokens, hidden_size]
+        last_hidden_states: torch.Tensor,
+        # num_layers x [num_tokens, hidden_size]
+        aux_hidden_states: list[torch.Tensor] | None,
+        # [num_reqs]
+        num_sampled: torch.Tensor,
+        # [num_reqs]
+        num_rejected: torch.Tensor,
+        # [max_num_reqs]
+        last_sampled: torch.Tensor,
+        # [max_num_reqs]
+        next_prefill_tokens: torch.Tensor,
+        # [max_num_reqs]
+        temperature: torch.Tensor,
+        # [max_num_reqs]
+        seeds: torch.Tensor,
+        num_tokens_across_dp: torch.Tensor | None = None,
+        dummy_run: bool = False,
+        skip_attn_for_dummy_run: bool = False,
+        mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        is_profile: bool = False,
+    ) -> torch.Tensor:
+        num_tokens = input_batch.num_tokens_after_padding
+        num_reqs = input_batch.num_reqs
+        max_seq_len = input_batch.seq_lens_cpu_upper_bound[:num_reqs].max().item()
+        self.draft_max_seq_len = min(
+            max_seq_len + self.num_speculative_steps, self.max_model_len
+        )
+
+        if aux_hidden_states:
+            assert self.method == "eagle3"
+            hidden_states = self.model.combine_hidden_states(
+                torch.cat(aux_hidden_states, dim=-1)
+            )
+        else:
+            hidden_states = last_hidden_states
+        self.hidden_states[:num_tokens].copy_(hidden_states)
+
+        self._copy_request_inputs(
+            num_reqs,
+            input_batch.idx_mapping,
+            temperature,
+            seeds,
+        )
+
+        prepare_prefill_inputs(
+            self.last_token_indices,
+            self.current_draft_step,
+            self.input_buffers,
+            input_batch,
+            num_sampled,
+            num_rejected,
+            last_sampled,
+            next_prefill_tokens,
+            self.max_num_reqs,
+        )
+
+        self._parallel_eagle(
+            num_reqs,
+            input_batch.num_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+            eagle_query_start_loc_np=input_batch.query_start_loc_np,
+            num_rejected=num_rejected,
+            skip_attn=dummy_run and skip_attn_for_dummy_run,
+            is_profile=is_profile,
+            mm_inputs=mm_inputs,
+        )
+        return self.draft_tokens[:num_reqs]
 
 
 # ---------------------------------------------------------------------------
 # PEagle (Parallel Eagle) helpers
 # ---------------------------------------------------------------------------
-
-
 @triton.jit
 def _prepare_peagle_prefill_inputs_kernel(
     # Outputs: extended PEagle buffer
