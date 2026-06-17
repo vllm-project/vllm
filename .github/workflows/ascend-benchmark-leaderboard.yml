@@ -18,7 +18,12 @@ on:
           - random-online
           - sharegpt-online
       publish_to_hf:
-        description: Publish benchmark result to HF and refresh website leaderboard
+        description: Publish benchmark result to HF
+        required: false
+        type: boolean
+        default: false
+      publish_to_benchmark_repo:
+        description: Publish benchmark result to the benchmark repo and refresh leaderboard snapshots
         required: false
         type: boolean
         default: false
@@ -150,8 +155,12 @@ jobs:
               '## Ascend Benchmark Command Help',
               '',
               'Supported same-repository PR preview commands:',
+              '- `/ascend smoke`',
+              '- `/ascend scenario random`',
+              '- `/ascend group smoke`',
               '- `/ascend benchmark random`',
               '- `/ascend benchmark random --num-prompts 16 --request-rate inf --max-concurrency 4`',
+              '- `/ascend scenario sharegpt --dataset-path /data/sharegpt.jsonl --constraints-file /data/constraints.json`',
               '- `/ascend benchmark sharegpt --dataset-path /data/sharegpt.jsonl --constraints-file /data/constraints.json`',
               '- `/ascend help`',
               '',
@@ -164,7 +173,7 @@ jobs:
               '- ShareGPT dataset and constraints files must be absolute `.json`/`.jsonl` paths under `/data/` or `/mnt/data/`.',
               '- Comment-triggered runs are optional preview checks and are not required checks.',
               '- Comment-triggered runs do not publish to HF or the benchmark repository.',
-              '- `/ascend smoke`, `/ascend group ...`, `/ascend scenario ...`, and `/ascend official ...` are planned but not supported yet.',
+              '- `/ascend official ...` is reserved for the future formal leaderboard path and is not supported yet.',
             ].join('\n');
             const {owner, repo} = context.repo;
             await github.rest.issues.createComment({
@@ -200,7 +209,11 @@ jobs:
               `Reason: ${safeReason}`,
               '',
               'Supported same-repository PR preview commands:',
+              '- `/ascend smoke`',
+              '- `/ascend scenario random`',
+              '- `/ascend group smoke`',
               '- `/ascend benchmark random`',
+              '- `/ascend scenario sharegpt --dataset-path /data/sharegpt.jsonl --constraints-file /data/constraints.json`',
               '- `/ascend benchmark sharegpt --dataset-path /data/sharegpt.jsonl --constraints-file /data/constraints.json`',
               '',
               'Notes:',
@@ -208,7 +221,7 @@ jobs:
               '- Comment-triggered limits: `--num-prompts <= 32`, `--max-concurrency <= 4`, `--request-rate <= 4` or `inf`.',
               '- ShareGPT dataset and constraints files must be absolute `.json`/`.jsonl` paths under `/data/` or `/mnt/data/`.',
               '- Comment-triggered runs are optional preview checks and are not required checks.',
-              '- `/ascend smoke`, `/ascend group ...`, `/ascend scenario ...`, and `/ascend official ...` are planned but not supported yet.',
+              '- `/ascend official ...` is reserved for the future formal leaderboard path and is not supported yet.',
             ].join('\n');
             const {owner, repo} = context.repo;
             await github.rest.issues.createComment({
@@ -254,7 +267,7 @@ jobs:
       HF_HOME: ${{ github.workspace }}/../.hf-cache
       HUGGINGFACE_HUB_CACHE: ${{ github.workspace }}/../.hf-cache/hub
       TRANSFORMERS_CACHE: ${{ github.workspace }}/../.hf-cache/transformers
-      HF_TOKEN: ${{ (github.event_name != 'pull_request' && github.event_name != 'issue_comment') && secrets.HF_TOKEN || '' }}
+      HF_TOKEN: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf) && secrets.HF_TOKEN || '' }}
       HF_REPO_ID: intellistream/vllm-hust-benchmark-results
       MODEL_NAME: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.model_name || (github.event_name == 'workflow_dispatch' && inputs.model_name || 'Qwen/Qwen2.5-3B-Instruct') }}
       BENCH_SCENARIO: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.benchmark_scenario || (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenario || (github.event_name == 'pull_request' && vars.VLLM_HUST_PR_BENCHMARK_SCENARIO) || (github.event_name == 'push' && vars.VLLM_HUST_MAIN_BENCHMARK_SCENARIO) || 'random-online') }}
@@ -288,8 +301,8 @@ jobs:
       ASCEND_BENCHMARK_ROOT_HELPER: ${{ vars.VLLM_HUST_BENCHMARK_ROOT_HELPER || '' }}
       ALLOW_RANDOM_HF_PUBLISH: ${{ vars.VLLM_HUST_ALLOW_RANDOM_HF_PUBLISH || '0' }}
       WEBSITE_LEADERBOARD_URL: ${{ vars.VLLM_HUST_LEADERBOARD_URL || '' }}
-      PUBLISH_TO_BENCHMARK_REPO: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && '1' || '0' }}
-      PUBLISH_TO_HF: ${{ (((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && secrets.HF_TOKEN != '') && '1' || '0' }}
+      PUBLISH_TO_BENCHMARK_REPO: ${{ ((github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VLLM_HUST_PUBLISH_BENCHMARK_ON_MAIN == '1') || (github.event_name == 'workflow_dispatch' && inputs.publish_to_benchmark_repo)) && '1' || '0' }}
+      PUBLISH_TO_HF: ${{ (github.event_name == 'workflow_dispatch' && inputs.publish_to_hf && secrets.HF_TOKEN != '') && '1' || '0' }}
       TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
       TARGET_REPO_SHA: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.pr_head_sha || github.sha }}
       BENCHMARK_REPO_URL: git@github.com:vLLM-HUST/vllm-hust-benchmark.git

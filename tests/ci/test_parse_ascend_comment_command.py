@@ -46,6 +46,42 @@ def test_parse_random_command_with_reasonable_defaults():
     assert command.num_prompts == "8"
     assert command.request_rate == "inf"
     assert command.max_concurrency == "4"
+    assert command.to_env()["PUBLISH_TO_BENCHMARK_REPO"] == "0"
+
+
+def test_parse_smoke_command_maps_to_random_preview():
+    parser = load_parser()
+
+    command = parser.parse_comment_command("/ascend smoke --num-prompts 4")
+
+    assert command is not None
+    assert command.action == "smoke"
+    assert command.scenario == "random-online"
+    assert command.num_prompts == "4"
+    assert command.publish_to_hf is False
+    assert command.to_env()["PUBLISH_TO_HF"] == "0"
+    assert command.to_env()["PUBLISH_TO_BENCHMARK_REPO"] == "0"
+
+
+def test_parse_scenario_command_maps_to_supported_scenario():
+    parser = load_parser()
+
+    command = parser.parse_comment_command("/ascend scenario random --request-rate 2")
+
+    assert command is not None
+    assert command.action == "scenario"
+    assert command.scenario == "random-online"
+    assert command.request_rate == "2"
+
+
+def test_parse_group_command_maps_to_supported_group():
+    parser = load_parser()
+
+    command = parser.parse_comment_command("/ascend group smoke")
+
+    assert command is not None
+    assert command.action == "group"
+    assert command.scenario == "random-online"
 
 
 def test_parse_sharegpt_command_with_explicit_options():
@@ -66,6 +102,22 @@ def test_parse_sharegpt_command_with_explicit_options():
     assert command.max_concurrency == "4"
     assert command.model_name == "Qwen/Qwen2.5-3B-Instruct"
     assert command.publish_to_hf is False
+
+
+def test_parse_scenario_sharegpt_command_with_explicit_options():
+    parser = load_parser()
+
+    command = parser.parse_comment_command(
+        "/ascend scenario sharegpt --dataset-path /data/sharegpt.jsonl "
+        "--constraints-file /mnt/data/constraints.json --num-prompts 16"
+    )
+
+    assert command is not None
+    assert command.action == "scenario"
+    assert command.scenario == "sharegpt-online"
+    assert command.dataset_path == "/data/sharegpt.jsonl"
+    assert command.constraints_file == "/mnt/data/constraints.json"
+    assert command.num_prompts == "16"
 
 
 def test_parse_rejects_comment_model_override():
@@ -161,21 +213,20 @@ def test_parse_rejects_unsupported_scenario():
         raise AssertionError("expected unsupported scenario to be rejected")
 
 
-def test_parse_rejects_planned_but_unsupported_protocols():
+def test_parse_rejects_unsupported_protocol_targets():
     parser = load_parser()
 
-    for body in [
-        "/ascend smoke",
-        "/ascend group moe",
-        "/ascend scenario qwen25",
-        "/ascend official official-ascend-qwen25",
+    for body, expected in [
+        ("/ascend group moe", "unsupported benchmark group"),
+        ("/ascend scenario qwen25", "unsupported benchmark scenario"),
+        ("/ascend official official-ascend-qwen25", "reserved for future formal leaderboard runs"),
     ]:
         try:
             parser.parse_comment_command(body)
         except ValueError as exc:
-            assert "invalid /ascend command" in str(exc) or "invalid choice" in str(exc)
+            assert expected in str(exc)
         else:
-            raise AssertionError(f"expected planned protocol to be rejected: {body}")
+            raise AssertionError(f"expected unsupported protocol target to be rejected: {body}")
 
 
 def test_parse_rejects_sharegpt_without_dataset_and_constraints():

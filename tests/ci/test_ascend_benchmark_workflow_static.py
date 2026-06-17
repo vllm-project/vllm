@@ -85,7 +85,7 @@ def test_benchmark_run_id_and_summary_use_target_repo_sha():
 def test_issue_comment_path_keeps_publish_secrets_disabled():
     text = workflow_text()
 
-    assert "github.event_name != 'issue_comment') && secrets.HF_TOKEN" in text
+    assert "github.event_name == 'workflow_dispatch' && inputs.publish_to_hf) && secrets.HF_TOKEN" in text
     assert "github.event_name != 'issue_comment') && secrets.VLLM_HUST_BENCHMARK_GH_TOKEN" in text
     assert "github.event_name != 'issue_comment') && secrets.VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY" in text
 
@@ -118,8 +118,22 @@ def test_issue_comment_help_is_posted_without_self_hosted_runner():
     assert "needs.issue-comment-command.outputs.help_requested == '1'" in text
     assert "<!-- ascend-benchmark-command-help -->" in text
     assert "Supported same-repository PR preview commands:" in text
+    assert "`/ascend smoke`" in text
+    assert "`/ascend scenario random`" in text
+    assert "`/ascend group smoke`" in text
     assert "Comment-triggered runs are optional preview checks and are not required checks." in text
-    assert "`/ascend smoke`, `/ascend group ...`, `/ascend scenario ...`, and `/ascend official ...` are planned but not supported yet." in text
+    assert "`/ascend official ...` is reserved for the future formal leaderboard path and is not supported yet." in text
+
+
+def test_workflow_dispatch_publish_inputs_are_split():
+    text = workflow_text()
+
+    assert "publish_to_benchmark_repo:" in text
+    assert "description: Publish benchmark result to HF" in text
+    assert "description: Publish benchmark result to the benchmark repo and refresh leaderboard snapshots" in text
+    assert "github.event_name == 'workflow_dispatch' && inputs.publish_to_benchmark_repo" in text
+    assert "github.event_name == 'workflow_dispatch' && inputs.publish_to_hf && secrets.HF_TOKEN != ''" in text
+    assert "github.event_name == 'workflow_dispatch' && inputs.publish_to_hf)) && '1' || '0'" not in text
 
 
 def test_issue_comment_non_pr_and_fork_pr_are_not_allowed_by_parser_tests():
