@@ -25,7 +25,7 @@ use super::utils::logprobs::{
 };
 use super::utils::types::Usage;
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, server_error};
+use crate::error::{ApiError, bail_server_error, server_error, text_submit_error};
 use crate::routes::openai::completions::types::{
     CompletionChoice, CompletionRequest, CompletionResponse, CompletionSseChunk,
     CompletionStreamChoice, CompletionStreamResponse,
@@ -47,13 +47,6 @@ pub async fn completions(
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
 
-    if let Err(err) = validate::validate_token_id_ranges(
-        &body,
-        state.tokenizer_vocab_size(),
-        state.model_vocab_size(),
-    ) {
-        return err.into_response();
-    }
     let prepared = match prepare_completion_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
@@ -75,11 +68,7 @@ pub async fn completions(
     {
         Ok(stream) => stream,
         Err(error) => {
-            return server_error!(
-                "failed to submit completion request: {}",
-                error.to_report_string()
-            )
-            .into_response();
+            return text_submit_error("failed to submit completion request", error).into_response();
         }
     };
 
