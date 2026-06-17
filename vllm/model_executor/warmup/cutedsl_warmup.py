@@ -25,15 +25,49 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-CuTeDSLWarmupCallback = Callable[["GPUModelRunner", Sequence[int]], None]
-CuTeDSLWarmupMode = Literal["prefill", "mixed", "uniform_decode"]
+CuTeDSLCompileFn = Callable[[], None]
 CuTeDSLWarmupCoverage = Literal["targeted", "full"]
 CuTeDSLWarmupTokenScope = Literal["rank_local", "data_parallel", "world"]
-_VALID_MODEL_RUNNER_MODES = {"prefill", "mixed", "uniform_decode"}
 _VALID_WARMUP_COVERAGE = {"targeted", "full"}
 _VALID_TOKEN_SCOPES = {"rank_local", "data_parallel", "world"}
 _CUTE_DSL_CACHE_ENABLED_ENV = "FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED"
 _CUTE_DSL_CACHE_DIR_ENV = "FLASH_ATTENTION_CUTE_DSL_CACHE_DIR"
+_CUTEDSL_WARMUP_TARGET_ATTRS = (
+    "impl",
+    "prefill_backend",
+    "quant_method",
+    "moe_kernel",
+    "fused_experts",
+)
+
+
+@dataclass(frozen=True)
+class CuTeDSLCompileUnit:
+    name: str
+    key: Hashable
+    compile: CuTeDSLCompileFn
+
+
+def compile_cutedsl_units(
+    units: Iterable[CuTeDSLCompileUnit],
+    *,
+    provider: str,
+    seen: set[Hashable] | None = None,
+) -> None:
+    seen_keys = seen if seen is not None else set()
+    for unit in units:
+        key = unit.key
+        if key in seen_keys:
+            logger.debug(
+                "Skipping duplicate CuTeDSL compile unit provider=%s "
+                "name=%s key=%r.",
+                provider,
+                unit.name,
+                key,
+            )
+            continue
+        seen_keys.add(key)
+        unit.compile()
 
 
 @dataclass(frozen=True)
@@ -66,23 +100,8 @@ class CuTeDSLWarmupPlan:
     provider: str
     """Human-readable provider name used in logs and error messages."""
 
-    model_runner_modes: tuple[CuTeDSLWarmupMode, ...] = ()
-    """Generic ``GPUModelRunner._dummy_run`` batch modes to execute."""
-
-    cudagraph_capture_modes: bool = False
-    """Warm eager dummy runs for the runner's CUDA graph capture descriptors."""
-
-    warmup_callbacks: tuple[CuTeDSLWarmupCallback, ...] = ()
-    """Provider-specific warmup callbacks for paths generic dummy runs miss."""
-
-    coverage: CuTeDSLWarmupCoverage = "targeted"
-    """Warmup token-size coverage requested by this provider."""
-
-    token_size_scope: CuTeDSLWarmupTokenScope = "rank_local"
-    """How callback token sizes should be interpreted in distributed runs."""
-
-    dedupe_key: Hashable | None = None
-    """Optional key for skipping equivalent warmup plans across modules."""
+    compile_units: tuple[CuTeDSLCompileUnit, ...] = ()
+    """Concrete compile-only work that does not depend on token sizes."""
 
 
 def _get_cutedsl_warmup_context(runner: "GPUModelRunner") -> CuTeDSLWarmupContext:
@@ -103,23 +122,90 @@ def _get_cutedsl_warmup_context(runner: "GPUModelRunner") -> CuTeDSLWarmupContex
     )
 
 
+def get_cutedsl_warmup_token_sizes(
+    runner: "GPUModelRunner",
+    coverage: CuTeDSLWarmupCoverage = "targeted",
+    token_size_scope: CuTeDSLWarmupTokenScope = "rank_local",
+) -> list[int]:
+    if coverage not in _VALID_WARMUP_COVERAGE:
+        raise ValueError(
+            "Invalid CuTeDSL warmup coverage "
+            f"{coverage!r}. Valid coverage values are "
+            f"{sorted(_VALID_WARMUP_COVERAGE)}."
+        )
+    if token_size_scope not in _VALID_TOKEN_SCOPES:
+        raise ValueError(
+            "Invalid CuTeDSL warmup token size scope "
+            f"{token_size_scope!r}. Valid scopes are "
+            f"{sorted(_VALID_TOKEN_SCOPES)}."
+        )
+
+    kernel_config = runner.vllm_config.kernel_config
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    if coverage == "full":
+        token_sizes = _derive_cutedsl_warmup_token_sizes(
+            runner,
+            coverage=coverage,
+            max_tokens=max_tokens,
+        )
+    else:
+        configured_sizes = kernel_config.cutedsl_warmup_token_sizes
+        token_sizes = _normalize_cutedsl_warmup_token_sizes(
+            configured_sizes,
+            max_tokens=max_tokens,
+        )
+        if not token_sizes:
+            token_sizes = _derive_cutedsl_warmup_token_sizes(
+                runner,
+                coverage=coverage,
+                max_tokens=max_tokens,
+            )
+
+    context = _get_cutedsl_warmup_context(runner)
+    return _scale_cutedsl_token_sizes(token_sizes, token_size_scope, context)
+
+
 def _get_cutedsl_warmup_token_sizes(
     runner: "GPUModelRunner",
     coverage: CuTeDSLWarmupCoverage = "targeted",
 ) -> list[int]:
-    kernel_config = runner.vllm_config.kernel_config
-    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    return get_cutedsl_warmup_token_sizes(runner, coverage)
+
+
+def _normalize_cutedsl_warmup_token_sizes(
+    token_sizes: Sequence[int],
+    *,
+    max_tokens: int,
+) -> list[int]:
+    return sorted(
+        {
+            min(size, max_tokens)
+            for size in token_sizes
+            if isinstance(size, int) and size > 0
+        }
+    )
+
+
+def _derive_cutedsl_warmup_token_sizes(
+    runner: "GPUModelRunner",
+    *,
+    coverage: CuTeDSLWarmupCoverage,
+    max_tokens: int,
+) -> list[int]:
     if coverage == "full":
         return list(range(1, max_tokens + 1))
 
-    configured_sizes = kernel_config.cutedsl_warmup_token_sizes
+    compilation_config = getattr(runner.vllm_config, "compilation_config", None)
+    cudagraph_sizes = _normalize_cutedsl_warmup_token_sizes(
+        getattr(compilation_config, "cudagraph_capture_sizes", ()) or (),
+        max_tokens=max_tokens,
+    )
+    if cudagraph_sizes:
+        return cudagraph_sizes
 
-    token_sizes = {
-        min(size, max_tokens)
-        for size in configured_sizes
-        if isinstance(size, int) and size > 0
-    }
-    return sorted(token_sizes)
+    # Match vLLM's eager/profile warmup shape. Eager startup does not sweep all
+    # token sizes; it profiles a single dummy batch at max_num_batched_tokens.
+    return [max_tokens]
 
 
 def _iter_cutedsl_warmup_targets(
@@ -128,11 +214,7 @@ def _iter_cutedsl_warmup_targets(
     seen: set[int] = set()
 
     for module in model.modules():
-        candidates = [
-            module,
-            getattr(module, "impl", None),
-            getattr(module, "prefill_backend", None),
-        ]
+        candidates = [module]
         for candidate in candidates:
             if candidate is None:
                 continue
@@ -141,6 +223,8 @@ def _iter_cutedsl_warmup_targets(
                 continue
             seen.add(candidate_id)
             yield candidate
+            for attr in _CUTEDSL_WARMUP_TARGET_ATTRS:
+                candidates.append(getattr(candidate, attr, None))
 
 
 def _coerce_cutedsl_warmup_plans(
@@ -160,51 +244,6 @@ def _coerce_cutedsl_warmup_plans(
     )
 
 
-def _validate_cutedsl_warmup_plan(plan: CuTeDSLWarmupPlan) -> None:
-    invalid_modes = set(plan.model_runner_modes) - _VALID_MODEL_RUNNER_MODES
-    if invalid_modes:
-        raise ValueError(
-            "Invalid CuTeDSL warmup model runner mode(s) "
-            f"{sorted(invalid_modes)} for provider {plan.provider}. "
-            f"Valid modes are {sorted(_VALID_MODEL_RUNNER_MODES)}."
-        )
-    if plan.coverage not in _VALID_WARMUP_COVERAGE:
-        raise ValueError(
-            "Invalid CuTeDSL warmup coverage "
-            f"{plan.coverage!r} for provider {plan.provider}. "
-            f"Valid coverage values are {sorted(_VALID_WARMUP_COVERAGE)}."
-        )
-    if plan.token_size_scope not in _VALID_TOKEN_SCOPES:
-        raise ValueError(
-            "Invalid CuTeDSL warmup token size scope "
-            f"{plan.token_size_scope!r} for provider {plan.provider}. "
-            f"Valid scopes are {sorted(_VALID_TOKEN_SCOPES)}."
-        )
-
-
-def _dedupe_cutedsl_warmup_plans(
-    plans: list[CuTeDSLWarmupPlan],
-) -> list[CuTeDSLWarmupPlan]:
-    deduped: list[CuTeDSLWarmupPlan] = []
-    seen: set[Hashable] = set()
-
-    for plan in plans:
-        if plan.dedupe_key is None:
-            deduped.append(plan)
-            continue
-        key = (plan.provider, plan.dedupe_key)
-        if key in seen:
-            logger.debug(
-                "Skipping duplicate CuTeDSL warmup plan provider=%s key=%r.",
-                plan.provider,
-                plan.dedupe_key,
-            )
-            continue
-        seen.add(key)
-        deduped.append(plan)
-    return deduped
-
-
 def _get_cutedsl_warmup_plans(
     runner: "GPUModelRunner",
     model: torch.nn.Module,
@@ -215,105 +254,7 @@ def _get_cutedsl_warmup_plans(
         get_plan = getattr(target, "get_cutedsl_warmup_plan", None)
         if get_plan is not None:
             plans.extend(_coerce_cutedsl_warmup_plans(get_plan(runner)))
-    for plan in plans:
-        _validate_cutedsl_warmup_plan(plan)
-    return _dedupe_cutedsl_warmup_plans(plans)
-
-
-def _run_mixed_dummy_warmup(
-    runner: "GPUModelRunner",
-    token_sizes: Sequence[int],
-) -> None:
-    for num_tokens in token_sizes:
-        runner._dummy_run(
-            num_tokens=num_tokens,
-            skip_eplb=True,
-            is_profile=True,
-            force_attention=True,
-            create_mixed_batch=True,
-        )
-
-
-def _run_prefill_dummy_warmup(
-    runner: "GPUModelRunner",
-    token_sizes: Sequence[int],
-) -> None:
-    for num_tokens in token_sizes:
-        runner._dummy_run(
-            num_tokens=num_tokens,
-            skip_eplb=True,
-            is_profile=True,
-            force_attention=True,
-        )
-
-
-def _run_uniform_decode_dummy_warmup(runner: "GPUModelRunner") -> None:
-    decode_tokens = min(
-        runner.scheduler_config.max_num_seqs,
-        runner.scheduler_config.max_num_batched_tokens,
-    )
-    if decode_tokens <= 0:
-        return
-
-    runner._dummy_run(
-        num_tokens=decode_tokens,
-        skip_eplb=True,
-        is_profile=True,
-        force_attention=True,
-        uniform_decode=True,
-    )
-
-
-def _run_cudagraph_capture_mode_warmup(runner: "GPUModelRunner") -> None:
-    """Warm eager forwards for CUDA graph capture descriptors.
-
-    CUDA graph capture descriptors are vLLM's concrete, configuration-specific
-    batch shapes. Running them eagerly warms JIT'ed kernels without capturing
-    graphs or adding a separate shape grid.
-    """
-    cudagraph_dispatcher = getattr(runner, "cudagraph_dispatcher", None)
-    if cudagraph_dispatcher is None:
-        logger.info(
-            "Skipping CuTeDSL CUDA graph descriptor warmup because the runner "
-            "does not have a cudagraph dispatcher."
-        )
-        return
-
-    capture_descs = cudagraph_dispatcher.get_capture_descs()
-    if not capture_descs:
-        logger.info(
-            "Skipping CuTeDSL CUDA graph descriptor warmup because no CUDA "
-            "graph capture descriptors are available."
-        )
-        return
-
-    descriptors: list[tuple[int, bool, int]] = []
-    seen_descs: set[tuple[int, bool, int]] = set()
-    for _runtime_mode, batch_descs in capture_descs:
-        for desc in batch_descs:
-            key = (desc.num_tokens, desc.uniform, desc.num_active_loras)
-            if key in seen_descs:
-                continue
-            seen_descs.add(key)
-            descriptors.append(key)
-
-    logger.info(
-        "Warming CuTeDSL eager CUDA graph descriptor shapes: %s.",
-        descriptors,
-    )
-
-    for num_tokens, uniform, num_active_loras in descriptors:
-        runner._dummy_run(
-            num_tokens=num_tokens,
-            cudagraph_runtime_mode=None,
-            skip_eplb=True,
-            is_profile=True,
-            force_attention=True,
-            uniform_decode=uniform,
-            allow_microbatching=False,
-            remove_lora=False,
-            num_active_loras=num_active_loras,
-        )
+    return plans
 
 
 def _reset_cutedsl_persistent_cache() -> bool:
@@ -429,31 +370,25 @@ def _cutedsl_persistent_cache_lock() -> Generator[None, None, None]:
 
 
 def _run_cutedsl_warmup_once(
-    runner: "GPUModelRunner",
     plans: list[CuTeDSLWarmupPlan],
-    token_sizes: list[int],
-    model_runner_modes: set[CuTeDSLWarmupMode],
-    use_cudagraph_capture_modes: bool,
-    context: CuTeDSLWarmupContext,
 ) -> None:
+    seen: set[Hashable] = set()
     with torch.inference_mode():
-        if token_sizes:
-            for plan in plans:
-                callback_token_sizes = _scale_cutedsl_token_sizes(
-                    token_sizes,
-                    plan.token_size_scope,
-                    context,
+        for plan in plans:
+            if plan.compile_units:
+                compile_cutedsl_units(
+                    plan.compile_units,
+                    provider=plan.provider,
+                    seen=seen,
                 )
-                for callback in plan.warmup_callbacks:
-                    callback(runner, callback_token_sizes)
-            if "prefill" in model_runner_modes:
-                _run_prefill_dummy_warmup(runner, token_sizes)
-            if "mixed" in model_runner_modes:
-                _run_mixed_dummy_warmup(runner, token_sizes)
-            if "uniform_decode" in model_runner_modes:
-                _run_uniform_decode_dummy_warmup(runner)
-        if use_cudagraph_capture_modes:
-            _run_cudagraph_capture_mode_warmup(runner)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+
+def _count_unique_cutedsl_compile_units(
+    plans: Iterable[CuTeDSLWarmupPlan],
+) -> int:
+    return len({unit.key for plan in plans for unit in plan.compile_units})
 
 
 @instrument(span_name="CuTeDSL warmup")
@@ -475,43 +410,14 @@ def cutedsl_warmup(runner: "GPUModelRunner") -> None:
         )
         return
 
-    provider_names = [plan.provider for plan in plans]
-    model_runner_modes = {
-        mode for plan in plans for mode in plan.model_runner_modes
-    }
-    has_cudagraph_capture_modes = any(
-        plan.cudagraph_capture_modes for plan in plans
-    )
-    use_cudagraph_capture_modes = (
-        has_cudagraph_capture_modes
-        and runner.vllm_config.kernel_config.cutedsl_warmup_use_cudagraph_descriptors
-    )
-    coverage: CuTeDSLWarmupCoverage = (
-        "full" if any(plan.coverage == "full" for plan in plans) else "targeted"
-    )
-    token_sizes = _get_cutedsl_warmup_token_sizes(runner, coverage)
+    provider_names = list(dict.fromkeys(plan.provider for plan in plans))
     context = _get_cutedsl_warmup_context(runner)
-    uses_token_sizes = bool(model_runner_modes) or any(
-        plan.warmup_callbacks for plan in plans
-    )
-    if not token_sizes and uses_token_sizes:
-        logger.info(
-            "Skipping CuTeDSL token-size warmup because no token sizes were "
-            "selected."
-        )
-        if not use_cudagraph_capture_modes:
-            return
 
     logger.info(
-        "Warming up CuTeDSL providers=%s with token_sizes=%s "
-        "coverage=%s, model_runner_modes=%s, cudagraph_capture_modes=%s, "
-        "use_cudagraph_descriptors=%s, parallel_context=%s.",
+        "Warming up CuTeDSL providers=%s with compile_units=%d, "
+        "parallel_context=%s.",
         provider_names,
-        token_sizes,
-        coverage,
-        sorted(model_runner_modes),
-        has_cudagraph_capture_modes,
-        use_cudagraph_capture_modes,
+        _count_unique_cutedsl_compile_units(plans),
         context,
     )
 
@@ -524,12 +430,7 @@ def cutedsl_warmup(runner: "GPUModelRunner") -> None:
     with lock_context:
         try:
             _run_cutedsl_warmup_once(
-                runner,
                 plans,
-                token_sizes,
-                model_runner_modes,
-                use_cudagraph_capture_modes,
-                context,
             )
         except Exception:
             if not _reset_cutedsl_persistent_cache():
@@ -545,12 +446,7 @@ def cutedsl_warmup(runner: "GPUModelRunner") -> None:
             )
             try:
                 _run_cutedsl_warmup_once(
-                    runner,
                     plans,
-                    token_sizes,
-                    model_runner_modes,
-                    use_cudagraph_capture_modes,
-                    context,
                 )
             except Exception:
                 logger.exception(

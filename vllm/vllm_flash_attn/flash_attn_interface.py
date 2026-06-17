@@ -3,6 +3,7 @@
 # Copyright (c) 2023, Tri Dao.
 # ruff: noqa: E501
 
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -405,6 +406,197 @@ def flash_attn_varlen_func(
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")
     return (out, softmax_lse) if return_softmax_lse else out
+
+
+def compile_flash_attn_varlen_func(
+    q,
+    k,
+    v,
+    max_seqlen_q,
+    cu_seqlens_q,
+    max_seqlen_k,
+    cu_seqlens_k=None,
+    seqused_k=None,
+    q_v=None,
+    dropout_p=0.0,
+    softmax_scale=None,
+    causal=False,
+    window_size: Optional[List[int]] = None,
+    softcap=0.0,
+    alibi_slopes=None,
+    deterministic=False,
+    return_attn_probs=False,
+    block_table=None,
+    return_softmax_lse=False,
+    out=None,
+    scheduler_metadata=None,
+    q_descale=None,
+    k_descale=None,
+    v_descale=None,
+    num_splits: int = 0,
+    fa_version: int = DEFAULT_FA_VERSION,
+    s_aux=None,
+    cp_world_size=1,
+    cp_rank=0,
+    cp_tot_seqused_k=None,
+    mask_mod=None,
+    aux_tensors=None,
+):
+    if fa_version != 4:
+        raise ValueError(
+            "Compile-only FlashAttention is only supported for FA4, "
+            f"got FA{fa_version}"
+        )
+    if any(
+        x is not None
+        for x in (
+            alibi_slopes,
+            scheduler_metadata,
+            q_descale,
+            k_descale,
+            v_descale,
+            cp_tot_seqused_k,
+        )
+    ):
+        raise NotImplementedError(
+            "FA4 compile-only wrapper does not support "
+            "FA2/FA3-specific arguments"
+        )
+    if dropout_p != 0.0 or return_attn_probs:
+        raise NotImplementedError(
+            "FA4 compile-only wrapper does not support dropout or "
+            "attention probabilities"
+        )
+    del cp_world_size, cp_rank, deterministic
+
+    from vllm.vllm_flash_attn.cute.interface import (
+        compile_flash_attn_varlen_func as _fa4_compile_flash_attn_varlen_func,
+    )
+
+    real_window_size: Tuple[int, int]
+    if window_size is None:
+        real_window_size = (-1, -1)
+    else:
+        assert len(window_size) == 2
+        real_window_size = (window_size[0], window_size[1])
+    q, k, v = [maybe_contiguous(x) for x in (q, k, v)]
+    if softmax_scale is None:
+        softmax_scale = q.shape[-1] ** (-0.5)
+
+    return _fa4_compile_flash_attn_varlen_func(
+        q=q,
+        k=k,
+        v=v,
+        qv=q_v,
+        cu_seqlens_q=cu_seqlens_q,
+        cu_seqlens_k=cu_seqlens_k,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        seqused_k=seqused_k,
+        page_table=block_table,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=real_window_size,
+        softcap=softcap,
+        num_splits=num_splits,
+        return_lse=return_softmax_lse,
+        out=out,
+        learnable_sink=s_aux,
+        mask_mod=mask_mod,
+        aux_tensors=aux_tensors,
+    )
+
+
+def compile_flash_attn_varlen_func_from_specs(
+    *,
+    q_shape: Tuple[int, ...],
+    k_shape: Tuple[int, ...],
+    v_shape: Tuple[int, ...],
+    q_dtype: torch.dtype,
+    q_stride: Optional[Tuple[int, ...]] = None,
+    k_stride: Optional[Tuple[int, ...]] = None,
+    v_stride: Optional[Tuple[int, ...]] = None,
+    out_stride: Optional[Tuple[int, ...]] = None,
+    k_dtype: Optional[torch.dtype] = None,
+    v_dtype: Optional[torch.dtype] = None,
+    out_shape: Optional[Tuple[int, ...]] = None,
+    out_dtype: Optional[torch.dtype] = None,
+    cu_seqlens_q_shape: Optional[Tuple[int, ...]] = None,
+    cu_seqlens_k_shape: Optional[Tuple[int, ...]] = None,
+    seqused_k_shape: Optional[Tuple[int, ...]] = None,
+    block_table_shape: Optional[Tuple[int, ...]] = None,
+    q_v_shape: Optional[Tuple[int, ...]] = None,
+    q_v_dtype: Optional[torch.dtype] = None,
+    max_seqlen_q: Optional[int] = None,
+    max_seqlen_k: Optional[int] = None,
+    dropout_p: float = 0.0,
+    softmax_scale=None,
+    causal=False,
+    window_size: Optional[List[int]] = None,
+    softcap=0.0,
+    deterministic=False,
+    return_softmax_lse=False,
+    num_splits: int = 0,
+    fa_version: int = DEFAULT_FA_VERSION,
+    s_aux_shape: Optional[Tuple[int, ...]] = None,
+    mask_mod=None,
+) -> None:
+    if fa_version != 4:
+        raise ValueError(
+            "Compile-only FlashAttention is only supported for FA4, "
+            f"got FA{fa_version}"
+        )
+    if dropout_p != 0.0:
+        raise NotImplementedError(
+            "FA4 compile-only wrapper does not support dropout"
+        )
+    del deterministic
+
+    from vllm.vllm_flash_attn.cute.interface import (
+        compile_flash_attn_varlen_func_from_specs as
+        _fa4_compile_flash_attn_varlen_func_from_specs,
+    )
+
+    real_window_size: Tuple[int, int]
+    if window_size is None:
+        real_window_size = (-1, -1)
+    else:
+        assert len(window_size) == 2
+        real_window_size = (window_size[0], window_size[1])
+
+    if softmax_scale is None:
+        softmax_scale = q_shape[-1] ** (-0.5)
+
+    return _fa4_compile_flash_attn_varlen_func_from_specs(
+        q_shape=q_shape,
+        k_shape=k_shape,
+        v_shape=v_shape,
+        q_dtype=q_dtype,
+        q_stride=q_stride,
+        k_stride=k_stride,
+        v_stride=v_stride,
+        out_stride=out_stride,
+        k_dtype=k_dtype,
+        v_dtype=v_dtype,
+        out_shape=out_shape,
+        out_dtype=out_dtype,
+        cu_seqlens_q_shape=cu_seqlens_q_shape,
+        cu_seqlens_k_shape=cu_seqlens_k_shape,
+        seqused_k_shape=seqused_k_shape,
+        page_table_shape=block_table_shape,
+        qv_shape=q_v_shape,
+        qv_dtype=q_v_dtype,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        softmax_scale=softmax_scale,
+        causal=causal,
+        window_size=real_window_size,
+        learnable_sink_shape=s_aux_shape,
+        softcap=softcap,
+        num_splits=num_splits,
+        mask_mod=mask_mod,
+        return_lse=return_softmax_lse,
+    )
 
 
 def sparse_attn_func(

@@ -178,13 +178,12 @@ class KernelConfig:
     enable_cutedsl_warmup: bool = False
     """If True, run CuTeDSL-specific warmup during kernel warmup."""
 
-    cutedsl_warmup_token_sizes: list[int] = Field(
-        default_factory=lambda: [8, 64]
-    )
-    """Token counts to use for CuTeDSL warmup runs."""
+    cutedsl_warmup_token_sizes: list[int] = Field(default_factory=list)
+    """Optional token-count override for CuTeDSL warmup.
 
-    cutedsl_warmup_use_cudagraph_descriptors: bool = False
-    """If True, warm CuTeDSL kernels for CUDA graph capture descriptors."""
+    When unset, CuTeDSL warmup derives token sizes from the active vLLM
+    scheduler/compilation config instead of using a hand-picked global list.
+    """
 
     cutedsl_cache_dir: str | None = None
     """Root directory for the persistent CuTeDSL cache.
@@ -257,7 +256,6 @@ class KernelConfig:
         """
         ignored_factors = {
             "cutedsl_cache_dir",
-            "cutedsl_warmup_use_cudagraph_descriptors",
             "cutedsl_warmup_token_sizes",
             "enable_cutedsl_warmup",
             "enable_flashinfer_autotune",

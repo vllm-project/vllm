@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -20,10 +23,62 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
+    flashinfer_b12x_compile_dynamic_moe,
+    flashinfer_b12x_compile_static_moe,
     flashinfer_b12x_fused_moe,
+    flashinfer_b12x_select_moe_backend,
     flashinfer_convert_sf_to_mma_layout,
     has_flashinfer_b12x_moe,
 )
+
+
+@dataclass(frozen=True)
+class _FlashInferB12xCompileSpec:
+    # Cache key is selected by backend:
+    # static=("static", activation_precision, state_E, weight_E, m, k, n,
+    #         num_topk, max_rows, mac, mma_tiler_mn, topk_ids_dtype,
+    #         input_scales_are_reciprocal, fast_math, activation)
+    # dynamic=("dynamic", activation_precision, E, k, n, num_topk, mac,
+    #          mma_tiler_mn, topk_ids_dtype, input_scales_are_reciprocal,
+    #          fast_math, activation, share_input_across_experts)
+    # Token-size iteration is needed only for static because m/max_rows are in
+    # the static cache key. Dynamic excludes m/max_rows and is emitted once if
+    # any configured warmup size selects the dynamic backend.
+    backend: str
+    num_local_experts: int
+    num_global_experts: int
+    num_tokens: int
+    hidden_dim: int
+    intermediate_dim: int
+    topk: int
+    max_rows: int
+
+    def compile(self) -> None:
+        if self.backend == "static":
+            flashinfer_b12x_compile_static_moe(
+                self.num_local_experts,
+                self.num_global_experts,
+                self.num_tokens,
+                self.hidden_dim,
+                self.intermediate_dim,
+                self.topk,
+                self.max_rows,
+                topk_ids_dtype=torch.int32,
+                activation="silu",
+                activation_precision="fp4",
+            )
+        elif self.backend == "dynamic":
+            flashinfer_b12x_compile_dynamic_moe(
+                self.num_local_experts,
+                self.num_tokens,
+                self.hidden_dim,
+                self.intermediate_dim,
+                self.topk,
+                self.max_rows,
+                topk_ids_dtype=torch.int32,
+                activation="silu",
+                activation_precision="fp4",
+            )
 
 
 class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
@@ -61,23 +116,85 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         self._fc2_input_scale: torch.Tensor | None = None
 
     def get_cutedsl_warmup_plan(self, runner: object) -> object:
-        del runner
+        from vllm.model_executor.warmup.cutedsl_warmup import (
+            CuTeDSLCompileUnit,
+            CuTeDSLWarmupPlan,
+            get_cutedsl_warmup_token_sizes,
+        )
 
-        from vllm.model_executor.warmup.cutedsl_warmup import CuTeDSLWarmupPlan
+        specs = tuple(
+            self._iter_cutedsl_compile_specs(
+                runner,
+                get_cutedsl_warmup_token_sizes(runner),
+            )
+        )
 
         return CuTeDSLWarmupPlan(
             provider="flashinfer_b12x_moe",
-            model_runner_modes=("mixed",),
-            cudagraph_capture_modes=True,
-            dedupe_key=(
-                "flashinfer_b12x_moe",
-                self.moe_config.hidden_dim,
-                self.moe_config.intermediate_size_per_partition,
-                self.moe_config.experts_per_token,
-                self.num_local_experts,
-                self.moe_config.num_experts,
+            compile_units=tuple(
+                CuTeDSLCompileUnit(
+                    name="flashinfer_b12x_moe",
+                    key=spec,
+                    compile=spec.compile,
+                )
+                for spec in specs
             ),
         )
+
+    def _iter_cutedsl_compile_specs(
+        self,
+        runner: object,
+        token_sizes: Sequence[int],
+    ) -> list[_FlashInferB12xCompileSpec]:
+        del runner
+
+        hidden_dim = self.moe_config.hidden_dim
+        intermediate_dim = self.moe_config.intermediate_size_per_partition
+        topk = self.moe_config.experts_per_token
+        max_rows_per_token = max(1, topk)
+
+        static_specs: list[_FlashInferB12xCompileSpec] = []
+        dynamic_num_tokens: int | None = None
+        for raw_num_tokens in token_sizes:
+            num_tokens = max(1, int(raw_num_tokens))
+            backend = flashinfer_b12x_select_moe_backend(
+                num_tokens=num_tokens,
+                num_topk=topk,
+                activation_precision="fp4",
+            )
+            if backend == "dynamic":
+                dynamic_num_tokens = dynamic_num_tokens or num_tokens
+                continue
+
+            static_specs.append(
+                _FlashInferB12xCompileSpec(
+                    backend=backend,
+                    num_local_experts=self.num_local_experts,
+                    num_global_experts=self.moe_config.num_experts,
+                    num_tokens=num_tokens,
+                    hidden_dim=hidden_dim,
+                    intermediate_dim=intermediate_dim,
+                    topk=topk,
+                    max_rows=max(1, num_tokens * max_rows_per_token),
+                )
+            )
+
+        if dynamic_num_tokens is None:
+            return static_specs
+
+        return [
+            *static_specs,
+            _FlashInferB12xCompileSpec(
+                backend="dynamic",
+                num_local_experts=self.num_local_experts,
+                num_global_experts=self.moe_config.num_experts,
+                num_tokens=dynamic_num_tokens,
+                hidden_dim=hidden_dim,
+                intermediate_dim=intermediate_dim,
+                topk=topk,
+                max_rows=max(1, dynamic_num_tokens * max_rows_per_token),
+            ),
+        ]
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Normalise block scales to absorb the per-expert weight global scale

@@ -3,6 +3,7 @@
 """Attention layer with FlashAttention."""
 
 import copy
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -22,6 +23,8 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import (
+    FlashAttentionCuTeDSLCompileSpec,
+    compile_flash_attn_varlen_func_from_specs,
     flash_attn_supports_quant_query_input,
     get_flash_attn_version,
     is_fa_version_supported,
@@ -696,18 +699,121 @@ class FlashAttentionImpl(AttentionImpl):
             self._dcp_dtype = vllm_config.model_config.dtype
 
     def get_cutedsl_warmup_plan(self, runner: object) -> object | None:
-        del runner
-
-        if self.vllm_flash_attn_version != 4:
+        if (
+            self.vllm_flash_attn_version != 4
+            or compile_flash_attn_varlen_func_from_specs is None
+            or self.dcp_world_size > 1
+            or self.alibi_slopes is not None
+            or self.sinks is not None
+            or is_quantized_kv_cache(self.kv_cache_dtype)
+            or self.attn_type != AttentionType.DECODER
+        ):
             return None
 
-        from vllm.model_executor.warmup.cutedsl_warmup import CuTeDSLWarmupPlan
+        from vllm.model_executor.warmup.cutedsl_warmup import (
+            CuTeDSLCompileUnit,
+            CuTeDSLWarmupPlan,
+            get_cutedsl_warmup_token_sizes,
+        )
+
+        specs = tuple(
+            self._iter_cutedsl_compile_specs(
+                runner,
+                get_cutedsl_warmup_token_sizes(runner),
+            )
+        )
 
         return CuTeDSLWarmupPlan(
             provider="fa4_attention",
-            model_runner_modes=("prefill", "mixed", "uniform_decode"),
-            cudagraph_capture_modes=True,
-            dedupe_key=("fa4_attention", self.dcp_world_size),
+            compile_units=tuple(
+                CuTeDSLCompileUnit(
+                    name="fa4_attention",
+                    key=spec,
+                    compile=spec.compile,
+                )
+                for spec in specs
+            ),
+        )
+
+    def _iter_cutedsl_compile_specs(
+        self,
+        runner: object,
+        token_sizes: Sequence[int],
+    ) -> Iterable[FlashAttentionCuTeDSLCompileSpec]:
+        vllm_config = getattr(runner, "vllm_config", None)
+        cache_config = getattr(vllm_config, "cache_config", None)
+        scheduler_config = getattr(vllm_config, "scheduler_config", None)
+        model_config = getattr(vllm_config, "model_config", None)
+
+        block_size = int(getattr(cache_config, "block_size", 16) or 16)
+        max_num_seqs = int(getattr(scheduler_config, "max_num_seqs", 1) or 1)
+        dtype = getattr(model_config, "dtype", torch.bfloat16)
+        if not isinstance(dtype, torch.dtype):
+            dtype = torch.bfloat16
+        sliding_window_size = self.sliding_window
+
+        for raw_num_tokens in token_sizes:
+            num_tokens = max(1, int(raw_num_tokens))
+            yield self._get_cutedsl_paged_attention_compile_spec(
+                num_tokens=max(1, int(num_tokens)),
+                query_lens=(max(1, int(num_tokens)),),
+                kv_lens=(max(1, int(num_tokens)),),
+                block_size=block_size,
+                dtype=dtype,
+                sliding_window_size=sliding_window_size,
+                causal=True,
+            )
+
+            batch_size = max(1, min(max_num_seqs, num_tokens))
+            decode_seq_len = max(block_size, int(num_tokens))
+            yield self._get_cutedsl_paged_attention_compile_spec(
+                num_tokens=batch_size,
+                query_lens=tuple(1 for _ in range(batch_size)),
+                kv_lens=tuple(decode_seq_len for _ in range(batch_size)),
+                block_size=block_size,
+                dtype=dtype,
+                sliding_window_size=sliding_window_size,
+                causal=True,
+            )
+
+    def _get_cutedsl_paged_attention_compile_spec(
+        self,
+        *,
+        num_tokens: int,
+        query_lens: tuple[int, ...],
+        kv_lens: tuple[int, ...],
+        block_size: int,
+        dtype: torch.dtype,
+        sliding_window_size: tuple[int, int] | None,
+        causal: bool,
+    ) -> FlashAttentionCuTeDSLCompileSpec:
+        assert compile_flash_attn_varlen_func_from_specs is not None
+
+        batch_size = len(query_lens)
+        max_seqlen_q = max(query_lens)
+        max_seqlen_k = max(kv_lens)
+        max_blocks_per_seq = cdiv(max_seqlen_k, block_size)
+        num_blocks = batch_size * max_blocks_per_seq
+
+        return FlashAttentionCuTeDSLCompileSpec(
+            q_shape=(num_tokens, self.num_heads, self.head_size),
+            k_shape=(num_blocks, block_size, self.num_kv_heads,
+                     self.head_size),
+            v_shape=(num_blocks, block_size, self.num_kv_heads,
+                     self.head_size),
+            out_shape=(num_tokens, self.num_heads, self.head_size),
+            q_dtype=dtype,
+            cu_seqlens_q_shape=(batch_size + 1,),
+            max_seqlen_q=max_seqlen_q,
+            seqused_k_shape=(batch_size,),
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=self.scale,
+            causal=causal,
+            window_size=sliding_window_size,
+            block_table_shape=(batch_size, max_blocks_per_seq),
+            softcap=self.logits_soft_cap,
+            fa_version=self.vllm_flash_attn_version,
+            num_splits=0,
         )
 
     def forward(

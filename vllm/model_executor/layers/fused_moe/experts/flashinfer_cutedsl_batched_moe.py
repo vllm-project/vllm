@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -22,6 +25,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
+    flashinfer_cutedsl_compile_grouped_gemm_nt_masked,
+    flashinfer_cutedsl_get_cutlass_dtype,
     flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutedsl_grouped_gemm_nt_masked,
     scaled_fp4_grouped_quantize,
@@ -29,6 +34,36 @@ from vllm.utils.flashinfer import (
 )
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _FlashInferGroupedGemmCompileSpec:
+    # Cache key is the MaskedBatchedMatmulCuteDSL specialization:
+    # (m, n, k, l, a_major, b_major, c_major, ab_dtype, sf_dtype, c_dtype,
+    #  alpha_dtype, sf_vec_size, mma_tiler_mn, cluster_shape_mn, sm_count,
+    #  sm_version, num_ranks, enable_dst_signals, enable_barrier_flag,
+    #  is_combine_fusion, is_swap_ab). Token-size iteration is intentional
+    # because m is part of the compile key.
+    m: int
+    n: int
+    k: int
+    l: int
+    c_dtype: str
+    sm_count: int
+    sm_version: str
+    has_alpha: bool = True
+
+    def compile(self) -> None:
+        _compile_flashinfer_cutedsl_grouped_gemm_nt_masked(
+            m=self.m,
+            n=self.n,
+            k=self.k,
+            l=self.l,
+            c_dtype=self.c_dtype,
+            sm_count=self.sm_count,
+            sm_version=self.sm_version,
+            has_alpha=self.has_alpha,
+        )
 
 
 class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
@@ -51,23 +86,71 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         self.out_dtype = moe_config.in_dtype
 
     def get_cutedsl_warmup_plan(self, runner: object) -> object:
-        del runner
+        from vllm.model_executor.warmup.cutedsl_warmup import (
+            CuTeDSLCompileUnit,
+            CuTeDSLWarmupPlan,
+            get_cutedsl_warmup_token_sizes,
+        )
 
-        from vllm.model_executor.warmup.cutedsl_warmup import CuTeDSLWarmupPlan
+        specs = tuple(
+            self._iter_cutedsl_compile_specs(
+                runner,
+                get_cutedsl_warmup_token_sizes(runner),
+            )
+        )
 
         return CuTeDSLWarmupPlan(
             provider="flashinfer_cutedsl_batched_moe",
-            model_runner_modes=("mixed",),
-            cudagraph_capture_modes=True,
-            dedupe_key=(
-                "flashinfer_cutedsl_batched_moe",
-                self.moe_config.hidden_dim,
-                self.moe_config.intermediate_size_per_partition,
-                self.moe_config.experts_per_token,
-                self.moe_config.num_local_experts,
-                self.moe_config.num_experts,
+            compile_units=tuple(
+                CuTeDSLCompileUnit(
+                    name="flashinfer_cutedsl_batched_moe",
+                    key=spec,
+                    compile=spec.compile,
+                )
+                for spec in specs
             ),
         )
+
+    def _iter_cutedsl_compile_specs(
+        self,
+        runner: object,
+        token_sizes: Sequence[int],
+    ) -> Sequence[_FlashInferGroupedGemmCompileSpec]:
+        device = getattr(runner, "device", torch.device("cuda"))
+        major, minor = torch.cuda.get_device_capability(device)
+        sm_count = torch.cuda.get_device_properties(device).multi_processor_count
+        sm_version = f"sm_{major}{minor}"
+        hidden_dim = self.moe_config.hidden_dim
+        intermediate_dim = self.moe_config.intermediate_size_per_partition
+        local_num_experts = self.moe_config.num_local_experts
+        c_dtype = get_cute_dtype_from_torch(self.moe_config.in_dtype)
+
+        specs: list[_FlashInferGroupedGemmCompileSpec] = []
+        for num_tokens in token_sizes:
+            m = max(1, int(num_tokens))
+            specs.append(
+                _FlashInferGroupedGemmCompileSpec(
+                    m=m,
+                    n=2 * intermediate_dim,
+                    k=hidden_dim,
+                    l=local_num_experts,
+                    c_dtype=c_dtype,
+                    sm_count=sm_count,
+                    sm_version=sm_version,
+                )
+            )
+            specs.append(
+                _FlashInferGroupedGemmCompileSpec(
+                    m=m,
+                    n=hidden_dim,
+                    k=intermediate_dim,
+                    l=local_num_experts,
+                    c_dtype=c_dtype,
+                    sm_count=sm_count,
+                    sm_version=sm_version,
+                )
+            )
+        return specs
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
@@ -212,6 +295,51 @@ def get_cute_dtype(input: torch.Tensor) -> str:
         return "float32"
     else:
         raise ValueError(f"Unsupported cute dtype {input.dtype}")
+
+
+def get_cute_dtype_from_torch(dtype: torch.dtype) -> str:
+    if dtype == torch.bfloat16:
+        return "bfloat16"
+    if dtype == torch.float16:
+        return "float16"
+    if dtype == torch.float32:
+        return "float32"
+    raise ValueError(f"Unsupported cute dtype {dtype}")
+
+
+def _compile_flashinfer_cutedsl_grouped_gemm_nt_masked(
+    *,
+    m: int,
+    n: int,
+    k: int,
+    l: int,
+    c_dtype: str,
+    sm_count: int,
+    sm_version: str,
+    has_alpha: bool,
+) -> None:
+    flashinfer_cutedsl_compile_grouped_gemm_nt_masked(
+        m=m,
+        n=n,
+        k=k,
+        l=l,
+        a_major="k",
+        b_major="k",
+        c_major="n",
+        ab_dtype=flashinfer_cutedsl_get_cutlass_dtype("float4_e2m1fn"),
+        sf_dtype=flashinfer_cutedsl_get_cutlass_dtype("float8_e4m3fn"),
+        c_dtype=flashinfer_cutedsl_get_cutlass_dtype(c_dtype),
+        alpha_dtype=(
+            flashinfer_cutedsl_get_cutlass_dtype("float32") if has_alpha else None
+        ),
+        sf_vec_size=16,
+        mma_tiler_mn=(128, 128),
+        cluster_shape_mn=(1, 1),
+        sm_count=sm_count,
+        sm_version=sm_version,
+        num_ranks=0,
+        enable_dst_signals=False,
+    )
 
 
 def flashinfer_cutedsl_moe_masked(

@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from typing import Any
+
+import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -18,6 +21,8 @@ _ROCM_FLASH_ATTN_AVAILABLE = False
 if current_platform.is_cuda():
     from vllm._custom_ops import reshape_and_cache_flash
     from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+        compile_flash_attn_varlen_func,
+        compile_flash_attn_varlen_func_from_specs,
         flash_attn_varlen_func,
         get_scheduler_metadata,
     )
@@ -28,10 +33,14 @@ elif current_platform.is_xpu():
 
     reshape_and_cache_flash = ops.reshape_and_cache_flash
     flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[assignment]
+    compile_flash_attn_varlen_func = None  # type: ignore[assignment]
+    compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
     get_scheduler_metadata = xpu_ops.get_scheduler_metadata  # type: ignore[assignment]
 elif current_platform.is_rocm():
     try:
         from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
+        compile_flash_attn_varlen_func = None  # type: ignore[assignment]
+        compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
 
         # Mark that upstream flash-attn is available on ROCm
         _ROCM_FLASH_ATTN_AVAILABLE = True
@@ -43,6 +52,9 @@ elif current_platform.is_rocm():
                 "to be installed. Please install flash-attn first."
             )
 
+        compile_flash_attn_varlen_func = None  # type: ignore[assignment]
+        compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
+
     # ROCm doesn't use scheduler metadata (FA3 feature), provide stub
     def get_scheduler_metadata(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
         return None
@@ -51,6 +63,65 @@ elif current_platform.is_rocm():
     from vllm import _custom_ops as ops
 
     reshape_and_cache_flash = ops.reshape_and_cache_flash
+
+
+@dataclass(frozen=True)
+class FlashAttentionCuTeDSLCompileSpec:
+    # Cache key is the FA4 varlen compile spec:
+    # (q/k/v/out shapes, q/k/v/out strides, q_dtype, cu_seqlens_q/k shapes,
+    #  seqused_k shape, block_table shape, max_seqlen_q/k, softmax_scale,
+    #  causal, window_size, softcap, return_softmax_lse, fa_version,
+    #  num_splits). Token-size loops in FA4 providers are deliberate because
+    # they produce distinct metadata shapes and max sequence lengths.
+    q_shape: tuple[int, ...]
+    k_shape: tuple[int, ...]
+    v_shape: tuple[int, ...]
+    q_dtype: torch.dtype
+    max_seqlen_q: int
+    max_seqlen_k: int
+    softmax_scale: float
+    causal: bool
+    fa_version: int
+    out_shape: tuple[int, ...] | None = None
+    q_stride: tuple[int, ...] | None = None
+    k_stride: tuple[int, ...] | None = None
+    v_stride: tuple[int, ...] | None = None
+    out_stride: tuple[int, ...] | None = None
+    cu_seqlens_q_shape: tuple[int, ...] | None = None
+    cu_seqlens_k_shape: tuple[int, ...] | None = None
+    seqused_k_shape: tuple[int, ...] | None = None
+    block_table_shape: tuple[int, ...] | None = None
+    window_size: tuple[int, int] | None = None
+    softcap: float = 0.0
+    return_softmax_lse: bool = False
+    num_splits: int = 0
+
+    def compile(self) -> None:
+        assert compile_flash_attn_varlen_func_from_specs is not None
+        compile_flash_attn_varlen_func_from_specs(
+            q_shape=self.q_shape,
+            k_shape=self.k_shape,
+            v_shape=self.v_shape,
+            out_shape=self.out_shape,
+            q_dtype=self.q_dtype,
+            q_stride=self.q_stride,
+            k_stride=self.k_stride,
+            v_stride=self.v_stride,
+            out_stride=self.out_stride,
+            cu_seqlens_q_shape=self.cu_seqlens_q_shape,
+            cu_seqlens_k_shape=self.cu_seqlens_k_shape,
+            seqused_k_shape=self.seqused_k_shape,
+            block_table_shape=self.block_table_shape,
+            max_seqlen_q=self.max_seqlen_q,
+            max_seqlen_k=self.max_seqlen_k,
+            softmax_scale=self.softmax_scale,
+            causal=self.causal,
+            window_size=self.window_size,
+            softcap=self.softcap,
+            return_softmax_lse=self.return_softmax_lse,
+            fa_version=self.fa_version,
+            num_splits=self.num_splits,
+        )
 
 
 def get_flash_attn_version(

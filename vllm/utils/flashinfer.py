@@ -12,7 +12,7 @@ import importlib.util
 import os
 import shutil
 from collections.abc import Callable
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 import requests
 import torch
@@ -126,6 +126,13 @@ flashinfer_cutlass_fused_moe = _lazy_import_wrapper(
 flashinfer_cutedsl_grouped_gemm_nt_masked = _lazy_import_wrapper(
     "flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"
 )
+flashinfer_cutedsl_compile_grouped_gemm_nt_masked = _lazy_import_wrapper(
+    "flashinfer.gemm.kernels.grouped_gemm_masked_blackwell",
+    "get_cute_dsl_compiled_masked_gemm_kernel",
+)
+flashinfer_cutedsl_get_cutlass_dtype = _lazy_import_wrapper(
+    "flashinfer.cute_dsl.utils", "get_cutlass_dtype"
+)
 flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
 nvfp4_batched_quantize = _lazy_import_wrapper("flashinfer", "nvfp4_batched_quantize")
 silu_and_mul_scaled_nvfp4_experts_quantize = _lazy_import_wrapper(
@@ -140,15 +147,177 @@ nvfp4_block_scale_interleave = _lazy_import_wrapper(
 flashinfer_cute_dsl_fused_moe_nvfp4 = _lazy_import_wrapper(
     "flashinfer", "cute_dsl_fused_moe_nvfp4"
 )
+flashinfer_cutedsl_compile_fused_moe_gather = _lazy_import_wrapper(
+    "flashinfer.fused_moe.cute_dsl."
+    "blockscaled_contiguous_gather_grouped_gemm_swiglu_fusion",
+    "_get_compiled_gather_kernel",
+)
+flashinfer_cutedsl_compile_fused_moe_finalize = _lazy_import_wrapper(
+    "flashinfer.fused_moe.cute_dsl."
+    "blockscaled_contiguous_grouped_gemm_finalize_fusion",
+    "_get_compiled_finalize_kernel",
+)
 flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
     "flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"
 )
 flashinfer_b12x_fused_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "b12x_fused_moe"
 )
+flashinfer_b12x_select_moe_backend = _lazy_import_wrapper(
+    "flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch",
+    "select_sm120_moe_backend",
+)
+flashinfer_b12x_compile_static_moe = _lazy_import_wrapper(
+    "flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch",
+    "_get_static_kernel",
+)
+flashinfer_b12x_compile_micro_moe = _lazy_import_wrapper(
+    "flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch",
+    "_get_micro_kernel",
+)
+flashinfer_b12x_compile_dynamic_moe = _lazy_import_wrapper(
+    "flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch",
+    "_get_dynamic_kernel",
+)
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
+
+
+def flashinfer_cutedsl_compile_fused_moe_nvfp4(
+    *,
+    kernel: Literal["gather", "finalize"],
+    hidden_dim: int,
+    intermediate_dim: int,
+    topk: int,
+    output_dtype: torch.dtype,
+    tile_size: int = 128,
+    mma_tiler_mn: tuple[int, int] = (128, 128),
+    cluster_shape_mn: tuple[int, int] = (1, 1),
+    enable_pdl: bool = True,
+) -> None:
+    """Compile FlashInfer non-batched CuTeDSL fused MoE without real tensors.
+
+    FlashInfer currently exposes the fused MoE compile entrypoints as private
+    helpers that accept CuTe pointer objects. Keep that bridge here so vLLM
+    warmup providers describe compile-key fields rather than constructing fake
+    pointers inline. Replace this with a public FlashInfer API once available.
+    """
+    import cutlass
+    import cutlass.cute as cute
+
+    from flashinfer.cute_dsl.utils import (
+        get_cutlass_dtype,
+        get_max_active_clusters,
+        make_ptr,
+    )
+
+    stream = cute.runtime.make_fake_stream(use_tvm_ffi_env_stream=True)
+    max_active_clusters = get_max_active_clusters(
+        cluster_shape_mn[0] * cluster_shape_mn[1]
+    )
+    ab_dtype = "float4_e2m1fn"
+    sf_dtype = "float8_e4m3fn"
+    ab_dtype_cutlass = get_cutlass_dtype(ab_dtype)
+    sf_dtype_cutlass = get_cutlass_dtype(sf_dtype)
+
+    a_ptr = make_ptr(ab_dtype_cutlass, 16, cute.AddressSpace.gmem,
+                     assumed_align=32)
+    b_ptr = make_ptr(ab_dtype_cutlass, 16, cute.AddressSpace.gmem,
+                     assumed_align=32)
+    a_sf_ptr = make_ptr(sf_dtype_cutlass, 16, cute.AddressSpace.gmem,
+                        assumed_align=16)
+    b_sf_ptr = make_ptr(sf_dtype_cutlass, 16, cute.AddressSpace.gmem,
+                        assumed_align=16)
+    alpha_ptr = make_ptr(cutlass.Float32, 16, cute.AddressSpace.gmem)
+    tile_idx_ptr = make_ptr(cutlass.Int32, 16, cute.AddressSpace.gmem)
+    mn_limit_ptr = make_ptr(cutlass.Int32, 16, cute.AddressSpace.gmem)
+    num_tiles_ptr = make_ptr(cutlass.Int32, 16, cute.AddressSpace.gmem)
+    permuted_m = max(tile_size, topk)
+
+    if kernel == "gather":
+        c_dtype = "float4_e2m1fn"
+        c_ptr = make_ptr(get_cutlass_dtype(c_dtype), 16,
+                         cute.AddressSpace.gmem, assumed_align=32)
+        c_sf_ptr = make_ptr(sf_dtype_cutlass, 16, cute.AddressSpace.gmem,
+                            assumed_align=16)
+        norm_const_ptr = make_ptr(cutlass.Float32, 16, cute.AddressSpace.gmem)
+        token_id_ptr = make_ptr(cutlass.Int32, 16, cute.AddressSpace.gmem)
+
+        flashinfer_cutedsl_compile_fused_moe_gather(
+            orig_m=1,
+            permuted_m=permuted_m,
+            n=2 * intermediate_dim,
+            k=hidden_dim,
+            num_experts=1,
+            a_ptr=a_ptr,
+            b_ptr=b_ptr,
+            a_sf_ptr=a_sf_ptr,
+            b_sf_ptr=b_sf_ptr,
+            c_ptr=c_ptr,
+            c_sf_ptr=c_sf_ptr,
+            alpha_ptr=alpha_ptr,
+            tile_idx_ptr=tile_idx_ptr,
+            mn_limit_ptr=mn_limit_ptr,
+            token_id_ptr=token_id_ptr,
+            num_tiles_ptr=num_tiles_ptr,
+            norm_const_ptr=norm_const_ptr,
+            max_active_clusters=max_active_clusters,
+            stream=stream,
+            ab_dtype=ab_dtype,
+            sf_dtype=sf_dtype,
+            c_dtype=c_dtype,
+            sf_vec_size=16,
+            tile_size=tile_size,
+            topk=topk,
+            mma_tiler_mn=mma_tiler_mn,
+            cluster_shape_mn=cluster_shape_mn,
+            vectorized_f32=True,
+            raster_along_m=False,
+            enable_pdl=enable_pdl,
+        )
+        return
+
+    out_dtype = {
+        torch.bfloat16: "bfloat16",
+        torch.float16: "float16",
+        torch.float32: "float32",
+    }.get(output_dtype, "bfloat16")
+    c_ptr = make_ptr(get_cutlass_dtype(out_dtype), 16, cute.AddressSpace.gmem,
+                     assumed_align=32)
+    permuted_idx_ptr = make_ptr(cutlass.Int32, 16, cute.AddressSpace.gmem)
+    token_scales_ptr = make_ptr(cutlass.Float32, 16, cute.AddressSpace.gmem,
+                                assumed_align=16)
+
+    flashinfer_cutedsl_compile_fused_moe_finalize(
+        seq_len=1,
+        permuted_m=permuted_m,
+        n=hidden_dim,
+        k=intermediate_dim,
+        num_experts=1,
+        topk=topk,
+        a_ptr=a_ptr,
+        b_ptr=b_ptr,
+        a_sf_ptr=a_sf_ptr,
+        b_sf_ptr=b_sf_ptr,
+        c_ptr=c_ptr,
+        alpha_ptr=alpha_ptr,
+        tile_idx_ptr=tile_idx_ptr,
+        mn_limit_ptr=mn_limit_ptr,
+        permuted_idx_ptr=permuted_idx_ptr,
+        num_tiles_ptr=num_tiles_ptr,
+        token_scales_ptr=token_scales_ptr,
+        max_active_clusters=max_active_clusters,
+        stream=stream,
+        sf_vec_size=16,
+        tile_size=tile_size,
+        mma_tiler_mn=mma_tiler_mn,
+        cluster_shape_mn=cluster_shape_mn,
+        raster_along_m=False,
+        enable_pdl=enable_pdl,
+    )
+
+
 # DeepSeek V4 sparse MLA TRTLLM-GEN decode launcher (public wrapper). Handles
 # the SWA + compressed KV pools, the concatenated sparse-index matrix, and
 # per-tensor FP8 / BF16 inputs with BF16 output.
@@ -266,6 +435,11 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
     # Check if all required functions are available
     required_functions = [
         ("flashinfer.cute_dsl.blockscaled_gemm", "grouped_gemm_nt_masked"),
+        (
+            "flashinfer.gemm.kernels.grouped_gemm_masked_blackwell",
+            "get_cute_dsl_compiled_masked_gemm_kernel",
+        ),
+        ("flashinfer.cute_dsl.utils", "get_cutlass_dtype"),
         ("flashinfer", "scaled_fp4_grouped_quantize"),
         ("flashinfer", "silu_and_mul_scaled_nvfp4_experts_quantize"),
     ]
@@ -310,6 +484,18 @@ def has_flashinfer_b12x_moe() -> bool:
     required_functions = [
         ("flashinfer.fused_moe", "b12x_fused_moe"),
         ("flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"),
+        (
+            "flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch",
+            "select_sm120_moe_backend",
+        ),
+        (
+            "flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch",
+            "_get_static_kernel",
+        ),
+        (
+            "flashinfer.fused_moe.cute_dsl.blackwell_sm12x.moe_dispatch",
+            "_get_dynamic_kernel",
+        ),
     ]
 
     for module_name, attr_name in required_functions:
@@ -973,12 +1159,21 @@ __all__ = [
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
     "flashinfer_cutedsl_grouped_gemm_nt_masked",
+    "flashinfer_cutedsl_compile_grouped_gemm_nt_masked",
+    "flashinfer_cutedsl_get_cutlass_dtype",
     "flashinfer_fp4_quantize",
     "silu_and_mul_scaled_nvfp4_experts_quantize",
     "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
+    "flashinfer_cutedsl_compile_fused_moe_nvfp4",
+    "flashinfer_cutedsl_compile_fused_moe_gather",
+    "flashinfer_cutedsl_compile_fused_moe_finalize",
     "flashinfer_b12x_fused_moe",
+    "flashinfer_b12x_select_moe_backend",
+    "flashinfer_b12x_compile_static_moe",
+    "flashinfer_b12x_compile_micro_moe",
+    "flashinfer_b12x_compile_dynamic_moe",
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",

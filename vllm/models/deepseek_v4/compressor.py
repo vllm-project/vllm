@@ -174,6 +174,83 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         return CompressorBackend
 
 
+@dataclass(frozen=True)
+class _CompressorCuTeDSLCompileSpec:
+    # Cache key is the direct sparse_attn_compress_cutedsl.py compile call:
+    # C4 fused: (head_size, state_width, rope_head_dim, fp8_max, quant_block,
+    #            token_stride, scale_dim, kv_block_stride, compress_ratio,
+    #            overlap, store_full_fp8, norm_weight_dtype)
+    # C128 split: compress=(head_size, state_width) plus
+    #             store=(head_size, rope_head_dim, fp8_max, quant_block,
+    #                    token_stride, scale_dim, kv_block_stride,
+    #                    compress_ratio, norm_weight_dtype,
+    #                    kv_cache_block_size/store_full_fp8)
+    # Request token count is a runtime launch input and is not enumerated.
+    head_size: int
+    state_width: int
+    block_size: int
+    rope_head_dim: int
+    quant_block: int
+    token_stride: int
+    scale_dim: int
+    kv_cache_block_size: int
+    kv_block_stride: int
+    compress_ratio: int
+    overlap: bool
+    norm_weight_dtype: torch.dtype
+    store_full_kv: bool
+    store_full_fp8: bool
+
+    def compile(self) -> None:
+        from .nvidia.ops.sparse_attn_compress_cutedsl import (
+            _TORCH_TO_CUTE,
+            SparseAttnCompressNormRopeStoreC4Kernel,
+            SparseAttnCompressNormRopeStoreFullC4Kernel,
+            compile_split_sparse_attn_cutedsl,
+        )
+
+        if self.compress_ratio == 4:
+            compile_kwargs = dict(
+                head_size=self.head_size,
+                state_width=self.state_width,
+                rope_head_dim=self.rope_head_dim,
+                fp8_max=448.0,
+                quant_block=self.quant_block,
+                token_stride=self.token_stride,
+                scale_dim=self.scale_dim,
+                kv_block_stride=self.kv_block_stride,
+                compress_ratio=self.compress_ratio,
+                overlap=self.overlap,
+                norm_weight_dtype=_TORCH_TO_CUTE[self.norm_weight_dtype],
+            )
+            if self.store_full_kv:
+                SparseAttnCompressNormRopeStoreFullC4Kernel.compile(
+                    store_full_fp8=self.store_full_fp8,
+                    **compile_kwargs,
+                )
+            else:
+                SparseAttnCompressNormRopeStoreC4Kernel.compile(**compile_kwargs)
+            return
+
+        compile_split_sparse_attn_cutedsl(
+            head_size=self.head_size,
+            state_width=self.state_width,
+            block_size=self.block_size,
+            rope_head_dim=self.rope_head_dim,
+            fp8_max=448.0,
+            quant_block=self.quant_block,
+            token_stride=self.token_stride,
+            scale_dim=self.scale_dim,
+            kv_cache_block_size=self.kv_cache_block_size,
+            kv_block_stride=self.kv_block_stride,
+            compress_ratio=self.compress_ratio,
+            overlap=self.overlap,
+            rms_norm_weight_dtype=self.norm_weight_dtype,
+            store_full_kv=self.store_full_kv,
+            store_full_fp8=self.store_full_fp8,
+        )
+
+
 class DeepseekCompressor(nn.Module):
     """DeepSeek V4 KV/score compressor.
 
@@ -212,6 +289,7 @@ class DeepseekCompressor(nn.Module):
         self.device = current_platform.device_type
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.max_model_len = vllm_config.model_config.max_model_len
+        self._cache_dtype = vllm_config.cache_config.cache_dtype
 
         self.overlap = compress_ratio == 4
         self.coff = 1 + self.overlap
@@ -272,18 +350,56 @@ class DeepseekCompressor(nn.Module):
             )
 
     def get_cutedsl_warmup_plan(self, runner: object) -> object | None:
-        del runner
-
-        if self.head_dim != 512:
+        if not current_platform.is_cuda() or self.head_dim != 512:
             return None
 
-        from vllm.model_executor.warmup.cutedsl_warmup import CuTeDSLWarmupPlan
+        from vllm.model_executor.warmup.cutedsl_warmup import (
+            CuTeDSLCompileUnit,
+            CuTeDSLWarmupPlan,
+        )
+
+        spec = self._get_cutedsl_compile_spec(runner)
 
         return CuTeDSLWarmupPlan(
             provider="deepseek_v4_compressor",
-            model_runner_modes=("mixed",),
-            cudagraph_capture_modes=True,
-            dedupe_key=("deepseek_v4_compressor", self.head_dim),
+            compile_units=(
+                CuTeDSLCompileUnit(
+                    name="deepseek_v4_compressor",
+                    key=spec,
+                    compile=spec.compile,
+                ),
+            ),
+        )
+
+    def _get_cutedsl_compile_spec(
+        self,
+        runner: object,
+    ) -> _CompressorCuTeDSLCompileSpec:
+        cache_config = getattr(getattr(runner, "vllm_config", None),
+                               "cache_config", None)
+        kv_cache_block_size = int(
+            getattr(cache_config, "block_size", self.state_cache.block_size)
+        )
+        kv_cache_width = (
+            584 if self._cache_dtype == "fp8_ds_mla" else self.head_dim
+        )
+        store_full_kv = self._cache_dtype != "fp8_ds_mla"
+        store_full_fp8 = self._cache_dtype.startswith("fp8") and store_full_kv
+        return _CompressorCuTeDSLCompileSpec(
+            head_size=self.head_dim,
+            state_width=self.coff * self.head_dim,
+            block_size=self.state_cache.block_size,
+            rope_head_dim=self.rope_head_dim,
+            quant_block=self._quant_block,
+            token_stride=self._token_stride,
+            scale_dim=self._scale_dim,
+            kv_cache_block_size=kv_cache_block_size,
+            kv_block_stride=kv_cache_block_size * kv_cache_width,
+            compress_ratio=self.compress_ratio,
+            overlap=self.overlap,
+            norm_weight_dtype=self.norm.weight.dtype,
+            store_full_kv=store_full_kv,
+            store_full_fp8=store_full_fp8,
         )
 
     def forward(
