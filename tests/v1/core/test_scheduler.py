@@ -24,14 +24,23 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
-from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
+from vllm.v1.core.kv_cache_utils import (
+    get_group_id,
+    get_request_block_hasher,
+    init_none_hash,
+)
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.core.single_type_kv_cache_manager import register_all_kvcache_specs
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    MambaSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -1412,6 +1421,213 @@ def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
         assert req_id in scheduler.finished_recving_kv_req_ids
 
     return initial_ecos
+
+
+def _make_hybrid_scheduler(
+    kv_cache_groups: list[KVCacheGroupSpec],
+    num_blocks: int = 800,
+) -> Scheduler:
+    scheduler_block_size = 256
+    hash_block_size = 4
+    model_config = ModelConfig(
+        model="facebook/opt-125m",
+        trust_remote_code=True,
+        dtype="float16",
+        seed=42,
+        skip_tokenizer_init=True,
+    )
+    scheduler_config = SchedulerConfig(
+        max_num_seqs=4,
+        max_num_batched_tokens=4096,
+        max_model_len=4096,
+        enable_chunked_prefill=True,
+        is_encoder_decoder=False,
+        watermark=0.0,
+    )
+    cache_config = CacheConfig(
+        block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+        gpu_memory_utilization=0.9,
+        cache_dtype="auto",
+        enable_prefix_caching=True,
+        mamba_cache_mode="all",
+    )
+    cache_config.num_gpu_blocks = num_blocks
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="MockKVConnector",
+        kv_role="kv_consumer",
+        kv_connector_extra_config={"matched_tokens": 0, "is_async": False},
+    )
+    vllm_config = VllmConfig(
+        scheduler_config=scheduler_config,
+        model_config=model_config,
+        cache_config=cache_config,
+        kv_transfer_config=kv_transfer_config,
+    )
+    register_all_kvcache_specs(vllm_config)
+    scheduler = Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[],
+            kv_cache_groups=kv_cache_groups,
+        ),
+        structured_output_manager=StructuredOutputManager(vllm_config),
+        block_size=scheduler_block_size,
+        hash_block_size=hash_block_size,
+        log_stats=True,
+    )
+    assert isinstance(scheduler.kv_cache_manager.coordinator, HybridKVCacheCoordinator)
+    return scheduler
+
+
+def _dsv4_like_kv_cache_groups() -> list[KVCacheGroupSpec]:
+    return [
+        KVCacheGroupSpec(
+            ["dense_mla"],
+            MLAAttentionSpec(
+                block_size=256,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.uint8,
+                compress_ratio=4,
+                model_version="deepseek_v4",
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["swa_tail"],
+            SlidingWindowMLASpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.uint8,
+                sliding_window=128,
+                model_version="deepseek_v4",
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["c4_state"],
+            SlidingWindowMLASpec(
+                block_size=4,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.uint8,
+                sliding_window=8,
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["c128_state"],
+            SlidingWindowMLASpec(
+                block_size=8,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.uint8,
+                sliding_window=128,
+            ),
+        ),
+    ]
+
+
+def _mamba_like_kv_cache_groups() -> list[KVCacheGroupSpec]:
+    return [
+        KVCacheGroupSpec(
+            ["dense_full_attention"],
+            FullAttentionSpec(
+                block_size=256,
+                num_kv_heads=1,
+                head_size=1,
+                dtype=torch.uint8,
+            ),
+        ),
+        KVCacheGroupSpec(
+            ["mamba_state"],
+            MambaSpec(
+                block_size=256,
+                shapes=((1, 1),),
+                dtypes=(torch.uint8,),
+                mamba_cache_mode="all",
+            ),
+        ),
+    ]
+
+
+def _seed_local_prefix_cache(scheduler: Scheduler) -> None:
+    [fill_req] = create_requests(
+        num_requests=1,
+        num_tokens=1024,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=4,
+        req_ids=["fill"],
+    )
+    manager = scheduler.kv_cache_manager
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(fill_req)
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        fill_req,
+        num_new_tokens=fill_req.num_tokens,
+        num_new_computed_tokens=num_computed_tokens,
+        new_computed_blocks=computed_blocks,
+    )
+    assert blocks is not None
+    manager.free(fill_req)
+
+
+def _evict_cached_groups(scheduler: Scheduler, group_ids_to_evict: set[int]) -> None:
+    cached_block_ids = {
+        block.block_id
+        for block in scheduler.kv_cache_manager.block_pool.blocks
+        if block.block_hash is not None
+        and get_group_id(block.block_hash) in group_ids_to_evict
+    }
+    assert cached_block_ids
+    scheduler.kv_cache_manager.evict_blocks(cached_block_ids)
+
+
+@pytest.mark.parametrize(
+    "kv_cache_groups,group_ids_to_evict",
+    [
+        pytest.param(_dsv4_like_kv_cache_groups(), {1, 2, 3}, id="dsv4-like"),
+        pytest.param(_mamba_like_kv_cache_groups(), {1}, id="mamba-like"),
+    ],
+)
+def test_kv_connector_hybrid_uses_dense_local_prefix_hit(
+    kv_cache_groups: list[KVCacheGroupSpec],
+    group_ids_to_evict: set[int],
+):
+    """Hybrid KVConnector hits should report reusable dense prefix tokens.
+
+    The non-dense/state groups may miss while the dense attention group is
+    locally cached. In that case the connector scalar should still receive the
+    dense local prefix hit instead of the minimum hit across all groups.
+    """
+    scheduler = _make_hybrid_scheduler(kv_cache_groups)
+    _seed_local_prefix_cache(scheduler)
+    _evict_cached_groups(scheduler, group_ids_to_evict)
+
+    queried_local_hits: list[int] = []
+
+    def record_connector_query(request: Request, num_computed_tokens: int):
+        queried_local_hits.append(num_computed_tokens)
+        return 0, False
+
+    assert scheduler.connector is not None
+    scheduler.connector.get_num_new_matched_tokens = record_connector_query
+
+    [replay_req] = create_requests(
+        num_requests=1,
+        num_tokens=1280,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=4,
+        req_ids=["replay"],
+    )
+    replay_req.kv_transfer_params = {"do_remote_prefill": True}
+    scheduler.add_request(replay_req)
+    scheduler_output = scheduler.schedule()
+
+    assert queried_local_hits == [1024]
+    assert scheduler_output.num_scheduled_tokens[replay_req.request_id] == 256
 
 
 @pytest.mark.parametrize("is_async", [False, True])
