@@ -257,9 +257,11 @@ def _fp8_mqa_logits_topk_triton(
         # topk width, which happens for short prompts and the early queries of
         # long prompts -- out[:, :select_k] is non-contiguous (row stride =
         # out.shape[1]), so writing it as contiguous silently corrupts later
-        # rows and drops their top-k (all -1). Hand the op a contiguous buffer
-        # and copy back.
-        work = selected if selected.is_contiguous() else selected.contiguous()
+        # rows and drops their top-k (all -1). Hand the op a fresh contiguous
+        # buffer and copy back. The buffer is left uninitialized (new_empty)
+        # rather than copied (.contiguous()) because the op overwrites every
+        # element, so copying the placeholder -1s in would be wasted work.
+        work = selected if selected.is_contiguous() else selected.new_empty(selected.shape)
         topk_op(
             logits,
             cu_seqlen_ks,
