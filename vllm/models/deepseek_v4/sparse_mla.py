@@ -46,7 +46,6 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
-        "bfloat16",
         "fp8_ds_mla",
         "fp8",  # alias for fp8_ds_mla
     ]
