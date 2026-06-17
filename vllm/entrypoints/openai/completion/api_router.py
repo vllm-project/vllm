@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import time
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -14,6 +15,13 @@ from vllm.entrypoints.openai.completion.protocol import (
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.orca_metrics import metrics_header
+from vllm.entrypoints.openai.request_log.aggregate import (
+    aggregate_completion_stream,
+)
+from vllm.entrypoints.openai.request_log.client import (
+    make_record,
+    stream_logging_wrapper,
+)
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.utils import (
     load_aware_call,
@@ -54,21 +62,56 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             message="The model does not support Completions API"
         )
 
+    received_at = time.time()
+    request_log_hub = getattr(raw_request.app.state, "request_log_hub", None)
     try:
         generator = await handler.create_completion(request, raw_request)
     except Exception as e:
         generator = handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
+        if request_log_hub is not None:
+            request_log_hub.log(
+                make_record(
+                    raw_request=raw_request,
+                    endpoint="/v1/completions",
+                    request_obj=request,
+                    response=None,
+                    received_at=received_at,
+                    stream=bool(request.stream),
+                    error=generator.model_dump(),
+                )
+            )
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
         )
     elif isinstance(generator, CompletionResponse):
+        if request_log_hub is not None:
+            request_log_hub.log(
+                make_record(
+                    raw_request=raw_request,
+                    endpoint="/v1/completions",
+                    request_obj=request,
+                    response=generator.model_dump(),
+                    received_at=received_at,
+                    stream=False,
+                )
+            )
         return JSONResponse(
             content=generator.model_dump(),
             headers=metrics_header(metrics_header_format),
         )
 
+    if request_log_hub is not None:
+        generator = stream_logging_wrapper(
+            generator,
+            hub=request_log_hub,
+            aggregator=aggregate_completion_stream,
+            raw_request=raw_request,
+            endpoint="/v1/completions",
+            request_obj=request,
+            received_at=received_at,
+        )
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 

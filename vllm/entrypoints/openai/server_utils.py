@@ -377,6 +377,9 @@ async def lifespan(app: FastAPI):
         finally:
             if task is not None:
                 task.cancel()
+            request_log_hub = getattr(app.state, "request_log_hub", None)
+            if request_log_hub is not None:
+                request_log_hub.close()
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state

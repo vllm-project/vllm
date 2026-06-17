@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import time
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, Request
@@ -15,6 +16,13 @@ from vllm.entrypoints.anthropic.protocol import (
 )
 from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.request_log.aggregate import (
+    aggregate_anthropic_messages_stream,
+)
+from vllm.entrypoints.openai.request_log.client import (
+    make_record,
+    stream_logging_wrapper,
+)
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.utils import (
     load_aware_call,
@@ -55,11 +63,34 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
             status_code=response.error.code, content=anthropic_error.model_dump()
         )
 
+    received_at = time.time()
+    request_log_hub = getattr(raw_request.app.state, "request_log_hub", None)
+
+    def _log_record(*, response, stream, error=None):
+        if request_log_hub is None:
+            return
+        request_log_hub.log(
+            make_record(
+                raw_request=raw_request,
+                endpoint="/v1/messages",
+                request_obj=request,
+                response=response,
+                received_at=received_at,
+                stream=stream,
+                error=error,
+            )
+        )
+
     handler = messages(raw_request)
     if handler is None:
         base_server = raw_request.app.state.openai_serving_tokenization
         error = base_server.create_error_response(
             message="The model does not support Messages API"
+        )
+        _log_record(
+            response=None,
+            stream=bool(request.stream),
+            error=error.model_dump(),
         )
         return translate_error_response(error)
 
@@ -67,24 +98,46 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         generator = await handler.create_messages(request, raw_request)
     except Exception as e:
         logger.exception("Error in create_messages: %s", e)
+        err = AnthropicErrorResponse(
+            error=AnthropicError(
+                type="internal_error",
+                message=str(e),
+            )
+        )
+        _log_record(
+            response=None,
+            stream=bool(request.stream),
+            error=err.model_dump(),
+        )
         return JSONResponse(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-            content=AnthropicErrorResponse(
-                error=AnthropicError(
-                    type="internal_error",
-                    message=str(e),
-                )
-            ).model_dump(),
+            content=err.model_dump(),
         )
 
     if isinstance(generator, ErrorResponse):
+        _log_record(
+            response=None,
+            stream=bool(request.stream),
+            error=generator.model_dump(),
+        )
         return translate_error_response(generator)
 
     elif isinstance(generator, AnthropicMessagesResponse):
         resp = generator.model_dump(exclude_none=True)
         logger.debug("Anthropic Messages Response: %s", resp)
+        _log_record(response=resp, stream=False)
         return JSONResponse(content=resp)
 
+    if request_log_hub is not None:
+        generator = stream_logging_wrapper(
+            generator,
+            hub=request_log_hub,
+            aggregator=aggregate_anthropic_messages_stream,
+            raw_request=raw_request,
+            endpoint="/v1/messages",
+            request_obj=request,
+            received_at=received_at,
+        )
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 

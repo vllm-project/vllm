@@ -356,6 +356,13 @@ class OpenAIServingChat(OpenAIServing):
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
+            # Stash chat-template-rendered prompt strings so the
+            # request-log hub can persist them alongside the raw HTTP
+            # request body. Cheap: just a list of references to strings
+            # already produced upstream.
+            raw_request.state.rendered_prompts = [
+                self._extract_prompt_text(ep) for ep in engine_prompts
+            ]
 
         try:
             lora_request = self._maybe_get_adapters(

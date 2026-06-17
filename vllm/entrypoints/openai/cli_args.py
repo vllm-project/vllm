@@ -144,6 +144,13 @@ class BaseFrontendArgs:
     enable_log_outputs: bool = False
     """If set to True, log model outputs (generations).
     Requires --enable-log-requests."""
+    request_log_path: str | None = envs.VLLM_REQUEST_LOG_PATH
+    """If set, every OpenAI HTTP request and its final response is appended to
+    this jsonl file. Disk writes are performed by a separate subprocess that
+    talks to the API server over ZMQ IPC, so logging cannot block the
+    request path. With multiple API server workers the per-rank suffix
+    ``.rank{N}`` is appended automatically. Falls back to the
+    ``VLLM_REQUEST_LOG_PATH`` env var; leave both unset to disable."""
     enable_log_deltas: bool = True
     """If set to False, output deltas will not be logged. Relevant only if 
     --enable-log-outputs is set.

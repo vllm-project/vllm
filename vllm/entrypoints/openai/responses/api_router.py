@@ -2,13 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from collections.abc import AsyncGenerator
+import time
+from collections.abc import AsyncGenerator, AsyncIterator
 from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.request_log.aggregate import (
+    aggregate_responses_stream,
+)
+from vllm.entrypoints.openai.request_log.client import (
+    make_record,
+    stream_logging_wrapper,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
     ResponsesResponse,
@@ -63,21 +71,55 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
         return base_server.create_error_response(
             message="The model does not support Responses API"
         )
+    received_at = time.time()
+    request_log_hub = getattr(raw_request.app.state, "request_log_hub", None)
     try:
         generator = await handler.create_responses(request, raw_request)
     except Exception as e:
         generator = handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
+        if request_log_hub is not None:
+            request_log_hub.log(
+                make_record(
+                    raw_request=raw_request,
+                    endpoint="/v1/responses",
+                    request_obj=request,
+                    response=None,
+                    received_at=received_at,
+                    stream=bool(getattr(request, "stream", False)),
+                    error=generator.model_dump(),
+                )
+            )
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
         )
     elif isinstance(generator, ResponsesResponse):
+        if request_log_hub is not None:
+            request_log_hub.log(
+                make_record(
+                    raw_request=raw_request,
+                    endpoint="/v1/responses",
+                    request_obj=request,
+                    response=generator.model_dump(),
+                    received_at=received_at,
+                    stream=False,
+                )
+            )
         return JSONResponse(content=generator.model_dump())
 
-    return StreamingResponse(
-        content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"
-    )
+    sse_stream: AsyncIterator[str] = _convert_stream_to_sse_events(generator)
+    if request_log_hub is not None:
+        sse_stream = stream_logging_wrapper(
+            sse_stream,
+            hub=request_log_hub,
+            aggregator=aggregate_responses_stream,
+            raw_request=raw_request,
+            endpoint="/v1/responses",
+            request_obj=request,
+            received_at=received_at,
+        )
+    return StreamingResponse(content=sse_stream, media_type="text/event-stream")
 
 
 @router.get("/v1/responses/{response_id}")

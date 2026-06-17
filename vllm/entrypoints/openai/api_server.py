@@ -29,6 +29,7 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.request_log import RequestLoggerHub
 from vllm.entrypoints.openai.server_utils import (
     get_uvicorn_log_config,
     http_exception_handler,
@@ -323,6 +324,12 @@ async def init_app_state(
     state.log_stats = not args.disable_log_stats
     state.vllm_config = vllm_config
     state.args = args
+    parallel_config = vllm_config.parallel_config
+    state.request_log_hub = RequestLoggerHub.maybe_create(
+        args,
+        rank=parallel_config._api_process_rank,
+        total_ranks=parallel_config._api_process_count,
+    )
     resolved_chat_template = load_chat_template(args.chat_template)
 
     # Merge default_mm_loras into the static lora_modules

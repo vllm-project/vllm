@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
+    VLLM_REQUEST_LOG_PATH: str | None = None
     S3_ACCESS_KEY_ID: str | None = None
     S3_SECRET_ACCESS_KEY: str | None = None
     S3_ENDPOINT_URL: str | None = None
@@ -638,6 +639,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False"
     ).lower()
     == "true",
+    # If set, the OpenAI-compatible API server will log every HTTP
+    # request/response pair as a single line of JSON to this file. Writes
+    # are performed by a separate subprocess that talks to the API server
+    # over ZMQ, so disk pressure does not block the request path.
+    "VLLM_REQUEST_LOG_PATH": lambda: os.environ.get("VLLM_REQUEST_LOG_PATH", None)
+    or None,
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID": lambda: os.environ.get("S3_ACCESS_KEY_ID", None),
     "S3_SECRET_ACCESS_KEY": lambda: os.environ.get("S3_SECRET_ACCESS_KEY", None),
@@ -1731,6 +1738,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_COLOR",
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
+        "VLLM_REQUEST_LOG_PATH",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",

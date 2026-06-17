@@ -148,6 +148,11 @@ class OpenAIServingCompletion(OpenAIServing):
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
+            # See note in chat_completion/serving.py: forward the rendered
+            # prompt strings to the request-log hub via raw_request.state.
+            raw_request.state.rendered_prompts = [
+                self._extract_prompt_text(ep) for ep in engine_prompts
+            ]
 
         try:
             lora_request = self._maybe_get_adapters(request)
