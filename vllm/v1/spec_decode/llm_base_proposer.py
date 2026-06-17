@@ -72,7 +72,6 @@ class SpecDecodeBaseProposer:
         self.method = self.speculative_config.method
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
         self._share_mtp_indices = False
-        self._recycle_post_norm = False
 
         self.device = device
         self.dtype = vllm_config.model_config.dtype
@@ -919,10 +918,13 @@ class SpecDecodeBaseProposer:
         return per_group_attn_metadata, per_layer_attn_metadata
 
     def model_returns_tuple(self) -> bool:
-        if self.method == "mtp" and self._recycle_post_norm:
-            # GLM-DSA MTP returns (logit_hidden, recycle_hidden) so the
-            # recycled hidden is post-final-norm; see deepseek_mtp.py.
-            return True
+        if self.method == "mtp":
+            # DeepSeek-family MTP (deepseek_mtp.py) recycles the post-final-
+            # norm hidden, so its forward returns (logit_hidden,
+            # recycle_hidden). Other MTP families return a single tensor.
+            return "DeepSeekMTPModel" in (
+                self.draft_model_config.hf_config.architectures or []
+            )
         return self.method not in ("mtp", "draft_model", "dflash")
 
     def prepare_next_token_ids_cpu(
@@ -1485,11 +1487,6 @@ class SpecDecodeBaseProposer:
         )
         self._share_mtp_indices = getattr(
             draft_hf_config, "index_share_for_mtp_iteration", False
-        )
-        # GLM-DSA MTP recycles the post-final-norm hidden into the next
-        # draft step, so it returns a (logit_hidden, recycle_hidden) tuple.
-        self._recycle_post_norm = getattr(
-            draft_hf_config, "mtp_recycle_post_norm", False
         )
 
         if self.use_local_argmax_reduction:
