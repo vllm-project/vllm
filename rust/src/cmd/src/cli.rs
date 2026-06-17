@@ -24,7 +24,7 @@ use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
     ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    HttpListenerMode, ParserSelection, RendererSelection,
+    HttpListenerMode, ParserSelection, RendererSelection, TlsConfig,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
@@ -251,6 +251,28 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub allow_credentials: bool,
 
+    /// The file path to the SSL key file. When omitted, the key is read from
+    /// `--ssl-certfile` (combined PEM).
+    #[arg(long)]
+    #[serde(default)]
+    pub ssl_keyfile: Option<String>,
+
+    /// The file path to the SSL cert file. Enables TLS when set.
+    #[arg(long)]
+    #[serde(default)]
+    pub ssl_certfile: Option<String>,
+
+    /// The CA certificates file used to verify client certificates (mTLS).
+    #[arg(long)]
+    #[serde(default)]
+    pub ssl_ca_certs: Option<String>,
+
+    /// Whether a client certificate is required: 0 = none, 1 = optional,
+    /// 2 = required (mirrors Python's `ssl.CERT_*`).
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i32).range(0..=2))]
+    #[serde(default)]
+    pub ssl_cert_reqs: i32,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -296,6 +318,7 @@ impl SharedRuntimeArgs {
         let shutdown_timeout = self.shutdown_timeout();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
+        let tls = self.tls_config();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -321,6 +344,7 @@ impl SharedRuntimeArgs {
             max_logprobs: self.max_logprobs,
             api_server_options,
             cors,
+            tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
@@ -343,6 +367,7 @@ impl SharedRuntimeArgs {
         let shutdown_timeout = self.shutdown_timeout();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
+        let tls = self.tls_config();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -367,6 +392,7 @@ impl SharedRuntimeArgs {
             max_logprobs: self.max_logprobs,
             api_server_options,
             cors,
+            tls,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
@@ -389,6 +415,21 @@ impl SharedRuntimeArgs {
             allow_headers: self.allowed_headers.0.clone(),
             allow_credentials: self.allow_credentials,
         }
+    }
+
+    /// Build the TLS config: `Some` when any `ssl_*` argument is set, else
+    /// `None` (plaintext). The combination is validated in [`Config::validate`].
+    fn tls_config(&self) -> Option<TlsConfig> {
+        let tls_requested = self.ssl_certfile.is_some()
+            || self.ssl_keyfile.is_some()
+            || self.ssl_ca_certs.is_some()
+            || self.ssl_cert_reqs != 0;
+        tls_requested.then(|| TlsConfig {
+            cert_file: self.ssl_certfile.clone(),
+            key_file: self.ssl_keyfile.clone(),
+            ca_certs: self.ssl_ca_certs.clone(),
+            cert_reqs: self.ssl_cert_reqs,
+        })
     }
 }
 

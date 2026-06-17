@@ -9,14 +9,20 @@ mod middleware;
 mod routes;
 mod server_info;
 mod state;
+mod tls;
+#[cfg(test)]
+mod tls_tests;
 mod utils;
 
+use std::future::Future;
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context as _, Result};
 use axum::Router;
 use axum::serve::ListenerExt as _;
-pub use config::{ApiServerOptions, Config, CoordinatorMode, CorsConfig, HttpListenerMode};
+pub use config::{
+    ApiServerOptions, Config, CoordinatorMode, CorsConfig, HttpListenerMode, TlsConfig,
+};
 use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
 use tokio_stream::wrappers::TcpListenerStream;
@@ -128,6 +134,16 @@ where
 {
     config.validate().context("invalid OpenAI frontend configuration")?;
 
+    // Build the TLS server config once, up front, so a bad cert/key fails fast
+    // before the (potentially long) engine handshake.
+    let tls_config = config
+        .tls
+        .as_ref()
+        .map(tls::build_server_config)
+        .transpose()
+        .context("invalid TLS configuration")?
+        .map(Arc::new);
+
     // Also check shutdown during the (potentially long) startup handshake.
     let state = tokio::select! {
         result = build_state(&config) => result?,
@@ -162,17 +178,12 @@ where
         None
     };
 
-    info!(%bind_address, %model, "starting OpenAI server");
-
-    // Set TCP_NODELAY on accepted connections to reduce latency.
-    // By `tap_io` we will do this on every accepted connection.
-    let listener = listener.tap_io(|io| {
-        if let Either::Left(tcp_stream) = io
-            && let Err(err) = tcp_stream.set_nodelay(true)
-        {
-            trace!(error = %err, "failed to enable TCP_NODELAY on accepted HTTP connection");
-        }
-    });
+    let scheme = if tls_config.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    info!(%bind_address, %scheme, %model, "starting OpenAI server");
 
     // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
     // token. Caller cancellation propagates into both protocols; if either
@@ -208,12 +219,9 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let server =
-                axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned());
-
             let result = tokio::select! {
-                result = server => {
-                    result.context("HTTP server failed")
+                result = serve_listener(listener, tls_config, app, shutdown.cancelled_owned()) => {
+                    result
                 }
                 _ = force_shutdown.cancelled() => {
                     warn!("HTTP graceful shutdown deadline elapsed; aborting server");
@@ -265,6 +273,37 @@ where
         .copied()
         .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
     state.shutdown(shutdown_deadline).await
+}
+
+/// Apply `TCP_NODELAY`, optional TLS termination, and graceful shutdown to a
+/// bound listener, then serve `app`. Shared by [`serve_with_router_extension`]
+/// and the TLS integration tests so both exercise the same listener wrapping.
+async fn serve_listener(
+    listener: Listener,
+    tls: Option<Arc<rustls::ServerConfig>>,
+    app: Router,
+    shutdown: impl Future<Output = ()> + Send + 'static,
+) -> Result<()> {
+    // Set TCP_NODELAY on accepted connections to reduce latency.
+    // By `tap_io` we will do this on every accepted connection.
+    let listener = listener.tap_io(|io| {
+        if let Either::Left(tcp_stream) = io
+            && let Err(err) = tcp_stream.set_nodelay(true)
+        {
+            trace!(error = %err, "failed to enable TCP_NODELAY on accepted HTTP connection");
+        }
+    });
+
+    match tls {
+        Some(config) => axum::serve(tls::TlsListener::new(listener, config), app)
+            .with_graceful_shutdown(shutdown)
+            .await
+            .context("HTTPS server failed"),
+        None => axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await
+            .context("HTTP server failed"),
+    }
 }
 
 #[cfg(test)]

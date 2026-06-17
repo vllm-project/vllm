@@ -99,6 +99,50 @@ impl CorsConfig {
     }
 }
 
+/// TLS settings mirroring Python's uvicorn `ssl_*` arguments.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TlsConfig {
+    /// PEM certificate chain file. Required when TLS is configured; may also
+    /// hold the private key (combined PEM) when `key_file` is unset.
+    pub cert_file: Option<String>,
+    /// PEM private key file. When `None`, the key is read from `cert_file`
+    /// (combined PEM).
+    pub key_file: Option<String>,
+    /// PEM CA bundle used to verify client certificates (mTLS). Required when
+    /// `cert_reqs` is non-zero.
+    pub ca_certs: Option<String>,
+    /// Client-certificate requirement, mirroring Python's `ssl.CERT_*`:
+    /// 0 = none, 1 = optional, 2 = required.
+    pub cert_reqs: i32,
+}
+
+impl TlsConfig {
+    /// Structurally validate the TLS arguments; the cert/key material is parsed
+    /// later, when the rustls server config is built.
+    pub fn validate(&self) -> Result<()> {
+        if self.cert_file.is_none() {
+            bail!(
+                "--ssl-certfile is required to enable TLS; \
+                 --ssl-keyfile/--ssl-ca-certs/--ssl-cert-reqs cannot be used without it"
+            );
+        }
+        if !matches!(self.cert_reqs, 0..=2) {
+            bail!(
+                "--ssl-cert-reqs must be 0 (none), 1 (optional), or 2 (required), got {}",
+                self.cert_reqs
+            );
+        }
+        if self.cert_reqs != 0 && self.ca_certs.is_none() {
+            bail!(
+                "--ssl-ca-certs is required when --ssl-cert-reqs is {} \
+                 (client certificate verification)",
+                self.cert_reqs
+            );
+        }
+        Ok(())
+    }
+}
+
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
@@ -138,6 +182,9 @@ pub struct Config {
     pub api_server_options: ApiServerOptions,
     /// CORS settings applied to every HTTP response.
     pub cors: CorsConfig,
+    /// TLS settings. `None` serves plaintext HTTP; `Some` terminates TLS at the
+    /// listener.
+    pub tls: Option<TlsConfig>,
     /// API keys accepted as bearer tokens for guarded routes.
     #[serde(skip_serializing)]
     #[educe(Debug(method(fmt_redacted_api_keys)))]
@@ -158,6 +205,9 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
         self.cors.validate()?;
+        if let Some(tls) = &self.tls {
+            tls.validate()?;
+        }
         if let Some(max_logprobs) = self.max_logprobs
             && max_logprobs < -1
         {
