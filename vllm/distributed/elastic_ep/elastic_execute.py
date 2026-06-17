@@ -76,7 +76,7 @@ def batch_transfer_weights(
     all_params = []
 
     for name, param in state_dict.items():
-        if name.endswith("expert_map"):
+        if name.endswith("expert_map") or name.find("._shared_experts") != -1:
             continue
         if param.data_ptr() not in expert_weights_set:
             all_params.append(param.data)
@@ -396,10 +396,7 @@ class ElasticEPScalingExecutor:
         ep_group = get_ep_group()
         for module in moe_modules:
             new_moe_config = self._make_eep_moe_config(module, dp_group, ep_group)
-            module.moe_config.num_experts = new_moe_config.num_experts
-            module.global_num_experts = module.moe_config.num_experts
-            module.moe_parallel_config = new_moe_config.moe_parallel_config
-            module.moe_config.moe_parallel_config = module.moe_parallel_config
+            module._set_moe_config(new_moe_config)
 
         # Update EPLB state
         eplb_state = self.worker.model_runner.eplb_state
@@ -466,13 +463,16 @@ class ElasticEPScalingExecutor:
             self._commit_staged_moe_quant_methods()
             # Legacy modular methods need to be recreated for the new EP size.
             for module in moe_modules:
-                if getattr(module.quant_method, "wraps_legacy_quant_method", False):
-                    module._replace_quant_method(module.quant_method.old_quant_method)
+                if getattr(module._quant_method, "wraps_legacy_quant_method", False):
+                    module._replace_quant_method(module._quant_method.old_quant_method)
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
 
         eplb_model_state.expert_buffer = [
             torch.empty_like(w) for w in model.expert_weights[0]
         ]
+        assert parallel_config.eplb_config.communicator is not None, (
+            "EPLB communicator backend must be set by ParallelConfig"
+        )
         eplb_model_state.communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
             backend=parallel_config.eplb_config.communicator,

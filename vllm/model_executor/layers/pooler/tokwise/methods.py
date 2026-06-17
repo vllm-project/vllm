@@ -41,6 +41,9 @@ class AllPool(TokenPoolingMethod):
 
         self.enable_chunked_prefill = scheduler_config.enable_chunked_prefill
 
+    def extra_repr(self) -> str:
+        return f"enable_chunked_prefill={self.enable_chunked_prefill}"
+
     def forward(
         self,
         hidden_states: torch.Tensor,

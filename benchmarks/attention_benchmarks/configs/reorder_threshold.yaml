@@ -63,8 +63,6 @@ model:
 
 # Benchmark settings
 device: "cuda:0"
-repeats: 15          # More repeats for spec decode variance
-warmup_iters: 5
 profile_memory: false
 
 # Output

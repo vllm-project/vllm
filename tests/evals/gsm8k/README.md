@@ -30,9 +30,9 @@ model_name: "Qwen/Qwen2.5-1.5B-Instruct"
 accuracy_threshold: 0.54  # Minimum expected accuracy
 num_questions: 1319       # Number of questions (default: full test set)
 num_fewshot: 5            # Few-shot examples from train set
-server_args: "--max-model-len 4096 --tensor-parallel-size 2"  # Server arguments
+server_args: "--max-model-len 4096 --tensor-parallel-size 2 --moe-backend flashinfer_cutlass"  # Server arguments
 env:                      # Environment variables (optional)
-  VLLM_USE_FLASHINFER_MOE_FP4: "1"
+  VLLM_LOGGING_LEVEL: "DEBUG"
 ```
 
 The `server_args` field accepts any arguments that can be passed to `vllm serve`.

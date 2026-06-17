@@ -28,8 +28,10 @@
 ###############################################################################
 set -o pipefail
 
-# Export Python path
-export PYTHONPATH=".."
+# Export Python path for commands that run directly on the host. Containerized
+# tests set this to /vllm-workspace below so spawned Python processes do not
+# depend on their current working directory.
+export PYTHONPATH="${PYTHONPATH:-..}"
 
 ###############################################################################
 # Helper Functions
@@ -377,6 +379,14 @@ HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p "${HF_CACHE}"
 HF_MOUNT="/root/.cache/huggingface"
 
+# Hugging Face Hub defaults to 10s request/download timeouts, while the ROCm
+# CI image currently raises downloads to 60s. AMD model-test jobs routinely
+# start from a cold or partially-populated shared cache, and the 60s read cap
+# has still timed out before pytest reached the vLLM behavior under test.
+# Keep the CI default explicit and overridable from the Buildkite environment.
+: "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
+: "${HF_HUB_ETAG_TIMEOUT:=60}"
+
 # ---- Command source selection ----
 # Prefer VLLM_TEST_COMMANDS (preserves all inner quoting intact).
 # Fall back to $* for backward compatibility, but warn that inner
@@ -416,7 +426,14 @@ fi
 
 echo "Final commands: $commands"
 
-MYPYTHONPATH=".."
+MYPYTHONPATH="/vllm-workspace"
+
+container_job_id="${BUILDKITE_JOB_ID:-${BUILDKITE_PARALLEL_JOB:-0}}"
+container_job_id="${container_job_id//[^A-Za-z0-9_.-]/_}"
+container_job_id_short="${container_job_id:0:8}"
+CONTAINER_TMPDIR="/tmp/vllm-${container_job_id_short}"
+CONTAINER_CACHE_ROOT="/tmp/vllm-buildkite-${container_job_id}/cache"
+CONTAINER_PREFLIGHT="mkdir -p \"\$TMPDIR\" \"\$TORCHINDUCTOR_CACHE_DIR\" \"\$TRITON_CACHE_DIR\" \"\$VLLM_CACHE_ROOT\" \"\$XDG_CACHE_HOME\" && python -c \"import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing\""
 
 # Verify GPU access
 render_gid=$(getent group render | cut -d: -f3)
@@ -493,6 +510,8 @@ else
     --group-add "$render_gid" \
     --rm \
     -e HF_TOKEN \
+    -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
+    -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \
     -e AWS_ACCESS_KEY_ID \
     -e AWS_SECRET_ACCESS_KEY \
     -e BUILDKITE_PARALLEL_JOB \
@@ -500,10 +519,15 @@ else
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
+    -e "TMPDIR=${CONTAINER_TMPDIR}/tmp" \
+    -e "TORCHINDUCTOR_CACHE_DIR=${CONTAINER_CACHE_ROOT}/torchinductor" \
+    -e "TRITON_CACHE_DIR=${CONTAINER_CACHE_ROOT}/triton" \
+    -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \
+    -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
     --name "${container_name}" \
     "${image_name}" \
-    /bin/bash -c "${commands}"
+    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
 
   exit_code=$?
   handle_pytest_exit "$exit_code"

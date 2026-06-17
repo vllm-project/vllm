@@ -82,6 +82,7 @@ class FlashAttnMLABackend(MLACommonBackend):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
         if not flash_attn_supports_mla():

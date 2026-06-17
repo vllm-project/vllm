@@ -225,7 +225,7 @@ impl MultimodalModelInfo {
     ///
     /// The HF renderer uses this token while flattening image content in string
     /// content format.
-    pub(crate) fn placeholder_token(&self) -> &str {
+    pub fn placeholder_token(&self) -> &str {
         &self.spec.placeholder_token
     }
 }

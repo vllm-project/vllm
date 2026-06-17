@@ -447,6 +447,9 @@ class EplbState:
         self._init_should_record_tensor(model)
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
 
+        assert self.parallel_config.eplb_config.communicator is not None, (
+            "EPLB communicator backend must be set by ParallelConfig"
+        )
         communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
             backend=self.parallel_config.eplb_config.communicator,
@@ -653,7 +656,8 @@ class EplbState:
             )
 
         for ls in layer_states:
-            ls.should_record_tensor = self.should_record_tensor
+            if ls is not None:
+                ls.should_record_tensor = self.should_record_tensor
 
     def rearrange(
         self,

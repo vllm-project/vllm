@@ -13,6 +13,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_is_k_full,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
+    marlin_pad_dim,
+    marlin_pad_qweight,
+    marlin_pad_scales,
+    marlin_padded_nk,
     marlin_permute_bias,
     marlin_permute_scales,
     marlin_sort_g_idx,
@@ -54,12 +58,29 @@ class MarlinLinearKernel(MPLinearKernel):
                 f"{MARLIN_SUPPORTED_GROUP_SIZES}",
             )
 
-        return check_marlin_supports_shape(
-            c.partition_weight_shape[1],  # out_features
-            c.partition_weight_shape[0],  # in_features
-            c.full_weight_shape[0],  # in_features
-            c.group_size,
-        )
+        if c.has_g_idx:
+            # Act-order couples K to the full-model group layout, so tile
+            # padding is not supported; keep the strict shape check.
+            return check_marlin_supports_shape(
+                c.partition_weight_shape[1],  # out_features
+                c.partition_weight_shape[0],  # in_features
+                c.full_weight_shape[0],  # in_features
+                c.group_size,
+            )
+
+        # A group straddling TP ranks cannot be fixed by padding.
+        if (
+            c.group_size != -1
+            and c.group_size < c.full_weight_shape[0]
+            and c.partition_weight_shape[0] % c.group_size != 0
+        ):
+            return False, (
+                f"in_features per partition {c.partition_weight_shape[0]} is "
+                f"not divisible by group_size = {c.group_size}."
+            )
+
+        # Tile misalignment is fixed by zero-padding at weight prep.
+        return True, None
 
     # note assumes that
     #  `weight_packed` is: {input_dim = 0, output_dim = 1, packed_dim = 0}
@@ -83,6 +104,13 @@ class MarlinLinearKernel(MPLinearKernel):
         row_parallel = c.partition_weight_shape[0] != c.full_weight_shape[0]
         self.is_k_full = marlin_is_k_full(c.has_g_idx, row_parallel)
 
+        size_k, size_n = c.partition_weight_shape
+        if c.has_g_idx:
+            # Act-order shapes were strictly validated in can_implement.
+            padded_n, padded_k = size_n, size_k
+        else:
+            padded_n, padded_k = marlin_padded_nk(size_n, size_k, c.group_size)
+
         # Allocate marlin workspace.
         self.workspace = marlin_make_workspace_new(device)
 
@@ -97,10 +125,12 @@ class MarlinLinearKernel(MPLinearKernel):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
             x.data = ops.gptq_marlin_repack(
-                x.data.contiguous(),
+                marlin_pad_qweight(
+                    x.data.contiguous(), size_n, size_k, padded_n, padded_k
+                ),
                 perm=layer.g_idx_sort_indices,
-                size_k=c.partition_weight_shape[0],
-                size_n=c.partition_weight_shape[1],
+                size_k=padded_k,
+                size_n=padded_n,
                 num_bits=c.weight_type.size_bits,
                 is_a_8bit=is_a_8bit,
             )
@@ -110,9 +140,16 @@ class MarlinLinearKernel(MPLinearKernel):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1)
             x.data = marlin_permute_scales(
-                x.data.contiguous(),
-                size_k=c.partition_weight_shape[0],
-                size_n=c.partition_weight_shape[1],
+                marlin_pad_scales(
+                    x.data.contiguous(),
+                    size_n,
+                    size_k,
+                    padded_n,
+                    padded_k,
+                    c.group_size,
+                ),
+                size_k=padded_k,
+                size_n=padded_n,
                 group_size=c.group_size,
                 is_a_8bit=is_a_8bit,
             )
@@ -143,21 +180,27 @@ class MarlinLinearKernel(MPLinearKernel):
             layer.g_idx_sort_indices = marlin_make_empty_g_idx(device)
 
         if c.zero_points:
-            grouped_k = (
-                c.partition_weight_shape[0] // c.group_size if c.group_size != -1 else 1
-            )
+            grouped_k = size_k // c.group_size if c.group_size != -1 else 1
+            padded_grouped_k = padded_k // c.group_size if c.group_size != -1 else 1
             self._transform_param(
                 layer,
                 self.w_zp_name,
                 lambda x: marlin_zero_points(
-                    unpack_cols(
-                        x.t(),
-                        c.weight_type.size_bits,
-                        grouped_k,
-                        c.partition_weight_shape[1],
+                    marlin_pad_scales(
+                        unpack_cols(
+                            x.t(),
+                            c.weight_type.size_bits,
+                            grouped_k,
+                            size_n,
+                        ),
+                        size_n,
+                        size_k,
+                        padded_n,
+                        padded_k,
+                        c.group_size,
                     ),
-                    size_k=grouped_k,
-                    size_n=c.partition_weight_shape[1],
+                    size_k=padded_grouped_k,
+                    size_n=padded_n,
                     num_bits=c.weight_type.size_bits,
                     is_a_8bit=is_a_8bit,
                 ),
@@ -168,7 +211,9 @@ class MarlinLinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
         if hasattr(layer, "bias") and layer.bias is not None:
-            layer.bias.data = marlin_permute_bias(layer.bias)
+            layer.bias.data = marlin_permute_bias(
+                marlin_pad_dim(layer.bias, size_n, padded_n)
+            )
 
     def apply_weights(
         self,

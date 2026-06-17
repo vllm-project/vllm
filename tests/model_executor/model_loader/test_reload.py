@@ -25,6 +25,10 @@ from vllm.model_executor.model_loader.reload.meta import (
 )
 from vllm.model_executor.model_loader.reload.types import LayerReloadingInfo
 from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
+from vllm.model_executor.model_loader.weight_utils import (
+    composed_weight_loader,
+    default_weight_loader,
+)
 from vllm.platforms import current_platform
 
 
@@ -176,6 +180,83 @@ def test_get_numel_loaded():
     num_loaded, ret = get_numel_loaded(complex_weight_loader, args)
     assert num_loaded == 6
     assert ret == "value"
+
+
+def test_get_numel_loaded_caps_at_param_size():
+    # composed_weight_loader copies into the param twice (the load and the
+    # in-place post-load transform), but only param.numel() distinct elements
+    # are loaded. get_numel_loaded must not double-count, otherwise a layer's
+    # loaded-element total can be reached early and trailing params get dropped.
+    param = torch.empty(10)
+    loaded_weight = torch.ones(10)
+    loader = composed_weight_loader(default_weight_loader, lambda x: x + 1)
+
+    args = inspect.signature(loader).bind(param, loaded_weight)
+    num_loaded, _ = get_numel_loaded(loader, args)
+    assert num_loaded == 10
+
+
+class _ComposedLoaderLayer(torch.nn.Module):
+    """Mimics a Mamba2 mixer's equal-numel direct params (A, D, dt_bias).
+
+    ``A`` uses ``composed_weight_loader`` (an extra in-place transform copy),
+    matching ``MambaMixer2`` where ``A`` is loaded as ``-exp(A_log)``.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.A = torch.nn.Parameter(torch.empty(4, dtype=torch.float32))
+        self.D = torch.nn.Parameter(torch.ones(4))
+        self.dt_bias = torch.nn.Parameter(torch.ones(4))
+        self.A.weight_loader = composed_weight_loader(
+            default_weight_loader, lambda x: -torch.exp(x.float())
+        )
+        self.D.weight_loader = default_weight_loader
+        self.dt_bias.weight_loader = default_weight_loader
+
+
+def test_layerwise_reload_composed_loader_does_not_drop_params(monkeypatch):
+    # Regression test: a composed_weight_loader param (A) used to double-count
+    # its elements, finalizing the layer before the trailing param (D) was
+    # loaded and leaving it as uninitialized materialized memory.
+    layer = _ComposedLoaderLayer()
+    model = torch.nn.Sequential(layer)
+
+    def materialize_with_sentinel(meta_tensor):
+        tensor = torch.empty_strided(
+            size=tuple(meta_tensor.size()),
+            stride=tuple(meta_tensor.stride()),
+            dtype=meta_tensor.dtype,
+            requires_grad=False,
+        )
+        tensor.fill_(float("nan"))
+        tensor.__class__ = meta_tensor.__class__
+        tensor.__dict__ = meta_tensor.__dict__.copy()
+        return tensor
+
+    monkeypatch.setattr(
+        reload_meta, "materialize_meta_tensor", materialize_with_sentinel
+    )
+
+    loaded = {
+        "A": torch.full((4,), 0.5),
+        "dt_bias": torch.full((4,), 3.0),
+        "D": torch.full((4,), 7.0),
+    }
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    # Mimic real load_weights: resolve params once, then load in checkpoint
+    # order with D last (the param that was dropped).
+    params = dict(layer.named_parameters())
+    for name in ("A", "dt_bias", "D"):
+        param = params[name]
+        param.weight_loader(param, loaded[name])
+    finalize_layerwise_reload(model, model_config=None)
+
+    assert torch.equal(layer.A, -torch.exp(loaded["A"]))
+    assert torch.equal(layer.dt_bias, loaded["dt_bias"])
+    assert torch.equal(layer.D, loaded["D"])
 
 
 def test_layerwise_reload_skips_non_persistent_parameter_alias_buffers(monkeypatch):

@@ -39,7 +39,7 @@ from vllm.distributed import (
 from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import FusedMoE, fused_experts
+from vllm.model_executor.layers.fused_moe import FusedMoE, MoERunner, fused_experts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
@@ -171,7 +171,7 @@ def override_normalize_e4m3fn_to_e4m3fnuz():
 
 
 def sp_wrapper(
-    fn: Callable | FusedMoE, is_sequence_parallel: bool | None = None
+    fn: Callable | MoERunner, is_sequence_parallel: bool | None = None
 ) -> Callable:
     """Wrapper to handle sequence parallelism chunking and gathering.
 
@@ -182,9 +182,9 @@ def sp_wrapper(
     - tensor_model_parallel_all_gather() uses get_tp_group()
     - Both should work correctly even when EP is enabled
     """
-    if isinstance(fn, FusedMoE):
+    if isinstance(fn, MoERunner):
         assert is_sequence_parallel is None
-        is_sequence_parallel = fn.is_sequence_parallel
+        is_sequence_parallel = fn.moe_config.moe_parallel_config.is_sequence_parallel
     else:
         assert is_sequence_parallel is not None
 
@@ -322,7 +322,7 @@ class MoETestConfig:
     def is_sequence_parallel(self) -> bool:
         # Sequence parallelism: EP enabled + TP dimension used for sequence splitting
         # In test config: ep_size represents total expert parallel size
-        # tp_size represents the original TP dimension (becomes sp_size in FusedMoE)
+        # tp_size represents the original TP dimension (becomes sp_size in MoERunner)
         # dp_size represents data parallel size
         # For SP: we need EP enabled (ep_size > 1) and sequence splitting (tp_size > 1)
         return self.ep_size > 1 and self.tp_size > 1
@@ -988,7 +988,7 @@ def make_fused_moe_layer(
     routed_output_transform: torch.nn.Module | None = None,
     pcp_size: int | None = 1,
     is_sequence_parallel: bool = False,
-) -> FusedMoE:
+) -> MoERunner:
     quant_config, qw = make_quant_config(quantization, w1, w2, global_num_experts)
 
     kwargs = dict()
@@ -1014,7 +1014,6 @@ def make_fused_moe_layer(
         topk_group=topk_group,
         quant_config=quant_config,
         tp_size=tp_size,
-        ep_size=ep_size,
         dp_size=dp_size,
         pcp_size=pcp_size,
         prefix="from_forward_context",
@@ -1031,7 +1030,9 @@ def make_fused_moe_layer(
         **kwargs,
     )
 
-    weight_scale_name = getattr(layer.quant_method, "weight_scale_name", "weight_scale")
+    weight_scale_name = getattr(
+        layer._quant_method, "weight_scale_name", "weight_scale"
+    )
 
     for name, value in [
         ("w13_weight", qw.w13_weight),
@@ -1044,11 +1045,11 @@ def make_fused_moe_layer(
         ("w2_input_scale", qw.w2_input_scale),
     ]:
         if value is not None:
-            layer.register_parameter(
+            layer.routed_experts.register_parameter(
                 name, torch.nn.Parameter(value, requires_grad=False)
             )
 
-    layer.quant_method.process_weights_after_loading(layer)
+    layer._quant_method.process_weights_after_loading(layer.routed_experts)
 
     return layer
 
@@ -1076,6 +1077,7 @@ def make_fake_moe_layer(
     expert_load_view: torch.Tensor | None = None,
     logical_to_physical_map: torch.Tensor | None = None,
     logical_replica_count: torch.Tensor | None = None,
+    num_redundant_experts: int = 0,
     gate: torch.nn.Module | None = None,
     routed_input_transform: torch.nn.Module | None = None,
     routed_output_transform: torch.nn.Module | None = None,
@@ -1100,9 +1102,6 @@ def make_fake_moe_layer(
         routed_scaling_factor=routed_scaling_factor,
         e_score_correction_bias=e_score_correction_bias,
         num_fused_shared_experts=0,  # TODO
-        # TODO(bnell): once we can construct the MK at init time, we
-        # can make this a value.
-        indices_type_getter=lambda: indices_type,
     )
 
     if quant_dtype is not None:
@@ -1143,6 +1142,7 @@ def make_fake_moe_layer(
         topk_weights, topk_ids = router.select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
+            topk_indices_dtype=indices_type,
         )
 
         # Shared experts use original (untransformed) hidden_states
@@ -1184,7 +1184,7 @@ def make_fake_moe_layer(
 
 
 def _test_body_regular(
-    moe_layer: FusedMoE,
+    moe_layer: MoERunner,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     vllm_config: VllmConfig,
@@ -1207,7 +1207,7 @@ def _test_body_regular(
 
 
 def _test_body_eplb(
-    moe_layer: FusedMoE,
+    moe_layer: MoERunner,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     vllm_config: VllmConfig,
@@ -1234,7 +1234,7 @@ def _test_body_eplb(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     device = torch.accelerator.current_accelerator()
 
-    is_sequence_parallel = moe_layer.is_sequence_parallel
+    is_sequence_parallel = moe_layer.moe_config.moe_parallel_config.is_sequence_parallel
 
     """EPLB test body: compare output before and after expert weight rearrangement."""
     # Get "before" output with original weight arrangement
@@ -1278,9 +1278,6 @@ def _test_body_eplb(
         is_sequence_parallel=is_sequence_parallel,
     )
 
-    if eplb_moe_layer._expert_map is not None:
-        eplb_moe_layer._expert_map = eplb_moe_layer._expert_map.to(device)
-
     # All ranks must generate the same permutation
     initial_indices = torch.arange(num_experts, dtype=torch.long)
     shuffled_indices = initial_indices[torch.randperm(num_experts)]
@@ -1288,6 +1285,9 @@ def _test_body_eplb(
     expert_weights = [list(eplb_moe_layer.get_expert_weights())]
 
     expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
+    assert vllm_config.parallel_config.eplb_config.communicator is not None, (
+        "EPLB communicator backend must be set by ParallelConfig"
+    )
     communicator = create_eplb_communicator(
         group_coordinator=get_eplb_group(),
         backend=vllm_config.parallel_config.eplb_config.communicator,
@@ -1329,7 +1329,7 @@ def _test_body_eplb(
         ),
     )
 
-    eplb_moe_layer.eplb_state.should_record_tensor = torch.ones(
+    eplb_moe_layer.router.eplb_state.should_record_tensor = torch.ones(
         (), dtype=torch.bool, device=device
     )
 
@@ -1381,193 +1381,194 @@ def _run_one_config(
       * Weights are chunked by ep_size (experts) but NOT by tp_size
       * Input sequences are chunked by tp_size (via sp_wrapper)
     """
-    set_random_seed(7)
+    try:
+        set_random_seed(7)
 
-    use_ep = ep_size > 1
+        use_ep = ep_size > 1
 
-    assert vllm_config.parallel_config.enable_expert_parallel == use_ep
+        assert vllm_config.parallel_config.enable_expert_parallel == use_ep
 
-    in_dtype = torch.bfloat16
-    device = torch.accelerator.current_accelerator()
+        in_dtype = torch.bfloat16
+        device = torch.accelerator.current_accelerator()
 
-    if not is_workspace_manager_initialized():
-        init_workspace_manager(device)
+        if not is_workspace_manager_initialized():
+            init_workspace_manager(device)
 
-    # Create test data and transforms
-    test_data = setup_moe_test_data(
-        m=m,
-        k=k,
-        n=n,
-        num_experts=num_experts,
-        in_dtype=in_dtype,
-        use_shared_experts=use_shared_experts,
-        use_gate=use_gate,
-        use_routed_input_transform=use_routed_input_transform,
-        backend=backend,
-        device=device,
-    )
-
-    # Extract data from test_data
-    hidden_states = test_data.hidden_states
-    router_logits = test_data.router_logits
-    w1 = test_data.w1
-    w2 = test_data.w2
-    shared_experts_config = test_data.shared_experts_config
-    gate = test_data.gate
-    routed_input_transform = test_data.routed_input_transform
-    routed_output_transform = test_data.routed_output_transform
-    activation = "silu"
-
-    # Create baseline layer with FULL weights (no EP chunking)
-    # Baseline represents the expected output using full model
-    baseline_layer = make_fake_moe_layer(
-        w1=w1,
-        w2=w2,
-        top_k=top_k,
-        global_num_experts=num_experts,
-        in_dtype=in_dtype,
-        quantization=quantization,
-        renormalize=False,
-        shared_experts_config=shared_experts_config,
-        gate=gate,
-        routed_input_transform=routed_input_transform,
-        routed_output_transform=routed_output_transform,
-        use_ep=use_ep,
-        tp_size=tp_size,
-        ep_size=ep_size,
-        dp_size=dp_size,
-        activation=activation,
-        is_sequence_parallel=is_sequence_parallel,
-    )
-
-    with set_current_vllm_config(vllm_config):
-        # Compute baseline output with SP wrapper if needed
-        # sp_wrapper handles sequence chunking/gathering for SP
-        baseline_output = sp_wrapper(baseline_layer, is_sequence_parallel)(
-            hidden_states, router_logits
-        )
-
-    del baseline_layer
-    torch.accelerator.empty_cache()
-
-    with set_current_vllm_config(vllm_config):
-        # Chunk weights for EP BEFORE creating FusedMoE
-        # FusedMoE uses EP-chunked weights and handles reductions internally
-        if ep_size > 1:
-            # Split experts across ranks (dimension 0 is the expert dimension)
-            # When EP is enabled, use EP group rank and ep_size for chunking
-            ep_rank = get_ep_group().rank_in_group
-            w1 = chunk_by_rank(w1, ep_rank, ep_size, dim=0, device=device)
-            w2 = chunk_by_rank(w2, ep_rank, ep_size, dim=0, device=device)
-
-        # Chunk weights for TP (only if NOT doing sequence parallelism)
-        # Sequence parallelism splits tokens/sequences, not weight tensors
-        if tp_size > 1 and not is_sequence_parallel:
-            w1 = tp_chunk_gate_up(w1, tp_rank, tp_size, dim=1, device=device)
-            w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
-
-        # Setup shared experts if needed
-        # In SP mode, shared experts should NOT be TP-chunked (same as routed experts)
-        # tp_size is used for sequence splitting, not weight splitting
-        shared_experts = create_shared_experts_from_config(
-            shared_experts_config,
-            in_dtype,
-            tp_size,
-            tp_rank,
-            is_sequence_parallel,
-            device,
-        )
-
-        # Determine hidden size for MoE layer
-        # When using routed_input_transform, experts operate in latent space
-        hidden_size_for_layer = k // 2 if routed_input_transform is not None else k
-
-        # Create initial MoE layer
-        moe_layer = make_fused_moe_layer(
-            quantization=quantization,
-            use_ep=use_ep,
-            hidden_size=hidden_size_for_layer,
-            intermediate_size=n,
+        # Create test data and transforms
+        test_data = setup_moe_test_data(
+            m=m,
+            k=k,
+            n=n,
+            num_experts=num_experts,
             in_dtype=in_dtype,
-            tp_size=tp_size,
-            ep_size=ep_size,
-            dp_size=dp_size,
+            use_shared_experts=use_shared_experts,
+            use_gate=use_gate,
+            use_routed_input_transform=use_routed_input_transform,
+            backend=backend,
+            device=device,
+        )
+
+        # Extract data from test_data
+        hidden_states = test_data.hidden_states
+        router_logits = test_data.router_logits
+        w1 = test_data.w1
+        w2 = test_data.w2
+        shared_experts_config = test_data.shared_experts_config
+        gate = test_data.gate
+        routed_input_transform = test_data.routed_input_transform
+        routed_output_transform = test_data.routed_output_transform
+        activation = "silu"
+
+        # Create baseline layer with FULL weights (no EP chunking)
+        # Baseline represents the expected output using full model
+        baseline_layer = make_fake_moe_layer(
             w1=w1,
             w2=w2,
             top_k=top_k,
             global_num_experts=num_experts,
-            shared_experts=shared_experts,
+            in_dtype=in_dtype,
+            quantization=quantization,
+            renormalize=False,
+            shared_experts_config=shared_experts_config,
             gate=gate,
             routed_input_transform=routed_input_transform,
             routed_output_transform=routed_output_transform,
-            activation=activation,
-            is_sequence_parallel=is_sequence_parallel,
-        )
-
-        if moe_layer._expert_map is not None:
-            moe_layer._expert_map = moe_layer._expert_map.to(device)
-
-        num_tokens = m
-        # num_tokens_across_dp should have one entry per DP group, not per total rank
-        # When EP is enabled, dp_size represents the number of DP groups
-        num_tokens_across_dp = torch.tensor(
-            [num_tokens] * dp_size,
-            device=device,
-            dtype=torch.int,
-        )
-
-        # Call the test body function with all necessary context
-        expected, actual = test_body_fn(
-            moe_layer=moe_layer,
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            vllm_config=vllm_config,
-            num_tokens=num_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
-            in_dtype=in_dtype,
-            quantization=quantization,
             use_ep=use_ep,
             tp_size=tp_size,
             ep_size=ep_size,
             dp_size=dp_size,
-            w1=w1,
-            w2=w2,
-            num_experts=num_experts,
-            k=k,
-            n=n,
-            m=m,
-            top_k=top_k,
-            shared_experts=shared_experts,
-            gate=gate,
-            routed_input_transform=routed_input_transform,
-            routed_output_transform=routed_output_transform,
-            baseline_output=baseline_output,
-            **kwargs,
+            activation=activation,
+            is_sequence_parallel=is_sequence_parallel,
         )
 
-    # Common tolerance logic
-    # TODO: consider associating tolerances with quant methods.
-    if quantization is None:
-        if k >= 2048:
-            atol, rtol = 7.6e-2, 7.6e-2
-        else:
-            atol, rtol = 3.5e-2, 3.5e-2
-    elif quantization in ("fp8", "fp8_blocked", "modelopt_fp8"):
-        atol, rtol = 6.5e-2, 6.5e-2
-    elif quantization == "modelopt_fp4":
-        if k >= 2048:
-            atol = rtol = 1e-1 + (k * 1e-4)
-        else:
-            atol = rtol = 1e-1
+        with set_current_vllm_config(vllm_config):
+            # Compute baseline output with SP wrapper if needed
+            # sp_wrapper handles sequence chunking/gathering for SP
+            baseline_output = sp_wrapper(baseline_layer, is_sequence_parallel)(
+                hidden_states, router_logits
+            )
 
-        if backend == "allgather_reducescatter" and tp_size > 1:
-            atol += 2e-1
-            rtol += 2e-1
-    else:
-        atol, rtol = 6e-2, 6e-2
+        del baseline_layer
+        torch.accelerator.empty_cache()
 
-    torch.accelerator.synchronize()  # TODO: Is this needed?
-    torch.testing.assert_close(expected, actual, atol=atol, rtol=rtol)
+        with set_current_vllm_config(vllm_config):
+            # Chunk weights for EP BEFORE creating FusedMoE
+            # FusedMoE uses EP-chunked weights and handles reductions internally
+            if ep_size > 1:
+                # Split experts across ranks (dimension 0 is the expert dimension)
+                # When EP is enabled, use EP group rank and ep_size for chunking
+                ep_rank = get_ep_group().rank_in_group
+                w1 = chunk_by_rank(w1, ep_rank, ep_size, dim=0, device=device)
+                w2 = chunk_by_rank(w2, ep_rank, ep_size, dim=0, device=device)
+
+            # Chunk weights for TP (only if NOT doing sequence parallelism)
+            # Sequence parallelism splits tokens/sequences, not weight tensors
+            if tp_size > 1 and not is_sequence_parallel:
+                w1 = tp_chunk_gate_up(w1, tp_rank, tp_size, dim=1, device=device)
+                w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
+
+            # Setup shared experts if needed
+            # In SP mode, shared experts should NOT be TP-chunked (same as routed
+            # experts).
+            # tp_size is used for sequence splitting, not weight splitting
+            shared_experts = create_shared_experts_from_config(
+                shared_experts_config,
+                in_dtype,
+                tp_size,
+                tp_rank,
+                is_sequence_parallel,
+                device,
+            )
+
+            # Determine hidden size for MoE layer
+            # When using routed_input_transform, experts operate in latent space
+            hidden_size_for_layer = k // 2 if routed_input_transform is not None else k
+
+            # Create initial MoE layer
+            moe_layer = make_fused_moe_layer(
+                quantization=quantization,
+                use_ep=use_ep,
+                hidden_size=hidden_size_for_layer,
+                intermediate_size=n,
+                in_dtype=in_dtype,
+                tp_size=tp_size,
+                ep_size=ep_size,
+                dp_size=dp_size,
+                w1=w1,
+                w2=w2,
+                top_k=top_k,
+                global_num_experts=num_experts,
+                shared_experts=shared_experts,
+                gate=gate,
+                routed_input_transform=routed_input_transform,
+                routed_output_transform=routed_output_transform,
+                activation=activation,
+                is_sequence_parallel=is_sequence_parallel,
+            )
+
+            num_tokens = m
+            # num_tokens_across_dp should have one entry per DP group, not per
+            # total rank.
+            # When EP is enabled, dp_size represents the number of DP groups
+            num_tokens_across_dp = torch.tensor(
+                [num_tokens] * dp_size,
+                device=device,
+                dtype=torch.int,
+            )
+
+            # Call the test body function with all necessary context
+            expected, actual = test_body_fn(
+                moe_layer=moe_layer,
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                vllm_config=vllm_config,
+                num_tokens=num_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                in_dtype=in_dtype,
+                quantization=quantization,
+                use_ep=use_ep,
+                tp_size=tp_size,
+                ep_size=ep_size,
+                dp_size=dp_size,
+                w1=w1,
+                w2=w2,
+                num_experts=num_experts,
+                k=k,
+                n=n,
+                m=m,
+                top_k=top_k,
+                shared_experts=shared_experts,
+                gate=gate,
+                routed_input_transform=routed_input_transform,
+                routed_output_transform=routed_output_transform,
+                baseline_output=baseline_output,
+                **kwargs,
+            )
+
+        # Common tolerance logic
+        # TODO: consider associating tolerances with quant methods.
+        if quantization is None:
+            if k >= 2048:
+                atol, rtol = 7.6e-2, 7.6e-2
+            else:
+                atol, rtol = 3.5e-2, 3.5e-2
+        elif quantization in ("fp8", "fp8_blocked", "modelopt_fp8"):
+            atol, rtol = 6.5e-2, 6.5e-2
+        elif quantization == "modelopt_fp4":
+            if k >= 2048:
+                atol = rtol = 1e-1 + (k * 1e-4)
+            else:
+                atol = rtol = 1e-1
+
+            if backend == "allgather_reducescatter" and tp_size > 1:
+                atol += 2e-1
+                rtol += 2e-1
+        else:
+            atol, rtol = 6e-2, 6e-2
+
+        torch.testing.assert_close(expected, actual, atol=atol, rtol=rtol)
+    finally:
+        torch.accelerator.synchronize()
 
 
 # Test for non-parallel cases (world_size == 1) - backend doesn't matter
@@ -1803,12 +1804,9 @@ def test_moe_layer(
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
         monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
-    # TODO
-    # VLLM_FLASHINFER_MOE_BACKEND=latency
-    # VLLM_USE_FLASHINFER_MOE_FP16=1
-    # VLLM_USE_FLASHINFER_MOE_FP8
-    # VLLM_USE_FLASHINFER_MOE_FP4
-    # VLLM_USE_FLASHINFER_MOE_INT4
+    # TODO: cover FlashInfer MoE backends via moe_backend, e.g.
+    # moe_backend=flashinfer_trtllm / flashinfer_cutlass / flashinfer_cutedsl
+    # (BF16, FP8 and NVFP4 paths), and VLLM_USE_FLASHINFER_MOE_INT4=1.
 
     parallel_config = ParallelConfig(
         pipeline_parallel_size=1,

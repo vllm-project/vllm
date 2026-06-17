@@ -39,6 +39,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     get_port_offset,
     get_role,
     parse_moriio_zmq_address,
+    resolve_host_ip,
     set_role,
     zmq_ctx,
 )
@@ -54,7 +55,6 @@ from vllm.distributed.parallel_state import (
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.utils.network_utils import (
-    get_ip,
     make_zmq_path,
     make_zmq_socket,
 )
@@ -105,7 +105,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
         self._set_port_defaults(vllm_config)
 
         self.engine_id = (
-            str(get_ip())
+            str(resolve_host_ip(self.kv_transfer_config.kv_connector_extra_config))
             + ":"
             + str(self.kv_transfer_config.kv_connector_extra_config["handshake_port"])
         )
@@ -256,7 +256,9 @@ class MoRIIOConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.mode = get_moriio_mode(self.kv_transfer_config)
-        self.host_ip = get_ip()
+        self.host_ip = resolve_host_ip(
+            self.kv_transfer_config.kv_connector_extra_config
+        )
         self.handshake_port = self.kv_transfer_config.kv_connector_extra_config[
             "handshake_port"
         ]

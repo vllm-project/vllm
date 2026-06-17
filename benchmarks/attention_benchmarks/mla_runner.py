@@ -8,6 +8,8 @@ This module provides helpers for running MLA backends without
 needing full VllmConfig integration.
 """
 
+import statistics
+
 import numpy as np
 import torch
 from batch_spec import parse_batch_spec
@@ -17,6 +19,8 @@ from common import (
     MockIndexer,
     MockKVBProj,
     MockLayer,
+    run_do_bench,
+    run_ncu_profile,
     setup_mla_dims,
 )
 
@@ -704,6 +708,8 @@ def _run_single_benchmark(
     device: torch.device,
     indexer=None,
     kv_cache_dtype: str | None = None,
+    output_scale: float | None = None,
+    fuse_quant_op: bool = False,
 ) -> BenchmarkResult:
     """
     Run a single benchmark iteration.
@@ -717,6 +723,11 @@ def _run_single_benchmark(
         mla_dims: MLA dimension configuration
         device: Target device
         indexer: Optional MockIndexer for sparse backends
+        output_scale: Static per-tensor FP8 scale for prefill output. None
+            keeps the plain bf16 output (no quantization).
+        fuse_quant_op: With output_scale set, True lets the prefill kernel write
+            FP8 directly; False runs bf16 attention then a standalone static-FP8
+            quant. The delta isolates the saved post-quant kernel.
 
     Returns:
         BenchmarkResult with timing statistics
@@ -820,63 +831,86 @@ def _run_single_benchmark(
             num_prefill, mla_dims, query_fmt, device, torch.bfloat16
         )
 
-    # Build forward function
+    # Prefill FP8 output: fused (kernel writes e4m3) vs separate post-quant.
+    prefill_fp8_output = None
+    prefill_output_scale = None
+    prefill_quant_op = None
+    if has_prefill and output_scale is not None:
+        from vllm.platforms import current_platform
+
+        prefill_output_scale = torch.tensor(
+            [output_scale], device=device, dtype=torch.float32
+        )
+        if fuse_quant_op:
+            prefill_fp8_output = torch.empty_like(
+                prefill_inputs["output"], dtype=current_platform.fp8_dtype()
+            )
+        else:
+            from vllm.model_executor.layers.quantization.input_quant_fp8 import (
+                QuantFP8,
+            )
+            from vllm.model_executor.layers.quantization.utils.quant_utils import (
+                GroupShape,
+            )
+
+            prefill_quant_op = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+
+    fused_output = output_scale is not None and fuse_quant_op
+
+    # Build forward function (runs a single decode/prefill pass)
     def forward_fn():
         results = []
         if has_decode:
             results.append(impl.forward_mqa(decode_inputs, kv_cache, metadata, layer))
         if has_prefill:
-            results.append(
-                impl.forward_mha(
-                    prefill_inputs["q"],
-                    prefill_inputs["k_c_normed"],
-                    prefill_inputs["k_pe"],
-                    kv_cache,
-                    metadata,
-                    prefill_inputs["k_scale"],
-                    prefill_inputs["output"],
-                )
+            out = impl.forward_mha(
+                prefill_inputs["q"],
+                prefill_inputs["k_c_normed"],
+                prefill_inputs["k_pe"],
+                kv_cache,
+                metadata,
+                prefill_inputs["k_scale"],
+                prefill_fp8_output if fused_output else prefill_inputs["output"],
+                prefill_output_scale if fused_output else None,
             )
+            if fused_output:
+                out = prefill_fp8_output
+            elif prefill_quant_op is not None:
+                out, _ = prefill_quant_op(
+                    prefill_inputs["output"], prefill_output_scale
+                )
+            results.append(out)
         return results[0] if len(results) == 1 else tuple(results)
 
-    # Warmup
-    for _ in range(config.warmup_iters):
-        forward_fn()
-    torch.accelerator.synchronize()
-
-    # Optionally capture a CUDA graph after warmup.
-    # Graph replay eliminates CPU launch overhead so timings reflect pure
-    # kernel time.
-    if config.use_cuda_graphs:
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            forward_fn()
-        benchmark_fn = graph.replay
-    else:
-        benchmark_fn = forward_fn
-
-    # Benchmark
-    times = []
-    for _ in range(config.repeats):
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-
-        start.record()
+    def benchmark_fn():
         for _ in range(config.num_layers):
-            benchmark_fn()
-        end.record()
+            forward_fn()
 
-        torch.accelerator.synchronize()
-        elapsed_ms = start.elapsed_time(end)
-        times.append(elapsed_ms / 1000.0 / config.num_layers)
+    if config.ncu_profile:
+        run_ncu_profile(benchmark_fn)
+        return BenchmarkResult(
+            config=config,
+            mean_time=0.0,
+            median_time=0.0,
+            std_time=0.0,
+            min_time=0.0,
+            max_time=0.0,
+            throughput_tokens_per_sec=0.0,
+        )
 
-    mean_time = float(np.mean(times))
+    all_ms = run_do_bench(benchmark_fn, config.use_cuda_graphs, config.warmup_ms)
+
+    # Convert ms to seconds per layer
+    times = [t / 1000.0 / config.num_layers for t in all_ms]
+    mean_time = statistics.mean(times)
+
     return BenchmarkResult(
         config=config,
         mean_time=mean_time,
-        std_time=float(np.std(times)),
-        min_time=float(np.min(times)),
-        max_time=float(np.max(times)),
+        median_time=statistics.median(times),
+        std_time=statistics.stdev(times) if len(times) > 1 else 0.0,
+        min_time=min(times),
+        max_time=max(times),
         throughput_tokens_per_sec=total_q / mean_time if mean_time > 0 else 0,
     )
 
@@ -886,6 +920,8 @@ def _run_mla_benchmark_batched(
     configs_with_params: list[tuple],  # [(config, threshold, num_splits), ...]
     index_topk: int = 2048,
     prefill_backend: str | None = None,
+    output_scale: float | None = None,
+    fuse_quant_op: bool = False,
 ) -> list[BenchmarkResult]:
     """
     Unified batched MLA benchmark runner for all backends.
@@ -1025,6 +1061,8 @@ def _run_mla_benchmark_batched(
                     device,
                     indexer=indexer,
                     kv_cache_dtype=kv_cache_dtype,
+                    output_scale=output_scale,
+                    fuse_quant_op=fuse_quant_op,
                 )
                 results.append(result)
 
@@ -1052,6 +1090,8 @@ def run_mla_benchmark(
     num_kv_splits: int | None = None,
     index_topk: int = 2048,
     prefill_backend: str | None = None,
+    output_scale: float | None = None,
+    fuse_quant_op: bool = False,
 ) -> BenchmarkResult | list[BenchmarkResult]:
     """
     Unified MLA benchmark runner for all backends.
@@ -1071,6 +1111,9 @@ def run_mla_benchmark(
         index_topk: Topk value for sparse MLA backends (default 2048)
         prefill_backend: Prefill backend name (e.g., "fa3", "fa4").
             When set, forces the specified FlashAttention version for prefill.
+        output_scale: Static per-tensor FP8 scale for prefill output (None = bf16).
+        fuse_quant_op: With output_scale set, fuse the FP8 write into the prefill
+            kernel vs a standalone post-quant kernel. See _run_single_benchmark.
 
     Returns:
         BenchmarkResult (single mode) or list of BenchmarkResult (batched mode)
@@ -1095,7 +1138,12 @@ def run_mla_benchmark(
 
     # Use unified batched execution
     results = _run_mla_benchmark_batched(
-        backend, configs_with_params, index_topk, prefill_backend=prefill_backend
+        backend,
+        configs_with_params,
+        index_topk,
+        prefill_backend=prefill_backend,
+        output_scale=output_scale,
+        fuse_quant_op=fuse_quant_op,
     )
 
     # Return single result or list based on input

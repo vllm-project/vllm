@@ -66,7 +66,6 @@ _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
     "bitsandbytes": 0.5,
     "modelopt_fp4": 0.5,
     "petit_nvfp4": 0.5,
-    "gguf": 0.5,
     "compressed-tensors": 0.5,
     "torchao": 0.5,
     "quark": 0.5,
@@ -396,6 +395,20 @@ class AttentionQuantizationConfigParser(Parser):
         return args
 
 
+class AttentionDetectionParser(Parser):
+    """
+    Prevents standard AttentionMetrics from being instantiated for MLA models.
+    MLA models should use MLAAttentionMetrics instead.
+    """
+
+    def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        if vllm_config.model_config.is_deepseek_mla:
+            raise InvalidComponent(
+                "Model uses MLA attention; use MLAAttentionMetrics instead"
+            )
+        return args
+
+
 class AttentionMetrics(ComponentMetrics):
     # From BaseConfigParser
     num_hidden_layers: int = Field(..., gt=0)
@@ -423,6 +436,7 @@ class AttentionMetrics(ComponentMetrics):
     @classmethod
     def get_parser(cls) -> ParserChain:
         return ParserChain(
+            AttentionDetectionParser(),
             BaseConfigParser(),
             BaseAttentionConfigParser(),
             AttentionQuantizationConfigParser(),
@@ -523,6 +537,276 @@ class AttentionMetrics(ComponentMetrics):
             "kv_cache": 2 * T * kv * d * self.cache_byte_size * L,
             "out_output": T * D * self.activation_byte_size * L,
         }
+
+
+#### MLA Attention ####
+
+
+class MLADetectionParser(Parser):
+    """
+    Validates that the model uses MLA attention.
+    Raises InvalidComponent if the model does not use MLA,
+    so MLAAttentionMetrics is silently skipped for non-MLA models.
+    """
+
+    def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        if not vllm_config.model_config.is_deepseek_mla:
+            raise InvalidComponent("Model does not use MLA attention")
+        return args
+
+
+class MLAConfigParser(Parser):
+    """
+    Parses MLA-specific configuration fields.
+    Provides: kv_lora_rank, qk_nope_head_dim, qk_rope_head_dim,
+    v_head_dim, q_lora_rank
+    """
+
+    def parse(self, args: ParsedArgs, vllm_config: VllmConfig) -> ParsedArgs:
+        model_config = vllm_config.model_config
+        cfg = model_config.hf_text_config
+
+        args.kv_lora_rank = get_required(cfg, "kv_lora_rank")
+        args.qk_nope_head_dim = get_required(cfg, "qk_nope_head_dim")
+        args.qk_rope_head_dim = get_required(cfg, "qk_rope_head_dim")
+        args.v_head_dim = get_required(cfg, "v_head_dim")
+        args.q_lora_rank = getattr(cfg, "q_lora_rank", None)
+
+        model_dtype = vllm_config.model_config.dtype
+        cache_dtype = vllm_config.cache_config.cache_dtype
+        kv_cache_torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
+        args.cache_byte_size = get_dtype_size(kv_cache_torch_dtype)
+
+        return args
+
+
+class MLAAttentionMetrics(ComponentMetrics):
+    """
+    Performance metrics for Multi-Latent Attention (MLA) layers.
+
+    MLA uses a compressed latent representation for KV cache:
+    - KV cache stores a single compressed vector of size
+      (kv_lora_rank + qk_rope_head_dim) per token per layer,
+      instead of 2 * num_kv_heads * head_dim as in standard MHA/GQA.
+    - Q path uses optional low-rank compression:
+      h -> q_lora_rank -> num_heads * qk_head_dim
+    - KV path: h -> (kv_lora_rank + qk_rope_head_dim),
+      then kv_lora_rank -> num_heads * (qk_nope_head_dim + v_head_dim)
+
+    Used by DeepSeek-V2, DeepSeek-V3, DeepSeek-R1, and similar models.
+    """
+
+    # From BaseConfigParser
+    num_hidden_layers: int = Field(..., gt=0)
+    hidden_size: int = Field(..., gt=0)
+    num_attention_heads: int = Field(..., gt=0)
+    activation_byte_size: int = Field(..., gt=0)
+    tp_size: int = Field(..., gt=0)
+    pp_size: int = Field(..., gt=0)
+
+    # From BaseConfigParser, can be overridden by AttentionQuantizationConfigParser
+    weight_byte_size: int | float = Field(..., gt=0)
+
+    # From MLAConfigParser
+    kv_lora_rank: int = Field(..., gt=0)
+    qk_nope_head_dim: int = Field(..., gt=0)
+    qk_rope_head_dim: int = Field(..., gt=0)
+    v_head_dim: int = Field(..., gt=0)
+    q_lora_rank: int | None = Field(None)
+    cache_byte_size: int = Field(..., gt=0)
+
+    @classmethod
+    def component_type(cls) -> str:
+        return "mla_attn"
+
+    @classmethod
+    def get_parser(cls) -> ParserChain:
+        return ParserChain(
+            MLADetectionParser(),
+            BaseConfigParser(),
+            MLAConfigParser(),
+            AttentionQuantizationConfigParser(),
+        )
+
+    def get_num_flops_breakdown(
+        self, ctx: ExecutionContext, per_gpu: bool = True
+    ) -> dict[str, int]:
+        """Calculate flops breakdown for MLA attention layers.
+
+        MLA projection structure:
+        - Q path: h -> q_lora_rank -> num_heads * qk_head_dim
+          (or h -> num_heads * qk_head_dim if q_lora_rank is None)
+        - KV path: h -> (kv_lora_rank + qk_rope_head_dim),
+          then kv_lora_rank -> num_heads * (qk_nope_head_dim + v_head_dim)
+        - Attention: Q @ K^T and attn @ V
+        - Output: num_heads * v_head_dim -> h
+        """
+        L = self.num_hidden_layers
+        D = self.hidden_size
+        q = self.num_attention_heads
+        qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        v_d = self.v_head_dim
+        c = self.kv_lora_rank
+        r = self.qk_rope_head_dim
+        q_rank = self.q_lora_rank
+
+        T = ctx.total_num_tokens()
+        TC = ctx.total_token_context_product()
+
+        if per_gpu:
+            L //= self.pp_size
+            q = max(1, q // self.tp_size)
+
+        flops: dict[str, int] = {}
+
+        # Q projection
+        if q_rank is not None:
+            # Two-stage: h -> q_lora_rank -> num_heads * qk_head_dim
+            flops["q_a_proj"] = 2 * T * D * q_rank * L
+            flops["q_b_proj"] = 2 * T * q_rank * q * qk_head_dim * L
+        else:
+            # Direct: h -> num_heads * qk_head_dim
+            flops["q_proj"] = 2 * T * D * q * qk_head_dim * L
+
+        # KV projection (always compressed, shared across heads)
+        # kv_a: h -> (kv_lora_rank + qk_rope_head_dim)  [replicated]
+        flops["kv_a_proj"] = 2 * T * D * (c + r) * L
+        # kv_b: kv_lora_rank -> num_heads * (qk_nope + v_head_dim)
+        flops["kv_b_proj"] = 2 * T * c * q * (self.qk_nope_head_dim + v_d) * L
+
+        # Attention core
+        flops["attn_qk"] = 2 * q * TC * qk_head_dim * L
+        flops["attn_av"] = 2 * q * TC * v_d * L
+
+        # Output projection: num_heads * v_head_dim -> h
+        flops["out_proj"] = 2 * T * q * v_d * D * L
+
+        return flops
+
+    def get_read_bytes_breakdown(
+        self, ctx: ExecutionContext, per_gpu: bool = True
+    ) -> dict[str, int]:
+        """Calculate read memory traffic for MLA attention layers."""
+        L = self.num_hidden_layers
+        D = self.hidden_size
+        q = self.num_attention_heads
+        qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        v_d = self.v_head_dim
+        c = self.kv_lora_rank
+        r = self.qk_rope_head_dim
+        q_rank = self.q_lora_rank
+
+        T = ctx.total_num_tokens()
+        # Compressed KV cache size per token
+        kv_compressed_dim = c + r
+
+        if per_gpu:
+            L //= self.pp_size
+            q = max(1, q // self.tp_size)
+
+        read_bytes: dict[str, int] = {}
+
+        # Q projection weight + input reads
+        if q_rank is not None:
+            read_bytes["q_a_input"] = T * D * self.activation_byte_size * L
+            read_bytes["q_a_weight"] = int(D * q_rank * self.weight_byte_size * L)
+            read_bytes["q_b_input"] = T * q_rank * self.activation_byte_size * L
+            read_bytes["q_b_weight"] = int(
+                q_rank * q * qk_head_dim * self.weight_byte_size * L
+            )
+        else:
+            read_bytes["q_input"] = T * D * self.activation_byte_size * L
+            read_bytes["q_weight"] = int(
+                D * q * qk_head_dim * self.weight_byte_size * L
+            )
+
+        # KV projection weight + input reads
+        # kv_a is replicated (not TP-sharded)
+        read_bytes["kv_a_input"] = T * D * self.activation_byte_size * L
+        read_bytes["kv_a_weight"] = int(
+            D * kv_compressed_dim * self.weight_byte_size * L
+        )
+        # kv_b is TP-sharded along heads
+        read_bytes["kv_b_input"] = T * c * self.activation_byte_size * L
+        read_bytes["kv_b_weight"] = int(
+            c * q * (self.qk_nope_head_dim + v_d) * self.weight_byte_size * L
+        )
+
+        # Attention input reads
+        # Prefill: read Q activations + K,V from kv_b_proj output
+        if ctx.prefill_num_tokens > 0:
+            read_bytes["attn_input"] = (
+                ctx.prefill_num_tokens * q * qk_head_dim * self.activation_byte_size * L
+                + ctx.prefill_context_len
+                * q
+                * (qk_head_dim + v_d)
+                * self.activation_byte_size
+                * L
+            )
+
+        # Decode: read Q activations + read compressed KV from cache
+        if ctx.decode_num_tokens > 0:
+            read_bytes["attn_input"] = read_bytes.get("attn_input", 0) + (
+                ctx.decode_num_tokens * q * qk_head_dim * self.activation_byte_size * L
+                + ctx.decode_context_len * kv_compressed_dim * self.cache_byte_size * L
+            )
+
+        # Output projection reads
+        read_bytes["out_input"] = T * q * v_d * self.activation_byte_size * L
+        read_bytes["out_weight"] = int(q * v_d * D * self.weight_byte_size * L)
+
+        return read_bytes
+
+    def get_write_bytes_breakdown(
+        self, ctx: ExecutionContext, per_gpu: bool = True
+    ) -> dict[str, int]:
+        """Calculate write memory traffic for MLA attention layers."""
+        L = self.num_hidden_layers
+        D = self.hidden_size
+        q = self.num_attention_heads
+        qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        v_d = self.v_head_dim
+        c = self.kv_lora_rank
+        r = self.qk_rope_head_dim
+        q_rank = self.q_lora_rank
+
+        T = ctx.total_num_tokens()
+        kv_compressed_dim = c + r
+
+        if per_gpu:
+            L //= self.pp_size
+            q = max(1, q // self.tp_size)
+
+        write_bytes: dict[str, int] = {}
+
+        # Q projection outputs
+        if q_rank is not None:
+            write_bytes["q_a_output"] = T * q_rank * self.activation_byte_size * L
+            write_bytes["q_b_output"] = (
+                T * q * qk_head_dim * self.activation_byte_size * L
+            )
+        else:
+            write_bytes["q_output"] = (
+                T * q * qk_head_dim * self.activation_byte_size * L
+            )
+
+        # KV projection outputs
+        write_bytes["kv_a_output"] = (
+            T * kv_compressed_dim * self.activation_byte_size * L
+        )
+        write_bytes["kv_b_output"] = (
+            T * q * (self.qk_nope_head_dim + v_d) * self.activation_byte_size * L
+        )
+
+        # KV cache write: one compressed vector per token
+        # (kv_lora_rank + qk_rope_head_dim) instead of
+        # 2 * num_kv_heads * head_dim in standard MHA
+        write_bytes["kv_cache"] = T * kv_compressed_dim * self.cache_byte_size * L
+
+        # Output projection
+        write_bytes["out_output"] = T * D * self.activation_byte_size * L
+
+        return write_bytes
 
 
 #### Ffn ####

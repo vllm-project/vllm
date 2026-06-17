@@ -5,7 +5,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until, take_while};
 
 use super::parameters::ToolSchemas;
-use super::utils::{parse_buffered_event, safe_text_len, xml_unescape};
+use super::utils::{parse_buffered_event, safe_text_len};
 use super::{Result, ToolCallDelta, ToolParserOutput};
 use crate::Tool;
 
@@ -238,12 +238,12 @@ fn parse_parameter(input: &mut &str) -> ModalResult<(String, String)> {
         _: literal(ARG_KEY_END),
         _: ws0,
         _: literal(ARG_VALUE_START),
-        take_until(0.., ARG_VALUE_END).map(str::trim).map(xml_unescape),
+        take_until(0.., ARG_VALUE_END).map(str::trim),
         _: literal(ARG_VALUE_END),
     )
     .parse_next(input)?;
 
-    Ok((key.trim().to_string(), value.into_owned()))
+    Ok((key.trim().to_string(), value.to_string()))
 }
 
 #[cfg(test)]
@@ -320,7 +320,7 @@ mod tests {
     }
 
     #[test]
-    fn glm45_parse_complete_unescapes_literal_closing_tags_in_arg_value() {
+    fn glm45_parse_complete_preserves_raw_closing_tag_text_in_arg_value() {
         let mut parser = Glm45MoeToolParser::new(&test_tools());
         let output = parser
             .parse_complete(&glm45_tool_call(
@@ -335,7 +335,7 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({
-                "city": "Paris </arg_value></tool_call>",
+                "city": "Paris &lt;/arg_value&gt;&lt;/tool_call&gt;",
                 "date": "2026-05-08",
             })
         );

@@ -880,9 +880,18 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         return N if not activation.is_gated else N // 2
 
     def activation(
-        self, activation: MoEActivation, output: torch.Tensor, input: torch.Tensor
+        self,
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        *,
+        clamp_limit: float | None = None,
+        alpha: float = 1.0,
+        beta: float = 0.0,
     ) -> None:
-        apply_moe_activation(activation, output, input)
+        apply_moe_activation(
+            activation, output, input, clamp_limit=clamp_limit, alpha=alpha, beta=beta
+        )
 
     @abstractmethod
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
@@ -1097,8 +1106,9 @@ class FusedMoEKernelModularImpl:
         shared_experts_input: torch.Tensor | None,
     ):
         if shared_experts is not None:
+            assert self.prepare_finalize.supports_async()
             assert shared_experts_input is not None
-            shared_experts.apply(
+            shared_experts(
                 shared_experts_input,
                 SharedExpertsOrder.MK_INTERNAL_OVERLAPPED,
             )
@@ -1572,7 +1582,7 @@ class FusedMoEKernel:
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        router_logits: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        router_logits: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,

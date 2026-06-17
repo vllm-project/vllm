@@ -1,3 +1,5 @@
+#include <sleef.h>
+
 #include "cpu/cpu_types.hpp"
 #include "cpu/utils.hpp"
 #include "cpu/micro_gemm/cpu_micro_gemm_vec.hpp"
@@ -163,7 +165,6 @@ void gelu_tanh_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
   vec_op::FP32Vec16 w1_vec(0.7978845608028654);
   vec_op::FP32Vec16 w2_vec(0.5);
   vec_op::FP32Vec16 w3_vec(0.044715);
-  alignas(64) float temp[16];
 
   for (int32_t m = 0; m < m_size; ++m) {
     for (int32_t n = 0; n < dim; n += 16) {
@@ -171,12 +172,9 @@ void gelu_tanh_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
       vec_op::FP32Vec16 up_vec(up + n);
       auto gate_pow3_vec = gate_vec * gate_vec * gate_vec;
       auto inner_vec = w1_vec * (gate_vec + w3_vec * gate_pow3_vec);
-
-      inner_vec.save(temp);
-      for (int32_t i = 0; i < 16; ++i) {
-        temp[i] = std::tanh(temp[i]);
-      }
-      vec_op::FP32Vec16 tanh_vec(temp);
+      // Note: can't use fast_exp form because diffusiongemma will generate
+      // wrong results
+      vec_op::FP32Vec16 tanh_vec(Sleef_tanhf16_u10(inner_vec.reg));
       auto gelu_tanh = gate_vec * w2_vec * (one_vec + tanh_vec);
       auto gated_output_fp32 = up_vec * gelu_tanh;
       scalar_vec_t gated_output = scalar_vec_t(gated_output_fp32);

@@ -37,6 +37,7 @@ class TestConfig:
     hidden_size: int
     intermediate_size: int
     num_tokens: int
+    moe_backend: str
 
 
 def make_fused_moe_layer(
@@ -61,7 +62,6 @@ def make_fused_moe_layer(
         intermediate_size=test_config.intermediate_size,
         prefix=f"dummy_layer_{layer_idx}",
         activation="silu",
-        is_act_and_mul=True,
         params_dtype=torch.bfloat16,
         quant_config=quant_config,
     )
@@ -77,6 +77,7 @@ def make_fused_moe_layer(
     )
 
     fml = fml.to(device)
+    re = fml.routed_experts
     w1_q, w2_q, quant_config = make_test_quant_config(
         test_config.num_local_experts,
         test_config.intermediate_size,
@@ -87,21 +88,21 @@ def make_fused_moe_layer(
         per_act_token_quant=False,
     )
 
-    fml.w13_weight.data = w1_q
-    fml.w2_weight.data = w2_q
+    re.w13_weight.data = w1_q
+    re.w2_weight.data = w2_q
 
-    fml.w2_input_scale.data = torch.randn_like(fml.w2_input_scale.data) / 5
-    fml.w13_input_scale.data = torch.randn_like(fml.w13_input_scale.data) / 5
-    fml.w2_weight_scale_2.data = torch.randn_like(fml.w2_weight_scale_2.data) / 5
-    fml.w13_weight_scale_2.data = torch.randn_like(fml.w13_weight_scale_2.data) / 5
-    fml.w2_weight_scale.data = (
-        torch.randn(fml.w2_weight_scale.data.shape, device=device) / 5
-    ).to(fml.w2_weight_scale.data.dtype)
-    fml.w13_weight_scale.data = (
-        torch.randn(fml.w13_weight_scale.data.shape, device=device) / 5
-    ).to(fml.w13_weight_scale.data.dtype)
+    re.w2_input_scale.data = torch.randn_like(re.w2_input_scale.data) / 5
+    re.w13_input_scale.data = torch.randn_like(re.w13_input_scale.data) / 5
+    re.w2_weight_scale_2.data = torch.randn_like(re.w2_weight_scale_2.data) / 5
+    re.w13_weight_scale_2.data = torch.randn_like(re.w13_weight_scale_2.data) / 5
+    re.w2_weight_scale.data = (
+        torch.randn(re.w2_weight_scale.data.shape, device=device) / 5
+    ).to(re.w2_weight_scale.data.dtype)
+    re.w13_weight_scale.data = (
+        torch.randn(re.w13_weight_scale.data.shape, device=device) / 5
+    ).to(re.w13_weight_scale.data.dtype)
 
-    nvfp4_fused_moe.process_weights_after_loading(fml)
+    nvfp4_fused_moe.process_weights_after_loading(re)
 
     fml.maybe_init_modular_kernel()
 
@@ -114,6 +115,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
     vllm_config = VllmConfig()
     vllm_config.parallel_config.data_parallel_size = world_size
     vllm_config.parallel_config.enable_expert_parallel = True
+    vllm_config.kernel_config.moe_backend = test_config.moe_backend
 
     with set_current_vllm_config(vllm_config):
         ensure_model_parallel_initialized(
@@ -250,7 +252,7 @@ def _test_eplb_fml(env, world_size: int, test_config: TestConfig):
 @pytest.mark.parametrize("hidden_size", [256])
 @pytest.mark.parametrize("intermediate_size", [256])
 @pytest.mark.parametrize("num_tokens", [256])
-@pytest.mark.parametrize("backend", ["latency", "throughput"])
+@pytest.mark.parametrize("moe_backend", ["flashinfer_trtllm", "flashinfer_cutlass"])
 def test_eplb_fml(
     world_size: int,
     num_layers: int,
@@ -258,12 +260,8 @@ def test_eplb_fml(
     hidden_size: int,
     intermediate_size: int,
     num_tokens: int,
-    backend: str,
-    monkeypatch,
+    moe_backend: str,
 ):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
-    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", backend)
-
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
@@ -278,6 +276,7 @@ def test_eplb_fml(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         num_tokens=num_tokens,
+        moe_backend=moe_backend,
     )
 
     distributed_run(

@@ -644,9 +644,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         (2, 2, 2, 3),
     ],
 )
-@pytest.mark.parametrize(
-    "eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl", "nixl"]
-)
+@pytest.mark.parametrize("eplb_communicator", ["torch_gloo", "nixl"])
 def test_async_transfer_layer_without_mtp(
     world_size: int,
     num_layers: int,

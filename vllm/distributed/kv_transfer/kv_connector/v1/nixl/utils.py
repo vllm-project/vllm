@@ -6,6 +6,7 @@ import contextlib
 from collections.abc import Iterator
 from typing import Any
 
+import regex as re
 import zmq
 
 from vllm.platforms import current_platform
@@ -55,3 +56,13 @@ def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
         inner = next(iter(spec.kv_cache_specs.values()))
         return type(inner)
     return type(spec)
+
+
+# Trailing 8-hex randomization suffix appended by
+# ``input_processor.assign_request_id`` as ``-{random_uuid():.8}``.
+_RANDOM_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$", re.IGNORECASE)
+
+
+def get_base_request_id(request_id: str) -> str:
+    """Strip the per-request ``-<8 hex>`` randomization suffix, if present."""
+    return _RANDOM_SUFFIX_RE.sub("", request_id)

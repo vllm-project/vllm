@@ -157,27 +157,22 @@ class H2OVLChatModel(InternVLChatModel):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
-        is_mono: bool,
         prefix: str,
     ):
-        if not is_mono:
-            vision_feature_layer = config.select_layer
-            if vision_feature_layer < 0:
-                num_hidden_layers = (
-                    config.vision_config.num_hidden_layers + vision_feature_layer + 1
-                )
-            else:
-                num_hidden_layers = vision_feature_layer + 1
-
-            return InternVisionModel(
-                config.vision_config,
-                quant_config=quant_config,
-                num_hidden_layers_override=num_hidden_layers,
-                prefix=prefix,
+        vision_feature_layer = config.select_layer
+        if vision_feature_layer < 0:
+            num_hidden_layers = (
+                config.vision_config.num_hidden_layers + vision_feature_layer + 1
             )
         else:
-            msg = "Monolith mode is not applicable to H2OVL"
-            raise NotImplementedError(msg)
+            num_hidden_layers = vision_feature_layer + 1
+
+        return InternVisionModel(
+            config.vision_config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers,
+            prefix=prefix,
+        )
 
     def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
         if num_image_tokens <= 0 or self.num_image_token <= 0:

@@ -45,6 +45,31 @@ class TestResponseInputToHarmonyRenderParity:
     # Single-message cases
     # -----------------------------------------------------------------------
 
+    def test_developer_message(self):
+        """Both APIs must render developer messages identically using
+        DeveloperContent (with the '# Instructions' header)."""
+        chat_msgs = parse_chat_input_to_harmony_message(
+            {"role": "developer", "content": "Be concise."}
+        )
+        resp_msgs = [
+            response_input_to_harmony(
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": "Be concise.",
+                },
+                prev_responses=[],
+            )
+        ]
+
+        expected = [{"role": "developer", "instructions": "Be concise."}]
+        verify_harmony_messages(chat_msgs, expected)
+        verify_harmony_messages(resp_msgs, expected)
+
+        assert render_for_completion([_system()] + chat_msgs) == render_for_completion(
+            [_system()] + resp_msgs
+        )
+
     def test_user_message(self):
         chat_msgs = parse_chat_input_to_harmony_message(
             {"role": "user", "content": "What's the weather in Paris?"}

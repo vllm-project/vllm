@@ -22,9 +22,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
-# Dummy placeholder hash for store_mask's template computation.
-_DUMMY_BLOCK_HASH = BlockHash(b"\x00" * 32)
-
 
 class ExternalCachedBlockPool:
     """Duck-typed BlockPool backed by a ``(group_id, hash)`` exists set."""
@@ -62,6 +59,7 @@ class MooncakeStoreCoordinator:
         scheduler_block_size: int,
         hash_block_size: int,
         use_eagle: bool = False,
+        retention_interval: int | None = None,
     ) -> None:
         assert all(
             g.kv_cache_spec.block_size % hash_block_size == 0 for g in kv_cache_groups
@@ -78,6 +76,13 @@ class MooncakeStoreCoordinator:
         self.hash_block_size = hash_block_size
         self.lcm_block_size = scheduler_block_size
         self.use_eagle = use_eagle
+        # Mirror vLLM core's KVCacheCoordinator.retention_interval.
+        self.retention_interval = retention_interval
+        self.eagle_group_ids = {
+            i for i, g in enumerate(kv_cache_groups) if g.is_eagle_group
+        }
+        if use_eagle and not self.eagle_group_ids:
+            self.eagle_group_ids = set(range(len(kv_cache_groups)))
         self._verify_and_split_kv_cache_groups()
 
     def _verify_and_split_kv_cache_groups(self) -> None:
@@ -163,44 +168,39 @@ class MooncakeStoreCoordinator:
         )
         return masks
 
-    def store_mask(self, aligned_token_len: int) -> tuple[list[bool], ...]:
+    def store_mask(
+        self,
+        aligned_token_len: int,
+        num_prompt_tokens: int | None = None,
+    ) -> tuple[list[bool], ...]:
         """Per-group store masks: ``mask[g][i]`` is True iff chunk ``i`` of
-        group ``g`` would be populated by some future cache hit at length
-        ``L = N * lcm_block_size <= aligned_token_len``.
+        group ``g`` should be written to the store so a future cache hit can
+        consume it.
+
+        Reuses the engine's ``SingleTypeKVCacheManager.reachable_block_mask``
+        so the store retains exactly the blocks the local prefix cache would.
         """
         assert aligned_token_len % self.lcm_block_size == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of "
             f"lcm_block_size ({self.lcm_block_size})"
         )
-        if aligned_token_len == 0:
-            return tuple([] for _ in self.kv_cache_groups)
-
-        num_chunks_per_group = [
-            aligned_token_len // g.kv_cache_spec.block_size
-            for g in self.kv_cache_groups
-        ]
-
-        # Fast path: single group or full attn groups or uniform block_sizes
-        if all(
-            isinstance(spec, FullAttentionSpec)
-            or spec.block_size == self.lcm_block_size
-            for spec, _, _ in self.attention_groups
-        ):
-            return tuple([True] * n for n in num_chunks_per_group)
-
-        n_segments = aligned_token_len // self.lcm_block_size
-        dummy_hashes: list[BlockHash] = [_DUMMY_BLOCK_HASH] * (
-            self.lcm_block_size // self.hash_block_size
-        )
-        template_masks, _ = self.find_longest_cache_hit(
-            dummy_hashes,
-            max_length=self.lcm_block_size,
-            cached_block_pool=ExternalCachedBlockPool(),
-        )
-        return tuple(
-            list(template_masks[g]) * n_segments
-            for g in range(len(self.kv_cache_groups))
-        )
+        masks: list[list[bool]] = []
+        for g_idx, g in enumerate(self.kv_cache_groups):
+            spec = _unwrap_spec(g.kv_cache_spec)
+            num_chunks = aligned_token_len // spec.block_size
+            manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+            assert manager_cls is not None
+            mask = manager_cls.reachable_block_mask(
+                start_block=0,
+                end_block=num_chunks,
+                alignment_tokens=self.lcm_block_size,
+                kv_cache_spec=spec,
+                use_eagle=g_idx in self.eagle_group_ids,
+                retention_interval=self.retention_interval,
+                num_prompt_tokens=num_prompt_tokens,
+            )
+            masks.append([True] * num_chunks if mask is None else mask)
+        return tuple(masks)
 
     def block_hashes_for_spec(
         self, block_hashes: list[BlockHash], spec: KVCacheSpec

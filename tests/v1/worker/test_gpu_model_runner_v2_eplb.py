@@ -70,6 +70,7 @@ def _make_runner(**overrides: Any) -> Any:
     runner.use_aux_hidden_state_outputs = False
     runner.speculative_config = None
     runner.speculator = None
+    runner.num_speculative_steps = 0
     runner.encoder_cache = None
     runner.is_pooling_model = False
     runner.is_last_pp_rank = True
@@ -102,18 +103,22 @@ def test_v2_load_model_registers_moe_with_eplb(monkeypatch):
         lambda load_config: SimpleNamespace(load_model=lambda **_: model),
     )
     monkeypatch.setattr(mrv2, "prepare_communication_buffer_for_model", prepared.append)
-    monkeypatch.setattr(mrv2, "init_model_state", lambda *args: "model-state")
+    monkeypatch.setattr(
+        mrv2,
+        "init_model_state",
+        lambda *args: SimpleNamespace(num_new_sampled_tokens_per_step=1),
+    )
     monkeypatch.setattr(
         eplb,
         "is_mixture_of_experts",
         lambda loaded_model: getattr(loaded_model, "is_moe", False),
     )
 
-    runner = _make_runner()
+    runner = _make_runner(is_last_pp_rank=False)
     mrv2.GPUModelRunner.load_model(runner)
 
     assert runner.model is model
-    assert runner.model_state == "model-state"
+    assert runner.model_state is not None
     assert prepared == [model]
     assert runner.eplb_state is not None
     assert runner.eplb_state.add_model_calls == [(model, runner.model_config)]
@@ -133,10 +138,14 @@ def test_v2_load_model_with_dummy_weights_skips_eplb_registration(monkeypatch):
         lambda load_config: SimpleNamespace(load_model=lambda **_: model),
     )
     monkeypatch.setattr(mrv2, "prepare_communication_buffer_for_model", prepared.append)
-    monkeypatch.setattr(mrv2, "init_model_state", lambda *args: "model-state")
+    monkeypatch.setattr(
+        mrv2,
+        "init_model_state",
+        lambda *args: SimpleNamespace(num_new_sampled_tokens_per_step=1),
+    )
     monkeypatch.setattr(eplb, "is_mixture_of_experts", lambda *_: True)
 
-    runner = _make_runner()
+    runner = _make_runner(is_last_pp_rank=False)
     mrv2.GPUModelRunner.load_model(runner, load_dummy_weights=True)
 
     assert runner.load_config.load_format == "dummy"

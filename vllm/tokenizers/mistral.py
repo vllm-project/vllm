@@ -31,20 +31,12 @@ from mistral_common.tokens.tokenizers.sentencepiece import (
 )
 from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 from pydantic import ValidationError
+from transformers.tokenization_mistral_common import MistralCommonBackend
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
 from vllm.tokenizers.protocol import TokenizerLike
-
-try:
-    # Transformers v5
-    from transformers.tokenization_mistral_common import MistralCommonBackend
-except ImportError:
-    # Transformers v4
-    from transformers.tokenization_mistral_common import (
-        MistralCommonTokenizer as MistralCommonBackend,
-    )
 
 if TYPE_CHECKING:
     import llguidance

@@ -28,6 +28,7 @@ from vllm.v1.core.kv_cache_utils import (
     estimate_max_model_len,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
+    get_kv_cache_capacity,
     get_kv_cache_configs,
     get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
@@ -1459,6 +1460,11 @@ def test_get_max_concurrency_for_kv_cache_config():
         vllm_config, kv_cache_config_hybrid_model
     )
     assert max_concurrency_hybrid_model == 3
+    num_tokens, max_concurrency = get_kv_cache_capacity(
+        vllm_config, kv_cache_config_hybrid_model
+    )
+    assert num_tokens == max_concurrency_hybrid_model * max_model_len
+    assert max_concurrency == max_concurrency_hybrid_model
 
 
 def test_allocate_with_lookahead():

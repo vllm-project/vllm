@@ -49,11 +49,13 @@ else
   KV_EXTRA_CONFIG=''
 fi
 
-# Build the kv-transfer-config once
+# Build the kv-transfer-config for P and D
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
+  KV_CONFIG_P='{"kv_connector":"NixlConnector","kv_role":"kv_producer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
+  KV_CONFIG_D='{"kv_connector":"NixlConnector","kv_role":"kv_consumer"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
 else
-  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
+  KV_CONFIG_P="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
+  KV_CONFIG_D="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
 fi
 
 # Models to run
@@ -159,7 +161,7 @@ run_tests_for_model() {
     --block-size ${PREFILL_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
-    --kv-transfer-config '$KV_CONFIG'"
+    --kv-transfer-config '$KV_CONFIG_P'"
     if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
       IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
       for arg in "${extra_args[@]}"; do
@@ -207,7 +209,7 @@ run_tests_for_model() {
     --enforce-eager \
     --block-size ${DECODE_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
-    --kv-transfer-config '$KV_CONFIG'"
+    --kv-transfer-config '$KV_CONFIG_D'"
     if [[ -n "$VLLM_SERVE_EXTRA_ARGS" ]]; then
       IFS=',' read -r -a extra_args <<< "$VLLM_SERVE_EXTRA_ARGS"
       for arg in "${extra_args[@]}"; do

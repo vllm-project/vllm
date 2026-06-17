@@ -455,6 +455,8 @@ class GraniteMoeHybridModel(nn.Module):
                 loaded_params.add(n)
 
         def _load_expert(n, p, name, shard_id, expert_id):
+            if n not in params_dict:
+                return
             param = params_dict[n]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, p, name, shard_id=shard_id, expert_id=expert_id)
@@ -495,18 +497,6 @@ class GraniteMoeHybridModel(nn.Module):
             if "A_log" in n:
                 n = n.replace("A_log", "A")
 
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(n)
-            ):
-                # Loading kv cache quantization scales
-                loaded_weight = p
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                _load(scale_name, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             if _load_quant_expert(n, p):
                 continue
 
@@ -530,14 +520,14 @@ class GraniteMoeHybridModel(nn.Module):
                     )
                     w1_param, w3_param = p[e].chunk(2, dim=0)
                     _load_expert(
-                        n.replace(".input_linear.", ".experts.w13_"),
+                        n.replace(".input_linear.", ".experts.routed_experts.w13_"),
                         w1_param,
                         w1_name,
                         shard_id="w1",
                         expert_id=e,
                     )
                     _load_expert(
-                        n.replace(".input_linear.", ".experts.w13_"),
+                        n.replace(".input_linear.", ".experts.routed_experts.w13_"),
                         w3_param,
                         w3_name,
                         shard_id="w3",
@@ -553,7 +543,7 @@ class GraniteMoeHybridModel(nn.Module):
                     )
                     w2_param = p[e]
                     _load_expert(
-                        n.replace(".output_linear.", ".experts.w2_"),
+                        n.replace(".output_linear.", ".experts.routed_experts.w2_"),
                         w2_param,
                         w2_name,
                         shard_id="w2",

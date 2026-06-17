@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use axum::Json;
+use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+use vllm_engine_core_client::protocol::utility::PauseMode;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -18,8 +20,8 @@ pub(crate) struct IsSleepingResponse {
 pub(crate) struct SleepParams {
     #[serde(default = "default_sleep_level")]
     level: u32,
-    #[serde(default = "default_sleep_mode")]
-    mode: String,
+    #[serde(default)]
+    mode: PauseMode,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -32,18 +34,20 @@ const fn default_sleep_level() -> u32 {
     1
 }
 
-fn default_sleep_mode() -> String {
-    "abort".to_string()
+fn invalid_query(error: QueryRejection) -> ApiError {
+    ApiError::invalid_request(error.body_text(), Some("mode"))
 }
 
 /// Put the engine to sleep.
 pub async fn sleep(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<SleepParams>,
+    params: Result<Query<SleepParams>, QueryRejection>,
 ) -> Result<StatusCode, ApiError> {
+    let Query(params) = params.map_err(invalid_query)?;
+
     state
         .engine_core_client()
-        .sleep(params.level, &params.mode)
+        .sleep(params.level, params.mode)
         .await
         .map_err(|error| utility_call_error("sleep", error))?;
 

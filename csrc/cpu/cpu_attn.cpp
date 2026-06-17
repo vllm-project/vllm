@@ -15,9 +15,10 @@ torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
     const int64_t num_heads_kv, const int64_t head_dim,
     const torch::Tensor& seq_lens, at::ScalarType dtype,
-    const torch::Tensor& query_start_loc, const bool casual,
+    const torch::Tensor& query_start_loc, const bool causal,
     const int64_t window_size, const std::string& isa_hint,
-    const bool enable_kv_split) {
+    const bool enable_kv_split,
+    const std::optional<torch::Tensor>& dynamic_causal) {
   cpu_attention::ISA isa;
   if (isa_hint == "amx") {
     isa = cpu_attention::ISA::AMX;
@@ -44,24 +45,13 @@ torch::Tensor get_scheduler_metadata(
   input.head_dim = head_dim;
   input.query_start_loc = query_start_loc.data_ptr<int32_t>();
   input.seq_lens = seq_lens.data_ptr<int32_t>();
-  if (window_size != -1) {
-    input.left_sliding_window_size = window_size - 1;
-    if (casual) {
-      input.right_sliding_window_size = 0;
-    } else {
-      input.right_sliding_window_size = window_size - 1;
-    }
-  } else {
-    input.left_sliding_window_size = -1;
-    if (casual) {
-      input.right_sliding_window_size = 0;
-    } else {
-      input.right_sliding_window_size = -1;
-    }
-  }
-  input.casual = casual;
+
+  input.sliding_window_size = window_size;
+  input.causal = causal;
   input.isa = isa;
   input.enable_kv_split = enable_kv_split;
+  input.dynamic_causal =
+      dynamic_causal.has_value() ? dynamic_causal->data_ptr<bool>() : nullptr;
 
   VLLM_DISPATCH_FLOATING_TYPES(dtype, "get_scheduler_metadata", [&]() {
     CPU_ATTN_DISPATCH(head_dim, isa, 0, [&]() {
@@ -175,10 +165,11 @@ void cpu_attention_with_kv_cache(
     const torch::Tensor& seq_lens,         // [num_tokens]
     const double scale, const bool causal,
     const std::optional<torch::Tensor>& alibi_slopes,  // [num_heads]
-    const int64_t sliding_window_left, const int64_t sliding_window_right,
+    const int64_t sliding_window,
     const torch::Tensor& block_table,  // [num_tokens, max_block_num]
     const double softcap, const torch::Tensor& scheduler_metadata,
-    const std::optional<torch::Tensor>& s_aux,  // [num_heads]
+    const std::optional<torch::Tensor>& s_aux,           // [num_heads]
+    const std::optional<torch::Tensor>& dynamic_causal,  // [num_reqs]
     const double k_scale = 1.0, const double v_scale = 1.0,
     const std::string& kv_cache_dtype = "auto") {
   TORCH_CHECK_EQ(query.dim(), 3);
@@ -220,13 +211,11 @@ void cpu_attention_with_kv_cache(
   input.alibi_slopes =
       alibi_slopes.has_value() ? alibi_slopes->data_ptr<float>() : nullptr;
   input.s_aux = s_aux.has_value() ? s_aux->data_ptr<c10::BFloat16>() : nullptr;
+  input.dynamic_causal =
+      dynamic_causal.has_value() ? dynamic_causal->data_ptr<bool>() : nullptr;
   input.scale = scale;
   input.causal = causal;
-  input.sliding_window_left = sliding_window_left;
-  input.sliding_window_right = sliding_window_right;
-  if (input.causal) {
-    input.sliding_window_right = 0;
-  }
+  input.sliding_window_size = sliding_window;
   input.softcap = static_cast<float>(softcap);
 
   if (is_fp8) {

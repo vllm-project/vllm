@@ -64,6 +64,15 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         self.quantization_emulation = False
         super().__init__(moe_config, quant_config)
 
+        self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
+        # Gated-activation params: silu == swigluoai with alpha=1, beta=0.
+        self.gemm1_alpha = (
+            quant_config.gemm1_alpha if quant_config.gemm1_alpha is not None else 1.0
+        )
+        self.gemm1_beta = (
+            quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
+        )
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -107,6 +116,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
             MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
@@ -129,14 +139,34 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         return TopKWeightAndReduceNoOP()
 
     def activation(
-        self, activation: MoEActivation, output: torch.Tensor, input: torch.Tensor
+        self,
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        **kwargs,
     ) -> None:
         gemm1_clamp_limit = self.quant_config.gemm1_clamp_limit
         if activation == MoEActivation.SILU and gemm1_clamp_limit is not None:
             swiglu_limit_func(output, input, float(gemm1_clamp_limit))
             return
 
-        super().activation(activation, output, input)
+        # SWIGLUOAI_UNINTERLEAVE routes to the silu_and_mul_with_clamp kernel and
+        # needs the clamped-SwiGLU params (gemm1_clamp_limit/alpha/beta read from
+        # the quant config in __init__) forwarded; without a clamp_limit it
+        # asserts. Other activations ignore alpha/beta/clamp_limit.
+        if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+            assert gemm1_clamp_limit is not None, (
+                "SWIGLUOAI_UNINTERLEAVE requires gemm1_clamp_limit"
+            )
+
+        super().activation(
+            activation,
+            output,
+            input,
+            clamp_limit=gemm1_clamp_limit,
+            alpha=self.gemm1_alpha,
+            beta=self.gemm1_beta,
+        )
 
     def workspace_shapes(
         self,

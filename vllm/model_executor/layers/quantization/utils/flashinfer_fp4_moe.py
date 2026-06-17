@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_fp4_moe_weights_for_fi,
@@ -14,10 +13,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
-)
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import (
-    has_flashinfer_cutlass_fused_moe,
 )
 
 if TYPE_CHECKING:
@@ -32,16 +27,6 @@ logger = init_logger(__name__)
 __all__ = [
     "reorder_w1w3_to_w3w1",
 ]
-
-
-def is_flashinfer_fp4_cutlass_moe_available() -> bool:
-    """Return `True` when FlashInfer CUTLASS NV-FP4 kernels can be used."""
-    return (
-        envs.VLLM_USE_FLASHINFER_MOE_FP4
-        and has_flashinfer_cutlass_fused_moe()
-        and current_platform.is_cuda()
-        and current_platform.has_device_capability(100)
-    )
 
 
 def reorder_w1w3_to_w3w1(

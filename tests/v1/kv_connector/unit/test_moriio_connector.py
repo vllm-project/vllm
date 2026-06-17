@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOAgentMetadata,
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
+    resolve_host_ip,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
@@ -568,3 +569,14 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
             assert isinstance(metadata, MoRIIOAgentMetadata), (
                 "Decoded metadata is not MoRIIOAgentMetadata"
             )
+
+
+def test_resolve_host_ip_prefers_extra_config():
+    """An explicit ``host_ip`` in kv_connector_extra_config overrides get_ip()
+    (so an external router can advertise a routable/internal address); an
+    absent or empty value falls back to get_ip()."""
+    assert resolve_host_ip({"host_ip": "10.0.0.7"}) == "10.0.0.7"
+
+    fallback = get_ip()
+    assert resolve_host_ip({}) == fallback
+    assert resolve_host_ip({"host_ip": ""}) == fallback

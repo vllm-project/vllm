@@ -950,6 +950,10 @@ class FunASRForConditionalGeneration(
             )
         self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
 
+    def get_language_model(self) -> torch.nn.Module:
+        # Required as part of SupportsMultiModal interface.
+        return self.model.decoder
+
     def forward(
         self,
         input_ids: torch.Tensor,

@@ -19,6 +19,7 @@ from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,
+    sanitize_message,
     validate_json_request,
     with_cancellation,
 )
@@ -75,7 +76,7 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
             content=AnthropicErrorResponse(
                 error=AnthropicError(
                     type="internal_error",
-                    message=str(e),
+                    message=sanitize_message(str(e)),
                 )
             ).model_dump(),
         )
@@ -121,7 +122,7 @@ async def count_tokens(request: AnthropicCountTokensRequest, raw_request: Reques
             content=AnthropicErrorResponse(
                 error=AnthropicError(
                     type="internal_error",
-                    message=str(e),
+                    message=sanitize_message(str(e)),
                 )
             ).model_dump(),
         )

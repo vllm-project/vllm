@@ -884,4 +884,3 @@ Examples:
 
 - DeepSeek-VL2: [vllm/model_executor/models/deepseek_vl2.py](../../../vllm/model_executor/models/deepseek_vl2.py)
 - InternVL: [vllm/model_executor/models/internvl.py](../../../vllm/model_executor/models/internvl.py)
-- Qwen-VL: [vllm/model_executor/models/qwen_vl.py](../../../vllm/model_executor/models/qwen_vl.py)

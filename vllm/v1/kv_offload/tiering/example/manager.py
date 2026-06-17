@@ -142,6 +142,12 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         return RequestOffloadingContext()
 
+    @override
+    def drain_jobs(self) -> None:
+        """Synchronous tier — submit_*() returns only after the operation
+        completes, so there is nothing to wait for."""
+        return
+
     def get_num_blocks(self) -> int:
         """Get the number of blocks currently stored in this tier."""
         return len(self.blocks)
