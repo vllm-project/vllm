@@ -70,6 +70,21 @@ class AiterCustomAllreduceProto(Protocol):
         registered: bool = False,
         use_1stage: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]: ...
+    def fused_ar_rms_per_group_quant(
+        self,
+        inp: torch.Tensor,
+        res_inp: torch.Tensor,
+        *,
+        w: torch.Tensor,
+        eps: float,
+        group_size: int = 128,
+        registered: bool = False,
+        use_1stage: bool = False,
+        emit_bf16: bool = False,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    ): ...
     def should_custom_ar(self, inp: torch.Tensor) -> bool: ...
 
 
@@ -152,6 +167,7 @@ def _rocm_aiter_fused_moe_impl(
     output_dtype: torch.dtype | None = None,
     hidden_pad: int = 0,
     intermediate_pad: int = 0,
+    gate_mode: str = "",
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
     moe_sorting_dispatch_policy: int = 0,
@@ -161,6 +177,10 @@ def _rocm_aiter_fused_moe_impl(
 
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
+
+    extra_kwargs: dict = {}
+    if gate_mode and rocm_aiter_ops.fused_moe_supports_gate_mode():
+        extra_kwargs["gate_mode"] = gate_mode
 
     return fused_moe(
         hidden_states,
@@ -183,6 +203,7 @@ def _rocm_aiter_fused_moe_impl(
         bias1=bias1,
         bias2=bias2,
         moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
+        **extra_kwargs,
     )
 
 
@@ -204,6 +225,7 @@ def _rocm_aiter_fused_moe_fake(
     output_dtype: torch.dtype | None = None,
     hidden_pad: int = 0,
     intermediate_pad: int = 0,
+    gate_mode: str = "",
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
     moe_sorting_dispatch_policy: int = 0,
@@ -848,6 +870,152 @@ def _rocm_aiter_fused_allreduce_rmsnorm_fake(
     epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.empty_like(input_), torch.empty_like(residual)
+
+
+def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused AllReduce + RMSNorm + per-group FP8 quant.
+
+    Mirrors the eligibility logic of ``_rocm_aiter_fused_allreduce_rmsnorm_impl``
+    for the 1-stage vs 2-stage AITER kernel dispatch (both variants run inside
+    AITER, the only choice we make here is the launcher to call into).
+    """
+    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    assert aiter_ar is not None, "aiter allreduce must be initialized"
+
+    total_bytes = input_.numel() * input_.element_size()
+    hidden_dim = input_.shape[-1]
+    token_num = input_.shape[0]
+    if input_.dtype in (torch.bfloat16, torch.float16):
+        pack_size = 16 // input_.element_size()
+        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
+    else:
+        hidden_ok = False
+    token_ok = token_num <= 80
+    world_size = aiter_ar.world_size
+    full_nvlink = aiter_ar.fully_connected
+
+    if world_size == 2:
+        size_ok = True
+    elif full_nvlink and world_size <= 4:
+        size_ok = total_bytes < 256 * 1024
+    elif full_nvlink and world_size <= 8:
+        size_ok = total_bytes < 128 * 1024
+    else:
+        size_ok = False
+
+    use_1stage = hidden_ok and token_ok and size_ok
+
+    result = aiter_ar.fused_ar_rms_per_group_quant(
+        input_,
+        residual,
+        w=weight,
+        eps=epsilon,
+        group_size=group_size,
+        registered=torch.cuda.is_current_stream_capturing(),
+        use_1stage=use_1stage,
+    )
+    assert result is not None
+    return result[0], result[1], result[2]
+
+
+def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_fake(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    hidden_dim = input_.shape[-1]
+    num_groups = hidden_dim // group_size
+    quant_out = torch.empty(input_.shape, dtype=FP8_DTYPE, device=input_.device)
+    residual_out = torch.empty_like(residual)
+    scale_out = torch.empty(
+        input_.shape[:-1] + (num_groups,),
+        dtype=torch.float32,
+        device=input_.device,
+    )
+    return quant_out, residual_out, scale_out
+
+
+def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_impl(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused AllReduce + add-RMSNorm + per-group FP8 quant + bf16 normed act.
+
+    Wraps the same AITER launcher as ``_rocm_aiter_fused_allreduce_rmsnorm_
+    quant_per_group_impl`` with ``emit_bf16=True``, emitting the pre-quant
+    bf16/fp16 normed activation for a parallel consumer (DeepSeek V3.2 sparse
+    indexer ``wk_weights_proj``).
+    """
+    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
+    assert aiter_ar is not None, "aiter allreduce must be initialized"
+
+    total_bytes = input_.numel() * input_.element_size()
+    hidden_dim = input_.shape[-1]
+    token_num = input_.shape[0]
+    if input_.dtype in (torch.bfloat16, torch.float16):
+        pack_size = 16 // input_.element_size()
+        hidden_ok = hidden_dim % pack_size == 0 and hidden_dim // pack_size <= 1024
+    else:
+        hidden_ok = False
+    token_ok = token_num <= 80
+    world_size = aiter_ar.world_size
+    full_nvlink = aiter_ar.fully_connected
+
+    if world_size == 2:
+        size_ok = True
+    elif full_nvlink and world_size <= 4:
+        size_ok = total_bytes < 256 * 1024
+    elif full_nvlink and world_size <= 8:
+        size_ok = total_bytes < 128 * 1024
+    else:
+        size_ok = False
+
+    use_1stage = hidden_ok and token_ok and size_ok
+
+    result = aiter_ar.fused_ar_rms_per_group_quant(
+        input_,
+        residual,
+        w=weight,
+        eps=epsilon,
+        group_size=group_size,
+        registered=torch.cuda.is_current_stream_capturing(),
+        use_1stage=use_1stage,
+        emit_bf16=True,
+    )
+    assert result is not None
+    assert len(result) == 4, "emit_bf16=True must return four tensors from aiter"
+    return result[0], result[1], result[2], result[3]
+
+
+def _rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_fake(
+    input_: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    hidden_dim = input_.shape[-1]
+    num_groups = hidden_dim // group_size
+    quant_out = torch.empty(input_.shape, dtype=FP8_DTYPE, device=input_.device)
+    residual_out = torch.empty_like(residual)
+    scale_out = torch.empty(
+        input_.shape[:-1] + (num_groups,),
+        dtype=torch.float32,
+        device=input_.device,
+    )
+    bf16_norm_out = torch.empty_like(input_)
+    return quant_out, residual_out, scale_out, bf16_norm_out
 
 
 def _rocm_aiter_per_tensor_quant_impl(
@@ -1643,6 +1811,21 @@ class rocm_aiter_ops:
         except (ImportError, ModuleNotFoundError):
             return False
 
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_gate_mode(cls) -> bool:
+        """Probe whether the installed aiter.fused_moe accepts `gate_mode`.
+
+        Added in https://github.com/ROCm/aiter/pull/3123 (>=0.1.14).
+        Builds with older AITER must omit this argument.
+        """
+        import inspect
+
+        from aiter.fused_moe import fused_moe
+
+        return "gate_mode" in inspect.signature(fused_moe).parameters
+
     @staticmethod
     @if_aiter_supported
     def register_ops_once() -> None:
@@ -1839,6 +2022,18 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_allreduce_rmsnorm_quant_per_group",
+                op_func=(_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_impl),
+                fake_impl=(_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_fake),
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm",  # noqa: E501
+                op_func=_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_impl,  # noqa: E501
+                fake_impl=_rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_fake,  # noqa: E501
+            )
+
+            direct_register_custom_op(
                 op_name="fused_mla_dual_rms_norm",
                 op_func=_fused_mla_dual_rms_norm_impl,
                 mutates_args=[],
@@ -1891,6 +2086,29 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_allreduce_rmsnorm_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm.default
+
+    @staticmethod
+    def get_fused_allreduce_rmsnorm_quant_per_group_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_quant_per_group.default
+
+    @staticmethod
+    def get_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm_op() -> OpOverload:  # noqa: E501
+        return torch.ops.vllm.rocm_aiter_fused_allreduce_rmsnorm_quant_per_group_with_bf16_norm.default  # noqa: E501
+
+    # TODO(frida-andersson): drop once vLLM pins AITER >= 0.1.14 (ROCm/aiter#2823).
+    @classmethod
+    def has_fused_allreduce_rmsnorm_quant_per_group(cls) -> bool:
+        """True if the running AITER build exposes the per-group AR+RMS+quant
+        kernel (added in ROCm/aiter PR #2823).
+
+        The pattern registration in ``RocmAiterAllReduceFusionPass`` keys off
+        this so vLLM degrades to the AR+RMS-only fusion when run against an
+        older aiter that lacks the per-group launcher.
+        """
+        aiter_ar = cls.get_aiter_allreduce()
+        return aiter_ar is not None and hasattr(
+            aiter_ar, "fused_ar_rms_per_group_quant"
+        )
 
     @staticmethod
     def get_fused_mla_dual_rms_norm_op() -> OpOverload:
@@ -1976,6 +2194,7 @@ class rocm_aiter_ops:
         output_dtype: torch.dtype | None = None,
         hidden_pad: int = 0,
         intermediate_pad: int = 0,
+        gate_mode: str = "",
         bias1: torch.Tensor | None = None,
         bias2: torch.Tensor | None = None,
         moe_sorting_dispatch_policy: int = 0,
@@ -1998,6 +2217,7 @@ class rocm_aiter_ops:
             output_dtype,
             hidden_pad,
             intermediate_pad,
+            gate_mode,
             bias1,
             bias2,
             moe_sorting_dispatch_policy,

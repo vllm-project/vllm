@@ -13,8 +13,8 @@ Register a lazy module mapping.
 Example:
     ReasoningParserManager.register_lazy_module(
         name="qwen3",
-        module_path="vllm.reasoning.qwen3_reasoning_parser",
-        class_name="Qwen3ReasoningParser",
+        module_path="vllm.reasoning.qwen3_engine_reasoning_parser",
+        class_name="Qwen3ParserReasoningAdapter",
     )
 """
 
@@ -49,8 +49,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Ernie45ReasoningParser",
     ),
     "gemma4": (
-        "gemma4_reasoning_parser",
-        "Gemma4ReasoningParser",
+        "gemma4_engine_reasoning_parser",
+        "Gemma4ParserReasoningAdapter",
     ),
     "glm45": (
         "deepseek_v3_reasoning_parser",
@@ -81,8 +81,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "KimiK2ReasoningParser",
     ),
     "mimo": (
-        "qwen3_reasoning_parser",
-        "Qwen3ReasoningParser",
+        "qwen3_engine_reasoning_parser",
+        "Qwen3ParserReasoningAdapter",
     ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",
@@ -92,21 +92,25 @@ _REASONING_PARSERS_TO_REGISTER = {
         "minimax_m2_reasoning_parser",
         "MiniMaxM2AppendThinkReasoningParser",
     ),
+    "minimax_m3": (
+        "minimax_m3_reasoning_parser",
+        "MiniMaxM3ReasoningParser",
+    ),
     "mistral": (
         "mistral_reasoning_parser",
         "MistralReasoningParser",
     ),
     "nemotron_v3": (
-        "nemotron_v3_reasoning_parser",
-        "NemotronV3ReasoningParser",
+        "nemotron_v3_engine_reasoning_parser",
+        "NemotronV3ParserReasoningAdapter",
     ),
     "olmo3": (
         "olmo3_reasoning_parser",
         "Olmo3ReasoningParser",
     ),
     "qwen3": (
-        "qwen3_reasoning_parser",
-        "Qwen3ReasoningParser",
+        "qwen3_engine_reasoning_parser",
+        "Qwen3ParserReasoningAdapter",
     ),
     "seed_oss": (
         "seedoss_reasoning_parser",
