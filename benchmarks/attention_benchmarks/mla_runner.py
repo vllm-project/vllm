@@ -710,6 +710,7 @@ def _run_single_benchmark(
     kv_cache_dtype: str | None = None,
     output_scale: float | None = None,
     fuse_quant_op: bool = False,
+    output_pergroup: bool = False,
 ) -> BenchmarkResult:
     """
     Run a single benchmark iteration.
@@ -832,27 +833,32 @@ def _run_single_benchmark(
         )
 
     # Prefill FP8 output: fused (kernel writes e4m3) vs separate post-quant.
+    # ``output_pergroup`` picks per-group (1x128) dynamic FP8 vs per-tensor static.
     prefill_fp8_output = None
     prefill_output_scale = None
+    prefill_output_scales = None
     prefill_quant_op = None
     if has_prefill and output_scale is not None:
+        from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+        from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
         from vllm.platforms import current_platform
 
+        out_t = prefill_inputs["output"]
         prefill_output_scale = torch.tensor(
             [output_scale], device=device, dtype=torch.float32
         )
         if fuse_quant_op:
             prefill_fp8_output = torch.empty_like(
-                prefill_inputs["output"], dtype=current_platform.fp8_dtype()
+                out_t, dtype=current_platform.fp8_dtype()
             )
+            if output_pergroup:
+                num_groups = out_t.shape[-1] // 128
+                prefill_output_scales = torch.empty(
+                    out_t.shape[0], num_groups, dtype=torch.float32, device=device
+                )
+        elif output_pergroup:
+            prefill_quant_op = QuantFP8(static=False, group_shape=GroupShape(1, 128))
         else:
-            from vllm.model_executor.layers.quantization.input_quant_fp8 import (
-                QuantFP8,
-            )
-            from vllm.model_executor.layers.quantization.utils.quant_utils import (
-                GroupShape,
-            )
-
             prefill_quant_op = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
     fused_output = output_scale is not None and fuse_quant_op
@@ -871,14 +877,21 @@ def _run_single_benchmark(
                 metadata,
                 prefill_inputs["k_scale"],
                 prefill_fp8_output if fused_output else prefill_inputs["output"],
-                prefill_output_scale if fused_output else None,
+                output_scale=(
+                    prefill_output_scale
+                    if fused_output and not output_pergroup
+                    else None
+                ),
+                output_scales=(
+                    prefill_output_scales if fused_output and output_pergroup else None
+                ),
             )
             if fused_output:
                 out = prefill_fp8_output
             elif prefill_quant_op is not None:
-                out, _ = prefill_quant_op(
-                    prefill_inputs["output"], prefill_output_scale
-                )
+                # Per-group is dynamic (own scales); static takes the scale.
+                qargs = () if output_pergroup else (prefill_output_scale,)
+                out, _ = prefill_quant_op(prefill_inputs["output"], *qargs)
             results.append(out)
         return results[0] if len(results) == 1 else tuple(results)
 
@@ -922,6 +935,7 @@ def _run_mla_benchmark_batched(
     prefill_backend: str | None = None,
     output_scale: float | None = None,
     fuse_quant_op: bool = False,
+    output_pergroup: bool = False,
 ) -> list[BenchmarkResult]:
     """
     Unified batched MLA benchmark runner for all backends.
@@ -1063,6 +1077,7 @@ def _run_mla_benchmark_batched(
                     kv_cache_dtype=kv_cache_dtype,
                     output_scale=output_scale,
                     fuse_quant_op=fuse_quant_op,
+                    output_pergroup=output_pergroup,
                 )
                 results.append(result)
 
@@ -1092,6 +1107,7 @@ def run_mla_benchmark(
     prefill_backend: str | None = None,
     output_scale: float | None = None,
     fuse_quant_op: bool = False,
+    output_pergroup: bool = False,
 ) -> BenchmarkResult | list[BenchmarkResult]:
     """
     Unified MLA benchmark runner for all backends.
@@ -1144,6 +1160,7 @@ def run_mla_benchmark(
         prefill_backend=prefill_backend,
         output_scale=output_scale,
         fuse_quant_op=fuse_quant_op,
+        output_pergroup=output_pergroup,
     )
 
     # Return single result or list based on input

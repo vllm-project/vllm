@@ -202,6 +202,7 @@ def flash_attn_varlen_func(
     num_splits: int = 0,
     # FA4 Only
     output_scale=None,
+    output_scales=None,
     # Version selector
     fa_version: int = DEFAULT_FA_VERSION,
     s_aux=None,
@@ -275,8 +276,8 @@ def flash_attn_varlen_func(
         "seqused_k must be provided if block_table is provided"
     )
 
-    assert output_scale is None or fa_version == 4, (
-        f"Fused FP8 output (output_scale) is only supported by FA4, "
+    assert (output_scale is None and output_scales is None) or fa_version == 4, (
+        f"Fused FP8 output (output_scale/output_scales) is only supported by FA4, "
         f"got fa_version={fa_version}"
     )
 
@@ -411,6 +412,8 @@ def flash_attn_varlen_func(
             mask_mod=mask_mod,
             aux_tensors=aux_tensors,
             output_scale=output_scale,
+            # Per-group scales are written in place into output_scales (input-only).
+            output_scales=output_scales,
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")

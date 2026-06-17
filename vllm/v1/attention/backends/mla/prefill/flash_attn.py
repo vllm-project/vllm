@@ -9,6 +9,8 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic64Sym,
+    kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
@@ -98,7 +100,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             and self._is_vllm_fa
             and device_capability is not None
             and device_capability[0] in (10, 11)
-            and quant_key == kFp8StaticTensorSym
+            and quant_key in (kFp8StaticTensorSym, kFp8Dynamic128Sym, kFp8Dynamic64Sym)
         )
 
     def _flash_attn_varlen_diff_headdims(
@@ -110,6 +112,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         softmax_scale: float | None = None,
         out: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
+        output_scales: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         maybe_padded_v = v
@@ -122,11 +125,12 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             kwargs["return_softmax_lse"] = return_softmax_lse
             kwargs["out"] = out
             kwargs["output_scale"] = output_scale
+            kwargs["output_scales"] = output_scales
         else:
             # ROCm leverages the upstream flash_attn, which takes a parameter
             # called "return_attn_probs" instead of return_softmax_lse
             kwargs["return_attn_probs"] = return_softmax_lse
-            assert out is None and output_scale is None
+            assert out is None and output_scale is None and output_scales is None
         if envs.VLLM_BATCH_INVARIANT:
             kwargs["num_splits"] = 1
 
@@ -161,6 +165,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         return_softmax_lse: bool,
         out: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
+        output_scales: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         return self._flash_attn_varlen_diff_headdims(
             q=q,
@@ -175,6 +180,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             return_softmax_lse=return_softmax_lse,
             out=out,
             output_scale=output_scale,
+            output_scales=output_scales,
         )
 
     def run_prefill_context_chunk(

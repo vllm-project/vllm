@@ -687,6 +687,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mqa_tokens = attn_metadata.num_decode_tokens
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
+        is_pergroup = quant_key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym)
+        # FA derives UE8M0 from the column-major scale layout, so it can only write the
+        # two self-consistent layouts: DeepGEMM (col-major + ue8m0 + tma-aligned) or
+        # plain row-major fp32.
+        pergroup_layout_ok = (
+            bool(quant_col_major) == bool(quant_scale_ue8m0) == bool(quant_tma_aligned)
+        )
         mha_use_quant_output = (
             quant_key is not None
             and self.prefill_backend.supports_quant_output(quant_key)
@@ -694,15 +701,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and attn_metadata.prefill is not None
             and attn_metadata.prefill.chunked_context is None
             and self.impl.dcp_world_size <= 1
+            and (not is_pergroup or pergroup_layout_ok)
         )
 
         if num_mha_tokens > 0:
             if mha_use_quant_output:
                 mha_output = quant_output
                 mha_output_scale = output_scale
+                mha_output_scales = output_block_scale
             else:
                 mha_output = output
                 mha_output_scale = None
+                mha_output_scales = None
 
             self.impl.forward_mha(  # type: ignore[attr-defined]
                 q[num_mqa_tokens:],
@@ -713,6 +723,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._k_scale,
                 output=mha_output[num_mqa_tokens:num_actual_toks],
                 output_scale=mha_output_scale,
+                output_scales=(
+                    mha_output_scales[num_mqa_tokens:num_actual_toks]
+                    if mha_output_scales is not None
+                    else None
+                ),
             )
 
         if num_mqa_tokens > 0:
@@ -2274,6 +2289,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
+        output_scales: torch.Tensor | None = None,
     ) -> None:
         assert attn_metadata.prefill is not None
         assert self.dcp_world_size != -1
@@ -2287,7 +2303,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             q = q.to(prefill_metadata.q_data_type)
 
         has_context = prefill_metadata.chunked_context is not None
-        assert output_scale is None or not has_context, (
+        fused_output = output_scale is not None or output_scales is not None
+        assert not fused_output or not has_context, (
             "Fused FP8 output is only wired for the non-chunked-context path"
         )
 
@@ -2308,10 +2325,19 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             return_softmax_lse=has_context,
             out=(
                 output.view(-1, self.num_heads, self.v_head_dim)
-                if output_scale is not None
+                if fused_output
                 else None
             ),
             output_scale=output_scale,
+            # (tokens, heads*groups) -> (tokens, heads, groups); unflatten (not view)
+            # preserves the column-major / TMA-aligned DeepGEMM scale strides.
+            output_scales=(
+                output_scales.unflatten(
+                    -1, (self.num_heads, output_scales.shape[-1] // self.num_heads)
+                )
+                if output_scales is not None
+                else None
+            ),
         )
 
         if has_context:
@@ -2341,8 +2367,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 suffix_lse=suffix_lse,
                 prefill_tokens_with_context=prefill_metadata.chunked_context.prefill_tokens_with_context,
             )
-        elif output_scale is None:
-            # With output_scale set, backend already wrote into `output` in place.
+        elif not fused_output:
+            # With fused output, the backend already wrote `output` in place.
             assert isinstance(output_prefill, torch.Tensor)
             output_prefill = output_prefill.flatten(start_dim=-2)
             output.copy_(output_prefill)

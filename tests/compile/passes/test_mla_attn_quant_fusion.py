@@ -32,6 +32,9 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
     CutlassFp8BlockScaledMMKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.triton import (
+    TritonFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
@@ -46,6 +49,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.attention.backends.mla.prefill.flash_attn import FlashAttnPrefillBackend
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
@@ -131,18 +135,19 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
             device=self.device,
         )
 
-    def build_attn_metadata(self, batch_size: int) -> AttentionMetadata:
+    def build_attn_metadata(
+        self, batch_size: int, query_len: int = 1
+    ) -> AttentionMetadata:
         """Initialize MLA attention metadata.
 
-        NOTE: Uses decode-only batch (query_len=1 per request). The prefill
-        (forward_mha) path is not separately tested here because it requires
-        FlashAttention availability and different input tensor shapes. The
-        quant logic in forward_impl is identical for both paths — it quantizes
-        the full output[:num_actual_toks] buffer after both forward_mha and
-        forward_mqa have written their results.
+        ``query_len == 1`` is a decode-only batch (forward_mqa). ``query_len > 1``
+        is a pure-prefill batch (seq_len == query_len, no context) which routes
+        through forward_mha — needed to exercise the fused per-group output path.
         """
 
-        batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
+        batch_spec = BatchSpec(
+            seq_lens=[query_len] * batch_size, query_lens=[query_len] * batch_size
+        )
         common_attn_metadata = create_common_attn_metadata(
             batch_spec, self.block_size, self.device, arange_block_indices=True
         )
@@ -288,6 +293,8 @@ class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
         is_checkpoint_fp8_serialized=True,
         weight_block_size=[128, 128],
     )
+    # o_proj block-scaled MM kernel; subclasses override to change the scale layout.
+    block_kernel = CutlassFp8BlockScaledMMKernel
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -303,15 +310,15 @@ class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
                 self.weight_block_size = [128, 128]
                 super().__init__(*a, **kw)
 
-        # Force CutlassFp8BlockScaledMMKernel to ensure the graph uses
-        # per_token_group_fp8_quant (not the deepgemm packed variant).
+        # Force a block-scaled kernel that emits per_token_group_fp8_quant (not the
+        # deepgemm packed variant) so the fusion pattern matches.
         self.block_fp8_linear = _BlockFP8Layer(
             weight_shape=(self.output_dim, self.output_dim),
             activation_quant_key=self.quant_key,
             weight_quant_key=weight_quant_key,
             input_dtype=self.dtype,
             device=device,
-            force_kernel=CutlassFp8BlockScaledMMKernel,
+            force_kernel=self.block_kernel,
         )
 
         w = kwargs.get("w")
@@ -339,6 +346,16 @@ class TestMLAAttentionFp8GroupQuantPatternModel(MLAAttentionQuantPatternModel):
             output_shape=(q.shape[0], self.output_dim),
         )
         return self.block_fp8_linear(attn_output)
+
+
+class TestMLAAttentionFp8GroupQuantPatternModelTriton(
+    TestMLAAttentionFp8GroupQuantPatternModel
+):
+    """Per-group FP8 with the Triton block-scaled o_proj, which produces plain row-major
+    (non-ue8m0, non-col-major) scales. That layout satisfies the FA4 fused-output gate
+    (col == ue8m0 == tma), so the prefill forward_mha fused path engages."""
+
+    block_kernel = TritonFp8BlockScaledMMKernel
 
 
 def is_nvfp4_supported():
@@ -585,3 +602,130 @@ def test_mla_attention_quant_pattern(
 
     # Check numerical correctness
     torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(100),
+    reason="FA4 fused per-group output requires Blackwell (SM100/SM110).",
+)
+@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("query_len", [32])
+def test_mla_prefill_pergroup_fused_output(
+    batch_size: int,
+    query_len: int,
+    dist_init,
+    monkeypatch,
+    use_fresh_inductor_cache,
+):
+    """Exercise the FA4 *prefill* per-group FP8 fused-output path (forward_mha).
+
+    ``test_mla_attention_quant_pattern`` is decode-only (forward_mqa -> post-quant). A
+    prefill batch routes through ``forward_mha``, and the Triton block-scaled o_proj
+    (plain row-major scales) makes ``forward_impl``'s layout gate engage the fused path.
+
+    Asserts (a) the fused path ran — the FA prefill call received ``output_scales`` —
+    and (b) the fused fp8 output is correct: dequantizing it matches a bf16 reference
+    attention on the same inputs within fp8 per-group tolerance. The downstream o_proj
+    GEMM's *consumption* of the scales is a separate concern that this synthetic harness
+    can't set up faithfully (the block-scaled GEMM needs real weight processing), so the
+    GEMM result itself is not asserted.
+    """
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    num_heads, qk_nope, qk_rope, v_head_dim, kv_lora = 16, 128, 64, 128, 512
+    qk_head_dim = qk_nope + qk_rope
+    num_tokens = batch_size * query_len
+    dtype = torch.bfloat16
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    torch.set_default_dtype(dtype)
+    torch.manual_seed(42)
+
+    model_config = ModelConfig(
+        model="deepseek-ai/DeepSeek-V3", max_model_len=2048, dtype=dtype
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=1024,
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE, custom_ops=["+quant_fp8"]
+        ),
+        cache_config=CacheConfig(cache_dtype="auto"),
+        attention_config=AttentionConfig(backend=AttentionBackendEnum.TRITON_MLA),
+    )
+    vllm_config.compilation_config.pass_config = PassConfig(
+        fuse_attn_quant=True, eliminate_noops=True
+    )
+
+    q = torch.randn(num_tokens, num_heads, qk_head_dim, dtype=dtype, device=device)
+    kv_c_normed = torch.randn(num_tokens, kv_lora, dtype=dtype, device=device)
+    k_pe = torch.randn(num_tokens, 1, qk_rope, dtype=dtype, device=device)
+    torch._dynamo.mark_dynamic(q, 0)
+    torch._dynamo.mark_dynamic(kv_c_normed, 0)
+    torch._dynamo.mark_dynamic(k_pe, 0)
+
+    # Spy on the FA prefill call: confirm the fused path ran (output_scales passed) and
+    # that the fused fp8 output dequantizes to a bf16 reference attention (same inputs).
+    orig_run = FlashAttnPrefillBackend.run_prefill_new_tokens
+    fused_ran = False
+    fa_err: dict = {}
+
+    def spy_run(self, *args, out=None, output_scale=None, output_scales=None, **kwargs):
+        nonlocal fused_ran
+        if output_scales is None:
+            return orig_run(self, *args, out=out, output_scale=output_scale, **kwargs)
+        fused_ran = True
+        bf16_ref = orig_run(self, *args, out=None, output_scale=None, **kwargs)
+        ret = orig_run(
+            self,
+            *args,
+            out=out,
+            output_scale=output_scale,
+            output_scales=output_scales,
+            **kwargs,
+        )
+        deq = out.float() * output_scales.float()
+        fa_err["abs"] = (deq - bf16_ref.float()).abs().max().item()
+        fa_err["amax"] = bf16_ref.float().abs().max().item()
+        return ret
+
+    monkeypatch.setattr(FlashAttnPrefillBackend, "run_prefill_new_tokens", spy_run)
+
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(attn_metadata=None, vllm_config=vllm_config),
+    ):
+        model = TestMLAAttentionFp8GroupQuantPatternModelTriton(
+            num_heads=num_heads,
+            qk_nope_head_dim=qk_nope,
+            qk_rope_head_dim=qk_rope,
+            v_head_dim=v_head_dim,
+            kv_lora_rank=kv_lora,
+            kv_cache_dtype=dtype,
+            device=device,
+            vllm_config=vllm_config,
+        ).to(device)
+        model(q, kv_c_normed, k_pe)  # HACK: warmup, see #131044
+        get_forward_context().attn_metadata = model.build_attn_metadata(
+            batch_size, query_len
+        )
+        test_backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            LazyInitPass(MLAAttnQuantFusionPass, vllm_config),
+            PostCleanupPass(vllm_config),
+        )
+        # forward_impl -> forward_mha (prefill) -> FA fused output -> o_proj GEMM.
+        torch.compile(model, backend=test_backend, fullgraph=True)(q, kv_c_normed, k_pe)
+
+    assert fused_ran, (
+        "fused per-group prefill path was not exercised: the FA prefill call never "
+        "received output_scales (forward_mha fell back to the post-quant path)"
+    )
+    # fp8-e4m3 per-group quant: max abs error is a few % of the block amax.
+    assert fa_err["abs"] <= 0.1 * fa_err["amax"], (
+        f"fused per-group fp8 output diverges from bf16 attention: "
+        f"max_abs={fa_err['abs']:.3f} vs amax={fa_err['amax']:.3f}"
+    )
