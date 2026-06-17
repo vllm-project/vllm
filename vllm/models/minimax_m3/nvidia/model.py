@@ -618,26 +618,17 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         output, _ = self.o_proj(attn_output)
         return output
 
+    @eager_break_during_capture
     def _run_attention(
         self,
         query: torch.Tensor,
         index_query: torch.Tensor,
         output: torch.Tensor,
     ) -> torch.Tensor:
-        # The indexer's decode path is cudagraph-safe (persistent buffers), so it
-        # runs in the captured segment, writing its top-k into the shared, stable
-        # ``topk_indices_buffer``. Only the sparse attention -- whose kernel reads
-        # per-request metadata -- is broken out into the eager segment, where it
-        # reads that buffer back. Nothing crosses the break as a Python value.
+        # Single eager break around both: their split-K kernels read per-request
+        # metadata and can't be captured into a cudagraph. The indexer writes its
+        # top-k into the shared ``topk_indices_buffer``; the attend reads it back.
         self.indexer(index_query)
-        return self._run_sparse_attn(query, output)
-
-    @eager_break_during_capture
-    def _run_sparse_attn(
-        self,
-        query: torch.Tensor,
-        output: torch.Tensor,
-    ) -> torch.Tensor:
         return self.impl.forward(self, query, self.kv_cache, output)
 
 
