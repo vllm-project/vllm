@@ -33,9 +33,9 @@ from vllm.model_executor.layers.quantization.base_config import QuantizationConf
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_act_int8_process_scales,
     marlin_moe_permute_scales,
-    marlin_moe_permute_zero_points,
     marlin_permute_bias,
     moe_awq_to_marlin_zero_points,
+    moe_packed_to_marlin_zero_points,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -371,87 +371,6 @@ def _process_weights_flashinfer(
     )
 
 
-def _marlin_moe_process_zero_points(
-    qzeros: torch.Tensor,
-    pack_factor: int,
-    num_bits: int,
-    is_a_8bit: bool,
-) -> torch.Tensor:
-    """Unpack and permute MoE zero points into Marlin format.
-
-    Handles two input conventions:
-
-    * **MoeWNA16** (``dtype == uint8``): shape ``(E, N_out // bit8_pack, K // gs)``
-      where bit8_pack = 8 // num_bits.  The packed dimension (axis 1) contains
-      output features; the group dimension (axis 2) contains input groups.  The
-      nibbles are unpacked and transposed to produce ``(E, K // gs, N_out)``
-      before applying the Marlin permutation.
-
-    * **GPTQ / AutoGPTQ / QuantizationArgs** (other dtypes): shape
-      ``(E, K // gs, N_out // pack32)`` where pack32 = 32 // num_bits.  The
-      group dimension (axis 1) and output features (axis 2) are already in the
-      right order; only int32 unpacking is needed.
-
-    Returns Marlin-formatted zero points with shape
-    ``(E, K // gs, N_out // pack32)`` as int32.
-    """
-    from vllm.model_executor.layers.quantization.utils.quant_utils import unpack_cols
-
-    num_experts = qzeros.shape[0]
-
-    if qzeros.dtype == torch.uint8:
-        # MoeWNA16 format: (E, N_out // bit8_pack, K // gs)
-        # axis 1 = packed output features, axis 2 = input groups
-        packed_out = qzeros.shape[1]  # N_out // bit8_pack
-        num_groups = qzeros.shape[2]  # K // group_size
-        size_n = packed_out * pack_factor  # N_out (output features)
-
-        unpacked = torch.empty(
-            (num_experts, num_groups, size_n),
-            dtype=torch.int32,
-            device=qzeros.device,
-        )
-        for e in range(num_experts):
-            # Transpose so rows = groups, cols = packed outputs
-            zp_t = qzeros[e].T.to(torch.int32)  # (num_groups, packed_out)
-            if num_bits == 4:
-                low = zp_t & 0xF  # (num_groups, packed_out)
-                high = (zp_t >> 4) & 0xF  # (num_groups, packed_out)
-                # Interleave: even channels from low, odd from high
-                unpacked[e] = torch.stack([low, high], dim=2).reshape(
-                    num_groups, size_n
-                )
-            else:  # 8-bit: one zero point per byte, already transposed
-                unpacked[e] = zp_t
-    else:
-        # GPTQ/AutoGPTQ format: (E, K // gs, N_out // pack32)
-        # axis 1 = input groups, axis 2 = packed output features
-        # Note: the parameter may be stored as params_dtype (e.g. bfloat16) even
-        # though it holds packed-integer data.  Use .to(int32) (value conversion)
-        # rather than .view(int32) (bitwise reinterpret) to avoid shape changes
-        # caused by the 2-byte vs 4-byte size difference.
-        num_groups = qzeros.shape[1]  # K // group_size
-        size_n = qzeros.shape[2] * pack_factor  # N_out (output features)
-
-        unpacked = torch.empty(
-            (num_experts, num_groups, size_n),
-            dtype=torch.int32,
-            device=qzeros.device,
-        )
-        for e in range(num_experts):
-            unpacked[e] = unpack_cols(
-                qzeros[e].to(torch.int32), num_bits, num_groups, size_n
-            )
-
-    return marlin_moe_permute_zero_points(
-        zp=unpacked,
-        size_k=num_groups,
-        size_n=size_n,
-        num_bits=num_bits,
-        is_a_8bit=is_a_8bit,
-    )
-
-
 def _process_weights_marlin(
     layer: torch.nn.Module,
     input_dtype: torch.dtype | None,
@@ -602,14 +521,20 @@ def _process_weights_marlin(
             )
 
     # --- Permute zero points ---
-    if w13_qzeros is not None:
-        w13_qzeros = _marlin_moe_process_zero_points(
-            w13_qzeros, pack_factor, num_bits, is_a_8bit
+    if w13_qzeros is not None and w2_qzeros is not None:
+        w13_qzeros = moe_packed_to_marlin_zero_points(
+            w13_qzeros,
+            size_k=w13_qzeros.shape[1],
+            size_n=w13_qzeros.shape[2] * pack_factor,
+            num_bits=num_bits,
+            is_a_8bit=is_a_8bit,
         )
-
-    if w2_qzeros is not None:
-        w2_qzeros = _marlin_moe_process_zero_points(
-            w2_qzeros, pack_factor, num_bits, is_a_8bit
+        w2_qzeros = moe_packed_to_marlin_zero_points(
+            w2_qzeros,
+            size_k=w2_qzeros.shape[1],
+            size_n=w2_qzeros.shape[2] * pack_factor,
+            num_bits=num_bits,
+            is_a_8bit=is_a_8bit,
         )
 
     # --- Permute bias ---
