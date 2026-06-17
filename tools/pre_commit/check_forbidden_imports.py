@@ -13,6 +13,7 @@ class ForbiddenImport:
     tip: str
     allowed_pattern: re.Pattern = re.compile(r"^$")  # matches nothing by default
     allowed_files: set[str] = field(default_factory=set)
+    applies_to: re.Pattern | None = None
 
 
 CHECK_IMPORTS = {
@@ -82,6 +83,24 @@ CHECK_IMPORTS = {
         ),
         allowed_files={"vllm/triton_utils/importing.py"},
     ),
+    "hw_agnostic_isolation": ForbiddenImport(
+        pattern=(
+            r"^\s*from\s+vllm\."
+            r"(?:"
+            r"model_executor\.layers(?!\.utils\b)"
+            r"|model_executor\.models(?!\.utils\b)"
+            r"|models\.[^.]+(?!\.hw_agnostic\b)"
+            r"|v1\.attention\.backends(?!\.utils\b)"
+            r")"
+            r"(?:\.|\s+import\b)"
+        ),
+        tip=(
+            "hardware-agnostic modelling code must not import from "
+            "non-hardware=angnostic parts. The only exceptions are general "
+            "utils.py files such as vllm.model_executor.layers.utils.py."
+        ),
+        applies_to=re.compile(r"^vllm/models/[^/]+/hw_agnostic/.*\.py$"),
+    ),
 }
 
 
@@ -91,6 +110,12 @@ def check_file(path: str) -> int:
     return_code = 0
     # Check all patterns in the whole file
     for import_name, forbidden_import in CHECK_IMPORTS.items():
+        # Path-scoped rules: skip files that don't match the rule's scope.
+        if (
+            forbidden_import.applies_to is not None
+            and not forbidden_import.applies_to.search(path)
+        ):
+            continue
         # Skip files that are allowed for this import
         if path in forbidden_import.allowed_files:
             continue
@@ -138,11 +163,101 @@ def test_regex():
         ("print('import pickle')", False),
         ("import pickleas as asdf", False),
     ]
+    pickle_pattern = re.compile(CHECK_IMPORTS["pickle/cloudpickle"].pattern)
     for i, (line, should_match) in enumerate(test_cases):
-        result = bool(CHECK_IMPORTS["pickle/cloudpickle"].pattern.match(line))
+        result = bool(pickle_pattern.match(line))
         assert result == should_match, (
             f"Test case {i} failed: '{line}' (expected {should_match}, got {result})"
         )
+
+    hw_agnostic_cases = [
+        ("from vllm.model_executor.layers.activation import SiluAndMul", True),
+        ("from vllm.model_executor.layers.layernorm import RMSNorm", True),
+        ("from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm", True),
+        ("from vllm.model_executor.layers.rotary_embedding import get_rope", True),
+        ("from vllm.model_executor.layers.sparse_attn_indexer import X", True),
+        ("from vllm.model_executor.layers.mhc import HCHeadOp", True),
+        ("from vllm.model_executor.layers.linear import ColumnParallelLinear", True),
+        ("from vllm.model_executor.layers.fused_moe import FusedMoE", True),
+        (
+            "from vllm.model_executor.layers.logits_processor import LogitsProcessor",
+            True,
+        ),
+        ("from vllm.model_executor.layers.attention_layer_base import X", True),
+        (
+            "from vllm.model_executor.layers.quantization import QuantizationConfig",
+            True,
+        ),
+        (
+            "from vllm.model_executor.layers.quantization.utils.fp8_utils import x",
+            True,
+        ),
+        ("from vllm.model_executor.layers.vocab_parallel_embedding import X", True),
+        ("from vllm.model_executor.models.deepseek_v2 import foo", True),
+        ("from vllm.model_executor.models.deepseek_mtp import SharedHead", True),
+        ("from vllm.model_executor.models.interfaces import SupportsPP", True),
+        ("from vllm.models.deepseek_v4.compressor import DeepseekCompressor", True),
+        ("from vllm.models.deepseek_v4.sparse_mla import X", True),
+        ("from vllm.models.deepseek_v4.common.ops import foo", True),
+        ("from vllm.models.deepseek_v4.common.ops.fused_indexer_q import bar", True),
+        ("from vllm.models.minimax_m3.compressor import X", True),
+        ("from vllm.models.llama4.experts import X", True),
+        ("from vllm.v1.attention.backends.mla.indexer import X", True),
+        ("from vllm.v1.attention.backends.mla.sparse_swa import Y", True),
+        ("    from vllm.model_executor.layers.activation import SiluAndMul", True),
+        ("from vllm.model_executor.custom_op import PluggableLayer", False),
+        ("from vllm.model_executor.custom_op import CustomOp", False),
+        ("from vllm.model_executor.models.utils import maybe_prefix", False),
+        ("from vllm.model_executor.models.utils import make_layers", False),
+        ("from vllm.v1.attention.backends.utils import split_decodes", False),
+        (
+            "from vllm.model_executor.model_loader.weight_utils import "
+            "default_weight_loader",
+            False,
+        ),
+        ("from vllm.v1.attention.backend import AttentionBackend", False),
+        ("from vllm.v1.kv_cache_interface import KVCacheSpec", False),
+        ("from vllm.v1.worker.workspace import current_workspace_manager", False),
+        ("from vllm.config import VllmConfig", False),
+        ("from vllm.distributed import get_pp_group", False),
+        ("from vllm.compilation.decorators import support_torch_compile", False),
+        ("from vllm.platforms import current_platform", False),
+        ("from vllm.forward_context import get_forward_context", False),
+        ("# from vllm.model_executor.layers.layernorm import RMSNorm", False),
+        ("from vllm.models.deepseek_v4.hw_agnostic.ops.layernorm import X", False),
+        ("from vllm.models.minimax_m3.hw_agnostic.ops.layernorm import X", False),
+        ("from vllm.model_executor.layers_extra import x", False),
+        ("from vllm.model_executor.models_extra import x", False),
+    ]
+    rule = CHECK_IMPORTS["hw_agnostic_isolation"]
+    rule_pattern = re.compile(rule.pattern, re.MULTILINE)
+    for i, (line, should_match) in enumerate(hw_agnostic_cases):
+        result = bool(rule_pattern.match(line))
+        assert result == should_match, (
+            f"hw_agnostic test case {i} failed: '{line}' "
+            f"(expected {should_match}, got {result})"
+        )
+
+    assert rule.applies_to is not None
+    accept_paths = [
+        "vllm/models/deepseek_v4/hw_agnostic/model.py",
+        "vllm/models/deepseek_v4/hw_agnostic/ops/attention.py",
+        "vllm/models/deepseek_v4/hw_agnostic/tests/test_hw_agnostic_e2e.py",
+        "vllm/models/minimax_m3/hw_agnostic/model.py",
+        "vllm/models/llama4/hw_agnostic/ops/attention.py",
+    ]
+    reject_paths = [
+        "vllm/models/deepseek_v4/attention.py",
+        "vllm/models/deepseek_v4/sparse_mla.py",
+        "vllm/models/minimax_m3/model.py",
+        "vllm/model_executor/layers/activation.py",
+        "tests/some_other.py",
+    ]
+    for p in accept_paths:
+        assert rule.applies_to.search(p), f"applies_to should match {p}"
+    for p in reject_paths:
+        assert not rule.applies_to.search(p), f"applies_to should NOT match {p}"
+
     print("All regex tests passed.")
 
 
