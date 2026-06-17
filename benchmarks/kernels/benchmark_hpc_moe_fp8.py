@@ -52,6 +52,11 @@ WEIGHT_SHAPES_MOE = {
     "Llama-4-Maverick-17B-128E-Instruct-FP8": [
         [128, 1, 5120, 8192],
     ],
+    # Hy3-preview-FP8 routed experts: num_experts=192, num_experts_per_tok=8,
+    # hidden_size=4096, per-expert intermediate (expert_hidden_dim)=1536.
+    "hy3-preview-fp8": [
+        [192, 8, 4096, 1536],
+    ],
 }
 
 DEFAULT_MODELS = [
