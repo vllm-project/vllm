@@ -298,14 +298,17 @@ class RayExecutorV2(MultiprocExecutor):
         dist_ip = bundle_assignments[0]["node_ip"]
         # Co-located data-parallel engines pick this TCPStore port
         # independently and a shared random search collides intermittently.
-        # Seed the search by DP rank into disjoint windows. See #28498.
+        # Seed the search by node-local DP rank into disjoint windows. See
+        # #28498.
         parallel_config = self.vllm_config.parallel_config
-        if parallel_config.data_parallel_size > 1:
+        # data_parallel_rank_local is set for DP engines, None otherwise.
+        local_dp_rank = parallel_config.data_parallel_rank_local
+        if local_dp_rank is not None:
             window = 32
             start_port = (
                 parallel_config.data_parallel_master_port
                 + 100
-                + parallel_config.data_parallel_rank * window
+                + local_dp_rank * window
             )
             try:
                 port = _get_open_port(start_port=start_port, max_attempts=window)
