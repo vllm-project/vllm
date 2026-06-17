@@ -8,6 +8,7 @@
 # both of them failed because of cuda context mismatch.
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
+import atexit
 import gc
 import os
 from collections.abc import Callable, Iterator
@@ -115,7 +116,62 @@ class CuMemAllocator:
         assert cumem_available, "cumem allocator is not available"
         if CuMemAllocator.instance is None:
             CuMemAllocator.instance = CuMemAllocator()
+            # Ensure MemPool/allocator wrappers are released in a controlled
+            # order before interpreter finalization. Otherwise the final GC may
+            # destroy the pluggable allocator wrapper before its MemPool, and
+            # MemPool teardown (which calls allocator virtual methods to release
+            # cached blocks) hits "pure virtual method called" / SIGSEGV. This
+            # has been observed on ROCm with CUDA graphs captured against the
+            # pool; see release_pools for details.
+            atexit.register(CuMemAllocator._shutdown_singleton)
         return CuMemAllocator.instance
+
+    @staticmethod
+    def _shutdown_singleton() -> None:
+        instance = CuMemAllocator.instance
+        if instance is None:
+            return
+        try:
+            instance.release_pools()
+        except Exception:
+            logger.exception("CuMemAllocator singleton shutdown failed")
+
+    def release_pools(self) -> None:
+        """Drop references to MemPool / pluggable allocators eagerly, in a safe
+        order, so pool destruction is not deferred to interpreter finalization.
+
+        MemPool teardown may invoke allocator virtual methods (e.g. raw_delete)
+        when releasing cached blocks. If the allocator wrappers are dropped
+        first, C++ can hit "pure virtual method called" (or SIGSEGV) during
+        shutdown. This was reproducible on ROCm/HIP when a CUDA graph was
+        captured against the pool: the final GC destroyed the
+        CUDAPluggableAllocator before its MemPool. Pure-torch (default
+        allocator) pools with the same topology tear down cleanly, so this is a
+        destruction-ordering issue specific to the pluggable allocator path.
+        """
+        if not self.allocator_and_pools:
+            return
+
+        # Keep allocators alive while MemPool objects are destroyed.
+        pool_entries = list(self.allocator_and_pools.values())
+        self.allocator_and_pools.clear()
+
+        mem_pools = [entry[0] for entry in pool_entries]
+        allocators = [entry[1] for entry in pool_entries]
+        pool_entries.clear()
+
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            logger.debug("torch.cuda.synchronize() failed during release_pools")
+
+        # Phase 1: drop MemPool refs while allocators are still strongly held.
+        mem_pools.clear()
+        gc.collect()
+
+        # Phase 2: now it is safe to release allocator wrappers.
+        allocators.clear()
+        gc.collect()
 
     def __init__(self):
         self.pointer_to_data: dict[int, AllocationData] = {}
