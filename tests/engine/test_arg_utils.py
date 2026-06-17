@@ -206,6 +206,14 @@ def test_get_kwargs():
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)  # type: ignore[call-arg]
 
 
+def test_jit_monitor_verbose_arg():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--jit-monitor-verbose"])
+
+    assert args.jit_monitor_verbose
+    assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
+
+
 def test_hf_token_get_kwargs():
     kwargs = get_kwargs(ModelConfig)["hf_token"]
 

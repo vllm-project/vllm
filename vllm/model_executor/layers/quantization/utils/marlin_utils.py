@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import math
+
 import numpy
 import torch
 
@@ -17,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.utils.math_utils import round_up
 from vllm.utils.platform_utils import num_compute_units
 
 from .quant_utils import pack_cols, unpack_cols
@@ -214,13 +217,110 @@ def check_marlin_supports_shape(
     return True, None
 
 
-def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
+def marlin_padded_nk(size_n: int, size_k: int, group_size: int = -1) -> tuple[int, int]:
+    """Minimal (padded_n, padded_k) satisfying a Marlin thread-tile family.
+
+    Marlin GEMM and repack require (n % 64, k % 128) or (n % 128, k % 64);
+    shapes satisfying neither are zero-padded up to the cheaper family. K
+    stays divisible by group_size so padded scales keep an integral group
+    count. Padded weight regions contribute nothing to the GEMM output:
+    quantized value 0 decodes to 0.0 (FP4/FP8) or is cancelled by the
+    zero-padded scales/zero-points (INT).
+    """
+    group = group_size if group_size > 0 else 1
+    candidates = (
+        (round_up(size_n, 64), round_up(size_k, math.lcm(128, group))),
+        (round_up(size_n, 128), round_up(size_k, math.lcm(64, group))),
+    )
+    padded_nk = min(candidates, key=lambda nk: (nk[0] * nk[1], nk[0] + nk[1]))
+    if padded_nk != (size_n, size_k):
+        logger.warning_once(
+            "Marlin requires thread-tile padding for some weight shapes in "
+            "this model. Activations and/or outputs of the padded layers are "
+            "padded/sliced on every forward; performance may be degraded."
+        )
+    return padded_nk
+
+
+def marlin_repacked_nk(qweight: torch.Tensor, num_bits: int) -> tuple[int, int]:
+    """Recover the (size_n, size_k) a Marlin weight was repacked with
+    (including any tile padding) from its packed shape."""
+    pack_factor = 32 // num_bits
+    size_k = qweight.size(0) * GPTQ_MARLIN_TILE
+    size_n = qweight.size(1) * pack_factor // GPTQ_MARLIN_TILE
+    return size_n, size_k
+
+
+def marlin_pad_qweight(
+    qweight: torch.Tensor, size_n: int, size_k: int, padded_n: int, padded_k: int
+) -> torch.Tensor:
+    """Zero-pad a GPTQ-layout packed weight (size_k / pack, size_n) for
+    gptq_marlin_repack."""
+    if (padded_n, padded_k) == (size_n, size_k):
+        return qweight
+    pack_factor = size_k // qweight.size(0)
+    return torch.nn.functional.pad(
+        qweight, (0, padded_n - size_n, 0, (padded_k - size_k) // pack_factor)
+    )
+
+
+def marlin_pad_scales(
+    scales: torch.Tensor,
+    size_n: int,
+    size_k: int,
+    padded_n: int,
+    padded_k: int,
+    group_size: int,
+) -> torch.Tensor:
+    """Zero-pad weight scales (num_groups, size_n); call before
+    marlin_permute_scales and pass the padded extents to it."""
+    if (padded_n, padded_k) == (size_n, size_k):
+        return scales
+    pad_rows = padded_k // group_size - scales.size(0) if group_size > 0 else 0
+    assert pad_rows >= 0
+    return torch.nn.functional.pad(scales, (0, padded_n - size_n, 0, pad_rows))
+
+
+def marlin_pad_dim(x: torch.Tensor, size: int, padded: int) -> torch.Tensor:
+    """Zero-pad the last dim from size to padded (activations K, bias N)."""
+    if padded == size:
+        return x
+    return torch.nn.functional.pad(x, (0, padded - size))
+
+
+def marlin_unpad_output(
+    output: torch.Tensor, size_n: int, padded_n: int
+) -> torch.Tensor:
+    """Strip padded output columns back to the logical N.
+
+    TODO: marlin_gemm could instead write the un-padded columns directly
+    into a caller-provided `c` buffer so this slice copy disappears.
+    """
+    if padded_n == size_n:
+        return output
+    return output[..., :size_n].contiguous()
+
+
+def check_marlin_supports_layer(
+    layer: LinearBase, group_size: int, allow_tile_padding: bool = False
+) -> bool:
     output_size_per_partition = (
         getattr(layer, "output_size_per_partition", None) or layer.output_size
     )
     input_size_per_partition = (
         getattr(layer, "input_size_per_partition", None) or layer.input_size
     )
+
+    if allow_tile_padding:
+        # Thread-tile misalignment is fixed by zero-padding at weight prep
+        # (see marlin_padded_nk); only a quantization group straddling the
+        # TP shard remains unsupported. Dense layers only - MoE prep does
+        # not pad yet.
+        return (
+            group_size == -1
+            or group_size >= layer.input_size
+            or input_size_per_partition % group_size == 0
+        )
 
     return check_marlin_supports_shape(
         output_size_per_partition=output_size_per_partition,
@@ -234,7 +334,12 @@ def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bo
     if current_platform.is_rocm():
         return False
     hidden_size = layer.hidden_size
-    intermediate_size_per_partition = layer.intermediate_size_per_partition
+    # Note: The layer has not performed rounding on intermediate_size's at this
+    # point. Use the unpadded size which won't change.
+    intermediate_size_per_partition = (
+        layer.moe_config.intermediate_size_per_partition_unpadded
+    )
+    assert intermediate_size_per_partition is not None
     # apply_router_weight_on_input is not supported for moe marlin
     supports_router_weight = not layer.apply_router_weight_on_input
 
@@ -551,10 +656,13 @@ def apply_gptq_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
+    padded_n, padded_k = marlin_repacked_nk(weight, wtype.size_bits)
+    reshaped_x = marlin_pad_dim(reshaped_x, input_size_per_partition, padded_k)
+
     use_atomic_add = should_use_atomic_add_reduce(
         m=reshaped_x.size(0),
-        n=output_size_per_partition,
-        k=reshaped_x.size(1),
+        n=padded_n,
+        k=padded_k,
         device=input.device,
         dtype=input.dtype,
     )
@@ -587,14 +695,15 @@ def apply_gptq_marlin_linear(
         workspace,
         wtype,
         size_m=reshaped_x.shape[0],
-        size_n=output_size_per_partition,
-        size_k=input_size_per_partition,
+        size_n=padded_n,
+        size_k=padded_k,
         is_k_full=is_k_full,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
         is_zp_float=False,
     )
 
+    output = marlin_unpad_output(output, output_size_per_partition, padded_n)
     return output.reshape(out_shape)
 
 
@@ -617,10 +726,13 @@ def apply_awq_marlin_linear(
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition,)
 
+    padded_n, padded_k = marlin_repacked_nk(weight, quant_type.size_bits)
+    reshaped_x = marlin_pad_dim(reshaped_x, input_size_per_partition, padded_k)
+
     use_atomic_add = should_use_atomic_add_reduce(
         m=reshaped_x.size(0),
-        n=output_size_per_partition,
-        k=reshaped_x.size(1),
+        n=padded_n,
+        k=padded_k,
         device=input.device,
         dtype=input.dtype,
     )
@@ -652,11 +764,12 @@ def apply_awq_marlin_linear(
         workspace,
         quant_type,
         size_m=reshaped_x.shape[0],
-        size_n=output_size_per_partition,
-        size_k=input_size_per_partition,
+        size_n=padded_n,
+        size_k=padded_k,
         use_atomic_add=use_atomic_add,
         use_fp32_reduce=use_fp32_reduce,
         is_zp_float=False,
     )
 
+    output = marlin_unpad_output(output, output_size_per_partition, padded_n)
     return output.reshape(out_shape)
