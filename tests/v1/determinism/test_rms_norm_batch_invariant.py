@@ -394,12 +394,12 @@ def test_rms_norm_batch_invariance(dtype):
     row = torch.randn(1, hidden_size, dtype=dtype, device=device)
 
     # Compute rms_norm on the single row alone
-    out_single = triton_rms_norm(row, weight, eps=eps)
+    out_single = rms_norm_batch_invariant(row, weight, eps=eps)
 
     # Embed the same row in a larger batch with random neighbors
     batch = torch.randn(8, hidden_size, dtype=dtype, device=device)
     batch[4] = row[0]
-    out_batch = triton_rms_norm(batch, weight, eps=eps)
+    out_batch = rms_norm_batch_invariant(batch, weight, eps=eps)
 
     assert torch.equal(out_single[0], out_batch[4]), (
         "rms_norm output for a row differs when batch context changes"
