@@ -40,6 +40,25 @@ def test_pr_without_l2_label_uses_default_scenario():
     assert "no L2 benchmark label" in selected.reason
 
 
+def test_issue_comment_event_falls_back_to_default_scenario():
+    resolver = load_resolver()
+    selected = resolver.select_scenario(
+        event_name="issue_comment",
+        manual_scenario="",
+        pr_labels=[],
+        default_scenario="random-online",
+        default_dataset_path="",
+        default_constraints_file="",
+        same_spec_spec_file="",
+        same_spec_constraints_file="",
+    )
+
+    assert selected.scenario == "random-online"
+    assert selected.mode == "default"
+    assert selected.trigger_label == ""
+    assert "issue_comment event uses configured default benchmark scenario" in selected.reason
+
+
 def test_parse_labels_accepts_github_label_objects():
     resolver = load_resolver()
 
