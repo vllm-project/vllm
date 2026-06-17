@@ -753,7 +753,9 @@ class Worker(WorkerBase):
             activate as activate_triton_jit_monitor,
         )
 
-        activate_triton_jit_monitor()
+        activate_triton_jit_monitor(
+            verbose=self.observability_config.jit_monitor_verbose
+        )
 
         # Freeze the worker heap so the GC won't scan static objects
         # (model weights, KV caches, CUDA graphs) during inference.
