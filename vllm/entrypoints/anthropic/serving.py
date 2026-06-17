@@ -665,7 +665,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 if origin_chunk.usage
                                 else None
                             )
-                            cached = prompt_details.cached_tokens if prompt_details else None
+                            cached = (
+                                prompt_details.cached_tokens if prompt_details else None
+                            )
                             chunk = AnthropicStreamEvent(
                                 type="message_start",
                                 message=AnthropicMessagesResponse(
@@ -708,7 +710,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 if origin_chunk.usage
                                 else None
                             )
-                            cached = prompt_details.cached_tokens if prompt_details else None
+                            cached = (
+                                prompt_details.cached_tokens if prompt_details else None
+                            )
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
                                 delta=AnthropicDelta(stop_reason=stop_reason),
@@ -725,8 +729,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     ),
                                     cache_read_input_tokens=cached,
                                     cache_creation_input_tokens=(
-                                        origin_chunk.usage.prompt_tokens
-                                        - (cached or 0)
+                                        origin_chunk.usage.prompt_tokens - (cached or 0)
                                         if origin_chunk.usage and cached is not None
                                         else None
                                     ),
