@@ -1,3 +1,6 @@
 lmcache >= 0.3.9
-nixl >= 1.1.0 # Required for disaggregated prefill
+# CuPy 14.1.0 imports pytest from cupy.testing._random. Use <14.1.0
+# until a fixed newer release is verified for runtime images.
+cupy-cuda13x < 14.1.0
+nixl == 1.2.0 # Required for disaggregated prefill
 mooncake-transfer-engine >= 0.3.8

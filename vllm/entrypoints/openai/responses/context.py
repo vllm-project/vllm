@@ -10,9 +10,13 @@ from contextlib import AsyncExitStack
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Final, Union
 
+from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
+from openai.types.responses.response_output_item import McpCall
+from openai.types.responses.response_output_message import ResponseOutputMessage
+from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
@@ -20,7 +24,6 @@ from vllm import envs
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.constants import MCP_PREFIX
 from vllm.entrypoints.mcp.tool import Tool
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
@@ -31,19 +34,19 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_streamable_parser_for_assistant,
     render_for_completion,
 )
-from vllm.entrypoints.openai.parser.responses_parser import (
-    get_responses_parser_for_simple_context,
-)
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponseRawMessageAndToken,
     ResponsesRequest,
 )
-from vllm.entrypoints.openai.responses.utils import construct_tool_dicts
+from vllm.entrypoints.openai.responses.utils import (
+    build_response_output_items,
+    construct_tool_dicts,
+)
+from vllm.entrypoints.serve.utils.constants import MCP_PREFIX
 from vllm.outputs import RequestOutput
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
@@ -272,12 +275,13 @@ class ParsableContext(ConversationContext):
         *,
         response_messages: list[ResponseInputOutputItem],
         tokenizer: TokenizerLike,
-        reasoning_parser_cls: type[ReasoningParser] | None,
+        parser_cls: type[Parser] | None,
         request: ResponsesRequest,
         available_tools: list[str] | None,
-        tool_parser_cls: type[ToolParser] | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
+        enable_auto_tools: bool = False,
+        tool_call_id_type: str = "random",
     ):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -286,19 +290,25 @@ class ParsableContext(ConversationContext):
         # not implemented yet for ParsableContext
         self.all_turn_metrics: list[TurnMetrics] = []
 
-        if reasoning_parser_cls is None:
-            raise ValueError("reasoning_parser_cls must be provided.")
+        self.response_messages: list[ResponseInputOutputItem] = response_messages
+        self.num_init_messages = len(response_messages)
+        self.finish_reason: str | None = None
+        self.enable_auto_tools = enable_auto_tools
+        self.tool_call_id_type = tool_call_id_type
 
-        self.parser = get_responses_parser_for_simple_context(
-            tokenizer=tokenizer,
-            reasoning_parser_cls=reasoning_parser_cls,
-            response_messages=response_messages,
-            request=request,
-            tool_parser_cls=tool_parser_cls,
-            chat_template=chat_template,
-            chat_template_content_format=chat_template_content_format,
-        )
-        self.tool_parser_cls = tool_parser_cls
+        self.parser_instance: Parser | None = None
+        if parser_cls is not None:
+            chat_template_kwargs = request.build_chat_params(
+                default_template=chat_template,
+                default_template_content_format=chat_template_content_format,
+            ).chat_template_kwargs
+            self.parser_instance = parser_cls(
+                tokenizer,
+                tools=request.tools,
+                chat_template_kwargs=chat_template_kwargs,
+            )
+
+        self.parser_cls = parser_cls
         self.request = request
 
         self.available_tools = available_tools or []
@@ -320,11 +330,44 @@ class ParsableContext(ConversationContext):
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
-        self.parser.process(output.outputs[0])
-        output_token_ids = output.outputs[0].token_ids or []
-        self._accumulated_token_ids.extend(output_token_ids)
 
-        # only store if enable_response_messages is True, save memory
+        completion = output.outputs[0]
+        self.finish_reason = completion.finish_reason
+
+        if self.parser_instance is not None:
+            reasoning, content, tool_calls = self.parser_instance.parse(
+                completion.text,
+                self.request,
+                enable_auto_tools=self.enable_auto_tools,
+            )
+            self.response_messages.extend(
+                build_response_output_items(
+                    reasoning=reasoning,
+                    content=content,
+                    tool_calls=tool_calls,
+                    tool_call_id_type=self.tool_call_id_type,
+                )
+            )
+        elif completion.text:
+            self.response_messages.append(
+                ResponseOutputMessage(
+                    type="message",
+                    id=f"msg_{random_uuid()}",
+                    status="completed",
+                    role="assistant",
+                    content=[
+                        ResponseOutputText(
+                            annotations=[],
+                            type="output_text",
+                            text=completion.text,
+                            logprobs=None,
+                        )
+                    ],
+                )
+            )
+
+        self._accumulated_token_ids.extend(completion.token_ids or [])
+
         if self.request.enable_response_messages:
             output_prompt = output.prompt or ""
             output_prompt_token_ids = output.prompt_token_ids or []
@@ -344,18 +387,18 @@ class ParsableContext(ConversationContext):
                 )
             self.output_messages.append(
                 ResponseRawMessageAndToken(
-                    message=output.outputs[0].text,
-                    tokens=output.outputs[0].token_ids,
+                    message=completion.text,
+                    tokens=completion.token_ids,
                 )
             )
 
     def append_tool_output(self, output: list[ResponseInputOutputItem]) -> None:
-        self.parser.response_messages.extend(output)
+        self.response_messages.extend(output)
 
     def need_builtin_tool_call(self) -> bool:
         """Return true if the last message is a builtin tool call
         that the request has enabled."""
-        last_message = self.parser.response_messages[-1]
+        last_message = self.response_messages[-1]
         if last_message.type != "function_call":
             return False
         if last_message.name in ("code_interpreter", "python"):
@@ -459,12 +502,12 @@ class ParsableContext(ConversationContext):
         return [message]
 
     async def call_tool(self) -> list[ResponseInputOutputItem]:
-        if not self.parser.response_messages:
+        if not self.response_messages:
             return []
-        last_msg = self.parser.response_messages[-1]
+        last_msg = self.response_messages[-1]
         # change this to a mcp_ function call
         last_msg.id = f"{MCP_PREFIX}{random_uuid()}"
-        self.parser.response_messages[-1] = last_msg
+        self.response_messages[-1] = last_msg
         if last_msg.name == "code_interpreter":
             return await self.call_python_tool(self._tool_sessions["python"], last_msg)
         elif last_msg.name == "web_search_preview":
@@ -474,6 +517,29 @@ class ParsableContext(ConversationContext):
                 self._tool_sessions["container"], last_msg
             )
         return []
+
+    def make_response_output_items(self) -> list[ResponseOutputItem]:
+        response_messages = self.response_messages[self.num_init_messages :]
+        output_messages: list[ResponseOutputItem] = []
+        for message in response_messages:
+            if not isinstance(message, ResponseFunctionToolCallOutputItem):
+                output_messages.append(message)
+            else:
+                if len(output_messages) == 0:
+                    raise ValueError(
+                        "Cannot have a FunctionToolCallOutput before FunctionToolCall."
+                    )
+                if isinstance(output_messages[-1], ResponseFunctionToolCall):
+                    output_messages[-1] = McpCall(
+                        id=f"{MCP_PREFIX}{random_uuid()}",
+                        arguments=output_messages[-1].arguments,
+                        name=output_messages[-1].name,
+                        server_label=output_messages[-1].name,
+                        type="mcp_call",
+                        status="completed",
+                        output=message.output,
+                    )
+        return output_messages
 
     def render_for_completion(self):
         raise NotImplementedError("Should not be called.")

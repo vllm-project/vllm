@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import disable_inplace
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -26,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kMxfp4Dynamic,
     kMxfp4Static,
 )
 
@@ -53,7 +53,7 @@ class ActivationMethod(IntEnum):
     GELU = 1
 
 
-aiter_topK_meta_data = None
+aiter_topK_meta_data: tuple[torch.Tensor, torch.Tensor] | None = None
 
 
 @lru_cache(maxsize=1)
@@ -245,6 +245,7 @@ def rocm_aiter_fused_experts(
     a1q_scale: torch.Tensor | None = None,
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
+    moe_sorting_dispatch_policy: int = 0,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
@@ -339,6 +340,31 @@ def rocm_aiter_fused_experts(
             moe_config.intermediate_size_per_partition
             - moe_config.intermediate_size_per_partition_unpadded
         )
+        # Round hidden_pad/intermediate_pad to match AITER's CK/FlyDSL MoE
+        # dispatch (currently pinned to v0.1.13.post1):
+        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1073
+        # https://github.com/ROCm/aiter/blob/v0.1.13.post1/aiter/fused_moe.py#L1099
+        # TODO: Revisit this once we bump AITER to 0.1.15 with padding fixes
+        # for CK/FlyDSL MoE GEMM e.g. https://github.com/ROCm/aiter/pull/3401
+        hidden_pad = hidden_pad // 128 * 128
+        intermediate_pad = (
+            intermediate_pad // 64 * 64 * (2 if moe_config.tp_size == 1 else 1)
+        )
+
+        # https://github.com/ROCm/aiter/pull/3123 specialized the AITER stage1 GEMMs
+        # for interleaved vs separated gate and up weights.
+        # For gpt-oss i.e. use_mxfp4_w4a16=True, the weights are shuffled by
+        # `rocm_aiter_ops.shuffle_weight_a16w4` in `oracle/mxfp4.py`,
+        # which always sets `is_guinterleave=True`.
+        # Hence, we pass in GateMode.INTERLEAVE to match the weight shuffling.
+        gate_mode = ""
+        if quant_config.use_mxfp4_w4a16:
+            try:
+                from aiter.ops.flydsl.moe_common import GateMode
+
+                gate_mode = GateMode.INTERLEAVE.value
+            except ImportError:
+                pass
 
         return rocm_aiter_ops.fused_moe(
             hidden_states,
@@ -358,8 +384,10 @@ def rocm_aiter_fused_experts(
             output_dtype=output_dtype,
             hidden_pad=hidden_pad,
             intermediate_pad=intermediate_pad,
+            gate_mode=gate_mode,
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
+            moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
         )
 
 
@@ -376,6 +404,21 @@ class AiterExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def is_supported_config(
+        cls, moe_config, weight_key, activation_key, activation_format
+    ):
+        is_supported, reason = super().is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        if not is_supported and not rocm_aiter_ops.is_fused_moe_enabled():
+            reason = (
+                f"{reason}. AITER MoE is not enabled — "
+                "set VLLM_ROCM_USE_AITER=1 and VLLM_ROCM_USE_AITER_MOE=1 "
+                "to enable it"
+            )
+        return is_supported, reason
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -397,6 +440,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
             (kFp8StaticChannelSym, kFp8DynamicTokenSym),
             (kMxfp4Static, None),
+            (kMxfp4Static, kMxfp4Dynamic),
         ]
         if (weight_key, activation_key) not in SUPPORTED_W_A:
             return False
@@ -422,9 +466,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             moe_parallel_config.use_fi_nvl_two_sided_kernels
             or moe_parallel_config.use_fi_nvl_one_sided_kernels
         )
-
-    def supports_expert_map(self):
-        return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -487,6 +528,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             a1q_scale=a1q_scale,
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
+            moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
         )
         # avoid redundant copy when output is a view of the result
         if (
@@ -496,7 +538,6 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             and output.is_contiguous()
             and result.is_contiguous()
             and output._base is None
-            and disable_inplace()
         ):
             output.set_(result)
         else:
