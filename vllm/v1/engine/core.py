@@ -514,14 +514,12 @@ class EngineCore:
             if now - self._busy_since <= envs.VLLM_READY_CHECK_IDLE_TIMEOUT_S:
                 return None
             return (
-                "Engine has unfinished requests but has not generated an "
-                "initial token."
+                "Engine has unfinished requests but has not generated an initial token."
             )
 
         if now - self._last_token_at > envs.VLLM_READY_CHECK_PROGRESS_TIMEOUT_S:
             return (
-                "Engine has unfinished requests but has not generated a "
-                "token recently."
+                "Engine has unfinished requests but has not generated a token recently."
             )
 
         return None

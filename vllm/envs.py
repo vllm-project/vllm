@@ -1084,7 +1084,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FASTSAFETENSORS_QUEUE_SIZE": lambda: int(
         os.getenv("VLLM_FASTSAFETENSORS_QUEUE_SIZE", "0")
     ),
-
     # Maximum age in seconds for the last admitted request to still require
     # forward progress before /health/ready reports unhealthy.
     "VLLM_READY_CHECK_IDLE_TIMEOUT_S": lambda: int(
