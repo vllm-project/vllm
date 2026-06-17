@@ -152,6 +152,8 @@ def test_l3_benchmark_publish_preflight_runs_before_benchmark():
     assert "L3_BENCHMARK_PUBLISH_PREFLIGHT" in text[summary_step:]
     assert "L3_BENCHMARK_PUBLISH_TARGET" in text[summary_step:]
     assert "L3_BENCHMARK_PUBLISH_CREDENTIAL" in text[summary_step:]
+    assert "GITHUB_SNAPSHOT_SYNC_VERIFICATION" in text[summary_step:]
+    assert "GITHUB_SNAPSHOT_SYNC_VERIFIED_COMMIT" in text[summary_step:]
 
 
 def test_issue_comment_non_pr_and_fork_pr_are_not_allowed_by_parser_tests():

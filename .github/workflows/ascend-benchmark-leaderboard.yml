@@ -1165,6 +1165,8 @@ jobs:
           snapshot_sync_branch = os.environ.get('GITHUB_SNAPSHOT_SYNC_BRANCH', '').strip()
           snapshot_sync_submission_path = os.environ.get('GITHUB_SNAPSHOT_SYNC_SUBMISSION_PATH', '').strip()
           snapshot_sync_snapshot_path = os.environ.get('GITHUB_SNAPSHOT_SYNC_SNAPSHOT_PATH', '').strip()
+          snapshot_sync_verification = os.environ.get('GITHUB_SNAPSHOT_SYNC_VERIFICATION', '').strip()
+          snapshot_sync_verified_commit = os.environ.get('GITHUB_SNAPSHOT_SYNC_VERIFIED_COMMIT', '').strip()
           l3_publish_preflight = os.environ.get('L3_BENCHMARK_PUBLISH_PREFLIGHT', '').strip()
           l3_publish_target = os.environ.get('L3_BENCHMARK_PUBLISH_TARGET', '').strip()
           l3_publish_credential = os.environ.get('L3_BENCHMARK_PUBLISH_CREDENTIAL', '').strip()
@@ -1303,6 +1305,10 @@ jobs:
               )
             if snapshot_sync_commit:
               publication_lines.append(f'- Commit: `{snapshot_sync_commit}`')
+            if snapshot_sync_verification:
+              publication_lines.append(f'- Verification: `{snapshot_sync_verification}`')
+            if snapshot_sync_verified_commit:
+              publication_lines.append(f'- Verified commit: `{snapshot_sync_verified_commit}`')
             if snapshot_sync_submission_path:
               publication_lines.append(f'- Submission path: `{snapshot_sync_submission_path}`')
             if snapshot_sync_snapshot_path:
