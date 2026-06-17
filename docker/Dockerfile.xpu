@@ -131,7 +131,7 @@ CMD ["/bin/bash"]
 # never included in the final runtime image (mirrors ROCm's build_rixl stage).
 FROM vllm-base AS ucx-nixl-build
 
-ARG UCX_VERSION=v1.20.1
+ARG UCX_VERSION=v1.21.0-rc2
 ARG NIXL_VERSION=0.10.1
 
 # Build-time only: compiler, autotools, and verbs dev headers
@@ -191,7 +191,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     ibverbs-providers \
     librdmacm1t64 \
     && rm -rf /var/lib/apt/lists/* \
-    && uv pip install --no-deps /tmp/nixl_wheels/nixl-*.whl \
+    && uv pip install --no-deps /tmp/nixl_wheels/nixl*.whl \
     && uv pip install nixl==${NIXL_VERSION} \
     && rm -rf /tmp/nixl_wheels
 
