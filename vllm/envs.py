@@ -191,7 +191,6 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
-    VLLM_M3_INDEXER_CONTEXT_LEN: int = 60000
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -1266,11 +1265,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "K_SCALE_CONSTANT": lambda: int(os.getenv("K_SCALE_CONSTANT", "200")),
     # Divisor for dynamic value scale factor calculation for FP8 KV Cache
     "V_SCALE_CONSTANT": lambda: int(os.getenv("V_SCALE_CONSTANT", "100")),
-    # Fixed context length assumed by the MiniMax M3 MSA indexer when estimating
-    # a cudagraph-stable num_kv_splits for the fmha_sm100 score plan.
-    "VLLM_M3_INDEXER_CONTEXT_LEN": lambda: int(
-        os.getenv("VLLM_M3_INDEXER_CONTEXT_LEN", "60000")
-    ),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(
         int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1"))

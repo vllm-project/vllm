@@ -581,6 +581,65 @@ def test_decode_index_topk_correctness(
     _assert_topk_indices_equal_unordered(actual, expected)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="fp8 e4m3 indexer cache is the SM100 (MSA) path.",
+)
+@pytest.mark.parametrize("num_idx_heads", [1, 4])
+def test_decode_index_topk_fp8(num_idx_heads: int):
+    """The fp8 (e4m3) indexer cache feeds the Triton decode kernel on the MSA
+    path. The kernel must score in fp32 (no scaling) so its top-k matches a
+    reference computed from the dequantized fp8 values."""
+    torch.manual_seed(0)
+    topk, init_blocks, local_blocks, head_dim = 8, 0, 1, 128
+    decode_query_len = 1
+    active_seq_lens = torch.tensor((129, 1025, 4097), device="cuda", dtype=torch.int32)
+    q_lens = torch.full_like(active_seq_lens, decode_query_len)
+    prefix_lens = active_seq_lens - decode_query_len
+    batch = active_seq_lens.numel()
+    max_seq_len = int(active_seq_lens.max())
+    max_blocks = (max_seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+    num_pages = batch * max_blocks
+    block_table = torch.randperm(num_pages, device="cuda", dtype=torch.int32).reshape(
+        batch, max_blocks
+    )
+    idx_q = torch.randn(
+        batch * decode_query_len, num_idx_heads, head_dim, device="cuda"
+    ).to(torch.float8_e4m3fn)
+    index_kv_cache = torch.randn(num_pages, BLOCK_SIZE, head_dim, device="cuda").to(
+        torch.float8_e4m3fn
+    )
+
+    actual = minimax_m3_index_decode(
+        idx_q,
+        index_kv_cache,
+        block_table,
+        active_seq_lens,
+        max_seq_len=max_seq_len,
+        topk=topk,
+        init_blocks=init_blocks,
+        local_blocks=local_blocks,
+        num_kv_heads=num_idx_heads,
+        sm_scale=head_dim**-0.5,
+        decode_query_len=decode_query_len,
+    )
+    # Reference from the DEQUANTIZED fp8 values (the kernel computes the fp8 QK
+    # in fp32, so it must match an fp32 matmul of the same e4m3 values).
+    expected = _reference_index_topk(
+        idx_q.float(),
+        index_kv_cache.float(),
+        block_table,
+        q_lens,
+        active_seq_lens,
+        prefix_lens,
+        topk,
+        init_blocks,
+        local_blocks,
+        head_dim**-0.5,
+    )
+    _assert_topk_indices_equal_unordered(actual, expected)
+
+
 # Sparse attention kernels.
 def _reference_sparse_attn(
     q: torch.Tensor,
