@@ -103,6 +103,36 @@ def test_is_envs_cache_enabled() -> None:
     assert not envs._is_envs_cache_enabled()
 
 
+def test_precompiled_install_flags_are_orthogonal() -> None:
+    # The Rust frontend flag is independent of the C-extension precompiled
+    # flag: requesting the precompiled Rust frontend must not implicitly
+    # enable the precompiled C extensions.
+    with patch.dict(os.environ, {"VLLM_USE_PRECOMPILED_RUST": "1"}, clear=True):
+        assert environment_variables["VLLM_USE_PRECOMPILED"]() is False
+        assert environment_variables["VLLM_USE_PRECOMPILED_RUST"]() is True
+
+    # ...and the reverse: requesting precompiled C extensions (here via a
+    # wheel location, which enables VLLM_USE_PRECOMPILED) must not flip the
+    # Rust frontend flag.
+    with patch.dict(
+        os.environ, {"VLLM_PRECOMPILED_WHEEL_LOCATION": "/tmp/vllm.whl"}, clear=True
+    ):
+        assert environment_variables["VLLM_USE_PRECOMPILED"]() is True
+        assert environment_variables["VLLM_USE_PRECOMPILED_RUST"]() is False
+
+    # ...and with both set together, each flag is still parsed independently.
+    with patch.dict(
+        os.environ,
+        {
+            "VLLM_PRECOMPILED_WHEEL_LOCATION": "/tmp/vllm.whl",
+            "VLLM_USE_PRECOMPILED_RUST": "1",
+        },
+        clear=True,
+    ):
+        assert environment_variables["VLLM_USE_PRECOMPILED"]() is True
+        assert environment_variables["VLLM_USE_PRECOMPILED_RUST"]() is True
+
+
 class TestEnvWithChoices:
     """Test cases for env_with_choices function."""
 

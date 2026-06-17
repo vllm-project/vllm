@@ -178,8 +178,43 @@ kInt4Static = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale, symmetric=True)
 kInt8StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
 kInt8Static = QuantKey(INT8_DTYPE, scale=kInt8StaticGroupScale, symmetric=True)
 
+kInt4Static32GroupScale = ScaleDesc(torch.float16, True, GroupShape(1, 32))
+kInt4Static32 = QuantKey(INT4_DTYPE, scale=kInt4Static32GroupScale, symmetric=True)
+
+kInt4StaticAsym = QuantKey(
+    scalar_types.uint4, scale=kInt4StaticGroupScale, symmetric=False
+)
+kInt4Static32Asym = QuantKey(
+    scalar_types.uint4, scale=kInt4Static32GroupScale, symmetric=False
+)
+
 kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True)
 kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
+
+# INT4 W4A8 quantization keys
+
+# For group-wise quantization (e.g., group_size=128)
+# Note: group_size will be specified at runtime, this is a generic group scale
+kInt4W4A8StaticGroupScale128 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 128))
+kInt4W4A8StaticGroup128Sym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale128, symmetric=True
+)
+
+kInt4W4A8StaticGroupScale64 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 64))
+kInt4W4A8StaticGroup64Sym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale64, symmetric=True
+)
+
+kInt4W4A8StaticGroupScale32 = ScaleDesc(torch.bfloat16, True, GroupShape(1, 32))
+kInt4W4A8StaticGroup32Sym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale32, symmetric=True
+)
+
+# Generic group-wise with flexible group size (per-token groups)
+kInt4W4A8StaticGroupScale = ScaleDesc(torch.bfloat16, True, GroupShape(1, -1))
+kInt4W4A8StaticGroupSym = QuantKey(
+    torch.int8, kInt4W4A8StaticGroupScale, symmetric=True
+)
 
 
 def create_fp8_quant_key(
@@ -366,6 +401,9 @@ def get_and_maybe_dequant_weights(
     """Return layer's unquantized weights in [out, in] layout"""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+    from vllm.model_executor.layers.quantization.online.fp8 import (
+        Fp8PerTensorOnlineLinearMethod,
+    )
 
     # LoRA linear wrappers store quantization metadata on `base_layer`.
     # Unwrap here so callers can pass either a raw linear layer or its LoRA
@@ -383,7 +421,9 @@ def get_and_maybe_dequant_weights(
 
     # Simple Fp8 case: rescale with tensor or block weight scales
     if (
-        isinstance(layer.quant_method, Fp8LinearMethod)
+        isinstance(
+            layer.quant_method, (Fp8LinearMethod, Fp8PerTensorOnlineLinearMethod)
+        )
         and not layer.quant_method.use_marlin
         # DeepGEMM transforms the scales using `transform_sf_into_required_layout` into
         # a layout that is not compatible with `scaled_dequantize`.
@@ -485,7 +525,15 @@ def is_layer_skipped(
     # in the safetensors checkpoint. So, we convert the name
     # from the fused version to unfused + check to make sure that
     # each shard of the fused layer has the same scheme.
-    if proj_name in fused_mapping:
+    #
+    # Some checkpoints (e.g. block-FP8 Step-3.5-Flash) already list the
+    # fused name (e.g. ``self_attn.qkv_proj``) directly in
+    # ``modules_to_not_convert``. Honor that fused-name match first so
+    # those layers are still correctly skipped even when a
+    # ``packed_modules_mapping`` is registered on the model.
+    if proj_name in fused_mapping and match_func(prefix, ignored_layers):
+        is_skipped = True
+    elif proj_name in fused_mapping:
         shard_prefixes = [
             prefix.replace(proj_name, shard_proj_name)
             for shard_proj_name in fused_mapping[proj_name]

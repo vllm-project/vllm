@@ -1,0 +1,35 @@
+[package]
+name = "vllm-tokenizer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+fastokens.workspace = true
+riptoken.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tekken.workspace = true
+thiserror.workspace = true
+thiserror-ext.workspace = true
+tiktoken-rs.workspace = true
+tokenizers.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+hf-hub.workspace = true
+tempfile.workspace = true
+
+[[bench]]
+name = "hf"
+harness = false
+
+[[bench]]
+name = "tiktoken"
+harness = false
+
+[lints]
+workspace = true

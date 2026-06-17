@@ -55,6 +55,7 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     kFp8StaticTensorSym,
+    kMxfp4Dynamic,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -496,7 +497,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
-                inplace=not self.moe.disable_inplace,
             )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
@@ -507,7 +507,6 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=not self.moe.disable_inplace,
                 activation=layer.activation,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
                 global_num_experts=layer.global_num_experts,
@@ -808,7 +807,6 @@ class QuarkW8A8Int8MoEMethod(QuarkMoEMethod):
             w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=not self.moe.disable_inplace,
             activation=layer.activation,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
@@ -1042,6 +1040,11 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
                 moe, activation_key=kFp8StaticTensorSym
             )
+        elif self.ocp_mx_scheme == "w_mxfp4_a_mxfp4":
+            # W4A4: MXFP4 weights + MXFP4 activations
+            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
+                moe, activation_key=kMxfp4Dynamic
+            )
 
         # Validation for unsupported schemes
         if any(
@@ -1061,45 +1064,19 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 "Please open an issue."
             )
 
-        self.use_rocm_aiter_moe = rocm_aiter_ops.is_fused_moe_enabled()
-
         self.model_type = getattr(
             get_current_vllm_config().model_config.hf_config, "model_type", None
         )
 
-        # TODO: Remove once all OCP MX schemes use the kernel abstraction
-        _AITER_NATIVE_OCP_MX_SCHEMES = ("w_mxfp4", "w_mxfp4_a_mxfp4", "w_mxfp4_a_fp8")
-        self.emulate = (
-            not current_platform.supports_mx()
-            or self.ocp_mx_scheme not in _AITER_NATIVE_OCP_MX_SCHEMES
-        ) and (
-            self.mxfp4_backend is Mxfp4MoeBackend.NONE or not self.use_rocm_aiter_moe
-        )
-
-        if self.emulate:
-            # We use the same code path between MXFP4/MXFP6 emulation.
+        # If no native backend available, use emulation.
+        if self.mxfp4_backend is Mxfp4MoeBackend.NONE:
             self.mxfp4_backend = Mxfp4MoeBackend.EMULATION
 
-        # TODO: Remove `self.mxfp4_backend != Mxfp4MoeBackend.NONE` and make it so that
-        # all MXFP4 backends use the kernel abstraction.
-        if self.mxfp4_backend != Mxfp4MoeBackend.NONE:
-            self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
+        self.experts_cls = backend_to_kernel_cls(self.mxfp4_backend)[0]
 
-        # Log backend selection
-        if self.mxfp4_backend != Mxfp4MoeBackend.NONE:
-            logger.info_once(
-                f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"
-            )
-        elif self.emulate:
-            logger.warning_once(
-                f"The current mode (supports_mx={current_platform.supports_mx()}, "
-                f"use_rocm_aiter_moe={self.use_rocm_aiter_moe}, "
-                f"ocp_mx_scheme={self.ocp_mx_scheme}) "
-                "does not support native MXFP4/MXFP6 "
-                "computation. Simulated weight dequantization and activation "
-                "QDQ (quantize and dequantize) will be used, with the linear "
-                "layers computed in high precision."
-            )
+        logger.info_once(
+            f"Using {self.mxfp4_backend.value} backend for {self.ocp_mx_scheme}"
+        )
 
     def maybe_roundup_sizes(
         self,
@@ -1243,97 +1220,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-    def process_weights_after_loading(self, layer: RoutedExperts):
-        # For MXFP4 schemes with native backend, use oracle
-        if self.mxfp4_backend != Mxfp4MoeBackend.NONE:
-            self._setup_kernel(layer)
-            return
-
-        if self.static_input_scales and self.input_dtype == "fp8":
-            # firstly, process activations if fp8 static input
-            if layer.w13_input_scale is None or layer.w2_input_scale is None:
-                raise ValueError(
-                    "QuantConfig has static quantization, but found "
-                    "activation scales are None."
-                )
-            if not all_close_1d(layer.w13_input_scale) or not all_close_1d(
-                layer.w2_input_scale
-            ):
-                logger.warning_once(
-                    "Found input_scales that are not equal for "
-                    "fp8 MoE layer. Using the maximum across experts "
-                    "for each layer. "
-                )
-            layer.w13_input_scale = torch.nn.Parameter(
-                layer.w13_input_scale.max(), requires_grad=False
-            )
-            layer.w2_input_scale = torch.nn.Parameter(
-                layer.w2_input_scale.max(), requires_grad=False
-            )
-
-            if current_platform.is_fp8_fnuz():
-                # Normalize the weights and scales
-                _, _, w13_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                    torch.empty_like(layer.w13_weight, dtype=torch.float8_e4m3fn),
-                    torch.empty_like(
-                        layer.w13_weight_scale, dtype=layer.w13_weight_scale.dtype
-                    ),
-                    layer.w13_input_scale,
-                )
-                _, _, w2_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                    torch.empty_like(layer.w2_weight, dtype=torch.float8_e4m3fn),
-                    torch.empty_like(
-                        layer.w2_weight_scale, dtype=layer.w13_weight_scale.dtype
-                    ),
-                    layer.w2_input_scale,
-                )
-                # Reset the parameter
-                if w13_input_scale is not None:
-                    layer.w13_input_scale = torch.nn.Parameter(
-                        w13_input_scale, requires_grad=False
-                    )
-                if w2_input_scale is not None:
-                    layer.w2_input_scale = torch.nn.Parameter(
-                        w2_input_scale, requires_grad=False
-                    )
-
-        # TODO(bowenbao): gradually migrate to oracles.
-        # Existing AITER path for w_mxfp4_a_mxfp4 and other schemes
-        from aiter.utility.fp4_utils import e8m0_shuffle
-
-        # Pre-shuffle weight scales
-        s0, s1, _ = layer.w13_weight_scale.shape
-        w13_weight_scale = layer.w13_weight_scale.view(s0 * s1, -1)
-        w13_weight_scale = e8m0_shuffle(w13_weight_scale)
-        layer.w13_weight_scale.data = w13_weight_scale.view(s0, s1, -1)
-
-        s0, s1, _ = layer.w2_weight_scale.shape
-        w2_weight_scale = layer.w2_weight_scale.view(s0 * s1, -1)
-        w2_weight_scale = e8m0_shuffle(w2_weight_scale)
-        layer.w2_weight_scale.data = w2_weight_scale.view(s0, s1, -1)
-
-        if self.fp4_dtype is not None:
-            layer.w13_weight = torch.nn.Parameter(
-                layer.w13_weight.view(self.fp4_dtype),
-                requires_grad=layer.w13_weight.requires_grad,
-            )
-            layer.w2_weight = torch.nn.Parameter(
-                layer.w2_weight.view(self.fp4_dtype),
-                requires_grad=layer.w2_weight.requires_grad,
-            )
-        # Pre-shuffle weight
-        shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
-            layer.w13_weight.data, layer.w2_weight.data
-        )
-
-        layer.w13_weight = torch.nn.Parameter(shuffled_w13, requires_grad=False)
-        layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
-        layer.w13_weight.is_shuffled = True
-        layer.w2_weight.is_shuffled = True
-
-        # Build quant config for AITER path
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        torch.accelerator.empty_cache()
+    def process_weights_after_loading(self, layer):
+        self._setup_kernel(layer)
 
     def _setup_kernel(self, layer: RoutedExperts):
         """Setup kernel using oracle functions for MXFP4 schemes (W4A16, W4A8)."""
@@ -1374,6 +1262,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         if w13_bias is not None and w2_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
+
+        if self.mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
+            layer.w13_weight.is_shuffled = True
+            layer.w2_weight.is_shuffled = True
 
         torch.accelerator.empty_cache()
 
@@ -1464,38 +1356,18 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
-        # For oracle-based kernels (W4A16, W4A8) or emulation kernel
-        if self.moe_kernel is not None:
-            return self.moe_kernel.apply(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                expert_map=layer.expert_map,
-                shared_experts=shared_experts,
-                shared_experts_input=shared_experts_input,
-            )
-
-        # AITER path
-        # TODO: Refactor this to use modular MOE kernel as well.
-        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-            rocm_aiter_fused_experts,
-        )
-
-        return rocm_aiter_fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
-            quant_config=self.moe_quant_config,
-            moe_config=layer.moe_config,
+            global_num_experts=layer.global_num_experts,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=layer.expert_map,
+            shared_experts_input=shared_experts_input,
         )
 
     def apply_monolithic(

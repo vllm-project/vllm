@@ -120,15 +120,12 @@ class KVOutputAggregator:
                 # Use the first worker's kv_connector_stats as accumulator.
                 aggregated_kv_connector_stats = kv_output.kv_connector_stats
             elif kv_connector_stats := kv_output.kv_connector_stats:
-                if aggregated_kv_connector_stats is None:
-                    aggregated_kv_connector_stats = kv_connector_stats
-                else:
-                    assert isinstance(
-                        aggregated_kv_connector_stats, type(kv_connector_stats)
-                    )
-                    aggregated_kv_connector_stats = (
-                        aggregated_kv_connector_stats.aggregate(kv_connector_stats)
-                    )
+                assert isinstance(
+                    aggregated_kv_connector_stats, type(kv_connector_stats)
+                )
+                aggregated_kv_connector_stats = aggregated_kv_connector_stats.aggregate(
+                    kv_connector_stats
+                )
 
             # Aggregate kv_connector_worker_meta from all workers.
             if aggregated_kv_connector_worker_meta is None:
@@ -371,7 +368,7 @@ def get_current_attn_backend(
 class EngineTransferInfo:
     """Common per-remote-engine transfer state, computed at handshake.
 
-    Stored per ``engine_id`` inside ``TransferTopology._engines``.
+    Stored per ``(engine_id, pp_rank)`` inside ``TransferTopology._engines``.
     """
 
     remote_tp_size: int
@@ -384,6 +381,15 @@ class EngineTransferInfo:
 
     remote_physical_blocks_per_logical: int
     """Physical blocks per logical block."""
+
+    remote_pp_rank: int = 0
+    """Remote producer PP rank for this engine."""
+
+    start_layer: int = 0
+    """Global index of the first layer owned by this PP rank."""
+
+    end_layer: int = 0
+    """Exclusive global index after the last layer owned by this PP rank."""
 
 
 # ---- Transfer topology ----
@@ -406,7 +412,7 @@ class TransferTopology:
     def __post_init__(self):
         self.local_physical_heads = max(1, self.total_num_kv_heads // self.tp_size)
 
-        self._engines: dict[EngineId, EngineTransferInfo] = {}
+        self._engines: dict[tuple[EngineId, int], EngineTransferInfo] = {}
 
         # Figure out whether the first dimension of the cache is K/V
         # or num_blocks.
@@ -420,7 +426,7 @@ class TransferTopology:
                 head_size=1,
             )
             logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
-        # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
+        # Non-MLA backends caches have 5 dims [num_blocks, 2, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
         # Hybrid SSM models assume a single blocks_first layout
         self._is_kv_layout_blocks_first = self.is_mamba or (
@@ -464,13 +470,21 @@ class TransferTopology:
             f"Cannot register local engine {self.engine_id} as remote. "
             f"Local identity is set via __init__ params."
         )
-        if remote_engine_id in self._engines:
-            return self._engines[remote_engine_id]
-        self._engines[remote_engine_id] = info
+        engine_key = (remote_engine_id, info.remote_pp_rank)
+        if engine_key in self._engines:
+            return self._engines[engine_key]
+        self._engines[engine_key] = info
         return info
 
-    def get_engine_info(self, remote_engine_id: EngineId) -> EngineTransferInfo:
-        return self._engines[remote_engine_id]
+    def get_engine_info(
+        self, remote_engine_id: EngineId, remote_pp_rank: int = 0
+    ) -> EngineTransferInfo:
+        return self._engines[(remote_engine_id, remote_pp_rank)]
+
+    def unregister_remote_engine(self, remote_engine_id: EngineId) -> None:
+        # Remove all pp_rank entries for the remote engine.
+        for key in [k for k in self._engines if k[0] == remote_engine_id]:
+            del self._engines[key]
 
     # ============================================================
     # Layout properties
@@ -483,6 +497,15 @@ class TransferTopology:
     @property
     def cross_layers_blocks(self) -> bool:
         return self._cross_layers_blocks
+
+    @property
+    def virtually_split_kv_in_blocks(self) -> bool:
+        # Whether to logically split each block into K and V halves.
+        # Applies when K/V are interleaved within each block (blocks-first),
+        # but NOT when cross-layer blocks are used — cross-layer blocks have
+        # per-layer K/V interleaving (L0_K, L0_V, L1_K, L1_V, ...) so a
+        # simple half-split does not separate K from V.
+        return self._is_kv_layout_blocks_first and not self._cross_layers_blocks
 
     @property
     def split_k_and_v(self) -> bool:
@@ -522,15 +545,22 @@ class TransferTopology:
         )
         return self.block_size // remote_block_size
 
-    def is_kv_replicated(self, remote_engine_id: EngineId) -> bool:
+    def is_kv_replicated(
+        self, remote_engine_id: EngineId, remote_pp_rank: int = 0
+    ) -> bool:
         """Whether the KV cache is replicated across TP workers due to the
         number of TP workers being greater than the number of KV heads.
         """
-        return self._engines[remote_engine_id].remote_tp_size > self.total_num_kv_heads
+        return (
+            self._engines[(remote_engine_id, remote_pp_rank)].remote_tp_size
+            > self.total_num_kv_heads
+        )
 
-    def replicates_kv_cache(self, remote_engine_id: EngineId) -> bool:
+    def replicates_kv_cache(
+        self, remote_engine_id: EngineId, remote_pp_rank: int = 0
+    ) -> bool:
         # MLA is always replicated as the hidden dim can't be split.
-        return self.is_mla or self.is_kv_replicated(remote_engine_id)
+        return self.is_mla or self.is_kv_replicated(remote_engine_id, remote_pp_rank)
 
     @property
     def local_replicates_kv_cache(self) -> bool:
@@ -549,12 +579,14 @@ class TransferTopology:
         abs_ratio = -tp_ratio
         return [self.tp_rank * abs_ratio + i for i in range(abs_ratio)]
 
-    def target_remote_ranks(self, remote_engine_id: EngineId) -> list[int]:
+    def target_remote_ranks(
+        self, remote_engine_id: EngineId, remote_pp_rank: int = 0
+    ) -> list[int]:
         """Get the remote TP rank(s) that the current local TP rank will
         read from.  When remote tp_size > local tp_size, reads from
         multiple remote ranks.
         """
-        info = self._engines[remote_engine_id]
+        info = self._engines[(remote_engine_id, remote_pp_rank)]
         tp_ratio = self.tp_ratio(info.remote_tp_size)
         if tp_ratio > 0:
             return [self.tp_rank // tp_ratio]
@@ -587,15 +619,16 @@ class TransferTopology:
         # Regular case: backends like FA register K/V in separate regions
         return cache if self.split_k_and_v else [cache]
 
-    def describe(self, remote_engine_id: EngineId) -> str:
+    def describe(self, remote_engine_id: EngineId, remote_pp_rank: int = 0) -> str:
         """One-line summary of transfer config for logging."""
-        info = self._engines[remote_engine_id]
+        info = self._engines[(remote_engine_id, remote_pp_rank)]
         return (
             f"TransferTopology("
             f"tp_ratio={self.tp_ratio(info.remote_tp_size)}, "
             f"num_kv_heads={self.total_num_kv_heads if not self.is_mla else 1}, "
             f"local_tp={self.tp_size}, "
             f"remote_tp={info.remote_tp_size}, "
+            f"remote_pp={remote_pp_rank}, "
             f"local_rank={self.tp_rank}, "
             f"remote_block_len={info.remote_block_len})"
         )

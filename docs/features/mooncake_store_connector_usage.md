@@ -101,7 +101,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
                 },
                 {
                     "kv_connector": "MooncakeStoreConnector",
-                    "kv_role": "kv_producer"
+                    "kv_role": "kv_both"
                 }
             ]
         }
@@ -196,25 +196,25 @@ the vLLM JSON config.
 
 ### KV Role Options
 
-- **kv_producer**: For prefiller instances that store KV caches to the pool.
-- **kv_consumer**: For decoder instances that load KV caches from the pool.
-- **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading.
+- **kv_producer**: For instances that store KV caches to the pool.
+- **kv_consumer**: For instances that load KV caches from the pool.
+- **kv_both**: The instance both stores and loads KV caches. Use this for single-node CPU offloading or prefiller instances.
 
 ### kv_connector_extra_config
 
 - `load_async` (bool): Enable asynchronous loading for better compute-I/O overlap. Default: `true`.
 - `enable_cross_layers_blocks` (bool): Enable cross-layer block packing for reduced store operations. Default: `false`.
-- `discard_partial_chunks` (bool): Discard partial block chunks during store. Default: `true`.
 - `lookup_rpc_port` (int): Custom port for the ZMQ lookup RPC socket. Default: `0`.
+- `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
 
 ## Notes
 
-### Cross-DP Prefix Cache Hits
+### Reproducible Block Hashes Across Processes
 
-When running with data parallelism, set a fixed `PYTHONHASHSEED` so that block hashes are consistent across DP ranks:
+The `MooncakeStoreConnector` relies on consistent block hashes across all vLLM processes sharing the distributed store. Because Python randomizes its hash seed per process by default, identical prompts can produce different block hashes on different processes — preventing cross-process prefix cache hits.
+
+Set a fixed `PYTHONHASHSEED` on every instance that shares the store (DP ranks, separate prefiller/decoder nodes, and any other vLLM process pointed at the same Mooncake store):
 
 ```bash
 PYTHONHASHSEED=0 vllm serve ...
 ```
-
-Without this, identical prompts may produce different block hashes on different DP ranks, preventing cross-instance prefix cache hits.
