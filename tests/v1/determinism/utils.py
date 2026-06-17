@@ -27,6 +27,7 @@ BACKENDS: list[str] = [
     "FLASH_ATTN",
     "TRITON_ATTN",
     "FLEX_ATTENTION",
+    "GDN_ATTN",
 ]
 
 # FlashInfer temporarily disabled due to invariant CTA sizes.
