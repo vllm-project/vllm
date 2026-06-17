@@ -33,6 +33,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
 )
 from vllm.v1.kv_offload.tiering.p2p.session.session import (
     _CANCEL_DRAIN_TIMEOUT_S,
+    _MAX_CONSECUTIVE_DISPATCH_ERRORS,
     _InflightXfer,
 )
 
@@ -1103,6 +1104,10 @@ class TestAdversarial:
         )
         session.poll()
         assert len(transport._transfers) == 0
+        # Protocol violation: session disconnects immediately so the peer
+        # can't keep wedging us with malformed traffic.
+        assert not session.alive
+        assert any(m[TYPE_KEY] == DisconnectMsg.TYPE for m in conn._sent)
 
     def test_transfer_done_missing_kv_request_id(self):
         session, conn, _ = _make_session()
@@ -1110,6 +1115,8 @@ class TestAdversarial:
         conn.enqueue({TYPE_KEY: TransferDoneMsg.TYPE, TransferDoneMsg.SUCCESS: True})
         loads, _ = session.poll()
         assert loads == []
+        assert not session.alive
+        assert any(m[TYPE_KEY] == DisconnectMsg.TYPE for m in conn._sent)
 
     def test_duplicate_connect_ack(self):
         session, conn, _ = _make_session()
@@ -1117,6 +1124,121 @@ class TestAdversarial:
         conn.enqueue({TYPE_KEY: ConnectAckMsg.TYPE, ConnectAckMsg.PEER_ID: "peer:8000"})
         session.poll()
         assert session.ready
+
+
+class TestDispatchErrorHandling:
+    """Errors raised by message handlers split into two classes:
+
+    - Protocol-contract violations from the peer (ValueError) → disconnect
+      on the first occurrence; retrying won't help and may corrupt state.
+    - Anything else is treated as an internal bug: log loudly, count, and
+      only disconnect once errors arrive in a tight burst. A successful
+      dispatch in between resets the counter.
+    """
+
+    def test_value_error_disconnects_on_first_occurrence(self):
+        """A FetchMsg that fails validate() raises ValueError and must
+        terminate the session immediately, with a DisconnectMsg sent."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        # length mismatch → FetchMsg.validate raises ValueError
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-bad",
+                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.BLOCK_INDEXES: [1],
+            }
+        )
+        session.poll()
+        assert not session.alive
+        assert any(m[TYPE_KEY] == DisconnectMsg.TYPE for m in conn._sent)
+
+    def test_transfer_done_missing_field_disconnects(self):
+        """Same contract for a malformed TransferDoneMsg from the peer."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        conn.enqueue({TYPE_KEY: TransferDoneMsg.TYPE, TransferDoneMsg.SUCCESS: True})
+        session.poll()
+        assert not session.alive
+
+    def test_internal_error_does_not_disconnect_once(self):
+        """A non-ValueError raised by a handler is treated as an internal
+        bug: counter increments, session stays alive on a single hit."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        def _boom(_msg):
+            raise RuntimeError("simulated internal bug")
+
+        session._on_fetch = _boom  # type: ignore[assignment]
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [0],
+            }
+        )
+        session.poll()
+        assert session.alive
+        assert session._dispatch_error_count == 1
+
+    def test_internal_error_threshold_disconnects(self):
+        """Once consecutive non-protocol errors hit the threshold, the
+        session tears down via _protocol_error."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        def _boom(_msg):
+            raise RuntimeError("simulated internal bug")
+
+        session._on_fetch = _boom  # type: ignore[assignment]
+        for _ in range(_MAX_CONSECUTIVE_DISPATCH_ERRORS):
+            conn.enqueue(
+                {
+                    TYPE_KEY: FetchMsg.TYPE,
+                    FetchMsg.KV_REQUEST_ID: "req-1",
+                    FetchMsg.BLOCK_HASHES: [b"k1"],
+                    FetchMsg.BLOCK_INDEXES: [0],
+                }
+            )
+        session.poll()
+        assert not session.alive
+        assert any(m[TYPE_KEY] == DisconnectMsg.TYPE for m in conn._sent)
+
+    def test_internal_error_counter_resets_on_success(self):
+        """A successful dispatch between errors prevents the threshold
+        from being reached."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        original_on_fetch = session._on_fetch
+
+        def _boom(_msg):
+            raise RuntimeError("simulated internal bug")
+
+        # Alternate (boom, success) (_MAX-1) times: counter rises to 1
+        # then resets to 0 each cycle, never reaching the threshold.
+        for _ in range(_MAX_CONSECUTIVE_DISPATCH_ERRORS - 1):
+            session._on_fetch = _boom  # type: ignore[assignment]
+            conn.enqueue(
+                {
+                    TYPE_KEY: FetchMsg.TYPE,
+                    FetchMsg.KV_REQUEST_ID: "req-1",
+                    FetchMsg.BLOCK_HASHES: [b"k1"],
+                    FetchMsg.BLOCK_INDEXES: [0],
+                }
+            )
+            session.poll()
+            session._on_fetch = original_on_fetch  # type: ignore[assignment]
+            # A benign no-op message (unknown type) dispatches cleanly
+            # and resets the consecutive-error counter.
+            conn.enqueue({TYPE_KEY: "unknown_for_test"})
+            session.poll()
+
+        assert session.alive
+        assert session._dispatch_error_count == 0
 
 
 # ---------------------------------------------------------------------------

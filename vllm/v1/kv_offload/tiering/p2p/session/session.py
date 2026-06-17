@@ -47,6 +47,12 @@ _LOAD_TIMEOUT_S = 30.0
 _ABORT_ACK_TIMEOUT_S = 10.0
 _STORE_TIMEOUT_S = 30.0
 _CANCEL_DRAIN_TIMEOUT_S = 10.0
+# Cap on consecutive non-protocol dispatch exceptions before we tear
+# down the session. Protocol violations (ValueError) disconnect on the
+# first occurrence; this threshold protects against repeated internal
+# bugs that may indicate a peer-induced bad state. Reset on any
+# successful dispatch.
+_MAX_CONSECUTIVE_DISPATCH_ERRORS = 5
 
 
 @dataclass
@@ -214,6 +220,9 @@ class P2PSession:
         # tick to surface. Mirrors the deferred-result pattern used for
         # load timeouts.
         self._pending_store_results: list[StoreResult] = []
+
+        # Consecutive non-protocol dispatch errors. Reset on success.
+        self._dispatch_error_count: int = 0
 
         if conn is not None:
             self.attach_connection(conn)
@@ -596,15 +605,36 @@ class P2PSession:
     # ------------------------------------------------------------------
 
     def _on_message(self, msg: dict) -> None:
+        msg_type = msg.get(TYPE_KEY) if isinstance(msg, dict) else msg
         try:
             self._dispatch_message(msg)
+        except ValueError as exc:
+            # Protocol contract violation from the peer — *Msg.validate()
+            # and handler-level checks raise ValueError. Retrying won't
+            # help and may corrupt session state, so disconnect now.
+            self._protocol_error(f"malformed {msg_type!r}: {exc}")
+            return
         except Exception as exc:
-            logger.warning(
-                "P2PSession %s: error handling message %r: %s",
+            # Anything else is most likely an internal bug rather than a
+            # peer fault. Log loudly with a traceback so it doesn't
+            # disappear, but don't kill the session on a single hiccup.
+            # Disconnect only if errors keep arriving — that pattern is
+            # consistent with a peer wedging us into a broken state.
+            self._dispatch_error_count += 1
+            logger.exception(
+                "P2PSession %s: error handling message %r (count=%d): %s",
                 self.peer_id,
-                msg.get(TYPE_KEY) if isinstance(msg, dict) else msg,
+                msg_type,
+                self._dispatch_error_count,
                 exc,
             )
+            if self._dispatch_error_count >= _MAX_CONSECUTIVE_DISPATCH_ERRORS:
+                self._protocol_error(
+                    f"too many consecutive dispatch errors "
+                    f"({self._dispatch_error_count})"
+                )
+            return
+        self._dispatch_error_count = 0
 
     def _protocol_error(self, reason: str) -> None:
         """Log a protocol violation and disconnect.
