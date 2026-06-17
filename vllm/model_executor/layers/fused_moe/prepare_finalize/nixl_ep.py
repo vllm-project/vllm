@@ -6,7 +6,6 @@ import nixl_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
 from vllm.distributed.device_communicators.all2all import NixlEPAll2AllManager
 from vllm.logger import init_logger
@@ -29,6 +28,8 @@ logger = init_logger(__name__)
 # NIXL EP kernels quantize dispatch inputs in 128 element chunks.
 NIXL_EP_QUANT_BLOCK_SIZE = 128
 NIXL_EP_QUANT_BLOCK_SHAPE = [NIXL_EP_QUANT_BLOCK_SIZE, NIXL_EP_QUANT_BLOCK_SIZE]
+NIXL_EP_TOPK_INDICES_DTYPE = getattr(nixl_ep, "topk_idx_t", torch.int64)
+assert isinstance(NIXL_EP_TOPK_INDICES_DTYPE, torch.dtype)
 
 
 def dequant_fp8(
@@ -152,7 +153,7 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         all2all_manager.commit_staged_state()
 
     def topk_indices_dtype(self) -> torch.dtype | None:
-        return torch.int64
+        return NIXL_EP_TOPK_INDICES_DTYPE
 
     def _map_global_to_physical_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
         if self.global_to_physical is None:
@@ -192,13 +193,9 @@ class NixlEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         x = x.view((-1, hidden_dim))
         q_dtype = quant_config.quant_dtype
 
-        moe_backend = get_current_vllm_config().kernel_config.moe_backend
-        if moe_backend == "flashinfer_cutedsl":
-            logger.info_once(
-                "Skip quantization when using FlashInfer CUTEDSL "
-                "(--moe-backend flashinfer_cutedsl) for ModelOptNvFp4FusedMoE."
-            )
+        if q_dtype == "nvfp4":
             q_dtype = None
+            logger.debug_once("Using NIXL EP bfloat16 dispatch for NVFP4 MoE.")
 
         x, x_scales = moe_kernel_quantize_input(
             x,
