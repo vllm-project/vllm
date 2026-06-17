@@ -340,10 +340,6 @@ def _xpu_mxfp8_quantize_impl(
     shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
     x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
     torch.ops._C.per_token_group_fp8_quant(
-<<<<<<< slokesha/fix_fp8_quant_xpu
-        x, x_q, x_s, MXFP8_BLOCK_SIZE, eps, fp8_min, fp8_max, True,
-        False, False
-=======
         x,
         x_q,
         x_s,
@@ -354,7 +350,6 @@ def _xpu_mxfp8_quantize_impl(
         True,
         False,
         False,  # dummy_is_scale_transposed, dummy_is_tma_aligned
->>>>>>> main
     )
     x_s = x_s.to(torch.float8_e8m0fnu)
     return x_q, x_s
