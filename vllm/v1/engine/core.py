@@ -471,6 +471,11 @@ class EngineCore:
         )
         self._iteration_index += 1
 
+    def _should_throttle_prefills(self) -> bool:
+        """Whether to defer new prefills this step (DP prefill balancing).
+        Overridden by the DP engine core; never throttles otherwise."""
+        return False
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -482,7 +487,7 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        scheduler_output = self.scheduler.schedule()
+        scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
@@ -539,7 +544,7 @@ class EngineCore:
         model_executed = False
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
-            scheduler_output = self.scheduler.schedule()
+            scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
             with self.log_error_detail(scheduler_output):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
@@ -1751,6 +1756,9 @@ class DPEngineCoreProc(EngineCoreProc):
             "DPEngineCoreProc should only be used for MoE models"
         )
 
+        scheduler_config = vllm_config.scheduler_config
+        self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
+
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
         self.step_counter = 0
@@ -1900,6 +1908,15 @@ class DPEngineCoreProc(EngineCoreProc):
                 *counts, step_counter=self.step_counter, current_wave=self.current_wave
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
+
+    def _should_throttle_prefills(self) -> bool:
+        # Throttle new prefills to cadence-aligned steps for DP balancing.
+        # step_counter is identical across DP ranks. On a fresh wave the
+        # counter is 0, so prefills are admitted immediately after idle.
+        return (
+            self.prefill_schedule_interval > 1
+            and self.step_counter % self.prefill_schedule_interval != 0
+        )
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
