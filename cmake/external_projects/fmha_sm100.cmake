@@ -36,12 +36,37 @@ set(FMHA_SM100_PY_ROOT "${fmha_sm100_SOURCE_DIR}/python/fmha_sm100")
 
 install(FILES
   "${FMHA_SM100_PY_ROOT}/__init__.py"
+  "${FMHA_SM100_PY_ROOT}/api.py"
+  "${FMHA_SM100_PY_ROOT}/bench_utils.py"
+  "${FMHA_SM100_PY_ROOT}/jit.py"
   "${FMHA_SM100_PY_ROOT}/sparse.py"
+  "${FMHA_SM100_PY_ROOT}/sparse_fmha_adapter.py"
   DESTINATION vllm/third_party/fmha_sm100
   COMPONENT fmha_sm100)
 
+install(DIRECTORY "${FMHA_SM100_PY_ROOT}/csrc/"
+  DESTINATION vllm/third_party/fmha_sm100/csrc
+  COMPONENT fmha_sm100
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
+  PATTERN ".git*" EXCLUDE)
+
 install(DIRECTORY "${FMHA_SM100_PY_ROOT}/cute/"
   DESTINATION vllm/third_party/fmha_sm100/cute
+  COMPONENT fmha_sm100
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
+  PATTERN ".git*" EXCLUDE)
+
+install(DIRECTORY "${FMHA_SM100_PY_ROOT}/cutlass/include/"
+  DESTINATION vllm/third_party/fmha_sm100/cutlass/include
+  COMPONENT fmha_sm100
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
+  PATTERN ".git*" EXCLUDE)
+
+install(DIRECTORY "${FMHA_SM100_PY_ROOT}/cutlass/tools/util/include/"
+  DESTINATION vllm/third_party/fmha_sm100/cutlass/tools/util/include
   COMPONENT fmha_sm100
   PATTERN "__pycache__" EXCLUDE
   PATTERN "*.pyc" EXCLUDE
