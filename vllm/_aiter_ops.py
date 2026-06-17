@@ -2789,7 +2789,7 @@ class rocm_aiter_ops:
         This function is NOT wrapped with @is_aiter_supported decorator
         to allow explicit backend selection via attention_config to work
         even when VLLM_ROCM_USE_AITER=0.
-        
+
         max_qlen>1 with qo_indptr enables the multi-query asm path.
 
         Note: This performs lazy import of aiter.paged_attention_common
