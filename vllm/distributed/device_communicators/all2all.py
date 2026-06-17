@@ -355,6 +355,17 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         torch.accelerator.synchronize()
         DeepEPLLAll2AllManager._last_mask = None
 
+    def update_mask(self, rank: int, masked: bool = True) -> None:
+        buf = DeepEPLLAll2AllManager._buffer
+        assert buf is not None
+        buf.low_latency_update_mask_buffer(rank, masked)
+        torch.accelerator.synchronize()
+        if DeepEPLLAll2AllManager._last_mask is None:
+            DeepEPLLAll2AllManager._last_mask = torch.zeros(
+                self.world_size, device="cuda", dtype=torch.int32
+            )
+        DeepEPLLAll2AllManager._last_mask[rank] = int(masked)
+
     def query_fault(self) -> tuple[torch.Tensor, torch.Tensor]:
         current = self.query_active_mask()
         if DeepEPLLAll2AllManager._last_mask is None:
@@ -570,6 +581,17 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         state.buffer.clean_mask_buffer()
         torch.accelerator.synchronize()
         NixlEPAll2AllManager._last_mask = None
+
+    def update_mask(self, rank: int, masked: bool = True) -> None:
+        state = NixlEPAll2AllManager._buffer
+        assert state is not None
+        state.buffer.update_mask_buffer(rank, mask=masked)
+        torch.accelerator.synchronize()
+        if NixlEPAll2AllManager._last_mask is None:
+            NixlEPAll2AllManager._last_mask = torch.zeros(
+                state.active_ep_size, device="cuda", dtype=torch.int32
+            )
+        NixlEPAll2AllManager._last_mask[rank] = int(masked)
 
     def query_fault(self) -> tuple[torch.Tensor, torch.Tensor]:
         current = self.query_active_mask()

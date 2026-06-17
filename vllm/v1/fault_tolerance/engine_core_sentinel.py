@@ -17,7 +17,7 @@ from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import UtilityResult, run_method
 
 if TYPE_CHECKING:
-    from vllm.v1.engine.core import EngineCoreProc
+    from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 
 logger = init_logger(__name__)
 
@@ -27,7 +27,7 @@ FT_UTILITY_METHOD = "handle_fault_tolerance"
 class EngineCoreSentinel:
     """Manages fault tolerance state for a single engine core."""
 
-    def __init__(self, engine: "EngineCoreProc", parallel_config):
+    def __init__(self, engine: "DPEngineCoreProc", parallel_config):
         self.engine = engine
         self.engine_index = engine.engine_index
         self.parallel_config = parallel_config
@@ -100,38 +100,146 @@ class EngineCoreSentinel:
         self.resumed.set()
         return {"request_id": ft_request.request_id, "success": True}
 
-    def _reinit_dp_group(self) -> dict:
-        """Reinit DP process group if in DP mode. Returns worker params."""
+    def scale_down(self, ft_request: FaultToleranceRequest) -> dict:
+        engine = self.engine
+        parallel_config = engine.vllm_config.parallel_config
+        removed_dp_ranks = ft_request.params["removed_dp_ranks"]
+
+        old_dp_size = parallel_config.data_parallel_size
+        old_dp_rank = parallel_config.data_parallel_rank
+        new_dp_size = old_dp_size - len(removed_dp_ranks)
+        removed_set = set(removed_dp_ranks)
+
+        # Densify: map old sparse ranks to new contiguous ranks.
+        surviving = [r for r in range(old_dp_size) if r not in removed_set]
+        new_dp_rank = surviving.index(old_dp_rank)
+
+        parallel_config.data_parallel_size = new_dp_size
+        parallel_config.data_parallel_rank = new_dp_rank
+        engine.dp_rank = new_dp_rank
+        engine.dp_size = new_dp_size
+        self.engine_index = new_dp_rank
+
+        # Rank 0 hosts the TCPStore master; rebuild if it was removed.
+        if 0 in removed_set and hasattr(engine, "dp_store"):
+            dp_store_port = ft_request.params.get("dp_store_port")
+            new_master_ip = ft_request.params.get("dp_master_ip")
+            if dp_store_port is None or new_master_ip is None:
+                raise ValueError(
+                    "dp_store_port and dp_master_ip required when rank 0 is removed "
+                )
+            parallel_config.data_parallel_master_ip = new_master_ip
+            self._rebuild_dp_store(
+                parallel_config.data_parallel_master_ip,
+                dp_store_port,
+                new_dp_rank,
+                new_dp_size,
+            )
+
+        with set_current_vllm_config(engine.vllm_config):
+            reinit_result = self._reinit_dp_group(
+                new_dp_size=new_dp_size,
+                new_dp_rank=new_dp_rank,
+            )
+
+        if hasattr(engine, "step_counter"):
+            engine.step_counter = 0
+
+        ft_request.params.update(
+            {
+                "new_dp_size": new_dp_size,
+                "new_dp_rank": new_dp_rank,
+            }
+        )
+        ft_request.params.update(reinit_result)
+
+        engine.model_executor.collective_rpc("handle_ft_command", args=(ft_request,))
+
+        self.status_type = EngineStatusType.HEALTHY
+        logger.info(
+            "[FT] Engine %d scale_down complete: dp_size %d->%d, "
+            "dp_rank %d->%d, removed %s",
+            self.engine_index,
+            old_dp_size,
+            new_dp_size,
+            old_dp_rank,
+            new_dp_rank,
+            removed_dp_ranks,
+        )
+        self.resumed.set()
+        return {"request_id": ft_request.request_id, "success": True}
+
+    def _rebuild_dp_store(
+        self,
+        host: str,
+        port: int,
+        dp_rank: int,
+        dp_size: int,
+    ) -> None:
+        """Rebuild dp_store when the old master (rank 0) is dead."""
+        from datetime import timedelta
+
+        from torch.distributed import TCPStore
+
+        self.engine.dp_store = TCPStore(
+            host,
+            port,
+            dp_size,
+            is_master=(dp_rank == 0),
+            timeout=timedelta(seconds=self.engine_recovery_timeout_sec),
+        )
+
+    def _reinit_dp_group(
+        self,
+        new_dp_size: int | None = None,
+        new_dp_rank: int | None = None,
+    ) -> dict:
+        """Reinit DP process group. Returns worker params."""
         engine = self.engine
         if not hasattr(engine, "dp_group") or not hasattr(engine, "dp_store"):
             return {}
 
         parallel_config = engine.vllm_config.parallel_config
-        worker_key = f"ft_worker_dp_port_{self._dp_reinit_epoch}"
-        engine_key = f"ft_engine_dp_port_{self._dp_reinit_epoch}"
-        self._dp_reinit_epoch += 1
+        dp_rank = (
+            new_dp_rank
+            if new_dp_rank is not None
+            else (parallel_config.data_parallel_rank)
+        )
+        dp_size = (
+            new_dp_size
+            if new_dp_size is not None
+            else (parallel_config.data_parallel_size)
+        )
+        dp_master_ip = parallel_config.data_parallel_master_ip
 
-        if parallel_config.data_parallel_rank == 0:
-            worker_port = get_open_port()
-            engine_port = get_open_port()
-            engine.dp_store.set(worker_key, str(worker_port).encode())
-            engine.dp_store.set(engine_key, str(engine_port).encode())
-        else:
-            worker_port = int(engine.dp_store.get(worker_key).decode())
-            engine_port = int(engine.dp_store.get(engine_key).decode())
+        worker_port = self._coordinate_port("ft_worker_dp_port")
+        engine_port = self._coordinate_port("ft_engine_dp_port")
+        self._dp_reinit_epoch += 1
 
         stateless_destroy_torch_distributed_process_group(engine.dp_group)
         engine.dp_group, engine.dp_store = (
             stateless_init_torch_distributed_process_group(
-                parallel_config.data_parallel_master_ip,
+                dp_master_ip,
                 engine_port,
-                parallel_config.data_parallel_rank,
-                parallel_config.data_parallel_size,
+                dp_rank,
+                dp_size,
                 backend="gloo",
                 return_store=True,
             )
         )
         return {"new_stateless_dp_group_port": worker_port}
+
+    def _coordinate_port(self, key_prefix: str) -> int:
+        """Rank 0 picks a fresh port, publishes via dp_store;
+        others block-read it."""
+        key = f"{key_prefix}_{self._dp_reinit_epoch}"
+        dp_rank = self.engine.vllm_config.parallel_config.data_parallel_rank
+        if dp_rank == 0:
+            port = get_open_port()
+            self.engine.dp_store.set(key, str(port).encode())
+        else:
+            port = int(self.engine.dp_store.get(key).decode())
+        return port
 
 
 def fault_tolerant_wrapper(busy_loop_func: Callable):

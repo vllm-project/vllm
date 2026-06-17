@@ -111,6 +111,10 @@ class All2AllManagerBase:
         """Clean RDMA buffers and mask state during FT retry."""
         raise NotImplementedError
 
+    def update_mask(self, rank: int, masked: bool = True) -> None:
+        """Set mask for a specific EP rank. Used during scale-down."""
+        raise NotImplementedError
+
     def query_fault(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (has_fault scalar, current_active_mask)."""
         raise NotImplementedError

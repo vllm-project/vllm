@@ -17,7 +17,12 @@ logger = init_logger(__name__)
 
 router = APIRouter()
 
-_ALLOWED_INSTRUCTIONS = {"retry"}
+_ALLOWED_INSTRUCTIONS = {"retry", "scale_down"}
+
+_REQUIRED_PARAMS: dict[str, set[str]] = {
+    "retry": {"timeout"},
+    "scale_down": {"removed_dp_ranks"},
+}
 
 
 def _validate_payload(body: dict) -> tuple[str, dict]:
@@ -27,8 +32,12 @@ def _validate_payload(body: dict) -> tuple[str, dict]:
         raise HTTPException(400, "'instruction' and 'params' are required.")
     if instruction not in _ALLOWED_INSTRUCTIONS:
         raise HTTPException(400, f"Invalid instruction: '{instruction}'.")
-    if "timeout" not in params or not isinstance(params["timeout"], (int, float)):
-        raise HTTPException(400, "Missing or invalid 'timeout' parameter.")
+    required = _REQUIRED_PARAMS.get(instruction, set())
+    missing = required - set(params.keys())
+    if missing:
+        raise HTTPException(
+            400, f"Missing params for '{instruction}': {sorted(missing)}"
+        )
     return instruction, params
 
 

@@ -979,6 +979,9 @@ class EngineCoreProc(EngineCore):
                 vllm_config.parallel_config.enable_fault_tolerance
             )
             if self.enable_fault_tolerance:
+                assert isinstance(self, DPEngineCoreProc), (
+                    "Fault tolerance is only supported in Multi-DP mode."
+                )
                 self.ft_sentinel = EngineCoreSentinel(
                     engine=self,
                     parallel_config=vllm_config.parallel_config,
