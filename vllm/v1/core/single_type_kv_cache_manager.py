@@ -271,6 +271,7 @@ class SingleTypeKVCacheManager(ABC):
             FullAttentionSpec,
             TQFullAttentionSpec,
             MLAAttentionSpec,
+            HiddenStateCacheSpec,
         ):
             self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
@@ -303,6 +304,7 @@ class SingleTypeKVCacheManager(ABC):
                 FullAttentionSpec,
                 TQFullAttentionSpec,
                 MLAAttentionSpec,
+                HiddenStateCacheSpec,
             ):
                 self.new_block_ids.extend(b.block_id for b in new_blocks)
             return new_blocks
