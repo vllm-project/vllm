@@ -80,6 +80,7 @@ from vllm.model_executor.model_loader.reload.layerwise import (
 )
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
+    ModelWeightParameter,
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
