@@ -53,6 +53,10 @@ def _create_workspace(
     rng_state = random.getstate()
     try:
         random.seed(int.from_bytes(os.urandom(16), byteorder="big"))
+        # Pass the (TP) process group so FlashInfer scopes its symmetric-
+        # memory rendezvous to this group instead of world size.
+        # Omitting it hangs during warmup when TP>1 and DP>1.
+        # Needs FlashInfer >= 0.6.11
         workspace = flashinfer_comm.create_allreduce_fusion_workspace(
             backend=backend,
             world_size=world_size,
@@ -61,6 +65,7 @@ def _create_workspace(
             hidden_dim=hidden_dim,
             dtype=dtype,
             comm_backend=comm_backend,
+            group=group,
         )
     except Exception as e:
         if "multicast" in str(e).lower():
