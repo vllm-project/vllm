@@ -3,6 +3,9 @@
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/tensor.h>
 
+#include <optional>
+#include <string>
+
 void per_token_group_quant_fp8(const torch::stable::Tensor& input,
                                torch::stable::Tensor& output_q,
                                torch::stable::Tensor& output_s,
@@ -185,11 +188,12 @@ torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
 
 // Layernorm kernels (shared CUDA/ROCm)
 void rms_norm(torch::stable::Tensor& out, torch::stable::Tensor& input,
-              torch::stable::Tensor& weight, double epsilon);
+              std::optional<torch::stable::Tensor> weight, double epsilon);
 
 void fused_add_rms_norm(torch::stable::Tensor& input,
                         torch::stable::Tensor& residual,
-                        torch::stable::Tensor& weight, double epsilon);
+                        std::optional<torch::stable::Tensor> weight,
+                        double epsilon);
 
 // Layernorm-quant kernels (shared CUDA/ROCm)
 void rms_norm_static_fp8_quant(torch::stable::Tensor& out,
@@ -297,7 +301,8 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
     std::optional<torch::stable::Tensor> kv_cache,
     std::optional<torch::stable::Tensor> index_cache, int64_t block_size,
     std::optional<torch::stable::Tensor> q_out,
-    std::optional<torch::stable::Tensor> index_q_out);
+    std::optional<torch::stable::Tensor> index_q_out,
+    const std::string& kv_cache_dtype);
 
 // Sampler kernels (shared CUDA/ROCm)
 void apply_repetition_penalties_(

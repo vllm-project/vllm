@@ -5,12 +5,12 @@
 Dispatches through aiter.mla_prefill_ps_asm_fwd -> aiter.mla_reduce_v1.
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+from vllm.v1.attention.backends.mla.prefill.base import MLADimensions, MLAPrefillBackend
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -40,7 +40,13 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
     """
 
     supported_dtypes = [torch.float16, torch.bfloat16]
-    requires_r1_mla_dimensions = True
+    supported_mla_dimensions: ClassVar[list[MLADimensions]] = [
+        MLADimensions(
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            v_head_dim=128,
+        ),
+    ]
     requires_fp8_query_quantization = True
 
     # Optimizations.
@@ -446,9 +452,15 @@ class AiterAsmPrefillBackend(MLAPrefillBackend):
         k: torch.Tensor,
         v: torch.Tensor,
         return_softmax_lse: bool,
+        out: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self._new_tokens_ps is not None, (
             "prepare_metadata must be called before run_prefill_new_tokens"
+        )
+        assert out is None and output_scale is None, (
+            "fused/in-place FP8 output not supported by the AITER ASM "
+            "MLA prefill backend"
         )
         out, lse = self._run_kernel(q, k, v, self._new_tokens_ps, is_causal=True)
         if return_softmax_lse:

@@ -13,6 +13,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 
 if TYPE_CHECKING:
@@ -31,26 +32,21 @@ class MLAPrefillSelectorConfig(NamedTuple):
     """
 
     dtype: torch.dtype
-    is_r1_compatible: bool
+    mla_dimensions: MLADimensions = MLADimensions(
+        qk_nope_head_dim=0,
+        qk_rope_head_dim=0,
+        v_head_dim=0,
+    )
     cache_dtype: str = "auto"
     dcp_world_size: int = 1
 
-
-def is_deepseek_r1_mla_compatible(vllm_config: "VllmConfig") -> bool:
-    """Check if model has DeepSeek R1 compatible MLA dimensions.
-
-    DeepSeek R1 MLA dimensions are:
-    - qk_nope_head_dim = 128
-    - qk_rope_head_dim = 64
-    - v_head_dim = 128
-    """
-    if vllm_config.model_config is None:
-        return False
-    hf_text_config = vllm_config.model_config.hf_text_config
-    qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
-    qk_rope_head_dim = getattr(hf_text_config, "qk_rope_head_dim", 1)
-    v_head_dim = getattr(hf_text_config, "v_head_dim", 1)
-    return qk_nope_head_dim == 128 and qk_rope_head_dim == 64 and v_head_dim == 128
+    def __repr__(self):
+        return (
+            f"MLAPrefillSelectorConfig(dtype={self.dtype}, "
+            f"mla_dimensions={self.mla_dimensions}, "
+            f"cache_dtype={self.cache_dtype}, "
+            f"dcp_world_size={self.dcp_world_size})"
+        )
 
 
 def _get_mla_prefill_backend_priorities(
@@ -115,12 +111,27 @@ def get_mla_prefill_backend(
 
     attention_config = vllm_config.attention_config
 
-    selector_config = MLAPrefillSelectorConfig(
-        dtype=vllm_config.model_config.dtype,
-        is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
-        cache_dtype=getattr(vllm_config.cache_config, "cache_dtype", "auto"),
-        dcp_world_size=vllm_config.parallel_config.decode_context_parallel_size,
-    )
+    cache_dtype = vllm_config.cache_config.cache_dtype
+    dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+    model_config = vllm_config.model_config
+    if model_config is None:
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.get_default_dtype(),
+            cache_dtype=cache_dtype,
+            dcp_world_size=dcp_world_size,
+        )
+    else:
+        hf_text_config = model_config.hf_text_config
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=model_config.dtype,
+            mla_dimensions=MLADimensions(
+                qk_nope_head_dim=getattr(hf_text_config, "qk_nope_head_dim", 0),
+                qk_rope_head_dim=getattr(hf_text_config, "qk_rope_head_dim", 0),
+                v_head_dim=getattr(hf_text_config, "v_head_dim", 0),
+            ),
+            cache_dtype=cache_dtype,
+            dcp_world_size=dcp_world_size,
+        )
 
     if attention_config.mla_prefill_backend is not None:
         selected_backend = attention_config.mla_prefill_backend

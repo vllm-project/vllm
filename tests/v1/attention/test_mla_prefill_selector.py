@@ -9,12 +9,12 @@ import torch
 
 from vllm.config import AttentionConfig, ModelConfig, VllmConfig
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.mla.prefill.selector import (
     MLAPrefillSelectorConfig,
     _auto_select_mla_prefill_backend,
     get_mla_prefill_backend,
-    is_deepseek_r1_mla_compatible,
 )
 
 
@@ -26,6 +26,10 @@ def clear_cache():
 
 GFX950 = DeviceCapability(major=9, minor=5)
 HOPPER = DeviceCapability(major=9, minor=0)
+
+# DeepSeek-R1 MLA head dimensions, which AITER_ASM supports.
+_R1_DIMS = MLADimensions(qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128)
+_NON_R1_DIMS = MLADimensions(qk_nope_head_dim=192, qk_rope_head_dim=64, v_head_dim=128)
 
 
 def _aiter_asm_class():
@@ -168,11 +172,14 @@ class TestAutoSelectMLAPrefillBackend:
     """Tests for fallback and error paths in auto-selection."""
 
     def test_blackwell_falls_back_to_trtllm(self):
-        vllm_config = _make_vllm_config()
         capability = DeviceCapability(major=10, minor=0)
         selector_config = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
-            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
+            mla_dimensions=MLADimensions(
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+            ),
         )
 
         try:
@@ -196,11 +203,14 @@ class TestAutoSelectMLAPrefillBackend:
             assert backend.get_name() == "TRTLLM_RAGGED"
 
     def test_all_fail_raises_error(self):
-        vllm_config = _make_vllm_config()
         capability = DeviceCapability(major=10, minor=0)
         selector_config = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
-            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
+            mla_dimensions=MLADimensions(
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+            ),
         )
 
         def mock_get_class(backend_enum):  # noqa: ARG001
@@ -220,28 +230,26 @@ class TestAutoSelectMLAPrefillBackend:
 class TestBackendValidation:
     """Tests for backend validation logic."""
 
-    def test_r1_dimension_requirement(self):
+    def test_backend_supported_dimension_validation(self):
         try:
             from vllm.v1.attention.backends.mla.prefill.flashinfer import (
                 FlashInferPrefillBackend,
             )
+            from vllm.v1.attention.backends.mla.prefill.trtllm_ragged import (
+                TrtllmRaggedPrefillBackend,
+            )
         except ImportError:
-            pytest.skip("FlashInfer prefill backend not available")
+            pytest.skip("MLA prefill backend not available")
             return
 
-        assert FlashInferPrefillBackend.requires_r1_mla_dimensions is True
-
-        vllm_config = _make_vllm_config(
-            model_config=_make_mock_model_config(
-                qk_nope_head_dim=128,
-                qk_rope_head_dim=64,
-                v_head_dim=128,
-            )
-        )
         capability = DeviceCapability(major=10, minor=0)
         selector_config = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
-            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
+            mla_dimensions=MLADimensions(
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+            ),
         )
 
         with patch.object(FlashInferPrefillBackend, "is_available", return_value=True):
@@ -251,16 +259,13 @@ class TestBackendValidation:
             )
             assert len(invalid_reasons) == 0
 
-        vllm_config_invalid = _make_vllm_config(
-            model_config=_make_mock_model_config(
+        selector_config_invalid = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=MLADimensions(
                 qk_nope_head_dim=64,
                 qk_rope_head_dim=64,
                 v_head_dim=128,
-            )
-        )
-        selector_config_invalid = MLAPrefillSelectorConfig(
-            dtype=torch.bfloat16,
-            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config_invalid),
+            ),
         )
 
         with patch.object(FlashInferPrefillBackend, "is_available", return_value=True):
@@ -269,7 +274,25 @@ class TestBackendValidation:
                 selector_config_invalid,
             )
             assert len(invalid_reasons) == 1
-            assert "DeepSeek R1 MLA dimensions" in invalid_reasons[0]
+            assert "supported MLA dimensions" in invalid_reasons[0]
+
+        selector_config_glm5 = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=MLADimensions(
+                qk_nope_head_dim=192,
+                qk_rope_head_dim=64,
+                v_head_dim=256,
+            ),
+        )
+
+        with patch.object(
+            TrtllmRaggedPrefillBackend, "is_available", return_value=True
+        ):
+            invalid_reasons = TrtllmRaggedPrefillBackend.validate_configuration(
+                capability,
+                selector_config_glm5,
+            )
+            assert invalid_reasons == []
 
 
 class TestMLAPrefillBackendParsing:
@@ -317,7 +340,7 @@ class TestAiterAsmValidation:
             (GFX950, "fp8", True, True, None),
             (GFX950, "auto", True, False, "fp8"),
             (HOPPER, "fp8", True, False, "compute capability"),
-            (GFX950, "fp8", False, False, "R1"),
+            (GFX950, "fp8", False, False, "MLA dimensions"),
         ],
     )
     def test_validate_configuration(
@@ -335,7 +358,7 @@ class TestAiterAsmValidation:
                 capability,
                 MLAPrefillSelectorConfig(
                     dtype=torch.bfloat16,
-                    is_r1_compatible=is_r1_compatible,
+                    mla_dimensions=_R1_DIMS if is_r1_compatible else _NON_R1_DIMS,
                     cache_dtype=cache_dtype,
                 ),
             )
@@ -352,7 +375,7 @@ class TestAiterAsmSelectorPriority:
         cls = aiter_asm_cls
         cfg = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
-            is_r1_compatible=True,
+            mla_dimensions=_R1_DIMS,
             cache_dtype="fp8",
         )
         with patch.object(cls, "is_available", return_value=True):
@@ -367,7 +390,7 @@ class TestAiterAsmSelectorPriority:
             pytest.skip("FLASH_ATTN backend not importable")
         cfg = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
-            is_r1_compatible=True,
+            mla_dimensions=_R1_DIMS,
             cache_dtype="auto",
         )
         with (

@@ -773,7 +773,8 @@ def test_backend_correctness(
     if not backends_to_test:
         pytest.skip(f"No backends support kv_cache_dtype={kv_cache_dtype}")
 
-    # Skip prefill backends that can't satisfy capability/deps/R1 constraints.
+    # Skip prefill backends that can't satisfy capability/deps/dimension constraints.
+    from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
     from vllm.v1.attention.backends.mla.prefill.selector import (
         MLAPrefillSelectorConfig,
     )
@@ -783,7 +784,11 @@ def test_backend_correctness(
             current_platform.get_device_capability(),
             MLAPrefillSelectorConfig(
                 dtype=torch.bfloat16,
-                is_r1_compatible=True,
+                mla_dimensions=MLADimensions(
+                    qk_nope_head_dim=128,
+                    qk_rope_head_dim=64,
+                    v_head_dim=128,
+                ),
                 cache_dtype=kv_cache_dtype,
             ),
         )
