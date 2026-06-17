@@ -263,7 +263,6 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
         prefill_worker = prefill_connector.connector_worker
 
         block_len = 4096
-        kv_half = block_len // 2
         prefill_worker.kv_caches_base_addr = [0x1000]
         prefill_worker.block_len_per_layer = [block_len]
         prefill_worker.registered_layer_names = ["model.layers.1.self_attn"]
@@ -310,15 +309,9 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
             await prefill_worker.send_kv_to_decode(identity, mock_socket, xfer_meta)
 
         src_ptrs, dst_ptrs, lengths = mock_send_blocks.call_args[0][1:]
-        assert src_ptrs == [
-            0x1000 + 10 * block_len,
-            0x1000 + 10 * block_len + kv_half,
-        ]
-        assert dst_ptrs == [
-            0xB000 + 20 * block_len,
-            0xB000 + 20 * block_len + kv_half,
-        ]
-        assert lengths == [kv_half, kv_half]
+        assert src_ptrs == [0x1000 + 10 * block_len]
+        assert dst_ptrs == [0xB000 + 20 * block_len]
+        assert lengths == [block_len]
 
         sent_identity, sent_payload = mock_socket.send_multipart.call_args[0][0]
         assert sent_identity == identity
