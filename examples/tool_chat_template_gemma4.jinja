@@ -234,7 +234,7 @@
     {#- Render reasoning/reasoning_content as thinking channel (tool-call turns only) -#}
     {%- set thinking_text = message.get('reasoning') or message.get('reasoning_content') -%}
     {%- set thinking_gate = (loop.index0 > ns_turn.last_user_idx) or preserve_thinking -%}
-    {%- if thinking_text and thinking_gate and message.get('tool_calls') -%}
+    {%- if thinking_text and thinking_gate -%}
         {{- '<|channel>thought\n' + thinking_text + '\n<channel|>' -}}
     {%- endif -%}
 
