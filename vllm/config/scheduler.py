@@ -155,6 +155,11 @@ class SchedulerConfig:
     scheduler step to one scheduler block. This preserves a real Mamba state
     snapshot at every block boundary while allowing max_num_batched_tokens to
     remain large for global batching and static buffer sizing."""
+    
+    prefill_schedule_interval: int = Field(default=1, ge=1)
+    """For data-parallel deployments, only admit new prefill requests
+    once every N engine steps, aligned across DP ranks, to better balance
+    per-step forward-pass times."""
 
     async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
