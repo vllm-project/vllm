@@ -471,7 +471,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int num_index_heads, "
       "Tensor? slot_mapping, Tensor? index_slot_mapping, "
       "Tensor!? kv_cache, Tensor!? index_cache, "
-      "int block_size, Tensor!? q_out, Tensor!? index_q_out) -> ()");
+      "int block_size, Tensor!? q_out, Tensor!? index_q_out, "
+      "str kv_cache_dtype) -> ()");
 
   // Apply repetition penalties to logits in-place.
   ops.def(

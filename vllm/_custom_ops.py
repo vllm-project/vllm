@@ -2634,6 +2634,7 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     block_size: int = 0,
     q_out: torch.Tensor | None = None,
     index_q_out: torch.Tensor | None = None,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -2645,8 +2646,9 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
       index_k]`` — the index branch is read straight out of ``qkv``.
 
     When ``kv_cache`` is given (sparse serving), also scatter-inserts the
-    normed/roped k & v into the paged bf16 KV cache by ``slot_mapping`` and the
-    index key into ``index_cache`` by ``index_slot_mapping``. If
+    normed/roped k & v into the paged KV cache by ``slot_mapping`` and the
+    index key into ``index_cache`` by ``index_slot_mapping``. ``kv_cache_dtype``
+    selects the cache storage/conversion path. If
     ``index_slot_mapping`` is omitted, ``slot_mapping`` is used for both caches.
 
     If ``q_out`` / ``index_q_out`` (contiguous ``[N, nq*128]`` / ``[N,
@@ -2675,6 +2677,7 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         block_size,
         q_out,
         index_q_out,
+        kv_cache_dtype,
     )
 
 
