@@ -365,12 +365,14 @@ class LlamaModel(nn.Module, EagleModelMixin):
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         self.quant_config = quant_config
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
+        # vLLM removed LoRAConfig.lora_extra_vocab_size in the version this fork
+        # rebased onto. The extra-vocab term is unused here anyway (vocab_size
+        # below has `#+ lora_vocab` commented out), so keep it 0 instead of
+        # dereferencing the removed attribute, which crashed EngineCore at load.
+        lora_vocab = 0
         self.vocab_size = config.vocab_size #+ lora_vocab
         self.org_vocab_size = config.vocab_size
         if get_pp_group().is_first_rank or (config.tie_word_embeddings
