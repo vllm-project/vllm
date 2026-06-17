@@ -76,8 +76,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            # self.num_speculative_steps + 1,
-            3,  # REVERT
+            self.num_speculative_steps + 1,
         )
 
         # PIECEWISE cudagraphs are not supported for draft decodes.
