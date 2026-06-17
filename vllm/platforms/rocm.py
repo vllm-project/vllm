@@ -459,7 +459,7 @@ class RocmPlatform(Platform):
         "modelopt_mixed",
         "fp8_per_tensor",
         "fp8_per_block",
-        "fp8_per_channel",  # PTPC: per-channel weight + per-token act fp8
+        "fp8_per_channel",
         "online",
         "gpt_oss_mxfp4",
     ]

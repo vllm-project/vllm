@@ -787,9 +787,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             a2_scale=a2_scale,
             block_shape=self.weight_block_size,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
-            # SwiGLU-OAI alpha/beta (e.g. MiniMax-M3: 1.702/1.0). Without these
-            # the fp8 MoE applies silu_and_mul_with_clamp with the default
-            # alpha=1.0/beta=0.0, producing garbage for SwiGLU-OAI MoEs.
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
         )

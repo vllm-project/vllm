@@ -609,11 +609,6 @@ def fp8_w8a8_moe_quant_config(
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for fp8 activations and fp8 weights.
-
-    ``gemm1_alpha``/``gemm1_beta`` drive the SwiGLU-OAI GEMM1 activation
-    (``silu_and_mul_with_clamp``); they must be forwarded for SwiGLU-OAI MoEs
-    (e.g. MiniMax-M3 alpha=1.702, beta=1.0), else the kernel defaults to
-    alpha=1.0/beta=0.0 and produces garbage.
     """
     return FusedMoEQuantConfig.make(
         current_platform.fp8_dtype(),
