@@ -67,7 +67,8 @@ pub(super) fn safe_text_len(input: &mut Partial<&str>, marker: &str) -> ModalRes
     Ok(emit_len)
 }
 
-/// Streaming scan state for a buffered marker search [`take_until_marker`].
+/// Streaming scan state for a buffered marker search [`take_until_marker`],
+/// so that we don't have to rescan the whole buffered prefix when resuming.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct MarkerScanState {
     scan_start: usize,
@@ -110,7 +111,9 @@ fn take_until_marker_<'i>(
         return incomplete();
     }
 
+    // Normal updates store a char boundary; this keeps stale or misused state from panicking.
     let scan_start = floor_char_boundary(text, state.scan_start);
+
     if let Some(offset) = text[scan_start..].find(marker) {
         let marker_start = scan_start + offset;
         let body = &text[..marker_start];
