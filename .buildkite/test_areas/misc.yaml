@@ -250,6 +250,16 @@ steps:
   - setup.py
   commands:
   - bash standalone_tests/python_only_compile.sh
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/standalone_tests/python_only_compile.sh
+      - setup.py
+      - vllm/platforms/rocm.py
 
 - label: Async Engine, Inputs, Utils, Worker
   device: h200_35gb
