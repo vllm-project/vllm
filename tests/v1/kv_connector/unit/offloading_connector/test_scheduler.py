@@ -1221,6 +1221,64 @@ def test_reset_cache(request_runner, async_scheduling: bool):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+def test_reset_cache_finalizes_finished_request_with_pending_store(
+    request_runner, async_scheduling: bool
+):
+    """reset_cache must finalize a finished request whose in-flight stores it
+    discards: call on_request_finished and drop its _req_status entry.
+
+    Otherwise the deferred hook (which waits for the now-discarded jobs to
+    complete) never fires and the entry leaks.
+    """
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        block_size_factor=block_size_factor,
+    )
+
+    finalized: list[str] = []
+    runner.manager.on_request_finished.side_effect = (
+        lambda req_context: finalized.append(req_context.req_id)
+    )
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+
+    # Decode a couple of blocks and keep every transfer in flight, so the
+    # request has pending store jobs.
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
+    runner.run(decoded_tokens=[0], complete_transfers=False)
+    runner.run(
+        decoded_tokens=[0] * (2 * offloaded_block_size),
+        complete_transfers=False,
+    )
+
+    cs = runner.connector_scheduler
+    req_id = str(runner.req_id)
+    req_status = cs._req_status[req_id]
+    assert req_status.transfer_jobs, "expected an in-flight store before finish"
+    assert any(job.is_store for job in cs._jobs.values())
+
+    # Finish the request while its store is still in flight. request_finished
+    # takes the defer branch (pending jobs), so on_request_finished is NOT
+    # called yet and the entry stays tracked.
+    req_status.req.status = RequestStatus.FINISHED_STOPPED
+    cs.request_finished(req_status.req)
+    assert finalized == []
+    assert req_id in cs._req_status
+
+    # reset_cache discards the in-flight store; it must finalize the request.
+    cs.reset_cache()
+    assert finalized == [req_id]
+    assert req_id not in cs._req_status
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
 def test_swa_alignment_skip(request_runner, async_scheduling: bool):
     """SWA blocks unreachable by the load path are skipped during store.
 
