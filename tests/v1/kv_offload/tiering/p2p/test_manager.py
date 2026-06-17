@@ -15,6 +15,7 @@ import numpy as np
 
 from vllm.v1.kv_offload.base import ReqContext
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
+from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
     _PENDING_SESSION_TIMEOUT_S,
     P2PSecondaryTierManager,
@@ -300,6 +301,9 @@ class _FakeSession:
         self._close_stores = close_stores or []
         self.requests: list[tuple[int, str]] = []
         self.finishes: list[str] = []
+        # Mirror P2PSession._inflight (transfer_id → handle/state). The
+        # shutdown-drain test populates this; other tests leave it empty.
+        self._inflight: dict[int, object] = {}
 
     def poll(self):
         loads = self._loads
@@ -562,6 +566,121 @@ class TestPerCallLocking:
         mgr.on_request_finished(ctx)
         assert mgr._lock.acquire(timeout=0.1)
         mgr._lock.release()
+
+
+# ---------------------------------------------------------------------------
+# Shutdown drain
+# ---------------------------------------------------------------------------
+
+
+class _ShutdownFakeData:
+    """Fake DataTransport that records cancel/poll/close calls and
+    drives the wait-cancel loop with a scriptable `still` queue."""
+
+    def __init__(self, still_queue: list[list[int]] | None = None) -> None:
+        # Each list in still_queue is the set of ids the next
+        # cancel(mode="wait") should report as still inflight. The last
+        # entry repeats once exhausted.
+        self._still_queue = list(still_queue) if still_queue else [[]]
+        self.cancel_calls: list[tuple[list[int], str]] = []
+        self.poll_calls: int = 0
+        self.close_calls: int = 0
+
+    def cancel(self, transfer_ids, mode: str = "immediate") -> list[int]:
+        ids = list(transfer_ids)
+        self.cancel_calls.append((ids, mode))
+        if mode == "wait":
+            if len(self._still_queue) > 1:
+                return list(self._still_queue.pop(0))
+            return list(self._still_queue[0])
+        return []
+
+    def poll(self):
+        self.poll_calls += 1
+
+        class _Empty:
+            done: list[int] = []
+            failed: list[int] = []
+
+        return _Empty()
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class _ShutdownFakeControl:
+    def __init__(self) -> None:
+        self.close_calls: int = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class TestShutdownDrain:
+    """shutdown() drains inflight transfers via cancel(mode='wait')
+    before calling _data.close(), with a 3s deadline fallback to
+    cancel(mode='immediate')."""
+
+    def _prep(
+        self,
+        still_queue: list[list[int]] | None = None,
+        inflight_ids: list[int] | None = None,
+    ) -> tuple[P2PSecondaryTierManager, _ShutdownFakeData, _ShutdownFakeControl]:
+        mgr = _make_manager()
+        data = _ShutdownFakeData(still_queue=still_queue)
+        control = _ShutdownFakeControl()
+        mgr._data = data  # type: ignore[assignment]
+        mgr._control = control  # type: ignore[assignment]
+        if inflight_ids:
+            session = _FakeSession(peer_id="peer:1", connected=True)
+            session._inflight = {tid: object() for tid in inflight_ids}
+            mgr._sessions["peer:1"] = session  # type: ignore[assignment]
+        return mgr, data, control
+
+    def test_shutdown_drains_inflight_via_wait_cancel(self):
+        # First cancel(wait) returns the input still inflight; second returns [].
+        mgr, data, control = self._prep(
+            still_queue=[[42, 43], []],
+            inflight_ids=[42, 43],
+        )
+        mgr.shutdown()
+
+        wait_calls = [c for c in data.cancel_calls if c[1] == "wait"]
+        immediate_calls = [c for c in data.cancel_calls if c[1] == "immediate"]
+        assert len(wait_calls) >= 1
+        assert wait_calls[0][0] == [42, 43]
+        assert immediate_calls == []
+        # poll() was driven between cancel attempts.
+        assert data.poll_calls >= 1
+        # _data and _control were closed exactly once each, after the drain.
+        assert data.close_calls == 1
+        assert control.close_calls == 1
+
+    def test_shutdown_force_cancels_after_timeout(self, monkeypatch):
+        # Drain never completes — wait-cancel keeps returning the inflight set.
+        monkeypatch.setattr(manager_module, "_SHUTDOWN_DRAIN_TIMEOUT_S", 0.05)
+        mgr, data, control = self._prep(
+            still_queue=[[42]],
+            inflight_ids=[42],
+        )
+        mgr._poll_interval = 0.001
+        mgr.shutdown()
+
+        wait_calls = [c for c in data.cancel_calls if c[1] == "wait"]
+        immediate_calls = [c for c in data.cancel_calls if c[1] == "immediate"]
+        assert len(wait_calls) >= 1
+        assert immediate_calls == [([42], "immediate")]
+        assert data.close_calls == 1
+        assert control.close_calls == 1
+
+    def test_shutdown_no_inflight_skips_drain(self):
+        mgr, data, control = self._prep()
+        mgr.shutdown()
+
+        assert data.cancel_calls == []
+        assert data.poll_calls == 0
+        assert data.close_calls == 1
+        assert control.close_calls == 1
 
 
 # ---------------------------------------------------------------------------

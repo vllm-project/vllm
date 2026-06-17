@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-PD-Connector proxy server for OffloadingConnector + TieringOffloadingSpec.
+P2PConnector proxy server for OffloadingConnector + TieringOffloadingSpec.
 
 Unlike NixlConnector (which returns remote_host/remote_port in the prefill
 response), OffloadingConnector does not embed connector coordinates in its
-response. This proxy injects the prefiller's PDConnector address into
+response. This proxy injects the prefiller's P2PConnector address into
 kv_transfer_params before forwarding the decode request so the decoder knows
 where to pull KV blocks from.
 
 Usage:
-    .venv/bin/python pd_connector_proxy.py \
+    .venv/bin/python p2p_connector_proxy.py \
         --port 8192 \
         --prefiller-host 127.0.0.1 --prefiller-port 8100 \
         --decoder-host   127.0.0.1 --decoder-port  8200 \
-        --pd-connector-host 127.0.0.1 --pd-connector-port 7777
+        --p2p-connector-host 127.0.0.1 --p2p-connector-port 7777
 """
 
 import argparse
@@ -74,13 +74,13 @@ async def lifespan(app: FastAPI):
     app.state.decode_iterator = itertools.cycle(range(len(app.state.decode_clients)))
 
     mode = "decoder-first" if global_args.decoder_first else "prefiller-first"
-    pd_host = global_args.pd_connector_host
-    pd_port = global_args.pd_connector_port
+    pd_host = global_args.p2p_connector_host
+    pd_port = global_args.p2p_connector_port
     print(
         f"Proxy ready [{mode}]: "
         f"{len(app.state.prefill_clients)} prefiller(s), "
         f"{len(app.state.decode_clients)} decoder(s). "
-        f"PDConnector at {pd_host}:{pd_port}"
+        f"P2PConnector at {pd_host}:{pd_port}"
     )
     yield
 
@@ -101,32 +101,32 @@ def parse_args():
     p.add_argument("--prefiller-ports", type=int, nargs="+", default=[8100])
     p.add_argument("--decoder-hosts", type=str, nargs="+", default=["127.0.0.1"])
     p.add_argument("--decoder-ports", type=int, nargs="+", default=[8200])
-    # PDConnector coordinates of the prefiller — injected into decode requests.
+    # P2PConnector coordinates of the prefiller — injected into decode requests.
     p.add_argument(
-        "--pd-connector-host",
+        "--p2p-connector-host",
         type=str,
         default="127.0.0.1",
-        help="Host of the prefiller's PDConnector ZMQ socket",
+        help="Host of the prefiller's P2PConnector ZMQ socket",
     )
     p.add_argument(
-        "--pd-connector-port",
+        "--p2p-connector-port",
         type=int,
         default=7777,
-        help="Port of the prefiller's PDConnector ZMQ socket",
+        help="Port of the prefiller's P2PConnector ZMQ socket",
     )
-    # PDConnector coordinates of the decoder — injected into prefill requests
+    # P2PConnector coordinates of the decoder — injected into prefill requests
     # so the prefiller's submit_store can resolve the peer to push KV to.
     p.add_argument(
-        "--decoder-pd-connector-host",
+        "--decoder-p2p-connector-host",
         type=str,
         default="127.0.0.1",
-        help="Host of the decoder's PDConnector ZMQ socket",
+        help="Host of the decoder's P2PConnector ZMQ socket",
     )
     p.add_argument(
-        "--decoder-pd-connector-port",
+        "--decoder-p2p-connector-port",
         type=int,
         default=7778,
-        help="Port of the decoder's PDConnector ZMQ socket",
+        help="Port of the decoder's P2PConnector ZMQ socket",
     )
     p.add_argument(
         "--decoder-first",
@@ -166,8 +166,8 @@ async def _prefill(client_info, endpoint, req_data, request_id):
         "do_remote_prefill": False,
         "remote_engine_id": None,
         "remote_block_ids": None,
-        "remote_host": global_args.decoder_pd_connector_host,
-        "remote_port": global_args.decoder_pd_connector_port,
+        "remote_host": global_args.decoder_p2p_connector_host,
+        "remote_port": global_args.decoder_p2p_connector_port,
         "kv_request_id": request_id,
     }
     data["stream"] = False
@@ -202,13 +202,13 @@ async def _handle_completions(api: str, request: Request):
         prefill_client = _get_next(request.app, "prefill")
         await _prefill(prefill_client, api, req_data, request_id)
 
-        # Inject the prefiller's PDConnector address so the decoder can pull
-        # KV blocks from it via the PDConnector transport.
+        # Inject the prefiller's P2PConnector address so the decoder can pull
+        # KV blocks from it via the P2PConnector transport.
         req_data["kv_transfer_params"] = {
             "do_remote_prefill": True,
             "do_remote_decode": False,
-            "remote_host": global_args.pd_connector_host,
-            "remote_port": global_args.pd_connector_port,
+            "remote_host": global_args.p2p_connector_host,
+            "remote_port": global_args.p2p_connector_port,
             "kv_request_id": request_id,
         }
 
@@ -248,8 +248,8 @@ async def _handle_completions_decoder_first(api: str, request: Request):
         decode_data["kv_transfer_params"] = {
             "do_remote_prefill": True,
             "do_remote_decode": False,
-            "remote_host": global_args.pd_connector_host,
-            "remote_port": global_args.pd_connector_port,
+            "remote_host": global_args.p2p_connector_host,
+            "remote_port": global_args.p2p_connector_port,
             "kv_request_id": request_id,
         }
 

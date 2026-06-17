@@ -42,6 +42,11 @@ logger = init_logger(__name__)
 # fires first for individual jobs.
 _PENDING_SESSION_TIMEOUT_S = 60.0
 
+# Time we wait during shutdown for inflight transfers to drain via
+# cancel(mode="wait") before falling back to mode="immediate". Bounded
+# so a wedged peer can't hang shutdown.
+_SHUTDOWN_DRAIN_TIMEOUT_S = 3.0
+
 
 class P2PSecondaryTierManager(SecondaryTierManager):
     """Secondary tier for P2P KV cache sharing.
@@ -583,9 +588,43 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             self._poller_thread.join(timeout=5.0)
             self._poller_thread = None
         with self._lock:
+            self._drain_inflight_for_shutdown()
             for session in self._sessions.values():
                 session.close()
             self._sessions.clear()
             self._pending_session_created_at.clear()
             self._control.close()
             self._data.close()
+
+    def _drain_inflight_for_shutdown(self) -> None:
+        """Best-effort drain of inflight transfers before closing _data.
+
+        Mirrors session._drain_abort but as a single bounded loop, since
+        the background poller is already stopped at this point. Collects
+        inflight transfer_ids from each session, repeatedly calls
+        _data.cancel(..., mode="wait") and _data.poll() so handles can
+        surface as done/failed, and falls back to mode="immediate" once
+        _SHUTDOWN_DRAIN_TIMEOUT_S elapses so a wedged peer can't hang us.
+        """
+        ids = [tid for s in self._sessions.values() for tid in s._inflight]
+        if not ids:
+            return
+        deadline = time.monotonic() + _SHUTDOWN_DRAIN_TIMEOUT_S
+        still: list[int] = ids
+        while still and time.monotonic() < deadline:
+            still = list(self._data.cancel(still, mode="wait"))
+            if not still:
+                break
+            # poll() advances NIXL handle state so the next wait-cancel
+            # has a chance to release the handles.
+            self._data.poll()
+            time.sleep(self._poll_interval)
+        if still:
+            logger.warning(
+                "P2P %s: shutdown drain timed out after %.1fs with %d "
+                "transfers still inflight — force-cancelling",
+                self._local_id,
+                _SHUTDOWN_DRAIN_TIMEOUT_S,
+                len(still),
+            )
+            self._data.cancel(still, mode="immediate")
