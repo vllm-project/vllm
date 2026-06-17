@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
+from dataclasses import replace
 from http import HTTPStatus
 from typing import Any, cast
 
@@ -261,7 +262,21 @@ class OpenAIServingRender:
             self.override_max_tokens,
             truncate_prompt_tokens=request.truncate_prompt_tokens,
         )
-        params = request.to_sampling_params(max_tokens, self.default_sampling_params)
+        chat_template_kwargs = request.apply_chat_template_kwargs(
+            request.build_chat_params(
+                self.chat_template,
+                self.chat_template_content_format,
+            )
+            .with_defaults(self.default_chat_template_kwargs)
+            .chat_template_kwargs,
+            model_config=self.model_config,
+        )
+        params = request.to_sampling_params(
+            max_tokens,
+            self.default_sampling_params,
+            chat_template_kwargs=chat_template_kwargs,
+            model_config=self.model_config,
+        )
 
         request_id = f"chatcmpl-{random_uuid()}"
 
@@ -789,6 +804,17 @@ class OpenAIServingRender:
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
+        apply_chat_template_kwargs = getattr(
+            request, "apply_chat_template_kwargs", None
+        )
+        if apply_chat_template_kwargs is not None:
+            chat_params = replace(
+                chat_params,
+                chat_template_kwargs=apply_chat_template_kwargs(
+                    chat_params.chat_template_kwargs,
+                    model_config=self.model_config,
+                ),
+            )
 
         (conversation,), (engine_input,) = await renderer.render_chat_async(
             [messages],
