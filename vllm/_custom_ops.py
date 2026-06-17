@@ -3622,6 +3622,7 @@ def cpu_attn_get_scheduler_metadata(
     sliding_window_size: int,
     isa: str,
     enable_kv_split: bool,
+    dynamic_causal: torch.Tensor | None = None,
 ) -> torch.Tensor:
     scheduler_metadata = torch.ops._C.get_scheduler_metadata(
         num_reqs,
@@ -3635,6 +3636,7 @@ def cpu_attn_get_scheduler_metadata(
         sliding_window_size,
         isa,
         enable_kv_split,
+        dynamic_causal,
     )
     return scheduler_metadata
 
@@ -3673,11 +3675,12 @@ def cpu_attention_with_kv_cache(
     scale: float,
     causal: bool,
     alibi_slopes: torch.Tensor | None,
-    sliding_window: tuple[int, int],
+    sliding_window: int,
     block_table: torch.Tensor,
     softcap: float,
     scheduler_metadata: torch.Tensor,
     s_aux: torch.Tensor | None,
+    dynamic_causal: torch.Tensor | None = None,
     k_scale: float = 1.0,
     v_scale: float = 1.0,
     kv_cache_dtype: str = "auto",
@@ -3692,12 +3695,12 @@ def cpu_attention_with_kv_cache(
         scale,
         causal,
         alibi_slopes,
-        sliding_window[0],
-        sliding_window[1],
+        sliding_window,
         block_table,
         softcap,
         scheduler_metadata,
         s_aux,
+        dynamic_causal,
         k_scale,
         v_scale,
         kv_cache_dtype,
