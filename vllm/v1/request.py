@@ -3,6 +3,7 @@
 
 import enum
 import time
+import weakref
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -27,6 +28,50 @@ from vllm.v1.utils import ConstantList
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
     from vllm.v1.core.kv_cache_utils import BlockHash
+
+
+class RequestBlockHashes(list["BlockHash"]):
+    """Fine-grained hashes with cached larger-block views.
+
+    The list itself stores hashes at the prefix-cache hash block size. The
+    larger-block views are only used when a partially cached block is promoted
+    to a full cache block, where the cache must use the direct full-block hash
+    rather than a hash composed from smaller hashes.
+    """
+
+    def __init__(self, request: "Request") -> None:
+        super().__init__()
+        self.request_ref = weakref.ref(request)
+        self._by_block_size: dict[int, list[BlockHash]] = {}
+        self._partial_by_block_size: dict[int, list[BlockHash]] = {}
+
+    def get_block_hashes(self, block_size: int) -> list["BlockHash"]:
+        request = self.request_ref()
+        assert request is not None
+        get_block_hashes = getattr(request._block_hasher, "get_block_hashes", None)
+        if get_block_hashes is None:
+            return self
+        if block_size not in self._by_block_size:
+            self._by_block_size[block_size] = get_block_hashes(request, block_size)
+        return self._by_block_size[block_size]
+
+    def get_partial_block_hashes(self, block_size: int) -> list["BlockHash"]:
+        request = self.request_ref()
+        assert request is not None
+        get_partial_block_hashes = getattr(
+            request._block_hasher, "get_partial_block_hashes", None
+        )
+        if get_partial_block_hashes is None:
+            return self
+        if block_size not in self._partial_by_block_size:
+            self._partial_by_block_size[block_size] = get_partial_block_hashes(
+                request, block_size
+            )
+        return self._partial_by_block_size[block_size]
+
+    def clear_cached_views(self) -> None:
+        self._by_block_size.clear()
+        self._partial_by_block_size.clear()
 
 
 @dataclass
@@ -172,7 +217,7 @@ class Request:
 
         self.prefill_stats: PrefillStats | None = PrefillStats()
 
-        self.block_hashes: list[BlockHash] = []
+        self.block_hashes: RequestBlockHashes = RequestBlockHashes(self)
         # Store the block hasher without binding self to avoid creating a
         # reference cycle (Request -> partial -> Request) that prevents
         # immediate garbage collection via reference counting.
@@ -229,6 +274,7 @@ class Request:
             self._all_token_ids.extend(token_ids)
 
         self.update_block_hashes()
+        self.block_hashes.clear_cached_views()
 
     def update_block_hashes(self) -> None:
         """Compute block hashes for any new full blocks and append them."""

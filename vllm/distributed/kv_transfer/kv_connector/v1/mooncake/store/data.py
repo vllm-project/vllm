@@ -15,10 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.kv_cache_utils import (
-    BlockHash,
-    BlockHashListWithBlockSize,
-)
+from vllm.v1.core.kv_cache_utils import BlockHash
 
 logger = init_logger(__name__)
 
@@ -127,8 +124,6 @@ class ChunkedTokenDatabase:
         Args:
             token_len: Total number of tokens.
             block_hashes: Block hashes computed at ``hash_block_size`` granularity.
-                When ``block_size > hash_block_size`` consecutive hashes are merged
-                up to the group's ``block_size`` via ``BlockHashListWithBlockSize``.
             mask_num: Number of tokens to skip from the beginning.
         """
         if not block_hashes:
@@ -136,8 +131,9 @@ class ChunkedTokenDatabase:
         if self.block_size == self.hash_block_size:
             chunk_hashes: Iterable[BlockHash] = block_hashes
         else:
-            chunk_hashes = BlockHashListWithBlockSize(
-                block_hashes, self.hash_block_size, self.block_size
+            raise NotImplementedError(
+                "Mooncake KV transfer requires direct block hashes when "
+                "block_size differs from hash_block_size."
             )
         for chunk_id, h in enumerate(chunk_hashes):
             start_idx = chunk_id * self.block_size

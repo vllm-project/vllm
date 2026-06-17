@@ -3,11 +3,13 @@
 
 from math import lcm
 
+import pytest
+
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashListWithBlockSize
+from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -173,24 +175,18 @@ def test_coordinator_hybrid_hole_in_full_clips_both():
     assert hit == 16
 
 
-def test_coordinator_group_block_size_double_hash():
-    """Group block_size=32 over hash_block_size=16 hashes: adjacent
-    hashes merge before pool lookup."""
+def test_coordinator_group_block_size_requires_direct_hashes():
+    """Group block_size=32 cannot be represented by concatenating 16 hashes."""
     groups = [
         KVCacheGroupSpec(["L0"], _full(16)),
         KVCacheGroupSpec(["L1"], _full(32)),
     ]
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
-    big_hashes = list(BlockHashListWithBlockSize(hs, 16, 32))
     exists = {(0, bytes(h)) for h in hs}
-    exists |= {(1, bytes(bh)) for bh in big_hashes}
     cmap = ExternalCachedBlockPool(exists)
-    _masks, hit = coord.find_longest_cache_hit(
-        hs, max_length=64, cached_block_pool=cmap
-    )
-    assert hit == 64
-    assert hit % 32 == 0
+    with pytest.raises(NotImplementedError):
+        coord.find_longest_cache_hit(hs, max_length=64, cached_block_pool=cmap)
 
 
 # ----- store_mask -----
