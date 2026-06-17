@@ -14,10 +14,17 @@ import torch
 from torch import nn
 from transformers import BatchFeature
 
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mla_dcp_qrep import (
+    dcp_q_group_index,
+    dcp_q_replicate_enabled,
+    dcp_qrep_replica_map,
+    load_dcp_replicated_column_weight,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors import (
     compressed_tensors,
@@ -472,4 +479,57 @@ class KimiK25ForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        dcp_world_size = (
+            get_current_vllm_config().parallel_config.decode_context_parallel_size
+        )
+        dcp_q_replicate = dcp_q_replicate_enabled() and dcp_world_size > 1
+        if not dcp_q_replicate:
+            return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+        params_dict = dict(self.named_parameters())
+        qrep_loaded_params: set[str] = set()
+        dcp_q_group_idx = dcp_q_group_index(
+            get_tensor_model_parallel_rank(), dcp_world_size
+        )
+
+        qrep_map = dcp_qrep_replica_map(params_dict)
+        expected_qrep_params = set(qrep_map.values())
+        qrep_mapper = self.hf_to_vllm_mapper
+        modules = (self, *self.children())
+        iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
+        quant_config = next(iterator, None)
+        cache_scale_mapper = (
+            quant_config.get_cache_scale_mapper() if quant_config is not None else None
+        )
+        if cache_scale_mapper is not None:
+            qrep_mapper = qrep_mapper | cache_scale_mapper
+
+        def mirror_qrep_weights() -> Iterable[tuple[str, torch.Tensor]]:
+            # Mirror each q/kv tensor into its DCP qrep replica, then yield it
+            # unchanged for the normal load.
+            for name, loaded_weight in weights:
+                replica = qrep_map.get(qrep_mapper._map_name(name))
+                if replica is not None:
+                    load_dcp_replicated_column_weight(
+                        params_dict[replica], loaded_weight, dcp_q_group_idx
+                    )
+                    qrep_loaded_params.add(replica)
+                yield name, loaded_weight
+
+        loaded = loader.load_weights(
+            mirror_qrep_weights(), mapper=self.hf_to_vllm_mapper
+        )
+        # qrep is on, so replicas must be registered and every one loaded.
+        if not expected_qrep_params:
+            raise RuntimeError(
+                "DCP query replication is enabled but this wrapper registered "
+                "no dcp_q_* replica parameters."
+            )
+        missing_qrep_params = expected_qrep_params - qrep_loaded_params
+        if missing_qrep_params:
+            sample = ", ".join(sorted(missing_qrep_params)[:8])
+            raise RuntimeError(
+                "DCP query replication is enabled but these qrep replica "
+                f"parameters were not loaded: {sample}"
+            )
+        return loaded | qrep_loaded_params
