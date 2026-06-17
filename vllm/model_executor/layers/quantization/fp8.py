@@ -80,7 +80,6 @@ from vllm.model_executor.model_loader.reload.layerwise import (
 )
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
-    ModelWeightParameter,
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
@@ -188,7 +187,11 @@ class Fp8Config(QuantizationConfig):
             ):
                 return UnquantizedLinearMethod()
             if not self.is_checkpoint_fp8_serialized:
-                online_method = Fp8OnlineLinearMethod(self)
+                from vllm.model_executor.layers.quantization.online.fp8 import (
+                    Fp8PerTensorOnlineLinearMethod,
+                )
+
+                online_method = Fp8PerTensorOnlineLinearMethod()
                 online_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
                 return online_method
             else:
