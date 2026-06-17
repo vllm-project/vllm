@@ -565,11 +565,9 @@ def rocm_fp8_mqa_logits(
 
     k_fp8, scale = kv
 
-    # gfx942: AITER's bundled fp8_mqa_logits launches with BLOCK_KV=128 +
-    # num_stages=2 (~96 KiB LDS), exceeding MI300X's 64 KiB LDS so it aborts
-    # with OutOfResources. Route gfx942 to a vendored copy that drops to
-    # BLOCK_KV=64 + num_stages=1 (~33 KiB) per ROCm/aiter#3257. Remove this
-    # branch once vLLM bumps AITER to a version that includes that PR.
+    # Temporarily route gfx942 to the vendored ROCm/aiter#3257 workaround.
+    # Remove this branch once vLLM bumps AITER to a version that includes
+    # ROCm/aiter#3257.
     if _ON_GFX942 and rocm_aiter_ops.is_enabled():
         from vllm.v1.attention.ops.triton_fp8_mqa_logits import (
             fp8_mqa_logits_gfx942,

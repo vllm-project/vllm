@@ -1,40 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""FP8 MQA logits kernel (vendored for ROCm gfx942).
+"""Temporary gfx942 fallback for AITER's fp8_mqa_logits kernel.
 
-This module ships a vLLM-local copy of AITER's ``fp8_mqa_logits`` Triton
-kernel together with the launch-time tile-size selection from AITER PR
-ROCm/aiter#3257. It exists solely as a temporary workaround so that
-PR vllm-project/vllm#45681 (DeepSeek V4 functional fixes on MI300X) can
-land *without* requiring an AITER version bump on the consumer side.
+This module vendors AITER's Triton fp8_mqa_logits kernel with the gfx942
+tile-size workaround from ROCm/aiter#3257. It is used only while vLLM's
+pinned AITER version lacks that fix.
 
 TODO: Remove this vendored copy once vLLM pins an AITER version that includes
-ROCm/aiter#3257.
-
-Background
-----------
-AITER's ``aiter.ops.triton.attention.fp8_mqa_logits._fp8_mqa_logits_kernel``
-in versions <= the wheel bundled with vLLM nightly
-``a6682d1d259cca69a9ae737ea5608fbbe7520031`` launches with the default
-``(BLOCK_KV=128, num_stages=2)`` tile on gfx942 (MI300X) hardware. For the
-DeepSeek V4 sparse indexer shape ``(NUM_HEADS=64, HEAD_SIZE=128)`` this
-double-buffers a ``128 * 128 * 2 = 32 KiB`` KV tile plus a ``64 * 128 * 4
-= 32 KiB`` fp32 scores accumulator plus an ``64 * 128 = 8 KiB`` Q tile,
-which Triton 3.5/3.6 routes into LDS and ends up requesting 96 KiB. The
-MI300X CU only has 64 KiB of LDS, so the kernel JIT-aborts with
-``triton.runtime.errors.OutOfResources: shared memory``.
-
-AITER ROCm/aiter#3257 (queued for merge) keeps the same ``@triton.jit``
-body but selects ``(BLOCK_KV=64, num_stages=1)`` (~33 KiB) on gfx942 when
-the default tile would not fit. Until that PR is consumed by vLLM, we
-route gfx942 callers in :func:`rocm_fp8_mqa_logits` to this vendored
-implementation, which carries the same logic. On gfx950+ and CUDA the
-upstream AITER wrapper continues to be used (it has a dedicated Gluon
-kernel that this vendor does not include).
-
-The ``@triton.jit`` body below is byte-for-byte equivalent to
-``aiter.ops.triton._triton_kernels.attention.fp8_mqa_logits``; only the
-imports were adjusted to use ``vllm.triton_utils``.
+ROCm/aiter#3257 bugfix for gfx942.
 """
 
 import torch
