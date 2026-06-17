@@ -69,6 +69,7 @@ class EncoderRunner:
         prefill_lens: np.ndarray,
         computed_prefill_lens: np.ndarray,
         draft_lookahead: int = 0,
+        num_embeds_per_req: list[int] | None = None,
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
         if draft_lookahead:
             computed_prefill_lens = computed_prefill_lens + draft_lookahead
@@ -76,6 +77,8 @@ class EncoderRunner:
         is_prefilling_np = computed_prefill_lens < prefill_lens
         if not is_prefilling_np.any():
             # All decode requests, so no need to gather any embeddings.
+            if num_embeds_per_req is not None:
+                num_embeds_per_req.extend([0] * len(req_ids))
             return [], torch.zeros(
                 total_num_scheduled_tokens, dtype=torch.bool, device=self.device
             )
@@ -91,10 +94,13 @@ class EncoderRunner:
         for i, req_id in enumerate(req_ids):
             if not is_prefilling[i]:
                 # OPTIMIZATION: Skip decode requests.
+                if num_embeds_per_req is not None:
+                    num_embeds_per_req.append(0)
                 continue
 
             cur_query_start = query_start[i]
             cur_query_end = query_end[i]
+            num_before = len(mm_embeds)
 
             mm_features = self.encoder_cache.mm_features[req_id]
             lo, hi = get_mm_features_in_window(
@@ -138,6 +144,9 @@ class EncoderRunner:
                     True if is_embed is None else is_embed
                 )
                 mm_embeds.append(mm_embeds_item)
+
+            if num_embeds_per_req is not None:
+                num_embeds_per_req.append(len(mm_embeds) - num_before)
 
         return mm_embeds, is_mm_embed
 
