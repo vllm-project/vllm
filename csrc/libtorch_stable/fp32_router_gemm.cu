@@ -175,49 +175,52 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
 }
 
 // ---------------------------------------------------------------------------
-// Explicit instantiations: M=1..32, E=256, H=3072, for both input types
+// Explicit instantiations: M=1..32, for both input types, for the supported
+// (E, H) pairs:  (256, 3072) [MiniMax-M2/M2.5]  and  (128, 6144) [MiniMax-M3].
 // ---------------------------------------------------------------------------
 
-#define INSTANTIATE(T, M)                              \
-  template void invokeFp32RouterGemm<T, M, 256, 3072>( \
-      float*, T const*, float const*, cudaStream_t);
+#define INSTANTIATE(T, M, E, H)                                    \
+  template void invokeFp32RouterGemm<T, M, E, H>(float*, T const*, \
+                                                 float const*, cudaStream_t);
 
-#define INSTANTIATE_ALL(T) \
-  INSTANTIATE(T, 1)        \
-  INSTANTIATE(T, 2)        \
-  INSTANTIATE(T, 3)        \
-  INSTANTIATE(T, 4)        \
-  INSTANTIATE(T, 5)        \
-  INSTANTIATE(T, 6)        \
-  INSTANTIATE(T, 7)        \
-  INSTANTIATE(T, 8)        \
-  INSTANTIATE(T, 9)        \
-  INSTANTIATE(T, 10)       \
-  INSTANTIATE(T, 11)       \
-  INSTANTIATE(T, 12)       \
-  INSTANTIATE(T, 13)       \
-  INSTANTIATE(T, 14)       \
-  INSTANTIATE(T, 15)       \
-  INSTANTIATE(T, 16)       \
-  INSTANTIATE(T, 17)       \
-  INSTANTIATE(T, 18)       \
-  INSTANTIATE(T, 19)       \
-  INSTANTIATE(T, 20)       \
-  INSTANTIATE(T, 21)       \
-  INSTANTIATE(T, 22)       \
-  INSTANTIATE(T, 23)       \
-  INSTANTIATE(T, 24)       \
-  INSTANTIATE(T, 25)       \
-  INSTANTIATE(T, 26)       \
-  INSTANTIATE(T, 27)       \
-  INSTANTIATE(T, 28)       \
-  INSTANTIATE(T, 29)       \
-  INSTANTIATE(T, 30)       \
-  INSTANTIATE(T, 31)       \
-  INSTANTIATE(T, 32)
+#define INSTANTIATE_ALL(T, E, H) \
+  INSTANTIATE(T, 1, E, H)        \
+  INSTANTIATE(T, 2, E, H)        \
+  INSTANTIATE(T, 3, E, H)        \
+  INSTANTIATE(T, 4, E, H)        \
+  INSTANTIATE(T, 5, E, H)        \
+  INSTANTIATE(T, 6, E, H)        \
+  INSTANTIATE(T, 7, E, H)        \
+  INSTANTIATE(T, 8, E, H)        \
+  INSTANTIATE(T, 9, E, H)        \
+  INSTANTIATE(T, 10, E, H)       \
+  INSTANTIATE(T, 11, E, H)       \
+  INSTANTIATE(T, 12, E, H)       \
+  INSTANTIATE(T, 13, E, H)       \
+  INSTANTIATE(T, 14, E, H)       \
+  INSTANTIATE(T, 15, E, H)       \
+  INSTANTIATE(T, 16, E, H)       \
+  INSTANTIATE(T, 17, E, H)       \
+  INSTANTIATE(T, 18, E, H)       \
+  INSTANTIATE(T, 19, E, H)       \
+  INSTANTIATE(T, 20, E, H)       \
+  INSTANTIATE(T, 21, E, H)       \
+  INSTANTIATE(T, 22, E, H)       \
+  INSTANTIATE(T, 23, E, H)       \
+  INSTANTIATE(T, 24, E, H)       \
+  INSTANTIATE(T, 25, E, H)       \
+  INSTANTIATE(T, 26, E, H)       \
+  INSTANTIATE(T, 27, E, H)       \
+  INSTANTIATE(T, 28, E, H)       \
+  INSTANTIATE(T, 29, E, H)       \
+  INSTANTIATE(T, 30, E, H)       \
+  INSTANTIATE(T, 31, E, H)       \
+  INSTANTIATE(T, 32, E, H)
 
-INSTANTIATE_ALL(float)
-INSTANTIATE_ALL(__nv_bfloat16)
+INSTANTIATE_ALL(float, 256, 3072)
+INSTANTIATE_ALL(__nv_bfloat16, 256, 3072)
+INSTANTIATE_ALL(float, 128, 6144)
+INSTANTIATE_ALL(__nv_bfloat16, 128, 6144)
 
 #undef INSTANTIATE_ALL
 #undef INSTANTIATE
