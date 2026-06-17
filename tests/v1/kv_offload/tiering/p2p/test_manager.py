@@ -9,12 +9,16 @@ using fake transport and session objects.
 from __future__ import annotations
 
 import threading
+import time
 
 import numpy as np
 
 from vllm.v1.kv_offload.base import ReqContext
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
-from vllm.v1.kv_offload.tiering.p2p.manager import P2PSecondaryTierManager
+from vllm.v1.kv_offload.tiering.p2p.manager import (
+    _PENDING_SESSION_TIMEOUT_S,
+    P2PSecondaryTierManager,
+)
 from vllm.v1.kv_offload.tiering.p2p.session import LoadResult, StoreResult
 
 
@@ -87,6 +91,7 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._finished_jobs = []
     mgr._failed_req_ids = set()
     mgr._sessions = {}
+    mgr._pending_session_created_at = {}
     _init_threading_state(mgr)
     return mgr
 
@@ -367,12 +372,60 @@ class TestGetFinished:
         assert "req-load" in mgr._failed_req_ids
 
     def test_pending_sessions_are_not_reaped(self):
-        """Pending (unconnected) sessions stay even when alive==True."""
+        """Fresh pending (unconnected) sessions stay across a poll."""
         mgr = self._make()
         pending = _FakeSession(peer_id="pending:1", alive=True, connected=False)
         mgr._sessions["pending:1"] = pending  # type: ignore[assignment]
+        mgr._pending_session_created_at["pending:1"] = time.monotonic()
         list(mgr.get_finished_jobs())
         assert "pending:1" in mgr._sessions
+        assert "pending:1" in mgr._pending_session_created_at
+
+    def test_pending_session_reaped_after_timeout(self):
+        """Pending session whose stamp is older than _PENDING_SESSION_TIMEOUT_S
+        is reaped, surfacing its buffered store/load jobs as failures."""
+
+        class FakeData:
+            def remove_remote_peer(self, pid):
+                pass
+
+        mgr = self._make()
+        mgr._data = FakeData()  # type: ignore[assignment]
+        stale = _FakeSession(
+            peer_id="pending:stale",
+            alive=True,
+            connected=False,
+            close_loads=[(20, "req-load")],
+            close_stores=[10, 11],
+        )
+        mgr._sessions["pending:stale"] = stale  # type: ignore[assignment]
+        # Backdate so the stamp is past the deadline.
+        mgr._pending_session_created_at["pending:stale"] = (
+            time.monotonic() - _PENDING_SESSION_TIMEOUT_S - 1.0
+        )
+
+        results = list(mgr.get_finished_jobs())
+
+        assert "pending:stale" not in mgr._sessions
+        assert "pending:stale" not in mgr._pending_session_created_at
+        # 2 baseline + 1 buffered load + 2 buffered stores
+        assert JobResult(job_id=10, success=False) in results
+        assert JobResult(job_id=11, success=False) in results
+        assert JobResult(job_id=20, success=False) in results
+        assert "req-load" in mgr._failed_req_ids
+
+    def test_submit_store_records_pending_stamp(self):
+        """submit_store stamps the creation time so the pending sweep can
+        find sessions that have been stranded long enough to reap."""
+
+        class FakeData:
+            block_len = 4096
+
+        mgr = _make_manager()
+        mgr._data = FakeData()  # type: ignore[assignment]
+        job = _job_metadata(job_id=1, kv_params=_kv_params())
+        mgr.submit_store(job)
+        assert "10.0.0.1:8000" in mgr._pending_session_created_at
 
 
 # ---------------------------------------------------------------------------

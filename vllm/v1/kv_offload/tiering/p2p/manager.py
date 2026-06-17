@@ -35,6 +35,13 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Reap pending (not-yet-connected) sessions older than this. Protects
+# against the prefiller buffering blocks for a decoder that never
+# connects (decoder died, network partition, lost kv_request_id).
+# Must be longer than the per-store deadline so the store-timeout path
+# fires first for individual jobs.
+_PENDING_SESSION_TIMEOUT_S = 60.0
+
 
 class P2PSecondaryTierManager(SecondaryTierManager):
     """Secondary tier for P2P KV cache sharing.
@@ -105,6 +112,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._control: ControlTransport = ZmqTransport(self._local_id, host, port)
 
         self._sessions: dict[str, P2PSession] = {}
+        # peer_id → time.monotonic() at which a pending (not-yet-connected)
+        # session was created. Cleared when the peer's connection arrives
+        # (in _accept_new_peers) or when the session is reaped. Used by
+        # _reap_dead_sessions to time out stranded pending sessions.
+        self._pending_session_created_at: dict[str, float] = {}
 
         self._finished_jobs: list[JobResult] = []
         # kv_request_ids that hit a transport/session failure; On load lookup()
@@ -229,6 +241,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             if session is None:
                 session = self._make_pending_session(peer_id)
                 self._sessions[peer_id] = session
+                self._pending_session_created_at[peer_id] = time.monotonic()
                 logger.info(
                     "P2P %s: created pending session for peer %s "
                     "(kv_request_id=%s, %d blocks)",
@@ -391,6 +404,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             )
         else:
             session = self._make_pending_session(peer_id)
+            self._pending_session_created_at[peer_id] = time.monotonic()
         self._sessions[peer_id] = session
         return session
 
@@ -407,6 +421,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                     if existing.connected:
                         raise ValueError(f"duplicate connection from {conn.peer_id}")
                     existing.attach_connection(conn)
+                    self._pending_session_created_at.pop(conn.peer_id, None)
                     logger.info(
                         "P2P %s: attached connection to pending session for %s",
                         self._local_id,
@@ -430,18 +445,40 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 conn.close()
 
     def _reap_dead_sessions(self) -> None:
-        # Pending sessions (no connection yet) are kept untouched —
-        # they're awaiting the decoder's connect handshake, not dead.
+        # Two reasons to reap:
+        #   1. Connected session whose connection died — peer is gone.
+        #   2. Pending session that has been waiting longer than
+        #      _PENDING_SESSION_TIMEOUT_S for a connection that never
+        #      arrived (decoder died, partition, lost kv_request_id).
+        # If a late connect arrives after a pending reap, _accept_new_peers
+        # will create a fresh connected session for it; the buffered work
+        # is gone (already surfaced as failures via session.close()) and
+        # _failed_req_ids steers any pending lookup to local prefill.
         dead: list[str] | None = None
+        deadline = time.monotonic() - _PENDING_SESSION_TIMEOUT_S
         for pid, s in self._sessions.items():
             if s.connected and not s.alive:
                 if dead is None:
                     dead = []
                 dead.append(pid)
+            elif not s.connected:
+                created_at = self._pending_session_created_at.get(pid)
+                if created_at is not None and created_at <= deadline:
+                    logger.warning(
+                        "P2P %s: pending session for peer %s timed out "
+                        "after %.0fs without connection — reaping",
+                        self._local_id,
+                        pid,
+                        _PENDING_SESSION_TIMEOUT_S,
+                    )
+                    if dead is None:
+                        dead = []
+                    dead.append(pid)
         if dead is None:
             return
         for pid in dead:
             session = self._sessions.pop(pid)
+            self._pending_session_created_at.pop(pid, None)
             failed_loads, failed_stores = session.close()
             for job_id, kv_request_id in failed_loads:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
@@ -549,5 +586,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             for session in self._sessions.values():
                 session.close()
             self._sessions.clear()
+            self._pending_session_created_at.clear()
             self._control.close()
             self._data.close()
