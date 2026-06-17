@@ -372,6 +372,7 @@ class RustFrontendProcessManager:
                     # Python passes the bootstrapped engine range explicitly.
                     "data_parallel_rank",
                     "data_parallel_external_lb",
+                    "data_parallel_hybrid_lb",
                 },
             ),
             sort_keys=True,
