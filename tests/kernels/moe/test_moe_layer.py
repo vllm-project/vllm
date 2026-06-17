@@ -1804,12 +1804,9 @@ def test_moe_layer(
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
         monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
-    # TODO
-    # VLLM_FLASHINFER_MOE_BACKEND=latency
-    # VLLM_USE_FLASHINFER_MOE_FP16=1
-    # VLLM_USE_FLASHINFER_MOE_FP8
-    # VLLM_USE_FLASHINFER_MOE_FP4
-    # VLLM_USE_FLASHINFER_MOE_INT4
+    # TODO: cover FlashInfer MoE backends via moe_backend, e.g.
+    # moe_backend=flashinfer_trtllm / flashinfer_cutlass / flashinfer_cutedsl
+    # (BF16, FP8 and NVFP4 paths), and VLLM_USE_FLASHINFER_MOE_INT4=1.
 
     parallel_config = ParallelConfig(
         pipeline_parallel_size=1,
