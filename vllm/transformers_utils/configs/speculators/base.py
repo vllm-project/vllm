@@ -65,11 +65,9 @@ class SpeculatorsConfig(PretrainedConfig):
         # Apply anything specific to the supported algorithm
         algo_updater = SUPPORTED_SPECULATORS_TYPES[speculators_model_type]
         algo_updater(config_dict=config_dict, pre_trained_config=pre_trained_config)
-        # A speculators draft declares its proposal count under
-        # speculators_config.proposal_methods; forward it onto the draft config
-        # as num_lookahead_tokens (the field SpeculativeConfig already syncs with
-        # num_speculative_tokens) so the count need not be restated when the
-        # draft is loaded via --speculative-config '{"model": <speculators repo>}'.
+        # Forward the draft's proposal count onto num_lookahead_tokens (the field
+        # SpeculativeConfig defaults num_speculative_tokens from) so it need not be
+        # restated on --speculative-config.
         proposal_methods = config_dict.get("speculators_config", {}).get(
             "proposal_methods"
         )

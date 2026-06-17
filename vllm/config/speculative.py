@@ -780,10 +780,8 @@ class SpeculativeConfig:
                         )
 
                 if self.num_speculative_tokens is None:
-                    # A speculators-format draft carries its proposal count on
-                    # the draft config as num_lookahead_tokens (set when the
-                    # speculators config is parsed); default to it so it need
-                    # not be restated.
+                    # Default from the speculators draft's num_lookahead_tokens
+                    # (its proposal count) so it need not be restated.
                     self.num_speculative_tokens = getattr(
                         self.draft_model_config.hf_config,
                         "num_lookahead_tokens",
