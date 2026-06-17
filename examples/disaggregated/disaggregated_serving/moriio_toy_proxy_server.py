@@ -75,6 +75,7 @@ def _listen_for_register(hostname, port):
                     "dp_size": data["dp_size"],
                     "tp_size": data["tp_size"],
                     "transfer_mode": data["transfer_mode"],
+                    "node_hosts": data.get("node_hosts", []),
                 }
                 # zmq_address format: "host:IP,handshake:PORT,notify:PORT"
                 # Stored verbatim; embedded into the request_id by handle_request.
@@ -277,6 +278,11 @@ async def handle_request(api: str, request: Request):
             decode_instance_endpoint["tp_size"]
         )
         req_data_to_prefill["kv_transfer_params"]["transfer_id"] = transfer_id
+        decode_hosts = decode_instance_endpoint.get("node_hosts") or []
+        if decode_hosts:
+            req_data_to_prefill["kv_transfer_params"]["remote_hosts"] = list(
+                decode_hosts
+            )
 
         prefill_request_url = prefill_instance_endpoint["request_address"] + api
         send_prefill_task = asyncio.create_task(
@@ -308,6 +314,13 @@ async def handle_request(api: str, request: Request):
                 "remote_block_ids"
             ]
             req_data["kv_transfer_params"]["transfer_id"] = prefill_kv["transfer_id"]
+            req_data["kv_transfer_params"]["remote_hosts"] = prefill_kv.get(
+                "remote_hosts"
+            )
+
+        prefill_hosts = prefill_instance_endpoint.get("node_hosts") or []
+        if prefill_hosts:
+            req_data["kv_transfer_params"]["remote_hosts"] = list(prefill_hosts)
 
         req_data["kv_transfer_params"]["remote_dp_size"] = prefill_instance_endpoint[
             "dp_size"
@@ -315,6 +328,7 @@ async def handle_request(api: str, request: Request):
         req_data["kv_transfer_params"]["remote_tp_size"] = prefill_instance_endpoint[
             "tp_size"
         ]
+        req_data["kv_transfer_params"]["tp_size"] = prefill_instance_endpoint["tp_size"]
 
         if selected_prefill_dp_rank is not None:
             req_data["kv_transfer_params"]["remote_dp_rank"] = selected_prefill_dp_rank

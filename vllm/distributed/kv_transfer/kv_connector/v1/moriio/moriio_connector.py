@@ -37,6 +37,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     TransferId,
     WriteTask,
     get_moriio_mode,
+    get_moriio_node_hosts,
     get_peer_zmq_from_request_id,
     get_port_offset,
     get_role,
@@ -184,6 +185,28 @@ def resolve_moriio_transfer_ack(
     notification_counts.pop(transfer_id, None)
     completed_transfer_ids.add(transfer_id)
     return transfer_id
+
+
+def _pick_remote_rank_host(
+    default_host: str,
+    remote_hosts: list[str] | None,
+    tp_size: int,
+    tp_rank: int,
+    remote_dp_size: int = 1,
+    remote_dp_rank: int = 0,
+) -> str:
+    if remote_hosts and len(remote_hosts) > 1:
+        n_hosts = len(remote_hosts)
+        if int(remote_dp_size) >= n_hosts:
+            dp_per_node = max(1, int(remote_dp_size) // n_hosts)
+            node_idx = int(remote_dp_rank) // dp_per_node
+            if 0 <= node_idx < n_hosts:
+                return remote_hosts[node_idx]
+        ranks_per_node = max(1, int(tp_size) // n_hosts)
+        node_idx = int(tp_rank) // ranks_per_node
+        if 0 <= node_idx < n_hosts:
+            return remote_hosts[node_idx]
+    return default_host
 
 
 class MoRIIOConnector(KVConnectorBase_V1):
@@ -364,10 +387,19 @@ class MoRIIOConnectorScheduler:
         self.host_ip = resolve_host_ip(
             self.kv_transfer_config.kv_connector_extra_config
         )
+        # Multi-node TP: node_hosts holds the ordered host IPs in this
+        # engine's TP group (rank 0 first). Surfaced to the peer side via
+        # request_finished's kv_transfer_params so workers can dial the rank
+        # owner. Single-node TP falls back to [host_ip].
+        self.node_hosts = get_moriio_node_hosts(self.kv_transfer_config, self.host_ip)
         self.handshake_port = self.kv_transfer_config.kv_connector_extra_config[
             "handshake_port"
         ]
-        logger.info("Initializing MoRIIO Scheduler engine_id = %s", engine_id)
+        logger.info(
+            "Initializing MoRIIO Scheduler engine_id = %s node_hosts = %s",
+            engine_id,
+            self.node_hosts,
+        )
 
         self.side_notify_port = self.kv_transfer_config.kv_connector_extra_config[
             "notify_port"
@@ -595,16 +627,28 @@ class MoRIIOConnectorScheduler:
 
                 block_ids = blocks.get_block_ids()[0]
 
+                remote_hosts = request.kv_transfer_params.get("remote_hosts")
+                if isinstance(remote_hosts, str):
+                    remote_hosts = [remote_hosts] if remote_hosts else None
+
                 for tp_index in range(self.tp_size):
                     target_port = remote_notify_port + get_port_offset(
                         remote_dp_rank, tp_index
+                    )
+                    target_host = _pick_remote_rank_host(
+                        remote_host,
+                        remote_hosts,
+                        self.tp_size,
+                        tp_index,
+                        int(request.kv_transfer_params.get("remote_dp_size", 1)),
+                        int(remote_dp_rank),
                     )
 
                     self.send_notify_block(
                         req_id=request.request_id,
                         transfer_id=request.kv_transfer_params["transfer_id"],
                         block_notify_list=block_ids,
-                        host=remote_host,
+                        host=target_host,
                         port=target_port,
                     )
 
@@ -764,6 +808,10 @@ class MoRIIOConnectorScheduler:
             remote_dp_size=self.vllm_config.parallel_config.data_parallel_size,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             transfer_id=params["transfer_id"],
+            # Multi-node TP: list of all prefill-instance host IPs in this
+            # engine's TP group (rank 0 first). Decode workers use this to
+            # pick the correct producer host per their tp_rank.
+            remote_hosts=self.node_hosts,
         )
 
     def update_connector_output(self, connector_output: KVConnectorOutput) -> None:
@@ -870,6 +918,7 @@ class MoRIIOConnectorWorker:
         self.http_port = self.moriio_config.http_port
         self.handshake_port = self.moriio_config.handshake_port
         self.notify_port = self.moriio_config.notify_port
+        self.node_hosts = self.moriio_config.node_hosts
 
         self.zmq_context = zmq.Context()
         self.metadata_address = (
@@ -1133,6 +1182,7 @@ class MoRIIOConnectorWorker:
                         # READ (prefill-then-decode, sequential) from WRITE (concurrent)
                         # scheduling.
                         "transfer_mode": self.mode.name,
+                        "node_hosts": list(self.node_hosts),
                     }
 
                     sock.send(msgpack.dumps(data))
@@ -1324,6 +1374,22 @@ class MoRIIOConnectorWorker:
     def _remote_tp_rank(self, remote_tp_size: int) -> int:
         return get_moriio_remote_tp_rank(self.tp_rank, self.world_size, remote_tp_size)
 
+    def _pick_remote_host(self, meta: ReqMeta) -> str:
+        """Resolve the per-worker peer host for multi-node TP prefill-decode."""
+        return _pick_remote_rank_host(
+            meta.remote_host, meta.remote_hosts, int(meta.tp_size), self.tp_rank
+        )
+
+    def _pick_host_for_dp_rank(self, meta: ReqMeta, dp_rank: int) -> str:
+        return _pick_remote_rank_host(
+            meta.remote_host,
+            meta.remote_hosts,
+            int(meta.tp_size),
+            self.tp_rank,
+            int(meta.remote_dp_size),
+            dp_rank,
+        )
+
     def _background_moriio_handshake(
         self, req_id: ReqId, remote_engine_id: EngineId, meta: ReqMeta
     ):
@@ -1332,7 +1398,6 @@ class MoRIIOConnectorWorker:
         if remote_engine_id is not None:
             fut = self._handshake_futures.get(remote_engine_id)
         if fut is None:
-            host = meta.remote_host
             port = int(meta.remote_handshake_port)
             tp_size = int(meta.tp_size)
             remote_dp_size = int(meta.remote_dp_size)
@@ -1349,6 +1414,7 @@ class MoRIIOConnectorWorker:
 
         for cur_dp_rank in range(remote_dp_size):
             dp_engine_id = self.get_engine_name_with_dp(remote_engine_id, cur_dp_rank)
+            host = self._pick_host_for_dp_rank(meta, cur_dp_rank)
             future = self._handshake_initiation_executor.submit(
                 self._moriio_handshake, host, port, tp_size, dp_engine_id, cur_dp_rank
             )
@@ -1793,13 +1859,20 @@ class MoRIIOConnectorWorker:
             meta.remote_engine_id,
             req_id,
         )
+        # Multi-node TP: remote_host here is used by _read_blocks to record the
+        # post-transfer notify callback address (so prefill can free its KV
+        # blocks). For multi-node prefill the notify must go to the prefill
+        # node that actually owns this worker's KV slice, not the prefill
+        # head. _pick_remote_host returns meta.remote_host unchanged for
+        # single-host setups, preserving TP=8 / monolithic behaviour.
+        actual_remote_host = self._pick_remote_host(meta)
         self._read_blocks(
             request_id=req_id,
             transfer_id=meta.transfer_id,
             dst_engine_id=meta.remote_engine_id,
             local_block_ids=meta.local_block_ids,
             remote_block_ids=meta.remote_block_ids,
-            remote_host=meta.remote_host,
+            remote_host=actual_remote_host,
             remote_notify_port=meta.remote_notify_port,
             remote_tp_size=meta.tp_size,
         )
@@ -1814,7 +1887,7 @@ class MoRIIOConnectorWorker:
             layer_name=layer_name,
             kv_layer=kv_layer,
             remote_notify_port=meta.remote_notify_port,
-            remote_ip=meta.remote_host,
+            remote_ip=self._pick_remote_host(meta),
         )
 
     def merge_contiguous_blocks(
