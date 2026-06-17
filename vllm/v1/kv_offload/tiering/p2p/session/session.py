@@ -88,6 +88,7 @@ class _MatchResult(NamedTuple):
 
     local_idxs: list[int]
     remote_idxs: list[int]
+    # The set of store job IDs that contributed blocks
     job_ids: set[int]
 
 
@@ -191,7 +192,7 @@ class P2PSession:
         self._conn: ControlConnection | None = None
 
         # Client-role state
-        self._inbound: dict[str, _InboundRequestState] = {}
+        self._inbound: dict[str, _InboundRequestState] = {}  # kv_Request_id -> req
         self._completed_loads: list[LoadResult] = []
         self._send_ready = False
         self._queued: list[dict] = []
