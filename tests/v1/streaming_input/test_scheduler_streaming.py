@@ -228,6 +228,58 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session.num_tokens >= scheduler.max_model_len
         assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
+    def test_update_from_output_resume_into_cap_reports_length(self):
+        # A segment stops (STOP), then _handle_stopped_request applies a queued
+        # chunk that overflows max_model_len and finishes the session
+        # LENGTH_CAPPED. update_from_output must report LENGTH, not the stale
+        # pre-update STOP, or the client keeps a freed stream open.
+        scheduler = create_scheduler()  # max_model_len = 1024
+
+        session = DummyRequest(request_id="session", prompt_token_ids=list(range(100)))
+        scheduler.add_request(session)
+        client_index = session.client_index
+
+        # Prefill + one ordinary decode token -> session RUNNING, not stopped.
+        out = scheduler.schedule()
+        scheduler.update_from_output(
+            out,
+            ModelRunnerOutput(
+                req_ids=["session"],
+                req_id_to_index={"session": 0},
+                sampled_token_ids=[[5]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+        assert session.status == RequestStatus.RUNNING
+
+        # Queue a chunk large enough to overflow max_model_len when applied.
+        chunk = DummyRequest(request_id="session", prompt_token_ids=list(range(1024)))
+        scheduler.add_request(chunk)
+        assert len(session.streaming_queue) == 1
+
+        # Next step: the session emits a stop token, triggering the cap.
+        out = scheduler.schedule()
+        eco = scheduler.update_from_output(
+            out,
+            ModelRunnerOutput(
+                req_ids=["session"],
+                req_id_to_index={"session": 0},
+                sampled_token_ids=[[STOP_TOKEN]],
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+        assert session.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        finish_outputs = [
+            o for o in eco[client_index].outputs if o.request_id == "session"
+        ]
+        assert len(finish_outputs) == 1
+        assert finish_outputs[0].finish_reason == FinishReason.LENGTH
+
     def test_full_length_non_resumable_request_not_clamped(self):
         # Regression: the streaming graceful-cap clamp in the WAITING loop must
         # apply ONLY to resumable streaming sessions. A classic (resumable=False)
