@@ -1455,6 +1455,57 @@ def test_renderer_num_workers_with_mm_cache():
     assert config.renderer_num_workers == 1
 
 
+@pytest.mark.parametrize(
+    ("model_type", "architectures"),
+    [
+        ("eagle", ["Eagle3LlamaForCausalLM"]),
+        ("speculators", ["LlamaForCausalLMEagle3"]),
+        ("qwen3_5_mtp", ["Qwen3_5MTPForCausalLM"]),
+    ],
+)
+def test_local_speculative_drafter_allows_pipeline_parallelism(
+    model_type, architectures
+):
+    cfg = SimpleNamespace(
+        model_arch_config=SimpleNamespace(total_num_attention_heads=8),
+        registry=SimpleNamespace(is_pp_supported_model=lambda *_: False),
+        architectures=architectures,
+        hf_config=SimpleNamespace(model_type=model_type),
+        runner_type="draft",
+        multimodal_config=None,
+        use_mla=False,
+        _verify_with_expert_parallelism=lambda: None,
+    )
+    cfg._is_local_speculative_drafter = (
+        lambda: ModelConfig._is_local_speculative_drafter(cfg)
+    )
+
+    parallel_config = ParallelConfig(pipeline_parallel_size=2)
+
+    ModelConfig.verify_with_parallel_config(cfg, parallel_config)
+
+
+def test_non_drafter_still_requires_pp_support():
+    cfg = SimpleNamespace(
+        model_arch_config=SimpleNamespace(total_num_attention_heads=8),
+        registry=SimpleNamespace(is_pp_supported_model=lambda *_: False),
+        architectures=["UnsupportedForCausalLM"],
+        hf_config=SimpleNamespace(model_type="unsupported"),
+        runner_type="generate",
+        multimodal_config=None,
+        use_mla=False,
+        _verify_with_expert_parallelism=lambda: None,
+    )
+    cfg._is_local_speculative_drafter = (
+        lambda: ModelConfig._is_local_speculative_drafter(cfg)
+    )
+
+    parallel_config = ParallelConfig(pipeline_parallel_size=2)
+
+    with pytest.raises(NotImplementedError, match="Pipeline parallelism"):
+        ModelConfig.verify_with_parallel_config(cfg, parallel_config)
+
+
 def test_eagle_draft_model_config():
     """Test that EagleDraft model config is correctly set."""
     target_model_config = ModelConfig(

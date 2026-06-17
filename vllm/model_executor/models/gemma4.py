@@ -1316,16 +1316,19 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             if per_layer_inputs is not None:
                 per_layer_inputs = intermediate_tensors["per_layer_inputs"]
         residual = None
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        for layer_idx, layer in enumerate(
+        aux_hidden_states = self._maybe_add_hidden_state(
+            self._get_eagle3_aux_hidden_states(intermediate_tensors),
+            0,
+            hidden_states,
+            residual,
+        )
+        for local_layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
+            layer_idx = self.start_layer + local_layer_idx
             # Extract the per-layer embedding for this specific layer
             if per_layer_inputs is not None:
-                actual_layer_idx = self.start_layer + layer_idx
-                layer_per_input = per_layer_inputs[
-                    :, actual_layer_idx, :
-                ]  # (num_tokens, per_layer_dim)
+                layer_per_input = per_layer_inputs[:, layer_idx, :]
             else:
                 layer_per_input = None
             hidden_states, residual = layer(
@@ -1344,6 +1347,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             }
             if per_layer_inputs is not None:
                 tensors["per_layer_inputs"] = per_layer_inputs
+            self._add_eagle3_aux_hidden_states(tensors, aux_hidden_states)
             return IntermediateTensors(tensors)
         # Gemma4 incorporates residual into hidden_states directly
         # Apply norm without residual fusion when possible.

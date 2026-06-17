@@ -97,6 +97,7 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 from .interfaces import (
+    EagleModelMixin,
     MixtureOfExperts,
     SupportsEagle,
     SupportsEagle3,
@@ -1217,7 +1218,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class DeepseekV2Model(nn.Module):
+class DeepseekV2Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1283,6 +1284,14 @@ class DeepseekV2Model(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def _get_num_incoming_eagle3_aux_hidden_states(
+        self,
+        start_layer: int,
+    ) -> int:
+        return sum(
+            layer_idx < start_layer for layer_idx in self.aux_hidden_state_layers
+        )
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
@@ -1320,20 +1329,21 @@ class DeepseekV2Model(nn.Module):
         else:
             llama_4_scaling = None
 
-        aux_hidden_states = []
+        aux_hidden_states = self._get_eagle3_aux_hidden_states(intermediate_tensors)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
             if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
+                value = hidden_states + residual if residual is not None else hidden_states
+                aux_hidden_states.append(value)
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+            return self._make_intermediate_tensors_with_eagle3_aux(
+                hidden_states, residual, aux_hidden_states
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
@@ -1694,7 +1704,10 @@ class DeepseekV2ForCausalLM(
         self.extract_moe_parameters(example_moe)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.model.aux_hidden_state_layers = layers
+        self.model._set_aux_hidden_state_layers(layers)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)

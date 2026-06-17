@@ -1529,7 +1529,12 @@ class Qwen3LLMModel(Qwen3Model):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        aux_hidden_states = self._maybe_add_hidden_state(
+            self._get_eagle3_aux_hidden_states(intermediate_tensors),
+            0,
+            hidden_states,
+            residual,
+        )
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
@@ -1551,8 +1556,8 @@ class Qwen3LLMModel(Qwen3Model):
             )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+            return self._make_intermediate_tensors_with_eagle3_aux(
+                hidden_states, residual, aux_hidden_states
             )
         hidden_states, _ = self.norm(hidden_states, residual)
 

@@ -1171,8 +1171,10 @@ class ModelConfig:
             self._verify_with_expert_parallelism()
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
-        if pipeline_parallel_size > 1 and not self.registry.is_pp_supported_model(
-            self.architectures, self
+        if (
+            pipeline_parallel_size > 1
+            and not self.registry.is_pp_supported_model(self.architectures, self)
+            and not self._is_local_speculative_drafter()
         ):
             raise NotImplementedError(
                 "Pipeline parallelism is not supported for this model. "
@@ -1219,6 +1221,29 @@ class ModelConfig:
                 "data_parallel_size > 1 or tensor_parallel_size > 1 "
                 "or pipeline_parallel_size > 1."
             )
+
+    def _is_local_speculative_drafter(self) -> bool:
+        """Return whether this config is for a local MTP/EAGLE drafter.
+
+        These drafters are loaded only on the last pipeline-parallel rank by
+        the spec decode proposer, so they are not partitioned across PP ranks
+        and do not need to implement SupportsPP themselves.
+        """
+        if self.runner_type != "draft":
+            return False
+
+        model_type = getattr(self.hf_config, "model_type", None)
+        architectures = self.architectures or ()
+        is_eagle_drafter = model_type in ("eagle", "speculators") and any(
+            arch.startswith("Eagle") or arch.endswith("Eagle3")
+            for arch in architectures
+        )
+        if is_eagle_drafter:
+            return True
+
+        from vllm.config.speculative import MTPModelTypes
+
+        return model_type in get_args(MTPModelTypes)
 
     def get_sliding_window(self) -> int | None:
         """Get the sliding window size from the HF text config if present."""

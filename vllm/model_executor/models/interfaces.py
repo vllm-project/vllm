@@ -60,6 +60,7 @@ else:
     IntermediateTensors = object
 
 logger = init_logger(__name__)
+_EAGLE3_AUX_KEY_PREFIX = "eagle3_aux_layer_"
 
 MultiModalEmbeddings: TypeAlias = list[Tensor] | Tensor | tuple[Tensor, ...]
 """
@@ -1317,18 +1318,110 @@ class LocalArgmaxMixin:
         return top
 
 
+def _get_eagle3_aux_hidden_states(
+    intermediate_tensors: "IntermediateTensors | None",
+) -> list[torch.Tensor]:
+    if intermediate_tensors is None:
+        return []
+    aux_keys = sorted(
+        (
+            key
+            for key in intermediate_tensors.tensors
+            if key.startswith(_EAGLE3_AUX_KEY_PREFIX)
+        ),
+        key=lambda key: int(key.removeprefix(_EAGLE3_AUX_KEY_PREFIX)),
+    )
+    return [intermediate_tensors.tensors[key] for key in aux_keys]
+
+
+def _add_eagle3_aux_hidden_states(
+    tensors: dict[str, torch.Tensor],
+    aux_hidden_states: list[torch.Tensor],
+) -> None:
+    for idx, tensor in enumerate(aux_hidden_states):
+        tensors[f"{_EAGLE3_AUX_KEY_PREFIX}{idx}"] = tensor
+
+
 class EagleModelMixin:
     aux_hidden_state_layers: tuple[int, ...] = ()
 
     def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.aux_hidden_state_layers = layers
+        self._wrap_make_empty_intermediate_tensors_for_eagle3_aux()
+
+    def _wrap_make_empty_intermediate_tensors_for_eagle3_aux(self) -> None:
+        if (
+            not hasattr(self, "make_empty_intermediate_tensors")
+            or getattr(self, "_eagle3_aux_empty_tensors_wrapped", False)
+        ):
+            return
+
+        original_make_empty = self.make_empty_intermediate_tensors
+
+        def make_empty_intermediate_tensors(
+            batch_size: int,
+            dtype: torch.dtype,
+            device: torch.device,
+        ) -> "IntermediateTensors":
+            result = original_make_empty(batch_size, dtype, device)
+            start_layer = getattr(self, "start_layer", 0)
+            hidden_size = self.config.hidden_size
+            num_incoming_aux_layers = (
+                self._get_num_incoming_eagle3_aux_hidden_states(start_layer)
+            )
+            for idx in range(num_incoming_aux_layers):
+                result.tensors[f"{_EAGLE3_AUX_KEY_PREFIX}{idx}"] = torch.zeros(
+                    (batch_size, hidden_size),
+                    dtype=dtype,
+                    device=device,
+                )
+            return result
+
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors
+        self._eagle3_aux_empty_tensors_wrapped = True
+
+    def _get_eagle3_aux_hidden_states(
+        self,
+        intermediate_tensors: "IntermediateTensors | None",
+    ) -> list[torch.Tensor]:
+        return _get_eagle3_aux_hidden_states(intermediate_tensors)
+
+    def _get_num_incoming_eagle3_aux_hidden_states(
+        self,
+        start_layer: int,
+    ) -> int:
+        return sum(
+            layer_idx <= start_layer for layer_idx in self.aux_hidden_state_layers
+        )
+
+    def _make_intermediate_tensors_with_eagle3_aux(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        aux_hidden_states: list[torch.Tensor],
+    ) -> "IntermediateTensors":
+        from vllm.sequence import IntermediateTensors
+
+        tensors = {
+            "hidden_states": hidden_states,
+            "residual": cast(torch.Tensor, residual),
+        }
+        _add_eagle3_aux_hidden_states(tensors, aux_hidden_states)
+        return IntermediateTensors(tensors)
+
+    def _add_eagle3_aux_hidden_states(
+        self,
+        tensors: dict[str, torch.Tensor],
+        aux_hidden_states: list[torch.Tensor],
+    ) -> None:
+        _add_eagle3_aux_hidden_states(tensors, aux_hidden_states)
 
     def _maybe_add_hidden_state(
         self,
         aux_hidden_states: list[torch.Tensor],
         layer_idx: int,
         hidden_states: torch.Tensor,
-        residual: torch.Tensor,
+        residual: torch.Tensor | None,
     ) -> list[torch.Tensor]:
         if layer_idx in self.aux_hidden_state_layers:
             value = hidden_states + residual if residual is not None else hidden_states
@@ -1401,6 +1494,18 @@ class SupportsEagle3(SupportsEagleBase, Protocol):
             "Model instance must inherit from EagleModelMixin to set auxiliary layers"
         )
         parent_ref.model._set_aux_hidden_state_layers(layers)
+        if hasattr(parent_ref, "make_empty_intermediate_tensors"):
+            parent_ref.make_empty_intermediate_tensors = (
+                parent_ref.model.make_empty_intermediate_tensors
+            )
+        if (
+            parent_ref is not self
+            and hasattr(parent_ref, "make_empty_intermediate_tensors")
+            and hasattr(self, "make_empty_intermediate_tensors")
+        ):
+            self.make_empty_intermediate_tensors = (
+                parent_ref.make_empty_intermediate_tensors
+            )
 
     def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         """

@@ -642,7 +642,10 @@ class LagunaModel(nn.Module, EagleModelMixin):
             residual = intermediate_tensors["residual"]
 
         aux_hidden_states = self._maybe_add_hidden_state(
-            [], self.start_layer, hidden_states, residual
+            self._get_eagle3_aux_hidden_states(intermediate_tensors),
+            0,
+            hidden_states,
+            residual,
         )
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
@@ -654,8 +657,8 @@ class LagunaModel(nn.Module, EagleModelMixin):
             )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+            return self._make_intermediate_tensors_with_eagle3_aux(
+                hidden_states, residual, aux_hidden_states
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)

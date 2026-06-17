@@ -656,10 +656,16 @@ class HunYuanModel(nn.Module, EagleModelMixin):
 
         cla_factor = _get_cla_factor(self.config)
         prev_kv_states = None
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
-        for i, layer in enumerate(
+        aux_hidden_states = self._maybe_add_hidden_state(
+            self._get_eagle3_aux_hidden_states(intermediate_tensors),
+            0,
+            hidden_states,
+            residual,
+        )
+        for local_i, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
+            layer_idx = self.start_layer + local_i
             hidden_states, residual, kv_states = layer(
                 positions,
                 hidden_states,
@@ -667,18 +673,18 @@ class HunYuanModel(nn.Module, EagleModelMixin):
                 prev_kv_states,
             )
 
-            if getattr(self.config, "use_cla", False) and i % cla_factor == 0:
+            if getattr(self.config, "use_cla", False) and local_i % cla_factor == 0:
                 prev_kv_states = kv_states
             else:
                 prev_kv_states = None
 
             self._maybe_add_hidden_state(
-                aux_hidden_states, i + 1, hidden_states, residual
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
             )
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+            return self._make_intermediate_tensors_with_eagle3_aux(
+                hidden_states, residual, aux_hidden_states
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
