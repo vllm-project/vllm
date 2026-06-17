@@ -56,8 +56,6 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
 
         input_shape = x.shape
         input_2d = x.view(-1, K)
-        M_orig = input_2d.shape[0]
-
         min_dim = 128
 
         assert min_dim <= K, (
@@ -71,11 +69,6 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             f"mm_mxfp8 requires N >= {min_dim}, got N={N}. "
             f"out_features is too small for mm_mxfp8."
         )
-
-        M_padded = ((M_orig + min_dim - 1) // min_dim) * min_dim
-        if M_padded != M_orig:
-            pad_rows = M_padded - M_orig
-            input_2d = torch.nn.functional.pad(input_2d, (0, 0, 0, pad_rows))
 
         input_mxfp8, input_scale = mxfp8_e4m3_quantize(
             input_2d, is_sf_swizzled_layout=True
@@ -92,9 +85,6 @@ class FlashInferCutlassMxfp8LinearKernel(Mxfp8LinearKernel):
             out_dtype=out_dtype,
             backend="cutlass",
         )
-
-        if M_padded != M_orig:
-            output = output[:M_orig, :]
 
         if bias is not None:
             output = output + bias
