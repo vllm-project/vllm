@@ -1004,6 +1004,22 @@ class PCPManager:
         from vllm.distributed.parallel_state import get_pcp_group
 
         if not self.pcp_use_hybrid_attn:
+            # Pure-decode fast path: the decode merge (cp_lse_ag_out_ar) already
+            # all-reduced, so every rank holds the COMPLETE decode hidden states
+            # in request order. The prefill all_gather+restore_idx below must
+            # NOT run here -- it would all_gather duplicate copies and then map
+            # req1+ onto req0 via the prefill-zigzag restore_idx, scrambling the
+            # decode logits for batched decode. Replicate to the padded layout
+            # ([dec0,dec0,dec1,dec1,...]) that get_logits_indices samples with
+            # its even indices [0,2,4,...].
+            if (
+                self.num_decode_tokens > 0
+                and self.num_decode_tokens * self.pcp_world_size
+                == self.num_actual_tokens_pcp_padded
+            ):
+                return hidden_states[: self.num_decode_tokens].repeat_interleave(
+                    self.pcp_world_size, dim=0
+                )
             hidden_states = get_pcp_group().all_gather(
                 hidden_states[
                     : self.num_actual_tokens_pcp_padded // self.pcp_world_size
