@@ -833,8 +833,14 @@ class P2PSession:
                 )
             )
         else:
+            # No matching _inbound entry: either a duplicate
+            # transfer_done from the peer (protocol violation) or a
+            # benign race with a local cancel/abort/timeout that
+            # already popped the entry. We don't track terminated ids,
+            # so we can't tell — log so it's findable.
             logger.warning(
-                "P2PSession %s: transfer_done for unknown kv_request_id=%s",
+                "P2PSession %s: transfer_done for unknown kv_request_id=%s "
+                "(duplicate from peer, or raced with local cancel/timeout)",
                 self.peer_id,
                 kv_request_id,
             )
@@ -849,8 +855,11 @@ class P2PSession:
                 )
             )
         else:
+            # See _on_transfer_done: same ambiguity (duplicate ack
+            # vs. raced with local cancel/timeout that already popped).
             logger.warning(
-                "P2PSession %s: abort_ack for unknown kv_request_id=%s",
+                "P2PSession %s: abort_ack for unknown kv_request_id=%s "
+                "(duplicate from peer, or raced with local cancel/timeout)",
                 self.peer_id,
                 kv_request_id,
             )
