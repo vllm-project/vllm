@@ -446,6 +446,7 @@ class KimiVLForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -499,6 +500,7 @@ class KimiVLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         grid_hws_list = self._get_grid_hws(mm_kwargs)
         buffers = self.vision_tower.prepare_encoder_metadata(
@@ -512,6 +514,7 @@ class KimiVLForConditionalGeneration(
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         pixel_values = values.pop("pixel_values")
         metadata = values
@@ -523,6 +526,7 @@ class KimiVLForConditionalGeneration(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         pixel_values = mm_kwargs["pixel_values"]
         image_grid_hws = mm_kwargs["image_grid_hws"]
