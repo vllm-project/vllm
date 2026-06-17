@@ -501,6 +501,11 @@ class AnthropicServingMessages(OpenAIServingChat):
         self,
         generator: ChatCompletionResponse,
     ) -> AnthropicMessagesResponse:
+        cached = (
+            generator.usage.prompt_tokens_details.cached_tokens
+            if generator.usage.prompt_tokens_details
+            else None
+        )
         result = AnthropicMessagesResponse(
             id=generator.id,
             content=[],
@@ -508,13 +513,10 @@ class AnthropicServingMessages(OpenAIServingChat):
             usage=AnthropicUsage(
                 input_tokens=generator.usage.prompt_tokens,
                 output_tokens=generator.usage.completion_tokens,
-                cache_read_input_tokens=generator.usage.prompt_tokens_details.cached_tokens
-                if generator.usage.prompt_tokens_details
-                else 0,
-                cache_creation_input_tokens=generator.usage.prompt_tokens
-                - generator.usage.prompt_tokens_details.cached_tokens
-                if generator.usage.prompt_tokens_details
-                else generator.usage.prompt_tokens,
+                cache_read_input_tokens=cached or 0,
+                cache_creation_input_tokens=(
+                    generator.usage.prompt_tokens - (cached or 0)
+                ),
             ),
             kv_transfer_params=generator.kv_transfer_params,
         )
@@ -658,6 +660,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                         )
 
                         if first_item:
+                            ptd = (
+                                origin_chunk.usage.prompt_tokens_details
+                                if origin_chunk.usage
+                                else None
+                            )
+                            cached = ptd.cached_tokens if ptd else None
                             chunk = AnthropicStreamEvent(
                                 type="message_start",
                                 message=AnthropicMessagesResponse(
@@ -667,19 +675,19 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     stop_reason=None,
                                     stop_sequence=None,
                                     usage=AnthropicUsage(
-                                        input_tokens=origin_chunk.usage.prompt_tokens
-                                        if origin_chunk.usage
-                                        else 0,
+                                        input_tokens=(
+                                            origin_chunk.usage.prompt_tokens
+                                            if origin_chunk.usage
+                                            else 0
+                                        ),
                                         output_tokens=0,
-                                        cache_read_input_tokens=origin_chunk.usage.prompt_tokens_details.cached_tokens
-                                        if origin_chunk.usage
-                                        and origin_chunk.usage.prompt_tokens_details
-                                        else None,
-                                        cache_creation_input_tokens=origin_chunk.usage.prompt_tokens
-                                        - origin_chunk.usage.prompt_tokens_details.cached_tokens
-                                        if origin_chunk.usage
-                                        and origin_chunk.usage.prompt_tokens_details
-                                        else None,
+                                        cache_read_input_tokens=cached,
+                                        cache_creation_input_tokens=(
+                                            origin_chunk.usage.prompt_tokens
+                                            - (cached or 0)
+                                            if origin_chunk.usage and cached is not None
+                                            else None
+                                        ),
                                     ),
                                 ),
                             )
@@ -695,25 +703,33 @@ class AnthropicServingMessages(OpenAIServingChat):
                             stop_reason = self.stop_reason_map.get(
                                 finish_reason or "stop"
                             )
+                            ptd = (
+                                origin_chunk.usage.prompt_tokens_details
+                                if origin_chunk.usage
+                                else None
+                            )
+                            cached = ptd.cached_tokens if ptd else None
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
                                 delta=AnthropicDelta(stop_reason=stop_reason),
                                 usage=AnthropicUsage(
-                                    input_tokens=origin_chunk.usage.prompt_tokens
-                                    if origin_chunk.usage
-                                    else 0,
-                                    output_tokens=origin_chunk.usage.completion_tokens
-                                    if origin_chunk.usage
-                                    else 0,
-                                    cache_read_input_tokens=origin_chunk.usage.prompt_tokens_details.cached_tokens
-                                    if origin_chunk.usage
-                                    and origin_chunk.usage.prompt_tokens_details
-                                    else None,
-                                    cache_creation_input_tokens=origin_chunk.usage.prompt_tokens
-                                    - origin_chunk.usage.prompt_tokens_details.cached_tokens
-                                    if origin_chunk.usage
-                                    and origin_chunk.usage.prompt_tokens_details
-                                    else None,
+                                    input_tokens=(
+                                        origin_chunk.usage.prompt_tokens
+                                        if origin_chunk.usage
+                                        else 0
+                                    ),
+                                    output_tokens=(
+                                        origin_chunk.usage.completion_tokens
+                                        if origin_chunk.usage
+                                        else 0
+                                    ),
+                                    cache_read_input_tokens=cached,
+                                    cache_creation_input_tokens=(
+                                        origin_chunk.usage.prompt_tokens
+                                        - (cached or 0)
+                                        if origin_chunk.usage and cached is not None
+                                        else None
+                                    ),
                                 ),
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
