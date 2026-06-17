@@ -155,6 +155,13 @@ if flashinfer_comm is not None:
         scale_factor: torch.Tensor | None = None,
         weight_bias: float = 0.0,
     ) -> None:
+        # handle transformers backend passing outer batch dim.
+        if allreduce_in.dim() != 2:
+            hidden = allreduce_in.shape[-1]
+            allreduce_in = allreduce_in.view(-1, hidden)
+            residual = residual.view(-1, hidden)
+            if norm_out is not None:
+                norm_out = norm_out.view(-1, hidden)
         num_tokens, hidden_size = allreduce_in.shape
         element_size = allreduce_in.element_size()
         current_tensor_size = num_tokens * hidden_size * element_size
