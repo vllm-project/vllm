@@ -2026,6 +2026,14 @@ class VllmConfig:
         ):
             unsupported.append("sequence parallelism")
 
+        # V2 does not implement the external_launcher (torchrun) PP-output
+        # broadcast that V1 uses to keep all ranks in sync (broadcast_pp_output).
+        if (
+            self.parallel_config.distributed_executor_backend == "external_launcher"
+            and self.parallel_config.pipeline_parallel_size > 1
+        ):
+            unsupported.append("pipeline parallelism with external_launcher")
+
         if speculative_config is not None:
             # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
             if speculative_config.method in ("ngram", "ngram_gpu"):
