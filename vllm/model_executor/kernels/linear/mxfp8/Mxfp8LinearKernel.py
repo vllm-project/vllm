@@ -15,7 +15,7 @@ class Mxfp8LinearLayerConfig:
     uint8 (E8M0) per-block scales at block size 32.
     """
 
-    pass
+    input_dtype: torch.dtype
 
 
 class Mxfp8LinearKernel(ABC):

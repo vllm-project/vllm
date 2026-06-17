@@ -23,6 +23,11 @@ class MarlinMxfp8LinearKernel(Mxfp8LinearKernel):
 
     @classmethod
     def can_implement(cls, c: Mxfp8LinearLayerConfig) -> tuple[bool, str | None]:
+        if c.input_dtype != torch.bfloat16:
+            return False, (
+                f"Marlin MXFP8 (W8A16) only supports bfloat16 activations "
+                f"(compiled templates limited to kBFloat16), got {c.input_dtype}"
+            )
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

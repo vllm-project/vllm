@@ -713,7 +713,12 @@ def choose_mp_linear_kernel(
 def init_mxfp8_linear_kernel() -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
     current platform."""
-    config = Mxfp8LinearLayerConfig()
+    from vllm.config import get_current_vllm_config
+
+    vllm_config = get_current_vllm_config()
+    config = Mxfp8LinearLayerConfig(
+        input_dtype=vllm_config.model_config.dtype,
+    )
 
     platform = current_platform._enum
     possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
