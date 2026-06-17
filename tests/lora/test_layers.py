@@ -1757,3 +1757,35 @@ def test_replicated_lora_preserves_base_forward_for_subclasses(
     merged_result = merged_layer(torch.cat(inputs))[0]
 
     torch.testing.assert_close(lora_result, merged_result, rtol=rtol, atol=atol)
+
+@torch.inference_mode()
+@pytest.mark.parametrize("device", DEVICES)
+def test_merged_column_lora_non_sharded_routes_to_apply_sync(
+    default_vllm_config, dist_init, device
+) -> None:
+    """Regression test for #45691: apply() must route to _apply_sync,
+    not _mcp_apply, when tp_size > 1 and fully_sharded_loras=False."""
+    from unittest.mock import patch
+
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        torch.accelerator.set_device_index(device)
+    torch.set_default_device(device)
+
+    layer = object.__new__(MergedColumnParallelLinearWithLoRA)
+    layer.tp_size = 2
+
+    apply_sync_calls = []
+    layer._apply_sync = (
+        lambda x, bias: apply_sync_calls.append((x, bias)) or torch.zeros(4, 32)
+    )
+
+    x = torch.zeros(4, 16)
+
+    with patch(
+        "vllm.lora.layers.column_parallel_linear._mcp_apply"
+    ) as mock_mcp:
+        layer.apply(x, bias=None)
+
+    assert len(apply_sync_calls) == 1
+    assert apply_sync_calls[0][1] is None
+    mock_mcp.assert_not_called()
