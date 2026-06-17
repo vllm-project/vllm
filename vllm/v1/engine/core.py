@@ -1526,7 +1526,7 @@ class EngineCoreProc(EngineCore):
                     if len(parts) == 2 and (b'resume' in bytes(parts[1].buffer)):
                         logger.info(f"[snapshot] engine core input thread received resume, stop input thread")
                         flag = False
-                        break  # 跳出内层循环
+                        break
 
     def process_output_sockets(
         self, output_paths: list[str], coord_output_path: str | None, engine_index: int
@@ -1772,20 +1772,13 @@ class EngineCoreProc(EngineCore):
         self.collective_rpc("rebuild_parallel_group_after_resume")
 
         # Stateless DP process group exists only for DPEngineCoreProc (DP>1).
-        # For data_parallel_size==1, EngineCoreProc._init_data_parallel is a no-op
-        # and never sets dp_group; skip destroy/re-init.
         dp_group = getattr(self, "dp_group", None)
         if dp_group is not None:
             logger.info(
                 f"[snapshot] [engine] " + "-" * 20 + "rebuild engie core dp_group" + "-" * 20
             )
             stateless_destroy_torch_distributed_process_group(dp_group)
-            # Pre-snapshot ports are stale in the new environment.  Clear the
-            # list so get_next_dp_init_port() falls back to
-            # data_parallel_master_port — the only value guaranteed identical
-            # across all DP engine-core processes (even on different nodes),
-            # because it was set once in __post_init__ and serialized to every
-            # process.  This ensures both sides attempt the same port.
+            # all EngineCore-DP falls to preserved data_parallel_master_port (P0 in list)
             self.vllm_config.parallel_config._data_parallel_master_port_list.clear()
             self.dp_group = self.vllm_config.parallel_config.stateless_init_dp_group()
         else:
@@ -1800,11 +1793,11 @@ class EngineCoreProc(EngineCore):
         logger.info(f"[snapshot] [engine] " + "-"*20 + "recapture_graph" + "-"*20)
         self.collective_rpc("recapture_graph")
 
-        # Refresh worker side_channel_host to new pod IP (P and D).
+        # Refresh worker side_channel_host to new pod IP (only for PD separate scenario).
         logger.info(f"[snapshot] [engine] " + "-" * 20 + "rebuild_kv_transfer_engine_after_resume" + "-" * 20)
         self.collective_rpc("rebuild_kv_transfer_engine_after_resume", args=(local_ip,))
 
-        # Refresh scheduler-side KV state in engine core (P and D).
+        # Refresh scheduler-side KV state in engine core (only for PD separate scenario).
         logger.info(f"[snapshot] [engine] " + "-" * 20 + "snapshot_refresh_scheduler_after_resume" + "-" * 20)
         _refresh_scheduler_after_resume(self, local_ip)
 

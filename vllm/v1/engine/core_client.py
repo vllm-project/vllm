@@ -1417,7 +1417,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         time_before_resume = time.perf_counter()
         self.is_resume = True
-        # 刷新和apiserver和coordinate的连接
+        # refresh the connection to the DP coordinator
         if not self.resources.stats_update_task.done():
             self.resources.stats_update_task.cancel()
             try:
@@ -1437,7 +1437,7 @@ class DPAsyncMPClient(AsyncMPClient):
             logger.error(f"[snapshot] api server resume_async start stats_update_task failed")
             raise
 
-        # input socket等待engin core重新注册
+        # Wait for engines send READY message to client
         logger.info(f"[snapshot] api server wait_for_engines_ready")
         task = asyncio.create_task(self.wait_for_engines_ready())
         await self.call_utility_async("resume", data_parallel_master_ip, model_path)

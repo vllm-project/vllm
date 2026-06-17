@@ -52,7 +52,6 @@ async def is_sleeping(raw_request: Request):
 @router.post("/suspend")
 async def suspend(raw_request: Request):
     model_save_path = raw_request.query_params.get("model_save_path")
-    # 校验参数是否存在
     if model_save_path is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -63,10 +62,8 @@ async def suspend(raw_request: Request):
 
 @router.post("/resume")
 async def resume(raw_request: Request):
-    # get POST params
     data_parallel_master_ip = raw_request.query_params.get("data_parallel_master_ip")
     model_path = raw_request.query_params.get("model_path")
-    # 校验参数是否存在
     if data_parallel_master_ip is None or model_path is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
