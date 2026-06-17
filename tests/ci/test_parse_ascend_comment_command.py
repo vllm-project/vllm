@@ -43,6 +43,8 @@ def test_parse_random_command_with_reasonable_defaults():
     assert command.action == "benchmark"
     assert command.scenario == "random-online"
     assert command.publish_to_hf is False
+    assert command.to_env()["PUBLISH_TO_HF"] == "0"
+    assert command.to_env()["PUBLISH_TO_BENCHMARK_REPO"] == "0"
     assert command.num_prompts == "8"
     assert command.request_rate == "inf"
     assert command.max_concurrency == "4"

@@ -46,6 +46,9 @@ def test_main_baseline_store_has_spec_file_and_benchmark_repo_checkout():
     text = workflow_text()
     store_job = text[text.index("  store-main-perfgate-baseline:"):]
 
+    assert "TARGET_REPO_SHA: ${{ github.sha }}" in store_job
+    assert "RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.TARGET_REPO_SHA }}" in store_job
+    assert "RESULT_ROOT: ${{ github.workspace }}/.benchmarks/ci/ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.TARGET_REPO_SHA }}" in store_job
     assert "PERFGATE_SPEC_FILE:" in store_job
     assert "BENCHMARK_REPO_URL: https://github.com/vLLM-HUST/vllm-hust-benchmark.git" in store_job
     assert "BENCHMARK_REPO_REF:" in store_job

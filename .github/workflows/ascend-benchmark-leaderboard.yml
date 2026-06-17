@@ -1358,6 +1358,8 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs: ascend-benchmark
     runs-on: ubuntu-latest
+    env:
+      TARGET_REPO_SHA: ${{ github.sha }}
     permissions:
       contents: write
       actions: read
@@ -1391,8 +1393,8 @@ jobs:
       - name: Store perfgate baseline
         shell: bash
         env:
-          RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
-          RESULT_ROOT: ${{ github.workspace }}/.benchmarks/ci/ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.TARGET_REPO_SHA }}
+          RESULT_ROOT: ${{ github.workspace }}/.benchmarks/ci/ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.TARGET_REPO_SHA }}
           PYTHON_BIN: python3
           PERFGATE_SPEC_FILE: ${{ vars.VLLM_HUST_PERFGATE_SPEC_FILE || 'docs/official-baselines/perfgate-ascend-qwen25-3b-910b3.json' }}
           BENCHMARK_REPO_URL: https://github.com/vLLM-HUST/vllm-hust-benchmark.git

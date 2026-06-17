@@ -85,7 +85,7 @@ class AscendCommentCommand:
             "BENCH_INPUT_LEN": self.input_length,
             "BENCH_OUTPUT_LEN": self.output_length,
             "PUBLISH_TO_HF": "1" if self.publish_to_hf else "0",
-            "PUBLISH_TO_BENCHMARK_REPO": "1" if self.publish_to_hf else "0",
+            "PUBLISH_TO_BENCHMARK_REPO": "0",
         }
 
 
