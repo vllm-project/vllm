@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test that we handle a startup Error and shutdown."""
 
+import gc
+
 import pytest
+import torch
 
 from tests.conftest import VllmRunner
 from tests.utils import create_new_process_for_each_test, wait_for_gpu_memory_to_clear
@@ -128,6 +131,36 @@ def test_llm_delete_inprocess(
                     ["Hello my name is"],
                     SamplingParams(max_tokens=1),
                 )
+
+        wait_for_gpu_memory_to_clear(
+            devices=[0],
+            threshold_bytes=SHUTDOWN_TEST_THRESHOLD_BYTES,
+        )
+
+
+@create_new_process_for_each_test("fork" if current_platform.is_cuda() else "spawn")
+@pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("send_one_request", [False, True])
+def test_llm_delete_inprocess_direct(
+    monkeypatch,
+    model: str,
+    send_one_request: bool,
+) -> None:
+    """Test that a directly-constructed LLM frees GPU memory on bare ``del``
+    in in-process (no multiprocessing) mode (#21073)."""
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+        llm = LLM(model)
+        if send_one_request:
+            llm.generate(
+                ["Hello my name is"],
+                SamplingParams(max_tokens=1),
+            )
+        del llm
+        gc.collect()
+        torch.accelerator.empty_cache()
 
         wait_for_gpu_memory_to_clear(
             devices=[0],

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 import time
 import weakref
 from collections.abc import Callable, Mapping
@@ -87,6 +88,7 @@ class LLMEngine:
         else:
             self.dp_group = None
         self.should_execute_dummy_batch = False
+        self._shutdown = False
 
         self.renderer = renderer = renderer_from_config(self.vllm_config)
 
@@ -442,7 +444,33 @@ class LLMEngine:
             if isinstance(module, TorchCompileWithNoGuardsWrapper):
                 module.cleanup()
 
-    def __del__(self):
+    def _shutdown_dp_group(self) -> None:
         dp_group = getattr(self, "dp_group", None)
-        if dp_group is not None and not self.external_launcher_dp:
+        external_launcher_dp = getattr(self, "external_launcher_dp", False)
+        if dp_group is not None and not external_launcher_dp:
             stateless_destroy_torch_distributed_process_group(dp_group)
+            self.dp_group = None
+
+    def shutdown(self, timeout: float | None = None) -> None:
+        if getattr(self, "_shutdown", False):
+            return
+        self._shutdown = True
+        try:
+            if renderer := getattr(self, "renderer", None):
+                renderer.shutdown()
+        finally:
+            # Always tear down the engine core (and DP group) even if renderer
+            # shutdown raised; this is what releases GPU memory, and __del__
+            # will not retry once _shutdown is set. Drop the v0 compatibility
+            # alias first so the torn-down executor is not still reachable when
+            # EngineCore empties the CUDA cache.
+            if hasattr(self, "model_executor"):
+                self.model_executor = None  # type: ignore[assignment]
+            if engine_core := getattr(self, "engine_core", None):
+                engine_core.shutdown(timeout=timeout)
+            self._shutdown_dp_group()
+
+    def __del__(self):
+        if sys is None or sys.is_finalizing():
+            return
+        self.shutdown()

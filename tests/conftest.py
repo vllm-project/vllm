@@ -1289,7 +1289,7 @@ class VllmRunner:
             # a hard kill leaves the whole allocation for the driver's slow async
             # VRAM reclamation, which starves the next test's startup.
             shutdown_timeout = 60.0 if current_platform.is_rocm() else None
-            self.llm.llm_engine.engine_core.shutdown(timeout=shutdown_timeout)
+            self.llm.shutdown(timeout=shutdown_timeout)
         except Exception:
             # Ignore shutdown errors as cleanup will still proceed
             pass
