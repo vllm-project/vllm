@@ -1224,21 +1224,35 @@ class FlashAttentionImpl(AttentionImpl):
             #    content (slot_mapping wrote wrong K/V for reqs 1+).
             import os as _os
 
-            if (
-                _os.environ.get("PCP_DUMP")
-                and num_decodes > 1
-                and _PCP_DUMP_BT[0] < 3
-            ):
+            if _os.environ.get("PCP_DUMP") and num_decodes > 1 and _PCP_DUMP_BT[0] < 1:
                 _PCP_DUMP_BT[0] += 1
                 _bt = attn_metadata.block_table
-                _bids = _bt[:num_decodes, :2].tolist()
-                _k0 = key_cache[int(_bt[0, 0]), 0, 0, :4].tolist()
-                _k1 = key_cache[int(_bt[1, 0]), 0, 0, :4].tolist()
+                _bs = key_cache.shape[1]
+                _kv = attn_metadata.pcp_decode_context_kv_lens
+                # first block (shared prefix -> k0==k1 is expected) AND last
+                # valid block (unique question part -> k0 MUST differ from k1).
+                # If last-block k0==k1 -> req1's cache is a copy of req0's
+                # (slot_mapping wrote req0 K/V into req1 blocks) -> duplication.
+                _nb = lambda i: (int(_kv[i]) + _bs - 1) // _bs
+                _lb0 = int(_bt[0, _nb(0) - 1])
+                _lb1 = int(_bt[1, _nb(1) - 1])
+                _kfirst0 = key_cache[int(_bt[0, 0]), 0, 0, :4].tolist()
+                _kfirst1 = key_cache[int(_bt[1, 0]), 0, 0, :4].tolist()
+                _klast0 = key_cache[_lb0, 0, 0, :4].tolist()
+                _klast1 = key_cache[_lb1, 0, 0, :4].tolist()
                 logger.warning(
-                    "PCP_DUMP bt_chk bt[:2]=%s k0=%s k1=%s rank=%d",
-                    _bids,
-                    _k0,
-                    _k1,
+                    "PCP_DUMP bt_chk bs=%d req0[blk0=%d,blkN=%d] req1[blk0=%d,"
+                    "blkN=%d] k_first0=%s k_first1=%s | k_last0=%s k_last1=%s "
+                    "rank=%d",
+                    _bs,
+                    int(_bt[0, 0]),
+                    _lb0,
+                    int(_bt[1, 0]),
+                    _lb1,
+                    _kfirst0,
+                    _kfirst1,
+                    _klast0,
+                    _klast1,
                     self.pcp_rank,
                 )
             decode_out = torch.empty_like(output[:num_decode_tokens])
