@@ -336,6 +336,7 @@ class RustFrontendProcessManager:
         args: argparse.Namespace,
         input_address: str,
         output_address: str,
+        engine_start_index: int,
         engine_count: int,
         stats_update_address: str | None = None,
     ):
@@ -354,6 +355,8 @@ class RustFrontendProcessManager:
             input_address,
             "--output-address",
             output_address,
+            "--engine-start-index",
+            str(engine_start_index),
             "--engine-count",
             str(engine_count),
         ]
@@ -362,7 +365,16 @@ class RustFrontendProcessManager:
         from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
 
         args_json = json.dumps(
-            jsonify_non_default_args(args, exclude={"api_server_count"}),
+            jsonify_non_default_args(
+                args,
+                exclude={
+                    "api_server_count",
+                    # Python passes the bootstrapped engine range explicitly.
+                    "data_parallel_rank",
+                    "data_parallel_external_lb",
+                    "data_parallel_hybrid_lb",
+                },
+            ),
             sort_keys=True,
         )
         cmd.extend(["--args-json", args_json])
