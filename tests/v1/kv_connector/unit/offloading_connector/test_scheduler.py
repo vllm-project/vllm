@@ -835,8 +835,26 @@ def test_fence_at_update_state_after_alloc(request_runner):
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    runner.run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=False)
+
+    # Capture fence snapshots to verify block 0 is registered.
+    fence_snapshots: list[dict] = []
+
+    def capture_fence():
+        fence_snapshots.append(
+            dict(runner.connector_scheduler._block_id_to_pending_jobs)
+        )
+
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        complete_transfers=False,
+        post_step_fn=capture_fence,
+    )
     assert runner.connector_scheduler._block_id_to_pending_jobs
+
+    # Verify fence was populated with the store job's block IDs.
+    populated_fence = next((f for f in fence_snapshots if f), None)
+    assert populated_fence is not None, "Fence was never populated"
+    assert len(populated_fence) > 0, "Fence is empty"
 
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * 4)
@@ -868,8 +886,26 @@ def test_fence_at_build_store_jobs(request_runner):
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-    runner.run(decoded_tokens=[EOS_TOKEN_ID], complete_transfers=False)
+
+    # Capture fence snapshots to verify block 0 is registered.
+    fence_snapshots: list[dict] = []
+
+    def capture_fence():
+        fence_snapshots.append(
+            dict(runner.connector_scheduler._block_id_to_pending_jobs)
+        )
+
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        complete_transfers=False,
+        post_step_fn=capture_fence,
+    )
     assert runner.connector_scheduler._block_id_to_pending_jobs
+
+    # Verify fence was populated with the store job's block IDs.
+    populated_fence = next((f for f in fence_snapshots if f), None)
+    assert populated_fence is not None, "Fence was never populated"
+    assert len(populated_fence) > 0, "Fence is empty"
 
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[1] * 4)
@@ -2072,15 +2108,17 @@ def test_request_finished_with_pending_stores_populates_fence(request_runner):
     block_size_factor = 1
     offloaded_block_size = block_size * block_size_factor
 
+    # Use 2 GPU blocks so the second run reuses the same blocks,
+    # triggering a fence-based flush of the in-flight job from run 1.
     runner = request_runner(
         block_size=block_size,
-        num_gpu_blocks=100,
+        num_gpu_blocks=2,
         async_scheduling=False,
         block_size_factor=block_size_factor,
     )
 
-    # Create a request with 3 blocks of data.
-    runner.new_request(token_ids=[0] * offloaded_block_size * 3)
+    # 4 prompt tokens → 1 GPU block (block 0)
+    runner.new_request(token_ids=[0] * offloaded_block_size)
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
@@ -2097,12 +2135,11 @@ def test_request_finished_with_pending_stores_populates_fence(request_runner):
             if js.is_store:
                 job_block_ids.update(js.non_sliding_window_block_ids or [])
 
-    # Run the full lifecycle: create job → finish request → flush → cleanup.
+    # Run 1: create store job, finish request, populate fence.
+    # With non-blocking drain (#45595), the job stays in-flight.
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         complete_transfers=False,
-        expected_stored=(0, 1, 2),
-        expected_flushed=(0, 1, 2),
         post_step_fn=capture_fence,
     )
 
@@ -2115,108 +2152,83 @@ def test_request_finished_with_pending_stores_populates_fence(request_runner):
     for bid in job_block_ids:
         assert bid in populated_fence, f"Block {bid} not in fence: {populated_fence}"
 
-    # Verify fence is empty after full lifecycle (cleanup happened).
-    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
-
-
-def test_multiple_in_flight_stores_all_flushed(request_runner):
-    """When a request finishes with multiple in-flight store jobs,
-    ALL jobs are flushed via the fence mechanism (observable behavior).
-
-    Uses two runner.run() calls to naturally produce two store jobs:
-    - First run: 4 decoded tokens fills blocks 0-1 → job_0 created for both
-    - Second run: 4 more tokens + EOS fills block 2 → job_1 created,
-      request finishes, "all finished" flush fires → both jobs flushed
-    """
-    block_size = 4
-    block_size_factor = 1
-    offloaded_block_size = block_size * block_size_factor
-
-    runner = request_runner(
-        block_size=block_size,
-        num_gpu_blocks=100,
-        async_scheduling=False,
-        block_size_factor=block_size_factor,
-    )
-
-    # 4 prompt tokens → 1 GPU block (block 0)
+    # Run 2: block reuse triggers fence-based flush → cleanup.
+    runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * offloaded_block_size)
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
-
-    # First run: 4 decoded tokens → blocks 0-1 full → job_0 created for both.
-    # complete_transfers=False keeps job_0 in-flight (not completed yet).
-    runner.run(
-        decoded_tokens=[0] * offloaded_block_size,
-        complete_transfers=False,
-        expected_stored=(),
-        expected_flushed=(),
-    )
-
-    # Verify job_0 is in-flight.
-    assert len(runner.connector_scheduler._jobs) == 1
-
-    # Second run: 4 more tokens + EOS → block 2 full → job_1 created.
-    # Request finishes → "all finished" flush fires → both jobs flushed.
-    # Note: prepare_store.side_effect persists across run() calls because
-    # manager.reset_mock() only resets call history, not side_effect.
-    runner.run(
-        decoded_tokens=[0] * offloaded_block_size + [EOS_TOKEN_ID],
-        complete_transfers=False,
-        expected_stored=(0, 1, 2),
-        expected_flushed=(0, 1, 2),
-    )
-
-    # Post-condition: fence cleaned up after full lifecycle.
-    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
-    assert len(runner.connector_scheduler._jobs) == 0
-
-
-def test_fence_full_lifecycle_populate_and_cleanup(request_runner):
-    """Verifies the complete fence lifecycle using the standard runner flow:
-    1. Store job created (in-flight)
-    2. Request finishes → request_finished populates the fence
-    3. build_connector_meta detects all requests finished → flushes jobs
-    4. Flush completes the job
-    5. update_connector_output cleans up the fence and req_status
-
-    The fence population is verified by
-    test_request_finished_with_pending_stores_populates_fence.
-    This test verifies the cleanup after the full lifecycle.
-    """
-    block_size = 4
-    block_size_factor = 1
-    offloaded_block_size = block_size * block_size_factor
-
-    runner = request_runner(
-        block_size=block_size,
-        num_gpu_blocks=100,
-        async_scheduling=False,
-        block_size_factor=block_size_factor,
-    )
-
-    runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
-    )
-
-    # Run with complete_transfers=False: creates store job, finishes request,
-    # populates fence, flushes job (which completes it), cleans up fence.
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
-        complete_transfers=False,
         expected_stored=(0,),
         expected_flushed=(0,),
     )
 
-    # After the full lifecycle, fence should be empty.
+    # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
-    # Job should be removed.
-    assert len(runner.connector_scheduler._jobs) == 0
     # req_status should be removed.
     req_id = str(runner.req_id)
     assert req_id not in runner.connector_scheduler._req_status
+
+
+def test_multiple_in_flight_stores_all_flushed_by_fence(request_runner):
+    """When a request finishes with multiple in-flight store jobs,
+    ALL jobs are flushed when a new request reuses their blocks.
+
+    Uses three runner.run() calls:
+    - Run 1: decode fills a block → job_0 created
+    - Run 2: decode fills another block + EOS → job_1 created, request finishes
+    - Run 3: block reuse → both jobs flushed via fence
+    """
+    block_size = 4
+    block_size_factor = 1
+    offloaded_block_size = block_size * block_size_factor
+
+    # 4 GPU blocks: block 0 is null, blocks 1-3 are usable.
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=4,
+        async_scheduling=False,
+        block_size_factor=block_size_factor,
+    )
+
+    # Prompt: 4 tokens → block 1
+    runner.new_request(token_ids=[0] * offloaded_block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    # Run 1: 4 decoded tokens → block 2 full → job_0 created for block 1.
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size,
+        complete_transfers=False,
+    )
+    assert len(runner.connector_scheduler._jobs) >= 1
+
+    # Run 2: 4 more tokens + EOS → block 3 full → more jobs created.
+    # Request finishes → all jobs registered in fence.
+    runner.run(
+        decoded_tokens=[0] * offloaded_block_size + [EOS_TOKEN_ID],
+        complete_transfers=False,
+    )
+    num_jobs = len(runner.connector_scheduler._jobs)
+    assert num_jobs >= 2, f"Expected multiple in-flight jobs, got {num_jobs}"
+
+    # Run 3: block reuse → fence flushes both jobs.
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * offloaded_block_size * 3)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=(0, 1, 2),
+        expected_flushed=(0, 1, 2),
+    )
+
+    # Post-condition: fence cleaned up, all jobs gone.
+    assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+    assert len(runner.connector_scheduler._jobs) == 0
 
 
 def test_request_finished_mixed_full_attn_and_sliding_window(
@@ -2253,15 +2265,17 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
         ),
     ]
 
+    # Use 4 GPU blocks (2 per group) so run 2 reuses the same blocks,
+    # triggering a fence-based flush.
     runner = request_runner(
         block_size=block_size,
-        num_gpu_blocks=100,
+        num_gpu_blocks=4,
         async_scheduling=False,
         kv_cache_groups=kv_cache_groups,
     )
 
-    # 3 blocks of prompt (12 tokens) — enough for both groups.
-    runner.new_request(token_ids=[0] * block_size * 3)
+    # 1 block of prompt (4 tokens) — 1 block per group.
+    runner.new_request(token_ids=[0] * block_size)
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output(keys)
     )
@@ -2280,12 +2294,10 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
                 sw_block_ids.update(js.sliding_window_block_ids or [])
                 non_sw_block_ids.update(js.non_sliding_window_block_ids or [])
 
-    # Run the full lifecycle: create job → finish request → flush → cleanup.
+    # Run 1: create store job, finish request, populate fence.
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         complete_transfers=False,
-        expected_stored=(0, 1, 2),
-        expected_flushed=(0, 1, 2),
         post_step_fn=capture_fence,
     )
 
@@ -2306,6 +2318,18 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     assert populated_fence is not None, (
         f"Fence never contained both SW {sw_block_ids} and "
         f"non-SW {non_sw_block_ids} blocks. Snapshots: {fence_snapshots}"
+    )
+
+    # Run 2: block reuse triggers fence-based flush of the old job.
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * block_size)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=((0, 0), (1, 0)),
+        expected_flushed=((1, 0),),
     )
 
     # Verify fence is empty after full lifecycle (cleanup happened).
