@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -21,6 +22,7 @@ from vllm.v1.structured_output.utils import (
     choice_as_grammar,
     compile_regex_with_timeout,
     convert_lark_to_ebnf,
+    get_xgrammar_disk_cache,
     grammar_is_likely_lark,
 )
 
@@ -69,6 +71,21 @@ class XgrammarBackend(StructuredOutputBackend):
             cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )
 
+        # Optional persistent on-disk cache for compiled grammars. Off by
+        # default; when enabled it lets cold starts deserialize grammars from
+        # disk instead of recompiling them (see get_xgrammar_disk_cache).
+        # tokenizer_info is kept because deserialize_json needs it on a hit.
+        self.tokenizer_info = tokenizer_info
+        self._disk_cache = get_xgrammar_disk_cache()
+        self._tokenizer_key: str | None = None
+        if self._disk_cache is not None:
+            # Stable per-tokenizer discriminator for the cache key (computed
+            # once). serialize_json() captures the full vocab + metadata, so
+            # different tokenizers never share a key.
+            self._tokenizer_key = hashlib.sha256(
+                tokenizer_info.serialize_json().encode()
+            ).hexdigest()
+
         self.num_speculative_tokens = 0
         if self.vllm_config.speculative_config is not None:
             self.num_speculative_tokens = (
@@ -78,6 +95,84 @@ class XgrammarBackend(StructuredOutputBackend):
     def compile_grammar(
         self, request_type: StructuredOutputOptions, grammar_spec: str
     ) -> StructuredOutputGrammar:
+        ctx = self._compile_grammar_ctx(request_type, grammar_spec)
+
+        return XgrammarGrammar(
+            matcher=xgr.GrammarMatcher(
+                ctx,
+                max_rollback_tokens=self.num_speculative_tokens,
+            ),
+            vocab_size=self.vocab_size,
+            ctx=ctx,
+        )
+
+    def _compile_grammar_ctx(
+        self, request_type: StructuredOutputOptions, grammar_spec: str
+    ) -> "xgr.CompiledGrammar":
+        """Compile a grammar, consulting the optional persistent disk cache.
+
+        When the disk cache is disabled (the default) this is exactly the
+        original compile path with zero added overhead. When enabled, a hit
+        deserializes the grammar from disk instead of recompiling; a miss
+        recompiles and writes the serialized grammar back. A cache problem
+        never fails the request -- it falls back to a fresh compile.
+        """
+        if self._disk_cache is None:
+            return self._compile(request_type, grammar_spec)
+
+        key = self._disk_key(request_type, grammar_spec)
+        text = self._disk_cache.get(key, None)
+        if text is not None:
+            try:
+                return xgr.CompiledGrammar.deserialize_json(text, self.tokenizer_info)
+            except (
+                xgr.InvalidJSONError,
+                xgr.DeserializeFormatError,
+                xgr.DeserializeVersionError,
+            ):
+                # Corrupt / format- or version-mismatched entry: recompile and
+                # overwrite it below.
+                logger.debug(
+                    "Ignoring unusable xgrammar disk cache entry; recompiling.",
+                    exc_info=True,
+                )
+            except Exception:
+                # A cache problem must never fail a request.
+                logger.warning(
+                    "Unexpected error reading xgrammar disk cache; recompiling.",
+                    exc_info=True,
+                )
+
+        ctx = self._compile(request_type, grammar_spec)
+        try:
+            self._disk_cache.set(key, ctx.serialize_json())
+        except Exception:
+            logger.warning("Failed to write xgrammar disk cache entry.", exc_info=True)
+        return ctx
+
+    def _disk_key(
+        self, request_type: StructuredOutputOptions, grammar_spec: str
+    ) -> str:
+        # INVARIANT: every input that changes the compiled grammar must be
+        # folded into this key. deserialize_json re-validates only the
+        # serialization version + tokenizer metadata, NOT compile flags, so a
+        # missing factor would serve a valid-but-wrong grammar on a hit.
+        # max_rollback_tokens is excluded on purpose: it parameterizes the
+        # GrammarMatcher (rebuilt fresh every call), not the CompiledGrammar.
+        return hashlib.sha256(
+            "\x00".join(
+                (
+                    self._tokenizer_key,
+                    request_type.name,
+                    "1" if self.disable_any_whitespace else "0",
+                    grammar_spec,
+                )
+            ).encode()
+        ).hexdigest()
+
+    def _compile(
+        self, request_type: StructuredOutputOptions, grammar_spec: str
+    ) -> "xgr.CompiledGrammar":
         if request_type == StructuredOutputOptions.JSON:
             ctx = self.compiler.compile_json_schema(
                 grammar_spec, any_whitespace=not self.disable_any_whitespace
@@ -115,15 +210,7 @@ class XgrammarBackend(StructuredOutputBackend):
             raise ValueError(
                 f"grammar is not of valid supported types. ({request_type!s})"
             )
-
-        return XgrammarGrammar(
-            matcher=xgr.GrammarMatcher(
-                ctx,
-                max_rollback_tokens=self.num_speculative_tokens,
-            ),
-            vocab_size=self.vocab_size,
-            ctx=ctx,
-        )
+        return ctx
 
     def allocate_token_bitmask(self, max_num_seqs: int):
         return xgr.allocate_token_bitmask(max_num_seqs, self.vocab_size)
