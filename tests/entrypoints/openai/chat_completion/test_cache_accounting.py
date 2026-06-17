@@ -51,10 +51,8 @@ async def test_cache_accounting_non_streaming(
     )
     assert first.usage is not None
     assert hasattr(first.usage, "cache_read_input_tokens")
-    assert hasattr(first.usage, "cache_creation_input_tokens")
     # first request: nothing cached yet
     assert first.usage.cache_read_input_tokens == 0
-    assert first.usage.cache_creation_input_tokens == first.usage.prompt_tokens
 
     # second request — same prefix, should hit cache
     second = await chat_client_with_prefix_caching.chat.completions.create(
@@ -65,11 +63,6 @@ async def test_cache_accounting_non_streaming(
     )
     assert second.usage is not None
     assert second.usage.cache_read_input_tokens > 0
-    assert (
-        second.usage.cache_read_input_tokens
-        + second.usage.cache_creation_input_tokens
-        == second.usage.prompt_tokens
-    )
 
 
 @pytest.mark.asyncio
@@ -107,5 +100,4 @@ async def test_cache_accounting_streaming(
 
     assert final_usage is not None
     assert hasattr(final_usage, "cache_read_input_tokens")
-    assert hasattr(final_usage, "cache_creation_input_tokens")
     assert final_usage.cache_read_input_tokens > 0

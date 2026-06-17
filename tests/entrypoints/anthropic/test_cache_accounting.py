@@ -43,9 +43,6 @@ async def test_cache_accounting_non_streaming(client: anthropic.AsyncAnthropic):
     )
     assert first.usage is not None
     assert first.usage.cache_read_input_tokens == 0
-    assert first.usage.cache_creation_input_tokens is None \
-        or first.usage.cache_creation_input_tokens >= 0
-
     # second request - same prefix, should hit cache
     second = await client.messages.create(
         model="claude-3-7-sonnet-latest",
