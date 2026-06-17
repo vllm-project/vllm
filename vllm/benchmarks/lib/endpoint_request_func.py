@@ -18,6 +18,12 @@ import regex as re
 from tqdm.asyncio import tqdm
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
+ROUTING_RESPONSE_HEADERS = (
+    "x-vllm-backend-id",
+    "x-vllm-endpoint-pool-id",
+    "x-vllm-backend-scope",
+    "x-vllm-route-outcome",
+)
 
 
 class StreamedResponseHandler:
@@ -96,6 +102,7 @@ class RequestFuncOutput:
     error: str = ""
     start_time: float = 0.0
     input_audio_duration: float = 0.0  # in seconds
+    response_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class RequestFunc(Protocol):
@@ -151,6 +158,15 @@ def _get_headers(content_type: str | None = None) -> dict[str, str]:
     return headers
 
 
+def _extract_response_metadata(response: aiohttp.ClientResponse) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for header_name in ROUTING_RESPONSE_HEADERS:
+        value = response.headers.get(header_name)
+        if value:
+            metadata[header_name] = value
+    return metadata
+
+
 async def async_request_openai_completions(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
@@ -195,6 +211,7 @@ async def async_request_openai_completions(
     most_recent_timestamp = st
     try:
         async with session.post(url=api_url, json=payload, headers=headers) as response:
+            output.response_metadata = _extract_response_metadata(response)
             if response.status == 200:
                 first_chunk_received = False
                 handler = StreamedResponseHandler()

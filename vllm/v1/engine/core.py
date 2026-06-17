@@ -151,6 +151,11 @@ class EngineCore:
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )
+        self.scheduler.available_kv_cache_memory_bytes = (
+            self.available_gpu_memory_for_kv_cache
+            if self.available_gpu_memory_for_kv_cache >= 0
+            else None
+        )
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
@@ -1783,7 +1788,10 @@ class DPEngineCoreProc(EngineCoreProc):
         if counts != self.last_counts:
             self.last_counts = counts
             stats = SchedulerStats(
-                *counts, step_counter=self.step_counter, current_wave=self.current_wave
+                num_running_reqs=counts[0],
+                num_waiting_reqs=counts[1],
+                step_counter=self.step_counter,
+                current_wave=self.current_wave,
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 

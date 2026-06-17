@@ -266,6 +266,165 @@ class SpecDecodeMetrics:
     accepted_per_pos: dict[int, int]
 
 
+@dataclass
+class BenchmarkLoadMetricsSnapshot:
+    num_requests_running: float | None = None
+    num_requests_waiting: float | None = None
+    kv_cache_usage_perc: float | None = None
+    available_kv_cache_memory_bytes: float | None = None
+    prefix_cache_queries: float | None = None
+    prefix_cache_hits: float | None = None
+    external_prefix_cache_queries: float | None = None
+    external_prefix_cache_hits: float | None = None
+
+
+async def _fetch_prometheus_metrics_text(
+    base_url: str, session: aiohttp.ClientSession
+) -> str | None:
+    metrics_url = f"{base_url}/metrics"
+    try:
+        async with session.get(metrics_url) as response:
+            if response.status != 200:
+                return None
+            return await response.text()
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return None
+
+
+def _extract_prometheus_metric_name(line: str) -> str | None:
+    first_field = line.split(None, 1)[0].strip()
+    if not first_field:
+        return None
+    return first_field.split("{", 1)[0]
+
+
+def _parse_prometheus_metric_value(line: str) -> float | None:
+    parts = line.split()
+    if not parts:
+        return None
+    with contextlib.suppress(ValueError):
+        return float(parts[-1])
+    return None
+
+
+def _aggregate_prometheus_samples(
+    samples: list[float], *, aggregate: Literal["sum", "max"]
+) -> float | None:
+    if not samples:
+        return None
+    if aggregate == "sum":
+        return float(sum(samples))
+    if aggregate == "max":
+        return float(max(samples))
+    raise ValueError(f"Unsupported aggregate '{aggregate}'")
+
+
+def parse_benchmark_load_metrics(
+    text: str,
+) -> BenchmarkLoadMetricsSnapshot | None:
+    tracked_metrics: dict[str, list[float]] = {
+        "vllm:num_requests_running": [],
+        "vllm:num_requests_waiting": [],
+        "vllm:kv_cache_usage_perc": [],
+        "vllm:available_kv_cache_memory_bytes": [],
+        "vllm:prefix_cache_queries": [],
+        "vllm:prefix_cache_hits": [],
+        "vllm:external_prefix_cache_queries": [],
+        "vllm:external_prefix_cache_hits": [],
+    }
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        metric_name = _extract_prometheus_metric_name(line)
+        if metric_name not in tracked_metrics:
+            continue
+        value = _parse_prometheus_metric_value(line)
+        if value is None:
+            continue
+        tracked_metrics[metric_name].append(value)
+
+    if not any(tracked_metrics.values()):
+        return None
+
+    return BenchmarkLoadMetricsSnapshot(
+        num_requests_running=_aggregate_prometheus_samples(
+            tracked_metrics["vllm:num_requests_running"], aggregate="sum"
+        ),
+        num_requests_waiting=_aggregate_prometheus_samples(
+            tracked_metrics["vllm:num_requests_waiting"], aggregate="sum"
+        ),
+        kv_cache_usage_perc=_aggregate_prometheus_samples(
+            tracked_metrics["vllm:kv_cache_usage_perc"], aggregate="max"
+        ),
+        available_kv_cache_memory_bytes=_aggregate_prometheus_samples(
+            tracked_metrics["vllm:available_kv_cache_memory_bytes"],
+            aggregate="max",
+        ),
+        prefix_cache_queries=_aggregate_prometheus_samples(
+            tracked_metrics["vllm:prefix_cache_queries"], aggregate="sum"
+        ),
+        prefix_cache_hits=_aggregate_prometheus_samples(
+            tracked_metrics["vllm:prefix_cache_hits"], aggregate="sum"
+        ),
+        external_prefix_cache_queries=_aggregate_prometheus_samples(
+            tracked_metrics["vllm:external_prefix_cache_queries"],
+            aggregate="sum",
+        ),
+        external_prefix_cache_hits=_aggregate_prometheus_samples(
+            tracked_metrics["vllm:external_prefix_cache_hits"],
+            aggregate="sum",
+        ),
+    )
+
+
+def _rate_or_none(numerator: float | None, denominator: float | None) -> float | None:
+    if numerator is None or denominator in (None, 0):
+        return None
+    return float(numerator) / float(denominator)
+
+
+def build_benchmark_load_result(
+    before: BenchmarkLoadMetricsSnapshot | None,
+    after: BenchmarkLoadMetricsSnapshot | None,
+) -> dict[str, float | None] | None:
+    if after is None:
+        return None
+
+    prefix_cache_hit_rate = None
+    external_prefix_cache_hit_rate = None
+    if before is not None:
+        prefix_cache_hit_rate = _rate_or_none(
+            None
+            if after.prefix_cache_hits is None or before.prefix_cache_hits is None
+            else after.prefix_cache_hits - before.prefix_cache_hits,
+            None
+            if after.prefix_cache_queries is None or before.prefix_cache_queries is None
+            else after.prefix_cache_queries - before.prefix_cache_queries,
+        )
+        external_prefix_cache_hit_rate = _rate_or_none(
+            None
+            if after.external_prefix_cache_hits is None
+            or before.external_prefix_cache_hits is None
+            else after.external_prefix_cache_hits - before.external_prefix_cache_hits,
+            None
+            if after.external_prefix_cache_queries is None
+            or before.external_prefix_cache_queries is None
+            else after.external_prefix_cache_queries
+            - before.external_prefix_cache_queries,
+        )
+
+    return {
+        "num_requests_running": after.num_requests_running,
+        "num_requests_waiting": after.num_requests_waiting,
+        "kv_cache_usage_perc": after.kv_cache_usage_perc,
+        "available_kv_cache_memory_bytes": after.available_kv_cache_memory_bytes,
+        "prefix_cache_hit_rate": prefix_cache_hit_rate,
+        "external_prefix_cache_hit_rate": external_prefix_cache_hit_rate,
+    }
+
+
 async def fetch_spec_decode_metrics(
     base_url: str, session: aiohttp.ClientSession
 ) -> SpecDecodeMetrics | None:
@@ -273,57 +432,59 @@ async def fetch_spec_decode_metrics(
 
     Returns None if speculative decoding is not enabled or metrics are not available.
     """
-    metrics_url = f"{base_url}/metrics"
-    try:
-        async with session.get(metrics_url) as response:
-            if response.status != 200:
-                return None
-            text = await response.text()
-
-            num_drafts = 0
-            num_draft_tokens = 0
-            num_accepted_tokens = 0
-            accepted_per_pos: dict[int, int] = {}
-            found_spec_decode = False
-
-            for line in text.split("\n"):
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-
-                if line.startswith("vllm:spec_decode"):
-                    found_spec_decode = True
-                    parts = line.split()
-                    if parts:
-                        with contextlib.suppress(ValueError):
-                            if "num_drafts" in line:
-                                num_drafts += int(float(parts[-1]))
-                            elif "num_draft_tokens" in line:
-                                num_draft_tokens += int(float(parts[-1]))
-                            elif "num_accepted_tokens_per_pos" in line:
-                                pos_label = 'position="'
-                                if pos_label in line:
-                                    start = line.index(pos_label) + len(pos_label)
-                                    end = line.index('"', start)
-                                    pos = int(line[start:end])
-                                    val = int(float(parts[-1]))
-                                    accepted_per_pos[pos] = (
-                                        accepted_per_pos.get(pos, 0) + val
-                                    )
-                            elif "num_accepted_tokens" in line:
-                                num_accepted_tokens += int(float(parts[-1]))
-
-            if not found_spec_decode:
-                return None
-
-            return SpecDecodeMetrics(
-                num_drafts=num_drafts,
-                num_draft_tokens=num_draft_tokens,
-                num_accepted_tokens=num_accepted_tokens,
-                accepted_per_pos=accepted_per_pos,
-            )
-    except (aiohttp.ClientError, asyncio.TimeoutError):
+    text = await _fetch_prometheus_metrics_text(base_url, session)
+    if text is None:
         return None
+
+    num_drafts = 0
+    num_draft_tokens = 0
+    num_accepted_tokens = 0
+    accepted_per_pos: dict[int, int] = {}
+    found_spec_decode = False
+
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        if line.startswith("vllm:spec_decode"):
+            found_spec_decode = True
+            parts = line.split()
+            if parts:
+                with contextlib.suppress(ValueError):
+                    if "num_drafts" in line:
+                        num_drafts += int(float(parts[-1]))
+                    elif "num_draft_tokens" in line:
+                        num_draft_tokens += int(float(parts[-1]))
+                    elif "num_accepted_tokens_per_pos" in line:
+                        pos_label = 'position="'
+                        if pos_label in line:
+                            start = line.index(pos_label) + len(pos_label)
+                            end = line.index('"', start)
+                            pos = int(line[start:end])
+                            val = int(float(parts[-1]))
+                            accepted_per_pos[pos] = accepted_per_pos.get(pos, 0) + val
+                    elif "num_accepted_tokens" in line:
+                        num_accepted_tokens += int(float(parts[-1]))
+
+    if not found_spec_decode:
+        return None
+
+    return SpecDecodeMetrics(
+        num_drafts=num_drafts,
+        num_draft_tokens=num_draft_tokens,
+        num_accepted_tokens=num_accepted_tokens,
+        accepted_per_pos=accepted_per_pos,
+    )
+
+
+async def fetch_benchmark_load_metrics(
+    base_url: str, session: aiohttp.ClientSession
+) -> BenchmarkLoadMetricsSnapshot | None:
+    text = await _fetch_prometheus_metrics_text(base_url, session)
+    if text is None:
+        return None
+    return parse_benchmark_load_metrics(text)
 
 
 class TaskType(Enum):
@@ -360,6 +521,10 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
+    p50_ttft_ms: float
+    p95_ttft_ms: float
+    p50_e2el_ms: float
+    p95_e2el_ms: float
     # Max output tokens per second and concurrent requests at that peak
     max_output_tokens_per_s: float
     max_concurrent_requests: int
@@ -757,6 +922,10 @@ def calculate_metrics(
         percentiles_e2el_ms=[
             (p, np.percentile(e2els or 0, p) * 1000) for p in selected_percentiles
         ],
+        p50_ttft_ms=np.percentile(ttfts or 0, 50) * 1000,
+        p95_ttft_ms=np.percentile(ttfts or 0, 95) * 1000,
+        p50_e2el_ms=np.percentile(e2els or 0, 50) * 1000,
+        p95_e2el_ms=np.percentile(e2els or 0, 95) * 1000,
         max_output_tokens_per_s=max_output_tokens_per_s,
         max_concurrent_requests=max_concurrent_requests,
         rtfx=input_audio_duration / dur_s,
@@ -946,6 +1115,9 @@ async def benchmark(
     print(f"Burstiness factor: {burstiness} ({distribution})")
     print(f"Maximum request concurrency: {max_concurrency}")
 
+    benchmark_load_metrics_before = await fetch_benchmark_load_metrics(
+        base_url, session
+    )
     spec_decode_metrics_before = await fetch_spec_decode_metrics(base_url, session)
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
@@ -1031,7 +1203,12 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
+    benchmark_load_metrics_after = await fetch_benchmark_load_metrics(base_url, session)
     spec_decode_metrics_after = await fetch_spec_decode_metrics(base_url, session)
+    benchmark_load_result = build_benchmark_load_result(
+        benchmark_load_metrics_before,
+        benchmark_load_metrics_after,
+    )
     spec_decode_stats: dict[str, Any] | None = None
     if spec_decode_metrics_before is not None and spec_decode_metrics_after is not None:
         delta_drafts = (
@@ -1144,16 +1321,30 @@ async def benchmark(
         )
 
     if isinstance(metrics, BenchmarkMetrics):
+        total_requests = metrics.completed + metrics.failed
+        reject_rate = metrics.failed / total_requests if total_requests else None
+        slo_violation_rate = None
+        if goodput_config_dict and metrics.request_throughput > 0:
+            slo_violation_rate = max(
+                0.0,
+                1.0 - (metrics.request_goodput / metrics.request_throughput),
+            )
         result = {
             "duration": benchmark_duration,
             "completed": metrics.completed,
             "failed": metrics.failed,
+            "reject_rate": reject_rate,
+            "slo_violation_rate": slo_violation_rate,
             "total_input_tokens": metrics.total_input,
             "total_output_tokens": metrics.total_output,
             "request_throughput": metrics.request_throughput,
             "request_goodput": metrics.request_goodput if goodput_config_dict else None,
             "output_throughput": metrics.output_throughput,
             "total_token_throughput": metrics.total_token_throughput,
+            "p50_ttft_ms": metrics.p50_ttft_ms,
+            "p95_ttft_ms": metrics.p95_ttft_ms,
+            "p50_e2el_ms": metrics.p50_e2el_ms,
+            "p95_e2el_ms": metrics.p95_e2el_ms,
             "input_lens": [output.prompt_len for output in outputs],
             "output_lens": actual_output_lens,
             "ttfts": [output.ttft for output in outputs],
@@ -1178,6 +1369,9 @@ async def benchmark(
 
     if rps_change_events:
         result["rps_change_events"] = rps_change_events
+
+    if benchmark_load_result is not None:
+        result.update(benchmark_load_result)
 
     if spec_decode_stats is not None:
         result["spec_decode_acceptance_rate"] = spec_decode_stats["acceptance_rate"]

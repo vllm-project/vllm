@@ -251,15 +251,17 @@ wait_for_ascend_runtime_ready() {
 }
 
 run_runner_npu_preflight_once() {
+  # Use hust-ascend-manager runtime check for the NPU probe (controlled env).
+  hust-ascend-manager runtime check \
+    --repo "${WORKSPACE_ROOT:-${GITHUB_WORKSPACE:-$PWD}}" \
+    --python "$PYTHON_BIN" \
+    --require-npu --json >/dev/null || return 1
+
+  # Device-specific torch.zeros allocation check
   "$PYTHON_BIN" - <<'PY'
-import importlib.util
 import os
 
 import torch
-
-if importlib.util.find_spec("torch_npu") is None:
-    raise RuntimeError("torch_npu is not installed in the regression-test environment")
-
 import torch_npu  # noqa: F401
 
 device = os.environ.get("VLLM_ASCEND_TORCH_PREFLIGHT_DEVICE", "npu:0")

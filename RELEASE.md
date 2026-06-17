@@ -30,16 +30,16 @@ The fork keeps one explicit upstream anchor and one explicit fork release line:
 
 For the current maintained line in this repository:
 
-* Upstream anchor: `upstream/v0.17.2rc0`
-* Current fork release line: `v0.17.2.post2`
+* Upstream anchor: `upstream/v0.20.1rc0`
+* Current fork release line: `v0.20.1.post1`
 
 ### Runtime metadata
 
 The generated version module exports both the public fork version and the
 upstream compatibility fields:
 
-* `__version__`: the full fork version, such as `0.17.2.post2.devM+gSHA`
-* `__upstream_version__`: the upstream compatibility version, such as `0.17.2rc0`
+* `__version__`: the full fork version, such as `0.20.1.post1.devM+gSHA`
+* `__upstream_version__`: the upstream compatibility version, such as `0.20.1rc0`
 * `__upstream_commit__`: the upstream anchor commit recorded for the fork line
 * `__commit_id__`: the current fork commit identifier embedded into the build
 

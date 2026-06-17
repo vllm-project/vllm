@@ -58,12 +58,25 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
             content=generator.model_dump(), status_code=generator.error.code
         )
     elif isinstance(generator, CompletionResponse):
+        response_headers = {
+            **dict(metrics_header(metrics_header_format) or {}),
+            **handler.build_routing_headers(request.model),
+        }
         return JSONResponse(
             content=generator.model_dump(),
-            headers=metrics_header(metrics_header_format),
+            headers=response_headers,
         )
 
-    return StreamingResponse(content=generator, media_type="text/event-stream")
+    response_headers = {
+        **dict(metrics_header(metrics_header_format) or {}),
+        **handler.build_routing_headers(request.model),
+    }
+
+    return StreamingResponse(
+        content=generator,
+        media_type="text/event-stream",
+        headers=response_headers,
+    )
 
 
 def attach_router(app: FastAPI):
