@@ -1032,15 +1032,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         tokenizer_mode="kimi_audio",
         trust_remote_code=True,
     ),
-    "MossAudioModel": _HfExamplesInfo(
-        "OpenMOSS-Team/MOSS-Audio-4B-Instruct",
-        extras={
-            "4b-thinking": "OpenMOSS-Team/MOSS-Audio-4B-Thinking",
-            "8b-instruct": "OpenMOSS-Team/MOSS-Audio-8B-Instruct",
-            "8b-thinking": "OpenMOSS-Team/MOSS-Audio-8B-Thinking",
-        },
-        trust_remote_code=True,
-    ),
     "KimiK25ForConditionalGeneration": _HfExamplesInfo(
         "moonshotai/Kimi-K2.5",
         trust_remote_code=True,
@@ -1151,6 +1142,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Moondream3ForCausalLM": _HfExamplesInfo(
         "moondream/moondream3-preview",
         tokenizer="moondream/starmie-v1",
+        trust_remote_code=True,
+    ),
+    "MossAudioModel": _HfExamplesInfo(
+        "OpenMOSS-Team/MOSS-Audio-4B-Instruct",
+        extras={
+            "4b-thinking": "OpenMOSS-Team/MOSS-Audio-4B-Thinking",
+            "8b-instruct": "OpenMOSS-Team/MOSS-Audio-8B-Instruct",
+            "8b-thinking": "OpenMOSS-Team/MOSS-Audio-8B-Thinking",
+        },
         trust_remote_code=True,
     ),
     "HfMoondream": _HfExamplesInfo(
