@@ -129,6 +129,7 @@ The class provides the following primitives:
 @dataclass(frozen=True)
 class OffloadingMetricMetadata:
     documentation: str
+    labelnames: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
