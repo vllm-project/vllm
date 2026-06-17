@@ -21,6 +21,7 @@ from vllm.entrypoints.serve.lora.protocol import (
 from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
+from vllm.lora.cache_identity import ensure_lora_cache_key, is_content_versioned
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.utils.counter import AtomicCounter
@@ -183,6 +184,25 @@ class OpenAIServingModels:
             )
             if base_model_name is not None and self.is_base_model(base_model_name):
                 lora_request.base_model_name = base_model_name
+            # Content-derived prefix-cache identity (single source of truth with
+            # the process_inputs backstop) so a same-name in-place reload of a
+            # readable local adapter's changed contents does not reuse stale
+            # prefix-cache KV. HF-Hub / relative / remote paths fall back to a
+            # path-only identity (not content-versioned).
+            ensure_lora_cache_key(lora_request)
+            if request.load_inplace and not is_content_versioned(
+                lora_path,
+                tensorizer_config_dict=lora_request.tensorizer_config_dict,
+            ):
+                logger.warning(
+                    "In-place reload of LoRA adapter '%s' from a "
+                    "non-content-versioned path (%s): its prefix-cache blocks "
+                    "are keyed by path only, so a same-path content change may "
+                    "still reuse stale KV. Load under a new name/path, or "
+                    "disable prefix caching for this adapter.",
+                    lora_name,
+                    lora_path,
+                )
 
             # Validate that the adapter can be loaded into the engine
             # This will also preload it for incoming requests

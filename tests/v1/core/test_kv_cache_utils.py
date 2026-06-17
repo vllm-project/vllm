@@ -80,6 +80,7 @@ def make_request(
     mm_hashes: list[str] | None = None,
     cache_salt: str | None = None,
     prompt_embeds: torch.Tensor | None = None,
+    lora_request: LoRARequest | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -102,7 +103,7 @@ def make_request(
         mm_features=mm_features if mm_features else None,
         sampling_params=sampling_params,
         pooling_params=None,
-        lora_request=None,
+        lora_request=lora_request,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
         prompt_embeds=prompt_embeds,
@@ -634,6 +635,7 @@ def test_generate_block_hash_extra_keys_different_prompt_embeds():
     assert extra_keys1 != extra_keys2
 
 
+@pytest.mark.skip_global_cleanup
 def test_generate_block_hash_extra_keys_lora():
     request = make_request(
         request_id="0",
@@ -645,11 +647,96 @@ def test_generate_block_hash_extra_keys_lora():
     )
 
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
-    assert extra_keys == ("test_lora_adapter",)
+    assert extra_keys == (
+        ("lora", "test_lora_adapter"),
+        ("lora_identity", "/path/to/lora"),
+    )
+
+    request.lora_request = LoRARequest(
+        lora_name="test_lora_adapter",
+        lora_int_id=1,
+        lora_path="/path/to/lora",
+        lora_cache_key="load-1",
+    )
+
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
+    assert extra_keys == (("lora", "test_lora_adapter"), ("lora_identity", "load-1"))
 
     request.lora_request = None
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
     assert extra_keys is None
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+@pytest.mark.skip_global_cleanup
+def test_hash_tokens_same_lora_name_different_path(hash_fn):
+    lora_a = LoRARequest(lora_name="tenant", lora_int_id=1, lora_path="/path/to/lora-a")
+    lora_b = LoRARequest(lora_name="tenant", lora_int_id=1, lora_path="/path/to/lora-b")
+    request1 = make_request(
+        request_id="0",
+        prompt_token_ids=[_ for _ in range(6)],
+        block_size=3,
+        hash_fn=hash_fn,
+        lora_request=lora_a,
+    )
+    request2 = make_request(
+        request_id="1",
+        prompt_token_ids=[_ for _ in range(6)],
+        block_size=3,
+        hash_fn=hash_fn,
+        lora_request=lora_b,
+    )
+    request3 = make_request(
+        request_id="2",
+        prompt_token_ids=[_ for _ in range(6)],
+        block_size=3,
+        hash_fn=hash_fn,
+        lora_request=lora_a,
+    )
+
+    assert request1.block_hashes != request2.block_hashes
+    assert request1.block_hashes == request3.block_hashes
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+@pytest.mark.skip_global_cleanup
+def test_hash_tokens_same_lora_path_different_cache_key(hash_fn):
+    lora_load_1 = LoRARequest(
+        lora_name="tenant",
+        lora_int_id=1,
+        lora_path="/path/to/lora",
+        lora_cache_key="load-1",
+    )
+    lora_load_2 = LoRARequest(
+        lora_name="tenant",
+        lora_int_id=1,
+        lora_path="/path/to/lora",
+        lora_cache_key="load-2",
+    )
+    request1 = make_request(
+        request_id="0",
+        prompt_token_ids=[_ for _ in range(6)],
+        block_size=3,
+        hash_fn=hash_fn,
+        lora_request=lora_load_1,
+    )
+    request2 = make_request(
+        request_id="1",
+        prompt_token_ids=[_ for _ in range(6)],
+        block_size=3,
+        hash_fn=hash_fn,
+        lora_request=lora_load_2,
+    )
+    request3 = make_request(
+        request_id="2",
+        prompt_token_ids=[_ for _ in range(6)],
+        block_size=3,
+        hash_fn=hash_fn,
+        lora_request=lora_load_1,
+    )
+
+    assert request1.block_hashes != request2.block_hashes
+    assert request1.block_hashes == request3.block_hashes
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

@@ -405,7 +405,7 @@ def need_extra_keys(request: Request) -> bool:
     """
 
     # Multimodal requests need to include the MM hash.
-    # LoRA requests need to include the LoRA name.
+    # LoRA requests need to include the LoRA adapter identity.
     # Request with provided cache salt need to include the salt.
     return (
         bool(request.mm_features)
@@ -481,19 +481,25 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
+def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str]]:
     """Generate extra keys related to LoRA for block hash computation.
 
     Args:
         request: The request object.
 
     Returns:
-        Return LoRA name of the request if it is a LoRA request. Return empty
-        list otherwise.
+        Return LoRA identity of the request if it is a LoRA request. Return
+        empty list otherwise.
     """
-    if not request.lora_request:
+    lora_request = request.lora_request
+    if not lora_request:
         return []
-    return [request.lora_request.lora_name]
+    identity_key = (
+        lora_request.lora_cache_key
+        if lora_request.lora_cache_key is not None
+        else lora_request.lora_path
+    )
+    return [("lora", lora_request.lora_name), ("lora_identity", identity_key)]
 
 
 def _gen_prompt_embeds_extra_hash_keys(
@@ -542,7 +548,7 @@ def generate_block_hash_extra_keys(
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx
     )
-    lora_extra_keys: list[str] = _gen_lora_extra_hash_keys(request)
+    lora_extra_keys = _gen_lora_extra_hash_keys(request)
     cache_salt_keys: list[str] = (
         [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
     )

@@ -344,6 +344,100 @@ def test_prefill(hash_fn):
     )
 
 
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+@pytest.mark.skip_global_cleanup
+def test_prefix_cache_separates_same_lora_name_different_path(hash_fn):
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 11),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    token_ids = [i for i in range(3) for _ in range(block_size)] + [3] * 5
+    lora_a = LoRARequest(
+        lora_name="tenant", lora_int_id=1, lora_path="/path/to/lora-a"
+    )
+    lora_b_same_name = LoRARequest(
+        lora_name="tenant", lora_int_id=1, lora_path="/path/to/lora-b"
+    )
+
+    req_a = make_request("a", token_ids, block_size, hash_fn, lora_request=lora_a)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req_a)
+    assert computed_blocks.get_block_ids(allow_none=True) is None
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req_a, len(token_ids), num_computed_tokens, computed_blocks
+    )
+    assert blocks is not None
+    manager.free(req_a)
+
+    req_a_replay = make_request(
+        "a_replay", token_ids, block_size, hash_fn, lora_request=lora_a
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req_a_replay)
+    assert computed_blocks.get_block_ids() == ([1, 2, 3],)
+    assert num_computed_tokens == 3 * block_size
+
+    req_b = make_request(
+        "b", token_ids, block_size, hash_fn, lora_request=lora_b_same_name
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req_b)
+    assert computed_blocks.get_block_ids(allow_none=True) is None
+    assert num_computed_tokens == 0
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+@pytest.mark.skip_global_cleanup
+def test_prefix_cache_separates_same_lora_path_different_cache_key(hash_fn):
+    block_size = 16
+    manager = make_kv_cache_manager(
+        make_kv_cache_config(block_size, 11),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+    token_ids = [i for i in range(3) for _ in range(block_size)] + [3] * 5
+    lora_load_1 = LoRARequest(
+        lora_name="tenant",
+        lora_int_id=1,
+        lora_path="/path/to/lora",
+        lora_cache_key="load-1",
+    )
+    lora_load_2 = LoRARequest(
+        lora_name="tenant",
+        lora_int_id=1,
+        lora_path="/path/to/lora",
+        lora_cache_key="load-2",
+    )
+
+    req_1 = make_request(
+        "load_1", token_ids, block_size, hash_fn, lora_request=lora_load_1
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req_1)
+    assert computed_blocks.get_block_ids(allow_none=True) is None
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req_1, len(token_ids), num_computed_tokens, computed_blocks
+    )
+    assert blocks is not None
+    manager.free(req_1)
+
+    req_1_replay = make_request(
+        "load_1_replay", token_ids, block_size, hash_fn, lora_request=lora_load_1
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req_1_replay)
+    assert computed_blocks.get_block_ids() == ([1, 2, 3],)
+    assert num_computed_tokens == 3 * block_size
+
+    req_2 = make_request(
+        "load_2", token_ids, block_size, hash_fn, lora_request=lora_load_2
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req_2)
+    assert computed_blocks.get_block_ids(allow_none=True) is None
+    assert num_computed_tokens == 0
+
+
 def test_prefill_hybrid_model():
     block_size = 16
     manager = make_kv_cache_manager(
