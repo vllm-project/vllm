@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
@@ -32,6 +33,10 @@ from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.topk_topp_sampler import (
+    empty_exponential_noise_like,
+    sample_with_exponential_noise,
+)
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.utils import (
@@ -66,6 +71,7 @@ class SpecDecodeBaseProposer:
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
         self.pass_hidden_states_to_model = pass_hidden_states_to_model
+        self._share_mtp_indices = False
 
         self.device = device
         self.dtype = vllm_config.model_config.dtype
@@ -113,6 +119,7 @@ class SpecDecodeBaseProposer:
         self.use_local_argmax_reduction: bool = (
             self.speculative_config.use_local_argmax_reduction
         )
+        self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
 
         self.max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -244,6 +251,13 @@ class SpecDecodeBaseProposer:
                 DeepseekV4ROCMAiterMLASparseMetadata,
                 DeepseekV4ROCMAiterSparseSWAMetadata,
             )
+
+            # MiniMax-M3 sparse (lightning-indexer) attention. The multi-step
+            # drafting machinery is shared code at num_speculative_tokens>1.
+            # this just opts the metadata into the ROCm allowlist.
+            from vllm.models.minimax_m3.common.sparse_attention import (
+                MiniMaxM3SparseMetadata,
+            )
             from vllm.v1.attention.backends.mla.indexer import (
                 DeepseekV32IndexerMetadata,
             )
@@ -259,6 +273,7 @@ class SpecDecodeBaseProposer:
                 DeepseekV4ROCMAiterMLASparseMetadata,
                 DeepseekV4ROCMAiterSparseSWAMetadata,
                 DeepseekV32IndexerMetadata,
+                MiniMaxM3SparseMetadata,
             ]
             # ROCM_AITER_FA is an optional backend
             # We check is_enabled() here to avoid importing the backend module during
@@ -409,7 +424,9 @@ class SpecDecodeBaseProposer:
             return logits.argmax(dim=-1), None
         if sampling_metadata.all_greedy:
             return logits.argmax(dim=-1), None
-        return compute_probs_and_sample_next_token(logits, sampling_metadata)
+        return compute_probs_and_sample_next_token(
+            logits, sampling_metadata, self.use_fp64_gumbel
+        )
 
     def _sample_draft_tokens(
         self,
@@ -426,6 +443,7 @@ class SpecDecodeBaseProposer:
 
     def propose(
         self,
+        num_speculative_tokens,
         # [num_tokens]
         target_token_ids: torch.Tensor,
         # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
@@ -443,12 +461,16 @@ class SpecDecodeBaseProposer:
         | list[dict[str, torch.Tensor]]
         | None = None,
     ) -> torch.Tensor:
+        self.num_speculative_tokens = num_speculative_tokens
         self._last_draft_probs = None
         batch_size = common_attn_metadata.batch_size()
 
         if self.method in ("eagle3", "dflash"):
+            model = self.model
+            if isinstance(model, BreakableCUDAGraphWrapper):
+                model = model.unwrap()
             assert isinstance(
-                self.model,
+                model,
                 (
                     Eagle3LlamaForCausalLM,
                     Eagle3DeepseekV2ForCausalLM,
@@ -483,6 +505,11 @@ class SpecDecodeBaseProposer:
         model_kwargs, slot_mapping_size = self.build_model_inputs_first_pass(
             num_tokens, num_input_tokens, mm_embed_inputs
         )
+        # Step 0 of index_share_for_mtp_iteration: let the MTP layer
+        # compute its own indices (skip_topk=False) so subsequent steps
+        # can reuse them.
+        if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
+            self.model.model.set_skip_topk(False)
 
         with set_forward_context(
             per_layer_attn_metadata,
@@ -501,7 +528,23 @@ class SpecDecodeBaseProposer:
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
 
+        # After step 0: switch to reuse mode so steps 1+ skip the indexer
+        # and read the indices that step 0 just wrote into the shared buffer.
+        if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
+            self.model.model.set_skip_topk(True)
+
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
+
+        # No draft tokens requested (e.g. Dynamic SD decided K=0).
+        # The prefill forward pass above already ran to keep the drafter
+        # KV cache in sync, so just return an empty tensor.
+        if self.num_speculative_tokens == 0:
+            return torch.empty(
+                batch_size,
+                0,
+                device=sample_hidden_states.device,
+                dtype=torch.int64,
+            )
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
@@ -1232,6 +1275,8 @@ class SpecDecodeBaseProposer:
                 "Qwen3VLForConditionalGeneration",
                 "Qwen3VLMoeForConditionalGeneration",
                 "Gemma4ForConditionalGeneration",
+                "Gemma4UnifiedForConditionalGeneration",
+                "Step3p7ForConditionalGeneration",
             ]:
                 self.model.config.image_token_index = target_model.config.image_token_id
             elif self.get_model_name(target_model) == "PixtralForConditionalGeneration":
@@ -1409,15 +1454,33 @@ class SpecDecodeBaseProposer:
                         )
 
         if hasattr(target_language_model.model, "topk_indices_buffer"):
+            target_buffer = target_language_model.model.topk_indices_buffer
             if hasattr(self.model.model, "topk_indices_buffer"):
                 del self.model.model.topk_indices_buffer
-            self.model.model.topk_indices_buffer = (
-                target_language_model.model.topk_indices_buffer
-            )
+            self.model.model.topk_indices_buffer = target_buffer
+            # Also share at per-module level so that the indexer and
+            # sparse-attention backends in each MTP layer read from
+            # the target model's buffer.
+            for _, module in self.model.model.named_modules():
+                if hasattr(module, "topk_indices_buffer"):
+                    module.topk_indices_buffer = target_buffer
             logger.info(
                 "Detected MTP model with topk_indices_buffer. "
                 "Sharing target model topk_indices_buffer with the draft model."
             )
+
+        # Detect index_share_for_mtp_iteration: when True, the proposer
+        # toggles skip_topk so step 0 computes MTP's own indices and
+        # steps 1+ reuse them.
+        spec_config = self.vllm_config.speculative_config
+        draft_hf_config = (
+            spec_config.draft_model_config.hf_config
+            if spec_config is not None
+            else None
+        )
+        self._share_mtp_indices = getattr(
+            draft_hf_config, "index_share_for_mtp_iteration", False
+        )
 
         if self.use_local_argmax_reduction:
             if not hasattr(self.model, "get_top_tokens"):
@@ -1426,23 +1489,10 @@ class SpecDecodeBaseProposer:
                     f"{self.model.__class__.__name__} does not implement "
                     "get_top_tokens()."
                 )
-            # Warn if draft model has vocab remapping, which forces fallback
-            # to the full-logits path (negating the optimization).
-            if (
-                hasattr(self.model, "draft_id_to_target_id")
-                and self.model.draft_id_to_target_id is not None
-            ):
-                logger.warning(
-                    "use_local_argmax_reduction is enabled but draft model "
-                    "uses draft_id_to_target_id vocab remapping. The "
-                    "optimization will be bypassed (falling back to full "
-                    "logits gather + argmax)."
-                )
-            else:
-                logger.info(
-                    "Using local argmax reduction for draft token generation "
-                    "(communication: O(2*tp_size) vs O(vocab_size))."
-                )
+            logger.info(
+                "Using local argmax reduction for draft token generation "
+                "(communication: O(2*tp_size) vs O(vocab_size))."
+            )
 
     @torch.inference_mode()
     def dummy_run(
@@ -1654,6 +1704,7 @@ class SpecDecodeBaseProposer:
 def compute_probs_and_sample_next_token(
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
+    use_fp64_gumbel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if sampling_metadata.all_greedy:
         # For greedy requests, draft_probs is not used in rejection sampling.
@@ -1680,11 +1731,11 @@ def compute_probs_and_sample_next_token(
     # of the generated tokens after rejection sampling.
 
     # TODO(woosuk): Consider seeds.
-    q = torch.empty_like(probs)
+    q = empty_exponential_noise_like(probs, use_fp64_gumbel)
     q.exponential_()
     # NOTE(woosuk): We shouldn't use `probs.div_(q)` because the draft_probs
     # will be used later for rejection sampling.
-    next_token_ids = probs.div(q).argmax(dim=-1).view(-1)
+    next_token_ids = sample_with_exponential_noise(probs.clone(), q)
     if not sampling_metadata.all_random:
         greedy_token_ids = probs.argmax(dim=-1)
         next_token_ids = torch.where(is_greedy, greedy_token_ids, next_token_ids)

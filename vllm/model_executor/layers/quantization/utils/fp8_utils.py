@@ -159,75 +159,104 @@ def _silu_mul_quant_fp8_packed_kernel(
     output_q_stride_m,
     output_scale_stride_k,
     clamp_limit,
+    alpha,
+    beta,
     N: tl.constexpr,
-    NUM_GROUPS: tl.constexpr,
+    GROUPS_PER_ROW: tl.constexpr,
+    PACKS_PER_ROW: tl.constexpr,
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
     GROUP_SIZE: tl.constexpr,
+    PACKS_PER_CTA: tl.constexpr,
     BLOCK_M: tl.constexpr,
     HAS_CLAMP: tl.constexpr,
 ):
-    N_2: tl.constexpr = N // 2
+    GROUPS_PER_PACK: tl.constexpr = 4
+    hidden_size: tl.constexpr = N // 2
 
-    pid_pack = tl.program_id(0)
-    pid_m = tl.program_id(1)
-    m_offset = pid_m.to(tl.int64) * BLOCK_M
+    pack_tile = tl.program_id(0)
+    row_start = tl.program_id(1).to(tl.int64) * BLOCK_M
+    row_step = tl.num_programs(1).to(tl.int64) * BLOCK_M
 
-    if m_offset >= M:
-        return
+    groups_per_cta: tl.constexpr = PACKS_PER_CTA * GROUPS_PER_PACK
+    elems_per_cta: tl.constexpr = groups_per_cta * GROUP_SIZE
+    col_start = pack_tile * elems_per_cta
+    col_offsets = tl.arange(0, elems_per_cta)
+    row_offsets = tl.arange(0, BLOCK_M)
+    pack_offsets = tl.arange(0, PACKS_PER_CTA)
 
-    offs_m = tl.arange(0, BLOCK_M)
-    offs_n = tl.arange(0, GROUP_SIZE)
-    row_mask = (m_offset + offs_m) < M
+    col_mask = (col_start + col_offsets) < (GROUPS_PER_ROW * GROUP_SIZE)
 
-    base_row_offset = (m_offset + offs_m[:, None]) * input_stride_m
-    base_out_offset = (m_offset + offs_m[:, None]) * output_q_stride_m
+    # persistent with grid_m-stride loop
+    while row_start < M:
+        rows = row_start + row_offsets
+        row_mask = rows < M
+        input_row_start = rows[:, None] * input_stride_m
+        output_row_start = rows[:, None] * output_q_stride_m
 
-    packed_scale = tl.zeros((BLOCK_M,), dtype=tl.int32)
+        gate_flat = tl.load(
+            input_ptr + input_row_start + col_start + col_offsets[None, :],
+            mask=row_mask[:, None] & col_mask[None, :],
+            other=0.0,
+        )
+        up_flat = tl.load(
+            input_ptr
+            + input_row_start
+            + hidden_size
+            + col_start
+            + col_offsets[None, :],
+            mask=row_mask[:, None] & col_mask[None, :],
+            other=0.0,
+        )
 
-    for pack_idx in tl.static_range(4):
-        group_id = pid_pack * 4 + pack_idx
+        gate = tl.reshape(gate_flat, (BLOCK_M, groups_per_cta, GROUP_SIZE)).to(
+            tl.float32
+        )
+        up = tl.reshape(up_flat, (BLOCK_M, groups_per_cta, GROUP_SIZE)).to(tl.float32)
 
-        if group_id < NUM_GROUPS:
-            n_offset = group_id * GROUP_SIZE
+        if HAS_CLAMP:
+            gate = tl.minimum(gate, clamp_limit)
+            up = tl.clamp(up, -clamp_limit, clamp_limit)
 
-            act_ptrs = input_ptr + base_row_offset + n_offset + offs_n[None, :]
-            act_in = tl.load(act_ptrs, mask=row_mask[:, None], other=0.0)
+        # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
+        #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
+        glu = gate / (1.0 + tl.exp(-gate * alpha))
+        y = (up + beta) * glu
+        # Round through bf16 to match unfused precision path
+        y = y.to(tl.bfloat16).to(tl.float32)
 
-            mul_ptrs = act_ptrs + N_2
-            mul_in = tl.load(mul_ptrs, mask=row_mask[:, None], other=0.0)
+        absmax = tl.max(tl.abs(y), axis=2)
+        scale_raw = tl.maximum(absmax / fp8_max, 1e-10)
+        exponent = tl.ceil(tl.log2(scale_raw))
+        scale = tl.math.exp2(exponent)
 
-            act_f32 = act_in.to(tl.float32)
-            mul_f32 = mul_in.to(tl.float32)
+        y_q = tl.clamp(y / scale[:, :, None], fp8_min, fp8_max)
 
-            if HAS_CLAMP:
-                act_f32 = tl.minimum(act_f32, clamp_limit)
-                mul_f32 = tl.clamp(mul_f32, -clamp_limit, clamp_limit)
+        y_q_flat = tl.reshape(y_q, (BLOCK_M, elems_per_cta))
+        tl.store(
+            output_q_ptr + output_row_start + col_start + col_offsets[None, :],
+            y_q_flat.to(output_q_ptr.dtype.element_ty),
+            mask=row_mask[:, None] & col_mask[None, :],
+        )
 
-            y = (act_f32 / (1.0 + tl.exp(-act_f32))) * mul_f32
-            # Round through bf16 to match unfused precision path
-            y = y.to(tl.bfloat16).to(tl.float32)
+        scale_byte = tl.clamp(exponent + 127.0, 0.0, 255.0).to(tl.int32)
+        scale_bytes = tl.reshape(scale_byte, (BLOCK_M, PACKS_PER_CTA, GROUPS_PER_PACK))
+        shifts = tl.arange(0, GROUPS_PER_PACK) * 8
+        packed_scale = tl.sum(scale_bytes << shifts[None, None, :], axis=2)
 
-            absmax = tl.max(tl.abs(y), axis=1)
+        scale_pack = pack_tile * PACKS_PER_CTA + pack_offsets
+        scale_ptrs = (
+            output_scale_ptr
+            + scale_pack[None, :] * output_scale_stride_k
+            + rows[:, None]
+        )
+        tl.store(
+            scale_ptrs,
+            packed_scale,
+            mask=row_mask[:, None] & (scale_pack[None, :] < PACKS_PER_ROW),
+        )
 
-            scale_raw = tl.maximum(absmax / fp8_max, 1e-10)
-            exponent = tl.ceil(tl.log2(scale_raw))
-            scale = tl.math.exp2(exponent)
-
-            y_q = tl.clamp(y / scale[:, None], fp8_min, fp8_max)
-
-            out_q_ptrs = output_q_ptr + base_out_offset + n_offset + offs_n[None, :]
-            tl.store(
-                out_q_ptrs,
-                y_q.to(output_q_ptr.dtype.element_ty),
-                mask=row_mask[:, None],
-            )
-
-            exponent_biased = tl.clamp(exponent + 127.0, 0.0, 255.0).to(tl.int32)
-            packed_scale = packed_scale | (exponent_biased << (pack_idx * 8))
-
-    scale_ptrs = output_scale_ptr + pid_pack * output_scale_stride_k + m_offset + offs_m
-    tl.store(scale_ptrs, packed_scale, mask=row_mask)
+        row_start += row_step
 
 
 def silu_mul_quant_fp8_packed_triton(
@@ -235,37 +264,48 @@ def silu_mul_quant_fp8_packed_triton(
     group_size: int = 128,
     output_q: torch.Tensor | None = None,
     clamp_limit: float | None = None,
+    alpha: float = 1.0,
+    beta: float = 0.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert input.dim() == 2
     assert input.is_contiguous()
 
     M, N = input.shape
-    N_2 = N // 2
+    hidden_size = N // 2
 
-    assert N_2 % group_size == 0
+    assert hidden_size % group_size == 0
 
     fp8_dtype = torch.float8_e4m3fn
     finfo = torch.finfo(fp8_dtype)
     fp8_min, fp8_max = finfo.min, finfo.max
 
-    num_groups_per_row = N_2 // group_size
-    num_packed_groups = (num_groups_per_row + 3) // 4
-    tma_aligned_M = ((M + 3) // 4) * 4
+    groups_per_row = hidden_size // group_size
+    groups_per_pack = 4  # pack 4 UE8M0 scales to a single INT32
+    packs_per_row = triton.cdiv(groups_per_row, groups_per_pack)
 
     if output_q is None:
-        output_q = torch.empty((M, N_2), dtype=fp8_dtype, device=input.device)
+        output_q = torch.empty((M, hidden_size), dtype=fp8_dtype, device=input.device)
 
+    aligned_m = triton.cdiv(M, 4) * 4
     output_scale_packed = torch.empty(
-        (num_packed_groups, tma_aligned_M),
+        (packs_per_row, aligned_m),
         dtype=torch.int32,
         device=input.device,
     ).T[:M, :]
 
-    BLOCK_M = 8
-    grid = (num_packed_groups, (M + BLOCK_M - 1) // BLOCK_M)
-
-    num_warps = max(4, group_size // 32)
+    # Tuned for group_size=32 (MXFP8) and group_size=128 (DeepSeek-V4)
+    num_warps = 4
     num_stages = 2
+    if group_size < 128:
+        BM = 1
+        packs_per_cta = 8
+    else:
+        BM = 1 if M < 512 else 4
+        packs_per_cta = 2 if M < 512 else 1
+
+    grid_n = triton.cdiv(packs_per_row, packs_per_cta)
+    grid_m = min(triton.cdiv(M, BM), 4096)
+    grid = (grid_n, grid_m)
 
     has_clamp = clamp_limit is not None
     _silu_mul_quant_fp8_packed_kernel[grid](
@@ -277,12 +317,16 @@ def silu_mul_quant_fp8_packed_triton(
         output_q.stride(0),
         output_scale_packed.stride(1),
         clamp_limit if has_clamp else 0.0,
+        alpha,
+        beta,
         N=N,
-        NUM_GROUPS=num_groups_per_row,
+        GROUPS_PER_ROW=groups_per_row,
+        PACKS_PER_ROW=packs_per_row,
         fp8_min=fp8_min,
         fp8_max=fp8_max,
         GROUP_SIZE=group_size,
-        BLOCK_M=BLOCK_M,
+        PACKS_PER_CTA=packs_per_cta,
+        BLOCK_M=BM,
         HAS_CLAMP=has_clamp,
         num_warps=num_warps,
         num_stages=num_stages,
@@ -303,6 +347,8 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
     # Information for float8
     eps,
     clamp_limit,
+    alpha,
+    beta,
     fp8_min: tl.constexpr,
     fp8_max: tl.constexpr,
     use_ue8m0: tl.constexpr,
@@ -348,10 +394,14 @@ def _silu_mul_per_token_group_quant_fp8_colmajor(
         mul_in = tl.clamp(mul_in.to(tl.float32), -clamp_limit, clamp_limit).to(
             y_ptr.dtype.element_ty
         )
+    # Unified gated activation: silu == swigluoai with alpha=1, beta=0.
+    #   glu = gate * sigmoid(alpha * gate); y = (up + beta) * glu
+    # Keep glu/up at input precision (narrow before the mul) so the alpha=1,
+    # beta=0 defaults match the C++ silu_and_mul path bit-for-bit.
     act_in = act_in.to(tl.float32)
-    one_f32 = tl.cast(1, tl.float32)
-    silu_out = (act_in / (one_f32 + tl.exp(-act_in))).to(y_ptr.dtype.element_ty)
-    y = (silu_out * mul_in).to(tl.float32)
+    glu = (act_in / (1.0 + tl.exp(-act_in * alpha))).to(y_ptr.dtype.element_ty)
+    up = (mul_in.to(tl.float32) + beta).to(y_ptr.dtype.element_ty)
+    y = (glu * up).to(tl.float32)
 
     # quant
     _absmax = tl.maximum(tl.max(tl.abs(y), axis=1), eps)
@@ -379,11 +429,15 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
     use_ue8m0: bool | None = None,
     eps: float = 1e-10,
     clamp_limit: float | None = None,
+    group_size: int = 128,
+    alpha: float = 1.0,
+    beta: float = 0.0,
 ):
     """
-    silu+mul + block-fp8 quant with group size 128.
+    Gated activation + block-fp8 quant. ``alpha``/``beta`` select the gate
+    (silu: alpha=1, beta=0; swigluoai: alpha, beta from config).
     """
-    GROUP_SIZE = 128
+    GROUP_SIZE = group_size
     assert input.ndim == 2
     if output is not None:
         assert output.ndim == 2
@@ -431,6 +485,8 @@ def silu_mul_per_token_group_quant_fp8_colmajor(
         output_scales.stride(-1),
         eps,
         clamp_limit if has_clamp else 0.0,
+        alpha,
+        beta,
         fp8_min,
         fp8_max,
         use_ue8m0,
@@ -575,7 +631,9 @@ def per_token_group_quant_fp8(
 
     # prefer CUDA/XPU kernel if available
     # TODO(bnell): this causes some fp8 moe test to fail.
-    if current_platform.is_cuda() and x.is_contiguous():
+    if (
+        current_platform.is_cuda_alike() or current_platform.is_xpu()
+    ) and x.is_contiguous():
         torch.ops._C.per_token_group_fp8_quant(
             x,
             x_q,
@@ -587,12 +645,6 @@ def per_token_group_quant_fp8(
             use_ue8m0,
             column_major_scales,
             tma_aligned_scales,
-        )
-        return x_q, x_s
-
-    if current_platform.is_xpu() and x.is_contiguous():
-        torch.ops._C.per_token_group_fp8_quant(
-            x, x_q, x_s, group_size, eps, fp8_min, fp8_max, use_ue8m0
         )
         return x_q, x_s
 
@@ -670,8 +722,7 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
     )
     assert x.stride(-1) == 1, "`x` groups must be contiguous"
 
-    finfo = torch.finfo(dtype)
-    fp8_min, fp8_max = finfo.min, finfo.max
+    fp8_min, fp8_max = get_fp8_min_max()
 
     # compute DeepGEMM-style packed scale tensor shape.
     hidden_dim = x.shape[-1]
@@ -687,10 +738,10 @@ def per_token_group_quant_fp8_packed_for_deepgemm(
         dtype=torch.int32,
     )
 
-    # CUDA kernel path only (DeepGEMM + E8M0 is CUDA-specific).
-    assert current_platform.is_cuda(), (
-        "per_token_group_quant_fp8_packed_for_deepgemm is only valid on CUDA "
-        "platforms using DeepGEMM."
+    # Native kernel (libtorch stable); used with DeepGEMM on CUDA and
+    # available on ROCm for the same packed UE8M0 scale layout.
+    assert current_platform.is_cuda_alike(), (
+        "per_token_group_quant_fp8_packed_for_deepgemm requires a CUDA or ROCm GPU."
     )
 
     x_contiguous = x.contiguous()
@@ -1020,9 +1071,10 @@ def deepgemm_post_process_fp8_weight_block(
         f"to be torch.float8_e4m3fn, got {wq.dtype} instead."
     )
 
-    if ws.dtype == torch.float8_e8m0fnu:
-        # Scales already in E8M0 from checkpoint — upcast to fp32
-        # and skip requantization (weights already have power-of-two scales).
+    if ws.dtype in (torch.float8_e8m0fnu, torch.uint8):
+        # Scales already in E8M0 from checkpoint (float8_e8m0fnu, or raw E8M0
+        # bits as uint8 for MXFP8) — upcast to fp32 and skip requantization
+        # (weights already have power-of-two scales).
         ws = _upcast_e8m0_to_fp32(ws)
     else:
         assert ws.dtype == torch.float32, (
@@ -1062,7 +1114,8 @@ def deepgemm_post_process_fp8_weight_block(
         ws = ws.unsqueeze(0)
 
     # From https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/utils/layout.hpp#L46
-    recipe = (1, 128, 128)
+    # (1, block_n, block_k): (1, 128, 128) for FP8 block, (1, 1, 32) for MXFP8.
+    recipe = (1, quant_block_shape[0], quant_block_shape[1])
 
     # Ref : https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/apis/gemm.hpp
     # DeepGemm uses the `transform_sf_into_required_layout` function to

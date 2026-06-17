@@ -29,7 +29,7 @@ def _tilelang_hc_prenorm_gemm(
     n_thr: int = 512,
     n_splits: int = 1,
 ) -> None:
-    from vllm._tilelang_ops import (
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         hc_prenorm_gemm_block_m_tilelang,
         hc_prenorm_gemm_tilelang,
     )
@@ -126,7 +126,7 @@ def mhc_pre_tilelang(
         comb_mix: shape (..., hc_mult, hc_mult), dtype torch.float32
         layer_input: shape (..., hidden_size), dtype torch.bfloat16
     """
-    from vllm._tilelang_ops import (
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
         mhc_pre_big_fuse_tilelang,
         mhc_pre_big_fuse_with_norm_tilelang,
@@ -306,7 +306,9 @@ def mhc_post_tilelang(
     post_layer_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
 ) -> torch.Tensor:
-    from vllm._tilelang_ops import mhc_post_tilelang as _mhc_post_kernel
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+        mhc_post_tilelang as _mhc_post_kernel,
+    )
 
     out = torch.empty_like(residual)
     _mhc_post_kernel(
@@ -353,7 +355,7 @@ def mhc_fused_post_pre_tilelang(
         layer_input_cur: shape (..., hidden_size)
     """
 
-    from vllm._tilelang_ops import (
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import (
         compute_num_split,
         mhc_fused_tilelang,
         mhc_post_tilelang,
@@ -608,21 +610,22 @@ def _mhc_post_tilelang_fake(
     return torch.empty_like(residual)
 
 
-def _hc_head_fused_kernel_tilelang(
+def hc_head_fused_kernel_tilelang(
     hs_flat: torch.Tensor,
     fn: torch.Tensor,
     hc_scale: torch.Tensor,
     hc_base: torch.Tensor,
-    out: torch.Tensor,
-    hidden_size: int,
     rms_eps: float,
     hc_eps: float,
-    hc_mult: int,
-) -> None:
-    """Fill pre-allocated `out` (T, H) in-place with the hc_head result."""
-    if hs_flat.shape[0] == 0:
-        return
-    from vllm._tilelang_ops import hc_head_fuse_tilelang
+) -> torch.Tensor:
+    """Apply the fused hc_head kernel and return the (T, H) bf16 result."""
+    num_tokens, hc_mult, hidden_size = hs_flat.shape
+    out = torch.empty(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device=hs_flat.device
+    )
+    if num_tokens == 0:
+        return out
+    from vllm.model_executor.kernels.mhc.tilelang_kernels import hc_head_fuse_tilelang
 
     hc_head_fuse_tilelang(
         hs_flat,
@@ -634,6 +637,21 @@ def _hc_head_fused_kernel_tilelang(
         rms_eps,
         hc_eps,
         hc_mult,
+    )
+    return out
+
+
+def _hc_head_fused_kernel_tilelang_fake(
+    hs_flat: torch.Tensor,
+    fn: torch.Tensor,
+    hc_scale: torch.Tensor,
+    hc_base: torch.Tensor,
+    rms_eps: float,
+    hc_eps: float,
+) -> torch.Tensor:
+    num_tokens, _, hidden_size = hs_flat.shape
+    return torch.empty(
+        num_tokens, hidden_size, dtype=torch.bfloat16, device=hs_flat.device
     )
 
 
@@ -659,6 +677,7 @@ direct_register_custom_op(
 
 direct_register_custom_op(
     op_name="hc_head_fused_kernel_tilelang",
-    op_func=_hc_head_fused_kernel_tilelang,
-    mutates_args=["out"],
+    op_func=hc_head_fused_kernel_tilelang,
+    mutates_args=[],
+    fake_impl=_hc_head_fused_kernel_tilelang_fake,
 )

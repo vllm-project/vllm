@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext, RequestOffloadingContext
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -162,6 +162,53 @@ class SecondaryTierManager(ABC):
             req_context: Per-request context.
         """
         return
+
+    @abstractmethod
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        """
+        Called when a new request is first seen by the scheduler.
+
+        Returns a RequestOffloadingContext expressing this tier's preference
+        for how blocks should be offloaded for this request.
+
+        Args:
+            req_context: Per-request context.
+        """
+        pass
+
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        """
+        Called when a request has finished.
+
+        Args:
+            req_context: per-request context.
+        """
+        return
+
+    def on_schedule_end(self) -> None:
+        """Called once at the end of each scheduler step.
+
+        Secondary tiers may override this for per-step cleanup or
+        deferred work submission.
+        """
+        return
+
+    @abstractmethod
+    def drain_jobs(self) -> None:
+        """Block until every submitted load/store job has completed or failed.
+
+        After this returns, no tier I/O is touching the primary memoryview,
+        and every submitted job's result is available from `get_finished_jobs()`
+        (yielded by a prior call or queued for the next one). Used by
+        `TieringOffloadingManager.reset_cache` to release primary slots
+        without racing with in-flight transfers.
+
+        Implementations must not abort a mid-flight transfer: a partial copy
+        would corrupt either the primary memoryview or the secondary backing
+        store. Queued (not-yet-started) transfers may be cancelled, but their
+        failure result must still appear in `get_finished_jobs()`.
+        """
+        pass
 
     def shutdown(self) -> None:
         """Release resources held by this tier (threads, connections, etc.)."""

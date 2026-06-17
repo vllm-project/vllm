@@ -95,6 +95,10 @@ def _resolve_flashinfer_autotune_file(runner: "GPUModelRunner") -> Path:
 
 
 def kernel_warmup(worker: "Worker"):
+    from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
+        minimax_m3_msa_warmup,
+    )
+
     model = worker.get_model()
 
     # Deep GEMM warmup
@@ -124,6 +128,8 @@ def kernel_warmup(worker: "Worker"):
         model_dtype=worker.model_runner.dtype,
         kv_caches=getattr(worker.model_runner, "kv_caches", None),
     )
+
+    minimax_m3_msa_warmup(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune

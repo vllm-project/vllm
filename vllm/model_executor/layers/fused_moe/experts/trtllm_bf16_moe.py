@@ -80,6 +80,8 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
             RoutingMethodType.Llama4,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
+            RoutingMethodType.SigmoidRenorm,
+            RoutingMethodType.Sigmoid,
         ]
 
     @staticmethod
@@ -98,9 +100,6 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
         routing_method: RoutingMethodType,
     ) -> bool:
         return True
-
-    def supports_expert_map(self) -> bool:
-        return False
 
     @property
     def expects_unquantized_inputs(self) -> bool:

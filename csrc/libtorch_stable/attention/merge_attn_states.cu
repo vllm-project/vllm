@@ -7,7 +7,7 @@
 #include <torch/headeronly/core/ScalarType.h>
 
 #include "../../attention/attention_dtypes.h"
-#include "../../attention/attention_utils.cuh"
+#include "attention_utils.cuh"
 #include "../../quantization/w8a8/fp8/common.cuh"
 
 namespace vllm {
