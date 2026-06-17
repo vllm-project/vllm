@@ -93,7 +93,15 @@ def ref_paged_attn(
 
 
 @pytest.mark.parametrize(
-    "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
+    "seq_lens",
+    [
+        [(1, 1328), (5, 18), (129, 463)],
+        [(1, 523), (1, 37), (1, 2011)],
+        # Issue #44575: kv_lens chosen so first_allowed_key lands at varied
+        # residues mod TILE_SIZE for the 64/128/256 windows below, exercising
+        # the non-tile-aligned sliding-window loop base.
+        [(1, 1001), (1, 1015), (1, 1031)],
+    ],
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)

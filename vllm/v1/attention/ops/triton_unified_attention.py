@@ -378,7 +378,7 @@ def kernel_unified_attention(
     if USE_QQ_BIAS:
         qq_bias_row_ptrs = qq_bias_ptr + query_pos[:, None] * qq_bias_stride_0
 
-    loop_lo, loop_hi, max_seq_prefix_len = compute_tile_loop_bounds(
+    loop_lo, loop_hi, max_seq_prefix_len, tile_base = compute_tile_loop_bounds(
         context_len,
         seq_len,
         cur_batch_query_len,
@@ -396,11 +396,12 @@ def kernel_unified_attention(
         USE_PER_SEQ_CAUSAL,
         CHUNK_LOOKBACK,
         CHUNK_SIZE,
+        USE_TD,
     )
 
     # iterate through tiles (now limited to the sliding window range)
     for j in range(loop_lo, loop_hi):
-        seq_offset = j * TILE_SIZE + offs_t
+        seq_offset = tile_base + j * TILE_SIZE + offs_t
         tile_mask = seq_offset < max_seq_prefix_len
 
         physical_block_idx = tl.load(
