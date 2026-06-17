@@ -1,4 +1,5 @@
 #include "ops.h"
+#include "cuda_utils.h"
 #include "core/registration.h"
 
 #include <torch/csrc/stable/library.h>
@@ -26,9 +27,74 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "
       "output_s, int group_size, float eps, float int8_min, float int8_max) -> "
       "()");
+  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 
 #ifndef USE_ROCM
-  ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
+
+  // TODO: Remove this once ROCm upgrade to torch 2.11.
+  ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+
+  // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
+  ops.def(
+      "machete_supported_schedules("
+      "   ScalarType a_type,"
+      "   int b_type,"
+      "   ScalarType? maybe_group_scales_type,"
+      "   ScalarType? maybe_group_zeros_type,"
+      "   ScalarType? maybe_channel_scales_type,"
+      "   ScalarType? maybe_token_scales_type,"
+      "   ScalarType? maybe_out_type"
+      ") -> str[]");
+  ops.def(
+      "machete_mm("
+      "   Tensor A,"
+      "   Tensor B,"
+      "   int b_type,"
+      "   ScalarType? out_type,"
+      "   Tensor? group_scales,"
+      "   Tensor? group_zeros,"
+      "   int?    group_size,"
+      "   Tensor? channel_scales,"
+      "   Tensor? token_scales,"
+      "   str?    schedule"
+      ") -> Tensor");
+  ops.def(
+      "machete_prepack_B("
+      "   Tensor B,"
+      "   ScalarType a_type,"
+      "   int b_type,"
+      "   ScalarType? group_scales_type"
+      ") -> Tensor");
+  // conditionally compiled so impl registration is in source file
+
+  // Marlin GEMM
+  ops.def(
+      "marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
+      "Tensor? b_bias_or_none,Tensor b_scales, "
+      "Tensor? a_scales, Tensor? global_scale, Tensor? b_zeros_or_none, "
+      "Tensor? "
+      "g_idx_or_none, Tensor? perm_or_none, Tensor workspace, int b_type_id, "
+      "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
+      "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
+  // conditionally compiled so impl registrations are in source file
+
+  // gptq_marlin repack from GPTQ.
+  ops.def(
+      "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, "
+      "SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
+  // conditionally compiled so impl registrations are in source file
+
+  // awq_marlin repack from AWQ.
+  ops.def(
+      "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
+      "SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
+  // conditionally compiled so impl registrations are in source file
+
+  // preprocess W-int4A-fp8 weight for marlin kernel
+  ops.def(
+      "marlin_int4_fp8_preprocess(Tensor qweight, "
+      "Tensor? qzeros_or_none, bool inplace) -> Tensor");
+  // conditionally compiled so impl registrations are in source file
 #endif
 
 #ifndef USE_ROCM
@@ -242,6 +308,22 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "awq_dequantize(Tensor _kernel, Tensor _scaling_factors, "
       "Tensor _zeros, SymInt split_k_iters, int thx, int thy) -> Tensor");
 
+  // Expert-specialization mxfp8 blockscaled grouped quantization (SM100+).
+  ops.def(
+      "mxfp8_experts_quant("
+      " Tensor input, Tensor problem_sizes, Tensor expert_offsets,"
+      " Tensor blockscale_offsets, Tensor! quant_output, Tensor! scale_factor)"
+      " -> ()");
+  // conditionally compiled so impl registration is in source file
+
+  // Expert-specialization mxfp8 blockscaled grouped GEMM (SM100+).
+  ops.def(
+      "cutlass_mxfp8_grouped_mm("
+      " Tensor a, Tensor b, Tensor sfa, Tensor sfb, Tensor! out,"
+      " Tensor problem_sizes, Tensor expert_offsets, Tensor blockscale_offsets)"
+      " -> ()");
+  // conditionally compiled so impl registration is in source file
+
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
   // conditionally compiled so impl registration is in source file
   ops.def(
@@ -321,6 +403,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? scale_ub, Tensor!? residual, int group_size, "
       "bool is_scale_transposed) -> ()");
 
+  // Fused SiLU+Mul + per-block quantization
+  ops.def(
+      "silu_and_mul_per_block_quant("
+      "Tensor! out, "
+      "Tensor input, "
+      "Tensor! scales, "
+      "int group_size, "
+      "Tensor? scale_ub=None, "
+      "bool is_scale_transposed=False) -> ()");
+
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.def(
@@ -342,6 +434,20 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor q_in, Tensor kv, Tensor! k_cache, "
       "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
       "int q_head_padded, float eps, int cache_block_size) -> Tensor");
+
+  // FlashInfer V4 full-cache variants: write Q in place (bf16) or to a separate
+  // FP8 tensor, and KV into a contiguous 512-wide token-strided cache.
+  ops.def(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert("
+      "Tensor! q, Tensor kv, Tensor! k_cache, Tensor slot_mapping, "
+      "Tensor position_ids, Tensor cos_sin_cache, float eps, "
+      "int cache_block_size) -> ()");
+  ops.def(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert("
+      "Tensor q, Tensor kv, Tensor! q_fp8, Tensor! k_cache, "
+      "Tensor slot_mapping, Tensor position_ids, Tensor cos_sin_cache, "
+      "Tensor fp8_scale, Tensor q_fp8_scale_inv, float eps, "
+      "int cache_block_size) -> ()");
 
 #ifndef USE_ROCM
   ops.def(
@@ -533,9 +639,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("per_token_group_quant_int8",
            TORCH_BOX(&per_token_group_quant_int8));
 
-#ifndef USE_ROCM
   ops.impl("permute_cols", TORCH_BOX(&permute_cols));
-#endif
 
 #ifndef USE_ROCM
   // CUTLASS scaled_mm ops
@@ -585,12 +689,20 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("rms_norm_dynamic_per_token_quant",
            TORCH_BOX(&rms_norm_dynamic_per_token_quant));
   ops.impl("rms_norm_per_block_quant", TORCH_BOX(&rms_norm_per_block_quant));
+  ops.impl("silu_and_mul_per_block_quant",
+           TORCH_BOX(&silu_and_mul_per_block_quant));
 
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
            TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert));
+  ops.impl(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert",
+      TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert));
+  ops.impl(
+      "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert",
+      TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert));
 #ifndef USE_ROCM
   ops.impl("minimax_allreduce_rms", TORCH_BOX(&minimax_allreduce_rms));
   ops.impl("minimax_allreduce_rms_qk", TORCH_BOX(&minimax_allreduce_rms_qk));
@@ -640,6 +752,28 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("paged_attention_v1", TORCH_BOX(&paged_attention_v1));
   ops.impl("paged_attention_v2", TORCH_BOX(&paged_attention_v2));
 }
+
+// TODO: Remove this once ROCm upgrade to torch 2.11.
+#ifndef USE_ROCM
+STABLE_TORCH_LIBRARY_IMPL(_C, CPU, ops) {
+  ops.impl("get_cuda_view_from_cpu_tensor",
+           TORCH_BOX(&get_cuda_view_from_cpu_tensor));
+}
+
+STABLE_TORCH_LIBRARY_FRAGMENT(_C_cuda_utils, cuda_utils) {
+  cuda_utils.def("get_device_attribute(int attribute, int device_id) -> int");
+  cuda_utils.def(
+      "get_max_shared_memory_per_block_device_attribute(int device_id) -> int");
+}
+
+STABLE_TORCH_LIBRARY_IMPL(_C_cuda_utils, CompositeExplicitAutograd,
+                          cuda_utils) {
+  cuda_utils.impl("get_device_attribute", TORCH_BOX(&get_device_attribute));
+  cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
+                  TORCH_BOX(&get_max_shared_memory_per_block_device_attribute));
+}
+
+#endif
 
 // These capability-check functions take only primitive args (no tensors), so
 // there is no device to dispatch on. CompositeExplicitAutograd makes them

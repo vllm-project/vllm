@@ -15,6 +15,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -1849,6 +1850,8 @@ def create_scheduler_with_priority(
         enable_chunked_prefill=True,
         is_encoder_decoder=model_config.is_encoder_decoder,
         policy="priority",  # Enable priority scheduling
+        # Ensure admission/preemption mechanics are deterministic
+        watermark=0.0,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
@@ -3988,6 +3991,87 @@ def test_delayed_kv_connector_free_keeps_scheduler_active():
     assert not scheduler.has_finished_requests()
 
 
+def test_scheduler_kv_connector_stats():
+    """Test worker-side, scheduler-side, and combined KV connector stats."""
+
+    class GenericKVConnectorStats(KVConnectorStats):
+        def reset(self):
+            self.data = {}
+
+        def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
+            self.data.update(other.data)
+            return self
+
+        def reduce(self) -> dict[str, int | float]:
+            return {}
+
+        def is_empty(self) -> bool:
+            return not self.data
+
+    test_cases = (
+        ({"worker": 1}, None, {"worker": 1}),
+        (None, {"scheduler": 2}, {"scheduler": 2}),
+        ({"worker": 1}, {"scheduler": 2}, {"worker": 1, "scheduler": 2}),
+    )
+
+    for worker_data, scheduler_data, expected_data in test_cases:
+        scheduler = create_scheduler()
+        worker_stats = (
+            GenericKVConnectorStats(data=worker_data) if worker_data else None
+        )
+        scheduler_stats = (
+            GenericKVConnectorStats(data=scheduler_data) if scheduler_data else None
+        )
+        scheduler.connector = Mock()
+        scheduler.connector.get_kv_connector_stats.return_value = (
+            scheduler_stats if worker_stats is None else None
+        )
+        scheduler.connector.take_events.return_value = []
+
+        def update_connector_output(
+            kv_connector_output: KVConnectorOutput,
+            scheduler=scheduler,
+            scheduler_stats=scheduler_stats,
+        ):
+            scheduler.connector.get_kv_connector_stats.return_value = scheduler_stats
+
+        scheduler.connector.update_connector_output.side_effect = (
+            update_connector_output
+        )
+
+        model_output = ModelRunnerOutput(
+            req_ids=["req_0"],
+            req_id_to_index={"req_0": 0},
+            sampled_token_ids=[[123]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[None],
+            kv_connector_output=KVConnectorOutput(kv_connector_stats=worker_stats)
+            if worker_stats
+            else None,
+        )
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=None,
+            num_scheduled_tokens={"req_0": 1},
+            total_num_scheduled_tokens=1,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[0],
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
+
+        engine_core_outputs = scheduler.update_from_output(
+            scheduler_output, model_output
+        )
+
+        final_stats = next(
+            iter(engine_core_outputs.values())
+        ).scheduler_stats.kv_connector_stats
+        assert final_stats == expected_data
+
+
 # ==============================================================================
 # Variable-length encoder cross-attention block allocation tests
 # ==============================================================================
@@ -4474,6 +4558,84 @@ def test_ec_connector_pending_prefetch_only_checks_future_mm_features():
         f"Expected only {HASH_FUTURE!r} from future mm feature filtering, "
         f"got {future_hashes!r}. Past/boundary features must be filtered out."
     )
+
+
+def test_async_load_reservation_prevents_wedge_e2e():
+    """Same wedge scenario as PR #40968's lateral-preemption e2e test, but
+    resolved by reservation-based admission control instead of preemption.
+
+    A (8 blocks) and B (5 blocks) both want an async KV load, sharing a 4-block
+    prefix, in a 10-block pool (9 usable). Admitting both loads would wedge:
+    once their recvs finish neither can complete its local prefill (8+5 > 9).
+
+    Here the reservation gate refuses to admit B's load while A's full sequence
+    is still reserved, so B never holds blocks and A is free to complete - no
+    deadlock, and (unlike lateral preemption) B is never preempted.
+    """
+    BLOCK_SIZE = 16
+    A_TOKENS = BLOCK_SIZE * 8  # bigger request
+    B_TOKENS = BLOCK_SIZE * 5  # smaller request
+    MATCHED_TOKENS = BLOCK_SIZE * 4  # 4-block prefix loaded for both
+    NUM_BLOCKS = 10  # 9 usable; both prefixes fit, but not both full sequences
+
+    scheduler = create_scheduler(
+        block_size=BLOCK_SIZE,
+        num_blocks=NUM_BLOCKS,
+        max_num_seqs=4,
+        max_num_batched_tokens=A_TOKENS * 2,
+        use_kv_connector=mock_kv(matched_tokens=MATCHED_TOKENS, is_async=True),
+    )
+
+    [a] = create_requests(
+        num_requests=1, num_tokens=A_TOKENS, block_size=BLOCK_SIZE, req_ids=["a"]
+    )
+    [b] = create_requests(
+        num_requests=1, num_tokens=B_TOKENS, block_size=BLOCK_SIZE, req_ids=["b"]
+    )
+    scheduler.add_request(a)
+    scheduler.add_request(b)
+
+    EMPTY_OUTPUT = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    req_to_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0
+    ].req_to_blocks
+
+    # Step 1: A's load is admitted; B's is held back by the reservation (B never
+    # holds blocks, so the wedge precondition - both holding prefixes - is gone).
+    out1 = scheduler.schedule()
+    assert a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert a.num_computed_tokens == MATCHED_TOKENS
+    assert b.status == RequestStatus.WAITING
+    assert b.request_id not in req_to_blocks
+    assert len(scheduler.running) == 0
+    scheduler.update_from_output(out1, EMPTY_OUTPUT)
+
+    # Step 2: nothing changes until A's recv lands.
+    out2 = scheduler.schedule()
+    assert len(scheduler.running) == 0
+    a_finished = dataclasses.replace(
+        EMPTY_OUTPUT,
+        kv_connector_output=KVConnectorOutput(finished_recving=[a.request_id]),
+    )
+    scheduler.update_from_output(out2, a_finished)
+
+    # Step 3: A makes forward progress straight to RUNNING - no preemption was
+    # needed because B never wedged it.
+    out3 = scheduler.schedule()
+    assert a.status == RequestStatus.RUNNING
+    assert a in scheduler.running
+    assert a.request_id in {req.req_id for req in out3.scheduled_new_reqs}
+    assert b.status == RequestStatus.WAITING
+    assert b.num_preemptions == 0
+    assert b.request_id not in req_to_blocks
 
 
 def test_new_attn_block_ids_drained_every_step():
