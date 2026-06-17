@@ -85,7 +85,7 @@ class ColoredFormatter(NewLineFormatter):
 
     # ANSI color codes
     COLORS = {
-        "DEBUG": "\033[37m",  # White
+        "DEBUG": "\033[36m",  # Cyan (legible on light and dark backgrounds)
         "INFO": "\033[32m",  # Green
         "WARNING": "\033[33m",  # Yellow
         "ERROR": "\033[31m",  # Red
