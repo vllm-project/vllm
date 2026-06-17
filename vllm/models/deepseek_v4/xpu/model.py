@@ -930,22 +930,48 @@ class DeepseekV4DecoderLayer(nn.Module):
     ) -> tuple[
         torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
     ]:
-        residual = x
-        x, post, comb = self.hc_pre(
-            x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
-        )
+        if residual is None:
+            # First layer: run standalone hc_pre
+            residual = x
+            x, post_mix, res_mix = self.hc_pre(
+                x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
+            )
+        else:
+            residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
+                x,
+                residual,
+                post_mix,
+                res_mix,
+                self.hc_attn_fn,
+                self.hc_attn_scale,
+                self.hc_attn_base,
+                self.rms_norm_eps,
+                self.hc_eps,
+                self.hc_eps,
+                self.hc_post_alpha,
+                self.hc_sinkhorn_iters,
+            )
+
         x = self.attn_norm(x)
         x = self.attn(positions, x, None)
-        x = self.hc_post(x, residual, post, comb)
 
-        residual = x
-        x, post, comb = self.hc_pre(
-            x, self.hc_ffn_fn, self.hc_ffn_scale, self.hc_ffn_base
+        residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
+            x,
+            residual,
+            post_mix,
+            res_mix,
+            self.hc_ffn_fn,
+            self.hc_ffn_scale,
+            self.hc_ffn_base,
+            self.rms_norm_eps,
+            self.hc_eps,
+            self.hc_eps,
+            self.hc_post_alpha,
+            self.hc_sinkhorn_iters,
         )
         x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
-        x = self.hc_post(x, residual, post, comb)
-        return x, None, None, None
+        return x, residual, post_mix, res_mix
 
 
 @support_torch_compile
@@ -1096,6 +1122,10 @@ class DeepseekV4Model(nn.Module):
                 res_mix,
                 residual,
             )
+        # The fused path defers the final hc_post to the next layer's
+        # fused_post_pre. After the last layer we must apply it explicitly.
+        if layer is not None:
+            hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
@@ -1196,8 +1226,6 @@ class DeepseekV4Model(nn.Module):
                 elif "attn_sink" in name:
                     if is_pp_missing_parameter(name, self):
                         continue
-                    if name not in params_dict:
-                        continue
                     narrow_weight = loaded_weight[head_rank_start:head_rank_end]
                     n = narrow_weight.shape[0]
                     params_dict[name][:n].copy_(narrow_weight)
@@ -1205,8 +1233,6 @@ class DeepseekV4Model(nn.Module):
                     continue
                 else:
                     if is_pp_missing_parameter(name, self):
-                        continue
-                    if name not in params_dict:
                         continue
                     param = params_dict[name]
                     weight_loader = getattr(
