@@ -1141,7 +1141,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             skip_compiled = True
 
         # REMOVE
-        print("target model")
+        # print("target model")
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.cudagraph_manager,
             num_reqs,

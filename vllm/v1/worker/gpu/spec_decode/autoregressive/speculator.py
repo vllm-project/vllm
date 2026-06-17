@@ -215,7 +215,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
 
         # REMOVE
-        print("draft prefill")
+        # print("draft prefill")
 
         prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
@@ -261,7 +261,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         )
 
         # REMOVE
-        print("draft decode")
+        # print("draft decode")
 
         # Each request produces exactly 1 token per draft generation step,
         # enabling FULL graph replay.
