@@ -678,16 +678,19 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
             )
 
     def uuid(self) -> str:
+        producers, _ = build_default_registries()
+        pattern_builders = tuple(
+            sorted(
+                {producer.pattern_builder for producer in producers},
+                key=lambda builder: getattr(builder, "__qualname__", repr(builder)),
+            )
+        )
         return self.hash_source(
             self,
             ProducerSpec,
             GemmSpec,
             BlockScaleSplitKZeroInitFusionPass,
             _make_extra_check,
-            _make_2_input_producer_pattern,
-            _make_2_input_with_residual_producer_pattern,
-            _make_act_mul_group_quant_producer_pattern,
-            _make_group_quant_producer_pattern,
-            _make_gated_producer_pattern,
             build_default_registries,
+            *pattern_builders,
         )
