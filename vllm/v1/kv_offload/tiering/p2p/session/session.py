@@ -881,6 +881,21 @@ class P2PSession:
                 kv_request_id,
                 len(result.local_idxs),
             )
+            # The matched blocks were popped from req.demanded /
+            # req.available, but no inflight will satisfy them, so
+            # remaining will never reach 0 on its own. Mark the
+            # request as finishing so the existing terminal paths
+            # clean up: if other inflight is in flight, the last one
+            # to drain will fire _finalize_outbound(success=False)
+            # via the elif branch in _collect_store_results. If
+            # nothing else is in flight, finalize now so the peer
+            # and the local store jobs don't wait for finish_request
+            # or for _STORE_TIMEOUT_S / _LOAD_TIMEOUT_S.
+            req = self._outbound.get(kv_request_id)
+            if req is not None:
+                req.finishing = True
+                if not self._has_inflight_for(kv_request_id):
+                    self._finalize_outbound(kv_request_id, success=False)
 
     def _send_connect(self) -> None:
         """Send our ConnectMsg announcing local NIXL metadata."""

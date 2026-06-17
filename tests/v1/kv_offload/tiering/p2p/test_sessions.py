@@ -813,6 +813,43 @@ class TestFinishRequestServerSide:
         assert StoreResult(job_id=7, success=True) in stores
         assert "req-1" not in session._outbound
 
+    def test_write_blocks_failure_finalizes_with_failure(self):
+        """write_blocks returning None must not leave the request hanging.
+
+        The matched blocks are gone from req.demanded but no inflight
+        will satisfy them, so remaining > 0 forever. Setting finishing
+        and calling _finalize_outbound(success=False) immediately (no
+        other inflight) tells the peer + emits StoreResult(success=False)
+        without waiting on _STORE_TIMEOUT_S or _LOAD_TIMEOUT_S.
+        """
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        # Decoder demands b"k1".
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [10],
+            }
+        )
+        session.poll()
+        # Force write_blocks to fail on the next call.
+        transport.write_blocks = lambda *a, **kw: None  # type: ignore[assignment]
+
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=42)
+
+        # Outbound was finalized immediately (no other inflight).
+        assert "req-1" not in session._outbound
+        # Peer notified with success=False.
+        msg = next(m for m in conn._sent if m[TYPE_KEY] == TransferDoneMsg.TYPE)
+        assert msg[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
+        assert msg[TransferDoneMsg.SUCCESS] is False
+        # Local store job surfaces on the next poll.
+        _, stores = session.poll()
+        assert StoreResult(job_id=42, success=False) in stores
+        assert 42 not in session._store_jobs
+
 
 # ---------------------------------------------------------------------------
 # Bidirectional — the case the unification is meant to fix
