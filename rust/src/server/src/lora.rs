@@ -57,12 +57,9 @@ impl LoraManager {
         }
     }
 
-    /// Return base served model names plus dynamically loaded LoRA adapter
-    /// names.
-    pub async fn served_model_names(&self, base_model_names: &[String]) -> Vec<String> {
-        let mut names = base_model_names.to_vec();
-        names.extend(self.requests.read().await.keys().cloned());
-        names
+    /// Snapshot loaded LoRA adapters.
+    pub async fn served_lora_requests(&self) -> Vec<LoraRequest> {
+        self.requests.read().await.values().cloned().collect()
     }
 
     /// Resolve the requested model against one consistent LoRA registry
