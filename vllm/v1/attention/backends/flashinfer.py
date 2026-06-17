@@ -1512,6 +1512,7 @@ class FlashInferImpl(AttentionImpl):
             assert attn_metadata.cascade_wrapper is not None
             stride_order = FlashInferBackend.get_kv_cache_stride_order()
             kv_perm = kv_cache.permute(*stride_order)
+            kv_perm = canonicalize_singleton_dim_strides(kv_perm)
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 kv_split_dim = 1 if get_kv_cache_layout() == "HND" else 2
                 kv_tuple = kv_perm.split(self.num_kv_heads, dim=kv_split_dim)
