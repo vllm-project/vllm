@@ -68,68 +68,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // custom types:
   // https://docs.google.com/document/d/18fBMPuOJ0fY5ZQ6YyrHUppw9FA332CpNtgB6SOIgyuA
 
-  // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
-  ops.def(
-      "machete_supported_schedules("
-      "   ScalarType a_type,"
-      "   int b_type,"
-      "   ScalarType? maybe_group_scales_type,"
-      "   ScalarType? maybe_group_zeros_type,"
-      "   ScalarType? maybe_channel_scales_type,"
-      "   ScalarType? maybe_token_scales_type,"
-      "   ScalarType? maybe_out_type"
-      ") -> str[]");
-  ops.def(
-      "machete_mm("
-      "   Tensor A,"
-      "   Tensor B,"
-      "   int b_type,"
-      "   ScalarType? out_type,"
-      "   Tensor? group_scales,"
-      "   Tensor? group_zeros,"
-      "   int?    group_size,"
-      "   Tensor? channel_scales,"
-      "   Tensor? token_scales,"
-      "   str?    schedule"
-      ") -> Tensor");
-  ops.def(
-      "machete_prepack_B("
-      "   Tensor B,"
-      "   ScalarType a_type,"
-      "   int b_type,"
-      "   ScalarType? group_scales_type"
-      ") -> Tensor");
-  // conditionally compiled so impl registration is in source file
-
-  // Marlin Optimized Quantized GEMM (supports GPTQ, AWQ, FP8, NVFP4, MXFP4).
-  ops.def(
-      "marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
-      "Tensor? b_bias_or_none,Tensor b_scales, "
-      "Tensor? a_scales, Tensor? global_scale, Tensor? b_zeros_or_none, "
-      "Tensor? "
-      "g_idx_or_none, Tensor? perm_or_none, Tensor workspace, int b_type_id, "
-      "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "
-      "bool use_atomic_add, bool use_fp32_reduce, bool is_zp_float) -> Tensor");
-  // conditionally compiled so impl registration is in source file
-
-  // gptq_marlin repack from GPTQ.
-  ops.def(
-      "gptq_marlin_repack(Tensor b_q_weight, Tensor perm, "
-      "SymInt size_k, SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
-  // conditionally compiled so impl registrations are in source file
-
-  // awq_marlin repack from AWQ.
-  ops.def(
-      "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
-      "SymInt size_n, int num_bits, bool is_a_8bit) -> Tensor");
-  // conditionally compiled so impl registrations are in source file
-
-  // preprocess W-int4A-fp8 weight for marlin kernel
-  ops.def(
-      "marlin_int4_fp8_preprocess(Tensor qweight, "
-      "Tensor? qzeros_or_none, bool inplace) -> Tensor");
-  // conditionally compiled so impl registrations are in source file
-
 #endif
 }
 

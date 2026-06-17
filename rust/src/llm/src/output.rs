@@ -12,6 +12,7 @@ use vllm_engine_core_client::protocol::{EngineCoreFinishReason, StopReason};
 use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
 use crate::error::Result;
+use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 
 /// Token usage metadata for one request.
@@ -195,12 +196,17 @@ impl GenerateOutput {
 
 /// Stream of per-request generate outputs for one request.
 ///
-/// - A normal termination of the stream represents a clean completion of the request.
-/// - For errors, unexpected closes, or explicit aborts, the stream terminates with an error.
+/// - A normal termination of the stream represents a clean completion of the
+///   request, including a client-initiated abort, which yields a final output
+///   with `finish_reason = Abort` before the stream ends.
+/// - For errors or unexpected engine-side closes, the stream terminates with an error.
 pub struct GenerateOutputStream {
     pending_prompt_info: Option<GeneratePromptInfo>,
     raw_stream: EngineCoreOutputStream,
     request_metrics: RequestMetricsTracker,
+    /// Removes this request's external→internal tracking edge on drop. Held for
+    /// its `Drop` side effect only; never read directly.
+    _request_guard: RequestGuard,
 }
 
 impl GenerateOutputStream {
@@ -210,6 +216,7 @@ impl GenerateOutputStream {
         prompt_token_ids: Arc<[u32]>,
         raw_stream: EngineCoreOutputStream,
         request_metrics: RequestMetricsTracker,
+        request_guard: RequestGuard,
     ) -> Self {
         Self {
             pending_prompt_info: Some(GeneratePromptInfo {
@@ -218,6 +225,7 @@ impl GenerateOutputStream {
             }),
             raw_stream,
             request_metrics,
+            _request_guard: request_guard,
         }
     }
 

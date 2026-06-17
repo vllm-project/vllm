@@ -787,6 +787,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         activation: MoEActivation,
         output: torch.Tensor,
         input: torch.Tensor,
+        **kwargs,
     ) -> None:
         quant_config = self.quant_config or FUSED_MOE_UNQUANTIZED_CONFIG
         if activation == MoEActivation.SWIGLUOAI:

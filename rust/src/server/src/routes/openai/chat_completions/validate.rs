@@ -92,13 +92,6 @@ pub(super) fn validate_request_compat(
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
-    if request.parallel_tool_calls.is_some() {
-        bail_invalid_request!(
-            param = "parallel_tool_calls",
-            "parallel_tool_calls is not supported."
-        );
-    }
-
     reject_non_default(
         request.length_penalty.as_ref(),
         "length_penalty",
@@ -135,15 +128,6 @@ pub(super) fn validate_request_compat(
         "repetition_detection",
         "repetition_detection is not supported.",
     )?;
-
-    if let Some(options) = &request.stream_options
-        && options.continuous_usage_stats.is_some()
-    {
-        bail_invalid_request!(
-            param = "stream_options",
-            "continuous_usage_stats is not supported."
-        );
-    }
 
     Ok(())
 }

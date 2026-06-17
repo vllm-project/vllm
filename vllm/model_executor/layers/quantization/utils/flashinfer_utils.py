@@ -5,10 +5,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
@@ -36,6 +34,7 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.GELU_NO_MUL: ActivationType.Gelu,
         MoEActivation.SILU: ActivationType.Swiglu,
         MoEActivation.GELU: ActivationType.Geglu,
+        MoEActivation.GELU_TANH: ActivationType.Geglu,
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation]
@@ -95,34 +94,6 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     )
 
 
-def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
-    backend_map = {
-        "throughput": FlashinferMoeBackend.CUTLASS,
-        "latency": FlashinferMoeBackend.TENSORRT_LLM,
-        "masked_gemm": FlashinferMoeBackend.CUTEDSL,
-    }
-
-    flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
-    if flashinfer_moe_backend in backend_map:
-        if (
-            flashinfer_moe_backend == "latency"
-            and not current_platform.is_device_capability_family(100)
-        ):
-            logger.info_once(
-                "Flashinfer TRTLLM MOE backend is only supported on "
-                "SM100 and later, using CUTLASS backend instead",
-            )
-            return FlashinferMoeBackend.CUTLASS
-        return backend_map[flashinfer_moe_backend]
-    elif current_platform.is_device_capability(90):
-        return FlashinferMoeBackend.CUTLASS
-
-    raise ValueError(
-        f"Unknown flashinfer moe backend: {flashinfer_moe_backend!r}. "
-        f"Expected one of {list(backend_map.keys())}."
-    )
-
-
 def is_flashinfer_supporting_global_sf(backend: FlashinferMoeBackend | None) -> bool:
     # TODO(shuw@nvidia): Update when new backends are added.
     backends_supporting_global_sf = (
@@ -150,7 +121,6 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
 
     from flashinfer.fused_moe.core import (
         _maybe_get_cached_w3_w1_permute_indices,
-        convert_to_block_layout,
         get_w2_permute_indices_with_cache,
     )
 
@@ -160,23 +130,49 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     # Reorder rows of W13 and W2 for fused gated activation and convert to the
     # block layout expected by the FlashInfer kernel.
     num_experts = w13_weight.shape[0]
-    device_w13 = w13_weight.device
-    device_w2 = w2_weight.device
 
-    w13_weights_shuffled: list[torch.Tensor] = []
-    w2_weights_shuffled: list[torch.Tensor] = []
+    def _copy_permuted_expert_to_block_layout(
+        out: torch.Tensor,
+        expert_uint8: torch.Tensor,
+        source_indices: torch.Tensor,
+    ) -> None:
+        expert_blocks = expert_uint8.view(
+            expert_uint8.shape[0], out.shape[0], block_k
+        ).permute(1, 0, 2)
+        torch.index_select(
+            expert_blocks,
+            1,
+            source_indices.to(expert_uint8.device),
+            out=out,
+        )
+
+    w13_rows, w13_cols = w13_weight[0].view(torch.uint8).shape
+    w2_rows, w2_cols = w2_weight[0].view(torch.uint8).shape
+    w13_weights_shuffled_tensor = torch.empty(
+        (num_experts, w13_cols // block_k, w13_rows, block_k),
+        dtype=torch.uint8,
+        device=w13_weight.device,
+    )
+    w2_weights_shuffled_tensor = torch.empty(
+        (num_experts, w2_cols // block_k, w2_rows, block_k),
+        dtype=torch.uint8,
+        device=w2_weight.device,
+    )
 
     for i in range(num_experts):
+        w13_expert_uint8 = w13_weight[i].view(torch.uint8)
+
         permute_indices = _maybe_get_cached_w3_w1_permute_indices(
             cache_permute_indices,
-            w13_weight[i].view(torch.uint8),
+            w13_expert_uint8,
             epilogue_tile_m,
         )
-        tmp_weights1 = (
-            w13_weight[i]
-            .clone()
-            .view(torch.uint8)[permute_indices.to(device_w13)]
-            .contiguous()
+        rows = w13_expert_uint8.shape[0]
+        permute_indices = (permute_indices + rows // 2) % rows
+        _copy_permuted_expert_to_block_layout(
+            w13_weights_shuffled_tensor[i],
+            w13_expert_uint8,
+            permute_indices,
         )
 
         permute_indices = get_w2_permute_indices_with_cache(
@@ -184,28 +180,16 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
             w2_weight[i].view(torch.uint8),
             epilogue_tile_m,
         )
-        tmp_weights2 = (
-            w2_weight[i]
-            .clone()
-            .view(torch.uint8)[permute_indices.to(device_w2)]
-            .contiguous()
+        _copy_permuted_expert_to_block_layout(
+            w2_weights_shuffled_tensor[i],
+            w2_weight[i].view(torch.uint8),
+            permute_indices,
         )
 
-        tmp_weights1 = convert_to_block_layout(tmp_weights1.view(torch.uint8), block_k)
-        tmp_weights2 = convert_to_block_layout(tmp_weights2.view(torch.uint8), block_k)
-
-        w13_weights_shuffled.append(tmp_weights1.view(torch.bfloat16))
-        w2_weights_shuffled.append(tmp_weights2.view(torch.bfloat16))
-
-    # Stack weights for all experts and return as BF16 tensors.
-    w13_weights_shuffled_tensor = (
-        torch.stack(w13_weights_shuffled).view(torch.bfloat16).contiguous()
+    return (
+        w13_weights_shuffled_tensor.view(torch.bfloat16),
+        w2_weights_shuffled_tensor.view(torch.bfloat16),
     )
-    w2_weights_shuffled_tensor = (
-        torch.stack(w2_weights_shuffled).view(torch.bfloat16).contiguous()
-    )
-
-    return w13_weights_shuffled_tensor, w2_weights_shuffled_tensor
 
 
 def align_fp4_moe_weights_for_fi(
