@@ -587,6 +587,68 @@ class TestServerFlows:
         _, stores = session.poll()
         assert StoreResult(job_id=1, success=False) in stores
 
+    def test_store_timeout_then_late_completion_no_duplicate(self):
+        """A job timed out by _timeout_pending_store_jobs must not also
+        emit a contradictory StoreResult(success=True) when the transport
+        later reports the same transfer as done."""
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [5],
+            }
+        )
+        session.poll()
+        tid = next(iter(transport._transfers))
+
+        # Backdate the store job so the next poll times it out.
+        session._store_jobs[1] = time.monotonic() - 60.0
+        _, stores = session.poll()
+        assert StoreResult(job_id=1, success=False) in stores
+        assert StoreResult(job_id=1, success=True) not in stores
+
+        # Transport later reports the same transfer as done — must not
+        # emit a second (contradictory) StoreResult for job_id=1.
+        transport._poll_done.append(tid)
+        _, stores = session.poll()
+        assert all(s.job_id != 1 for s in stores), (
+            f"unexpected duplicate StoreResult after timeout: {stores}"
+        )
+
+    def test_store_timeout_then_late_failure_no_duplicate(self):
+        """Symmetric guard: a timed-out job must not also emit a second
+        StoreResult(success=False) when the transport later reports the
+        same transfer as failed."""
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=1)
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1"],
+                FetchMsg.BLOCK_INDEXES: [5],
+            }
+        )
+        session.poll()
+        tid = next(iter(transport._transfers))
+
+        session._store_jobs[1] = time.monotonic() - 60.0
+        _, stores = session.poll()
+        assert [s for s in stores if s.job_id == 1] == [
+            StoreResult(job_id=1, success=False)
+        ]
+
+        transport._poll_failed.append(tid)
+        _, stores = session.poll()
+        assert all(s.job_id != 1 for s in stores), (
+            f"unexpected duplicate StoreResult after timeout: {stores}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # finish_request server-role early-fail flow

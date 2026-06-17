@@ -507,7 +507,10 @@ class P2PSession:
                 continue
             req = self._outbound.get(xfer.kv_request_id)
             for job_id in xfer.job_ids:
-                self._store_jobs.pop(job_id, None)
+                if self._store_jobs.pop(job_id, None) is None:
+                    # Already reported (timeout, cancellation, etc.) —
+                    # don't double-emit a contradictory success result.
+                    continue
                 results.append(StoreResult(job_id=job_id, success=True))
                 if req is not None:
                     req.pending_job_ids.discard(job_id)
@@ -539,7 +542,10 @@ class P2PSession:
             failed_kv_request_ids.add(xfer.kv_request_id)
             req_for_xfer = self._outbound.get(xfer.kv_request_id)
             for job_id in xfer.job_ids:
-                self._store_jobs.pop(job_id, None)
+                if self._store_jobs.pop(job_id, None) is None:
+                    # Already reported (timeout, cancellation, etc.) —
+                    # don't double-emit.
+                    continue
                 results.append(StoreResult(job_id=job_id, success=False))
                 if req_for_xfer is not None:
                     req_for_xfer.pending_job_ids.discard(job_id)
