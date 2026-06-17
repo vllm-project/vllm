@@ -209,25 +209,27 @@ def test_w8a8_block_fp8_fused_moe(
     # independently, so few-ulp differences in the gemm1 output perturb the
     # per-group amax and flip ~11% of the fp8 activation codes — an inherent
     # ~1.5%-of-output-RMS noise floor whose extreme tail grows with the
-    # M*N sample count, while output RMS grows with K. A fixed atol=0.035
-    # therefore fails legitimately for large K on some architectures (0.066
-    # observed at K=7168 on SM120, with the underlying triton GEMM matching
-    # float64 to 1e-6). See issue #45332.
-    #
-    # Two-leg check instead:
-    #  * calc_diff (the DeepGEMM block-fp8 similarity check) bounds broad
-    #    numeric drift: measured ~1.2e-4 at the worst K=7168 case, vs well
-    #    above 1e-3 for structural errors hitting whole experts.
-    #  * assert_close with a 4x atol hard cap bounds localized errors
-    #    (e.g. a zeroed row sails through a norm check but its elements
-    #    blow past 0.14): the quant-noise tail stays below it (0.066
-    #    observed max), real per-element corruption does not.
+    # M*N sample count, while output RMS grows with K. On SM120 (Blackwell
+    # workstation) this pushes a fixed atol=0.035 past failure at large K
+    # (0.066 observed at K=7168, with the underlying triton GEMM matching
+    # float64 to 1e-6). Other architectures keep the strict tolerance so they
+    # retain full regression sensitivity. See issue #45332.
     base_tol = 0.035 if M < 8192 else 0.039
-    diff_tol = 1e-3
-    assert calc_diff(out, ref_out) < diff_tol
-    assert calc_diff(m_out, ref_out) < diff_tol
-    torch.testing.assert_close(out, ref_out, atol=4 * base_tol, rtol=base_tol)
-    torch.testing.assert_close(m_out, ref_out, atol=4 * base_tol, rtol=base_tol)
+    if current_platform.has_device_capability(120):
+        # Two-leg check on SM120:
+        #  * calc_diff (the DeepGEMM block-fp8 similarity check) bounds broad
+        #    numeric drift: ~1.2e-4 at the worst K=7168 case, vs well above
+        #    1e-3 for structural errors hitting whole experts.
+        #  * assert_close with a 4x atol cap bounds localized errors (a zeroed
+        #    row sails through a norm check but its elements blow past 0.14);
+        #    the quant-noise tail (0.066 max) stays below it.
+        assert calc_diff(out, ref_out) < 1e-3
+        assert calc_diff(m_out, ref_out) < 1e-3
+        torch.testing.assert_close(out, ref_out, atol=4 * base_tol, rtol=base_tol)
+        torch.testing.assert_close(m_out, ref_out, atol=4 * base_tol, rtol=base_tol)
+    else:
+        torch.testing.assert_close(out, ref_out, atol=base_tol, rtol=base_tol)
+        torch.testing.assert_close(m_out, ref_out, atol=base_tol, rtol=base_tol)
 
 
 @pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS_DG)
