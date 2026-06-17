@@ -99,6 +99,9 @@ class ParserEngineConfig:
     # .strip() content text when tool calls are present.
     strip_content_whitespace_with_tools: bool = True
 
+    # Reject tool calls whose names are absent from the request tools.
+    validate_tool_names: bool = False
+
     drop_tokens: frozenset[str] = field(default_factory=frozenset)
 
     @cached_property
