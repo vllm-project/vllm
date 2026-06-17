@@ -4,6 +4,8 @@
 
 from typing import Literal
 
+from pydantic import field_validator
+
 from vllm.config.utils import config
 
 
@@ -46,6 +48,27 @@ class KVEventsConfig:
     """The topic to use for the event publisher. Consumers can subscribe to
     this topic to receive events.
     """
+
+    @field_validator("buffer_steps", mode="after")
+    @classmethod
+    def _check_buffer_steps(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"buffer_steps must be positive (> 0), got {v}.")
+        return v
+
+    @field_validator("hwm", mode="after")
+    @classmethod
+    def _check_hwm(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"hwm (high water mark) must be positive (> 0), got {v}.")
+        return v
+
+    @field_validator("max_queue_size", mode="after")
+    @classmethod
+    def _check_max_queue_size(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"max_queue_size must be positive (> 0), got {v}.")
+        return v
 
     def __post_init__(self):
         if self.publisher is None:
