@@ -116,6 +116,10 @@ def bench_run(
         hidden_dim=k,
         intermediate_size=n,
         in_dtype=a.dtype,
+        # The CUTLASS permute scratch is sized by moe_config.max_num_tokens;
+        # it must cover the current batch size, otherwise moe_permute asserts
+        # n_token <= max_num_tokens (default 512) for large batches.
+        max_num_tokens=max(m, 512),
     )
 
     # ---- HPC quant config (single dq scale + inverse a2 scale, like FI). ----
