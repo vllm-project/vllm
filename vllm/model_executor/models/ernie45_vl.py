@@ -1660,7 +1660,13 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         return {"pixel_values": selected_pv, "image_grid_thw": selected_grid}
 
     def prepare_encoder_cudagraph_capture_inputs(
-        self, token_budget, max_batch_size, max_frames_per_batch, device, dtype
+        self,
+        token_budget,
+        max_batch_size,
+        max_frames_per_batch,
+        device,
+        dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1695,7 +1701,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         return EncoderCudaGraphCaptureInputs(values=values)
 
     def prepare_encoder_cudagraph_replay_buffers(
-        self, mm_kwargs, max_batch_size, max_frames_per_batch
+        self, mm_kwargs, max_batch_size, max_frames_per_batch, path: str = "default"
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
@@ -1711,14 +1717,16 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         return EncoderCudaGraphReplayBuffers(values=values)
 
     def encoder_cudagraph_forward(
-        self, values: dict[str, torch.Tensor]
+        self, values: dict[str, torch.Tensor], path: str = "default"
     ) -> torch.Tensor:
         # Graph captures the ViT only, and the resampler runs in
         # postprocess_encoder_output.
         pixel_values = values.pop("pixel_values")
         return self.vision_model(pixel_values, encoder_metadata=values)
 
-    def encoder_eager_forward(self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
+    def encoder_eager_forward(
+        self, mm_kwargs: dict[str, Any], path: str = "default"
+    ) -> torch.Tensor:
         # Eager fallback: run the full pipeline (ViT + resampler). The result
         # is scattered directly, so it must be the post-merge embeddings.
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs).type(
