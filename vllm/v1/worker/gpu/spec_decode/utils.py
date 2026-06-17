@@ -29,9 +29,7 @@ class DraftTokensHandler:
         # Ngram speculator uses 0 as sentinel for "no draft found";
         # Eagle/MTP always produce k non-zero tokens.
         draft_np = draft_tokens.cpu().numpy()
-        self._num_valid_drafts_per_req = [
-            int((row != 0).sum()) for row in draft_np
-        ]
+        self._num_valid_drafts_per_req = [int((row != 0).sum()) for row in draft_np]
 
         if not input_batch.has_structured_output_reqs:
             # No draft token validation needs to be performed by
@@ -59,9 +57,7 @@ class DraftTokensHandler:
             # Generate sentinel (-1) tokens only for the ACTUAL number of
             # drafts per request. Requests with 0 drafts (e.g. ngram no-match)
             # produce an empty list, which the scheduler correctly skips.
-            draft_token_ids = [
-                [-1] * n for n in self._num_valid_drafts_per_req
-            ]
+            draft_token_ids = [[-1] * n for n in self._num_valid_drafts_per_req]
         return DraftTokenIds(self.req_ids, draft_token_ids)
 
 

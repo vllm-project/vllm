@@ -2032,7 +2032,11 @@ class VllmConfig:
             if speculative_config.method in ("ngram_gpu",):
                 unsupported.append("ngram_gpu speculative decoding")
             elif speculative_config.method not in (
-                "eagle", "eagle3", "mtp", "dflash", "ngram"
+                "eagle",
+                "eagle3",
+                "mtp",
+                "dflash",
+                "ngram",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
