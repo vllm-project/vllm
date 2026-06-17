@@ -69,6 +69,7 @@ logger = init_logger(__name__)
 # PCP_DEBUG/PCP_DUMP step counter to cap log volume (only the first N
 # qualifying steps are logged).
 _PCP_DUMP_N = [0]
+_PCP_DUMP_BT = [0]
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -1215,6 +1216,31 @@ class FlashAttentionImpl(AttentionImpl):
 
         if num_decode_tokens > 0:
             assert attn_metadata.pcp_decode_context_kv_lens is not None
+            # PCP_DUMP (once): dump each decode req's first block_table IDs and
+            # read back the first-token K from req0 vs req1's first cache block.
+            #  - bt0[0]==bt0[1] or k0==k1  -> block_table aliasing (reqs share
+            #    blocks) -> block_table bug.
+            #  - distinct blocks, distinct K -> block_table fine; bug is cache
+            #    content (slot_mapping wrote wrong K/V for reqs 1+).
+            import os as _os
+
+            if (
+                _os.environ.get("PCP_DUMP")
+                and num_decodes > 1
+                and _PCP_DUMP_BT[0] < 3
+            ):
+                _PCP_DUMP_BT[0] += 1
+                _bt = attn_metadata.block_table
+                _bids = _bt[:num_decodes, :2].tolist()
+                _k0 = key_cache[int(_bt[0, 0]), 0, 0, :4].tolist()
+                _k1 = key_cache[int(_bt[1, 0]), 0, 0, :4].tolist()
+                logger.warning(
+                    "PCP_DUMP bt_chk bt[:2]=%s k0=%s k1=%s rank=%d",
+                    _bids,
+                    _k0,
+                    _k1,
+                    self.pcp_rank,
+                )
             decode_out = torch.empty_like(output[:num_decode_tokens])
             decode_attn_out, decode_lse = flash_attn_varlen_func(
                 q=query[:num_decode_tokens],
