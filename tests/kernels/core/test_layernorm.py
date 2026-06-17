@@ -6,6 +6,7 @@ import torch
 
 from tests.kernels.quant_utils import FP8_DTYPE
 from tests.kernels.utils import opcheck
+from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -190,3 +191,61 @@ def test_gemma_rms_norm_mixed_input_weight_dtype(default_vllm_config) -> None:
 
     assert out.dtype == x.dtype
     torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+@pytest.mark.parametrize("add_residual", [False, True])
+@pytest.mark.parametrize("strided_input", [False, True])
+@torch.inference_mode()
+def test_rms_norm_custom_op_toggle_parity(
+    dtype: torch.dtype,
+    add_residual: bool,
+    strided_input: bool,
+) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+
+    device = CUDA_DEVICES[0]
+    torch.set_default_device(device)
+    set_random_seed(0)
+
+    num_tokens = 64
+    hidden_size = 1536
+    last_dim = hidden_size * 2 if strided_input else hidden_size
+
+    x_base = torch.randn(num_tokens, last_dim, dtype=dtype)
+    x = x_base[..., :hidden_size]
+    assert x.is_contiguous() != strided_input
+
+    residual = torch.randn_like(x) * (1 / (2 * hidden_size)) if add_residual else None
+
+    weight = torch.empty(hidden_size, dtype=dtype).normal_(mean=1.0, std=0.1)
+
+    enabled_cfg = VllmConfig(
+        compilation_config=CompilationConfig(custom_ops=["none", "+rms_norm"])
+    )
+    disabled_cfg = VllmConfig(compilation_config=CompilationConfig(custom_ops=["none"]))
+
+    with set_current_vllm_config(enabled_cfg):
+        layer_enabled = RMSNorm(hidden_size).to(dtype=dtype)
+        layer_enabled.weight.data.copy_(weight)
+        out_enabled = layer_enabled(
+            x.clone(), residual.clone() if residual is not None else None
+        )
+
+    with set_current_vllm_config(disabled_cfg):
+        layer_disabled = RMSNorm(hidden_size).to(dtype=dtype)
+        layer_disabled.weight.data.copy_(weight)
+        out_disabled = layer_disabled(
+            x.clone(), residual.clone() if residual is not None else None
+        )
+
+    if add_residual:
+        torch.testing.assert_close(
+            out_enabled[0], out_disabled[0], atol=1e-2, rtol=1e-2
+        )
+        torch.testing.assert_close(
+            out_enabled[1], out_disabled[1], atol=1e-2, rtol=1e-2
+        )
+    else:
+        torch.testing.assert_close(out_enabled, out_disabled, atol=1e-2, rtol=1e-2)

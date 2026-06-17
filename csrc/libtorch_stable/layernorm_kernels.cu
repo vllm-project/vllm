@@ -10,6 +10,32 @@
 
 namespace vllm {
 
+namespace {
+
+constexpr int kRmsNormVectorWidth = 8;
+constexpr int kRmsNormAlignmentBytes =
+    kRmsNormVectorWidth * 2;  // 8 * sizeof(fp16/bf16)
+
+inline bool can_launch_vectorized_fused_rms_norm(const void* input_ptr,
+                                                 const void* residual_ptr,
+                                                 const void* weight_ptr,
+                                                 int hidden_size,
+                                                 int64_t input_stride) {
+  auto inp = reinterpret_cast<std::uintptr_t>(input_ptr);
+  auto res = reinterpret_cast<std::uintptr_t>(residual_ptr);
+  auto wt = reinterpret_cast<std::uintptr_t>(weight_ptr);
+  const bool ptrs_are_aligned = inp % kRmsNormAlignmentBytes == 0 &&
+                                res % kRmsNormAlignmentBytes == 0 &&
+                                wt % kRmsNormAlignmentBytes == 0;
+  const bool offsets_are_multiple_of_vector_width =
+      hidden_size % kRmsNormVectorWidth == 0 &&
+      input_stride % kRmsNormVectorWidth == 0;
+  return ptrs_are_aligned && offsets_are_multiple_of_vector_width &&
+         !vllm::vllm_is_batch_invariant();
+}
+
+}  // namespace
+
 // TODO(woosuk): Further optimize this kernel.
 template <typename scalar_t, int VEC_SIZE, int NUM_DIMS>
 __global__ void rms_norm_kernel(
@@ -276,21 +302,9 @@ void fused_add_rms_norm(torch::stable::Tensor& input,     // [..., hidden_size]
     However, this requires each tensor's data to be aligned to 16
     bytes.
    */
-  auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.data_ptr());
-  auto res_ptr = reinterpret_cast<std::uintptr_t>(residual.data_ptr());
-  auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.data_ptr());
-  constexpr int vector_width = 8;
-  constexpr int req_alignment_bytes =
-      vector_width * 2;  // vector_width * sizeof(bfloat16 or float16) (float32
-                         // falls back to non-vectorized version anyway)
-  bool ptrs_are_aligned = inp_ptr % req_alignment_bytes == 0 &&
-                          res_ptr % req_alignment_bytes == 0 &&
-                          wt_ptr % req_alignment_bytes == 0;
-  bool offsets_are_multiple_of_vector_width =
-      hidden_size % vector_width == 0 && input_stride % vector_width == 0;
-  bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
-  if (ptrs_are_aligned && offsets_are_multiple_of_vector_width &&
-      !batch_invariant_launch) {
+  if (vllm::can_launch_vectorized_fused_rms_norm(
+          input.data_ptr(), residual.data_ptr(), weight.data_ptr(), hidden_size,
+          input_stride)) {
     LAUNCH_FUSED_ADD_RMS_NORM(8);
   } else {
     LAUNCH_FUSED_ADD_RMS_NORM(0);
