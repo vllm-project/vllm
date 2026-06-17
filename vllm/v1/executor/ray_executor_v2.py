@@ -296,12 +296,9 @@ class RayExecutorV2(MultiprocExecutor):
         # The TCPStore server runs on rank 0's node, so all workers
         # must be able to reach this address.
         dist_ip = bundle_assignments[0]["node_ip"]
-        # Each data-parallel rank runs its own RayExecutorV2 and picks the
-        # TCPStore port independently. A shared random search lands on the
-        # same port intermittently (a TOCTOU port race; related to #28498),
-        # which surfaces as a TCPStore validation failure during init. Seed
-        # the search by DP rank so sibling engines scan disjoint windows and
-        # cannot collide; fall back to a random port if the window is taken.
+        # Co-located data-parallel engines pick this TCPStore port
+        # independently and a shared random search collides intermittently.
+        # Seed the search by DP rank into disjoint windows. See #28498.
         parallel_config = self.vllm_config.parallel_config
         if parallel_config.data_parallel_size > 1:
             window = 32
