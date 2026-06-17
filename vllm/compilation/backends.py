@@ -542,7 +542,24 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
                     else:
                         new_args.append(arg)
                 user.args = tuple(new_args)
-        graph.graph.erase_node(node)
+                # Also replace in kwargs (e.g. size= passed as keyword)
+                new_kwargs = {}
+                for k, v in user.kwargs.items():
+                    if v is node:
+                        if len(dims) == 1:
+                            new_kwargs[k] = dims[0]
+                        else:
+                            new_kwargs[k] = tuple(dims)
+                    else:
+                        new_kwargs[k] = v
+                user.kwargs = new_kwargs
+        # Only erase if all users have been replaced
+        if len(node.users) == 0:
+            graph.graph.erase_node(node)
+        else:
+            # Some users still reference this node (e.g. mutated outputs).
+            # Leave the size node in place; it will be handled downstream.
+            pass
 
 
 def split_graph(
