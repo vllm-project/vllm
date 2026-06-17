@@ -17,6 +17,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import (
+    _get_open_port,
     get_distributed_init_method,
     get_open_port,
 )
@@ -295,7 +296,27 @@ class RayExecutorV2(MultiprocExecutor):
         # The TCPStore server runs on rank 0's node, so all workers
         # must be able to reach this address.
         dist_ip = bundle_assignments[0]["node_ip"]
-        distributed_init_method = get_distributed_init_method(dist_ip, get_open_port())
+        # Each data-parallel rank runs its own RayExecutorV2 and picks the
+        # TCPStore port independently. A shared random search lands on the
+        # same port intermittently (a TOCTOU port race; related to #28498),
+        # which surfaces as a TCPStore validation failure during init. Seed
+        # the search by DP rank so sibling engines scan disjoint windows and
+        # cannot collide; fall back to a random port if the window is taken.
+        parallel_config = self.vllm_config.parallel_config
+        if parallel_config.data_parallel_size > 1:
+            window = 32
+            start_port = (
+                parallel_config.data_parallel_master_port
+                + 100
+                + parallel_config.data_parallel_rank * window
+            )
+            try:
+                port = _get_open_port(start_port=start_port, max_attempts=window)
+            except RuntimeError:
+                port = get_open_port()
+        else:
+            port = get_open_port()
+        distributed_init_method = get_distributed_init_method(dist_ip, port)
 
         # Step 4: Create broadcast MessageQueue.
         # Workers on the driver node use shared memory; the rest use TCP.
