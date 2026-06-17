@@ -129,13 +129,7 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if TP > 1, PP == 1, Hopper/Blackwell, and flashinfer installed.
-
-    Gated off for PP > 1: the fused op's GPU-side peer-signal spin-wait
-    assumes byte-identical kernel launches across TP peers, but concurrent
-    independent warmup of multiple TP subgroups lets ranks pick divergent
-    FlashInfer launch configs and deadlock.
-    """
+    """Enable if TP > 1 and Hopper/Blackwell and flashinfer installed."""
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
@@ -148,7 +142,6 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 
     return (
         cfg.parallel_config.tensor_parallel_size > 1
-        and cfg.parallel_config.pipeline_parallel_size == 1
         and current_platform.is_cuda()
         and has_flashinfer()
         and (
