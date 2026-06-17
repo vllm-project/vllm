@@ -279,7 +279,10 @@ def test_mxfp8_gfx94x_selects_block_fp8_backend(use_ep):
     from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
         TritonExperts,
     )
-    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+        Fp8MoeBackend,
+        make_fp8_moe_quant_config,
+    )
     from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
         select_mxfp8_moe_backend,
     )
@@ -314,6 +317,22 @@ def test_mxfp8_gfx94x_selects_block_fp8_backend(use_ep):
 
     assert backend == Fp8MoeBackend.TRITON
     assert experts_cls is TritonExperts
+
+    weight_scale = torch.ones(1, 2, 2, device=DEVICE, dtype=torch.float32)
+    quant_config = make_fp8_moe_quant_config(
+        fp8_backend=backend,
+        w1_scale=weight_scale,
+        w2_scale=weight_scale,
+        a1_scale=None,
+        a2_scale=None,
+        block_shape=[128, 128],
+        swiglu_limit=7.0,
+        gemm1_alpha=1.702,
+        gemm1_beta=1.0,
+    )
+    assert quant_config.gemm1_clamp_limit == 7.0
+    assert quant_config.gemm1_alpha == 1.702
+    assert quant_config.gemm1_beta == 1.0
 
     backend, experts_cls = select_mxfp8_moe_backend(config)
 
