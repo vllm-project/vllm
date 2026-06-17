@@ -134,8 +134,8 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
-    # if tool_choice == "auto" and not _any_tool_strict(tools):
-    #     return None
+    if tool_choice == "auto" and not _any_tool_strict(tools):
+        return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
     dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)
