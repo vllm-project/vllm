@@ -315,7 +315,10 @@ class AutoAWQConfig(QuantizationConfig):
             )
 
             if use_marlin:
-                if not check_marlin_supports_layer(layer, self.group_size):
+                # tile-misaligned shapes are fixed by padding at weight prep
+                if not check_marlin_supports_layer(
+                    layer, self.group_size, allow_tile_padding=True
+                ):
                     logger.warning_once(
                         "Layer '%s' is not supported by AutoAWQMarlin. "
                         "Falling back to unoptimized AWQ kernels.",
