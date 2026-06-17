@@ -329,10 +329,9 @@ class MediaConnector:
 
         url_spec = parse_url(url)
 
-        self._maybe_validate_private_networks_access(url_spec)
-
         if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
+            self._maybe_validate_private_networks_access(url_spec)
 
             cached = self._get_cached_bytes(url)
             if cached is not None:
@@ -373,10 +372,9 @@ class MediaConnector:
 
         url_spec = parse_url(url)
 
-        self._maybe_validate_private_networks_access(url_spec)
-
         if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
+            self._maybe_validate_private_networks_access(url_spec)
 
             cached = await loop.run_in_executor(
                 global_thread_pool, self._get_cached_bytes, url
