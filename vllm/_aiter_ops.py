@@ -1534,6 +1534,9 @@ class rocm_aiter_ops:
     # Lazily probed: whether aiter.topk_softmax supports the
     # num_shared_experts / shared_expert_scoring_func args (7-arg form).
     _TOPK_SOFTMAX_FUSED_SIGMOID: bool | None = None
+    # Lazily probed: whether the installed AITER build exposes
+    # indexer_qk_rope_quant_and_cache.
+    _DSV32_INDEXER_QK_FUSION_KERNEL_PRESENT: bool | None = None
 
     _ALL_REDUCE_MAX_SIZE: int = 8192 * 1024 * 8 * 2
     _CUSTOM_ALL_REDUCE: AiterCustomAllreduceProto | None = None
@@ -1752,6 +1755,24 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_triton_gemm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_UNQUANT_GEMM
+
+    @classmethod
+    @if_aiter_supported
+    def is_dsv32_indexer_qk_fusion_enabled(cls) -> bool:
+        """True iff aiter is enabled and the running aiter build exposes
+        ``indexer_qk_rope_quant_and_cache``."""
+        if not cls._AITER_ENABLED:
+            return False
+        if cls._DSV32_INDEXER_QK_FUSION_KERNEL_PRESENT is None:
+            try:
+                import aiter
+
+                cls._DSV32_INDEXER_QK_FUSION_KERNEL_PRESENT = hasattr(
+                    aiter, "indexer_qk_rope_quant_and_cache"
+                )
+            except ImportError:
+                cls._DSV32_INDEXER_QK_FUSION_KERNEL_PRESENT = False
+        return cls._DSV32_INDEXER_QK_FUSION_KERNEL_PRESENT
 
     @classmethod
     @if_aiter_supported
@@ -1994,7 +2015,9 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_sparse_attn_indexer",
                 op_func=rocm_aiter_sparse_attn_indexer,
-                mutates_args=["topk_indices_buffer"],
+                # K-cache write happens inside the op (either
+                # ops.indexer_k_quant_and_cache or the fused kernel).
+                mutates_args=["topk_indices_buffer", "kv_cache"],
                 fake_impl=rocm_aiter_sparse_attn_indexer_fake,
                 dispatch_key=current_platform.dispatch_key,
             )

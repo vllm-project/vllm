@@ -662,6 +662,20 @@ class Indexer(nn.Module):
         from vllm.v1.attention.backends.mla.indexer import get_max_prefill_buffer_size
 
         self.max_total_seq_len = get_max_prefill_buffer_size(vllm_config)
+        # Fused indexer writes K into its own cache; gated to DSv3.2 shape.
+        self.use_qk_rope_cache_fusion = (
+            current_platform.is_rocm()
+            and rocm_aiter_ops.is_dsv32_indexer_qk_fusion_enabled()
+            and self.head_dim == 128
+            and self.rope_dim == 64
+            and self.head_dim == self.quant_block_size
+            and getattr(config, "model_type", None) != "glm_moe_dsa"
+        )
+        # Folded into weights_out by the fused kernel alongside Q's per-token
+        # scale; the unfused path applies it after Q quant.
+        self._weights_scale = self.softmax_scale * self.n_head**-0.5
+        self._k_norm_weight_q_dtype: torch.Tensor | None = None
+        self._k_norm_bias_q_dtype: torch.Tensor | None = None
         self.indexer_op = SparseAttnIndexer(
             self.k_cache,
             self.quant_block_size,
@@ -671,6 +685,7 @@ class Indexer(nn.Module):
             self.max_model_len,
             self.max_total_seq_len,
             self.topk_indices_buffer,
+            skip_k_cache_insert=self.use_qk_rope_cache_fusion,
         )
 
         self.is_inplace_rope = is_inplace_rope
@@ -680,6 +695,41 @@ class Indexer(nn.Module):
     ) -> torch.Tensor:
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
+
+        if self.use_qk_rope_cache_fusion:
+            # Fused path: pass raw bf16 Q + K-norm/RoPE params to the indexer
+            # op, which calls aiter.indexer_qk_rope_quant_and_cache internally.
+            kw, _ = self.wk_weights_proj(hidden_states)
+            k = kw[:, : self.head_dim].contiguous()
+            weights = kw[:, self.head_dim :].contiguous()
+
+            cos_sin_cache = rotary_emb._match_cos_sin_cache_dtype(q)
+            cos_cache, sin_cache = cos_sin_cache.chunk(2, dim=-1)
+            # LayerNorm weight/bias are fp32 (their native dtype); the
+            # fused AITER kernel requires fp32, and casting to bf16 here
+            # loses precision and drifts K from the unfused path.
+            if self._k_norm_weight_q_dtype is None:
+                self._k_norm_weight_q_dtype = (
+                    self.k_norm.weight.detach().to(torch.float32).contiguous()
+                )
+                self._k_norm_bias_q_dtype = (
+                    self.k_norm.bias.detach().to(torch.float32).contiguous()
+                )
+            return self.indexer_op(
+                hidden_states,
+                q,
+                k,
+                weights,
+                k_norm_weight=self._k_norm_weight_q_dtype,
+                k_norm_bias=self._k_norm_bias_q_dtype,
+                k_norm_eps=float(self.k_norm.eps),
+                positions=positions,
+                cos_cache=cos_cache,
+                sin_cache=sin_cache,
+                weights_scale=self._weights_scale,
+                is_neox_style=bool(rotary_emb.is_neox_style),
+                use_qk_rope_cache_fusion=True,
+            )
 
         if current_platform.is_rocm() and self.is_inplace_rope:
             # This path should works on all platform, will remove extra
