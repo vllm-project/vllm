@@ -360,6 +360,13 @@ def make_unquantized_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
+    from vllm.model_executor.layers.fused_moe.utils import (
+        warn_if_moe_use_td_ineffective,
+    )
+
+    # Warn against the selected backend, not each probed candidate.
+    warn_if_moe_use_td_ineffective(backend.value, is_quantized=False)
+
     # Create Prepare/Finalize
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
     prepare_finalize = maybe_make_prepare_finalize(
