@@ -2270,7 +2270,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 toks=toks,
             )
 
-            _kv_b_proj_w_dtype = (
+            kv_b_proj_w_dtype = (
                 self.kv_b_proj.weight.dtype
                 if hasattr(self.kv_b_proj, "weight")
                 else self.kv_b_proj.params_dtype
