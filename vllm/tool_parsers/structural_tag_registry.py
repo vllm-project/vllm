@@ -62,7 +62,6 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "qwen_3",
         "harmony",
         "deepseek_v3_2",
-        "glm_4_7",
         "deepseek_v4",
     }
 )
@@ -106,8 +105,8 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
-    if tool_choice == "auto" and not _any_tool_strict(tools):
-        return None
+    # if tool_choice == "auto" and not _any_tool_strict(tools):
+    #     return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
     dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)
@@ -313,10 +312,10 @@ def get_minimax_structural_tag(
                         end=tool_call_end,
                     )
                 ],
-                excludes=["<think>", "</think>"],
+                # excludes=["<think>", "</think>"],
             )
             if tags
-            else AnyTextFormat(excludes=["<think>", "</think>"])
+            else AnyTextFormat()
         )
     elif tool_choice == "forced":
         suffix_tag = SequenceFormat(
@@ -342,6 +341,60 @@ def get_minimax_structural_tag(
                 ),
                 ConstStringFormat(value=tool_call_end),
             ]
+        )
+
+    return StructuralTag(format=suffix_tag)
+
+
+def _glm_4_7_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
+    return [
+        TagFormat(
+            begin=f"<tool_call>{tool.function.name}",
+            content=JSONSchemaFormat(
+                json_schema=_get_function_parameters(tool.function),
+                style="glm_xml",
+            ),
+            end="</tool_call>",
+        )
+        for tool in tools
+    ]
+
+
+@register_vllm_structural_tag("glm_4_7")
+def get_glm_4_7_structural_tag(
+    tools: list[FunctionToolParam],
+    builtin_tools: list[BuiltinToolParam],
+    tool_choice: SimplifiedToolChoice,
+    reasoning: bool,
+) -> StructuralTag:
+    del builtin_tools, reasoning
+
+    tool_call_trigger = "<tool_call>"
+
+    tags = _glm_4_7_tool_tags(tools)
+
+    if tool_choice == "auto":
+        suffix_tag = (
+            TriggeredTagsFormat(
+                triggers=[tool_call_trigger],
+                tags=tags,
+                # excludes=["<think>", "</think>"],
+            )
+            if tags
+            else AnyTextFormat()
+        )
+    elif tool_choice == "forced":
+        suffix_tag = TagsWithSeparatorFormat(
+            tags=tags,
+            separator="",
+            at_least_one=True,
+            stop_after_first=True,
+        )
+    else:
+        suffix_tag = TagsWithSeparatorFormat(
+            tags=tags,
+            separator="",
+            at_least_one=True,
         )
 
     return StructuralTag(format=suffix_tag)
