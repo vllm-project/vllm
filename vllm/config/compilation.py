@@ -1418,20 +1418,6 @@ class CompilationConfig:
                 "and make sure compilation mode is VLLM_COMPILE"
             )
 
-        # Adjust cudagraph sizes to be a multiple of uniform_decode_query_len
-        # to avoid: https://github.com/vllm-project/vllm/issues/28207 and temp-fix:
-        # https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
-        # Will be removed in the near future when we have separate cudagraph capture
-        # sizes for decode and mixed prefill-decode.
-        # if (
-        #     cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-        #     and uniform_decode_query_len > 1
-        # ):
-        #     self.adjust_cudagraph_sizes_for_spec_decode(
-        #         uniform_decode_query_len,
-        #         tensor_parallel_size,
-        #     )
-
         # For Mamba models with FULL decode cudagraphs, each decode
         # sequence needs one Mamba cache block. The decode cudagraph
         # dispatcher already caps batch sizes at max_num_seqs, so we just

@@ -142,10 +142,7 @@ class CudaGraphManager:
 
         self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
-        # adjust the cudagraph sizes to be a multiple of the uniform decode query length
-        # self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
-        #     self.decode_query_len, self.tp_size
-        # )
+
         self._init_candidates()
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
@@ -377,7 +374,6 @@ class CudaGraphManager:
                     effective_loras,
                 ):
                     return desc
-
         return BatchExecutionDescriptor(
             cg_mode=CUDAGraphMode.NONE,
             num_tokens=num_tokens,

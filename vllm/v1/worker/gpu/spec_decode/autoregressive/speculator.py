@@ -213,7 +213,6 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             input_batch.num_tokens,
             max_query_len,
         )
-
         prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
             num_reqs,

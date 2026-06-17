@@ -1054,11 +1054,6 @@ class Scheduler(SchedulerInterface):
                 len(num_scheduled_tokens)
             ]
 
-        # REMOVE
-        # import random
-        # num_spec_tokens_to_schedule=random.randint(0, self.num_spec_tokens)
-        # print(f"num_spec_tokens_to_schedule: {num_spec_tokens_to_schedule}")
-
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
