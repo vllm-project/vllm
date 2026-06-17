@@ -61,12 +61,11 @@
 #ifdef USE_ROCM
 // ROCm-compatible FP8 conversion helpers
 __device__ __forceinline__ uint8_t rocm_cvt_float_to_fp8_e4m3(float val) {
-  // HIP defines HIP_FP8_TYPE_OCP based on HIP version, not GPU arch. On gfx942
-  // MFMA only supports FNUZ FP8, and the rest of vLLM's gfx942 path uses FNUZ.
-  #if defined(HIP_FP8_TYPE_OCP) && defined(__gfx950__)
-  __hip_fp8_e4m3 fp8_val(val);
-  #else
+  // gfx942 uses FNUZ FP8; other ROCm targets use OCP E4M3.
+  #if defined(__gfx942__)
   __hip_fp8_e4m3_fnuz fp8_val(val);
+  #else
+  __hip_fp8_e4m3 fp8_val(val);
   #endif
   return reinterpret_cast<uint8_t&>(fp8_val);
 }
@@ -92,9 +91,9 @@ constexpr int kQuantBlock = 64;
 constexpr int kNumQuantBlocks = kNopeDim / kQuantBlock;   // 7
 constexpr int kScaleBytesPerToken = kNumQuantBlocks + 1;  // 8 (7 real + 1 pad)
 constexpr int kTokenDataBytes = kNopeDim + kRopeDim * 2;  // 448 + 128 = 576
-// FNUZ on gfx942 / OCP on gfx950. FNUZ uses 224.0 (not the dtype's raw
+// FNUZ on gfx942 / OCP elsewhere. FNUZ uses 224.0 (not the dtype's raw
 // 240.0) to match the rest of vLLM's FNUZ pipeline.
-#if defined(USE_ROCM) && (!defined(HIP_FP8_TYPE_OCP) || !defined(__gfx950__))
+#if defined(USE_ROCM) && defined(__gfx942__)
 constexpr float kFp8Max = 224.0f;
 #else
 constexpr float kFp8Max = 448.0f;
