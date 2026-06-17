@@ -3,6 +3,7 @@
 import anthropic
 import pytest
 import pytest_asyncio
+
 from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
