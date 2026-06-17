@@ -2276,9 +2276,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 else self.kv_b_proj.params_dtype
             )
             if (
-                use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype()
-            ) and _kv_b_proj_w_dtype != torch.uint8:
-                kv_c_normed = kv_c_normed.to(_kv_b_proj_w_dtype)
+                use_fp8_prefill or kv_b_proj_w_dtype != current_platform.fp8_dtype()
+            ) and kv_b_proj_w_dtype != torch.uint8:
+                kv_c_normed = kv_c_normed.to(kv_b_proj_w_dtype)
 
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
