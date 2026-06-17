@@ -78,6 +78,12 @@ class PerTensorTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         bias: torch.Tensor | None,
         output_shape: list,
     ) -> torch.Tensor:
+        # torch._scaled_mm under torch.compile does not support 0-D scales
+        if As.dim() == 0:
+            As = As.view(1)
+        if Bs.dim() == 0:
+            Bs = Bs.view(1)
+
         output = torch._scaled_mm(
             A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
         )
