@@ -35,6 +35,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import random_uuid
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import EngineCoreRequest, PauseMode
@@ -984,6 +985,162 @@ class AsyncLLM(EngineClient):
         timeout: float = 300,
     ) -> None:
         await self.engine_core.wait_for_dp_ranks_to_drain(dp_ranks, timeout)
+
+    async def reroute_inflight_to_active(
+        self,
+        sleeping_dp_ranks: Sequence[int],
+    ) -> dict[str, int]:
+        """Reroute in-flight requests off of the given DP ranks.
+
+        Strategy (method "A"): for each in-flight request whose chosen engine
+        belongs to ``sleeping_dp_ranks``:
+          1. Snapshot prompt_token_ids + already-generated token_ids,
+             sampling_params, lora_request and the original output queue.
+          2. Detach its RequestState from the OutputProcessor (without pushing
+             an ABORT to the queue).
+          3. Tell the engine to free the original (sleeping-rank) request via
+             ``engine_core.abort_requests_async``.
+          4. Re-issue an EngineCoreRequest with prompt = prompt + generated,
+             ``max_tokens`` reduced by len(generated), a fresh internal
+             request_id, and ``data_parallel_rank=None`` so the LB picks an
+             active rank. The same RequestOutputCollector queue is reused so
+             the client transparently keeps receiving tokens.
+
+        Returns a mapping ``{old_internal_id: target_dp_rank}`` for the
+        requests that were successfully rerouted. Requests that cannot be
+        safely rerouted (parallel sampling n>1, pooling, streaming input,
+        prompt_embeds, or non-DELTA output kinds) are left alone -- they will
+        either finish naturally or fall through to the existing drain path.
+        """
+        client = self.engine_core
+        if not hasattr(client, "request_ids_on_dp_ranks"):
+            # Only DPLBAsyncMPClient currently supports per-request DP rank
+            # introspection; nothing to do otherwise.
+            return {}
+        candidate_ids = client.request_ids_on_dp_ranks(sleeping_dp_ranks)
+        if not candidate_ids:
+            return {}
+
+        op = self.output_processor
+        rerouted: dict[str, int] = {}
+        skipped: list[tuple[str, str]] = []
+        for old_id in candidate_ids:
+            req_state = op.request_states.get(old_id)
+            if req_state is None:
+                continue
+            old_request = req_state.original_request
+            if old_request is None or old_request.sampling_params is None:
+                skipped.append((old_id, "no original sampling request"))
+                continue
+            if old_request.pooling_params is not None:
+                skipped.append((old_id, "pooling request"))
+                continue
+            if req_state.parent_req is not None or req_state.n not in (None, 1):
+                skipped.append((old_id, "parallel sampling n>1"))
+                continue
+            if req_state.streaming_input:
+                skipped.append((old_id, "streaming input"))
+                continue
+            if req_state.output_kind != RequestOutputKind.DELTA:
+                # Non-DELTA modes accumulate token_ids in the new RequestState
+                # only; the pre-reroute tokens would be missing from the final
+                # RequestOutput. Leave these alone for v1.
+                skipped.append((old_id, f"output_kind={req_state.output_kind}"))
+                continue
+            if old_request.prompt_embeds is not None:
+                skipped.append((old_id, "prompt_embeds"))
+                continue
+            if req_state.detokenizer is None:
+                skipped.append((old_id, "no detokenizer"))
+                continue
+
+            generated = list(req_state.detokenizer.output_token_ids)
+            old_prompt_ids = list(old_request.prompt_token_ids or [])
+            new_prompt_ids = old_prompt_ids + generated
+
+            old_sampling = old_request.sampling_params
+            remaining_max_tokens: int | None
+            if old_sampling.max_tokens is None:
+                remaining_max_tokens = None
+            else:
+                remaining_max_tokens = old_sampling.max_tokens - len(generated)
+                if remaining_max_tokens <= 0:
+                    # Already produced everything the caller asked for; let
+                    # natural finish handle it on the sleeping rank.
+                    skipped.append((old_id, "max_tokens already exhausted"))
+                    continue
+
+            new_sampling = copy(old_sampling)
+            if remaining_max_tokens is not None:
+                new_sampling.max_tokens = remaining_max_tokens
+            # min_tokens is measured against the new RequestState's output,
+            # which starts at zero -- shrink it so we don't over-extend.
+            if getattr(new_sampling, "min_tokens", 0):
+                new_sampling.min_tokens = max(
+                    0, new_sampling.min_tokens - len(generated)
+                )
+
+            external = req_state.external_req_id
+            new_internal = f"{external}-{random_uuid():.8}"
+            new_request = EngineCoreRequest(
+                request_id=new_internal,
+                prompt_token_ids=new_prompt_ids,
+                mm_features=old_request.mm_features,
+                sampling_params=new_sampling,
+                pooling_params=None,
+                arrival_time=time.time(),
+                lora_request=old_request.lora_request,
+                cache_salt=old_request.cache_salt,
+                # None -> let the load balancer pick an active rank.
+                data_parallel_rank=None,
+                prompt_embeds=None,
+                prompt_is_token_ids=None,
+                client_index=old_request.client_index,
+                current_wave=old_request.current_wave,
+                priority=old_request.priority,
+                trace_headers=old_request.trace_headers,
+                resumable=False,
+                external_req_id=external,
+                reasoning_ended=old_request.reasoning_ended,
+                reasoning_parser_kwargs=old_request.reasoning_parser_kwargs,
+            )
+
+            # Detach old state without notifying the client queue.
+            queue = req_state.queue
+            old_state = op.detach_request_state(old_id)
+            assert old_state is not None
+            # Free engine-side resources on the sleeping rank.
+            await client.abort_requests_async([old_id])
+
+            # Re-register a fresh RequestState (new detokenizer, reuse queue).
+            op.add_request(
+                new_request,
+                prompt=req_state.prompt,
+                parent_req=None,
+                request_index=0,
+                queue=queue,
+            )
+            await client.add_request_async(new_request)
+
+            new_rank = client.dp_rank_for_request(new_internal)
+            if new_rank is None:
+                # Should not happen, but record as-is for the caller's log.
+                new_rank = -1
+            rerouted[old_id] = new_rank
+
+        if rerouted:
+            logger.info(
+                "reroute_inflight_to_active: rerouted %d requests off %s",
+                len(rerouted),
+                list(sleeping_dp_ranks),
+            )
+        if skipped and self.log_requests:
+            logger.info(
+                "reroute_inflight_to_active: skipped %d requests: %s",
+                len(skipped),
+                skipped[:5],
+            )
+        return rerouted
 
     async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
         """Wait for all requests to be drained."""

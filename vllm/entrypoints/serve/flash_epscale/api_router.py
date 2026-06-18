@@ -114,13 +114,17 @@ async def _paused(client: EngineClient, timing: dict[str, float]):
     """Stop-the-world only around the steps that require global quiescence
     (NCCL split, EPLB remap, sleep/wake RPCs). Always attempts resume on exit;
     resume failures propagate so the endpoint cannot report false success."""
+    logger.info("flash_epscale: entering pause_generation(mode=abort)")
     async with _timed(timing, "pause"):
-        await client.pause_generation(mode="abort", clear_cache=False)
+        await client.pause_generation(mode="wait", clear_cache=False)
+    logger.info("flash_epscale: pause_generation done")
     try:
         yield
     finally:
+        logger.info("flash_epscale: entering resume_generation")
         async with _timed(timing, "resume"):
             await client.resume_generation()
+        logger.info("flash_epscale: resume_generation done")
 
 
 router = APIRouter()
@@ -254,6 +258,14 @@ async def _scale_down(
     try:
         async with _timed(timing, "route_shrink"):
             client.set_active_data_parallel_size(target_ep_size)
+        # 1b. Reroute eligible in-flight requests off the soon-to-sleep ranks
+        # onto the new active prefix, so we don't have to wait for them to
+        # naturally finish under reduced throughput. Best-effort: requests
+        # that cannot be safely re-issued (n>1, pooling, streaming input,
+        # non-DELTA output) fall through to the drain step below.
+        async with _timed(timing, "reroute"):
+            rerouted = await client.reroute_inflight_to_active(target_sleeping)
+        timing["reroute_count"] = float(len(rerouted))
         async with _timed(timing, "drain"):
             await client.wait_for_dp_ranks_to_drain(target_sleeping, drain_timeout)
     except Exception as e:
@@ -274,6 +286,7 @@ async def _scale_down(
             sleep_started = False
             try:
                 if current_sleeping:
+                    logger.info("flash_epscale: wake_up_ep_ranks(%s)", current_sleeping)
                     async with _timed(timing, "wake"):
                         await client.collective_rpc(
                             "wake_up_ep_ranks",
@@ -283,11 +296,19 @@ async def _scale_down(
                                 "level": level,
                             },
                         )
+                    logger.info("flash_epscale: wake_up_ep_ranks done")
+                logger.info("flash_epscale: resize_sleep_ep_ranks(%s)", target_sleeping)
                 async with _timed(timing, "resize"):
                     await client.collective_rpc(
                         "resize_sleep_ep_ranks",
                         kwargs={"sleeping_ep_ranks": target_sleeping},
                     )
+                logger.info("flash_epscale: resize_sleep_ep_ranks done")
+                logger.info(
+                    "flash_epscale: sleep_ep_ranks_by_tags(%s, level=%d)",
+                    target_sleeping,
+                    level,
+                )
                 async with _timed(timing, "sleep"):
                     sleep_started = True
                     await client.collective_rpc(
@@ -298,6 +319,7 @@ async def _scale_down(
                             "level": level,
                         },
                     )
+                logger.info("flash_epscale: sleep_ep_ranks_by_tags done")
                 transition_completed = True
             except Exception:
                 await _restore_scale_down_sleep_state(

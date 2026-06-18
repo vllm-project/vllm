@@ -1547,6 +1547,33 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             for req_id in outputs.finished_requests:
                 self.reqs_in_flight.pop(req_id, None)
 
+    def dp_rank_for_request(self, request_id: str) -> int | None:
+        """Return the DP rank that the given internal request_id is currently
+        routed to, or None if the request is not tracked by this client."""
+        engine = self.reqs_in_flight.get(request_id)
+        if engine is None:
+            return None
+        try:
+            eng_index = self.core_engines.index(engine)
+        except ValueError:
+            return None
+        if eng_index >= len(self.engine_ranks_managed):
+            return None
+        return self.engine_ranks_managed[eng_index]
+
+    def request_ids_on_dp_ranks(self, dp_ranks: Sequence[int]) -> list[str]:
+        """Return all in-flight internal request_ids whose chosen engine
+        belongs to the given set of DP ranks."""
+        if not dp_ranks:
+            return []
+        target = set(dp_ranks)
+        out: list[str] = []
+        for req_id in list(self.reqs_in_flight):
+            rank = self.dp_rank_for_request(req_id)
+            if rank is not None and rank in target:
+                out.append(req_id)
+        return out
+
     @staticmethod
     async def eep_process_engine_core_notification(
         self: "DPLBAsyncMPClient", notification_data: tuple[str, int]

@@ -232,6 +232,18 @@ class EngineClient(ABC):
         Default no-op for engines that do not track per-rank load.
         """
 
+    async def reroute_inflight_to_active(  # noqa: B027
+        self,
+        sleeping_dp_ranks: Sequence[int],
+    ) -> dict[str, int]:
+        """Best-effort reroute in-flight requests off ``sleeping_dp_ranks``.
+
+        Default no-op. Engines that support this return a mapping
+        ``{old_internal_id: target_dp_rank}`` for the requests that were
+        successfully re-issued onto an active rank.
+        """
+        return {}
+
     @abstractmethod
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown the engine with optional timeout."""
