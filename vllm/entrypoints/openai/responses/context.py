@@ -18,7 +18,7 @@ from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_output_text import ResponseOutputText
 from openai.types.responses.tool import Mcp
-from openai_harmony import Author, Message, Role, StreamState, TextContent
+from openai_harmony import Author, Message, Role, TextContent
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import (
@@ -31,8 +31,12 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
-    get_streamable_parser_for_assistant,
     render_for_completion,
+)
+from vllm.entrypoints.openai.responses.harmony import (
+    ResponseItemKind,
+    message_text_content,
+    resolve_response_item_type,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
@@ -46,6 +50,7 @@ from vllm.entrypoints.openai.responses.utils import (
 from vllm.entrypoints.serve.utils.constants import MCP_PREFIX
 from vllm.outputs import RequestOutput
 from vllm.parser.abstract_parser import Parser
+from vllm.parser.harmony import HarmonyParser, Segment
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 
@@ -140,28 +145,6 @@ class ConversationContext(ABC):
     @abstractmethod
     async def cleanup_session(self) -> None:
         raise NotImplementedError("Should not be called.")
-
-
-def _create_json_parse_error_messages(
-    last_msg: Message, e: json.JSONDecodeError
-) -> list[Message]:
-    """
-    Creates an error message when json parse failed.
-    """
-    error_msg = (
-        f"Error parsing tool arguments as JSON: {str(e)}. "
-        "Please ensure the tool call arguments are valid JSON and try again."
-    )
-    content = TextContent(text=error_msg)
-    author = Author(role=Role.TOOL, name=last_msg.recipient)
-    return [
-        Message(
-            author=author,
-            content=[content],
-            recipient=Role.ASSISTANT,
-            channel=last_msg.channel,
-        )
-    ]
 
 
 class SimpleContext(ConversationContext):
@@ -441,8 +424,9 @@ class ParsableContext(ConversationContext):
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
                 args = json.loads(last_msg.arguments)
-            except json.JSONDecodeError as e:
-                return _create_json_parse_error_messages(last_msg, e)
+            except json.JSONDecodeError:
+                # TODO: Handle error and retry
+                raise
         else:
             args = json.loads(last_msg.arguments)
         result = await tool_session.call_tool("search", args)
@@ -484,8 +468,9 @@ class ParsableContext(ConversationContext):
         if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
             try:
                 args = json.loads(last_msg.arguments)
-            except json.JSONDecodeError as e:
-                return _create_json_parse_error_messages(last_msg, e)
+            except json.JSONDecodeError:
+                # TODO: Handle error and retry
+                raise
         else:
             args = json.loads(last_msg.arguments)
         result = await tool_session.call_tool("exec", args)
@@ -590,6 +575,7 @@ class HarmonyContext(ConversationContext):
         self,
         messages: list,
         available_tools: list[str],
+        harmony_parser: HarmonyParser,
         function_tool_names: frozenset[str] | None = None,
     ):
         self._messages = messages
@@ -599,7 +585,10 @@ class HarmonyContext(ConversationContext):
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
 
-        self.parser = get_streamable_parser_for_assistant()
+        self.parser = harmony_parser
+        self.encoding = get_encoding()
+        self.last_tok: int | None = None
+        self.batch_segments: list[Segment] = []
         self.num_init_messages = len(messages)
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -611,44 +600,52 @@ class HarmonyContext(ConversationContext):
         self.current_turn_metrics = TurnMetrics()
         # Track metrics for all turns
         self.all_turn_metrics: list[TurnMetrics] = []
-        self.is_first_turn = True
-        self.first_tok_of_message = True  # For streaming support
+        self.is_first_append_of_turn = True
         self.kv_transfer_params: dict[str, Any] | None = None
 
-    def _update_num_reasoning_tokens(self):
-        channel = self.parser.current_channel
-        if channel == "analysis":
-            self.num_reasoning_tokens += 1
-        elif channel == "commentary" and self.parser.current_recipient is not None:
-            # Tool interactions (python/browser/container) are hidden.
-            # Preambles (recipient=None) are visible user text.
-            self.num_reasoning_tokens += 1
+    def _sync_completed_messages(self, segments: list[Segment]) -> None:
+        for seg in segments:
+            if seg.completed_message is not None:
+                self._messages.append(seg.completed_message)
 
     def append_output(self, output: RequestOutput) -> None:
-        output_token_ids = output.outputs[0].token_ids
-        self.parser = get_streamable_parser_for_assistant()
-        for token_id in output_token_ids:
-            self.parser.process(token_id)
-            # Check if the current token is part of reasoning content
-            self._update_num_reasoning_tokens()
-        self._update_prefill_token_usage(output)
+        token_ids = output.outputs[0].token_ids or ()
+
+        if self.is_first_append_of_turn:
+            self._update_prefill_token_usage(output)
+
+        result = self.parser.process_chunk(token_ids)
+        if output.finished:
+            tail = self.parser.flush_current_segment()
+            if tail is not None:
+                result.segments.append(tail)
+
+        self.batch_segments = result.segments
+        self._sync_completed_messages(result.segments)
+        self.num_reasoning_tokens += result.reasoning_token_count
         self._update_decode_token_usage(output)
+
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
-        # Append current turn to all turn list for next turn's calculations
-        self.all_turn_metrics.append(self.current_turn_metrics.copy())
-        self.current_turn_metrics.reset()
-        # append_output is called only once before tool calling
-        # in non-streaming case
-        # so we can append all the parser messages to _messages
-        output_msgs = self.parser.messages
-        # The responses finish reason is set in the last message
-        self.finish_reason = output.outputs[0].finish_reason
-        self._messages.extend(output_msgs)
+
+        if token_ids:
+            self.last_tok = token_ids[-1]
+
+        self.is_first_append_of_turn = output.finished
+        if output.finished:
+            self.finish_reason = output.outputs[0].finish_reason
+            self.all_turn_metrics.append(self.current_turn_metrics.copy())
+            self.current_turn_metrics.reset()
 
     def append_tool_output(self, output: list[Message]) -> None:
-        output_msgs = output
-        self._messages.extend(output_msgs)
+        for msg in output:
+            if msg.author.role == Role.TOOL and msg.recipient is None:
+                msg.recipient = "assistant"
+            toks = self.encoding.render(msg)
+            assert toks, "Tool output should render to at least one token"
+            result = self.parser.process_chunk(toks)
+            self._sync_completed_messages(result.segments)
+            self.last_tok = toks[-1]
 
     def _update_prefill_token_usage(self, output: RequestOutput) -> None:
         """Update token usage statistics for the prefill phase of generation.
@@ -677,10 +674,8 @@ class HarmonyContext(ConversationContext):
         self.current_turn_metrics.input_tokens = this_turn_input_tokens
         self.num_prompt_tokens += this_turn_input_tokens
 
-        # Calculate tool tokens (except on first turn)
-        if self.is_first_turn:
-            self.is_first_turn = False
-        else:
+        # Calculate tool tokens when there is a previous completed turn.
+        if self.all_turn_metrics:
             previous_turn = self.all_turn_metrics[-1]
             # start counting tool after first turn
             # tool tokens = this turn prefill - last turn prefill -
@@ -746,56 +741,72 @@ class HarmonyContext(ConversationContext):
 
     def need_builtin_tool_call(self) -> bool:
         last_msg = self.messages[-1]
-        recipient = last_msg.recipient
-        if recipient is None:
-            return False
-        if recipient.startswith("browser."):
-            return "browser" in self.available_tools
-        if recipient.startswith("python"):
-            return "python" in self.available_tools
-        if recipient.startswith("container."):
-            return "container" in self.available_tools
-        return False
+        item_type = resolve_response_item_type(
+            last_msg.channel,
+            last_msg.recipient,
+            self.function_tool_names,
+        )
+        return item_type.kind in (
+            ResponseItemKind.CODE_INTERPRETER,
+            ResponseItemKind.WEB_SEARCH,
+            ResponseItemKind.CONTAINER,
+        )
 
     async def call_tool(self) -> list[Message]:
         if not self.messages:
             return []
         last_msg = self.messages[-1]
-        recipient = last_msg.recipient
-        if recipient is not None:
-            if recipient.startswith("browser."):
-                return await self.call_search_tool(
-                    self._tool_sessions["browser"], last_msg
-                )
-            elif recipient.startswith("python"):
+        item_type = resolve_response_item_type(
+            last_msg.channel,
+            last_msg.recipient,
+            self.function_tool_names,
+        )
+        match item_type.kind:
+            case ResponseItemKind.CODE_INTERPRETER:
                 return await self.call_python_tool(
                     self._tool_sessions["python"], last_msg
                 )
-            elif recipient.startswith("container."):
-                return await self.call_container_tool(
-                    self._tool_sessions["container"], last_msg
+            case ResponseItemKind.WEB_SEARCH:
+                assert item_type.action is not None
+                return await self.call_search_tool(
+                    self._tool_sessions["browser"], item_type.action, last_msg
                 )
-        raise ValueError("No tool call found")
+            case ResponseItemKind.CONTAINER:
+                assert item_type.action is not None
+                return await self.call_container_tool(
+                    self._tool_sessions["container"], item_type.action, last_msg
+                )
+            case _:
+                raise ValueError("No tool call found")
 
     def render_for_completion(self) -> list[int]:
-        return render_for_completion(self.messages)
+        rendered_tokens = render_for_completion(self.messages)
+
+        last_n = -1
+        to_process = []
+        while rendered_tokens[last_n] != self.last_tok:
+            to_process.append(rendered_tokens[last_n])
+            last_n -= 1
+        if to_process:
+            self.parser.process_chunk(list(reversed(to_process)))
+
+        return rendered_tokens
 
     async def call_search_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: Message
+        self, tool_session: Union["ClientSession", Tool], action: str, last_msg: Message
     ) -> list[Message]:
         self.called_tools.add("browser")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
-        tool_name = last_msg.recipient.split(".")[1]
-        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
-            try:
-                args = json.loads(last_msg.content[0].text)
-            except json.JSONDecodeError as e:
-                return _create_json_parse_error_messages(last_msg, e)
+        try:
+            args = json.loads("".join(message_text_content(last_msg)))
+        except json.JSONDecodeError as e:
+            if not envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+                raise
+            result_str = f"Invalid tool call JSON arguments: {e}"
         else:
-            args = json.loads(last_msg.content[0].text)
-        result = await tool_session.call_tool(tool_name, args)
-        result_str = result.content[0].text
+            result = await tool_session.call_tool(action, args)
+            result_str = result.content[0].text
         content = TextContent(text=result_str)
         author = Author(role=Role.TOOL, name=last_msg.recipient)
         return [
@@ -852,7 +863,7 @@ class HarmonyContext(ConversationContext):
                     exit_stack.push_async_exit(self.cleanup_session)
 
     async def call_container_tool(
-        self, tool_session: Union["ClientSession", Tool], last_msg: Message
+        self, tool_session: Union["ClientSession", Tool], action: str, last_msg: Message
     ) -> list[Message]:
         """
         Call container tool. Expect this to be run in a stateful docker
@@ -873,16 +884,15 @@ class HarmonyContext(ConversationContext):
         self.called_tools.add("container")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
-        tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
-        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
-            try:
-                args = json.loads(last_msg.content[0].text)
-            except json.JSONDecodeError as e:
-                return _create_json_parse_error_messages(last_msg, e)
+        try:
+            args = json.loads("".join(message_text_content(last_msg)))
+        except json.JSONDecodeError as e:
+            if not envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+                raise
+            result_str = f"Invalid tool call JSON arguments: {e}"
         else:
-            args = json.loads(last_msg.content[0].text)
-        result = await tool_session.call_tool(tool_name, args)
-        result_str = result.content[0].text
+            result = await tool_session.call_tool(action, args)
+            result_str = result.content[0].text
         content = TextContent(text=result_str)
         author = Author(role=Role.TOOL, name=last_msg.recipient)
         return [
@@ -911,88 +921,3 @@ class HarmonyContext(ConversationContext):
                 for tool in self.called_tools
             )
         )
-
-
-class StreamingHarmonyContext(HarmonyContext):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.last_output = None
-
-        self.parser = get_streamable_parser_for_assistant()
-        self.encoding = get_encoding()
-        self.last_tok = None
-        self.first_tok_of_message = True
-        self.last_content_delta = None
-
-    @property
-    def messages(self) -> list:
-        return self._messages
-
-    def append_output(self, output: RequestOutput) -> None:
-        # append_output is called for each output token in streaming case,
-        # so we only want to add the prompt tokens once for each message.
-        self.last_content_delta = None
-        if self.first_tok_of_message:
-            self._update_prefill_token_usage(output)
-        # Reset self.first_tok_of_message if needed:
-        # if the current token is the last one of the current message
-        # (finished=True), then the next token processed will mark the
-        # beginning of a new message
-        self.first_tok_of_message = output.finished
-        last_delta_text = ""
-        for tok in output.outputs[0].token_ids:
-            self.parser.process(tok)
-            last_delta_text += self.parser.last_content_delta or ""
-        if last_delta_text:
-            self.last_content_delta = last_delta_text
-        self._update_decode_token_usage(output)
-        if output.kv_transfer_params is not None:
-            self.kv_transfer_params = output.kv_transfer_params
-
-        # For streaming, update previous turn when message is complete
-        if output.finished:
-            self.all_turn_metrics.append(self.current_turn_metrics.copy())
-            self.current_turn_metrics.reset()
-        # Check if the current token is part of reasoning content
-        self._update_num_reasoning_tokens()
-        self.last_tok = tok
-        if len(self._messages) - self.num_init_messages < len(self.parser.messages):
-            self._messages.extend(
-                self.parser.messages[len(self._messages) - self.num_init_messages :]
-            )
-
-    def append_tool_output(self, output: list[Message]) -> None:
-        # Handle the case of tool output in direct message format
-        assert len(output) == 1, "Tool output should be a single message"
-        msg = output[0]
-        # Sometimes the recipient is not set for tool messages,
-        # so we set it to "assistant"
-        if msg.author.role == Role.TOOL and msg.recipient is None:
-            msg.recipient = "assistant"
-        toks = self.encoding.render(msg)
-        for tok in toks:
-            self.parser.process(tok)
-        self.last_tok = toks[-1]
-        # TODO: add tool_output messages to self._messages
-
-    def is_expecting_start(self) -> bool:
-        return self.parser.state == StreamState.EXPECT_START
-
-    def is_assistant_action_turn(self) -> bool:
-        return self.last_tok in self.encoding.stop_tokens_for_assistant_actions()
-
-    def render_for_completion(self) -> list[int]:
-        # now this list of tokens as next turn's starting tokens
-        # `<|start|>assistant`,
-        # we need to process them in parser.
-        rendered_tokens = super().render_for_completion()
-
-        last_n = -1
-        to_process = []
-        while rendered_tokens[last_n] != self.last_tok:
-            to_process.append(rendered_tokens[last_n])
-            last_n -= 1
-        for tok in reversed(to_process):
-            self.parser.process(tok)
-
-        return rendered_tokens
