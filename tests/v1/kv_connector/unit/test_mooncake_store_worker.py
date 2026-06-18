@@ -31,6 +31,27 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
+from vllm.sampling_params import SamplingParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.request import Request
+
+
+def _make_request(
+    request_id: str,
+    token_ids: list[int],
+    hash_block_size: int,
+) -> Request:
+    init_none_hash(sha256)
+    sampling_params = SamplingParams(max_tokens=1)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+    return Request(
+        request_id=request_id,
+        prompt_token_ids=token_ids,
+        sampling_params=sampling_params,
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(hash_block_size, sha256),
+    )
 
 
 def _default_send_coord() -> mooncake_store_worker.MooncakeStoreCoordinator:
@@ -946,7 +967,7 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
 
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.side_effect = lambda keys, addrs, sizes: (
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, addrs, sizes, *args: (
         [256] * len(keys)
     )
 
@@ -988,14 +1009,14 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
         block_size=32,
     )
 
-    hs = [bytes([i + 1]) * 4 for i in range(8)]
+    req = _make_request("r0", list(range(64)), hash_block_size=8)
     thread.add_stored_request("r0")
     thread._handle_request(
         ReqMeta(
             req_id="r0",
             token_len_chunk=64,
             block_ids=([0, 1], list(range(8))),
-            block_hashes=hs,
+            block_hashes=req.block_hashes,
             can_save=True,
         )
     )
@@ -1006,14 +1027,21 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
     # Full-attn: 2 blocks (chunks ending at 32 and 64).
     assert len(full_keys) == 2
     # SWA: only the two blocks ending at lcm boundaries (32 and 64), i.e.
-    # blocks covering tokens [24,32) and [56,64) — hashes hs[3] and hs[7].
+    # blocks covering tokens [24,32) and [56,64).
     assert len(swa_keys) == 2
-    swa_hashes = {k.rsplit("@", 1)[-1] for k in swa_keys}
-    assert swa_hashes == {hs[3].hex(), hs[7].hex()}
+    full_hashes = req.block_hashes.get_block_hashes(32)
+    assert {k.rsplit("@", 1)[-1] for k in full_keys} == {
+        full_hashes[0].hex(),
+        full_hashes[1].hex(),
+    }
+    assert {k.rsplit("@", 1)[-1] for k in swa_keys} == {
+        req.block_hashes[3].hex(),
+        req.block_hashes[7].hex(),
+    }
 
 
 def test_store_sending_thread_kv_events_use_group_chunk_metadata():
-    from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+    from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
     from vllm.v1.kv_cache_interface import (
         FullAttentionSpec,
         KVCacheGroupSpec,
@@ -1063,14 +1091,14 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     )
     thread.enable_kv_event = True
 
-    hs = [bytes([i + 1]) * 4 for i in range(4)]
+    req = _make_request("r0", list(range(32)), hash_block_size=8)
     thread.add_stored_request("r0")
     thread._handle_request(
         ReqMeta(
             req_id="r0",
             token_len_chunk=32,
             block_ids=([0], list(range(4))),
-            block_hashes=hs,
+            block_hashes=req.block_hashes,
             can_save=True,
             token_ids=list(range(32)),
         )
@@ -1081,13 +1109,13 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     assert full_event.block_size == 32
     assert full_event.token_ids == list(range(32))
     assert full_event.block_hashes == [
-        maybe_convert_block_hash(BlockHash(b"".join(hs)))
+        maybe_convert_block_hash(req.block_hashes.get_block_hashes(32)[0])
     ]
 
     assert swa_event.group_idx == 1
     assert swa_event.block_size == 8
     assert swa_event.token_ids == list(range(24, 32))
-    assert swa_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
+    assert swa_event.block_hashes == [maybe_convert_block_hash(req.block_hashes[3])]
 
 
 def _auto_set_ready_event(*args, **kwargs):

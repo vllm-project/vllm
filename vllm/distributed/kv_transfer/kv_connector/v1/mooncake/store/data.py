@@ -131,10 +131,14 @@ class ChunkedTokenDatabase:
         if self.block_size == self.hash_block_size:
             chunk_hashes: Iterable[BlockHash] = block_hashes
         else:
-            raise NotImplementedError(
-                "Mooncake KV transfer requires direct block hashes when "
-                "block_size differs from hash_block_size."
-            )
+            get_block_hashes = getattr(block_hashes, "get_block_hashes", None)
+            if get_block_hashes is None:
+                raise NotImplementedError(
+                    "Mooncake KV transfer requires request block hashes with "
+                    "direct block-size views when block_size differs from "
+                    "hash_block_size."
+                )
+            chunk_hashes = get_block_hashes(self.block_size)
         for chunk_id, h in enumerate(chunk_hashes):
             start_idx = chunk_id * self.block_size
             if start_idx >= token_len:

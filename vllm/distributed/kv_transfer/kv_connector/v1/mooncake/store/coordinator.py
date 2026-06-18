@@ -206,9 +206,12 @@ class MooncakeStoreCoordinator:
     ) -> BlockHashList:
         if spec.block_size == self.hash_block_size:
             return block_hashes
+        get_block_hashes = getattr(block_hashes, "get_block_hashes", None)
+        if get_block_hashes is not None:
+            return get_block_hashes(spec.block_size)
         raise NotImplementedError(
-            "Mooncake KV transfer requires direct block hashes when block_size "
-            "differs from hash_block_size."
+            "Mooncake KV transfer requires request block hashes with direct "
+            "block-size views when block_size differs from hash_block_size."
         )
 
     def _find_hit_blocks(
