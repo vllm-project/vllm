@@ -8,6 +8,7 @@ import torch
 import vllm.v1.attention.backends.triton_attn as triton_attn_backend
 import vllm.v1.attention.ops.triton_unified_attention as triton_unified_attention_ops
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import (
     nvfp4_kv_cache_full_dim,
@@ -22,6 +23,8 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
+    _decode_e2m1_nibble,
+    _decode_e2m1_nibble_lut,
     _get_nvfp4_launch_config,
     unified_attention,
 )
@@ -46,6 +49,25 @@ NUM_BLOCKS = [32768, 2048]
 # 0: use 2D kernel for decode
 # 8: use 3D kernel for decode
 SEQ_THRESHOLD_3D_VALUES = [0, 8]
+
+
+@triton.jit
+def _e2m1_lut_compare_kernel(old_out, lut_out):
+    offs = tl.arange(0, 16)
+    nibble = offs.to(tl.uint8)
+    tl.store(old_out + offs, _decode_e2m1_nibble(nibble).to(tl.float32))
+    tl.store(lut_out + offs, _decode_e2m1_nibble_lut(nibble).to(tl.float32))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_nvfp4_e2m1_lut_matches_existing_decoder() -> None:
+    old = torch.empty((16,), dtype=torch.float32, device="cuda")
+    lut = torch.empty_like(old)
+
+    _e2m1_lut_compare_kernel[(1,)](old, lut, num_warps=1)
+
+    torch.testing.assert_close(lut, old, rtol=0, atol=0, equal_nan=True)
+    assert torch.equal(lut.cpu().view(torch.int32), old.cpu().view(torch.int32))
 
 
 def test_nvfp4_launch_config_large_full_decode_heads() -> None:

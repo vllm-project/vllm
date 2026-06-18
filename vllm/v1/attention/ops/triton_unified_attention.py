@@ -92,7 +92,26 @@ def _decode_e2m1_nibble_fast(nibble):
 
 
 @triton.jit
+def _decode_e2m1_nibble_lut(nibble):
+    magnitude = nibble & 0x07
+    idx = magnitude & 0x03
+    low = tl.full(magnitude.shape, 0x3FC03F803F000000, tl.uint64)
+    high = tl.full(magnitude.shape, 0x40C0408040404000, tl.uint64)
+    packed = tl.where(magnitude < 4, low, high)
+    bits16 = ((packed >> (idx.to(tl.uint64) << 4)) & 0xFFFF).to(tl.uint32)
+    sign_bits = tl.where(
+        magnitude == 0,
+        tl.full(magnitude.shape, 0, tl.uint32),
+        ((nibble & 0x08).to(tl.uint32)) << 28,
+    )
+    bits = (bits16 << 16) | sign_bits
+    return bits.to(tl.uint32).to(tl.float32, bitcast=True)
+
+
+@triton.jit
 def _decode_e2m1_nibble_for_head(nibble, HEAD_SIZE: tl.constexpr):
+    if HEAD_SIZE == 256:
+        return _decode_e2m1_nibble_lut(nibble)
     if HEAD_SIZE >= 512:
         return _decode_e2m1_nibble_fast(nibble)
     return _decode_e2m1_nibble(nibble)
