@@ -107,7 +107,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._poller_enabled: bool = bool(kwargs.pop("start_poller", True))
         self._poll_interval: float = float(kwargs.pop("poll_interval", 0.001))
 
-        config_fields = self._build_config_fields(offloading_spec)
+        config_fields = FileMapper.from_offloading_spec(
+            root_dir="",
+            offloading_spec=offloading_spec,
+            gpu_blocks_per_file=offloading_spec.block_size_factor,
+            parallel_agnostic=True,
+        ).get_run_config()
         self._data: DataTransport = NixlTransport(
             self._local_id,
             primary_kv_view,
@@ -346,24 +351,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _build_config_fields(offloading_spec: OffloadingSpec) -> dict | None:
-        """Extract config fields for the peer-compatibility fingerprint."""
-        try:
-            mapper = FileMapper.from_offloading_spec(
-                root_dir="",
-                offloading_spec=offloading_spec,
-                gpu_blocks_per_file=offloading_spec.block_size_factor,
-                parallel_agnostic=True,
-            )
-            fields = mapper.get_run_config()
-            fields["hash_block_size"] = offloading_spec.hash_block_size
-            fields["block_size_factor"] = offloading_spec.block_size_factor
-            fields["gpu_block_size"] = list(offloading_spec.gpu_block_size)
-            return fields
-        except (AttributeError, TypeError):
-            return None
 
     @staticmethod
     def _remote_id_from_params(kv_params: dict) -> str | None:
