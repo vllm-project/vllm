@@ -417,7 +417,7 @@ class Sm100ChunkHKernel:
                             ).load()
                         )
 
-                    for j in cutlass.range_constexpr(32):
+                    for j in cutlass.range(32, vectorize=True):
                         h_f32[j] *= h_scale
                     _tcgen05.st(warp_id_ * 32, vk_tmem + i * 32, "32x32b", 32, h_f32)
 
@@ -486,7 +486,7 @@ class Sm100ChunkHKernel:
                     h_f32.store(
                         _tcgen05.ld(warp_id_ * 32, vk_tmem + i * 32, "32x32b", 32)
                     )
-                    for j in cutlass.range_constexpr(32):
+                    for j in cutlass.range(32, vectorize=True):
                         h_f32[j] *= h_scale
                     _tcgen05.st(warp_id_ * 32, vk_tmem + i * 32, "32x32b", 32, h_f32)
                 _tcgen05.wait_st()

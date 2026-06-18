@@ -508,7 +508,7 @@ class Sm100ChunkUWKernel:
                     Ai_bf16.store(acc.load().to(BFloat16))
 
                     # Second MMA: Ai_new = 2Ai + (-AiM) @ Ai
-                    for j in cutlass.range_constexpr(8):
+                    for j in cutlass.range(8, vectorize=True):
                         Ai_f32[j] *= 2.0
                     cute.copy(
                         ldsm_trans_atom,
