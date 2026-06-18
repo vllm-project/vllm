@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
+import io
 from collections.abc import Iterable
 
 import torch
@@ -34,6 +34,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.multimodal.inputs import NestedTensors
 from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.v1.attention.backend import AttentionType
 
 from .qwen2 import Qwen2MLP as Qwen3MLP
@@ -47,37 +48,71 @@ from .utils import (
 
 logger = init_logger(__name__)
 
-MASK_EMBEDDING_FILENAME = "mask_embedding.pt"
 
+def _resolve_layer_attention(
+    config: Qwen3Config, layer_idx: int
+) -> tuple[int | None, bool]:
+    """Resolve ``(sliding_window, causal)`` for one DFlash draft layer.
 
-def _find_mask_embedding_file(
-    model_path: str, revision: str | None = None
-) -> str | None:
-    """Locate the DFlash ``mask_embedding.pt`` file for a draft model.
+    Sliding window:
+    - Without ``layer_types``, every layer is full attention unless
+      ``dflash_config.use_swa`` is set, in which case every layer is SWA.
+    - With ``layer_types``, each layer follows its own entry; ``use_swa`` is
+      then only valid when every layer is sliding (raises otherwise).
 
-    Args:
-        model_path: Local directory or Hugging Face repo id of the draft model.
-        revision: Optional revision used when the draft lives on the HF Hub.
+    Causality: ``dflash_config.causal`` applies to all layers when set.
+    Otherwise full-attention layers are non-causal and SWA layers are causal;
+    uniform full/SWA models default to non-causal.
 
-    Returns:
-        The path to ``mask_embedding.pt`` if it can be found, otherwise None.
+    This is to support a varied ecosystem of checkpoints, including:
+    - XiaomiMiMo/MiMo-V2.5-Pro-FP4-DFlash (sets "use_swa", assumes non-causal)
+    - z-lab/gemma-4-31B-it-DFlash (has mixed layer types, assumes causal only for SWA)
+    - z-lab/Qwen3.5-9B-DFlash ("standard" DFlash, all full attn, assumes non-causal)
     """
-    if os.path.isdir(model_path):
-        candidate = os.path.join(model_path, MASK_EMBEDDING_FILENAME)
-        return candidate if os.path.isfile(candidate) else None
+    dflash_config = getattr(config, "dflash_config", None) or {}
+    layer_types = getattr(config, "layer_types", None)
+    use_swa = dflash_config.get("use_swa", False)
+    config_causal = dflash_config.get("causal", None)
 
-    # Remote draft: the weight loader only fetches *.safetensors/*.bin, so the
-    # mask embedding (a plain .pt) must be downloaded explicitly.
-    try:
-        from huggingface_hub import hf_hub_download
+    default_causal = False
+    if layer_types is None:
+        is_sliding = use_swa
+    else:
+        SLIDING_ATTENTION = "sliding_attention"
+        num_sliding = sum(lt == SLIDING_ATTENTION for lt in layer_types)
+        all_sliding = num_sliding == len(layer_types)
+        any_sliding = num_sliding > 0
 
-        return hf_hub_download(
-            repo_id=model_path,
-            filename=MASK_EMBEDDING_FILENAME,
-            revision=revision,
+        if any_sliding and not all_sliding:
+            # Mixed sliding/full attention needs per-layer causal metadata and
+            # multiple KV-cache groups, which DFlash does not yet support.
+            raise NotImplementedError(
+                "DFlash does not yet support mixed sliding/full attention via "
+                "layer_types; see "
+                "https://github.com/vllm-project/vllm/issues/40898."
+            )
+        if use_swa and not all_sliding:
+            raise ValueError(
+                "DFlash dflash_config.use_swa=True requires every entry in "
+                "layer_types to be 'sliding_attention'."
+            )
+        is_sliding = layer_types[layer_idx] == SLIDING_ATTENTION
+        # Full-attention layers default non-causal; SWA layers default causal.
+        default_causal = is_sliding
+
+    sliding_window = None
+    if is_sliding:
+        sliding_window = dflash_config.get(
+            "swa_window_size", getattr(config, "sliding_window", None)
         )
-    except Exception:
-        return None
+        if sliding_window is None:
+            raise ValueError(
+                "DFlash sliding attention requires a window size configured in "
+                "dflash_config.swa_window_size or the top-level sliding_window."
+            )
+
+    causal = config_causal if config_causal is not None else default_causal
+    return sliding_window, causal
 
 
 class DFlashQwen3Attention(nn.Module):
@@ -99,6 +134,7 @@ class DFlashQwen3Attention(nn.Module):
         attention_bias: bool = False,
         add_swa_attention_sink_bias: bool = False,
         sliding_window: int | None = None,
+        causal: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -163,18 +199,11 @@ class DFlashQwen3Attention(nn.Module):
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
         )
-        if sliding_window is not None:
-            # DFlash attends non-causally: the query block (bonus + mask tokens)
-            # must attend to itself bidirectionally, and the current full-
-            # attention path relies on that. Attention defaults a DECODER
-            # sliding window to the causal (w-1, 0) tuple, which would mask
-            # later query tokens from earlier ones. Widen the right edge to a
-            # symmetric (w-1, w-1) window so the windowed masking matches the
-            # non-causal reference (the FlashAttention impl stores the window as
-            # a (left, right) tuple). The KV-cache SlidingWindowSpec is still
-            # driven by the int window passed above, so block management is
-            # unchanged. For causal layers a symmetric window is equivalent,
-            # since causal masking clamps the right edge regardless.
+        if sliding_window is not None and not causal:
+            # Dedicated override for FlashAttention + non-causal SWA:
+            # we need to ensure that the sliding window is symmetric around the query
+            # (a sliding-window both forwards and backwards). This is a rare edge-case.
+            # FA3 can sometimes build the config incorrectly, so patch it here anyways.
             impl_window = getattr(self.attn.impl, "sliding_window", None)
             if isinstance(impl_window, tuple):
                 self.attn.impl.sliding_window = (sliding_window - 1, sliding_window - 1)
@@ -215,6 +244,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
         vllm_config: VllmConfig,
         *,
         config: Qwen3Config,
+        layer_idx: int,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -232,14 +262,9 @@ class DFlashQwen3DecoderLayer(nn.Module):
             getattr(config, "add_swa_attention_sink_bias", False),
         )
 
-        # Sliding-window attention is configured in dflash_config (use_swa /
-        # swa_window_size); fall back to the top-level sliding_window field.
-        # When disabled the draft keeps full attention (sliding_window=None).
-        sliding_window = None
-        if dflash_config.get("use_swa", False):
-            sliding_window = dflash_config.get(
-                "swa_window_size", getattr(config, "sliding_window", None)
-            )
+        # Resolve this layer's attention mode (full vs sliding window, causal vs
+        # non-causal) from the draft config.
+        sliding_window, causal = _resolve_layer_attention(config, layer_idx)
 
         self.self_attn = DFlashQwen3Attention(
             hidden_size=self.hidden_size,
@@ -250,6 +275,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             attention_bias=getattr(config, "attention_bias", False),
             add_swa_attention_sink_bias=add_swa_attention_sink_bias,
             sliding_window=sliding_window,
+            causal=causal,
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
@@ -321,27 +347,24 @@ class DFlashQwen3Model(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
-        # Masked query slots are fed to the draft as `mask_token_id`. The target
-        # embedding table (shared with this draft) has no trained row for that
-        # token, so DFlash ships a separately-trained vector in
-        # `mask_embedding.pt`. When that file is available, `embed_input_ids`
-        # substitutes it for masked slots instead of `embed_tokens[mask_token_id]`.
+        # Masked query slots are fed to the draft as `mask_token_id`. Most DFlash
+        # checkpoints will have the mask embedding in the vocabulary embedding table
+        # at that slot id. Some checkpoints (XiaomiMiMo/MiMo-V2.5-Pro-FP4-DFlash) ship
+        # with a separate mask embedding tensor to use instead. When present, we load it
+        # and substitute it for embed_tokens[mask_token_id] when computing embeddings.
         self.mask_token_id = drafter_config.get("mask_token_id")
-        self.register_buffer(
-            "mask_embedding",
-            torch.zeros(
-                self.config.hidden_size,
-                dtype=vllm_config.model_config.dtype,
-            ),
-            persistent=False,
+        self.mask_embedding = nn.Parameter(
+            torch.zeros(self.config.hidden_size, dtype=vllm_config.model_config.dtype),
+            requires_grad=False,
         )
-        self.has_mask_embedding = False
+        self.has_separate_mask_embedding = False
 
         self.layers = nn.ModuleList(
             [
                 DFlashQwen3DecoderLayer(
                     current_vllm_config,
                     config=self.config,
+                    layer_idx=layer_idx,
                     cache_config=current_vllm_config.cache_config,
                     quant_config=self.quant_config,
                     prefix=maybe_prefix(prefix, f"layers.{layer_idx + start_layer_id}"),
@@ -379,9 +402,8 @@ class DFlashQwen3Model(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         embeds = self.embed_tokens(input_ids)
-        if self.has_mask_embedding and self.mask_token_id is not None:
-            # Replace masked slots with the trained mask embedding. Use a
-            # data-independent torch.where so this stays CUDA-graph friendly.
+        if self.has_separate_mask_embedding and self.mask_token_id is not None:
+            # Replace masked slots with the dedicated mask embedding.
             is_mask = (input_ids == self.mask_token_id).unsqueeze(-1)
             embeds = torch.where(is_mask, self.mask_embedding.to(embeds.dtype), embeds)
         return embeds
@@ -703,6 +725,13 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
 
+        # Route the separately-trained mask embedding (if shipped) through the
+        # standard weight loader alongside the rest of the draft weights.
+        mask_embedding = self._read_mask_embedding()
+        if mask_embedding is not None:
+            model_weights["model.mask_embedding"] = mask_embedding
+            self.model.has_separate_mask_embedding = True
+
         skip_substrs = []
         if not includes_draft_id_mapping:
             skip_substrs.append("draft_id_to_target_id")
@@ -710,72 +739,51 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             skip_substrs.append("embed_tokens")
         if not self.model.use_aux_hidden_state:
             skip_substrs.append("fc.")
+        if not self.model.has_separate_mask_embedding:
+            skip_substrs.append("mask_embedding")
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=None,
             skip_substrs=skip_substrs,
         )
         loader.load_weights(model_weights.items())
-        self._load_mask_embedding()
         self.model._build_fused_kv_buffers()
 
-    def _load_mask_embedding(self) -> None:
-        """Load the trained mask embedding from ``mask_embedding.pt`` if present.
+    def _read_mask_embedding(self) -> torch.Tensor | None:
+        """Checks for an override mask embedding in `mask_embedding.pt` and returns it.
 
-        DFlash drafts ship a separately-trained embedding for the mask token in
-        a ``mask_embedding.pt`` file, because the (shared) target embedding table
-        has no meaningful row for ``mask_token_id``. When the file is available
-        the draft uses this vector for masked query slots; otherwise it falls
-        back to embedding ``mask_token_id`` through ``embed_tokens``.
+        Some checkpoints ship a separately-trained mask embedding for the mask token,
+        which we use to overwrite the embedding for `mask_token_id`. This helper
+        checks for the file, loads the pytorch tensor, and returns the embedding to use.
+
+        Returns None if the override file is not present.
         """
-        model = self.model
-        if model.mask_token_id is None:
-            return
+        mask_token_id = self.model.mask_token_id
+        if mask_token_id is None:
+            return None
 
-        path = _find_mask_embedding_file(
+        MASK_EMBEDDING_FILENAME = "mask_embedding.pt"
+        data = get_hf_file_bytes(
+            MASK_EMBEDDING_FILENAME,
             self.draft_model_config.model,
-            revision=self.draft_model_config.revision,
+            self.draft_model_config.revision,
         )
-        if path is None:
-            logger.info(
-                "No %s found for DFlash draft; embedding mask_token_id (%s) "
-                "via the shared embed_tokens table.",
-                MASK_EMBEDDING_FILENAME,
-                model.mask_token_id,
-            )
-            return
+        if data is None:
+            return None
 
-        state = torch.load(path, map_location="cpu", weights_only=True)
+        state = torch.load(io.BytesIO(data), weights_only=True)
         if isinstance(state, dict):
-            embedding = state["embedding"]
-            file_mask_token_id = state.get("mask_token_id")
-        else:
-            embedding = state
-            file_mask_token_id = None
+            if state.get("mask_token_id", mask_token_id) != mask_token_id:
+                raise ValueError(
+                    f"{MASK_EMBEDDING_FILENAME} mask_token_id does not match "
+                    f"dflash_config.mask_token_id ({mask_token_id}). "
+                    f"Got {state.get('mask_token_id')}."
+                )
+            state = state["embedding"]
 
-        if file_mask_token_id is not None and file_mask_token_id != model.mask_token_id:
-            raise ValueError(
-                f"{MASK_EMBEDDING_FILENAME} mask_token_id ({file_mask_token_id}) "
-                f"does not match dflash_config.mask_token_id "
-                f"({model.mask_token_id})."
-            )
-
-        embedding = embedding.reshape(-1)
-        if embedding.numel() != model.mask_embedding.numel():
-            raise ValueError(
-                f"{MASK_EMBEDDING_FILENAME} has {embedding.numel()} elements but "
-                f"the draft hidden size is {model.mask_embedding.numel()}."
-            )
-
-        model.mask_embedding.copy_(
-            embedding.to(
-                device=model.mask_embedding.device,
-                dtype=model.mask_embedding.dtype,
-            )
-        )
-        model.has_mask_embedding = True
         logger.info(
-            "Loaded trained mask embedding from %s for DFlash mask_token_id %s.",
-            path,
-            model.mask_token_id,
+            "Loaded DFlash mask embedding for mask_token_id %s from %s",
+            mask_token_id,
+            MASK_EMBEDDING_FILENAME,
         )
+        return state.reshape(-1)
