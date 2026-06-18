@@ -6,6 +6,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -24,6 +25,8 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.utils import (
+    dcp_localize_seq_lens,
+    get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
@@ -243,6 +246,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         scheduler_config = self.vllm_config.scheduler_config
+        parallel_config = self.vllm_config.parallel_config
+        if parallel_config.decode_context_parallel_size > 1:
+            self.dcp_world_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+        else:
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
+        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
         self.num_speculative_tokens = (
@@ -331,6 +342,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # Get compress_ratio for DeepseekV4 support
         if isinstance(self.kv_cache_spec, MLAAttentionSpec):
             self.compress_ratio = self.kv_cache_spec.compress_ratio
+        if self.dcp_world_size > 1 and self.compress_ratio > 1:
+            raise NotImplementedError(
+                "DCP is not supported with sparse indexer KV compression "
+                f"(compress_ratio={self.compress_ratio})."
+            )
 
         # Pre-allocate buffers for CUDA graph compatibility when
         if self.compress_ratio > 1:
@@ -347,6 +363,26 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 dtype=torch.int32,
                 device=self.device,
             )
+
+    def _dcp_localize_decode_seq_lens(
+        self,
+        seq_lens: torch.Tensor,
+        num_decodes: int,
+        seq_lens_is_buffer_view: bool,
+    ) -> torch.Tensor:
+        local_seq_lens = dcp_localize_seq_lens(
+            seq_lens,
+            self.dcp_rank,
+            self.dcp_world_size,
+            self.cp_kv_cache_interleave_size,
+        )
+        if seq_lens_is_buffer_view:
+            seq_lens.copy_(local_seq_lens)
+            return seq_lens
+
+        out = self.decode_seq_lens_buffer[:num_decodes]
+        out.copy_(local_seq_lens)
+        return out
 
     def _prepare_decode_tensors(
         self,
@@ -481,6 +517,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         seq_lens = common_attn_metadata.seq_lens
         slot_mapping = common_attn_metadata.slot_mapping
         block_table = common_attn_metadata.block_table_tensor
+        dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -507,6 +544,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
             compressed_seq_lens = seq_lens // self.compress_ratio
 
+        if dcp_local_seq_lens is not None:
+            compressed_seq_lens = dcp_local_seq_lens
+
         prefill_metadata = None
         if num_prefills > 0:
             # This CPU value is an upper bound for async-spec extend rows.  It
@@ -519,6 +559,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 if self.compress_ratio > 1
                 else seq_lens_cpu
             )
+            if dcp_local_seq_lens is not None:
+                compressed_seq_lens_cpu = get_dcp_local_seq_lens(
+                    seq_lens_cpu,
+                    self.dcp_world_size,
+                    self.dcp_rank,
+                    self.cp_kv_cache_interleave_size,
+                )
             prefill_query_lens_cpu = torch.diff(
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
@@ -549,6 +596,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.compress_ratio,
                     query_slice=query_slice,
                     skip_kv_gather=query_slice.start > 0,
+                    dcp_rank=self.dcp_rank,
+                    dcp_world_size=self.dcp_world_size,
+                    cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
@@ -588,15 +638,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
             )
 
+            seq_lens_is_buffer_view = (use_native and next_n > 1) or (
+                not use_native and max_decode_len > 1
+            )
+
+            if dcp_local_seq_lens is not None:
+                seq_lens = self._dcp_localize_decode_seq_lens(
+                    seq_lens,
+                    num_decodes,
+                    seq_lens_is_buffer_view=seq_lens_is_buffer_view,
+                )
+
             # For DeepseekV4 (compress_ratio > 1), the indexer KV cache stores
             # compressed tokens. Convert uncompressed seq_lens to compressed.
             if self.compress_ratio > 1:
-                # True iff seq_lens aliases decode_seq_lens_buffer (flatten or
-                # native wrote it); False iff it aliases common_attn_metadata.
-                seq_lens_is_local_view = (use_native and next_n > 1) or (
-                    not use_native and max_decode_len > 1
-                )
-                if seq_lens_is_local_view:
+                if seq_lens_is_buffer_view:
                     seq_lens //= self.compress_ratio
                 else:
                     # Copy to avoid mutating shared state; keeps CG address stable.
@@ -655,6 +711,9 @@ def build_prefill_chunk_metadata(
     compress_ratio: int,
     query_slice: slice | None = None,
     skip_kv_gather: bool = False,
+    dcp_rank: int = 0,
+    dcp_world_size: int = 1,
+    cp_kv_cache_interleave_size: int = 1,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     total_seq_lens = compressed_seq_lens_cpu[start_idx:end_idx].sum().item()
     if total_seq_lens == 0:
@@ -696,6 +755,9 @@ def build_prefill_chunk_metadata(
         cu_seq_len_ke,
         qs_start,
         qs_stop,
+        dcp_rank,
+        dcp_world_size,
+        cp_kv_cache_interleave_size,
         BLOCK_SIZE=1024,
         COMPRESS_RATIO=compress_ratio,
     )
@@ -734,6 +796,9 @@ def _build_prefill_chunk_metadata_kernel(
     cu_compressed_seq_len_ke_ptr,
     query_slice_start,
     query_slice_stop,
+    DCP_RANK,
+    DCP_WORLD,
+    DCP_INTERLEAVE,
     BLOCK_SIZE: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
 ):
@@ -763,8 +828,18 @@ def _build_prefill_chunk_metadata_kernel(
         # Compute cu_seq_len_ks
         tl.store(cu_compressed_seq_len_ks_ptr + out_pos, seq_start, mask=mask)
 
-        # Compute cu_seq_len_ke
-        seq_len_per_token = (start_pos + 1 + offset) // COMPRESS_RATIO
+        # Compute cu_seq_len_ke. Under DCP, global KV position p is owned by
+        # rank (p // DCP_INTERLEAVE) % DCP_WORLD, so each token's global
+        # causal bound must be reduced to this rank's local count.
+        global_ctx = start_pos + 1 + offset
+        dcp_group = DCP_WORLD * DCP_INTERLEAVE
+        full = global_ctx // dcp_group
+        rem = global_ctx % dcp_group
+        extra = tl.minimum(
+            tl.maximum(rem - DCP_RANK * DCP_INTERLEAVE, 0), DCP_INTERLEAVE
+        )
+        local_ctx = full * DCP_INTERLEAVE + extra
+        seq_len_per_token = local_ctx // COMPRESS_RATIO
         tl.store(
             cu_compressed_seq_len_ke_ptr + out_pos,
             seq_start + seq_len_per_token,

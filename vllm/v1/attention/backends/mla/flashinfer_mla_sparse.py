@@ -12,6 +12,7 @@ For sparse MLA:
 - sparse_mla_top_k parameter must be set to the topk value
 """
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -19,6 +20,7 @@ import numpy as np
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -49,7 +51,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
+FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE = 2048 * 1024 * 1024
 
 
 class FlashInferMLASparseBackend(AttentionBackend):
@@ -243,8 +245,11 @@ _fi_sparse_workspace: torch.Tensor | None = None
 def _get_workspace_buffer(device: torch.device) -> torch.Tensor:
     global _fi_sparse_workspace
     if _fi_sparse_workspace is None:
+        buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+        if "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE" not in os.environ:
+            buffer_size = max(buffer_size, FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE)
         _fi_sparse_workspace = torch.zeros(
-            FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE,
+            buffer_size,
             dtype=torch.uint8,
             device=device,
         )
@@ -257,6 +262,8 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
     Uses the TRT-LLM MLA kernel with sparse_mla_top_k parameter for
     sparse attention computation.
     """
+
+    can_return_lse_for_decode: bool = True
 
     def __init__(
         self,
@@ -349,7 +356,7 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
 
-        o = trtllm_batch_decode_with_kv_cache_mla(
+        kernel_out = trtllm_batch_decode_with_kv_cache_mla(
             query=q.unsqueeze(1),
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
             workspace_buffer=self._workspace_buffer,
@@ -362,5 +369,41 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
             sparse_mla_top_k=attn_metadata.topk_tokens,
+            return_lse=self.need_to_return_lse_for_decode,
         )
-        return o.view(-1, o.shape[-2], o.shape[-1]), None
+        if self.need_to_return_lse_for_decode:
+            assert isinstance(kernel_out, tuple)
+            o, lse = kernel_out
+        else:
+            assert isinstance(kernel_out, torch.Tensor)
+            o = kernel_out
+            lse = None
+
+        out = o.view(-1, o.shape[-2], o.shape[-1])
+        if lse is None:
+            return out, None
+
+        lse = self._normalize_lse(lse, out.shape[0], out.shape[1])
+
+        empty_rows = (topk_indices_physical == -1).all(dim=-1)
+        out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+        lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+        return out.contiguous(), lse
+
+    @staticmethod
+    def _normalize_lse(
+        lse: torch.Tensor,
+        num_tokens: int,
+        num_heads: int,
+    ) -> torch.Tensor:
+        if lse.dim() == 3:
+            if lse.shape[-1] == 1:
+                lse = lse.squeeze(-1)
+            elif lse.shape[1] == 1:
+                lse = lse.squeeze(1)
+        if lse.shape != (num_tokens, num_heads):
+            raise RuntimeError(
+                "Unexpected FlashInfer sparse MLA LSE shape: "
+                f"{tuple(lse.shape)}, expected ({num_tokens}, {num_heads})."
+            )
+        return lse
