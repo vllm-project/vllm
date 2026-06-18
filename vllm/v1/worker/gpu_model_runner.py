@@ -7485,6 +7485,13 @@ class GPUModelRunner(
                 continue
             # Skip modules that don't need KV cache (eg encoder-only attention)
             if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                if isinstance(spec, AttentionSpec):
+                    backend = attn_module.get_attn_backend()
+                    # indexes_kv_by_block_stride() -> get_kv_cache_stride_order()
+                    # -> get_kv_cache_layout() needs the current vLLM config.
+                    with set_current_vllm_config(self.vllm_config):
+                        indexes = backend.indexes_kv_by_block_stride()
+                    spec = replace(spec, indexes_kv_by_block_stride=indexes)
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
