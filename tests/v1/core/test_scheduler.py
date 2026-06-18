@@ -33,7 +33,12 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    KVConnectorOutput,
+    LogprobsLists,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -4992,3 +4997,140 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.num_preemptions == 0
     assert b.request_id not in req_to_blocks
+
+
+def _make_decode_model_runner_output(
+    scheduler_output: SchedulerOutput,
+    *,
+    token_id: int = 42,
+    logprobs: LogprobsLists | None = None,
+) -> ModelRunnerOutput:
+    req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        sampled_token_ids=[[token_id] for _ in req_ids],
+        logprobs=logprobs,
+        prompt_logprobs_dict={},
+        pooler_output=None,
+    )
+
+
+def _setup_decode_batch(num_requests: int, **scheduler_kwargs):
+    scheduler = create_scheduler(
+        max_num_seqs=num_requests,
+        max_num_batched_tokens=max(num_requests * 32, 8192),
+        **scheduler_kwargs,
+    )
+    requests = create_requests(
+        num_requests=num_requests,
+        num_tokens=32,
+        max_tokens=64,
+        ignore_eos=True,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    prefill_output = scheduler.schedule()
+    scheduler.update_from_output(
+        prefill_output,
+        _make_decode_model_runner_output(prefill_output, token_id=0),
+    )
+    for request in requests:
+        request.num_computed_tokens = len(request.prompt_token_ids)
+    return scheduler, requests
+
+
+def test_update_from_output_simple_decode_path():
+    """Decode-only batch uses the lightweight per-request update path."""
+    num_requests = 32
+    scheduler, requests = _setup_decode_batch(num_requests)
+    sched_output = scheduler.schedule()
+    assert all(
+        num_tokens == 1 for num_tokens in sched_output.num_scheduled_tokens.values()
+    )
+
+    model_runner_output = _make_decode_model_runner_output(sched_output, token_id=42)
+    engine_core_outputs = scheduler.update_from_output(
+        sched_output, model_runner_output
+    )
+
+    for request in requests:
+        assert request._output_token_ids == [0, 42]
+    assert len(engine_core_outputs[0].outputs) == num_requests
+    for output in engine_core_outputs[0].outputs:
+        assert output.new_token_ids == [42]
+        assert output.new_logprobs is None
+
+
+def test_update_from_output_simple_path_disabled_with_logprobs():
+    """Sample logprobs force the full update path but preserve correctness."""
+    import numpy as np
+
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        max_num_batched_tokens=8192,
+    )
+    requests = create_requests(
+        num_requests=4,
+        num_tokens=32,
+        max_tokens=64,
+        ignore_eos=True,
+    )
+    for request in requests:
+        request.sampling_params = SamplingParams(
+            ignore_eos=True,
+            max_tokens=64,
+            logprobs=1,
+        )
+        request.sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+        scheduler.add_request(request)
+    prefill_output = scheduler.schedule()
+    scheduler.update_from_output(
+        prefill_output,
+        _make_decode_model_runner_output(prefill_output, token_id=0),
+    )
+    for request in requests:
+        request.num_computed_tokens = len(request.prompt_token_ids)
+
+    sched_output = scheduler.schedule()
+    num_reqs = len(sched_output.num_scheduled_tokens)
+    logprobs = LogprobsLists(
+        logprob_token_ids=np.array([[7, 8]] * num_reqs, dtype=np.int32),
+        logprobs=np.array([[-1.0, -2.0]] * num_reqs, dtype=np.float32),
+        sampled_token_ranks=np.array([0] * num_reqs, dtype=np.int32),
+        cu_num_generated_tokens=list(range(num_reqs + 1)),
+    )
+    model_runner_output = _make_decode_model_runner_output(
+        sched_output,
+        token_id=11,
+        logprobs=logprobs,
+    )
+
+    engine_core_outputs = scheduler.update_from_output(
+        sched_output, model_runner_output
+    )
+
+    for request in requests:
+        assert request._output_token_ids == [0, 11]
+    for output in engine_core_outputs[0].outputs:
+        assert output.new_logprobs is not None
+
+
+def test_update_from_output_simple_path_disabled_with_spec_decode():
+    """Scheduled spec-decode tokens disable the simple update path."""
+    scheduler, requests = _setup_decode_batch(4)
+    sched_output = scheduler.schedule()
+    sched_output = dataclasses.replace(
+        sched_output,
+        scheduled_spec_decode_tokens={requests[0].request_id: []},
+    )
+
+    model_runner_output = _make_decode_model_runner_output(sched_output, token_id=5)
+    engine_core_outputs = scheduler.update_from_output(
+        sched_output, model_runner_output
+    )
+
+    for request in requests:
+        assert request._output_token_ids[-1] == 5
+    assert len(engine_core_outputs[0].outputs) == len(requests)
