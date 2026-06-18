@@ -742,6 +742,16 @@ class ModelConfig:
             return value
         return handler(value)
 
+    @field_validator("max_logprobs", mode="after")
+    @classmethod
+    def _check_max_logprobs(cls, v: int) -> int:
+        if v == -1 or v >= 0:
+            return v
+        raise ValueError(
+            f"max_logprobs must be a non-negative integer or -1 "
+            f"(auto-derive to vocab size), got {v}."
+        )
+
     @field_validator("tokenizer_mode", mode="after")
     def _lowercase_tokenizer_mode(cls, tokenizer_mode: str) -> str:
         return tokenizer_mode.lower()
