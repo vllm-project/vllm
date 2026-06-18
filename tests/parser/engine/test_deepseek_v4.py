@@ -8,6 +8,9 @@ import pytest
 
 from tests.parser.engine.conftest import make_mock_tokenizer
 from tests.parser.engine.streaming_helpers import (
+    collect_content,
+    collect_function_name,
+    collect_tool_arguments,
     simulate_reasoning_streaming,
     simulate_tool_streaming,
 )
@@ -163,6 +166,44 @@ class TestThinkTagAbsorption:
         reasoning, content = simulate_reasoning_streaming(parser, chunks)
         assert "Some reasoning" in reasoning
         assert "Answer" in content
+
+
+# ── Missing </｜DSML｜invoke> before </｜DSML｜tool_calls> ────────────
+
+
+class TestMissingInvokeEnd:
+    def test_non_streaming(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(mock_tokenizer)
+        text = (
+            f"{DSML_TOOL_START}"
+            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
+            f"{_param('location', 'true', 'NYC')}\n"
+            f"{DSML_TOOL_END}"
+        )
+        result = parser.extract_tool_calls(text, mock_request)
+
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "NYC"}
+
+    def test_streaming_with_trailing_content(self, mock_tokenizer, mock_request):
+        parser = DeepSeekV4Parser(mock_tokenizer)
+        chunks = [
+            DSML_TOOL_START,
+            f"{DSML_INVOKE_PREFIX}get_weather{DSML_INVOKE_NAME_END}\n"
+            f"{_param('location', 'true', 'NYC')}\n",
+            DSML_TOOL_END,
+            "Done.",
+        ]
+
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+
+        assert collect_function_name(results) == "get_weather"
+        args = json.loads(collect_tool_arguments(results))
+        assert args == {"location": "NYC"}
+        assert "Done." in collect_content(results)
 
 
 # ── Thinking mode initial state ──────────────────────────────────────

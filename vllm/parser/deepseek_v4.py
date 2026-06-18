@@ -147,6 +147,10 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
                 ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
             ),
+            (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
             # Parallel tool calls
             (ParserState.TOOL_BETWEEN, "INVOKE_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
