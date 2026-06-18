@@ -141,6 +141,10 @@ jobs:
       VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
       HUST_ASCEND_MANAGER_REPO_URL: git@github.com:vLLM-HUST/ascend-runtime-manager.git
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
+      # Disable precompiled CUDA wheel fetch from wheels.vllm.ai.
+      # The Ascend benchmark uses the vllm-ascend-hust plugin, not CUDA
+      # precompiled wheels, so this avoids transient SSL failures.
+      VLLM_USE_PRECOMPILED: "0"
 
     steps:
       - name: Detect runner user and Ascend devices
