@@ -131,7 +131,7 @@ A/B controlled via `--compilation-config '{"pass_config":{"fuse_rope_kvcache_cat
 | 16 | 13.14 ms | 13.04 ms | -0.8% | 691.0 | 1078.4 | **+56%** |
 | 32 | 15.85 ms | 15.27 ms | -3.7% | 336.8 | 182.4 | -45.9% |
 
-![TPOT Baseline vs Fusion (MXFP4, ISL=1000, OSL=100)](docs/assets/mxfp4_tpot_comparison.png)
+![TPOT Baseline vs Fusion (MXFP4, ISL=1000, OSL=100)](https://raw.githubusercontent.com/shantipriya-amd/vllm/d9b7f3f46678db0145949b75b74f92a4f28b4f11/docs/assets/mxfp4_tpot_comparison.png)
 
 **ISL=512, OSL=512:**
 
@@ -165,8 +165,14 @@ other concurrencies reflects batch-scheduling dynamics, not kernel overhead.
 
 | MC | Baseline TPOT | Fusion TPOT | Δ TPOT | Baseline tok/s | Fusion tok/s | Δ tok/s |
 |----|--------------|------------|--------|---------------|-------------|---------|
-| 8  | 13.24 ms | 13.29 ms | +0.4% | 319.6 | 86.6 | -72.9% |
-| 16 | 15.62 ms | 15.71 ms | +0.6% | 914.3 | 696.9 | -23.8% |
+| 4  | 16.65 ms | 13.21 ms | **-20.7%** | 219.3 | 233.3 | +6.4% |
+| 8  | 13.24 ms | 13.31 ms | +0.5% | 319.6 | 111.6 | -65.1% |
+| 16 | 15.62 ms | 15.53 ms | -0.6% | 914.3 | 414.0 | -54.7% |
+| 32 | 30.73 ms | 26.13 ms | **-15.0%** | 942.5 | 1046.4 | **+11.0%** |
+| 64 | 33.91 ms | 31.37 ms | **-7.5%** | 1487.6 | 1522.7 | **+2.4%** |
 
-TPOT is within ±0.13 ms (≤1%) across all configs — regression-free per decode step.
+![TPOT Baseline vs Fusion (BF16, ISL=1000, OSL=100)](https://raw.githubusercontent.com/shantipriya-amd/vllm/d9b7f3f46678db0145949b75b74f92a4f28b4f11/docs/assets/bf16_tpot_comparison.png)
+
+TPOT improves 7–21% at MC=4/32/64; decode-step cost is regression-free (≤1% at MC=8/16).
+Throughput variance at other concurrencies reflects batch-scheduling dynamics, not kernel overhead.
 
