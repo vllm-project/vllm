@@ -13,8 +13,6 @@ namespace vec_op {
 struct fp8_e4m3_tag {};
 struct fp8_e5m2_tag {};
 
-namespace vec_op {
-
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
   AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
@@ -121,7 +119,7 @@ template <typename T, T... indexes, typename F>
 constexpr void unroll_loop_item(std::integer_sequence<T, indexes...>, F&& f) {
   (f(std::integral_constant<T, indexes>{}), ...);
 }
-};
+};  // namespace
 
 template <typename T, T count, typename F,
           typename = std::enable_if_t<std::is_invocable_v<F, T>>>
@@ -510,6 +508,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   }
 
   explicit FP32Vec16(const c10::Half* ptr) : FP32Vec16(FP16Vec16(ptr)) {}
+  explicit FP32Vec16(const FP16Vec16&);
   explicit FP32Vec16(bool, const float* ptr) : FP32Vec16(ptr) {}
   explicit FP32Vec16(f32x4x4_t data) : reg(data) {}
 
@@ -1013,5 +1012,5 @@ struct INT8Vec64 {
 
   void nt_save(int8_t* ptr) const { save(ptr); }
 };
-}
+}  // namespace vec_op
 #endif
