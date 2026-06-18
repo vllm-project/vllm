@@ -14,6 +14,7 @@ from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnu
 from vllm.v1.attention.backends.mla.prefill.selector import (
     MLAPrefillSelectorConfig,
     _auto_select_mla_prefill_backend,
+    _get_mla_prefill_backend_priorities,
     get_mla_prefill_backend,
 )
 
@@ -270,6 +271,154 @@ class TestBackendValidation:
                 selector_config_glm5,
             )
             assert invalid_reasons == []
+
+
+class TestROCmAiterFAPrefillSelection:
+    """Tests for the ROCm AITER FlashAttention MLA prefill backend.
+
+    These run on any platform: ROCm/gfx950 specifics are mocked so the
+    selection logic and gating can be exercised without AMD hardware or a
+    real ``aiter`` install.
+    """
+
+    def test_rocm_priorities_prefer_aiter_fa(self):
+        """On ROCm, ROCM_AITER_FA is tried first, FLASH_ATTN as fallback."""
+        with patch("vllm.platforms.current_platform") as mock_platform:
+            mock_platform.is_rocm.return_value = True
+            priorities = _get_mla_prefill_backend_priorities(
+                DeviceCapability(major=9, minor=5)
+            )
+
+        assert priorities == [
+            MLAPrefillBackendEnum.ROCM_AITER_FA,
+            MLAPrefillBackendEnum.FLASH_ATTN,
+        ]
+
+    def test_supported_dtypes_are_fp16_bf16_only(self):
+        from vllm.v1.attention.backends.mla.prefill.aiter_flash_attn import (
+            AiterFlashAttnPrefillBackend,
+        )
+
+        assert AiterFlashAttnPrefillBackend.supports_dtype(torch.bfloat16)
+        assert AiterFlashAttnPrefillBackend.supports_dtype(torch.float16)
+        # FP8 is served by the separate AITER ASM backend, not this one.
+        assert not AiterFlashAttnPrefillBackend.supports_dtype(torch.float8_e4m3fn)
+
+    def test_supports_compute_capability_only_on_rocm_gfx950(self):
+        from vllm.v1.attention.backends.mla.prefill import aiter_flash_attn as mod
+
+        capability = DeviceCapability(major=9, minor=5)
+
+        # Non-ROCm host: never supported (falls back via selector).
+        with patch.object(mod.current_platform, "is_rocm", return_value=False):
+            assert not mod.AiterFlashAttnPrefillBackend.supports_compute_capability(
+                capability
+            )
+
+        # ROCm but not gfx950: not supported.
+        with (
+            patch.object(mod.current_platform, "is_rocm", return_value=True),
+            patch("vllm.platforms.rocm.on_gfx950", return_value=False),
+        ):
+            assert not mod.AiterFlashAttnPrefillBackend.supports_compute_capability(
+                capability
+            )
+
+        # ROCm gfx950: supported.
+        with (
+            patch.object(mod.current_platform, "is_rocm", return_value=True),
+            patch("vllm.platforms.rocm.on_gfx950", return_value=True),
+        ):
+            assert mod.AiterFlashAttnPrefillBackend.supports_compute_capability(
+                capability
+            )
+
+    def test_is_available_requires_env_and_aiter(self):
+        import vllm.envs as envs
+        from vllm.v1.attention.backends.mla.prefill import aiter_flash_attn as mod
+
+        # VLLM_ROCM_USE_AITER disabled: not available.
+        with patch.object(envs, "VLLM_ROCM_USE_AITER", False):
+            assert not mod.AiterFlashAttnPrefillBackend.is_available()
+
+        # Enabled but aiter.flash_attn_varlen_func missing: not available.
+        with (
+            patch.object(envs, "VLLM_ROCM_USE_AITER", True),
+            patch.object(
+                mod,
+                "is_aiter_flash_attn_varlen_func_available",
+                return_value=False,
+            ),
+        ):
+            assert not mod.AiterFlashAttnPrefillBackend.is_available()
+
+        # All prerequisites satisfied: available.
+        with (
+            patch.object(envs, "VLLM_ROCM_USE_AITER", True),
+            patch.object(
+                mod,
+                "is_aiter_flash_attn_varlen_func_available",
+                return_value=True,
+            ),
+            patch(
+                "vllm._aiter_ops.is_aiter_found_and_supported",
+                return_value=True,
+            ),
+        ):
+            assert mod.AiterFlashAttnPrefillBackend.is_available()
+
+    def test_auto_select_prefers_aiter_fa_on_gfx950(self):
+        from vllm.v1.attention.backends.mla.prefill.aiter_flash_attn import (
+            AiterFlashAttnPrefillBackend,
+        )
+
+        capability = DeviceCapability(major=9, minor=5)
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            is_r1_compatible=True,
+        )
+
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch.object(
+                AiterFlashAttnPrefillBackend,
+                "validate_configuration",
+                return_value=[],
+            ),
+        ):
+            mock_platform.is_rocm.return_value = True
+            backend = _auto_select_mla_prefill_backend(capability, selector_config)
+            assert backend.get_name() == "ROCM_AITER_FA"
+
+    def test_auto_select_falls_back_to_flash_attn_when_aiter_invalid(self):
+        from vllm.v1.attention.backends.mla.prefill.aiter_flash_attn import (
+            AiterFlashAttnPrefillBackend,
+        )
+
+        try:
+            flash_attn_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
+        except ImportError:
+            pytest.skip("FLASH_ATTN backend not available")
+            return
+
+        capability = DeviceCapability(major=9, minor=0)
+        selector_config = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            is_r1_compatible=True,
+        )
+
+        with (
+            patch("vllm.platforms.current_platform") as mock_platform,
+            patch.object(
+                AiterFlashAttnPrefillBackend,
+                "validate_configuration",
+                return_value=["compute capability 9.0 not supported"],
+            ),
+            patch.object(flash_attn_cls, "validate_configuration", return_value=[]),
+        ):
+            mock_platform.is_rocm.return_value = True
+            backend = _auto_select_mla_prefill_backend(capability, selector_config)
+            assert backend.get_name() == "FLASH_ATTN"
 
 
 class TestMLAPrefillBackendParsing:
