@@ -677,6 +677,17 @@ class Platform:
 
         if cache_config.mamba_cache_mode == "align":
             cache_config.mamba_block_size = cache_config.block_size
+        elif cache_config.enable_prefix_caching and (
+            cache_config.mamba_cache_mode == "all"
+        ):
+            logger.warning(
+                "Prefix caching with 'all' mode requires the shared prefix "
+                "to exceed the attention block size (%d tokens) for cache hits. "
+                "If your prefix is smaller than the block size, "
+                "consider using '--mamba-cache-mode=align' or disabling "
+                "prefix caching.",
+                cache_config.block_size,
+            )
 
         # Pad mamba page size to exactly match attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token

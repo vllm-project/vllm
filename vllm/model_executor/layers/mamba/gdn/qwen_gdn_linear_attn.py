@@ -48,8 +48,8 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
-from vllm.model_executor.layers.quantization.awq_marlin import AWQMarlinConfig
 from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.model_loader.weight_utils import (
     sharded_weight_loader,
@@ -557,6 +557,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
+        self.is_cache_all = self.cache_config.mamba_cache_mode == "all"
+
+        if self.num_spec > 0:
+            self.register_buffer(
+                "_decode_state_offsets",
+                torch.arange(1 + self.num_spec, dtype=torch.int32).unsqueeze(0),
+                persistent=False,
+            )
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -628,7 +636,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         return (
             current_platform.is_cuda()
             and not self.gqa_interleaved_layout
-            and isinstance(quant_config, (AWQMarlinConfig, AutoGPTQConfig, INCConfig))
+            and isinstance(quant_config, (AutoAWQConfig, AutoGPTQConfig, INCConfig))
         )
 
     def split_ba(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1230,8 +1238,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # The AITER fused reshape/conv kernel expects Qwen3-Next's interleaved
         # GQA layout. Qwen3.5 uses a non-interleaved q/k/v/z layout and must use
         # the generic path below to split/rearrange inputs correctly.
+        # The AITER kernel does not support "all" mode block-level state
+        # indexing, so fall through to the generic path in that case.
         if (
             self.gqa_interleaved_layout
+            and not self.is_cache_all
             and attn_metadata.spec_sequence_masks is None
             and attn_metadata.num_prefills == 0
             and attn_metadata.num_decodes > 0
@@ -1306,6 +1317,76 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache
+
+        # "all" mode prefix caching variables
+        is_cache_all = self.is_cache_all
+        state_indices_all_d: torch.Tensor | None = None
+        state_indices_all_p: torch.Tensor | None = None
+        block_idx_last_scheduled_token_d: torch.Tensor | None = None
+        block_idx_last_computed_token_d: torch.Tensor | None = None
+        block_idx_last_scheduled_token_p: torch.Tensor | None = None
+        block_idx_last_computed_token_p: torch.Tensor | None = None
+        block_idx_first_scheduled_token_p: torch.Tensor | None = None
+        block_idx_last_scheduled_token_prev_step_d: torch.Tensor | None = None
+
+        if is_cache_all:
+            state_indices_all_d = attn_metadata.state_indices_all_d
+            state_indices_all_p = attn_metadata.state_indices_all_p
+            block_idx_first_scheduled_token_p = (
+                attn_metadata.block_idx_first_scheduled_token_p
+            )
+            pfx_num_computed = attn_metadata.num_computed_tokens_p
+
+            assert attn_metadata.block_idx_last_scheduled_token is not None
+            assert attn_metadata.block_idx_last_computed_token is not None
+
+            if spec_sequence_masks is not None:
+                # Spec decode: spec sequences are first in batch
+                num_spec_d = attn_metadata.num_spec_decodes
+                block_idx_last_scheduled_token_d = (
+                    attn_metadata.block_idx_last_scheduled_token[:num_spec_d]
+                )
+                block_idx_last_computed_token_d = (
+                    attn_metadata.block_idx_last_computed_token[:num_spec_d]
+                )
+                block_idx_last_scheduled_token_prev_step = (
+                    attn_metadata.block_idx_last_scheduled_token_prev_step
+                )
+                if block_idx_last_scheduled_token_prev_step is not None:
+                    block_idx_last_scheduled_token_prev_step_d = (
+                        block_idx_last_scheduled_token_prev_step[:num_spec_d]
+                    )
+                # Non-spec (prefill) sequences follow spec
+                if attn_metadata.num_prefills > 0:
+                    n_total = num_spec_d + attn_metadata.num_prefills
+                    block_idx_last_scheduled_token_p = (
+                        attn_metadata.block_idx_last_scheduled_token[num_spec_d:n_total]
+                    )
+                    block_idx_last_computed_token_p = (
+                        attn_metadata.block_idx_last_computed_token[num_spec_d:n_total]
+                    )
+            else:
+                # No spec: decodes first, then prefills
+                num_d = attn_metadata.num_decodes
+                if num_d > 0:
+                    block_idx_last_scheduled_token_d = (
+                        attn_metadata.block_idx_last_scheduled_token[:num_d]
+                    )
+                    block_idx_last_computed_token_d = (
+                        attn_metadata.block_idx_last_computed_token[:num_d]
+                    )
+                if attn_metadata.num_prefills > 0:
+                    num_p = attn_metadata.num_prefills
+                    block_idx_last_scheduled_token_p = (
+                        attn_metadata.block_idx_last_scheduled_token[
+                            num_d : num_d + num_p
+                        ]
+                    )
+                    block_idx_last_computed_token_p = (
+                        attn_metadata.block_idx_last_computed_token[
+                            num_d : num_d + num_p
+                        ]
+                    )
         # conv_state must be (..., dim, width-1) for the conv kernels.
         # DS layout stores it that way directly; SD layout needs a transpose.
         conv_state = (
@@ -1341,18 +1422,38 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if spec_sequence_masks is not None:
             # spec_state_indices_tensor is always set when spec_sequence_masks is set
             assert spec_state_indices_tensor is not None
+            if is_cache_all:
+                # "all" mode: use full block table with block-level indices
+                assert state_indices_all_d is not None
+                assert block_idx_last_scheduled_token_d is not None
+                assert block_idx_last_computed_token_d is not None
+                spec_conv_indices = state_indices_all_d[
+                    : attn_metadata.num_spec_decodes
+                ]
+                spec_conv_max_qlen = state_indices_all_d.size(-1)
+                spec_conv_blk_last = block_idx_last_scheduled_token_d
+                spec_conv_init_idx = block_idx_last_computed_token_d
+            else:
+                spec_conv_indices = spec_state_indices_tensor[
+                    :, 0
+                ][  # type: ignore[index]
+                    : attn_metadata.num_spec_decodes  # type: ignore[attr-defined]
+                ]
+                spec_conv_max_qlen = spec_state_indices_tensor.size(-1)
+                spec_conv_blk_last = None
+                spec_conv_init_idx = None
             mixed_qkv_spec = causal_conv1d_update(
                 mixed_qkv_spec,
                 conv_state,
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=spec_state_indices_tensor[:, 0][  # type: ignore[index]
-                    : attn_metadata.num_spec_decodes  # type: ignore[attr-defined]
-                ],
+                conv_state_indices=spec_conv_indices,
+                block_idx_last_scheduled_token=spec_conv_blk_last,
+                initial_state_idx=spec_conv_init_idx,
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=spec_query_start_loc,
-                max_query_len=spec_state_indices_tensor.size(-1),
+                max_query_len=spec_conv_max_qlen,
                 validate_data=False,
             )
 
@@ -1362,6 +1463,22 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv_non_spec_T = mixed_qkv_non_spec.transpose(0, 1)
             # - "cache_indices" updates the conv_state cache in positions
             #   pointed to by "state_indices_tensor"
+            if is_cache_all:
+                # "all" mode: pass full block table and block-level indices
+                # to enable per-block conv state caching.
+                assert state_indices_all_p is not None
+                pfx_cache_indices = state_indices_all_p
+                pfx_blk_first = block_idx_first_scheduled_token_p
+                pfx_blk_last = block_idx_last_scheduled_token_p
+                pfx_init_idx = block_idx_last_computed_token_p
+                pfx_blk_size = self.cache_config.mamba_block_size or 0
+            else:
+                pfx_cache_indices = non_spec_state_indices_tensor
+                pfx_blk_first = None
+                pfx_blk_last = None
+                pfx_init_idx = None
+                pfx_blk_size = None
+                pfx_num_computed = None
             mixed_qkv_non_spec = causal_conv1d_fn(
                 mixed_qkv_non_spec_T,
                 conv_weights,
@@ -1369,22 +1486,44 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 activation=self.activation,
                 conv_states=conv_state,
                 has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
+                cache_indices=pfx_cache_indices,
+                block_idx_first_scheduled_token=pfx_blk_first,
+                block_idx_last_scheduled_token=pfx_blk_last,
+                initial_state_idx=pfx_init_idx,
+                num_computed_tokens=pfx_num_computed,
+                block_size_to_align=pfx_blk_size,
                 query_start_loc=non_spec_query_start_loc,
                 metadata=attn_metadata,
             ).transpose(0, 1)
         elif attn_metadata.num_decodes > 0:
             assert mixed_qkv_non_spec is not None
+            if is_cache_all:
+                # "all" mode: use full block table with block-level
+                # read/write indices for conv state.
+                assert state_indices_all_d is not None
+                assert block_idx_last_scheduled_token_d is not None
+                assert block_idx_last_computed_token_d is not None
+                dec_conv_indices = state_indices_all_d[: attn_metadata.num_decodes]
+                dec_conv_blk_last = block_idx_last_scheduled_token_d
+                dec_conv_init_idx = block_idx_last_computed_token_d
+                dec_conv_validate = False
+            else:
+                dec_conv_indices = non_spec_state_indices_tensor[  # type: ignore[index]
+                    : attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
+                ]
+                dec_conv_blk_last = None
+                dec_conv_init_idx = None
+                dec_conv_validate = True
             mixed_qkv_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 conv_state,
                 conv_weights,
                 self.conv1d.bias,
                 self.activation,
-                conv_state_indices=non_spec_state_indices_tensor[  # type: ignore[index]
-                    : attn_metadata.num_actual_tokens  # type: ignore[attr-defined]
-                ],
-                validate_data=True,
+                conv_state_indices=dec_conv_indices,
+                block_idx_last_scheduled_token=dec_conv_blk_last,
+                initial_state_idx=dec_conv_init_idx,
+                validate_data=dec_conv_validate,
             )
         else:
             mixed_qkv_non_spec = None
@@ -1453,6 +1592,52 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            if is_cache_all:
+                # "all" mode: resolve state indices from full block table
+                assert state_indices_all_d is not None
+                assert block_idx_last_scheduled_token_d is not None
+                num_sd = attn_metadata.num_spec_decodes
+                if block_idx_last_scheduled_token_prev_step_d is not None:
+                    # Spec decode: use previous step offset for input
+                    input_indices = (
+                        block_idx_last_scheduled_token_prev_step_d.unsqueeze(1)
+                        + self._decode_state_offsets
+                    )
+                    output_indices = (
+                        block_idx_last_scheduled_token_d.unsqueeze(1)
+                        + self._decode_state_offsets
+                    )
+                    spec_input = state_indices_all_d[:num_sd].gather(1, input_indices)
+                    spec_output = state_indices_all_d[:num_sd].gather(1, output_indices)
+                    # Copy initial state from input to output position
+                    ssm_state[spec_output[:, 0]] = ssm_state[spec_input[:, 0]]
+                else:
+                    # No previous step info: read from last computed
+                    output_indices = (
+                        block_idx_last_scheduled_token_d.unsqueeze(1)
+                        + self._decode_state_offsets
+                    )
+                    spec_output = state_indices_all_d[:num_sd].gather(1, output_indices)
+                    assert block_idx_last_computed_token_d is not None
+                    initial_slot = (
+                        state_indices_all_d[:num_sd]
+                        .gather(
+                            1,
+                            block_idx_last_computed_token_d.unsqueeze(1),
+                        )
+                        .squeeze(1)
+                    )
+                    ssm_state[spec_output[:, 0]] = ssm_state[initial_slot]
+                spec_ssm_indices = spec_output
+                spec_cu_seqlens = spec_query_start_loc[  # type: ignore[index]
+                    : num_sd + 1
+                ]
+            else:
+                spec_ssm_indices = spec_state_indices_tensor
+                spec_cu_seqlens = spec_query_start_loc[  # type: ignore[index]
+                    : attn_metadata.num_spec_decodes
+                    + 1  # type: ignore[attr-defined]
+                ]
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -1464,11 +1649,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     v=value_spec,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=spec_query_start_loc[  # type: ignore[index]
-                        : attn_metadata.num_spec_decodes
-                        + 1  # type: ignore[attr-defined]
-                    ],
-                    ssm_state_indices=spec_state_indices_tensor,
+                    cu_seqlens=spec_cu_seqlens,
+                    ssm_state_indices=spec_ssm_indices,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
                 )
@@ -1481,6 +1663,37 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             query_decode, key_decode, value_decode = self.rearrange_mixed_qkv(
                 mixed_qkv_non_spec[:num_decode_tokens]  # type: ignore[index]
             )
+            if is_cache_all:
+                # "all" mode: gather state indices from full block table
+                assert state_indices_all_d is not None
+                assert block_idx_last_computed_token_d is not None
+                assert block_idx_last_scheduled_token_d is not None
+                num_d = attn_metadata.num_decodes
+                ssm_in_idx = (
+                    state_indices_all_d[:num_d]
+                    .gather(1, block_idx_last_computed_token_d.unsqueeze(1))
+                    .squeeze(1)
+                )
+                ssm_out_idx = (
+                    state_indices_all_d[:num_d]
+                    .gather(1, block_idx_last_scheduled_token_d.unsqueeze(1))
+                    .squeeze(1)
+                )
+                # Copy state at block boundary crossings
+                boundary_mask = ssm_in_idx != ssm_out_idx
+                if boundary_mask.any():
+                    ssm_state[ssm_out_idx[boundary_mask]] = ssm_state[
+                        ssm_in_idx[boundary_mask]
+                    ]
+                split_ssm_indices = ssm_out_idx
+                split_cu_seqlens = non_spec_query_start_loc[  # type: ignore[index]
+                    : num_d + 1
+                ]
+            else:
+                split_ssm_indices = non_spec_state_indices_tensor
+                split_cu_seqlens = non_spec_query_start_loc[  # type: ignore[index]
+                    : attn_metadata.num_decodes + 1
+                ]
             core_attn_out_decode, _ = fused_sigmoid_gating_delta_rule_update(
                 A_log=self.A_log,
                 a=a[:num_decode_tokens],
@@ -1491,10 +1704,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 v=value_decode,
                 initial_state=ssm_state,
                 inplace_final_state=True,
-                cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
-                    : attn_metadata.num_decodes + 1
-                ],
-                ssm_state_indices=non_spec_state_indices_tensor,
+                cu_seqlens=split_cu_seqlens,
+                ssm_state_indices=split_ssm_indices,
                 use_qk_l2norm_in_kernel=True,
             )
         else:
@@ -1510,26 +1721,142 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            initial_state = ssm_state[prefill_state_indices]
-            initial_state[~prefill_has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = self.chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=attn_metadata.prefill_query_start_loc,
-                chunk_indices=attn_metadata.chunk_indices,
-                chunk_offsets=attn_metadata.chunk_offsets,
-                use_qk_l2norm_in_kernel=False,
-            )
-            # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+
+            if is_cache_all:
+                # "all" mode: resolve initial state from block table
+                assert state_indices_all_p is not None
+                assert block_idx_last_computed_token_p is not None
+                assert block_idx_last_scheduled_token_p is not None
+                kernel_ssm_indices = state_indices_all_p.gather(
+                    1, block_idx_last_computed_token_p.unsqueeze(1)
+                ).squeeze(1)
+                initial_state = ssm_state[kernel_ssm_indices]
+                initial_state[~prefill_has_initial_state, ...] = 0
+
+                # Determine the first block to save for each sequence.
+                # If we have a cached initial state, we save starting from
+                # last_computed + 1 (the first NEW block). Otherwise from 0.
+                first_save_block = torch.where(
+                    prefill_has_initial_state,
+                    block_idx_last_computed_token_p + 1,
+                    block_idx_last_computed_token_p,
+                )
+                num_blocks_to_save = (
+                    block_idx_last_scheduled_token_p - first_save_block + 1
+                )
+                needs_intermediate = (num_blocks_to_save > 1).any().item()
+
+                if needs_intermediate:
+                    # Process blocks sequentially per sequence to save
+                    # intermediate SSM states at every block boundary.
+                    mamba_block_size = self.cache_config.mamba_block_size
+                    assert mamba_block_size is not None
+                    prefill_cu_seqlens = attn_metadata.prefill_query_start_loc
+                    num_sequences = len(prefill_cu_seqlens) - 1
+
+                    core_attn_out_parts = []
+
+                    for seq_idx in range(num_sequences):
+                        seq_start = prefill_cu_seqlens[seq_idx].item()
+                        seq_end = prefill_cu_seqlens[seq_idx + 1].item()
+                        seq_len = seq_end - seq_start
+
+                        state = initial_state[seq_idx : seq_idx + 1].clone()
+
+                        first_blk = first_save_block[seq_idx].item()
+                        last_blk = block_idx_last_scheduled_token_p[seq_idx].item()
+
+                        seq_outputs = []
+
+                        for blk in range(first_blk, last_blk + 1):
+                            blk_relative = blk - first_blk
+                            blk_start = blk_relative * mamba_block_size
+                            blk_end = min(
+                                (blk_relative + 1) * mamba_block_size,
+                                seq_len,
+                            )
+                            blk_len = blk_end - blk_start
+                            if blk_len <= 0:
+                                break
+
+                            t_start = seq_start + blk_start
+                            t_end = seq_start + blk_end
+
+                            o_block, state = self.chunk_gated_delta_rule(
+                                q=query_non_spec[:, t_start:t_end],
+                                k=key_non_spec[:, t_start:t_end],
+                                v=value_non_spec[:, t_start:t_end],
+                                g=g_non_spec[:, t_start:t_end],
+                                beta=beta_non_spec[:, t_start:t_end],
+                                initial_state=state,
+                                output_final_state=True,
+                                cu_seqlens=None,
+                                chunk_indices=None,
+                                chunk_offsets=None,
+                                use_qk_l2norm_in_kernel=False,
+                            )
+                            seq_outputs.append(o_block)
+
+                            # Save state at this block boundary
+                            save_idx = state_indices_all_p[seq_idx, blk].item()
+                            ssm_state[save_idx] = state[0].to(ssm_state.dtype)
+                            # Round-trip state through cache dtype so
+                            # that the next block's initial_state matches
+                            # exactly what would be restored from cache.
+                            state = ssm_state[save_idx].unsqueeze(0).to(state.dtype)
+
+                        core_attn_out_parts.append(torch.cat(seq_outputs, dim=1))
+
+                    core_attn_out_non_spec = torch.cat(core_attn_out_parts, dim=1)
+                else:
+                    # Single block per sequence — use efficient batched call
+                    (
+                        core_attn_out_non_spec,
+                        last_recurrent_state,
+                    ) = self.chunk_gated_delta_rule(
+                        q=query_non_spec,
+                        k=key_non_spec,
+                        v=value_non_spec,
+                        g=g_non_spec,
+                        beta=beta_non_spec,
+                        initial_state=initial_state,
+                        output_final_state=True,
+                        cu_seqlens=attn_metadata.prefill_query_start_loc,
+                        chunk_indices=attn_metadata.chunk_indices,
+                        chunk_offsets=attn_metadata.chunk_offsets,
+                        use_qk_l2norm_in_kernel=False,
+                    )
+                    # Save final state at last_scheduled_token
+                    output_ssm_indices = state_indices_all_p.gather(
+                        1, block_idx_last_scheduled_token_p.unsqueeze(1)
+                    ).squeeze(1)
+                    ssm_state[output_ssm_indices] = last_recurrent_state.to(
+                        ssm_state.dtype
+                    )
+            else:
+                initial_state = ssm_state[prefill_state_indices]
+                initial_state[~prefill_has_initial_state, ...] = 0
+
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = self.chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=attn_metadata.prefill_query_start_loc,
+                    chunk_indices=attn_metadata.chunk_indices,
+                    chunk_offsets=attn_metadata.chunk_offsets,
+                    use_qk_l2norm_in_kernel=False,
+                )
+                # Init cache
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
 
             if split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
@@ -1538,6 +1865,38 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     [core_attn_out_decode, core_attn_out_non_spec], dim=1
                 )
         elif attn_metadata.num_decodes > 0:
+            if is_cache_all:
+                # "all" mode: gather state indices from full block table
+                assert state_indices_all_d is not None
+                assert block_idx_last_computed_token_d is not None
+                assert block_idx_last_scheduled_token_d is not None
+                num_d = attn_metadata.num_decodes
+                ssm_in_idx = (
+                    state_indices_all_d[:num_d]
+                    .gather(1, block_idx_last_computed_token_d.unsqueeze(1))
+                    .squeeze(1)
+                )
+                ssm_out_idx = (
+                    state_indices_all_d[:num_d]
+                    .gather(1, block_idx_last_scheduled_token_d.unsqueeze(1))
+                    .squeeze(1)
+                )
+                # Copy state at block boundary crossings
+                boundary_mask = ssm_in_idx != ssm_out_idx
+                if boundary_mask.any():
+                    ssm_state[ssm_out_idx[boundary_mask]] = ssm_state[
+                        ssm_in_idx[boundary_mask]
+                    ]
+                dec_ssm_indices = ssm_out_idx
+                dec_cu_seqlens = non_spec_query_start_loc[  # type: ignore[index]
+                    : num_d + 1
+                ]
+            else:
+                dec_ssm_indices = non_spec_state_indices_tensor
+                dec_cu_seqlens = non_spec_query_start_loc[  # type: ignore[index]
+                    : attn_metadata.num_decodes
+                    + 1  # type: ignore[attr-defined]
+                ]
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -1549,11 +1908,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     v=value_non_spec,
                     initial_state=ssm_state,
                     inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[  # type: ignore[index]
-                        : attn_metadata.num_decodes
-                        + 1  # type: ignore[attr-defined]
-                    ],
-                    ssm_state_indices=non_spec_state_indices_tensor,
+                    cu_seqlens=dec_cu_seqlens,
+                    ssm_state_indices=dec_ssm_indices,
                     use_qk_l2norm_in_kernel=True,
                 )
             )
@@ -1671,15 +2027,65 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
+
+        is_cache_all = self.is_cache_all
+        if is_cache_all:
+            # "all" mode: use full block table with block-level indices
+            state_indices_all_d = attn_metadata.state_indices_all_d
+            assert state_indices_all_d is not None
+            assert attn_metadata.block_idx_last_scheduled_token is not None
+            assert attn_metadata.block_idx_last_computed_token is not None
+            num_d = attn_metadata.num_decodes
+            block_idx_last_scheduled_token_d = (
+                attn_metadata.block_idx_last_scheduled_token[:num_d]
+            )
+            block_idx_last_computed_token_d = (
+                attn_metadata.block_idx_last_computed_token[:num_d]
+            )
+
+            # Conv with block-level read/write
+            nsd_conv_indices = state_indices_all_d[:num_d]
+            nsd_conv_blk_last = block_idx_last_scheduled_token_d
+            nsd_conv_init_idx = block_idx_last_computed_token_d
+        else:
+            nsd_conv_indices = non_spec_state_indices_tensor[:num_actual_tokens]  # type: ignore[index]
+            nsd_conv_blk_last = None
+            nsd_conv_init_idx = None
+
         mixed_qkv_non_spec = causal_conv1d_update(
             mixed_qkv,
             conv_state,
             conv_weights,
             self.conv1d.bias,
             self.activation,
-            conv_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+            conv_state_indices=nsd_conv_indices,
+            block_idx_last_scheduled_token=nsd_conv_blk_last,
+            initial_state_idx=nsd_conv_init_idx,
             validate_data=False,
         )
+
+        if is_cache_all:
+            # SSM: gather input/output indices from block table
+            ssm_in_idx = (
+                state_indices_all_d[:num_d]
+                .gather(1, block_idx_last_computed_token_d.unsqueeze(1))
+                .squeeze(1)
+            )
+            ssm_out_idx = (
+                state_indices_all_d[:num_d]
+                .gather(1, block_idx_last_scheduled_token_d.unsqueeze(1))
+                .squeeze(1)
+            )
+            # Copy state at block boundary crossings
+            boundary_mask = ssm_in_idx != ssm_out_idx
+            if boundary_mask.any():
+                ssm_state[ssm_out_idx[boundary_mask]] = ssm_state[
+                    ssm_in_idx[boundary_mask]
+                ]
+            nsd_ssm_indices = ssm_out_idx
+        else:
+            nsd_ssm_indices = non_spec_state_indices_tensor[:num_actual_tokens]  # type: ignore[index]
+
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
         fused_recurrent_gated_delta_rule_packed_decode(
             mixed_qkv=mixed_qkv_non_spec,
@@ -1690,10 +2096,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             scale=self.head_k_dim**-0.5,
             initial_state=ssm_state,
             out=out_buf,
-            ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],  # type: ignore[index]
+            ssm_state_indices=nsd_ssm_indices,
             use_qk_l2norm_in_kernel=True,
         )
-        return
 
 
 def qwen_gdn_attention_core(

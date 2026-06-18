@@ -2407,7 +2407,7 @@ class GPUModelRunner(
                     ],
                 )
                 if (
-                    isinstance(builder, Mamba2AttentionMetadataBuilder)
+                    isinstance(builder, (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder))
                     and self.mamba_prev_last_scheduled_idx is not None
                 ):
                     extra_attn_metadata_args["prev_last_scheduled_idx"] = (
