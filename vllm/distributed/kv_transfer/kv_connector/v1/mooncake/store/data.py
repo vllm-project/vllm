@@ -29,7 +29,7 @@ class BlobBlockHashes(Sequence[BlockHash]):
     of materializing all hashes upfront.
     """
 
-    def __init__(self, blob: bytes, hash_len: int):
+    def __init__(self, blob: memoryview, hash_len: int):
         self._blob = blob
         self._hash_len = hash_len
         self._n = len(blob) // hash_len if hash_len else 0
@@ -42,6 +42,8 @@ class BlobBlockHashes(Sequence[BlockHash]):
             return [self[i] for i in range(*idx.indices(self._n))]
         if idx < 0:
             idx += self._n
+        if not 0 <= idx < self._n:
+            raise IndexError(idx)
         off = idx * self._hash_len
         return BlockHash(self._blob[off : off + self._hash_len])
 

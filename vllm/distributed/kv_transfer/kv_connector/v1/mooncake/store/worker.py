@@ -1506,7 +1506,7 @@ class LookupKeyServer:
                 if msg_type == LOOKUP_MSG:
                     token_len = int.from_bytes(all_frames[1], byteorder="big")
                     hash_len = int.from_bytes(all_frames[2], byteorder="big")
-                    blob = bytes(all_frames[3])
+                    blob = all_frames[3].buffer
                     block_hashes = BlobBlockHashes(blob, hash_len)
                     result = self.store_worker.lookup(token_len, block_hashes)
                     self.socket.send(result.to_bytes(4, "big"))
@@ -1573,12 +1573,12 @@ class LookupKeyClient:
 
     def _lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
         hash_len = len(block_hashes[0]) if block_hashes else 0
-        all_frames = [
+        all_frames = (
             LOOKUP_MSG,
             token_len.to_bytes(4, byteorder="big"),
             hash_len.to_bytes(2, byteorder="big"),
             b"".join(block_hashes),
-        ]
+        )
         self.socket.send_multipart(all_frames, copy=False)
         resp = self.socket.recv()
         return int.from_bytes(resp, "big")
