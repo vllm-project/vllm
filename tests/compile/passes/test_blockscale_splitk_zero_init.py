@@ -9,10 +9,10 @@ into
                 -> auto_functionalized(gemm_out, output=Y, y_is_zeroed=True)
 
 The tests below exercise this rewrite on toy modules covering producers in
-the default registry (Gemma RMSNorm, gated RMSNorm, and the HIP/Triton
-group-quant / rmsnorm / silu-mul producers). All tests are gated behind
-``is_aiter_found_and_supported`` because they call ROCm AITER ops at
-trace-time.
+the default registry (Gemma RMSNorm, gated RMSNorm, fused GDN gated RMSNorm,
+and the HIP/Triton group-quant / rmsnorm / silu-mul producers). All tests are
+gated behind ``is_aiter_found_and_supported`` because they call ROCm AITER ops
+at trace-time.
 """
 
 from __future__ import annotations
@@ -143,6 +143,55 @@ class _GatedRMSNormGroupQuantModule(torch.nn.Module):
             self.eps,
             GROUP_SIZE,
         )
+        return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
+            out, self.B, scale, self.Bs, torch.bfloat16
+        )
+
+
+class _FusedRMSGatedFP8GroupQuantModule(torch.nn.Module):
+    """Fused gated RMSNorm + FP8 group quant -> blockscale GEMM.
+
+    Mirrors the upstream ``AiterRMSNormGatedFp8GroupQuantPattern``
+    replacement: call the fused op on per-head ``[T * H, D]`` tensors, then
+    reshape FP8/scales back to the blockscale GEMM's ``[T, H * D]`` layout.
+    """
+
+    def __init__(self, K: int, N: int, eps: float = EPS):
+        super().__init__()
+        self.eps = eps
+        assert K % GROUP_SIZE == 0, (
+            "K must be a multiple of head_dim=128 for fused gated RMS group quant"
+        )
+        self._hidden_dim = K
+        self._num_heads = K // GROUP_SIZE
+        self._head_dim = GROUP_SIZE
+        self.weight = torch.nn.Parameter(
+            torch.ones(self._head_dim, dtype=torch.bfloat16), requires_grad=False
+        )
+        self.B = torch.nn.Parameter(
+            torch.empty((N, K), dtype=current_platform.fp8_dtype()),
+            requires_grad=False,
+        )
+        self.Bs = torch.nn.Parameter(
+            torch.empty((N, (K + GROUP_SIZE - 1) // GROUP_SIZE), dtype=torch.float32),
+            requires_grad=False,
+        )
+
+    def forward(self, x: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        x_flat = x.reshape(-1, self._head_dim)
+        z_flat = z.reshape(-1, self._head_dim)
+        out, scale = torch.ops.vllm.rocm_aiter_fused_rms_gated_fp8_group_quant(
+            x=x_flat,
+            weight=self.weight,
+            bias=None,
+            z=z_flat,
+            eps=self.eps,
+            norm_before_gate=True,
+            activation="silu",
+            group_size=GROUP_SIZE,
+        )
+        out = out.reshape(-1, self._hidden_dim)
+        scale = scale.reshape(-1, self._num_heads)
         return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
             out, self.B, scale, self.Bs, torch.bfloat16
         )
@@ -307,14 +356,24 @@ def _run_pass_on_module(
     module: torch.nn.Module,
     inputs: tuple[torch.Tensor, ...],
     vllm_config: VllmConfig,
+    execute_compiled: bool = True,
 ):
     """Compile ``module`` with the fusion pass and return the TestBackend."""
     from vllm.compilation.passes.fusion.blockscale_splitk_zero_init import (
         BlockScaleSplitKZeroInitFusionPass,
     )
 
+    class _GraphOnlyBackend(TestBackend):
+
+        def __call__(self, graph, example_inputs):
+            super().__call__(graph, example_inputs)
+            return lambda *args: (
+                torch.empty((M, N), device=args[0].device, dtype=torch.bfloat16),
+            )
+
     fusion_pass = BlockScaleSplitKZeroInitFusionPass(vllm_config)
-    backend = TestBackend(
+    backend_cls = TestBackend if execute_compiled else _GraphOnlyBackend
+    backend = backend_cls(
         NoOpEliminationPass(vllm_config),
         fusion_pass,
         PostCleanupPass(vllm_config),
@@ -404,27 +463,39 @@ def test_pass_rewrites_producer_gemm_chain(
     reason="ROCm + AITER required for the blockscale SplitK zero-init fusion test",
 )
 @pytest.mark.parametrize(
-    "module_cls,extra_inputs,expected_replaced_op",
+    "module_cls,extra_inputs,expected_replaced_op,execute_compiled",
     [
         (
             _GroupQuantModule,
             (),
             "rocm_aiter_group_fp8_quant_with_zero_init",
+            True,
         ),
         (
             _RMSNormGroupQuantModule,
             (),
             "rocm_aiter_rmsnorm_fp8_group_quant_with_zero_init",
+            True,
         ),
         (
             _RMSNormWithAddGroupQuantModule,
             ("residual",),
             "rocm_aiter_rmsnorm_with_add_fp8_group_quant_with_zero_init",
+            True,
         ),
         (
             _ActMulGroupQuantModule,
             ("gate_up_2k",),  # special-cased input: x has 2*K cols
             "rocm_aiter_act_mul_and_fp8_group_quant_with_zero_init",
+            True,
+        ),
+        (
+            _FusedRMSGatedFP8GroupQuantModule,
+            ("z",),
+            "rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init",
+            # This case validates the reshape-aware graph rewrite; launching
+            # the tiny synthetic GEMM shape can hit AITER runtime/JIT instability.
+            False,
         ),
     ],
 )
@@ -432,6 +503,7 @@ def test_pass_rewrites_new_producer_specs(
     module_cls: type[torch.nn.Module],
     extra_inputs: tuple[str, ...],
     expected_replaced_op: str,
+    execute_compiled: bool,
     monkeypatch: pytest.MonkeyPatch,
 ):
     """Each of the new ProducerSpec entries must rewrite its producer
@@ -463,7 +535,12 @@ def test_pass_rewrites_new_producer_specs(
             # silu+mul consumes (M, 2*K) and halves the last dim back to K.
             inputs = [torch.randn(M, 2 * K, dtype=torch.bfloat16)]
 
-        backend, fusion_pass = _run_pass_on_module(model, tuple(inputs), vllm_config)
+        backend, fusion_pass = _run_pass_on_module(
+            model,
+            tuple(inputs),
+            vllm_config,
+            execute_compiled=execute_compiled,
+        )
 
         assert fusion_pass.matched_count >= 1, (
             f"Expected at least 1 fusion match for {module_cls.__name__}, "

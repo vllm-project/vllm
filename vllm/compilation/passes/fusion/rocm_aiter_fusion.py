@@ -32,6 +32,7 @@ from ..vllm_inductor_pass import (
     fold_consecutive_reshapes,
 )
 from .matcher_utils import (
+    AITER_FUSED_RMS_GATED_FP8_GROUP_QUANT_HEAD_DIMS,
     MatcherQuantFP8,
     MatcherRMSNormGated,
     MatcherSiluAndMul,
@@ -640,7 +641,10 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             # an aiter version that includes the GDN triton kernel renames.
             if gated_norm_shapes and rocm_aiter_ops.are_gdn_triton_kernels_available():
                 for num_heads, head_dim in gated_norm_shapes:
-                    if head_dim != 128:
+                    if (
+                        head_dim
+                        not in AITER_FUSED_RMS_GATED_FP8_GROUP_QUANT_HEAD_DIMS
+                    ):
                         continue
                     AiterRMSNormGatedFp8GroupQuantPattern(
                         epsilon,

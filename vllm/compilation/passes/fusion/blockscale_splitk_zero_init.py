@@ -42,12 +42,15 @@ from dataclasses import dataclass, field
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
+from torch._inductor.fx_passes.post_grad import (
+    view_to_reshape as _fx_view_to_reshape,
+)
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch.fx.experimental.symbolic_shapes import is_concrete_int
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import (
@@ -55,7 +58,10 @@ from ..vllm_inductor_pass import (
     VllmPatternMatcherPass,
     VllmPatternReplacement,
 )
-from .matcher_utils import RMSNORM_EPS_VALUES
+from .matcher_utils import (
+    AITER_FUSED_RMS_GATED_FP8_GROUP_QUANT_HEAD_DIMS,
+    RMSNORM_EPS_VALUES,
+)
 
 # ---------------------------------------------------------------------------
 # Registry types
@@ -88,6 +94,7 @@ class ProducerSpec:
     fp8_output_index: int
     scales_output_index: int
     residual_output_index: int | None = None
+    trace_fn: Callable[..., fx.GraphModule] = pm.fwd_only
     # Extra kwargs always forwarded to both ops (e.g. group_size=128). These
     # are appended to whatever the call site provides.
     static_kwargs: dict[str, object] = field(default_factory=dict)
@@ -155,6 +162,12 @@ def _make_extra_check(gemm: GemmSpec, min_k: int) -> Callable[[pm.Match], bool]:
         return K >= min_k
 
     return extra_check
+
+
+def _fwd_only_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
+    gm = pm.fwd_only(*args, **kwargs)
+    _fx_view_to_reshape(gm)
+    return gm
 
 
 def _make_2_input_producer_pattern(
@@ -538,12 +551,130 @@ def _make_gated_producer_pattern(
     )
 
 
+def _make_fused_rms_gated_producer_pattern(
+    producer: ProducerSpec,
+    gemm: GemmSpec,
+    output_dtype: torch.dtype,
+    min_k: int,
+    eps: float | None,
+) -> tuple[object, object, list[torch.Tensor], object]:
+    """Builder for fused GDN RMS-gate + FP8 group quant producers.
+
+    The upstream ``AiterRMSNormGatedFp8GroupQuantPattern`` emits the fused op
+    on per-head ``(tokens * heads, head_dim)`` tensors, then reshapes FP8 and
+    scale outputs back to ``(tokens, hidden_dim)`` and ``(tokens, heads)`` for
+    the downstream blockscale GEMM.
+    """
+
+    group_size = int(producer.static_kwargs.get("group_size", 128))
+    num_heads = int(producer.static_kwargs["num_heads"])
+    hidden_dim = num_heads * group_size
+    assert eps is not None
+    fp8_idx = producer.fp8_output_index
+    scales_idx = producer.scales_output_index
+
+    def pattern(x, z, weight, B, Bs):
+        prod_out = producer.op(
+            x,
+            weight,
+            None,
+            z,
+            eps,
+            True,
+            "silu",
+            group_size,
+        )
+        A = torch.ops.aten.reshape.default(prod_out[fp8_idx], [-1, hidden_dim])
+        As = torch.ops.aten.reshape.default(prod_out[scales_idx], [-1, num_heads])
+        Y = gemm.op(A, B, As, Bs, output_dtype)
+        return Y
+
+    def replacement(x, z, weight, B, Bs):
+        M = x.shape[0] // num_heads
+        N = B.shape[0]
+        Y = torch.empty(M, N, dtype=output_dtype, device=B.device)
+        prod_results = auto_functionalized(
+            producer.with_zero_init_op,
+            x=x,
+            weight=weight,
+            bias=None,
+            z=z,
+            eps=eps,
+            norm_before_gate=True,
+            activation="silu",
+            group_size=group_size,
+            gemm_out_zero_init=Y,
+        )
+        A = prod_results[fp8_idx].reshape(-1, hidden_dim)
+        As = prod_results[scales_idx].reshape(-1, num_heads)
+        Y_zeroed = prod_results[-1]
+        gemm_results = auto_functionalized(
+            gemm.out_op,
+            A=A,
+            B=B,
+            As=As,
+            Bs=Bs,
+            output=Y_zeroed,
+            output_dtype=output_dtype,
+            y_is_zeroed=True,
+        )
+        return gemm_results[-1]
+
+    example_inputs = [
+        VllmPatternReplacement.empty_bf16(
+            8 * num_heads, group_size
+        ),  # x (M*H, D)
+        VllmPatternReplacement.empty_bf16(
+            8 * num_heads, group_size
+        ),  # z (M*H, D)
+        VllmPatternReplacement.empty_bf16(group_size),  # weight (D,)
+        VllmPatternReplacement.empty_fp8(64, hidden_dim),  # B (N, H*D)
+        VllmPatternReplacement.empty_fp32(64, num_heads),  # Bs (N, H)
+    ]
+
+    return (
+        pattern,
+        replacement,
+        example_inputs,
+        _make_extra_check(gemm, min_k),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Concrete registries
 # ---------------------------------------------------------------------------
 
 
-def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
+def _discover_gated_norm_shapes(config: VllmConfig) -> set[tuple[int, int]]:
+    """Return per-TP ``(num_heads, head_dim)`` pairs for GDN fused producers."""
+
+    from vllm.model_executor.layers.mamba.gdn.base import (
+        GatedDeltaNetAttention,
+    )
+
+    gdn_layers = get_layers_from_vllm_config(
+        config,
+        GatedDeltaNetAttention,  # type: ignore[type-abstract]
+    )
+    gated_norm_shapes: set[tuple[int, int]] = set()
+    for layer in gdn_layers.values():
+        num_v_heads = getattr(layer, "num_v_heads", None) or getattr(
+            layer, "num_heads", None
+        )
+        head_v_dim = getattr(layer, "head_v_dim", None) or getattr(
+            layer, "head_dim", None
+        )
+
+        assert num_v_heads is not None and head_v_dim is not None
+        gated_norm_shapes.add((num_v_heads // layer.tp_size, head_v_dim))
+
+    return gated_norm_shapes
+
+
+def build_default_registries(
+    gated_norm_shapes: set[tuple[int, int]] | None = None,
+) -> tuple[list[ProducerSpec], list[GemmSpec]]:
+    fused_gated_shapes = gated_norm_shapes or {(64, 128)}
     producers = [
         ProducerSpec(
             name="aiter_group_fp8_quant",
@@ -617,6 +748,27 @@ def build_default_registries() -> tuple[list[ProducerSpec], list[GemmSpec]]:
             eps_values=RMSNORM_EPS_VALUES,
         ),
     ]
+    for num_heads, head_dim in sorted(fused_gated_shapes):
+        if head_dim not in AITER_FUSED_RMS_GATED_FP8_GROUP_QUANT_HEAD_DIMS:
+            continue
+        producers.append(
+            ProducerSpec(
+                name=(
+                    "aiter_fused_rms_gated_fp8_group_quant_"
+                    f"h{num_heads}_d{head_dim}"
+                ),
+                op=rocm_aiter_ops.get_fused_rms_gated_fp8_group_quant_op(),
+                with_zero_init_op=(
+                    torch.ops.vllm.rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init.default
+                ),
+                pattern_builder=_make_fused_rms_gated_producer_pattern,
+                fp8_output_index=0,
+                scales_output_index=1,
+                trace_fn=_fwd_only_view_to_reshape,
+                static_kwargs={"group_size": head_dim, "num_heads": num_heads},
+                eps_values=RMSNORM_EPS_VALUES,
+            )
+        )
     gemms = [
         GemmSpec(
             name="aiter_gemm_a8w8_blockscale",
@@ -646,7 +798,9 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
             output_dtype = self.model_dtype or torch.bfloat16
         self.output_dtype = output_dtype
 
-        producers, gemms = build_default_registries()
+        producers, gemms = build_default_registries(
+            _discover_gated_norm_shapes(config)
+        )
         min_k = (
             config.compilation_config.pass_config.blockscale_splitk_zero_init_min_k
         )
@@ -662,7 +816,7 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
                         pattern,
                         replacement,
                         inputs,
-                        pm.fwd_only,
+                        producer.trace_fn,
                         self.patterns,
                         extra_check=extra_check,
                     )
@@ -691,6 +845,7 @@ class BlockScaleSplitKZeroInitFusionPass(VllmPatternMatcherPass):
             GemmSpec,
             BlockScaleSplitKZeroInitFusionPass,
             _make_extra_check,
+            _fwd_only_view_to_reshape,
             build_default_registries,
             *pattern_builders,
         )

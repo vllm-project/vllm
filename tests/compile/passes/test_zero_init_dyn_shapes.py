@@ -121,6 +121,33 @@ def test_act_mul_group_quant_dynamic_M():
     _compile_and_check(fn, x, y)
 
 
+def test_fused_rms_gated_group_quant_dynamic_M():
+    op = (
+        torch.ops.vllm.rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init.default
+    )
+
+    def fn(x, y, w, z):
+        res = auto_functionalized(
+            op,
+            x=x,
+            weight=w,
+            bias=None,
+            z=z,
+            eps=1e-6,
+            norm_before_gate=True,
+            activation="silu",
+            group_size=128,
+            gemm_out_zero_init=y,
+        )
+        return res[0]
+
+    x = torch.randn(8, 128, dtype=torch.bfloat16, device="cuda")
+    y = torch.empty(8, 256, dtype=torch.bfloat16, device="cuda")
+    w = torch.randn(128, dtype=torch.bfloat16, device="cuda")
+    z = torch.randn(8, 128, dtype=torch.bfloat16, device="cuda")
+    _compile_and_check(fn, x, y, w, z)
+
+
 def test_full_pass_register_then_compile_dyn_model():
     """End-to-end smoke: instantiate `BlockScaleSplitKZeroInitFusionPass`
     (which registers all producer/GEMM patterns), then compile a tiny model

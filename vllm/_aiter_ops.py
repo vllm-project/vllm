@@ -1221,6 +1221,7 @@ def _rocm_aiter_fused_rms_gated_fp8_group_quant_impl(
     norm_before_gate: bool,
     activation: str,
     group_size: int,
+    gemm_out_zero_init: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused gated-RMSNorm + FP8 group quantization via aiter Triton kernel."""
     from aiter.ops.triton.quant import fused_rms_gated_fp8_group_quant
@@ -1235,6 +1236,7 @@ def _rocm_aiter_fused_rms_gated_fp8_group_quant_impl(
         activation=activation,
         out_dtype=FP8_DTYPE,
         group_size=group_size,
+        gemm_out_zero_init=gemm_out_zero_init,
     )
 
 
@@ -1247,6 +1249,7 @@ def _rocm_aiter_fused_rms_gated_fp8_group_quant_fake(
     norm_before_gate: bool,
     activation: str,
     group_size: int,
+    gemm_out_zero_init: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
@@ -2175,6 +2178,13 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_fused_rms_gated_fp8_group_quant",
                 op_func=_rocm_aiter_fused_rms_gated_fp8_group_quant_impl,
+                fake_impl=_rocm_aiter_fused_rms_gated_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_fused_rms_gated_fp8_group_quant_with_zero_init",
+                op_func=_rocm_aiter_fused_rms_gated_fp8_group_quant_impl,
+                mutates_args=["gemm_out_zero_init"],
                 fake_impl=_rocm_aiter_fused_rms_gated_fp8_group_quant_fake,
             )
 
