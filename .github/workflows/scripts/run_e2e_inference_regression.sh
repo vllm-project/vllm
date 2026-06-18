@@ -28,6 +28,7 @@ else
   ASCEND_E2E_ROOT_HELPER=$REPO_ASCEND_ROOT_HELPER
 fi
 VLLM_CLI=("$PYTHON_BIN" -m vllm.entrypoints.cli.main)
+VLLM_OPENAI_SERVER=("$PYTHON_BIN" -m vllm.entrypoints.openai.api_server)
 
 server_pid=""
 server_group_pid=""
@@ -318,7 +319,8 @@ start_server() {
         PYTHON_BIN="$helper_python_bin" setsid sudo -E -n "$ASCEND_E2E_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
       fi
     else
-      setsid "${VLLM_CLI[@]}" serve "$MODEL_NAME" \
+      setsid "${VLLM_OPENAI_SERVER[@]}" \
+        --model "$MODEL_NAME" \
         --host "$HOST" \
         --port "$PORT" \
         --dtype "$DTYPE" \
@@ -332,7 +334,8 @@ start_server() {
     if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then
       run_ascend_root_helper serve >"$SERVER_LOG" 2>&1 &
     else
-      "${VLLM_CLI[@]}" serve "$MODEL_NAME" \
+      "${VLLM_OPENAI_SERVER[@]}" \
+        --model "$MODEL_NAME" \
         --host "$HOST" \
         --port "$PORT" \
         --dtype "$DTYPE" \
