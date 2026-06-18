@@ -42,6 +42,7 @@ class OpenAIModelRegistry:
     ) -> None:
         self.model_config = model_config
         self.base_model_paths = base_model_paths
+        self.lora_requests: dict[str, LoRARequest] = {}
 
     def is_base_model(self, model_name: str) -> bool:
         return any(model.name == model_name for model in self.base_model_paths)
