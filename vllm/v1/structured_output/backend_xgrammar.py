@@ -74,14 +74,27 @@ class XgrammarBackend(StructuredOutputBackend):
         # tokenizer_info is retained because deserialize_json needs it on a
         # disk-cache hit (see get_xgrammar_disk_cache).
         self.tokenizer_info = tokenizer_info
-        self._disk_cache = get_xgrammar_disk_cache()
         self._tokenizer_key: str | None = None
-        if self._disk_cache is not None:
-            # serialize_json() captures the full vocab + metadata, so folding
-            # its hash into the key keeps two tokenizers from sharing an entry.
-            self._tokenizer_key = hashlib.sha256(
-                tokenizer_info.serialize_json().encode()
-            ).hexdigest()
+        try:
+            self._disk_cache = get_xgrammar_disk_cache()
+            if self._disk_cache is not None:
+                # serialize_json() captures the full vocab + metadata, so
+                # folding its hash into the key keeps two tokenizers from
+                # sharing an entry.
+                self._tokenizer_key = hashlib.sha256(
+                    tokenizer_info.serialize_json().encode()
+                ).hexdigest()
+        except Exception:
+            # A disk-cache setup failure (unwritable cache dir, corrupt db,
+            # serialization error) must never prevent serving requests; fall
+            # back to the no-cache compile path.
+            logger.warning(
+                "Failed to initialize the xgrammar disk cache; "
+                "falling back to in-process compilation.",
+                exc_info=True,
+            )
+            self._disk_cache = None
+            self._tokenizer_key = None
 
         self.num_speculative_tokens = 0
         if self.vllm_config.speculative_config is not None:
@@ -136,16 +149,18 @@ class XgrammarBackend(StructuredOutputBackend):
                 exc_info=True,
             )
         except Exception:
-            logger.warning(
-                "Unexpected error reading xgrammar disk cache; recompiling.",
-                exc_info=True,
+            # warning_once: a persistently broken cache (e.g. corrupt db) would
+            # otherwise log per compile_grammar call. The debug branch above
+            # retains the traceback for the expected corrupt/skewed-entry case.
+            logger.warning_once(
+                "Unexpected error reading xgrammar disk cache; recompiling."
             )
 
         ctx = self._compile(request_type, grammar_spec)
         try:
             self._disk_cache.set(key, ctx.serialize_json())
         except Exception:
-            logger.warning("Failed to write xgrammar disk cache entry.", exc_info=True)
+            logger.warning_once("Failed to write xgrammar disk cache entry.")
         return ctx
 
     def _disk_key(
@@ -157,6 +172,9 @@ class XgrammarBackend(StructuredOutputBackend):
         # missing factor would serve a valid-but-wrong grammar on a hit.
         # max_rollback_tokens is excluded on purpose: it parameterizes the
         # GrammarMatcher (rebuilt fresh every call), not the CompiledGrammar.
+        # _disk_key is only reached with the disk cache enabled, where
+        # _tokenizer_key is always set (see __post_init__).
+        assert self._tokenizer_key is not None
         return hashlib.sha256(
             "\x00".join(
                 (

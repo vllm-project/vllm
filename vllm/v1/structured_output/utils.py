@@ -258,7 +258,9 @@ def get_xgrammar_disk_cache():
 
     # Defense-in-depth: the grammar serialization API is present at the pinned
     # xgrammar (>= 0.2.1), but if a build somehow lacks it, disable the disk
-    # cache rather than crash.
+    # cache rather than crash. The deserialize error classes are part of this
+    # API: the read path references them in an ``except`` tuple, which would
+    # raise AttributeError during exception handling if any were absent.
     if not (
         hasattr(xgr, "get_serialization_version")
         and hasattr(xgr, "CompiledGrammar")
@@ -266,6 +268,9 @@ def get_xgrammar_disk_cache():
         and hasattr(xgr.CompiledGrammar, "deserialize_json")
         and hasattr(xgr, "TokenizerInfo")
         and hasattr(xgr.TokenizerInfo, "serialize_json")
+        and hasattr(xgr, "InvalidJSONError")
+        and hasattr(xgr, "DeserializeFormatError")
+        and hasattr(xgr, "DeserializeVersionError")
     ):
         logger.warning(
             "VLLM_XGRAMMAR_DISK_CACHE is set but this xgrammar build lacks the "
@@ -283,9 +288,12 @@ def get_xgrammar_disk_cache():
     cache_dir = os.path.join(envs.VLLM_CACHE_ROOT, "xgrammar_cache")
     # Bounded by size_limit + LRU eviction. This intentionally diverges from
     # get_outlines_cache (eviction_policy="none"), which is unbounded.
+    # Floor at 1 MB: a size_limit of 0 (or negative) would make diskcache evict
+    # every entry on write, silently turning the cache into a no-op.
+    size_limit_mb = max(1, envs.VLLM_XGRAMMAR_DISK_CACHE_MB)
     cache = Cache(
         cache_dir,
-        size_limit=envs.VLLM_XGRAMMAR_DISK_CACHE_MB * 1024 * 1024,
+        size_limit=size_limit_mb * 1024 * 1024,
         eviction_policy="least-recently-used",
     )
 
