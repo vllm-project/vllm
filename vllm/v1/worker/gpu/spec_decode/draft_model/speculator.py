@@ -283,15 +283,9 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
                 out=self.input_buffers.seq_lens[:num_reqs],
             )
 
-            if skip_attn:
-                hidden_states = self._run_model(
-                    self.input_buffers.input_ids[:num_reqs],
-                    self.input_buffers.positions[:num_reqs],
-                    None,
-                    None,
-                    num_tokens_across_dp,
-                )
-            else:
+            decode_attn_md = None
+            step_slot_maps_by_layer = None
+            if not skip_attn:
                 block_tables = self.block_tables
                 kv_cache_config = self.kv_cache_config
                 assert block_tables is not None
@@ -307,13 +301,13 @@ class PlainDraftModelSpeculator(DraftModelSpeculator):
                 decode_attn_md = self._build_draft_attn_metadata(
                     num_reqs, num_reqs, num_reqs
                 )
-                hidden_states = self._run_model(
-                    self.input_buffers.input_ids[:num_reqs],
-                    self.input_buffers.positions[:num_reqs],
-                    decode_attn_md,
-                    step_slot_maps_by_layer,
-                    num_tokens_across_dp,
-                )
+            hidden_states = self._run_model(
+                self.input_buffers.input_ids[:num_reqs],
+                self.input_buffers.positions[:num_reqs],
+                decode_attn_md,
+                step_slot_maps_by_layer,
+                num_tokens_across_dp,
+            )
 
             self.current_draft_step.fill_(step)
             self.draft_tokens[:num_reqs, step] = self.sample_draft(
