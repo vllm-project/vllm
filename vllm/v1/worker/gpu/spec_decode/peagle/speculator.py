@@ -450,7 +450,6 @@ class PEagleSpeculator(DraftModelSpeculator):
             next_prefill_tokens=next_prefill_tokens,
             pard_token_id=self.parallel_drafting_token_id,
             num_speculative_steps=self.num_speculative_steps,
-            max_num_reqs=self.max_num_reqs,
         )
 
         self._parallel_eagle(
@@ -493,7 +492,6 @@ def _prepare_peagle_inputs_kernel(
     num_rejected_ptr,
     pard_token_id,
     num_speculative_steps,
-    max_num_reqs,
     BLOCK_SIZE_TOKENS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
@@ -591,16 +589,6 @@ def _prepare_peagle_inputs_kernel(
         out_end = out_start + total_tokens
         tl.store(out_query_start_loc_ptr + num_reqs, out_end)
         tl.store(draft_current_step_ptr, 0)
-        # Pad query_start_loc, seq_lens, last_token_indices for CUDA graphs.
-        for i in range(num_reqs + 1, max_num_reqs + 1, BLOCK_SIZE_TOKENS):
-            block = i + tl.arange(0, BLOCK_SIZE_TOKENS)
-            mask = block < max_num_reqs + 1
-            tl.store(out_query_start_loc_ptr + block, out_end, mask=mask)
-        for i in range(num_reqs, max_num_reqs, BLOCK_SIZE_TOKENS):
-            block = i + tl.arange(0, BLOCK_SIZE_TOKENS)
-            mask = block < max_num_reqs
-            tl.store(out_seq_lens_ptr + block, 0, mask=mask)
-            tl.store(last_token_indices_ptr + block, 0, mask=mask)
 
 
 def prepare_peagle_inputs(
@@ -622,7 +610,6 @@ def prepare_peagle_inputs(
     next_prefill_tokens: torch.Tensor,
     pard_token_id: int,
     num_speculative_steps: int,
-    max_num_reqs: int,
 ) -> None:
     num_reqs = input_batch.num_reqs
     _prepare_peagle_inputs_kernel[(num_reqs,)](
@@ -646,6 +633,5 @@ def prepare_peagle_inputs(
         num_rejected,
         pard_token_id,
         num_speculative_steps,
-        max_num_reqs,
         BLOCK_SIZE_TOKENS=32,
     )
