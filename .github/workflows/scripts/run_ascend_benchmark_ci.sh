@@ -734,7 +734,7 @@ run_runner_npu_preflight_once() {
   local manager_output
   local manager_rc
   manager_output="$(hust-ascend-manager runtime check \
-    --repo "$WORKSPACE_ROOT" \
+    --repo "$VLLM_HUST_REPO" \
     --python "$PYTHON_BIN" \
     --require-npu --json 2>&1)"
   manager_rc=$?
