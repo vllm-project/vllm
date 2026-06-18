@@ -45,6 +45,8 @@ def warmup_kernels(
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
     num_kv_cache_groups = len(kv_cache_groups)
+    if num_kv_cache_groups == 0:
+        return
 
     # Compute per-request block counts for each KV cache group.
     group_block_sizes = [g.kv_cache_spec.block_size for g in kv_cache_groups]

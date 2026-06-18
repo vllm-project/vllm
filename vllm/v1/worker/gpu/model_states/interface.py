@@ -64,6 +64,20 @@ class ModelState(ABC):
     ) -> None:
         return None
 
+    def prepare_sample_hidden_states(
+        self,
+        hidden_states: torch.Tensor,
+        input_batch: InputBatch,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Select hidden states used by compute_logits.
+
+        The optional row-index tensor maps returned hidden states back to the
+        original flattened logits rows in ``input_batch``. Model-specific
+        samplers can use it to scatter compact logits back into request-local
+        positions.
+        """
+        return hidden_states[input_batch.logits_indices], None
+
     @abstractmethod
     def get_mm_embeddings(
         self, scheduled_encoder_inputs: dict[str, list[int]], input_batch: InputBatch

@@ -1526,7 +1526,9 @@ class ModelConfig:
     @cached_property
     def is_diffusion(self) -> bool:
         """Detect discrete diffusion (dLLM) models from HF config."""
-        return getattr(self.hf_config, "canvas_length", None) is not None
+        if getattr(self.hf_config, "canvas_length", None) is not None:
+            return True
+        return getattr(self.hf_config, "model_type", None) == "mineru_diffusion"
 
     @property
     def uses_alibi(self) -> bool:

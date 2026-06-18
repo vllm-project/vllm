@@ -508,6 +508,7 @@ class GPUModelRunner(
             logprobs_mode=self.model_config.logprobs_mode,
             use_fp64_gumbel=self.model_config.use_fp64_gumbel,
         )
+        self.rejection_sampler = RejectionSampler(self.sampler, None, self.device)
 
         self.eplb_state: EplbState | None = None
         self._moe_model: MixtureOfExperts | None = None
@@ -618,7 +619,6 @@ class GPUModelRunner(
             self.rejection_sampler = RejectionSampler(
                 self.sampler, self.speculative_config, self.device
             )
-
         self.num_spec_tokens = 0
         self.prev_num_spec_tokens = 0
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None

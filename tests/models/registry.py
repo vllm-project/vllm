@@ -903,6 +903,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "google/diffusiongemma-26B-A4B-it",
         trust_remote_code=True,
     ),
+    "MinerUDiffusionForConditionalGeneration": _HfExamplesInfo(
+        "opendatalab/MinerU-Diffusion",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "Gemma4ForConditionalGeneration": _HfExamplesInfo(
         "google/gemma-4-E2B-it",
         min_transformers_version="5.5.0",

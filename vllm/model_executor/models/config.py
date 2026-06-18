@@ -173,6 +173,43 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
             )
 
 
+class MinerUDiffusionForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """Enable native diffusion scheduling defaults for MinerU-Diffusion."""
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attention_config = vllm_config.attention_config
+        if attention_config.backend == AttentionBackendEnum.FLASHINFER:
+            raise ValueError(
+                "FlashInfer does not support MinerU-Diffusion's mixed "
+                "causal/bidirectional attention. Use --attention-backend "
+                "FLASH_ATTN or TRITON_ATTN instead."
+            )
+        if attention_config.backend is None and not attention_config.use_non_causal:
+            attention_config.use_non_causal = True
+            logger.info(
+                "MinerU-Diffusion uses causal prompt attention and "
+                "bidirectional block denoising; setting use_non_causal=True."
+            )
+
+        if vllm_config.diffusion_config is None:
+            from vllm.config.diffusion import DiffusionConfig
+
+            hf_config = vllm_config.model_config.hf_config
+            canvas_length = getattr(hf_config, "canvas_length", 32)
+            vllm_config.diffusion_config = DiffusionConfig(
+                canvas_length=canvas_length,
+                max_denoising_steps=canvas_length,
+            )
+
+        from vllm.config.scheduler import SchedulerConfig
+
+        sc = vllm_config.scheduler_config
+        if sc is not None and sc.max_num_seqs >= SchedulerConfig.DEFAULT_MAX_NUM_SEQS:
+            sc.max_num_seqs = 8
+
+
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -679,6 +716,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "MambaForCausalLM": MambaModelConfig,
+    "MinerUDiffusionForConditionalGeneration": MinerUDiffusionForConditionalGenerationConfig,  # noqa: E501
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
