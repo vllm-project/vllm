@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 
@@ -17,7 +16,6 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.engine.protocol import DeltaMessage
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
-logger = init_logger(__name__)
 
 
 class DeepSeekV3ReasoningParser(ReasoningParser):

@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 import regex as re
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 
 if TYPE_CHECKING:
@@ -17,7 +16,6 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
     from vllm.tokenizers import TokenizerLike
 
-logger = init_logger(__name__)
 
 
 class Olmo3ReasoningState(enum.Enum):
