@@ -87,10 +87,24 @@ def test_nvfp4_launch_config_large_full_decode_heads() -> None:
         1,
     )
     assert _get_nvfp4_launch_config(
+        16, 128, 128, is_3d=True, sliding_window_val=1024
+    ) == (
+        16,
+        8,
+        1,
+    )
+    assert _get_nvfp4_launch_config(
+        16, 256, 256, is_3d=True, sliding_window_val=1024
+    ) == (
+        16,
+        4,
+        1,
+    )
+    assert _get_nvfp4_launch_config(
         32, 512, 512, is_3d=True, sliding_window_val=1024
     ) == (
         32,
-        8,
+        4,
         1,
     )
 
@@ -722,6 +736,88 @@ def test_triton_unified_attn_nvfp4_spec_verify_uses_bytewise_decode(
     assert captured["USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE"] is True
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 Triton path is CUDA")
+@torch.inference_mode()
+def test_triton_unified_attn_nvfp4_sliding_decode_uses_bytewise_decode(
+    monkeypatch,
+) -> None:
+    torch.set_default_device(DEVICE_TYPE)
+
+    query_lens = [1, 1]
+    kv_lens = [1328, 2048]
+    num_query_heads = 8
+    num_kv_heads = 2
+    head_size = 256
+    block_size = 16
+    num_blocks = 256
+    dtype = torch.bfloat16
+    full_dim = nvfp4_kv_cache_full_dim(head_size)
+
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    output = torch.empty_like(query)
+    key_cache = torch.empty(
+        num_blocks, block_size, num_kv_heads, full_dim, dtype=torch.uint8
+    )
+    value_cache = torch.empty_like(key_cache)
+    (key_data_cache,), (key_scale_cache,) = nvfp4_kv_cache_split_views(key_cache)
+    (value_data_cache,), (value_scale_cache,) = nvfp4_kv_cache_split_views(value_cache)
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(0)
+    kv_lens_t = torch.tensor(kv_lens, dtype=torch.int32)
+    block_tables = torch.zeros(
+        (len(query_lens), max(kv_lens) // block_size), dtype=torch.int32
+    )
+    scale = torch.tensor(1.0, dtype=torch.float32)
+    captured = {}
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            captured["grid"] = grid
+
+            def launch(**kwargs):
+                captured.update(kwargs)
+
+            return launch
+
+    monkeypatch.setattr(
+        triton_unified_attention_ops, "kernel_unified_attention", FakeKernel()
+    )
+
+    unified_attention(
+        q=query,
+        k=key_data_cache,
+        v=value_data_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens_t,
+        max_seqlen_q=max(query_lens),
+        max_seqlen_k=max(kv_lens),
+        softmax_scale=head_size**-0.5,
+        causal=True,
+        window_size=(1023, 0),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=scale,
+        v_descale=scale,
+        seq_threshold_3D=8,
+        num_par_softmax_segments=16,
+        softmax_segm_output=torch.empty(
+            (8, num_query_heads, 16, head_size), dtype=torch.float32
+        ),
+        softmax_segm_max=torch.empty((8, num_query_heads, 16), dtype=torch.float32),
+        softmax_segm_expsum=torch.empty((8, num_query_heads, 16), dtype=torch.float32),
+        kv_quant_mode=KVQuantMode.NVFP4,
+        k_scale_cache=key_scale_cache.view(torch.uint8),
+        v_scale_cache=value_scale_cache.view(torch.uint8),
+    )
+
+    assert captured["IS_3D"] is True
+    assert captured["SLIDING_WINDOW"] == 1024
+    assert captured["USE_RAW_CURRENT_KV"] is False
+    assert captured["USE_NVFP4_BYTEWISE_DECODE"] is True
+    assert captured["USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE"] is False
+
+
 def ref_paged_attn(
     query: torch.Tensor,
     key_cache: torch.Tensor,
@@ -1194,6 +1290,144 @@ def test_triton_unified_attn_nvfp4_kv(
         kv_lens=kv_lens,
         block_tables=block_tables,
         scale=scale,
+    )
+    torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="NVFP4 Triton path is CUDA")
+@torch.inference_mode()
+def test_triton_unified_attn_nvfp4_sliding_bytewise_matches_dequant_reference() -> None:
+    """Sliding decode should be able to use the packed-byte NVFP4 reader."""
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    seq_lens = [(1, 1328), (1, 37), (1, 2011)]
+    query_lens = [x[0] for x in seq_lens]
+    kv_lens = [x[1] for x in seq_lens]
+    num_query_heads = 8
+    num_kv_heads = 2
+    head_size = 256
+    block_size = 16
+    dtype = torch.bfloat16
+    scale = head_size**-0.5
+    sliding_window = 1024
+
+    block_tables, used_blocks = _make_sequential_block_tables(kv_lens, block_size)
+    num_blocks = used_blocks + 4
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    key_cache_ref = torch.randn(
+        num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    value_cache_ref = torch.randn_like(key_cache_ref)
+
+    full_dim = nvfp4_kv_cache_full_dim(head_size)
+    key_cache = torch.empty(
+        num_blocks, block_size, num_kv_heads, full_dim, dtype=torch.uint8
+    )
+    value_cache = torch.empty_like(key_cache)
+
+    slot_mapping = torch.arange(num_blocks * block_size, dtype=torch.long)
+    k_scale = (key_cache_ref.abs().amax() / 448.0).to(torch.float32)
+    v_scale = (value_cache_ref.abs().amax() / 448.0).to(torch.float32)
+    triton_reshape_and_cache_flash(
+        key_cache_ref.reshape(-1, num_kv_heads, head_size),
+        value_cache_ref.reshape(-1, num_kv_heads, head_size),
+        key_cache,
+        value_cache,
+        slot_mapping,
+        "nvfp4",
+        k_scale,
+        v_scale,
+    )
+
+    (key_data_cache,), (key_scale_cache,) = nvfp4_kv_cache_split_views(key_cache)
+    (value_data_cache,), (value_scale_cache,) = nvfp4_kv_cache_split_views(value_cache)
+
+    from tests.kernels.quantization.nvfp4_utils import dequant_nvfp4_kv_cache
+
+    key_cache_dequant = (
+        dequant_nvfp4_kv_cache(
+            key_data_cache.permute(0, 2, 1, 3),
+            key_scale_cache.permute(0, 2, 1, 3),
+            k_scale.item(),
+            head_size,
+            block_size,
+            triton_scale_layout=True,
+        )
+        .permute(0, 2, 1, 3)
+        .to(dtype)
+        .contiguous()
+    )
+    value_cache_dequant = (
+        dequant_nvfp4_kv_cache(
+            value_data_cache.permute(0, 2, 1, 3),
+            value_scale_cache.permute(0, 2, 1, 3),
+            v_scale.item(),
+            head_size,
+            block_size,
+            triton_scale_layout=True,
+        )
+        .permute(0, 2, 1, 3)
+        .to(dtype)
+        .contiguous()
+    )
+
+    cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
+        dim=0, dtype=torch.int32
+    )
+    kv_lens_t = torch.tensor(kv_lens, dtype=torch.int32)
+    output = torch.empty_like(query)
+    num_par_softmax_segments = 16
+    head_size_padded = next_power_of_2(head_size)
+    softmax_segm_output = torch.empty(
+        (8, num_query_heads, num_par_softmax_segments, head_size_padded),
+        dtype=torch.float32,
+    )
+    softmax_segm_max = torch.empty(
+        (8, num_query_heads, num_par_softmax_segments),
+        dtype=torch.float32,
+    )
+    softmax_segm_expsum = torch.empty(
+        (8, num_query_heads, num_par_softmax_segments),
+        dtype=torch.float32,
+    )
+
+    unified_attention(
+        q=query,
+        k=key_data_cache,
+        v=value_data_cache,
+        out=output,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=kv_lens_t,
+        max_seqlen_q=max(query_lens),
+        max_seqlen_k=max(kv_lens),
+        softmax_scale=scale,
+        causal=True,
+        window_size=(sliding_window - 1, 0),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=k_scale,
+        v_descale=v_scale,
+        seq_threshold_3D=8,
+        num_par_softmax_segments=num_par_softmax_segments,
+        softmax_segm_output=softmax_segm_output,
+        softmax_segm_max=softmax_segm_max,
+        softmax_segm_expsum=softmax_segm_expsum,
+        kv_quant_mode=KVQuantMode.NVFP4,
+        k_scale_cache=key_scale_cache.view(torch.uint8),
+        v_scale_cache=value_scale_cache.view(torch.uint8),
+    )
+
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache_dequant,
+        value_cache=value_cache_dequant,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        sliding_window=sliding_window,
     )
     torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2)
 

@@ -75,6 +75,30 @@ def _decode_e2m1_nibble(nibble):
 
 
 @triton.jit
+def _e2m1_inline_fast(magnitude):
+    magnitude_i32 = magnitude.to(tl.int32)
+    normal_bits = (126 << 23) + (magnitude_i32 << 22)
+    normal = normal_bits.to(tl.uint32).to(tl.float32, bitcast=True)
+    subnormal = (magnitude & 0x01).to(tl.float32) * 0.5
+    return tl.where(magnitude < 2, subnormal, normal)
+
+
+@triton.jit
+def _decode_e2m1_nibble_fast(nibble):
+    magnitude = nibble & 0x07
+    sign = (nibble >> 3) & 1
+    value = _e2m1_inline_fast(magnitude)
+    return tl.where(sign == 1, -value, value)
+
+
+@triton.jit
+def _decode_e2m1_nibble_for_head(nibble, HEAD_SIZE: tl.constexpr):
+    if HEAD_SIZE >= 512:
+        return _decode_e2m1_nibble_fast(nibble)
+    return _decode_e2m1_nibble(nibble)
+
+
+@triton.jit
 def _nvfp4_scale_bits_to_float(bits):
     # NVFP4 block scales are produced from absmax values, so the sign bit
     # is not used on the Triton KV cache path.
@@ -170,9 +194,11 @@ def _load_k_tile_nvfp4(
         other=0,
     )
     block_scale = _nvfp4_scale_bits_to_float(block_scale_bits)
-    return (_decode_e2m1_nibble(nibble).to(tl.float32) * block_scale * global_scale).to(
-        Q.dtype
-    )
+    return (
+        _decode_e2m1_nibble_for_head(nibble, HEAD_SIZE).to(tl.float32)
+        * block_scale
+        * global_scale
+    ).to(Q.dtype)
 
 
 @triton.jit
@@ -239,9 +265,11 @@ def _load_v_tile_nvfp4(
         other=0,
     )
     block_scale = _nvfp4_scale_bits_to_float(block_scale_bits)
-    return (_decode_e2m1_nibble(nibble).to(tl.float32) * block_scale * global_scale).to(
-        Q.dtype
-    )
+    return (
+        _decode_e2m1_nibble_for_head(nibble, HEAD_SIZE).to(tl.float32)
+        * block_scale
+        * global_scale
+    ).to(Q.dtype)
 
 
 @triton.jit
@@ -303,8 +331,13 @@ def _load_k_tile_nvfp4_bytewise(
         other=0,
     )
     scale = _nvfp4_scale_bits_to_float(block_scale_bits) * global_scale
-    low = _decode_e2m1_nibble(raw_bytes & 0x0F).to(tl.float32) * scale
-    high = _decode_e2m1_nibble((raw_bytes >> 4) & 0x0F).to(tl.float32) * scale
+    low = (
+        _decode_e2m1_nibble_for_head(raw_bytes & 0x0F, HEAD_SIZE).to(tl.float32) * scale
+    )
+    high = (
+        _decode_e2m1_nibble_for_head((raw_bytes >> 4) & 0x0F, HEAD_SIZE).to(tl.float32)
+        * scale
+    )
     return low.to(Q.dtype), high.to(Q.dtype)
 
 
@@ -367,8 +400,13 @@ def _load_k_tile_nvfp4_bytewise_transposed(
         other=0,
     )
     scale = _nvfp4_scale_bits_to_float(block_scale_bits) * global_scale
-    low = _decode_e2m1_nibble(raw_bytes & 0x0F).to(tl.float32) * scale
-    high = _decode_e2m1_nibble((raw_bytes >> 4) & 0x0F).to(tl.float32) * scale
+    low = (
+        _decode_e2m1_nibble_for_head(raw_bytes & 0x0F, HEAD_SIZE).to(tl.float32) * scale
+    )
+    high = (
+        _decode_e2m1_nibble_for_head((raw_bytes >> 4) & 0x0F, HEAD_SIZE).to(tl.float32)
+        * scale
+    )
     return tl.trans(low.to(Q.dtype)), tl.trans(high.to(Q.dtype))
 
 
@@ -431,8 +469,13 @@ def _load_v_tile_nvfp4_bytewise(
         other=0,
     )
     scale = _nvfp4_scale_bits_to_float(block_scale_bits) * global_scale
-    low = _decode_e2m1_nibble(raw_bytes & 0x0F).to(tl.float32) * scale
-    high = _decode_e2m1_nibble((raw_bytes >> 4) & 0x0F).to(tl.float32) * scale
+    low = (
+        _decode_e2m1_nibble_for_head(raw_bytes & 0x0F, HEAD_SIZE).to(tl.float32) * scale
+    )
+    high = (
+        _decode_e2m1_nibble_for_head((raw_bytes >> 4) & 0x0F, HEAD_SIZE).to(tl.float32)
+        * scale
+    )
     return low.to(Q.dtype), high.to(Q.dtype)
 
 
@@ -761,10 +804,6 @@ def kernel_unified_attention(
             "USE_NVFP4_BYTEWISE_DECODE does not support TD Q/O",
         )
         tl.static_assert(
-            SLIDING_WINDOW == 0,
-            "USE_NVFP4_BYTEWISE_DECODE does not support sliding-window masks",
-        )
-        tl.static_assert(
             not USE_MM_PREFIX,
             "USE_NVFP4_BYTEWISE_DECODE does not support MM prefix masks",
         )
@@ -1035,23 +1074,7 @@ def kernel_unified_attention(
                     HEAD_SIZE,
                     HEAD_SIZE_PADDED,
                 ).T
-                # V : (TILE_SIZE, HEAD_SIZE)
-                V_load = _load_kv_tile_td(
-                    value_cache_ptr,
-                    physical_block_scalar,
-                    kv_head_idx,
-                    offset_in_block,
-                    stride_v_cache_0,
-                    stride_v_cache_1,
-                    stride_v_cache_2,
-                    stride_v_cache_3,
-                    BLOCK_SIZE,
-                    TILE_SIZE,
-                    HEAD_SIZE,
-                    HEAD_SIZE_PADDED,
-                )
                 K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
-                V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
             else:
                 v_offset = (
                     physical_block_idx[:, None] * stride_v_cache_0
@@ -1085,20 +1108,6 @@ def kernel_unified_attention(
                             stride_raw_k_2,
                             Q,
                         )
-                        V = _load_v_tile_raw_current(
-                            raw_value_ptr,
-                            context_len,
-                            cur_batch_in_all_start_index,
-                            seq_offset,
-                            kv_head_idx,
-                            offs_d,
-                            dim_mask,
-                            tile_mask,
-                            stride_raw_v_0,
-                            stride_raw_v_1,
-                            stride_raw_v_2,
-                            Q,
-                        )
                     elif USE_RAW_CURRENT_KV and tile_start + TILE_SIZE > context_len:
                         # Boundary tile: prefix lanes come from the FP4 cache,
                         # current-chunk lanes come from raw K/V.
@@ -1127,30 +1136,6 @@ def kernel_unified_attention(
                             HEAD_SIZE_PADDED,
                             Q,
                         )
-                        # V : (TILE_SIZE, HEAD_SIZE)
-                        V_fp4 = _load_v_tile_nvfp4(
-                            value_cache_ptr,
-                            v_scale_cache_ptr,
-                            nvfp4_v_global_scale,
-                            physical_block_idx,
-                            seq_offset,
-                            kv_head_idx,
-                            offs_d,
-                            dim_mask,
-                            prefix_tile_mask,
-                            stride_v_cache_0,
-                            stride_v_cache_1,
-                            stride_v_cache_2,
-                            stride_v_cache_3,
-                            stride_vs_blk,
-                            stride_vs_slot,
-                            stride_vs_head,
-                            stride_vs_dim,
-                            BLOCK_SIZE,
-                            HEAD_SIZE,
-                            HEAD_SIZE_PADDED,
-                            Q,
-                        )
                         K_raw = _load_k_tile_raw_current(
                             raw_key_ptr,
                             context_len,
@@ -1165,22 +1150,7 @@ def kernel_unified_attention(
                             stride_raw_k_2,
                             Q,
                         )
-                        V_raw = _load_v_tile_raw_current(
-                            raw_value_ptr,
-                            context_len,
-                            cur_batch_in_all_start_index,
-                            seq_offset,
-                            kv_head_idx,
-                            offs_d,
-                            dim_mask,
-                            tile_mask,
-                            stride_raw_v_0,
-                            stride_raw_v_1,
-                            stride_raw_v_2,
-                            Q,
-                        )
                         K = K_fp4 + K_raw
-                        V = V_fp4 + V_raw
                     else:
                         # Prefix-only or raw-current disabled: read packed FP4.
                         # K : (HEAD_SIZE, TILE_SIZE)
@@ -1207,30 +1177,6 @@ def kernel_unified_attention(
                             HEAD_SIZE_PADDED,
                             Q,
                         )
-                        # V : (TILE_SIZE, HEAD_SIZE)
-                        V = _load_v_tile_nvfp4(
-                            value_cache_ptr,
-                            v_scale_cache_ptr,
-                            nvfp4_v_global_scale,
-                            physical_block_idx,
-                            seq_offset,
-                            kv_head_idx,
-                            offs_d,
-                            dim_mask,
-                            tile_mask,
-                            stride_v_cache_0,
-                            stride_v_cache_1,
-                            stride_v_cache_2,
-                            stride_v_cache_3,
-                            stride_vs_blk,
-                            stride_vs_slot,
-                            stride_vs_head,
-                            stride_vs_dim,
-                            BLOCK_SIZE,
-                            HEAD_SIZE,
-                            HEAD_SIZE_PADDED,
-                            Q,
-                        )
                 else:
                     # K : (HEAD_SIZE, TILE_SIZE)
                     K_load = tl.load(
@@ -1238,14 +1184,7 @@ def kernel_unified_attention(
                         mask=dim_mask[:, None] & tile_mask[None, :],
                         other=0.0,
                     )
-                    # V : (TILE_SIZE, HEAD_SIZE)
-                    V_load = tl.load(
-                        value_cache_ptr + v_offset,
-                        mask=dim_mask[None, :] & tile_mask[:, None],
-                        other=0.0,
-                    )
                     K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
-                    V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
             # Per-(token, head) scales for INT8 / FP8 per-token-head modes.
             if USE_PER_TOKEN_HEAD_SCALES:
@@ -1332,6 +1271,118 @@ def kernel_unified_attention(
             acc_odd += tl.dot(P_cast, V_high)
         else:
             acc = acc * alpha[:, None]
+
+            # Delay V loads until after QK + softmax so large K and V tiles do
+            # not have to stay live through the score/softmax section.
+            if USE_TD:
+                # V : (TILE_SIZE, HEAD_SIZE)
+                V_load = _load_kv_tile_td(
+                    value_cache_ptr,
+                    physical_block_scalar,
+                    kv_head_idx,
+                    offset_in_block,
+                    stride_v_cache_0,
+                    stride_v_cache_1,
+                    stride_v_cache_2,
+                    stride_v_cache_3,
+                    BLOCK_SIZE,
+                    TILE_SIZE,
+                    HEAD_SIZE,
+                    HEAD_SIZE_PADDED,
+                )
+                V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
+            else:
+                if USE_NVFP4:
+                    tile_start = j * TILE_SIZE
+                    if USE_RAW_CURRENT_KV and tile_start >= context_len:
+                        V = _load_v_tile_raw_current(
+                            raw_value_ptr,
+                            context_len,
+                            cur_batch_in_all_start_index,
+                            seq_offset,
+                            kv_head_idx,
+                            offs_d,
+                            dim_mask,
+                            tile_mask,
+                            stride_raw_v_0,
+                            stride_raw_v_1,
+                            stride_raw_v_2,
+                            Q,
+                        )
+                    elif USE_RAW_CURRENT_KV and tile_start + TILE_SIZE > context_len:
+                        prefix_tile_mask_v = tile_mask & (seq_offset < context_len)
+                        # V : (TILE_SIZE, HEAD_SIZE)
+                        V_fp4 = _load_v_tile_nvfp4(
+                            value_cache_ptr,
+                            v_scale_cache_ptr,
+                            nvfp4_v_global_scale,
+                            physical_block_idx,
+                            seq_offset,
+                            kv_head_idx,
+                            offs_d,
+                            dim_mask,
+                            prefix_tile_mask_v,
+                            stride_v_cache_0,
+                            stride_v_cache_1,
+                            stride_v_cache_2,
+                            stride_v_cache_3,
+                            stride_vs_blk,
+                            stride_vs_slot,
+                            stride_vs_head,
+                            stride_vs_dim,
+                            BLOCK_SIZE,
+                            HEAD_SIZE,
+                            HEAD_SIZE_PADDED,
+                            Q,
+                        )
+                        V_raw = _load_v_tile_raw_current(
+                            raw_value_ptr,
+                            context_len,
+                            cur_batch_in_all_start_index,
+                            seq_offset,
+                            kv_head_idx,
+                            offs_d,
+                            dim_mask,
+                            tile_mask,
+                            stride_raw_v_0,
+                            stride_raw_v_1,
+                            stride_raw_v_2,
+                            Q,
+                        )
+                        V = V_fp4 + V_raw
+                    else:
+                        # V : (TILE_SIZE, HEAD_SIZE)
+                        V = _load_v_tile_nvfp4(
+                            value_cache_ptr,
+                            v_scale_cache_ptr,
+                            nvfp4_v_global_scale,
+                            physical_block_idx,
+                            seq_offset,
+                            kv_head_idx,
+                            offs_d,
+                            dim_mask,
+                            tile_mask,
+                            stride_v_cache_0,
+                            stride_v_cache_1,
+                            stride_v_cache_2,
+                            stride_v_cache_3,
+                            stride_vs_blk,
+                            stride_vs_slot,
+                            stride_vs_head,
+                            stride_vs_dim,
+                            BLOCK_SIZE,
+                            HEAD_SIZE,
+                            HEAD_SIZE_PADDED,
+                            Q,
+                        )
+                else:
+                    # V : (TILE_SIZE, HEAD_SIZE)
+                    V_load = tl.load(
+                        value_cache_ptr + v_offset,
+                        mask=dim_mask[None, :] & tile_mask[:, None],
+                        other=0.0,
+                    )
+                    V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
             if SLIDING_WINDOW:
                 qpos_lo = q_block_local_idx * BLOCK_Q
@@ -1649,6 +1700,8 @@ def _get_nvfp4_launch_config(
     if not is_3d:
         return 16, 8, 3 if head_size == 128 else 1
     if sliding_window_val > 0:
+        if head_size_padded >= 256:
+            return default_tile_size, 4, 1
         return default_tile_size, 8, 1
     max_tile_size = max(16, 4096 // head_size_padded)
     tile_size = min(default_tile_size, max_tile_size)
@@ -1804,14 +1857,15 @@ def unified_attention(
     use_nvfp4_bytewise_decode = (
         use_nvfp4
         and not use_raw_current_kv
-        and sliding_window_val == 0
         and chunk_lookback == -1
         and mm_prefix_range is None
         and output_scale is None
         and q.dtype != current_platform.fp8_dtype()
     )
+    # h256 transposed K showed worse L1TEX sector utilization and long
+    # scoreboard stalls than the regular bytewise K reader.
     use_nvfp4_transposed_k_bytewise_decode = (
-        use_nvfp4_bytewise_decode and head_size in (128, 256)
+        use_nvfp4_bytewise_decode and head_size == 128
     )
 
     TILE_SIZE_PREFILL = _get_tile_size(
