@@ -18,6 +18,9 @@ import torch
 
 import vllm.model_executor.layers.sparse_attn_indexer as idx_mod
 import vllm.v1.attention.backends.mla.flashmla_sparse as sparse_mla_mod
+from vllm.model_executor.layers.attention.mla_attention import (
+    _supports_dcp_fp8_kv_cache,
+)
 from vllm.model_executor.layers.sparse_attn_indexer import (
     _dcp_finalize_topk_remap,
     _dcp_pack_topk_candidates,
@@ -35,6 +38,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     _localize_decode_seq_lens_inplace,
     split_indexer_prefill_chunks,
 )
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 
 class _FakeDCPGroup:
@@ -84,6 +88,7 @@ def _make_common_metadata(
     seq_lens_cpu: torch.Tensor,
     max_seq_len: int,
     *,
+    dcp_local_seq_lens: torch.Tensor | None = None,
     dcp_local_seq_lens_cpu: torch.Tensor | None = None,
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     exact_seq_lens_cpu: torch.Tensor | None = None,
@@ -100,6 +105,7 @@ def _make_common_metadata(
         max_seq_len=max_seq_len,
         block_table_tensor=torch.empty((num_reqs, 1), dtype=torch.int32),
         slot_mapping=torch.empty(num_reqs, dtype=torch.int64),
+        dcp_local_seq_lens=dcp_local_seq_lens,
         dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
         seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
         _seq_lens_cpu=exact_seq_lens_cpu,
@@ -113,6 +119,12 @@ def test_decode_persistent_topk_enabled_for_dcp(monkeypatch):
     assert _use_persistent_topk_decode(1024)
     assert _use_persistent_topk_decode(2048)
     assert not _use_persistent_topk_decode(256)
+
+
+def test_dcp_fp8_kv_cache_allowlist_is_flashmla_sparse_only():
+    assert _supports_dcp_fp8_kv_cache("FLASHMLA_SPARSE", "fp8_ds_mla")
+    assert not _supports_dcp_fp8_kv_cache("FLASHMLA_SPARSE", "fp8")
+    assert not _supports_dcp_fp8_kv_cache("FLASHINFER_MLA_SPARSE", "fp8_ds_mla")
 
 
 def test_decode_topk_max_seq_len_uses_dcp_local_lengths():
@@ -550,6 +562,169 @@ def test_dcp_prefill_chunking_uses_all_rank_max_lengths_for_collective_order():
     assert safe_specs == [(0, 1, 0, 1), (1, 2, 0, 1)]
 
 
+def _make_fp8_sparse_metadata_builder(
+    dcp_world_size: int = 2,
+    dcp_rank: int = 1,
+    interleave: int = 2,
+) -> sparse_mla_mod.FlashMLASparseMetadataBuilder:
+    builder = object.__new__(sparse_mla_mod.FlashMLASparseMetadataBuilder)
+    builder.dcp_world_size = dcp_world_size
+    builder.dcp_rank = dcp_rank
+    builder.cp_kv_cache_interleave_size = interleave
+    builder.reorder_batch_threshold = 1
+    builder.device = torch.device("cpu")
+    builder.dummy_block_table = torch.empty((8, 1), dtype=torch.int32)
+    builder.fp8_cache_lens_tensor = torch.full((8,), 8, dtype=torch.int32)
+    builder.vllm_config = type(
+        "MockVllmConfig",
+        (),
+        {
+            "model_config": type(
+                "MockModelConfig",
+                (),
+                {"max_model_len": 2},
+            )()
+        },
+    )()
+    return builder
+
+
+def test_flashmla_sparse_fp8_decode_metadata_uses_dcp_local_lengths(monkeypatch):
+    monkeypatch.setattr(
+        sparse_mla_mod,
+        "get_mla_metadata",
+        lambda *args, **kwargs: ("sched", None),
+    )
+    builder = _make_fp8_sparse_metadata_builder()
+    global_seq_lens = torch.tensor([10, 11], dtype=torch.int32)
+    local_seq_lens = get_dcp_local_seq_lens(
+        global_seq_lens,
+        builder.dcp_world_size,
+        builder.dcp_rank,
+        builder.cp_kv_cache_interleave_size,
+    )
+    common = _make_common_metadata(
+        global_seq_lens,
+        max_seq_len=11,
+        dcp_local_seq_lens=local_seq_lens,
+    )
+
+    metadata = builder._build_fp8_separate_prefill_decode(common)
+
+    assert metadata.num_decodes == 2
+    assert metadata.prefill is None
+    assert metadata.decode is not None
+    assert torch.equal(metadata.decode.seq_lens, local_seq_lens)
+    assert torch.equal(
+        metadata.decode.kernel_metadata.cache_lens,
+        builder.fp8_cache_lens_tensor[:2],
+    )
+
+
+def test_flashmla_sparse_fp8_prefill_metadata_chunks_dcp_local_lengths():
+    builder = _make_fp8_sparse_metadata_builder()
+    query_start_loc = torch.tensor([0, 2, 5], dtype=torch.int32)
+    global_seq_lens = torch.tensor([9, 12], dtype=torch.int32)
+    local_seq_lens = get_dcp_local_seq_lens(
+        global_seq_lens,
+        builder.dcp_world_size,
+        builder.dcp_rank,
+        builder.cp_kv_cache_interleave_size,
+    )
+    common = CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=global_seq_lens,
+        num_reqs=2,
+        num_actual_tokens=5,
+        max_query_len=3,
+        max_seq_len=12,
+        block_table_tensor=torch.arange(2, dtype=torch.int32).view(2, 1),
+        slot_mapping=torch.empty(5, dtype=torch.int64),
+        dcp_local_seq_lens=local_seq_lens,
+        seq_lens_cpu_upper_bound=global_seq_lens,
+    )
+
+    metadata = builder._build_fp8_separate_prefill_decode(common)
+
+    assert metadata.num_prefills == 2
+    assert metadata.decode is None
+    assert metadata.prefill is not None
+    assert torch.equal(metadata.prefill.seq_lens, local_seq_lens)
+    assert metadata.prefill.request_ids.tolist() == [0, 0, 1, 1, 1]
+    assert len(metadata.prefill.chunks) == 1
+    chunk = metadata.prefill.chunks[0]
+    assert torch.equal(chunk.seq_lens, local_seq_lens)
+    assert int(chunk.chunk_tot_seqlen) == int(local_seq_lens.sum().item())
+    assert metadata.prefill.workspace_starts.tolist() == [0, local_seq_lens[0].item()]
+
+
+def test_flashmla_sparse_fp8_decode_uses_gathered_head_count(monkeypatch):
+    impl = object.__new__(sparse_mla_mod.FlashMLASparseImpl)
+    impl.num_heads = 4
+
+    def fake_convert_req_index_to_global_index(
+        _req_id_per_token,
+        _block_table,
+        topk_indices,
+        **_kwargs,
+    ):
+        return topk_indices
+
+    def fake_fp8_kernel(_self, q, **_kwargs):
+        assert q.shape == (2, 1, 64, 576)
+        out = q.new_zeros((2, 1, 64, 512))
+        lse = torch.zeros((2, 64, 1), dtype=torch.float32)
+        return out, lse
+
+    monkeypatch.setattr(
+        sparse_mla_mod,
+        "triton_convert_req_index_to_global_index",
+        fake_convert_req_index_to_global_index,
+    )
+    monkeypatch.setattr(
+        sparse_mla_mod.FlashMLASparseImpl,
+        "_fp8_flash_mla_kernel",
+        fake_fp8_kernel,
+    )
+
+    FP8Meta = sparse_mla_mod.FlashMLASparseMetadata.FP8SeparatePrefillDecode
+    fp8_metadata = FP8Meta(num_decodes=2, num_decode_tokens=2)
+    kernel_metadata = sparse_mla_mod.FlashMLASparseMetadata.FP8KernelMetadata(
+        scheduler_metadata="sched",
+        dummy_block_table=torch.empty((2, 1), dtype=torch.int32),
+        cache_lens=torch.full((2,), 8, dtype=torch.int32),
+    )
+    fp8_metadata.decode = FP8Meta.Decode(
+        seq_lens=torch.full((2,), 4, dtype=torch.int32),
+        kernel_metadata=kernel_metadata,
+        decode_query_len=1,
+    )
+    attn_metadata = sparse_mla_mod.FlashMLASparseMetadata(
+        num_reqs=2,
+        max_query_len=1,
+        max_seq_len=4,
+        num_actual_tokens=2,
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        slot_mapping=torch.empty(2, dtype=torch.int64),
+        block_table=torch.empty((2, 1), dtype=torch.int32),
+        req_id_per_token=torch.zeros(2, dtype=torch.int32),
+        fp8_extra_metadata=fp8_metadata,
+    )
+    q = torch.randn(2, 64, 576, dtype=torch.bfloat16)
+    topk_indices = torch.zeros((2, 8), dtype=torch.int32)
+    kv_cache = torch.empty((1, 64, 656), dtype=torch.uint8)
+
+    out, lse = (
+        sparse_mla_mod.FlashMLASparseImpl._forward_fp8_kv_separate_prefill_decode(
+            impl, q, kv_cache, topk_indices, attn_metadata
+        )
+    )
+
+    assert out.shape == (2, 64, 512)
+    assert lse.shape == (2, 64)
+
+
 @pytest.mark.parametrize(
     ("input_heads", "kernel_heads", "output_heads"),
     [
@@ -567,7 +742,9 @@ def test_bf16_sparse_prefill_padding_uses_input_head_count(
 
     seen = {}
 
-    def fake_flash_mla_sparse_fwd(q, kv_cache, topk_indices, softmax_scale):
+    def fake_flash_mla_sparse_fwd(
+        q, kv_cache, topk_indices, softmax_scale, topk_length=None
+    ):
         seen["q_shape"] = tuple(q.shape)
         seen["kv_shape"] = tuple(kv_cache.shape)
         seen["topk_shape"] = tuple(topk_indices.shape)

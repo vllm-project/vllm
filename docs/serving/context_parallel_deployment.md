@@ -36,6 +36,8 @@ For DeepSeek-R1, we have 1 kv-head when MLA is enabled. The typical single-node 
 
 For Kimi-K2, the architecture is similar to DeepSeek-R1, but with more parameters. When we deploy it with `-tp 16`, the KV cache duplication is 16x. We can add `-dcp 16` to completely remove the KV cache duplication, at the cost of more communication overhead. We can also add `-dcp 8` to reduce the KV cache duplication to 2x. Although it still duplicates the KV cache twice, the communication overhead is smaller since the DCP communication only happens inside one node.
 
+For GLM-5.2 with DeepSeek Sparse Attention, the same single-kv-head duplication pressure applies. Deployments using `FLASHMLA_SPARSE` can enable DCP to shard the sparse MLA KV cache across the DCP group; this path is used in production to serve GLM-5.2 with 1M context on 16xH100.
+
 For Qwen3-235B-A22B, we have 4 kv-heads. When we deploy it with `-tp 8`, the KV cache duplication is 2x. Then we can add `-dcp 2` to remove the KV cache duplication.
 
 In short, for decode context parallel, try to increase `-tp` size until you get satisfactory performance, and then add `-dcp` to reduce the KV cache duplication.

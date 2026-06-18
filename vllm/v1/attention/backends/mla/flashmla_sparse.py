@@ -9,6 +9,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
@@ -31,6 +32,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.utils import (
+    get_dcp_local_seq_lens,
     reshape_attn_output_for_spec_decode,
     reshape_query_for_spec_decode,
     split_decodes_and_prefills,
@@ -262,6 +264,15 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
         self.topk_tokens = vllm_config.model_config.hf_config.index_topk
         self.use_fp8_kv_cache = cache_config.cache_dtype == "fp8_ds_mla"
+        self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        try:
+            dcp_group = get_dcp_group()
+            self.dcp_world_size = dcp_group.world_size
+            self.dcp_rank = dcp_group.rank_in_group
+        except AssertionError:
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
+
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         # Shape: [max_num_seqs], all elements = topk_tokens (constant for full-CG)
         self.topk_tokens_tensor = torch.full(
@@ -271,6 +282,23 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         self.max_model_len_tensor = torch.full(
             (max_num_seqs,),
             self.model_config.max_model_len,
+            device=device,
+            dtype=torch.int32,
+        )
+        local_max_model_len = self.model_config.max_model_len
+        if self.dcp_world_size > 1:
+            local_max_model_len = int(
+                get_dcp_local_seq_lens(
+                    torch.tensor([self.model_config.max_model_len], dtype=torch.int32),
+                    self.dcp_world_size,
+                    self.dcp_rank,
+                    self.cp_kv_cache_interleave_size,
+                ).item()
+            )
+        # Shape: [max_num_seqs], all elements = DCP-local max_model_len.
+        self.fp8_cache_lens_tensor = torch.full(
+            (max_num_seqs,),
+            local_max_model_len,
             device=device,
             dtype=torch.int32,
         )
@@ -338,7 +366,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
         fp8_metadata = FlashMLASparseMetadata.FP8KernelMetadata(
             scheduler_metadata=scheduler_metadata,
-            cache_lens=self.max_model_len_tensor[:1],
+            cache_lens=self.fp8_cache_lens_tensor[:1],
             dummy_block_table=self.dummy_block_table[:1],
         )
 
@@ -381,6 +409,21 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             assert seq_lens_cpu is not None
             seq_lens = common_attn_metadata.seq_lens
+            if self.dcp_world_size > 1:
+                assert common_attn_metadata.dcp_local_seq_lens is not None, (
+                    "DCP is enabled but dcp_local_seq_lens is missing from "
+                    "the attention metadata."
+                )
+                seq_lens = common_attn_metadata.dcp_local_seq_lens
+                if common_attn_metadata.dcp_local_seq_lens_cpu is not None:
+                    seq_lens_cpu = common_attn_metadata.dcp_local_seq_lens_cpu
+                else:
+                    seq_lens_cpu = get_dcp_local_seq_lens(
+                        seq_lens_cpu,
+                        self.dcp_world_size,
+                        self.dcp_rank,
+                        self.cp_kv_cache_interleave_size,
+                    )
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
 
             prefill_seq_lens_cpu = seq_lens_cpu[num_decodes:]
@@ -470,6 +513,13 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             # Compute decode_query_len for spec decode (uniform due to require_uniform)
             query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
             decode_query_len = (query_start_loc_cpu[1] - query_start_loc_cpu[0]).item()
+            decode_seq_lens = common_attn_metadata.seq_lens[:num_decodes]
+            if self.dcp_world_size > 1:
+                assert common_attn_metadata.dcp_local_seq_lens is not None, (
+                    "DCP is enabled but dcp_local_seq_lens is missing from "
+                    "the attention metadata."
+                )
+                decode_seq_lens = common_attn_metadata.dcp_local_seq_lens[:num_decodes]
 
             # Use padded head count since that's what the kernel will see
             scheduler_metadata, _ = get_mla_metadata()
@@ -477,10 +527,10 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             kernel_meta = FlashMLASparseMetadata.FP8KernelMetadata(
                 scheduler_metadata=scheduler_metadata,
                 dummy_block_table=self.dummy_block_table[:num_decodes],
-                cache_lens=self.max_model_len_tensor[:num_decodes],
+                cache_lens=self.fp8_cache_lens_tensor[:num_decodes],
             )
             fp8_metadata.decode = FP8Meta.Decode(
-                seq_lens=common_attn_metadata.seq_lens[:num_decodes],
+                seq_lens=decode_seq_lens,
                 kernel_metadata=kernel_meta,
                 decode_query_len=decode_query_len,
             )
@@ -512,7 +562,9 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             | FlashMLASparseMetadata.FP8KernelMetadata
             | None
         ) = None
-        fp8_use_mixed_batch = self.num_heads < MIN_HEADS_FOR_BF16_PREFILL
+        fp8_use_mixed_batch = (
+            self.num_heads < MIN_HEADS_FOR_BF16_PREFILL and self.dcp_world_size == 1
+        )
         if self.use_fp8_kv_cache:
             if fp8_use_mixed_batch:
                 fp8_extra_metadata = self._build_fp8_mixed_decode_prefill(cm)
@@ -696,6 +748,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 topk_indices=topk_indices,
                 kernel_metadata=fp8_metadata.decode.kernel_metadata,
             )
+            num_heads = q.shape[2]
             # Reshape output: (num_decodes, seq_len, num_heads, head_dim_v)
             #              -> (num_decode_tokens, num_heads, head_dim_v)
             attn_out = reshape_attn_output_for_spec_decode(attn_out)
@@ -703,13 +756,14 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             #           -> (num_decode_tokens, num_heads)  [decode-major layout]
             lse = (
                 lse.permute(0, 2, 1)
-                .reshape(num_decodes * seq_len, self.num_heads)
+                .reshape(num_decodes * seq_len, num_heads)
                 .contiguous()
             )
             return attn_out, lse
 
         num_decode_tokens = fp8_metadata.num_decode_tokens
         num_prefill_tokens = fp8_metadata.num_prefill_tokens
+        actual_num_heads = q.shape[1]
 
         # Pure decode: direct call without allocation
         if num_decode_tokens > 0 and num_prefill_tokens == 0:
@@ -719,13 +773,13 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
 
         # Mixed or pure prefill: allocate output + lse buffers
         attn_out = q.new_empty(
-            (attn_metadata.num_actual_tokens, self.num_heads, self.kv_lora_rank),
+            (attn_metadata.num_actual_tokens, actual_num_heads, self.kv_lora_rank),
             dtype=q.dtype,
             device=q.device,
         )
         # LSE is float32 per the DCP merge contract ([tokens, num_heads] base-e).
         lse_buf = torch.empty(
-            (attn_metadata.num_actual_tokens, self.num_heads),
+            (attn_metadata.num_actual_tokens, actual_num_heads),
             dtype=torch.float32,
             device=q.device,
         )
@@ -814,7 +868,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # q shape: (batch, seq_len, num_heads, head_dim)
         actual_num_heads = q.size(2)
-        padded_num_heads = self.fp8_decode_padded_heads
+        padded_num_heads = self._compute_fp8_decode_padded_heads(actual_num_heads)
 
         # Pad query if needed (kernel only supports h_q = 64 or 128)
         if actual_num_heads < padded_num_heads:

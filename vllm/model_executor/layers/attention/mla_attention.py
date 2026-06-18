@@ -283,6 +283,10 @@ logger = init_logger(__name__)
 _FP8_DTYPE = current_platform.fp8_dtype()
 
 
+def _supports_dcp_fp8_kv_cache(attn_backend_name: str, kv_cache_dtype: str) -> bool:
+    return attn_backend_name == "FLASHMLA_SPARSE" and kv_cache_dtype == "fp8_ds_mla"
+
+
 def _detect_output_quant_key(
     output: torch.Tensor,
     output_scale: torch.Tensor | None,
@@ -785,7 +789,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
-                assert not fp8_attention, "DCP not support fp8 kvcache now."
+                if fp8_attention and not _supports_dcp_fp8_kv_cache(
+                    self.attn_backend.get_name(), self.kv_cache_dtype
+                ):
+                    raise AssertionError(
+                        "DCP with FP8 KV cache is only supported for "
+                        "FlashMLASparse with fp8_ds_mla KV cache."
+                    )
+                assert isinstance(mqa_q, tuple), (
+                    "DCP gathers unquantized MLA queries before the sparse "
+                    "attention kernel."
+                )
                 # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
                 mqa_q = torch.cat(mqa_q, dim=-1)
                 # mqa_q do allgather in head dim.
