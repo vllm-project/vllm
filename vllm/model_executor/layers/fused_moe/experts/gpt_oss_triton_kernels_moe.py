@@ -722,9 +722,6 @@ class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
-    def supports_expert_map(self) -> bool:
-        return True
-
     def moe_problem_size(
         self,
         a1: torch.Tensor,
@@ -872,6 +869,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUSTEP,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -904,6 +902,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         activation: MoEActivation,
         output: torch.Tensor,
         input: torch.Tensor,
+        **kwargs,
     ) -> None:
         quant_config = self.quant_config or FUSED_MOE_UNQUANTIZED_CONFIG
         if activation == MoEActivation.SWIGLUOAI:
@@ -926,6 +925,19 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
                 output,
                 input,
                 quant_config.gemm1_clamp_limit,
+            )
+        elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+            assert quant_config.gemm1_clamp_limit is not None
+            alpha = (
+                quant_config.gemm1_alpha
+                if quant_config.gemm1_alpha is not None
+                else 1.0
+            )
+            beta = (
+                quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
+            )
+            torch.ops._C.silu_and_mul_with_clamp(
+                output, input, quant_config.gemm1_clamp_limit, alpha, beta
             )
         else:
             super().activation(activation, output, input)
@@ -1499,9 +1511,6 @@ class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
     ) -> bool:
-        return True
-
-    def supports_expert_map(self) -> bool:
         return True
 
     @property

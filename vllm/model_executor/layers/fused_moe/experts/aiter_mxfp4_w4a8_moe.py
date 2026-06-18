@@ -136,6 +136,14 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
     from aiter.ops.triton.quant_moe import downcast_to_static_fp8
 
+    from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+        should_use_cdna4_mx_scale_swizzle,
+    )
+
+    _swizzle_mx_scale = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
+    #TODO (JPVILLAM): merge conflic resolve later if _swizzle_mx_scale is enough
+    mx_scale_swizzle = None if on_gfx1250() else "CDNA4_SCALE"
+
     assert quant_config.w1_precision is not None, (
         "w1_precision in quant config can't be None"
     )
@@ -154,7 +162,6 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     # gfx950 uses the CDNA4 swizzle layout.
     from vllm.platforms.rocm import on_gfx1250
 
-    mx_scale_swizzle = None if on_gfx1250() else "CDNA4_SCALE"
 
     intermediate_cache1 = moe_gemm_a8w4(
         hidden_states,
@@ -283,9 +290,6 @@ class AiterW4A8ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
         routing_method: RoutingMethodType,
     ) -> bool:
         return True
-
-    def supports_expert_map(self) -> bool:
-        return False  # Expert parallelism not yet supported
 
     @property
     def expects_unquantized_inputs(self) -> bool:

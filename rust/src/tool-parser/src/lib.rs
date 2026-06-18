@@ -6,9 +6,11 @@ mod deepseek_dsml;
 mod deepseek_json;
 mod gemma4;
 mod glm_xml;
+mod hy_v3;
 mod json;
 mod kimi_k2;
 mod minimax_m2;
+mod minimax_m3;
 mod parameters;
 mod qwen_coder;
 #[cfg(any(test, feature = "test-util"))]
@@ -22,9 +24,14 @@ pub use deepseek_json::{DeepSeekV3ToolParser, DeepSeekV31ToolParser};
 pub use error::{Result, ToolParserError};
 pub use gemma4::Gemma4ToolParser;
 pub use glm_xml::{Glm45MoeToolParser, Glm47MoeToolParser};
-pub use json::{HermesToolParser, Llama3JsonToolParser, MistralToolParser, Qwen3XmlToolParser};
+pub use hy_v3::HyV3ToolParser;
+pub use json::{
+    Granite4ToolParser, HermesToolParser, Internlm2ToolParser, Llama3JsonToolParser,
+    MistralToolParser, Phi4MiniJsonToolParser, Qwen3XmlToolParser,
+};
 pub use kimi_k2::KimiK2ToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
+pub use minimax_m3::MinimaxM3ToolParser;
 pub use qwen_coder::Qwen3CoderToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -51,20 +58,20 @@ pub struct ToolCallDelta {
 
 /// Result of advancing tool parsing with one assistant-text input.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ToolParseResult {
+pub struct ToolParserOutput {
     /// Plain assistant text that is not part of any tool call.
     pub normal_text: String,
     /// Tool-call updates extracted from this input.
     pub calls: Vec<ToolCallDelta>,
 }
 
-impl ToolParseResult {
-    /// Append another parser result onto this one.
+impl ToolParserOutput {
+    /// Append another parser output onto this one.
     ///
     /// Note that this does not attempt to merge multiple deltas for the same
     /// tool call into one complete item. Call `coalesce_calls()` after if
     /// that behavior is desired.
-    pub(crate) fn append(&mut self, mut other: Self) {
+    pub fn append(&mut self, mut other: Self) {
         self.normal_text.push_str(&other.normal_text);
         self.calls.append(&mut other.calls);
     }
@@ -75,7 +82,7 @@ impl ToolParseResult {
     /// which delegates through the incremental parser lifecycle and then
     /// needs to collapse streaming-style argument fragments into one final
     /// tool call.
-    pub(crate) fn coalesce_calls(mut self) -> Self {
+    pub fn coalesce_calls(mut self) -> Self {
         let mut merged = BTreeMap::<usize, ToolCallDelta>::new();
         let mut order = Vec::new();
 
@@ -116,24 +123,61 @@ pub trait ToolParser: Send {
         false
     }
 
-    /// Feed one decoded text delta into the parser.
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult>;
+    /// Return the parser-provided ID for a tool call by index, if the model
+    /// emitted one.
+    fn tool_call_id(&self, _tool_index: usize) -> Option<&str> {
+        None
+    }
+
+    /// Feed one decoded text delta into the parser, appending committed output
+    /// into `output`.
+    ///
+    /// If this returns an error, any output already appended to `output`
+    /// remains committed parser output. The parser must keep its uncommitted
+    /// buffer intact so callers may recover it with `reset()`.
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()>;
 
     /// Flush any buffered partial state at end of stream.
-    fn finish(&mut self) -> Result<ToolParseResult> {
-        Ok(ToolParseResult::default())
+    ///
+    /// This operation is atomic: on error no partial output is returned and the
+    /// parser's buffered state is left intact.
+    fn finish(&mut self) -> Result<ToolParserOutput>;
+
+    /// Clear parser state and return currently uncommitted buffered text.
+    ///
+    /// Callers may use this to recover any text that failed to parse after an error
+    /// and output it as normal text.
+    fn reset(&mut self) -> String;
+}
+
+/// Extension methods for easily testing `ToolParser` implementations.
+///
+/// These helpers do not handle partial parsing or error recovery, so they are
+/// not intended for use in production code paths.
+#[cfg(any(test, feature = "test-util"))]
+#[easy_ext::ext(ToolParserTestExt)]
+impl<T: ToolParser + ?Sized> T {
+    /// Feed one decoded text delta and return only if the whole chunk parses.
+    ///
+    /// If parsing fails, partial committed output is discarded by this helper.
+    /// Prefer `parse_into` for more fine-grained control in error recovery.
+    pub fn parse_chunk(&mut self, chunk: &str) -> Result<ToolParserOutput> {
+        let mut output = ToolParserOutput::default();
+        self.parse_into(chunk, &mut output)?;
+        Ok(output)
     }
 
     /// Parse complete tool calls from final output.
     ///
-    /// The default implementation reuses the incremental parser lifecycle by
-    /// feeding the full output through `push()` and then calling `finish()`.
-    /// This keeps one source of truth for robust parsers whose incremental
-    /// state machine is equivalent across arbitrary chunking.
-    fn parse_complete(&mut self, output: &str) -> Result<ToolParseResult> {
-        let mut result = self.push(output)?;
-        result.append(self.finish()?);
-        Ok(result.coalesce_calls())
+    /// This default implementation reuses the incremental parser lifecycle by
+    /// feeding the full output through `parse_chunk()` and then calling `finish()`.
+    ///
+    /// If parsing fails, partial committed output is discarded by this helper.
+    /// Prefer `parse_into` for more fine-grained control in error recovery.
+    pub fn parse_complete(&mut self, text: &str) -> Result<ToolParserOutput> {
+        let mut output = self.parse_chunk(text)?;
+        output.append(self.finish()?);
+        Ok(output.coalesce_calls())
     }
 }
 
