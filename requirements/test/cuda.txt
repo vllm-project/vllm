@@ -360,6 +360,7 @@ jsonpointer==3.0.0
     # via jsonschema
 jsonschema==4.23.0
     # via
+    #   -c requirements/common.txt
     #   hypothesis-jsonschema
     #   mistral-common
     #   ray
