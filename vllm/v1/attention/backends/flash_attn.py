@@ -1109,21 +1109,31 @@ class FlashAttentionImpl(AttentionImpl):
 
                 if (
                     _os.environ.get("PCP_DUMP")
-                    and self.pcp_rank == 0
                     and num_decode_tokens > 1
-                    and _PCP_DUMP_DECSLOT[0] < 5
+                    and _PCP_DUMP_DECSLOT[0] < 10
                 ):
                     _PCP_DUMP_DECSLOT[0] += 1
                     _sl = decode_slot_mapping.tolist()
                     _bs = key_cache.shape[1]
                     _collide = len(_sl) != len(set(_sl))
-                    _rb0 = key_cache[_sl[0] // _bs, _sl[0] % _bs, 0, 0].item()
-                    _rb1 = key_cache[_sl[1] // _bs, _sl[1] % _bs, 0, 0].item()
+                    _rb0 = (
+                        key_cache[_sl[0] // _bs, _sl[0] % _bs, 0, 0].item()
+                        if _sl[0] >= 0
+                        else -999.0
+                    )
+                    _rb1 = (
+                        key_cache[_sl[1] // _bs, _sl[1] % _bs, 0, 0].item()
+                        if _sl[1] >= 0
+                        else -999.0
+                    )
+                    _bt = pcp_attn_metadata.block_table
+                    _raw6 = slot_mapping[: min(6, slot_mapping.shape[0])].tolist()
                     logger.warning(
-                        "PCP_DUMP dec_slot n=%d slot0=%d slot1=%d "
+                        "PCP_DUMP dec_slot n=%d rank=%d slot0=%d slot1=%d "
                         "collision=%s key0=%.5f readback0=%.5f key1=%.5f "
-                        "readback1=%.5f",
+                        "readback1=%.5f raw_slotmap=%s bt[0,0]=%d bt[1,0]=%d",
                         num_decode_tokens,
+                        self.pcp_rank,
                         _sl[0],
                         _sl[1],
                         _collide,
@@ -1131,6 +1141,9 @@ class FlashAttentionImpl(AttentionImpl):
                         _rb0,
                         key[1, 0, 0].item(),
                         _rb1,
+                        _raw6,
+                        int(_bt[0, 0]),
+                        int(_bt[1, 0]),
                     )
             local_padded_tokens = (
                 pcp_metadata.num_actual_tokens_pcp_padded // self.pcp_world_size
