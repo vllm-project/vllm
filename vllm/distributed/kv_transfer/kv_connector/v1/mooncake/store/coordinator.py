@@ -172,19 +172,50 @@ class MooncakeStoreCoordinator:
         self,
         aligned_token_len: int,
         num_prompt_tokens: int | None = None,
-    ) -> tuple[list[bool], ...]:
-        """Per-group store masks: ``mask[g][i]`` is True iff chunk ``i`` of
-        group ``g`` should be written to the store so a future cache hit can
-        consume it.
+    ) -> tuple[list[bool] | None, ...]:
+        """Per-group store masks.
+
+        ``mask[g][i]`` is True iff chunk ``i`` of group ``g`` should be
+        written to the store so a future cache hit can consume it. ``None`` is
+        the all-True sentinel.
 
         Reuses the engine's ``SingleTypeKVCacheManager.reachable_block_mask``
         so the store retains exactly the blocks the local prefix cache would.
         """
+        return self._reachable_masks(
+            aligned_token_len,
+            retention_interval=self.retention_interval,
+            num_prompt_tokens=num_prompt_tokens,
+        )
+
+    def lookup_mask(
+        self,
+        aligned_token_len: int,
+    ) -> tuple[list[bool] | None, ...]:
+        """Per-group lookup masks.
+
+        ``mask[g][i]`` is True iff chunk ``i`` of group ``g`` should be
+        looked up as an aligned hit boundary. ``None`` is the all-True
+        sentinel.
+        """
+        return self._reachable_masks(
+            aligned_token_len,
+            retention_interval=None,
+            num_prompt_tokens=None,
+        )
+
+    def _reachable_masks(
+        self,
+        aligned_token_len: int,
+        *,
+        retention_interval: int | None,
+        num_prompt_tokens: int | None,
+    ) -> tuple[list[bool] | None, ...]:
         assert aligned_token_len % self.lcm_block_size == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of "
             f"lcm_block_size ({self.lcm_block_size})"
         )
-        masks: list[list[bool]] = []
+        masks: list[list[bool] | None] = []
         for g_idx, g in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(g.kv_cache_spec)
             num_chunks = aligned_token_len // spec.block_size
@@ -196,10 +227,12 @@ class MooncakeStoreCoordinator:
                 alignment_tokens=self.lcm_block_size,
                 kv_cache_spec=spec,
                 use_eagle=g_idx in self.eagle_group_ids,
-                retention_interval=self.retention_interval,
+                retention_interval=retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
             )
-            masks.append([True] * num_chunks if mask is None else mask)
+            if mask is not None:
+                assert len(mask) == num_chunks
+            masks.append(mask)
         return tuple(masks)
 
     def block_hashes_for_spec(
