@@ -378,12 +378,7 @@ class FlashInferBackend(AttentionBackend):
         if cache_dtype_str == "nvfp4":
             full_dim = nvfp4_kv_cache_full_dim(head_size)
             return (num_blocks, 2 * num_kv_heads, block_size, full_dim)
-        if is_quantized_kv_cache(cache_dtype_str):
-            # Quantized KV caches store K and V as separate head groups:
-            # (B, 2*H, N, hs). This allows zero-copy reshape to
-            # (B, 2, H, N, hs) for kernels that need the K/V split.
-            return (num_blocks, 2 * num_kv_heads, block_size, head_size)
-        # Non-quantized: pack K and V in the content dim (B, H, N, 2*hs).
+        # All non-nvfp4 cases (fp8, non-quantized) pack K/V in content dim.
         return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
@@ -1513,7 +1508,7 @@ class FlashInferImpl(AttentionImpl):
             stride_order = FlashInferBackend.get_kv_cache_stride_order()
             kv_perm = kv_cache.permute(*stride_order)
             kv_perm = canonicalize_singleton_dim_strides(kv_perm)
-            if is_quantized_kv_cache(self.kv_cache_dtype):
+            if self.is_kvcache_nvfp4:
                 kv_split_dim = 1 if get_kv_cache_layout() == "HND" else 2
                 kv_tuple = kv_perm.split(self.num_kv_heads, dim=kv_split_dim)
             else:
@@ -1545,21 +1540,19 @@ class FlashInferImpl(AttentionImpl):
         kv_cache_permute = fixed
 
         # Split K/V — zero-copy views.
-        # Quantized caches (fp8, nvfp4) store K/V as separate head groups
-        # (2*H in dim 1), split on dim=1. Non-quantized caches pack K/V in
-        # the content dim (2*hs in dim=-1), split there.
+        # NVFP4 stores K/V as separate head groups (2*H in dim 1).
+        # All other cases (fp8 and non-quantized) pack K/V in the content
+        # dim (2*hs in dim=-1) and split there.
         hs = self.head_size
         nvfp4_kv_data = None
         nvfp4_kv_block_scales = None
-        kv_split_dim = 1 if get_kv_cache_layout() == "HND" else 2
         if self.is_kvcache_nvfp4:
+            kv_split_dim = 1 if get_kv_cache_layout() == "HND" else 2
             kv_cache_tuple = kv_cache_permute.split(self.num_kv_heads, dim=kv_split_dim)
             k_data, k_sf = nvfp4_split_data_scale(kv_cache_tuple[0])
             v_data, v_sf = nvfp4_split_data_scale(kv_cache_tuple[1])
             nvfp4_kv_data = (k_data, v_data)
             nvfp4_kv_block_scales = (k_sf, v_sf)
-        elif is_quantized_kv_cache(self.kv_cache_dtype):
-            kv_cache_tuple = kv_cache_permute.split(self.num_kv_heads, dim=kv_split_dim)
         else:
             kv_cache_tuple = kv_cache_permute.split(hs, dim=-1)
 
@@ -1700,18 +1693,12 @@ class FlashInferImpl(AttentionImpl):
                     kv_cache_permute = canonicalize_singleton_dim_strides(
                         kv_cache_permute
                     )
-                    kv_strides = kv_cache_permute.stride()
-                    assert (
-                        kv_strides[-1] == 1
-                        and kv_strides[-2] == kv_cache_permute.shape[-1]
-                    ), (
-                        "KV cache inner dims (block_size, head_size) must be "
-                        f"contiguous, got strides {kv_strides}"
-                    )
-                    # fp8 uses (B, 2*H, N, hs); reshape to (B, 2, H, N, hs)
-                    # for the dequant kernel — zero-copy view.
-                    kv_cache_5d = kv_cache_permute.view(
-                        -1, 2, self.num_kv_heads, *kv_cache_permute.shape[2:]
+                    # Packed layout (B, H, N, 2*hs) → (B, H, N, 2, hs)
+                    # → permute → (B, 2, H, N, hs) contiguous for dequant.
+                    kv_cache_5d = (
+                        kv_cache_permute.unflatten(-1, (2, hs))
+                        .permute(0, 3, 1, 2, 4)
+                        .contiguous()
                     )
                     mock_kv_cache, mock_block_table = trtllm_prefill_attn_kvfp8_dequant(
                         kv_cache_5d,
@@ -1905,13 +1892,13 @@ class FlashInferImpl(AttentionImpl):
             # and value[:num_actual_tokens] because the reshape_and_cache_flash
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
-            if is_quantized_kv_cache(self.kv_cache_dtype):
-                # (B, 2*H, N, hs) -> ((B, N, H, hs), (B, N, H, hs))
+            if self.is_kvcache_nvfp4:
+                # nvfp4: (B, 2*H, N, full_dim) → split on head dim
                 k_cache, v_cache = kv_cache.transpose(1, 2).split(
                     self.num_kv_heads, dim=-2
                 )
             else:
-                # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+                # fp8 and non-quantized: (B, H, N, 2*hs) → split on content
                 k_cache, v_cache = kv_cache.transpose(1, 2).split(
                     self.head_size, dim=-1
                 )
