@@ -350,7 +350,19 @@ def fused_indexer_q_rope_quant(
             dtype=torch.uint8,
             device=index_q.device,
         )
-        if has_cutedsl():
+        if current_platform.is_xpu():
+            torch.ops._xpu_C.deepseek_fused_indexer_q_rope_mxfp4(
+                index_q,
+                positions,
+                index_q_cos_sin_cache,
+                index_weights,
+                index_weights_softmax_scale,
+                index_weights_head_scale,
+                index_q_packed,
+                index_q_scale,
+                index_weights_out,
+            )
+        elif has_cutedsl():
             # lazily import, otherwise some tests fail due to CUDA driver init failure.
             from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
                 fused_indexer_q_rope_quant_mxfp4_cutedsl,
@@ -407,7 +419,18 @@ def fused_indexer_q_rope_quant(
     use_fnuz = fp8_dtype == torch.float8_e4m3fnuz
     fp8_max = 224.0 if use_fnuz else 448.0
     index_q_fp8 = torch.empty_like(index_q, dtype=fp8_dtype)
-    if has_cutedsl():
+    if current_platform.is_xpu():
+        torch.ops._xpu_C.deepseek_fused_indexer_q_rope_fp8(
+            index_q,
+            positions,
+            index_q_cos_sin_cache,
+            index_weights,
+            index_weights_softmax_scale,
+            index_weights_head_scale,
+            index_q_fp8,
+            index_weights_out,
+        )
+    elif has_cutedsl():
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.fused_indexer_q_cutedsl import (
             fused_indexer_q_rope_quant_fp8_cutedsl,
