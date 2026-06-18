@@ -174,9 +174,13 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   for (auto i = 0; i < num_chunks; ++i) {
     CUDA_CHECK(cuMemCreate(p_memHandle[i], chunk_sizes[i], &prop, 0));
     if (error_code != 0) {
-      // Clean up previously created handles
+      // Clean up previously created handles. Zero each handle after release
+      // so a later unmap_and_release (e.g. at teardown after a failed wake_up
+      // OOM) does not release the same handle again and crash with a double
+      // free (hipMemRelease on an already-freed handle).
       for (auto j = 0; j < i; ++j) {
         cuMemRelease(*(p_memHandle[j]));
+        *(p_memHandle[j]) = 0;
       }
       return;
     }
@@ -193,9 +197,11 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
         cuMemUnmap(unmap_addr, chunk_sizes[j]);
         unmapped_size += chunk_sizes[j];
       }
-      // release all created handles
+      // release all created handles; zero each so a later unmap_and_release
+      // cannot release the same handle again (double free).
       for (auto j = 0; j < num_chunks; ++j) {
         cuMemRelease(*(p_memHandle[j]));
+        *(p_memHandle[j]) = 0;
       }
       return;
     }
@@ -241,6 +247,14 @@ void unmap_and_release(unsigned long long device, ssize_t size,
   CUresult first_error = no_error;
 
   for (auto i = 0; i < num_chunks; ++i) {
+    // A zero handle marks a chunk that is not live (e.g. it was released by
+    // create_and_map's cleanup after a failed wake_up OOM). Such a chunk was
+    // never (re)mapped, so skip it; unmapping/releasing a stale handle again
+    // would double-free and crash (hipMemRelease on an already-freed handle).
+    if (*(p_memHandle[i]) == 0) {
+      allocated_size += chunk_sizes[i];
+      continue;
+    }
     void* map_addr = (void*)((uintptr_t)d_mem + allocated_size);
     CUresult status = cuMemUnmap(map_addr, chunk_sizes[i]);
     if (status != no_error && first_error == no_error) {
@@ -250,10 +264,14 @@ void unmap_and_release(unsigned long long device, ssize_t size,
   }
 
   for (auto i = 0; i < num_chunks; ++i) {
+    if (*(p_memHandle[i]) == 0) {
+      continue;
+    }
     CUresult status = cuMemRelease(*(p_memHandle[i]));
     if (status != no_error && first_error == no_error) {
       first_error = status;
     }
+    *(p_memHandle[i]) = 0;
   }
 
   if (first_error != no_error) {
