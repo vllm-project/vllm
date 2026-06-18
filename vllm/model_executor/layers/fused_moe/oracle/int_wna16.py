@@ -770,18 +770,19 @@ def _process_weights_cpu(
     # Determine zero points for repacking.
     w13_zeros: torch.Tensor | None = None
     w2_zeros: torch.Tensor | None = None
-    if w13_qzeros is not None:
-        w13_zeros = (
-            w13_qzeros.data.view(torch.int32)
-            if w13_qzeros.dtype != torch.int32
-            else w13_qzeros.data
-        )
-    if w2_qzeros is not None:
-        w2_zeros = (
-            w2_qzeros.data.view(torch.int32)
-            if w2_qzeros.dtype != torch.int32
-            else w2_qzeros.data
-        )
+
+    def convert_zp(t_zp: torch.Tensor | None) -> torch.Tensor | None:
+        if t_zp is None:
+            return t_zp
+        if t_zp.dtype.is_floating_point:
+            return t_zp.to(torch.int32)
+        elif t_zp.dtype == torch.int32:
+            return t_zp.data
+        else:
+            return t_zp.data.view(torch.int32)
+
+    w13_zeros = convert_zp(w13_qzeros)
+    w2_zeros = convert_zp(w2_qzeros)
 
     (
         blocked_w13,

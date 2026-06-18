@@ -547,16 +547,16 @@ def moe_packed_to_marlin_zero_points(
     Unlike AWQ, compressed-tensors uses standard bit packing without
     interleaving, so we just unpack and apply Marlin permutation directly.
     """
-    use_int32 = (q_zp_packed.dtype != torch.uint8,)
+    cvt_int32 = q_zp_packed.dtype.is_floating_point
     num_experts = q_zp_packed.shape[0]
     output = torch.empty(
         (num_experts, q_zp_packed.shape[1], q_zp_packed.shape[2]),
         device=q_zp_packed.device,
-        dtype=torch.int32 if use_int32 else q_zp_packed.dtype,
+        dtype=torch.int32 if cvt_int32 else q_zp_packed.dtype,
     )
     for e in range(num_experts):
         q_zp = unpack_cols(
-            q_zp_packed[e] if not use_int32 else q_zp_packed[e].to(torch.int32),
+            q_zp_packed[e] if not cvt_int32 else q_zp_packed[e].to(torch.int32),
             num_bits,
             size_k,
             size_n,
