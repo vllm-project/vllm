@@ -452,12 +452,7 @@ class BlockPool:
         if block_size == self.hash_block_size:
             return request.block_hashes[num_hash_blocks - 1]
 
-        get_partial_block_hash = getattr(
-            request.block_hashes, "get_partial_block_hash", None
-        )
-        if get_partial_block_hash is not None:
-            return get_partial_block_hash(block_size, num_tokens)
-        return None
+        return request.block_hashes.get_partial_block_hash(block_size, num_tokens)
 
     def get_block_alias_parent_hash_and_start(
         self,

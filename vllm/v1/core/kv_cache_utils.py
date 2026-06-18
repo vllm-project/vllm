@@ -760,7 +760,7 @@ class RequestBlockHasher:
         while True:
             end_token_idx = start_token_idx + block_size
             if end_token_idx > num_tokens:
-                # We only hash full blocks.
+                # We only hash full blocks
                 break
 
             # MM and LoRA requests need extra keys for block-hash computation.
@@ -768,7 +768,7 @@ class RequestBlockHasher:
                 request, start_token_idx, end_token_idx, curr_mm_idx
             )
 
-            # Compute the hash of the current block.
+            # Compute the hash of the current block
             block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
             block_hash = hash_block_tokens(
                 self.caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
