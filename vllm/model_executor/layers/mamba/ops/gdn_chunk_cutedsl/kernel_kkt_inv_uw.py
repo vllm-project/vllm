@@ -477,8 +477,7 @@ class Sm100ChunkUWKernel:
                 M = cute.logical_divide(cute.recast_tensor(M_bf16, Uint32), 2)
 
                 # construct rmem-backed identity matrix
-                eye_bf16 = cute.make_rmem_tensor(8, BFloat16)
-                eye = cute.recast_tensor(eye_bf16, Uint32)
+                eye = cute.make_rmem_tensor(4, Uint32)
                 eye[0] = Uint32(lane_id % 9 == 0) * Uint32(0x00003F80) + Uint32(
                     lane_id % 9 == 4
                 ) * Uint32(0x3F800000)

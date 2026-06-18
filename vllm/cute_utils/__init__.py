@@ -103,6 +103,8 @@ def _bf16x2_unary(asm: str, a: Uint32, *, loc=None, ip=None) -> Uint32:
         "=r,r",
         has_side_effects=False,
         is_align_stack=False,
+        loc=loc,
+        ip=ip,
     )
     return Uint32(out)
 
@@ -115,6 +117,8 @@ def _bf16x2_binary(asm: str, a: Uint32, b: Uint32, *, loc=None, ip=None) -> Uint
         "=r,r,r",
         has_side_effects=False,
         is_align_stack=False,
+        loc=loc,
+        ip=ip,
     )
     return Uint32(out)
 
