@@ -1096,3 +1096,43 @@ class TestMessageStartIncludesTypeAndRole:
         message = events[0][1]["message"]
         assert message["type"] == "message"
         assert message["role"] == "assistant"
+
+
+# ======================================================================
+# Auto-detection of system-first template requirement
+# ======================================================================
+
+
+Q35_TEMPLATE = (
+    "{%- for message in messages %}"
+    "{%- if message.role == 'system' %}"
+    "{%- if not loop.first %}"
+    "{{- raise_exception('System message must be at the beginning.') }}"
+    "{%- endif %}"
+    "{%- endif %}"
+    "{%- endfor %}"
+)
+
+
+class TestDetectMergeInlineSystem:
+    """Verify _detect_merge_inline_system auto-detection."""
+
+    def test_qwen_template_requires_merge(self):
+        """Qwen-style template with loop.first guard → merge needed."""
+        assert AnthropicServingMessages._detect_merge_inline_system(
+            Q35_TEMPLATE
+        ) is True
+
+    def test_no_restriction_no_merge(self):
+        """Template without restriction → no merge."""
+        assert AnthropicServingMessages._detect_merge_inline_system(
+            (
+                "{%- for message in messages %}"
+                "{{- message.role }}: {{ message.content }}\\n"
+                "{%- endfor %}"
+            )
+        ) is False
+
+    def test_no_template_defaults_merge(self):
+        """None template → safe default: merge."""
+        assert AnthropicServingMessages._detect_merge_inline_system(None) is True

@@ -99,6 +99,34 @@ class AnthropicServingMessages(OpenAIServingChat):
             "length": "max_tokens",
             "tool_calls": "tool_use",
         }
+        type(self)._merge_inline_system = cls._detect_merge_inline_system(
+            chat_template
+        )
+
+    @classmethod
+    def _detect_merge_inline_system(cls, chat_template: str | None) -> bool:
+        """Auto-detect whether the chat template requires system-first ordering.
+
+        Renders a [system, user, system, user] conversation against the
+        template; if it raises (e.g. Qwen's ``loop.first`` guard), the
+        model needs inline system messages merged into the leading block.
+        """
+        if not chat_template:
+            return True
+        try:
+            from jinja2 import Template
+            Template(chat_template).render(
+                messages=[
+                    {"role": "system", "content": "t"},
+                    {"role": "user", "content": "t"},
+                    {"role": "system", "content": "t"},
+                    {"role": "user", "content": "t"},
+                ],
+                add_generation_prompt=False,
+            )
+            return False
+        except Exception:
+            return True
 
     @staticmethod
     def _convert_image_source_to_url(source: dict[str, Any]) -> str:
@@ -159,6 +187,26 @@ class AnthropicServingMessages(OpenAIServingChat):
                             continue
                         system_parts.append(block.text)
 
+        # When the template requires system-first ordering, extract inline
+        # system messages from the messages array and merge them into the
+        # top-level block so the template doesn't reject them.
+        if cls._merge_inline_system:
+            for msg in anthropic_request.messages:
+                if msg.role != "system":
+                    continue
+                if isinstance(msg.content, str):
+                    text = msg.content
+                    if not text.startswith("x-anthropic-billing-header"):
+                        system_parts.append(text)
+                else:
+                    for block in msg.content:
+                        if block.type == "text" and block.text:
+                            if block.text.startswith(
+                                "x-anthropic-billing-header"
+                            ):
+                                continue
+                            system_parts.append(block.text)
+
         if system_parts:
             openai_messages.append({"role": "system", "content": "".join(system_parts)})
 
@@ -190,6 +238,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             # doesn't strip billing headers and may produce messages with
             # no "content" key.
             if msg.role == "system":
+                if cls._merge_inline_system:
+                    continue  # already merged into top-level by _convert_system_message
                 text = cls._extract_system_text(msg)
                 if text:
                     openai_messages.append({"role": "system", "content": text})
