@@ -89,6 +89,14 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
+        # GLM-style NextN (e.g. GLM-5, model_type "glm_moe_dsa") reuses this
+        # DeepSeek MTP module but applies the shared-head norm at the end of
+        # every draft step, so the hidden state carried into the next step is
+        # normalized. DeepSeek-V3 instead carries the raw (pre-norm) hidden.
+        self.norm_hidden_per_step = (
+            getattr(vllm_config.model_config.hf_config, "model_type", "")
+            == "glm_moe_dsa"
+        )
         self.mtp_block = DeepseekV2DecoderLayer(
             vllm_config,
             prefix,
@@ -120,6 +128,10 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             residual=None,
         )
         hidden_states = residual + hidden_states
+        # GLM NextN normalizes the hidden state before it is carried into the
+        # next draft step; compute_logits then skips re-normalizing it.
+        if self.norm_hidden_per_step:
+            hidden_states = self.shared_head(hidden_states)
         return hidden_states
 
 
@@ -194,9 +206,14 @@ class DeepSeekMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
         mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
-        logits = self.logits_processor(
-            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
+        # GLM NextN already applied the shared-head norm in forward(); avoid
+        # normalizing twice.
+        normed_hidden_states = (
+            hidden_states
+            if mtp_layer.norm_hidden_per_step
+            else mtp_layer.shared_head(hidden_states)
         )
+        logits = self.logits_processor(mtp_layer.shared_head.head, normed_hidden_states)
         return logits
 
 
