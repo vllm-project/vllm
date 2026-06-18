@@ -459,6 +459,7 @@ class RocmPlatform(Platform):
         "modelopt_mixed",
         "fp8_per_tensor",
         "fp8_per_block",
+        "fp8_per_channel",
         "online",
         "gpt_oss_mxfp4",
     ]
