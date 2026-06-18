@@ -20,6 +20,11 @@ Normal map: fp16_exp = fp8_exp + 8, fp16_mant = fp8_mant << 7
   decode normal:  fp16 = (mag << 7) + 0x2000      (0x2000 == 8<<10)
   encode normal:  fp8  = ((e5 - 8) << 3) + round(m10 >> 7)
 
+Each conversion is a `pack=4` inline-asm block: the 4 elements are unrolled
+explicitly into 4 independent lanes (suffix 0..3), one $-operand-pair in, one
+out. The lanes are identical except for the index; they are written out in full
+(not codegen'd) so the emitted PTX is exactly what you read here.
+
 # ---------------------------------------------------------------------------
 # Encode: fp16 -> fp8e4m3  (write path -- KV-cache store, O(new_tokens))
 #
@@ -28,7 +33,10 @@ Normal map: fp16_exp = fp8_exp + 8, fp16_mant = fp8_mant << 7
 #   TRUNC -- truncation, saturating; <=2 FP8-code ULP. ~84 PTX instr/pack-4.
 # Encode fires once per written KV position, not in the attention inner loop,
 # so RNE is the better default; TRUNC is offered for the throughput-sensitive
-# write path.
+# write path. Per lane: split sign/exp/mantissa; round the normal path (half-up
+# + one even-tie correction); round the subnormal path with a per-lane variable
+# shift sh = 16 - max(e,5); select normal vs subnormal by e>8; saturate a>=0x5f41
+# to 0x7e; OR the sign back in. Bytes packed o0|o1<<8|o2<<16|o3<<24.
 #
 # Decode: fp8e4m3 -> fp16  (read path -- KV-cache load, attention inner loop)
 #
@@ -37,219 +45,367 @@ Normal map: fp16_exp = fp8_exp + 8, fp16_mant = fp8_mant << 7
 #   control nibble is the (shifted) fp8 code -- LUT[m] << 8 in one prmt, no
 #   region arithmetic, no vset2, no post and/shl. Bit-exact incl. denormals.
 #   This is the hot path (every KV tile load), so it is the leanest + lowest
-#   register pressure.
+#   register pressure. LUT high bytes by m (0..7):
+#   0x00,0x18,0x1c,0x1e,0x20,0x21,0x22,0x23  (packed: sublut=0x1e1c1800,
+#   subhi=0x23222120). m<<4 puts the index in prmt control nibble 1, so prmt
+#   writes LUT[m] into result byte 1 (= LUT[m]<<8); nibbles 0/2/3 select sublut
+#   byte 0 (= 0x00).
 #
 # NaN/Inf: not handled specially (fp16 Inf/NaN -> saturated fp8 byte on encode;
 # fp8 NaN bytes 0x7f/0xff -> large-finite fp16 on decode). KV activations do not
 # contain NaN/Inf; this matches the finite-conversion contract.
+#
+# Saturating overflow (0x7e, never NaN) is the KV-cache default. To use the
+# truncating encode, point fp16_to_fp8e4m3 at _FP16_TO_FP8E4M3_TRUNC_ASM.
 # ---------------------------------------------------------------------------
 """
 
 from vllm.triton_utils import tl, triton
 
-# ===========================================================================
-# PTX builders (codegen at import; pure SM75 integer ISA). Expand to string
-# literals if preferred -- the builders just keep the 4 lanes in sync.
-# ===========================================================================
+# ---- encode: fp16 -> fp8e4m3, RNE (round-to-nearest-even), saturating -------
+_FP16_TO_FP8E4M3_RNE_ASM = """\
+{
+    .reg .u16 b<4>;
+    .reg .u32 raw<4>;
+    .reg .u32 a0, e0, m0, r0, tmp0, ndec0, norm0, ec0, sh0, shm10;
+    .reg .u32 shp10, one0, half0, mask0, rem0, sub0, sdec0, sgn0, o0;
+    .reg .u32 a1, e1, m1, r1, tmp1, ndec1, norm1, ec1, sh1, shm11;
+    .reg .u32 shp11, one1, half1, mask1, rem1, sub1, sdec1, sgn1, o1;
+    .reg .u32 a2, e2, m2, r2, tmp2, ndec2, norm2, ec2, sh2, shm12;
+    .reg .u32 shp12, one2, half2, mask2, rem2, sub2, sdec2, sgn2, o2;
+    .reg .u32 a3, e3, m3, r3, tmp3, ndec3, norm3, ec3, sh3, shm13;
+    .reg .u32 shp13, one3, half3, mask3, rem3, sub3, sdec3, sgn3, o3;
+    .reg .u32 out;
+    .reg .pred p_ntie0, p_stie0, p_tiny0, p_norm0, p_hi0;
+    .reg .pred p_ntie1, p_stie1, p_tiny1, p_norm1, p_hi1;
+    .reg .pred p_ntie2, p_stie2, p_tiny2, p_norm2, p_hi2;
+    .reg .pred p_ntie3, p_stie3, p_tiny3, p_norm3, p_hi3;
 
+    mov.b32 {b0, b1}, $1;
+    mov.b32 {b2, b3}, $2;
+    cvt.u32.u16 raw0, b0;
+    cvt.u32.u16 raw1, b1;
+    cvt.u32.u16 raw2, b2;
+    cvt.u32.u16 raw3, b3;
 
-def _enc_input_header() -> list[str]:
-    return [
-        "    mov.b32 {b0, b1}, $1;",
-        "    mov.b32 {b2, b3}, $2;",
-        "    cvt.u32.u16 raw0, b0;",
-        "    cvt.u32.u16 raw1, b1;",
-        "    cvt.u32.u16 raw2, b2;",
-        "    cvt.u32.u16 raw3, b3;",
-    ]
+    // lane 0
+    and.b32  a0, raw0, 0x7fff;
+    and.b32  sgn0, raw0, 0x8000;
+    shr.u32  sgn0, sgn0, 8;
+    shr.u32  e0, a0, 10;
+    and.b32  m0, a0, 0x3ff;
 
+    add.u32  r0, m0, 0x40;
+    shr.u32  r0, r0, 7;
+    and.b32  tmp0, m0, 0xff;
+    setp.eq.u32 p_ntie0, tmp0, 0x40;
+    sub.u32  ndec0, r0, 1;
+    selp.u32 r0, ndec0, r0, p_ntie0;
+    sub.u32  norm0, e0, 8;
+    shl.b32  norm0, norm0, 3;
+    add.u32  norm0, norm0, r0;
+    min.u32  norm0, norm0, 0x7f;
 
-def _enc_pack_tail() -> list[str]:
-    return [
-        "    shl.b32 o1, o1, 8;",
-        "    shl.b32 o2, o2, 16;",
-        "    shl.b32 o3, o3, 24;",
-        "    or.b32  out, o0, o1;",
-        "    or.b32  out, out, o2;",
-        "    or.b32  $0, out, o3;",
-    ]
+    max.u32  ec0, e0, 5;
+    sub.u32  sh0, 16, ec0;
+    sub.u32  shm10, sh0, 1;
+    mov.u32  one0, 1;
+    shl.b32  half0, one0, shm10;
+    or.b32   tmp0, m0, 0x400;
+    add.u32  sub0, tmp0, half0;
+    shr.u32  sub0, sub0, sh0;
+    add.u32  shp10, sh0, 1;
+    shl.b32  mask0, one0, shp10;
+    sub.u32  mask0, mask0, 1;
+    and.b32  rem0, tmp0, mask0;
+    setp.eq.u32 p_stie0, rem0, half0;
+    sub.u32  sdec0, sub0, 1;
+    selp.u32 sub0, sdec0, sub0, p_stie0;
+    min.u32  sub0, sub0, 8;
+    setp.lt.u32 p_tiny0, e0, 5;
+    selp.u32 sub0, 0, sub0, p_tiny0;
 
+    setp.gt.u32 p_norm0, e0, 8;
+    selp.u32 o0, norm0, sub0, p_norm0;
+    setp.ge.u32 p_hi0, a0, 0x5f41;
+    selp.u32 o0, 0x7e, o0, p_hi0;
+    or.b32 o0, o0, sgn0;
 
-def _enc_lane_rne(i: int, overflow_code: str) -> str:
-    # round-to-nearest-even via half-up + single even-tie correction (normal &
-    # subnormal); saturating overflow. Preserves all fp8 denormals.
-    return f"""
-    and.b32  a{i}, raw{i}, 0x7fff;
-    and.b32  sgn{i}, raw{i}, 0x8000;
-    shr.u32  sgn{i}, sgn{i}, 8;
-    shr.u32  e{i}, a{i}, 10;
-    and.b32  m{i}, a{i}, 0x3ff;
+    // lane 1
+    and.b32  a1, raw1, 0x7fff;
+    and.b32  sgn1, raw1, 0x8000;
+    shr.u32  sgn1, sgn1, 8;
+    shr.u32  e1, a1, 10;
+    and.b32  m1, a1, 0x3ff;
 
-    add.u32  r{i}, m{i}, 0x40;
-    shr.u32  r{i}, r{i}, 7;
-    and.b32  tmp{i}, m{i}, 0xff;
-    setp.eq.u32 p_ntie{i}, tmp{i}, 0x40;
-    sub.u32  ndec{i}, r{i}, 1;
-    selp.u32 r{i}, ndec{i}, r{i}, p_ntie{i};
-    sub.u32  norm{i}, e{i}, 8;
-    shl.b32  norm{i}, norm{i}, 3;
-    add.u32  norm{i}, norm{i}, r{i};
-    min.u32  norm{i}, norm{i}, 0x7f;
+    add.u32  r1, m1, 0x40;
+    shr.u32  r1, r1, 7;
+    and.b32  tmp1, m1, 0xff;
+    setp.eq.u32 p_ntie1, tmp1, 0x40;
+    sub.u32  ndec1, r1, 1;
+    selp.u32 r1, ndec1, r1, p_ntie1;
+    sub.u32  norm1, e1, 8;
+    shl.b32  norm1, norm1, 3;
+    add.u32  norm1, norm1, r1;
+    min.u32  norm1, norm1, 0x7f;
 
-    max.u32  ec{i}, e{i}, 5;
-    sub.u32  sh{i}, 16, ec{i};
-    sub.u32  shm1{i}, sh{i}, 1;
-    mov.u32  one{i}, 1;
-    shl.b32  half{i}, one{i}, shm1{i};
-    or.b32   tmp{i}, m{i}, 0x400;
-    add.u32  sub{i}, tmp{i}, half{i};
-    shr.u32  sub{i}, sub{i}, sh{i};
-    add.u32  shp1{i}, sh{i}, 1;
-    shl.b32  mask{i}, one{i}, shp1{i};
-    sub.u32  mask{i}, mask{i}, 1;
-    and.b32  rem{i}, tmp{i}, mask{i};
-    setp.eq.u32 p_stie{i}, rem{i}, half{i};
-    sub.u32  sdec{i}, sub{i}, 1;
-    selp.u32 sub{i}, sdec{i}, sub{i}, p_stie{i};
-    min.u32  sub{i}, sub{i}, 8;
-    setp.lt.u32 p_tiny{i}, e{i}, 5;
-    selp.u32 sub{i}, 0, sub{i}, p_tiny{i};
+    max.u32  ec1, e1, 5;
+    sub.u32  sh1, 16, ec1;
+    sub.u32  shm11, sh1, 1;
+    mov.u32  one1, 1;
+    shl.b32  half1, one1, shm11;
+    or.b32   tmp1, m1, 0x400;
+    add.u32  sub1, tmp1, half1;
+    shr.u32  sub1, sub1, sh1;
+    add.u32  shp11, sh1, 1;
+    shl.b32  mask1, one1, shp11;
+    sub.u32  mask1, mask1, 1;
+    and.b32  rem1, tmp1, mask1;
+    setp.eq.u32 p_stie1, rem1, half1;
+    sub.u32  sdec1, sub1, 1;
+    selp.u32 sub1, sdec1, sub1, p_stie1;
+    min.u32  sub1, sub1, 8;
+    setp.lt.u32 p_tiny1, e1, 5;
+    selp.u32 sub1, 0, sub1, p_tiny1;
 
-    setp.gt.u32 p_norm{i}, e{i}, 8;
-    selp.u32 o{i}, norm{i}, sub{i}, p_norm{i};
-    setp.ge.u32 p_hi{i}, a{i}, 0x5f41;
-    selp.u32 o{i}, {overflow_code}, o{i}, p_hi{i};
-    or.b32 o{i}, o{i}, sgn{i};
-"""
+    setp.gt.u32 p_norm1, e1, 8;
+    selp.u32 o1, norm1, sub1, p_norm1;
+    setp.ge.u32 p_hi1, a1, 0x5f41;
+    selp.u32 o1, 0x7e, o1, p_hi1;
+    or.b32 o1, o1, sgn1;
 
+    // lane 2
+    and.b32  a2, raw2, 0x7fff;
+    and.b32  sgn2, raw2, 0x8000;
+    shr.u32  sgn2, sgn2, 8;
+    shr.u32  e2, a2, 10;
+    and.b32  m2, a2, 0x3ff;
 
-def _make_enc_rne_asm(overflow_code: str) -> str:
-    regs, preds = [], []
-    for i in range(4):
-        regs.append(
-            "    .reg .u32 "
-            + ", ".join(
-                f"{n}{i}"
-                for n in (
-                    "a",
-                    "e",
-                    "m",
-                    "r",
-                    "tmp",
-                    "ndec",
-                    "norm",
-                    "ec",
-                    "sh",
-                    "shm1",
-                    "shp1",
-                    "one",
-                    "half",
-                    "mask",
-                    "rem",
-                    "sub",
-                    "sdec",
-                    "sgn",
-                    "o",
-                )
-            )
-            + ";"
-        )
-        preds.append(
-            "    .reg .pred "
-            + ", ".join(
-                f"{p}{i}" for p in ("p_ntie", "p_stie", "p_tiny", "p_norm", "p_hi")
-            )
-            + ";"
-        )
-    lanes = "".join(_enc_lane_rne(i, overflow_code) for i in range(4))
-    return "\n".join(
-        [
-            "{",
-            "    .reg .u16 b<4>;",
-            "    .reg .u32 raw<4>;",
-            *regs,
-            "    .reg .u32 out;",
-            *preds,
-            "",
-            *_enc_input_header(),
-            lanes,
-            *_enc_pack_tail(),
-            "}",
-        ]
-    )
+    add.u32  r2, m2, 0x40;
+    shr.u32  r2, r2, 7;
+    and.b32  tmp2, m2, 0xff;
+    setp.eq.u32 p_ntie2, tmp2, 0x40;
+    sub.u32  ndec2, r2, 1;
+    selp.u32 r2, ndec2, r2, p_ntie2;
+    sub.u32  norm2, e2, 8;
+    shl.b32  norm2, norm2, 3;
+    add.u32  norm2, norm2, r2;
+    min.u32  norm2, norm2, 0x7f;
 
+    max.u32  ec2, e2, 5;
+    sub.u32  sh2, 16, ec2;
+    sub.u32  shm12, sh2, 1;
+    mov.u32  one2, 1;
+    shl.b32  half2, one2, shm12;
+    or.b32   tmp2, m2, 0x400;
+    add.u32  sub2, tmp2, half2;
+    shr.u32  sub2, sub2, sh2;
+    add.u32  shp12, sh2, 1;
+    shl.b32  mask2, one2, shp12;
+    sub.u32  mask2, mask2, 1;
+    and.b32  rem2, tmp2, mask2;
+    setp.eq.u32 p_stie2, rem2, half2;
+    sub.u32  sdec2, sub2, 1;
+    selp.u32 sub2, sdec2, sub2, p_stie2;
+    min.u32  sub2, sub2, 8;
+    setp.lt.u32 p_tiny2, e2, 5;
+    selp.u32 sub2, 0, sub2, p_tiny2;
 
-def _enc_lane_trunc(i: int, overflow_code: str) -> str:
-    # truncating encode (no rounding, no tie logic); saturating overflow.
-    return f"""
-    and.b32  a{i}, raw{i}, 0x7fff;
-    and.b32  sgn{i}, raw{i}, 0x8000;
-    shr.u32  sgn{i}, sgn{i}, 8;
-    shr.u32  e{i}, a{i}, 10;
-    and.b32  m{i}, a{i}, 0x3ff;
+    setp.gt.u32 p_norm2, e2, 8;
+    selp.u32 o2, norm2, sub2, p_norm2;
+    setp.ge.u32 p_hi2, a2, 0x5f41;
+    selp.u32 o2, 0x7e, o2, p_hi2;
+    or.b32 o2, o2, sgn2;
 
-    shr.u32  r{i}, m{i}, 7;
-    sub.u32  norm{i}, e{i}, 8;
-    shl.b32  norm{i}, norm{i}, 3;
-    add.u32  norm{i}, norm{i}, r{i};
+    // lane 3
+    and.b32  a3, raw3, 0x7fff;
+    and.b32  sgn3, raw3, 0x8000;
+    shr.u32  sgn3, sgn3, 8;
+    shr.u32  e3, a3, 10;
+    and.b32  m3, a3, 0x3ff;
 
-    max.u32  ec{i}, e{i}, 5;
-    sub.u32  sh{i}, 16, ec{i};
-    or.b32   tmp{i}, m{i}, 0x400;
-    shr.u32  sub{i}, tmp{i}, sh{i};
+    add.u32  r3, m3, 0x40;
+    shr.u32  r3, r3, 7;
+    and.b32  tmp3, m3, 0xff;
+    setp.eq.u32 p_ntie3, tmp3, 0x40;
+    sub.u32  ndec3, r3, 1;
+    selp.u32 r3, ndec3, r3, p_ntie3;
+    sub.u32  norm3, e3, 8;
+    shl.b32  norm3, norm3, 3;
+    add.u32  norm3, norm3, r3;
+    min.u32  norm3, norm3, 0x7f;
 
-    setp.gt.u32 p_norm{i}, e{i}, 8;
-    selp.u32 o{i}, norm{i}, sub{i}, p_norm{i};
-    setp.ge.u32 p_hi{i}, a{i}, 0x5f41;
-    selp.u32 o{i}, {overflow_code}, o{i}, p_hi{i};
-    or.b32 o{i}, o{i}, sgn{i};
-"""
+    max.u32  ec3, e3, 5;
+    sub.u32  sh3, 16, ec3;
+    sub.u32  shm13, sh3, 1;
+    mov.u32  one3, 1;
+    shl.b32  half3, one3, shm13;
+    or.b32   tmp3, m3, 0x400;
+    add.u32  sub3, tmp3, half3;
+    shr.u32  sub3, sub3, sh3;
+    add.u32  shp13, sh3, 1;
+    shl.b32  mask3, one3, shp13;
+    sub.u32  mask3, mask3, 1;
+    and.b32  rem3, tmp3, mask3;
+    setp.eq.u32 p_stie3, rem3, half3;
+    sub.u32  sdec3, sub3, 1;
+    selp.u32 sub3, sdec3, sub3, p_stie3;
+    min.u32  sub3, sub3, 8;
+    setp.lt.u32 p_tiny3, e3, 5;
+    selp.u32 sub3, 0, sub3, p_tiny3;
 
+    setp.gt.u32 p_norm3, e3, 8;
+    selp.u32 o3, norm3, sub3, p_norm3;
+    setp.ge.u32 p_hi3, a3, 0x5f41;
+    selp.u32 o3, 0x7e, o3, p_hi3;
+    or.b32 o3, o3, sgn3;
 
-def _make_enc_trunc_asm(overflow_code: str) -> str:
-    regs, preds = [], []
-    for i in range(4):
-        regs.append(
-            "    .reg .u32 "
-            + ", ".join(
-                f"{n}{i}"
-                for n in (
-                    "a",
-                    "e",
-                    "m",
-                    "r",
-                    "norm",
-                    "ec",
-                    "sh",
-                    "tmp",
-                    "sub",
-                    "sgn",
-                    "o",
-                )
-            )
-            + ";"
-        )
-        preds.append("    .reg .pred " + ", ".join((f"p_norm{i}", f"p_hi{i}")) + ";")
-    lanes = "".join(_enc_lane_trunc(i, overflow_code) for i in range(4))
-    return "\n".join(
-        [
-            "{",
-            "    .reg .u16 b<4>;",
-            "    .reg .u32 raw<4>;",
-            *regs,
-            "    .reg .u32 out;",
-            *preds,
-            "",
-            *_enc_input_header(),
-            lanes,
-            *_enc_pack_tail(),
-            "}",
-        ]
-    )
+    shl.b32 o1, o1, 8;
+    shl.b32 o2, o2, 16;
+    shl.b32 o3, o3, 24;
+    or.b32  out, o0, o1;
+    or.b32  out, out, o2;
+    or.b32  $0, out, o3;
+}"""
 
+# ---- encode: fp16 -> fp8e4m3, TRUNC (round-toward-zero), saturating ---------
+_FP16_TO_FP8E4M3_TRUNC_ASM = """\
+{
+    .reg .u16 b<4>;
+    .reg .u32 raw<4>;
+    .reg .u32 a0, e0, m0, r0, norm0, ec0, sh0, tmp0, sub0, sgn0, o0;
+    .reg .u32 a1, e1, m1, r1, norm1, ec1, sh1, tmp1, sub1, sgn1, o1;
+    .reg .u32 a2, e2, m2, r2, norm2, ec2, sh2, tmp2, sub2, sgn2, o2;
+    .reg .u32 a3, e3, m3, r3, norm3, ec3, sh3, tmp3, sub3, sgn3, o3;
+    .reg .u32 out;
+    .reg .pred p_norm0, p_hi0;
+    .reg .pred p_norm1, p_hi1;
+    .reg .pred p_norm2, p_hi2;
+    .reg .pred p_norm3, p_hi3;
 
-def _dec_extract_header() -> str:
-    return """
+    mov.b32 {b0, b1}, $1;
+    mov.b32 {b2, b3}, $2;
+    cvt.u32.u16 raw0, b0;
+    cvt.u32.u16 raw1, b1;
+    cvt.u32.u16 raw2, b2;
+    cvt.u32.u16 raw3, b3;
+
+    // lane 0
+    and.b32  a0, raw0, 0x7fff;
+    and.b32  sgn0, raw0, 0x8000;
+    shr.u32  sgn0, sgn0, 8;
+    shr.u32  e0, a0, 10;
+    and.b32  m0, a0, 0x3ff;
+
+    shr.u32  r0, m0, 7;
+    sub.u32  norm0, e0, 8;
+    shl.b32  norm0, norm0, 3;
+    add.u32  norm0, norm0, r0;
+
+    max.u32  ec0, e0, 5;
+    sub.u32  sh0, 16, ec0;
+    or.b32   tmp0, m0, 0x400;
+    shr.u32  sub0, tmp0, sh0;
+
+    setp.gt.u32 p_norm0, e0, 8;
+    selp.u32 o0, norm0, sub0, p_norm0;
+    setp.ge.u32 p_hi0, a0, 0x5f41;
+    selp.u32 o0, 0x7e, o0, p_hi0;
+    or.b32 o0, o0, sgn0;
+
+    // lane 1
+    and.b32  a1, raw1, 0x7fff;
+    and.b32  sgn1, raw1, 0x8000;
+    shr.u32  sgn1, sgn1, 8;
+    shr.u32  e1, a1, 10;
+    and.b32  m1, a1, 0x3ff;
+
+    shr.u32  r1, m1, 7;
+    sub.u32  norm1, e1, 8;
+    shl.b32  norm1, norm1, 3;
+    add.u32  norm1, norm1, r1;
+
+    max.u32  ec1, e1, 5;
+    sub.u32  sh1, 16, ec1;
+    or.b32   tmp1, m1, 0x400;
+    shr.u32  sub1, tmp1, sh1;
+
+    setp.gt.u32 p_norm1, e1, 8;
+    selp.u32 o1, norm1, sub1, p_norm1;
+    setp.ge.u32 p_hi1, a1, 0x5f41;
+    selp.u32 o1, 0x7e, o1, p_hi1;
+    or.b32 o1, o1, sgn1;
+
+    // lane 2
+    and.b32  a2, raw2, 0x7fff;
+    and.b32  sgn2, raw2, 0x8000;
+    shr.u32  sgn2, sgn2, 8;
+    shr.u32  e2, a2, 10;
+    and.b32  m2, a2, 0x3ff;
+
+    shr.u32  r2, m2, 7;
+    sub.u32  norm2, e2, 8;
+    shl.b32  norm2, norm2, 3;
+    add.u32  norm2, norm2, r2;
+
+    max.u32  ec2, e2, 5;
+    sub.u32  sh2, 16, ec2;
+    or.b32   tmp2, m2, 0x400;
+    shr.u32  sub2, tmp2, sh2;
+
+    setp.gt.u32 p_norm2, e2, 8;
+    selp.u32 o2, norm2, sub2, p_norm2;
+    setp.ge.u32 p_hi2, a2, 0x5f41;
+    selp.u32 o2, 0x7e, o2, p_hi2;
+    or.b32 o2, o2, sgn2;
+
+    // lane 3
+    and.b32  a3, raw3, 0x7fff;
+    and.b32  sgn3, raw3, 0x8000;
+    shr.u32  sgn3, sgn3, 8;
+    shr.u32  e3, a3, 10;
+    and.b32  m3, a3, 0x3ff;
+
+    shr.u32  r3, m3, 7;
+    sub.u32  norm3, e3, 8;
+    shl.b32  norm3, norm3, 3;
+    add.u32  norm3, norm3, r3;
+
+    max.u32  ec3, e3, 5;
+    sub.u32  sh3, 16, ec3;
+    or.b32   tmp3, m3, 0x400;
+    shr.u32  sub3, tmp3, sh3;
+
+    setp.gt.u32 p_norm3, e3, 8;
+    selp.u32 o3, norm3, sub3, p_norm3;
+    setp.ge.u32 p_hi3, a3, 0x5f41;
+    selp.u32 o3, 0x7e, o3, p_hi3;
+    or.b32 o3, o3, sgn3;
+
+    shl.b32 o1, o1, 8;
+    shl.b32 o2, o2, 16;
+    shl.b32 o3, o3, 24;
+    or.b32  out, o0, o1;
+    or.b32  out, out, o2;
+    or.b32  $0, out, o3;
+}"""
+
+# ---- decode: fp8e4m3 -> fp16 (prmt byte-LUT for subnormals; exact) ----------
+_FP8E4M3_TO_FP16_ASM = """\
+{
+    .reg .u32 sublut, subhi;
+    .reg .u32 raw0, mag0, m0, sign0, norm0, sub0, o0;
+    .reg .u32 raw1, mag1, m1, sign1, norm1, sub1, o1;
+    .reg .u32 raw2, mag2, m2, sign2, norm2, sub2, o2;
+    .reg .u32 raw3, mag3, m3, sign3, norm3, sub3, o3;
+    .reg .u32 out0, out1;
+    .reg .pred p_norm0;
+    .reg .pred p_norm1;
+    .reg .pred p_norm2;
+    .reg .pred p_norm3;
+    mov.u32 sublut, 0x1e1c1800;
+    mov.u32 subhi, 0x23222120;
+
     and.b32 raw0, $2, 0xff;
     shr.u32 raw1, $2, 8;
     and.b32 raw1, raw1, 0xff;
@@ -257,79 +413,69 @@ def _dec_extract_header() -> str:
     and.b32 raw2, raw2, 0xff;
     shr.u32 raw3, $2, 24;
     and.b32 raw3, raw3, 0xff;
-"""
 
+    // lane 0
+    and.b32 mag0, raw0, 0x7f;
+    and.b32 sign0, raw0, 0x80;
+    shl.b32 sign0, sign0, 8;
+    shl.b32 norm0, mag0, 7;
+    add.u32 norm0, norm0, 0x2000;
+    and.b32 m0, raw0, 0x07;
+    shl.b32 m0, m0, 4;
+    prmt.b32 sub0, sublut, subhi, m0;
+    setp.ge.u32 p_norm0, mag0, 8;
+    selp.u32 o0, norm0, sub0, p_norm0;
+    or.b32 o0, o0, sign0;
 
-def _dec_lane_lut(i: int) -> str:
-    # normal: (mag<<7)+0x2000; subnormal value from a prmt byte-LUT (the 7 fp16
-    # subnormal targets all have low byte 0 -> sub bits = LUT[m] << 8); zero via
-    # m==0 LUT entry 0x00. Bit-exact incl. denormals.
-    #
-    # The shift `m << 4` places the LUT index in prmt control nibble 1, so prmt
-    # writes LUT[m] straight into result byte 1 while nibbles 0/2/3 select sublut
-    # byte 0 (= 0x00). That yields LUT[m] << 8 in ONE prmt -- no post and/shl --
-    # which keeps the decode register-lean (the hot KV-load path).
-    return f"""
-    and.b32 mag{i}, raw{i}, 0x7f;
-    and.b32 sign{i}, raw{i}, 0x80;
-    shl.b32 sign{i}, sign{i}, 8;
-    shl.b32 norm{i}, mag{i}, 7;
-    add.u32 norm{i}, norm{i}, 0x2000;
-    and.b32 m{i}, raw{i}, 0x07;
-    shl.b32 m{i}, m{i}, 4;
-    prmt.b32 sub{i}, sublut, subhi, m{i};
-    setp.ge.u32 p_norm{i}, mag{i}, 8;
-    selp.u32 o{i}, norm{i}, sub{i}, p_norm{i};
-    or.b32 o{i}, o{i}, sign{i};
-"""
+    // lane 1
+    and.b32 mag1, raw1, 0x7f;
+    and.b32 sign1, raw1, 0x80;
+    shl.b32 sign1, sign1, 8;
+    shl.b32 norm1, mag1, 7;
+    add.u32 norm1, norm1, 0x2000;
+    and.b32 m1, raw1, 0x07;
+    shl.b32 m1, m1, 4;
+    prmt.b32 sub1, sublut, subhi, m1;
+    setp.ge.u32 p_norm1, mag1, 8;
+    selp.u32 o1, norm1, sub1, p_norm1;
+    or.b32 o1, o1, sign1;
 
+    // lane 2
+    and.b32 mag2, raw2, 0x7f;
+    and.b32 sign2, raw2, 0x80;
+    shl.b32 sign2, sign2, 8;
+    shl.b32 norm2, mag2, 7;
+    add.u32 norm2, norm2, 0x2000;
+    and.b32 m2, raw2, 0x07;
+    shl.b32 m2, m2, 4;
+    prmt.b32 sub2, sublut, subhi, m2;
+    setp.ge.u32 p_norm2, mag2, 8;
+    selp.u32 o2, norm2, sub2, p_norm2;
+    or.b32 o2, o2, sign2;
 
-def _make_dec_lut_asm() -> str:
-    regs, preds = [], []
-    for i in range(4):
-        regs.append(
-            "    .reg .u32 "
-            + ", ".join(
-                f"{n}{i}" for n in ("raw", "mag", "m", "sign", "norm", "sub", "o")
-            )
-            + ";"
-        )
-        preds.append(f"    .reg .pred p_norm{i};")
-    lanes = "".join(_dec_lane_lut(i) for i in range(4))
-    # LUT high bytes by m (0..7): 0x00,0x18,0x1c,0x1e,0x20,0x21,0x22,0x23
-    return "\n".join(
-        [
-            "{",
-            "    .reg .u32 sublut, subhi;",
-            *regs,
-            "    .reg .u32 out0, out1;",
-            *preds,
-            "    mov.u32 sublut, 0x1e1c1800;",
-            "    mov.u32 subhi, 0x23222120;",
-            _dec_extract_header(),
-            lanes,
-            "    shl.b32 o1, o1, 16;",
-            "    or.b32  out0, o0, o1;",
-            "    shl.b32 o3, o3, 16;",
-            "    or.b32  out1, o2, o3;",
-            "    mov.b32 $0, out0;",
-            "    mov.b32 $1, out1;",
-            "}",
-        ]
-    )
+    // lane 3
+    and.b32 mag3, raw3, 0x7f;
+    and.b32 sign3, raw3, 0x80;
+    shl.b32 sign3, sign3, 8;
+    shl.b32 norm3, mag3, 7;
+    add.u32 norm3, norm3, 0x2000;
+    and.b32 m3, raw3, 0x07;
+    shl.b32 m3, m3, 4;
+    prmt.b32 sub3, sublut, subhi, m3;
+    setp.ge.u32 p_norm3, mag3, 8;
+    selp.u32 o3, norm3, sub3, p_norm3;
+    or.b32 o3, o3, sign3;
 
+    shl.b32 o1, o1, 16;
+    or.b32  out0, o0, o1;
+    shl.b32 o3, o3, 16;
+    or.b32  out1, o2, o3;
+    mov.b32 $0, out0;
+    mov.b32 $1, out1;
+}"""
 
-# Saturating overflow (0x7e, never NaN) is the KV-cache default (no NaN/Inf in
-# activations; overflow clamps to fp8 max 448).
-_FP16_TO_FP8E4M3_RNE_ASM = _make_enc_rne_asm("0x7e")
-_FP16_TO_FP8E4M3_TRUNC_ASM = _make_enc_trunc_asm("0x7e")
-_FP8E4M3_TO_FP16_ASM = _make_dec_lut_asm()
-
-# Select the encode variant (RNE default; swap to TRUNC for the fast write path):
-_FP16_TO_FP8E4M3_ASM = _FP16_TO_FP8E4M3_RNE_ASM
-# _FP16_TO_FP8E4M3_ASM = _FP16_TO_FP8E4M3_TRUNC_ASM
-
-_FP16_TO_FP8E4M3_ASM = tl.constexpr(_FP16_TO_FP8E4M3_ASM)
+# RNE is the default encode; swap to TRUNC for the throughput-sensitive write path.
+_FP16_TO_FP8E4M3_ASM = tl.constexpr(_FP16_TO_FP8E4M3_RNE_ASM)
 _FP16_TO_FP8E4M3_TRUNC_ASM = tl.constexpr(_FP16_TO_FP8E4M3_TRUNC_ASM)
 _FP8E4M3_TO_FP16_ASM = tl.constexpr(_FP8E4M3_TO_FP16_ASM)
 
