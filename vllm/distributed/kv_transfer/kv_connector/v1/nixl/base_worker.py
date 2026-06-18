@@ -930,19 +930,16 @@ class NixlBaseConnectorWorker:
         # Detect packed allocation: all tensors are strided views into the
         # same backing storage (different data_ptr but same storage).
         # This happens with DSv4-style contiguous per-block packing.
-        # Skip detection when values are lists (hybrid SSM models).
-        if len(kv_caches) > 1:
-            first_val = next(iter(kv_caches.values()))
-            if isinstance(first_val, torch.Tensor):
-                storage = first_val.untyped_storage()
-                storage_ptrs = {
-                    cache.untyped_storage().data_ptr() for cache in kv_caches.values()
-                }
-                data_ptrs = {cache.data_ptr() for cache in kv_caches.values()}
-                if len(storage_ptrs) == 1 and len(data_ptrs) > 1:
-                    self._register_packed_kv_cache(storage)
-                    self.device_kv_caches = kv_caches
-                    return
+        if len(kv_caches) > 1 and not self._has_mamba:
+            storage = next(iter(kv_caches.values())).untyped_storage()
+            storage_ptrs = {
+                cache.untyped_storage().data_ptr() for cache in kv_caches.values()
+            }
+            data_ptrs = {cache.data_ptr() for cache in kv_caches.values()}
+            if len(storage_ptrs) == 1 and len(data_ptrs) > 1:
+                self._register_packed_kv_cache(storage)
+                self.device_kv_caches = kv_caches
+                return
 
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
