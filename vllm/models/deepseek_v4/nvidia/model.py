@@ -1181,24 +1181,22 @@ class DeepseekV4Model(nn.Module):
         self, name: str, loaded_weight: torch.Tensor
     ) -> torch.Tensor:
         """Zero-pad a block-FP8 shared-expert weight/scale on its intermediate
-        axis up to cdiv(n_blocks, tp_size) * tp_size blocks so the standard TP
-        loaders split it evenly. gate (w1)/up (w3) [I, H] pad dim 0; down
-        (w2 -> down_proj) [H, I] pads dim 1.
+        axis so the standard TP loaders split it into even, block-aligned shards
+        (trailing ranks get the zero pad). gate (w1)/up (w3) [I, H] pad dim 0;
+        down (w2 -> down_proj) [H, I] pads dim 1.
         """
         block_size = getattr(self.quant_config, "weight_block_size", None)
         assert block_size is not None
-        block = block_size[0]
-        n_blocks = (
-            self.config.moe_intermediate_size * (self.config.n_shared_experts or 1)
-        ) // block
-        tp_size = get_tensor_model_parallel_world_size()
-        pad_blocks = cdiv(n_blocks, tp_size) * tp_size - n_blocks
-        if pad_blocks == 0:
-            return loaded_weight
-        step = 1 if name.endswith("weight_scale_inv") else block
+        # Round the intermediate axis up to a whole number of TP shards. The axis
+        # is in elements for weights (step = block) and in blocks for scales.
+        step = 1 if name.endswith("weight_scale_inv") else block_size[0]
         dim = 1 if ".down_proj." in name else 0
+        mult = get_tensor_model_parallel_world_size() * step
+        pad = cdiv(loaded_weight.shape[dim], mult) * mult - loaded_weight.shape[dim]
+        if pad == 0:
+            return loaded_weight
         pad_shape = list(loaded_weight.shape)
-        pad_shape[dim] = pad_blocks * step
+        pad_shape[dim] = pad
         return torch.cat([loaded_weight, loaded_weight.new_zeros(pad_shape)], dim=dim)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
