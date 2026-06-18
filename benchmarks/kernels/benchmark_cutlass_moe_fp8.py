@@ -17,8 +17,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 )
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import CutlassExpertsFp8
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
+from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
 from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -140,9 +139,8 @@ def bench_run(
 
     moe_config = make_dummy_moe_config(
         num_experts=num_experts,
-        experts_per_token=topk,
         hidden_dim=k,
-        intermediate_size=n,
+        intermediate_size_per_partition=n,
         in_dtype=a.dtype,
     )
     fn = mk.FusedMoEKernel(
@@ -164,7 +162,7 @@ def bench_run(
     with torch.cuda.graph(cutlass_graph, stream=cutlass_stream):
         # Capture 10 invocations like benchmark_moe.py
         for _ in range(10):
-            fn.apply(
+            fn(
                 a,
                 w1_fp8q_cutlass,
                 w2_fp8q_cutlass,
@@ -172,8 +170,6 @@ def bench_run(
                 topk_ids,
                 activation=MoEActivation.SILU,
                 global_num_experts=num_experts,
-                expert_map=None,
-                apply_router_weight_on_input=False,
             )
     torch.accelerator.synchronize()
 
