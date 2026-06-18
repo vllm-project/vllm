@@ -1893,7 +1893,8 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             if is_interleaved:
                 # Use input_ids-based mask for correct vision positions
                 # when audio and video tokens are interleaved.
-                is_vision = is_video.clone()
+                is_vision = is_video.clone() | ( is_multimodal & (input_ids_cpu == self.config.image_token_id))
+
             else:
                 is_vision = torch.zeros_like(is_multimodal)
                 mm_positions = torch.nonzero(is_multimodal, as_tuple=True)[0]
