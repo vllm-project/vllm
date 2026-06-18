@@ -184,8 +184,9 @@ class DeepSeekV4Parser(ParserEngine):
         **kwargs,
     ) -> None:
         chat_kwargs = kwargs.pop("chat_template_kwargs", None) or {}
-        thinking = bool(
-            chat_kwargs.get("thinking") or chat_kwargs.get("enable_thinking")
+        thinking = (
+            bool(chat_kwargs.get("thinking") or chat_kwargs.get("enable_thinking"))
+            and chat_kwargs.get("reasoning_effort") != "none"
         )
         super().__init__(
             tokenizer,

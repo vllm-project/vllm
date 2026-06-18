@@ -264,6 +264,16 @@ class TestThinkingModeConfig:
         assert "the PR" in reasoning
         assert content == ""
 
+    def test_reasoning_effort_none_overrides_enable_thinking(self, mock_tokenizer):
+        p = DeepSeekV4Parser(
+            mock_tokenizer,
+            chat_template_kwargs={
+                "enable_thinking": True,
+                "reasoning_effort": "none",
+            },
+        )
+        assert p.parser_engine_config.initial_state.name == "CONTENT"
+
 
 # ── Wrapper argument unwrapping ──────────────────────────────────────
 
