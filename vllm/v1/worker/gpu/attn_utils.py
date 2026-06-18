@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from math import prod
 from typing import Any, cast
 
 import torch
@@ -254,18 +255,16 @@ def _reshape_kv_cache(
                 ]
 
                 dtype = kv_cache_spec.dtype
-                kv_tensor = kv_raw_tensor.view(dtype)
                 if packing is not None:
-                    layer_offset, blk_stride = packing
-                    dtype_size = get_dtype_size(dtype)
-                    page_stride = blk_stride // dtype_size
-                    strides = list(torch.empty(kv_cache_shape).stride())
-                    strides[inv_order[0]] = page_stride
-                    kv_cache = torch.as_strided(
-                        kv_tensor,
-                        size=kv_cache_shape,
-                        stride=tuple(strides),
-                        storage_offset=layer_offset // dtype_size,
+                    offset, block_stride = packing
+                    assert inv_order[0] == 0
+                    page_bytes = prod(kv_cache_shape[1:]) * get_dtype_size(dtype)
+                    kv_cache = (
+                        kv_raw_tensor.view(-1, block_stride)[
+                            :, offset : offset + page_bytes
+                        ]
+                        .view(dtype)
+                        .view(kv_cache_shape)
                     )
                 elif kv_cache_spec.page_size_padded is not None:
                     # Use strided view to handle page_size_bytes that
@@ -280,13 +279,13 @@ def _reshape_kv_cache(
                     strides = list(torch.empty(kv_cache_shape).stride())
                     strides[inv_order[0]] = page_stride
                     kv_cache = torch.as_strided(
-                        kv_tensor,
+                        kv_raw_tensor.view(dtype),
                         size=kv_cache_shape,
                         stride=tuple(strides),
                     )
                 else:
                     # No padding — safe to use a contiguous view.
-                    kv_cache = kv_tensor.view(kv_cache_shape)
+                    kv_cache = kv_raw_tensor.view(dtype).view(kv_cache_shape)
                 kv_caches[layer_name] = kv_cache.permute(*inv_order)
 
             elif isinstance(kv_cache_spec, MambaSpec):

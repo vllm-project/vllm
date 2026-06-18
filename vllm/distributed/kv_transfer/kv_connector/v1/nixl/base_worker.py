@@ -842,7 +842,8 @@ class NixlBaseConnectorWorker:
         self.register_kv_caches({first_layer: kv_cache})
 
     def _register_packed_kv_cache(
-        self, kv_cache: torch.Tensor, block_stride: int
+        self,
+        storage: torch.UntypedStorage,
     ) -> None:
         """Register a packed KV cache as a single NIXL region.
 
@@ -867,7 +868,11 @@ class NixlBaseConnectorWorker:
             self.transfer_topo.cross_layers_blocks,
         )
 
-        total_size = kv_cache.numel() * kv_cache.element_size()
+        total_size = storage.nbytes()
+        block_stride = total_size // self.num_blocks
+        base_addr = storage.data_ptr()
+        device_id = storage.device.index
+        assert device_id is not None
 
         logger.info(
             "Registering packed KV cache: total_size=%s, block_stride=%s, "
@@ -877,19 +882,18 @@ class NixlBaseConnectorWorker:
             self.num_blocks,
         )
 
-        self.device_id = max(kv_cache.get_device(), 0)
-        caches_data = [(kv_cache.data_ptr(), total_size, self.device_id, "")]
+        self.device_id = device_id
+        caches_data = [(base_addr, total_size, self.device_id, "")]
 
         self.block_len_per_layer = [block_stride]
         self.num_regions = 1
         self.num_descs = self.num_blocks
-        self.kv_caches_base_addr[self.engine_id][self.tp_rank] = [kv_cache.data_ptr()]
+        self.kv_caches_base_addr[self.engine_id][self.tp_rank] = [base_addr]
 
         descs = self.nixl_wrapper.get_reg_descs(caches_data, self.nixl_memory_type)
         self.nixl_wrapper.register_memory(descs, backends=self.nixl_backends)
         self._registered_descs.append(descs)
 
-        self.device_kv_caches = {layer: kv_cache for layer in self._layer_specs}
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
         self.src_xfer_handles_by_block_size[self.block_size], (self.src_blocks_data) = (
@@ -927,20 +931,14 @@ class NixlBaseConnectorWorker:
         # same backing storage (different data_ptr but same storage).
         # This happens with DSv4-style contiguous per-block packing.
         if len(kv_caches) > 1:
-            storage_ptrs: dict[int, torch.Tensor] = {}
-            data_ptrs: set[int] = set()
-            for cache in kv_caches.values():
-                if isinstance(cache, torch.Tensor):
-                    storage_ptrs[cache.untyped_storage().data_ptr()] = cache
-                    data_ptrs.add(cache.data_ptr())
+            storage = next(iter(kv_caches.values())).untyped_storage()
+            storage_ptrs = {
+                cache.untyped_storage().data_ptr() for cache in kv_caches.values()
+            }
+            data_ptrs = {cache.data_ptr() for cache in kv_caches.values()}
             if len(storage_ptrs) == 1 and len(data_ptrs) > 1:
-                any_cache = next(iter(storage_ptrs.values()))
-                total_bytes = any_cache.untyped_storage().nbytes()
-                block_stride = total_bytes // self.num_blocks
-                flat = torch.tensor(
-                    [], dtype=torch.uint8, device=any_cache.device
-                ).set_(any_cache.untyped_storage())
-                self._register_packed_kv_cache(flat, block_stride)
+                self._register_packed_kv_cache(storage)
+                self.device_kv_caches = kv_caches
                 return
 
         self.transfer_topo = TransferTopology(
