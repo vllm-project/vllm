@@ -644,6 +644,14 @@ class OffloadingConnectorScheduler:
                   (between scheduler steps).
         """
         req_status = self._req_status[request.request_id]
+
+        # A preempted request may still have in-flight stores whose
+        # completion has not been consumed yet (async scheduling delay).
+        # Defer re-admission so update_state_after_alloc does not hit the
+        # one-load-xor-stores invariant assertion.
+        if req_status.transfer_jobs:
+            return None, False
+
         for group_state in req_status.group_states:
             group_state.block_ids.clear()
 
