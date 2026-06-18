@@ -14,7 +14,8 @@ def test_run_ascend_benchmark_propagates_benchmark_repo_publish_env():
     text = script_text("run_ascend_benchmark_ci.sh")
 
     assert "PUBLISH_TO_BENCHMARK_REPO=${PUBLISH_TO_BENCHMARK_REPO:-0}" in text
-    assert "PUBLISH_TO_BENCHMARK_REPO" in text[text.index("export_sudo_preserved_env_vars()"):]
+    sudo_env_block = text[text.index("export_sudo_preserved_env_vars()") :]
+    assert "PUBLISH_TO_BENCHMARK_REPO" in sudo_env_block
     assert 'if [[ "$PUBLISH_TO_BENCHMARK_REPO" != "1" ]]; then' in text
     assert 'if [[ "$PUBLISH_TO_BENCHMARK_REPO" == "1" ]]; then' in text
     assert 'BENCHMARK_REPO_GH_TOKEN="${BENCHMARK_REPO_GH_TOKEN:-}" \\' in text

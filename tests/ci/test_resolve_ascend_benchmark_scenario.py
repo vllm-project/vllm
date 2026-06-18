@@ -12,7 +12,10 @@ SCRIPT_PATH = (
 
 
 def load_resolver():
-    spec = importlib.util.spec_from_file_location("resolve_ascend_benchmark_scenario", SCRIPT_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "resolve_ascend_benchmark_scenario",
+        SCRIPT_PATH,
+    )
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -56,7 +59,10 @@ def test_issue_comment_event_falls_back_to_default_scenario():
     assert selected.scenario == "random-online"
     assert selected.mode == "default"
     assert selected.trigger_label == ""
-    assert "issue_comment event uses configured default benchmark scenario" in selected.reason
+    assert (
+        "issue_comment event uses configured default benchmark scenario"
+        in selected.reason
+    )
 
 
 def test_parse_labels_accepts_github_label_objects():

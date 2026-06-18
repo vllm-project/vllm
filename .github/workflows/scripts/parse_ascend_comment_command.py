@@ -100,7 +100,10 @@ def _command_line(comment_body: str) -> str | None:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="/ascend", description="Parse Ascend benchmark PR comment command.")
+    parser = argparse.ArgumentParser(
+        prog="/ascend",
+        description="Parse Ascend benchmark PR comment command.",
+    )
     subparsers = parser.add_subparsers(dest="action", required=True)
     subparsers.add_parser("help")
     benchmark = subparsers.add_parser("benchmark")
@@ -133,8 +136,15 @@ def _parse_request_rate(value: str) -> str:
     except ValueError as exc:
         raise ValueError("--request-rate must be 'inf' or a positive number") from exc
     if parsed <= 0 or parsed > MAX_COMMENT_REQUEST_RATE:
-        raise ValueError(f"--request-rate must be 'inf' or between 0 and {MAX_COMMENT_REQUEST_RATE:g}")
-    return str(parsed).rstrip("0").rstrip(".") if "." in str(parsed) else str(parsed)
+        raise ValueError(
+            "--request-rate must be 'inf' or between 0 and "
+            f"{MAX_COMMENT_REQUEST_RATE:g}"
+        )
+    return (
+        str(parsed).rstrip("0").rstrip(".")
+        if "." in str(parsed)
+        else str(parsed)
+    )
 
 
 def _validate_sharegpt_path(path: str, name: str) -> str:
@@ -154,23 +164,52 @@ def _validate_sharegpt_path(path: str, name: str) -> str:
 
 def _validate_command_args(args: argparse.Namespace, scenario: str) -> dict[str, str]:
     validated = {
-        "num_prompts": _parse_bounded_int(args.num_prompts, "--num-prompts", 1, MAX_COMMENT_NUM_PROMPTS),
+        "num_prompts": _parse_bounded_int(
+            args.num_prompts,
+            "--num-prompts",
+            1,
+            MAX_COMMENT_NUM_PROMPTS,
+        ),
         "request_rate": _parse_request_rate(args.request_rate),
-        "max_concurrency": _parse_bounded_int(args.max_concurrency, "--max-concurrency", 1, MAX_COMMENT_MAX_CONCURRENCY),
+        "max_concurrency": _parse_bounded_int(
+            args.max_concurrency,
+            "--max-concurrency",
+            1,
+            MAX_COMMENT_MAX_CONCURRENCY,
+        ),
         "input_length": "",
         "output_length": "",
         "dataset_path": "",
         "constraints_file": "",
     }
     if args.input_length:
-        validated["input_length"] = _parse_bounded_int(args.input_length, "--input-length", 1, MAX_COMMENT_LOGICAL_LEN)
+        validated["input_length"] = _parse_bounded_int(
+            args.input_length,
+            "--input-length",
+            1,
+            MAX_COMMENT_LOGICAL_LEN,
+        )
     if args.output_length:
-        validated["output_length"] = _parse_bounded_int(args.output_length, "--output-length", 1, MAX_COMMENT_LOGICAL_LEN)
+        validated["output_length"] = _parse_bounded_int(
+            args.output_length,
+            "--output-length",
+            1,
+            MAX_COMMENT_LOGICAL_LEN,
+        )
     if scenario == "sharegpt-online":
-        validated["dataset_path"] = _validate_sharegpt_path(args.dataset_path, "--dataset-path")
-        validated["constraints_file"] = _validate_sharegpt_path(args.constraints_file, "--constraints-file")
+        validated["dataset_path"] = _validate_sharegpt_path(
+            args.dataset_path,
+            "--dataset-path",
+        )
+        validated["constraints_file"] = _validate_sharegpt_path(
+            args.constraints_file,
+            "--constraints-file",
+        )
     elif args.dataset_path or args.constraints_file:
-        raise ValueError("--dataset-path and --constraints-file are only supported for sharegpt-online")
+        raise ValueError(
+            "--dataset-path and --constraints-file are only supported "
+            "for sharegpt-online"
+        )
     return validated
 
 
@@ -192,7 +231,10 @@ def parse_comment_command(comment_body: str) -> AscendCommentCommand | None:
     scenario = SCENARIO_ALIASES.get(args.scenario)
     if scenario is None:
         supported = ", ".join(SUPPORTED_SCENARIOS)
-        raise ValueError(f"unsupported benchmark scenario {args.scenario!r}; supported: {supported}")
+        raise ValueError(
+            f"unsupported benchmark scenario {args.scenario!r}; "
+            f"supported: {supported}"
+        )
 
     missing = []
     if scenario == "sharegpt-online":
@@ -270,10 +312,14 @@ def resolve_issue_comment_pr_context(
     is_same_repo = head_repo == repository and base_repo == repository
     if not is_same_repo:
         raise ValueError(
-            f"fork PR issue_comment benchmark is not allowed: head={head_repo}, base={base_repo}, repository={repository}"
+            "fork PR issue_comment benchmark is not allowed: "
+            f"head={head_repo}, base={base_repo}, repository={repository}"
         )
     if not _has_allowed_commenter(event_payload, pr_payload):
-        raise ValueError("issue_comment benchmark requires the PR author or a repository collaborator")
+        raise ValueError(
+            "issue_comment benchmark requires the PR author or a repository "
+            "collaborator"
+        )
 
     return IssueCommentPrContext(
         pr_number=pr_number,
@@ -320,17 +366,29 @@ def _deny_values(reason: str) -> dict[str, str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Parse an Ascend benchmark PR comment command.")
+    parser = argparse.ArgumentParser(
+        description="Parse an Ascend benchmark PR comment command."
+    )
     parser.add_argument("--comment-body", default=os.environ.get("COMMENT_BODY", ""))
-    parser.add_argument("--event-payload", default=os.environ.get("GITHUB_EVENT_PATH", ""))
-    parser.add_argument("--pr-payload", default=os.environ.get("ISSUE_COMMENT_PR_PAYLOAD", ""))
+    parser.add_argument(
+        "--event-payload",
+        default=os.environ.get("GITHUB_EVENT_PATH", ""),
+    )
+    parser.add_argument(
+        "--pr-payload",
+        default=os.environ.get("ISSUE_COMMENT_PR_PAYLOAD", ""),
+    )
     parser.add_argument("--github-env", default=os.environ.get("GITHUB_ENV", ""))
     parser.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT", ""))
     args = parser.parse_args()
 
     try:
         command = parse_comment_command(args.comment_body)
-        values = command.to_env() if command is not None else {"ASCEND_COMMENT_COMMAND": "0"}
+        values = (
+            command.to_env()
+            if command is not None
+            else {"ASCEND_COMMENT_COMMAND": "0"}
+        )
         if isinstance(command, AscendHelpCommand):
             write_env_file(args.github_env, values)
             write_env_file(args.github_output, values)
