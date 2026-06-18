@@ -85,6 +85,34 @@ from vllm.utils.mistral import mt as _mt
 logger = init_logger(__name__)
 
 
+def _eos_suffix_for_log(
+    tokenizer,
+    finish_reason: str | None,
+    stop_reason,
+    last_token_id: int | None,
+) -> str:
+    """Return the string form of the model-emitted EOS token for the
+    request-log ``raw_output_texts`` capture, or ``""`` if generation
+    didn't end on a natural EOS.
+
+    We only append when ``finish_reason == "stop"`` *and* ``stop_reason``
+    is ``None`` — i.e. the engine stopped because the model emitted an
+    EOS token (not because a user-supplied stop string matched, not
+    because of length, not because of a tool-call extraction). The
+    actual emitted token is decoded directly so models with multiple
+    EOS variants (e.g. Qwen's ``<|im_end|>`` vs ``<|endoftext|>``)
+    record the one the model really used.
+    """
+    if finish_reason != "stop" or stop_reason is not None:
+        return ""
+    if last_token_id is None or tokenizer is None:
+        return ""
+    try:
+        return tokenizer.decode([last_token_id], skip_special_tokens=False)
+    except Exception:
+        return ""
+
+
 class OpenAIServingChat(OpenAIServing):
     def __init__(
         self,
@@ -696,6 +724,11 @@ class OpenAIServingChat(OpenAIServing):
         # ``"".join`` once at the end to avoid O(n²) string realloc on
         # very long generations.
         raw_output_fragments: list[list[str]] = [[] for _ in range(num_choices)]
+        # Trackers used at end-of-stream to optionally append the
+        # model-emitted EOS to ``raw_output_texts`` (see _eos_suffix_for_log).
+        raw_last_token_ids: list[int | None] = [None] * num_choices
+        raw_finish_reasons: list[str | None] = [None] * num_choices
+        raw_stop_reasons: list[Any] = [None] * num_choices
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
@@ -833,6 +866,11 @@ class OpenAIServingChat(OpenAIServing):
                     # text is independent of reasoning / tool extraction.
                     if output.text:
                         raw_output_fragments[i].append(output.text)
+                    if output.token_ids:
+                        raw_last_token_ids[i] = output.token_ids[-1]
+                    if output.finish_reason is not None:
+                        raw_finish_reasons[i] = output.finish_reason
+                        raw_stop_reasons[i] = output.stop_reason
 
                     if (
                         reasoning_parser
@@ -1385,7 +1423,14 @@ class OpenAIServingChat(OpenAIServing):
                 total_tokens=num_prompt_tokens + num_completion_tokens,
             )
             request_metadata.raw_output_texts = [
-                "".join(parts) for parts in raw_output_fragments
+                "".join(raw_output_fragments[i])
+                + _eos_suffix_for_log(
+                    tokenizer,
+                    raw_finish_reasons[i],
+                    raw_stop_reasons[i],
+                    raw_last_token_ids[i],
+                )
+                for i in range(num_choices)
             ]
 
             # Log complete streaming response if output logging is enabled
@@ -1443,8 +1488,18 @@ class OpenAIServingChat(OpenAIServing):
 
         # Capture raw model output before any parser strips/rewrites it,
         # so the request-log hub can persist the pristine generation.
+        # Append the EOS token's literal form when the model stopped
+        # naturally so the saved record ends with the same end-of-turn
+        # marker the model emitted.
         request_metadata.raw_output_texts = [
-            output.text for output in final_res.outputs
+            output.text
+            + _eos_suffix_for_log(
+                tokenizer,
+                output.finish_reason,
+                output.stop_reason,
+                output.token_ids[-1] if output.token_ids else None,
+            )
+            for output in final_res.outputs
         ]
 
         choices: list[ChatCompletionResponseChoice] = []
