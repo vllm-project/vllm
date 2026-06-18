@@ -30,14 +30,14 @@ def test_torchinductor_default_cache_dir_patch_is_version_guarded(monkeypatch):
     assert cache_dir_utils.default_cache_dir is original
 
 
-def test_torchinductor_cache_dir_patch_applies_through_torch_2_13(monkeypatch):
-    monkeypatch.setattr(env_override.torch, "__version__", "2.13.1+cu128")
+def test_torchinductor_cache_dir_patch_applies_through_torch_2_12(monkeypatch):
+    monkeypatch.setattr(env_override.torch, "__version__", "2.12.1+cu128")
 
     assert env_override._torch_needs_torchinductor_cache_dir_patch()
 
 
-def test_torchinductor_cache_dir_patch_skips_torch_2_14_dev(monkeypatch):
-    monkeypatch.setattr(env_override.torch, "__version__", "2.14.0.dev20260601")
+def test_torchinductor_cache_dir_patch_skips_torch_2_13(monkeypatch):
+    monkeypatch.setattr(env_override.torch, "__version__", "2.13.0")
 
     assert not env_override._torch_needs_torchinductor_cache_dir_patch()
 

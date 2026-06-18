@@ -93,10 +93,10 @@ import torch
 def _torch_needs_torchinductor_cache_dir_patch():
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-    # PyTorch < 2.14 crashes in getpass.getuser() when the current UID has no
-    # /etc/passwd entry; 2.14+ ships the upstream fix (pytorch/pytorch#184208),
+    # PyTorch < 2.13 crashes in getpass.getuser() when the current UID has no
+    # /etc/passwd entry; 2.13 ships the upstream fix (pytorch/pytorch#184208),
     # so leave its native behavior untouched.
-    return not is_torch_equal_or_newer("2.14.0.dev")
+    return not is_torch_equal_or_newer("2.13.0.dev")
 
 
 def _patch_torchinductor_default_cache_dir():
