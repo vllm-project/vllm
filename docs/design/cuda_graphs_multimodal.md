@@ -127,9 +127,9 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 | Architecture | Models | CG for Image | CG for Video | Dual-Path Graph |
 | ------------ | ------ | ------------ | ------------ | --------------- |
 | `DeepseekOCRForCausalLM` | `DeepSeek-OCR` | ✅︎ | ❌︎ | ✅︎ |
+| `DeepseekVLV2ForCausalLM` | `DeepSeek-VL2` | ✅︎ | ❌︎ | ❌︎ |
 | `Glm4vForConditionalGeneration` | `GLM-4.1V, GLM-4.6V-Flash` | ✅︎ | ✅︎ | ❌︎ |
 | `InternVLChatModel` | `InternVL3.5`, `InternVL3`, `InternVL2.5`, `InternVL2` | ✅︎ | ✅︎ | ❌︎ |
-| `KimiVLForConditionalGeneration` | `Kimi-VL` | ✅︎ | ❌︎ | ❌︎ |
 | `Llama4ForConditionalGeneration` | `Llama 4` | ✅︎ | ❌︎ | ❌︎ |
 | `Qwen2VLForConditionalGeneration` | `Qwen2-VL` | ✅︎ | ✅︎ | ❌︎ |
 | `Qwen2_5_VLForConditionalGeneration` | `Qwen2.5-VL` | ✅︎ | ✅︎ | ❌︎ |
