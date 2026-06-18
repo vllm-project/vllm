@@ -904,9 +904,9 @@ def enable_batch_invariant_mode():
     _batch_invariant_MODE = True
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
-    if current_platform.is_cuda():
-        key = "CUDA"
+    key = current_platform.dispatch_key
 
+    if current_platform.is_cuda():
         if current_platform.is_device_capability_family(80):
             # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
             # triton persistent matmul overrides for mm/addmm/matmul/linear.
@@ -923,8 +923,6 @@ def enable_batch_invariant_mode():
 
         _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
     elif current_platform.is_xpu():
-        key = "XPU"
-
         _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
         _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
         # TODO: register matmul and linear for XPU
