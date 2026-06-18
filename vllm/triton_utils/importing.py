@@ -29,7 +29,7 @@ if HAS_TRITON:
         # Check if we're in a distributed environment where CUDA_VISIBLE_DEVICES
         # might be temporarily empty (e.g., Ray sets it to "" during actor init)
         cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-        # These Ray-managed env vars are set in worker processes mean we're inside Ray.
+        # These Ray-managed env vars being set means we're inside Ray.
         in_ray_worker = (
             os.environ.get("RAY_RAYLET_PID") is not None
             or os.environ.get("RAY_JOB_ID") is not None
