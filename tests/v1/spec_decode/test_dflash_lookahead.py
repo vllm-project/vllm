@@ -26,6 +26,7 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 # Matches defaults from tests/v1/spec_decode/test_eagle.py
 DFLASH_TARGET_DIR = "Qwen/Qwen3-8B"
 DFLASH_DRAFT_DIR = "z-lab/Qwen3-8B-DFlash-b16"
+ORTHRUS_TARGET_DIR = "chiennv/Orthrus-Qwen3-1.7B"
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 8
@@ -48,8 +49,21 @@ def _dflash_speculative_config(num_speculative_tokens: int) -> SpeculativeConfig
     )
 
 
-def _create_dflash_scheduler(num_speculative_tokens: int) -> Scheduler:
-    speculative_config = _dflash_speculative_config(num_speculative_tokens)
+def _orthrus_speculative_config(num_speculative_tokens: int) -> SpeculativeConfig:
+    model_config = ModelConfig(
+        model=ORTHRUS_TARGET_DIR,
+        runner="generate",
+        max_model_len=100,
+    )
+    return SpeculativeConfig(
+        target_model_config=model_config,
+        target_parallel_config=ParallelConfig(),
+        method="orthrus",
+        num_speculative_tokens=num_speculative_tokens,
+    )
+
+
+def _create_scheduler(speculative_config: SpeculativeConfig) -> Scheduler:
     model_config = speculative_config.target_model_config
     scheduler_config = SchedulerConfig(
         max_num_seqs=16,
@@ -95,6 +109,14 @@ def _create_dflash_scheduler(num_speculative_tokens: int) -> Scheduler:
     )
 
 
+def _create_dflash_scheduler(num_speculative_tokens: int) -> Scheduler:
+    return _create_scheduler(_dflash_speculative_config(num_speculative_tokens))
+
+
+def _create_orthrus_scheduler(num_speculative_tokens: int) -> Scheduler:
+    return _create_scheduler(_orthrus_speculative_config(num_speculative_tokens))
+
+
 def test_dflash_prefill_reserves_lookahead_blocks():
     scheduler = _create_dflash_scheduler(NUM_SPECULATIVE_TOKENS)
 
@@ -131,6 +153,21 @@ def test_dflash_first_prefill_query_window_fits_allocated_blocks():
     assert all(pos // BLOCK_SIZE < len(block_ids) for pos in query_positions)
 
 
+def test_orthrus_prefill_reserves_lookahead_blocks():
+    scheduler = _create_orthrus_scheduler(NUM_SPECULATIVE_TOKENS)
+
+    assert scheduler.num_lookahead_tokens == NUM_SPECULATIVE_TOKENS + 1
+
+
+def test_orthrus_config_enables_parallel_drafting():
+    spec_config = _orthrus_speculative_config(NUM_SPECULATIVE_TOKENS)
+
+    assert spec_config.parallel_drafting
+    # Orthrus reserves KV lookahead slots, but its query block is a separate
+    # drafter batch and does not append compute slots to the target batch.
+    assert spec_config.max_num_new_slots_for_drafting == 0
+
+
 def test_dflash_drafter_window_reserves_bonus_token():
     # DFlash's drafter window is num_spec + 1 (the extra slot is the bonus token),
     # so max_seq_len + num_spec + 1 must stay within the draft model's max len.
@@ -149,6 +186,21 @@ def test_dflash_drafter_window_reserves_bonus_token():
     plain_runner = SimpleNamespace(
         num_spec_tokens=NUM_SPECULATIVE_TOKENS,
         effective_drafter_max_model_len=100,
-        speculative_config=SimpleNamespace(use_dflash=lambda: False),
+        speculative_config=SimpleNamespace(
+            use_dflash=lambda: False,
+            use_orthrus=lambda: False,
+        ),
     )
     assert input_fits_in_drafter(plain_runner, SimpleNamespace(max_seq_len=97))
+
+
+def test_orthrus_drafter_window_reserves_bonus_token():
+    input_fits_in_drafter = GPUModelRunner._input_fits_in_drafter
+    orthrus_runner = SimpleNamespace(
+        num_spec_tokens=NUM_SPECULATIVE_TOKENS,
+        effective_drafter_max_model_len=100,
+        speculative_config=_orthrus_speculative_config(NUM_SPECULATIVE_TOKENS),
+    )
+
+    assert input_fits_in_drafter(orthrus_runner, SimpleNamespace(max_seq_len=96))
+    assert not input_fits_in_drafter(orthrus_runner, SimpleNamespace(max_seq_len=97))
