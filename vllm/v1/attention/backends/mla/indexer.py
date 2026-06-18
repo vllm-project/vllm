@@ -25,7 +25,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.utils import (
-    dcp_localize_seq_lens,
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
@@ -370,10 +369,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         num_decodes: int,
         seq_lens_is_buffer_view: bool,
     ) -> torch.Tensor:
-        local_seq_lens = dcp_localize_seq_lens(
+        local_seq_lens = get_dcp_local_seq_lens(
             seq_lens,
-            self.dcp_rank,
             self.dcp_world_size,
+            self.dcp_rank,
             self.cp_kv_cache_interleave_size,
         )
         if seq_lens_is_buffer_view:

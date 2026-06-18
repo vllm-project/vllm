@@ -899,30 +899,6 @@ def get_dcp_local_seq_lens(
     return dcp_local_seq_lens.squeeze(1)
 
 
-def dcp_localize_seq_lens(
-    seq_lens: torch.Tensor,
-    dcp_rank: int,
-    dcp_size: int,
-    cp_kv_cache_interleave_size: int = 1,
-) -> torch.Tensor:
-    """Map global causal bounds to local DCP KV counts.
-
-    This is the per-token form of get_dcp_local_seq_lens. It is useful after
-    MTP/spec-decode expansion, where each token has its own global causal
-    bound and consecutive positions may be owned by different DCP ranks.
-    """
-    seq_lens_i32 = seq_lens.to(torch.int32)
-    group = dcp_size * cp_kv_cache_interleave_size
-    full = seq_lens_i32 // group
-    rem = seq_lens_i32 % group
-    extra = torch.clamp(
-        rem - dcp_rank * cp_kv_cache_interleave_size,
-        0,
-        cp_kv_cache_interleave_size,
-    )
-    return full * cp_kv_cache_interleave_size + extra
-
-
 def mamba_get_block_table_tensor(
     block_table: torch.Tensor,
     seq_lens: torch.Tensor,

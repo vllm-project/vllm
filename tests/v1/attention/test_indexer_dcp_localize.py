@@ -4,10 +4,7 @@
 import pytest
 import torch
 
-from vllm.v1.attention.backends.utils import (
-    dcp_localize_seq_lens,
-    get_dcp_local_seq_lens,
-)
+from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 
 
 def _local_count(length: int, rank: int, world: int, interleave: int) -> int:
@@ -16,11 +13,11 @@ def _local_count(length: int, rank: int, world: int, interleave: int) -> int:
 
 @pytest.mark.parametrize("world", [1, 2, 4])
 @pytest.mark.parametrize("interleave", [1, 2, 4])
-def test_dcp_localize_seq_lens_matches_naive(world: int, interleave: int):
+def test_get_dcp_local_seq_lens_matches_naive(world: int, interleave: int):
     seq_lens = torch.arange(0, 33, dtype=torch.int32)
 
     for rank in range(world):
-        actual = dcp_localize_seq_lens(seq_lens, rank, world, interleave)
+        actual = get_dcp_local_seq_lens(seq_lens, world, rank, interleave)
         expected = torch.tensor(
             [
                 _local_count(int(seq_len), rank, world, interleave)
@@ -31,28 +28,34 @@ def test_dcp_localize_seq_lens_matches_naive(world: int, interleave: int):
         torch.testing.assert_close(actual, expected)
 
 
-def test_dcp_localize_seq_lens_matches_request_level_helper():
+def test_get_dcp_local_seq_lens_can_localize_per_token_bounds():
     seq_lens = torch.tensor([0, 1, 2, 3, 4, 7, 8, 17], dtype=torch.int32)
     world = 4
     interleave = 2
 
     for rank in range(world):
-        per_token = dcp_localize_seq_lens(seq_lens, rank, world, interleave)
-        per_request = get_dcp_local_seq_lens(seq_lens, world, rank, interleave)
-        torch.testing.assert_close(per_token, per_request)
+        actual = get_dcp_local_seq_lens(seq_lens, world, rank, interleave)
+        expected = torch.tensor(
+            [
+                _local_count(int(seq_len), rank, world, interleave)
+                for seq_len in seq_lens
+            ],
+            dtype=torch.int32,
+        )
+        torch.testing.assert_close(actual, expected)
 
 
-def test_dcp_localize_seq_lens_must_run_after_decode_expansion():
+def test_get_dcp_local_seq_lens_must_run_after_decode_expansion():
     world = 2
     rank = 1
     interleave = 1
     expanded_bounds = torch.tensor([8, 9, 10], dtype=torch.int32)
 
-    localized_after_expansion = dcp_localize_seq_lens(
-        expanded_bounds, rank, world, interleave
+    localized_after_expansion = get_dcp_local_seq_lens(
+        expanded_bounds, world, rank, interleave
     )
-    localized_request_len_minus_offsets = dcp_localize_seq_lens(
-        torch.tensor([10], dtype=torch.int32), rank, world
+    localized_request_len_minus_offsets = get_dcp_local_seq_lens(
+        torch.tensor([10], dtype=torch.int32), world, rank
     ) - torch.tensor([2, 1, 0], dtype=torch.int32)
 
     assert not torch.equal(
