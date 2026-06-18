@@ -24,7 +24,14 @@ class AsyncScheduler(Scheduler):
             -1
         ] * scheduler_output.num_spec_tokens_to_schedule
         for req_id in scheduler_output.num_scheduled_tokens:
-            request = self.requests[req_id]
+            request = self.requests.get(req_id)
+            if request is None:
+                logger.debug(
+                    "Skipping stale req_id %s in AsyncScheduler."
+                    "_update_after_schedule (likely finished or aborted)",
+                    req_id,
+                )
+                continue
             if request.is_prefill_chunk:
                 continue
 

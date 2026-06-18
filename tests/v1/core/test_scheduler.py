@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -25,7 +26,10 @@ from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+from vllm.v1.core.sched.interface import PauseState
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
@@ -40,6 +44,44 @@ from vllm.v1.structured_output import StructuredOutputManager
 from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
 
 pytestmark = pytest.mark.cpu_test
+
+
+def make_minimal_empty_scheduler() -> Scheduler:
+    scheduler = object.__new__(Scheduler)
+    scheduler.current_step = 0
+    scheduler.requests = {}
+    scheduler.waiting = create_request_queue(SchedulingPolicy.FCFS)
+    scheduler.skipped_waiting = create_request_queue(SchedulingPolicy.FCFS)
+    scheduler.running = []
+    scheduler.policy = SchedulingPolicy.FCFS
+    scheduler.max_num_scheduled_tokens = 8
+    scheduler.max_num_encoder_input_tokens = 0
+    scheduler.max_num_running_reqs = 16
+    scheduler._pause_state = PauseState.UNPAUSED
+    scheduler.scheduler_config = SimpleNamespace(async_scheduling=False)
+    scheduler.kv_cache_manager = SimpleNamespace(
+        new_step_starts=Mock(),
+        get_num_common_prefix_blocks=Mock(return_value=[]),
+    )
+    scheduler.kv_cache_config = SimpleNamespace(kv_cache_groups=[])
+    scheduler.lora_config = None
+    scheduler.use_v2_model_runner = False
+    scheduler.use_pp = False
+    scheduler.prev_step_scheduled_req_ids = set()
+    scheduler.needs_kv_cache_zeroing = False
+    scheduler.num_spec_tokens = 0
+    scheduler.dynamic_sd_lookup = None
+    scheduler.encoder_cache_manager = SimpleNamespace(
+        get_freed_mm_hashes=Mock(return_value=[]),
+    )
+    scheduler.connector = None
+    scheduler.ec_connector = None
+    scheduler.finished_req_ids = set()
+    scheduler.defer_block_free = False
+    scheduler.sched_step_seq = 0
+    scheduler.enable_return_routed_experts = False
+    scheduler._inflight_prefills = set()
+    return scheduler
 
 
 def test_add_requests():
@@ -62,6 +104,115 @@ def test_finish_request():
         scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         assert request.request_id not in scheduler.requests
         assert len(scheduler.waiting) == 9 - i
+
+
+def test_schedule_drops_stale_running_request():
+    scheduler = make_minimal_empty_scheduler()
+    stale_req = create_requests(num_requests=1, req_ids=["stale_req"])[0]
+    stale_req.status = RequestStatus.RUNNING
+    scheduler.running.append(stale_req)
+    scheduler._inflight_prefills.add(stale_req)
+
+    scheduler_output = scheduler.schedule()
+
+    assert scheduler.running == []
+    assert stale_req not in scheduler._inflight_prefills
+    assert scheduler_output.num_scheduled_tokens == {}
+    assert scheduler_output.scheduled_cached_reqs.req_ids == []
+
+
+def test_schedule_drops_stale_waiting_request():
+    scheduler = make_minimal_empty_scheduler()
+    stale_req = create_requests(num_requests=1, req_ids=["stale_req"])[0]
+    scheduler.waiting.add_request(stale_req)
+    scheduler._inflight_prefills.add(stale_req)
+
+    scheduler_output = scheduler.schedule()
+
+    assert len(scheduler.waiting) == 0
+    assert stale_req not in scheduler._inflight_prefills
+    assert scheduler_output.num_scheduled_tokens == {}
+    assert scheduler_output.scheduled_new_reqs == []
+
+
+def test_update_after_schedule_skips_stale_req_id():
+    scheduler = object.__new__(Scheduler)
+    scheduler.requests = {}
+    scheduler.defer_block_free = False
+    scheduler.enable_return_routed_experts = False
+    scheduler.finished_req_ids = set()
+    scheduler._inflight_prefills = set()
+
+    live_req, stale_req = create_requests(num_requests=2)
+
+    for req in (live_req, stale_req):
+        req.num_computed_tokens = req.num_tokens
+        req.status = RequestStatus.RUNNING
+        scheduler.requests[req.request_id] = req
+
+    original_live_num_computed_tokens = live_req.num_computed_tokens
+    del scheduler.requests[stale_req.request_id]
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={
+            live_req.request_id: 1,
+            stale_req.request_id: 1,
+        },
+        total_num_scheduled_tokens=2,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    scheduler._update_after_schedule(scheduler_output)
+
+    assert live_req.num_computed_tokens == original_live_num_computed_tokens + 1
+
+
+def test_async_update_after_schedule_skips_stale_req_id():
+    scheduler = object.__new__(AsyncScheduler)
+    scheduler.requests = {}
+    scheduler.defer_block_free = False
+    scheduler.enable_return_routed_experts = False
+    scheduler.finished_req_ids = set()
+    scheduler._inflight_prefills = set()
+    scheduler.num_sampled_tokens_per_step = 1
+    scheduler.use_v2_model_runner = False
+    scheduler._spec_token_placeholders = []
+
+    live_req, stale_req = create_requests(num_requests=2)
+
+    for req in (live_req, stale_req):
+        req.num_computed_tokens = req.num_tokens
+        req.status = RequestStatus.RUNNING
+        scheduler.requests[req.request_id] = req
+
+    original_live_num_computed_tokens = live_req.num_computed_tokens
+    del scheduler.requests[stale_req.request_id]
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={
+            live_req.request_id: 1,
+            stale_req.request_id: 1,
+        },
+        total_num_scheduled_tokens=2,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    scheduler._update_after_schedule(scheduler_output)
+
+    assert live_req.num_computed_tokens == original_live_num_computed_tokens + 1
+    assert stale_req.request_id not in scheduler.requests
 
 
 def test_get_num_unfinished_requests():

@@ -430,6 +430,14 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if self.requests.get(request.request_id) is not request:
+                logger.debug(
+                    "Dropping stale running request %s before scheduling",
+                    request.request_id,
+                )
+                self.running.pop(req_index)
+                self._inflight_prefills.discard(request)
+                continue
 
             if (
                 request.num_output_placeholders > 0
@@ -634,6 +642,14 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+                if self.requests.get(request_id) is not request:
+                    logger.debug(
+                        "Dropping stale waiting request %s before scheduling",
+                        request_id,
+                    )
+                    request_queue.pop_request()
+                    self._inflight_prefills.discard(request)
+                    continue
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -1137,7 +1153,14 @@ class Scheduler(SchedulerInterface):
         #    computed tokens will be adjusted in update_from_output.
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
-            request = self.requests[req_id]
+            request = self.requests.get(req_id)
+            if request is None:
+                logger.debug(
+                    "Skipping stale req_id %s in _update_after_schedule "
+                    "(likely finished or aborted)",
+                    req_id,
+                )
+                continue
             request.num_computed_tokens += num_scheduled_token
             if self.defer_block_free:
                 # Record the in-flight step, to fence deferred block freeing.
