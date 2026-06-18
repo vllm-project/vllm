@@ -486,9 +486,6 @@ class Fp8LinearMethod(LinearMethodBase):
                         weight_bf16 = weight_fp8 * weight_scale
                 return torch.nn.functional.linear(x, weight_bf16.t(), bias)
 
-        if self.use_marlin:
-            return self.fp8_linear.apply_weights(layer, x, bias)
-
         return self.fp8_linear.apply_weights(layer, x, bias)
 
 
