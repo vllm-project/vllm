@@ -175,6 +175,7 @@ class MiniMaxM3IndexerDecodeMetadata:
     block_table: torch.Tensor
     max_seq_len: int
     decode_query_len: int
+    max_decode_query_len: int
 
 
 @dataclass
@@ -229,6 +230,8 @@ class MiniMaxM3IndexerMetadataBuilder(
             assert tp_size % total_index_heads == 0
         self.num_index_heads = max(1, total_index_heads // tp_size)
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        assert self.reorder_batch_threshold is not None
+        self.max_decode_query_len = self.reorder_batch_threshold
 
         # Stable context-length buffer for decode cudagraph replays.
         self.context_len_buffer = torch.empty(
@@ -297,6 +300,7 @@ class MiniMaxM3IndexerTritonMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
                 block_table=block_table[:num_decodes],
                 max_seq_len=common_attn_metadata.max_seq_len,
                 decode_query_len=decode_query_len,
+                max_decode_query_len=self.max_decode_query_len,
             )
 
         return MiniMaxM3IndexerMetadata(
@@ -403,8 +407,8 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 self.init_blocks,
                 self.local_blocks,
                 self.num_kv_heads,
-                self.scale,
                 d.decode_query_len,
+                d.max_decode_query_len,
             )
         if index_md.num_prefills > 0:
             p = index_md.prefill
@@ -419,7 +423,6 @@ class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
                 p.max_query_len,
                 p.max_seq_len,
                 self.num_kv_heads,
-                self.scale,
             )
             prefill_topk = minimax_m3_index_topk(
                 score,
