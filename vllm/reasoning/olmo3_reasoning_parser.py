@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
 
 
-
 class Olmo3ReasoningState(enum.Enum):
     REASONING = 1
     CONTENT = 2

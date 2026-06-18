@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
-
 class Step3ReasoningParser(ReasoningParser):
     """
     Reasoning parser for Step3 model.

@@ -16,7 +16,6 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
-
 class MiniMaxM2ReasoningParser(MinimaxM2ParserReasoningAdapter):  # type: ignore[valid-type, misc]
     """
     Reasoning parser for MiniMax M2 model.

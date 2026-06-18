@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
-
 class HunyuanA13BReasoningParser(ReasoningParser):
     """
     Reasoning parser for Hunyuan A13B Model

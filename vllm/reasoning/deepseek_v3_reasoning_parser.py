@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
-
 class DeepSeekV3ReasoningParser(ReasoningParser):
     """
     V3 parser that delegates to either DeepSeekR1ReasoningParser or

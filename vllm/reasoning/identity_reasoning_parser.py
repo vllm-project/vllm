@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
-
 class IdentityReasoningParser(ReasoningParser):
     """
     Identity reasoning parser.

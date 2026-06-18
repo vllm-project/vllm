@@ -14,7 +14,6 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
-
 class Ernie45ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for Ernie45 thinking model.

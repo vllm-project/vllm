@@ -15,7 +15,6 @@ if TYPE_CHECKING:
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
-
 class GraniteReasoningParser(ReasoningParser):
     """
     Reasoning parser for IBM Granite.
