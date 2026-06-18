@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -16,10 +18,7 @@ from vllm.v1.attention.ops.fp8e4nv_fp16 import fp16_to_fp8e4m3
 
 
 def _fp8_software_conv(kv_cache_dtype: str) -> bool:
-    """True when fp8 KV must be software-emulated (pre-SM89, no native fp8e4nv).
-
-    SM80/86 convert via bf16; SM75 (no bf16 hardware type) convert via fp16.
-    """
+    """True when fp8 KV is software-converted (pre-SM89 CUDA, no native fp8e4nv)."""
     return (
         is_quantized_kv_cache(kv_cache_dtype)
         and current_platform.is_cuda()
@@ -39,12 +38,10 @@ def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
     ):
         return False
     if kv_cache_dtype.startswith("fp8"):
-        # fp8 KV: native fp8e4nv on SM89+; on SM75-88 supported via software
-        # conversion on the Triton path (bf16 on SM80/86, fp16 on SM75, since
-        # SM75 has no bf16 hardware type).
-        return current_platform.has_device_capability(75)
+        # fp8 KV: native on SM89+, software-converted on SM75-88, or XPU.
+        return current_platform.has_device_capability(75) or current_platform.is_xpu()
     if kv_cache_dtype == "bfloat16":
-        return current_platform.has_device_capability(80)
+        return current_platform.has_device_capability(80) or current_platform.is_xpu()
     return True
 
 
@@ -74,6 +71,8 @@ def reshape_and_cache_kernel_flash(
     FP8_KV_CACHE: tl.constexpr,
     # software fp8e4nv emulation (pre-SM89): cache is uint8, encode explicitly
     FP8_SOFTWARE_CONV: tl.constexpr,
+    # encode rounding mode for software fp8: "rn", "rne", or "trunc"
+    FP8_ENCODE_ROUND: tl.constexpr,
     # tune parameters
     TILE_SIZE: tl.constexpr,
 ):
@@ -155,23 +154,23 @@ def reshape_and_cache_kernel_flash(
         if key_tile.dtype == tl.float16:
             tl.store(
                 key_cache_ptr + tgt_idx_k,
-                fp16_to_fp8e4m3(key_tile),
+                fp16_to_fp8e4m3(key_tile, round=FP8_ENCODE_ROUND),
                 mask=tile_pos < (num_heads * head_size),
             )
             tl.store(
                 value_cache_ptr + tgt_idx_v,
-                fp16_to_fp8e4m3(value_tile),
+                fp16_to_fp8e4m3(value_tile, round=FP8_ENCODE_ROUND),
                 mask=tile_pos < (num_heads * head_size),
             )
         else:
             tl.store(
                 key_cache_ptr + tgt_idx_k,
-                bf16_to_fp8e4m3(key_tile.to(tl.bfloat16)),
+                bf16_to_fp8e4m3(key_tile.to(tl.bfloat16), round=FP8_ENCODE_ROUND),
                 mask=tile_pos < (num_heads * head_size),
             )
             tl.store(
                 value_cache_ptr + tgt_idx_v,
-                bf16_to_fp8e4m3(value_tile.to(tl.bfloat16)),
+                bf16_to_fp8e4m3(value_tile.to(tl.bfloat16), round=FP8_ENCODE_ROUND),
                 mask=tile_pos < (num_heads * head_size),
             )
     else:
@@ -463,9 +462,11 @@ def triton_reshape_and_cache_flash(
         # (e.g. explicit cast to fp8e4m3fnuz is not supported in triton 3.4)
         key_cache = key_cache.view(kv_cache_torch_dtype)
         value_cache = value_cache.view(kv_cache_torch_dtype)
-    # On the software-emulation path we keep the cache as uint8 and the kernel
-    # encodes bf16 -> fp8e4nv bits explicitly (no native cvt on SM80/86).
+    # On the software path the cache stays uint8 and the kernel encodes to
+    # fp8e4nv bits explicitly.
     FP8_KV_CACHE = is_quantized_kv_cache(kv_cache_dtype)
+    # software fp8 encode rounding: "rn", "rne" (default), or "trunc"
+    fp8_encode_round = os.environ.get("VLLM_FP8_ENCODE_ROUND", "rne")
     # heuristics instead of autotuning
     TILE_SIZE = min(2048, triton.next_power_of_2(n))
     if current_platform.is_rocm() or current_platform.is_xpu():
@@ -507,6 +508,7 @@ def triton_reshape_and_cache_flash(
         USE_HEAD_MAJOR_LAYOUT=use_head_major_layout,
         FP8_KV_CACHE=FP8_KV_CACHE,
         FP8_SOFTWARE_CONV=fp8_software_conv,
+        FP8_ENCODE_ROUND=fp8_encode_round,
         # autotune parameters
         TILE_SIZE=TILE_SIZE,
         num_warps=num_warps,
