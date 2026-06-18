@@ -179,22 +179,6 @@ def chatglm3_lora_files():
 
 
 @pytest.fixture(scope="session")
-def baichuan_lora_files():
-    return snapshot_download(repo_id="jeeejeee/baichuan7b-text2sql-spider")
-
-
-@pytest.fixture(scope="session")
-def baichuan_zero_lora_files():
-    # all the lora_B weights are initialized to zero.
-    return snapshot_download(repo_id="jeeejeee/baichuan7b-zero-init")
-
-
-@pytest.fixture(scope="session")
-def baichuan_regex_lora_files():
-    return snapshot_download(repo_id="jeeejeee/baichuan-7b-lora-zero-regex")
-
-
-@pytest.fixture(scope="session")
 def ilama_lora_files():
     return snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")
 
