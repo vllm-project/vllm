@@ -804,6 +804,7 @@ class Step3VLForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -857,6 +858,7 @@ class Step3VLForConditionalGeneration(
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         # Graph captures only the compute (vision model + conv projector).
         # Per-item merge happens CPU-side in finalize_encoder_cudagraph_output
@@ -884,6 +886,7 @@ class Step3VLForConditionalGeneration(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         image_input = Step3VLImagePixelInputs(
             type="pixel_values",
@@ -902,6 +905,7 @@ class Step3VLForConditionalGeneration(
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
+        local_output: torch.Tensor | None = None,
     ):
         """CPU-side per-item merge after graph replay.
 
@@ -959,6 +963,7 @@ class Step3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
