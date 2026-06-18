@@ -2097,7 +2097,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
     comb_dim = nope_head_dim + rope_head_dim
     is_fnuz = current_platform.is_fp8_fnuz()
 
-    if not _ON_GFX950:  # Fallback path for un-tuned architectures.
+    if not (_ON_GFX942 or _ON_GFX950):  # Fallback path for un-tuned architectures.
         block_k = 16 if head_dim >= 256 else 32
         _sparse_attn_decode_ragged_kernel[(num_queries, heads_blocks)](
             q,
