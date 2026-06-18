@@ -17,10 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.w4a8 import (
-    convert_to_w4a8_moe_kernel_format,
-    make_w4a8_moe_kernel,
-    make_w4a8_moe_quant_config,
-    select_w4a8_moe_backend,
+    W4a8MoEKernelOracle,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
@@ -50,7 +47,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         assert self.weight_quant.actorder != "group"
         assert self.group_size == 128, "Only group size 128 supported for W4A8 MoE"
 
-        self.w4a8_backend, self.experts_cls = select_w4a8_moe_backend(
+        self.w4a8_backend, self.experts_cls = W4a8MoEKernelOracle.select_backend(
             config=self.moe,
         )
 
@@ -174,7 +171,9 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             w2_weight_chan_scale,
             b_strides1,
             b_strides2,
-        ) = convert_to_w4a8_moe_kernel_format(
+        ) = W4a8MoEKernelOracle.convert_to_kernel_format(
+            backend=self.w4a8_backend,
+            layer=layer,
             w13_weight_packed=layer.w13_weight_packed,
             w2_weight_packed=layer.w2_weight_packed,
             w13_weight_scale=layer.w13_weight_scale,
@@ -194,9 +193,10 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is not None:
             assert self.experts_cls is not None
-            self.moe_kernel = make_w4a8_moe_kernel(
+            self.moe_kernel = W4a8MoEKernelOracle.make_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
+                backend=self.w4a8_backend,
                 experts_cls=self.experts_cls,
                 b_strides1=self.b_strides1,
                 b_strides2=self.b_strides2,
@@ -205,7 +205,8 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
-        return make_w4a8_moe_quant_config(
+        return W4a8MoEKernelOracle.make_quant_config(
+            backend=self.w4a8_backend,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             g1_alphas=layer.w13_weight_chan_scale,
