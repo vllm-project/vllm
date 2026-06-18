@@ -503,7 +503,18 @@ def select_mxfp4_moe_backend(
             activation_format,
         )
 
-    if current_platform.is_cuda() or current_platform.is_rocm():
+    if current_platform.is_rocm():
+        backend = Mxfp4MoeBackend.TRITON_UNFUSED
+        logger.info_once(_make_log_backend(backend))
+        return _return_or_raise(
+            Mxfp4MoeBackend.TRITON_UNFUSED,
+            config,
+            kMxfp4Static,
+            None,
+            activation_format,
+        )
+
+    if current_platform.is_cuda():
         raise NotImplementedError(
             "No MXFP4 MoE backend supports the deployment configuration. "
             f"weight_key=kMxfp4Static, activation_key={activation_key}. "
