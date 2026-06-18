@@ -18,7 +18,6 @@ from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
     LoRAExpertsMixin,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
@@ -290,9 +289,7 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
         x = kv_pairs & 0xFFFF0000 | 0x00000001
         run_lengths = tl.associative_scan(x, 0, _keyed_add)
         exclusive_run_lengths = (run_lengths - 1) & 0xFFFF
-        gates = tl.load(
-            PartialOffs + pid_m * stride_pm + expert * stride_pn, mask=mask
-        )
+        gates = tl.load(PartialOffs + pid_m * stride_pm + expert * stride_pn, mask=mask)
         gates += tl.load(TokensStart + expert, mask=mask)
         gates += exclusive_run_lengths
         tl.store(ScatterIndx + offs, gates, mask=mask)
@@ -373,9 +370,7 @@ def _patch_legacy_routing_for_nonpow2_topk() -> None:
         hist, partial_hist = bitmatrix.sum(partials_block_size=HIST_BLOCK_M)
         hist = hist[:n_expts_tot]
         expt_offs = torch.empty(n_expts_tot, dtype=torch.int32, device=device)
-        combined_indx = torch.empty(
-            n_gates_pad * 2, dtype=torch.int32, device=device
-        )
+        combined_indx = torch.empty(n_gates_pad * 2, dtype=torch.int32, device=device)
         topk_indx = combined_indx[:n_gates_pad]
         gate_indx = combined_indx[n_gates_pad:]
         gate_scal = torch.empty(n_gates_pad, dtype=dtype, device=device)
@@ -1220,183 +1215,6 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
             )
 
         self.moe_sum(intermediate_cache3.view(-1, topk, K), output)
-
-
-class BatchedUnfusedOAITritonExperts(BaseOAITritonExperts):
-    """
-    OAI-Triton MXFP4 experts in the *batched* activation format
-    ``(num_experts, max_tokens_per_expert, hidden)``, for use with
-    batched all2all backends (e.g. ``deepep_low_latency``).
-
-    Unlike ``UnfusedOAITritonExperts`` (which consumes the Standard ragged
-    format and routes via gather/scatter), this consumes the per-expert padded
-    batch produced by the prepare/finalize and drives ``matmul_ogs`` in its
-    batched mode (3D input, no routing/gather/scatter). Top-k weighting and
-    the cross-expert reduction are deferred to ``finalize()``.
-    """
-
-    def __init__(
-        self,
-        moe_config: FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-        max_num_tokens: int,
-        num_dispatchers: int,
-    ):
-        super().__init__(
-            moe_config=moe_config,
-            quant_config=quant_config,
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=num_dispatchers,
-        )
-
-    @staticmethod
-    def activation_format() -> mk.FusedMoEActivationFormat:
-        return mk.FusedMoEActivationFormat.BatchedExperts
-
-    @staticmethod
-    def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.SWIGLUOAI,
-            MoEActivation.SWIGLUSTEP,
-        ]
-
-    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        # Top-k weighting and reduction are done by the prepare/finalize.
-        return TopKWeightAndReduceDelegate()
-
-    def moe_problem_size(
-        self,
-        a1: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ) -> tuple[int, int, int, int, int]:
-        # Batched format: a1 is (E, max_tokens, K); w1 is (E, K, 2N).
-        assert a1.dim() == 3
-        E, max_num_tokens, _ = a1.shape
-        N = w1.shape[-1]
-        K = a1.shape[-1]
-        topk = topk_ids.size(1)
-        return E, max_num_tokens, N, K, topk
-
-    def activation(
-        self,
-        activation: MoEActivation,
-        output: torch.Tensor,
-        input: torch.Tensor,
-        **kwargs,
-    ) -> None:
-        quant_config = self.quant_config or FUSED_MOE_UNQUANTIZED_CONFIG
-        if activation == MoEActivation.SWIGLUOAI:
-            alpha = (
-                quant_config.gemm1_alpha
-                if quant_config.gemm1_alpha is not None
-                else 1.702
-            )
-            limit = (
-                quant_config.gemm1_clamp_limit
-                if quant_config.gemm1_clamp_limit is not None
-                else 7.0
-            )
-            torch.ops._C.swigluoai_and_mul(output, input, alpha, limit)
-        elif (
-            activation == MoEActivation.SILU
-            and quant_config.gemm1_clamp_limit is not None
-        ):
-            swiglu_limit_func(output, input, quant_config.gemm1_clamp_limit)
-        else:
-            super().activation(activation, output, input)
-
-    def workspace_shapes(
-        self,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        global_num_experts: int,
-        local_num_experts: int,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: MoEActivation,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        assert self.max_num_tokens is not None
-        assert self.num_dispatchers is not None
-        num_experts = local_num_experts
-        max_tokens = self.max_num_tokens * self.num_dispatchers
-        activation_out_dim = self.adjust_N_for_activation(N, activation)
-        # N is the gate_up dim (2 * intermediate); activation halves it.
-        workspace13 = (num_experts, max_tokens, N)
-        workspace2 = (num_experts, max_tokens, activation_out_dim)
-        output = (num_experts, max_tokens, K)
-        return (workspace13, workspace2, output)
-
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: MoEActivation,
-        global_num_experts: int,
-        expert_map: torch.Tensor | None,
-        a1q_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        apply_router_weight_on_input: bool,
-    ):
-        quant_config = self.quant_config or FUSED_MOE_UNQUANTIZED_CONFIG
-
-        assert hidden_states.dim() == 3, (
-            "BatchedUnfusedOAITritonExperts expects the batched "
-            "(num_experts, max_tokens, hidden) activation format"
-        )
-        assert hidden_states.dtype == torch.bfloat16
-
-        E, max_num_tokens, N, K, _ = self.moe_problem_size(
-            hidden_states, w1, w2, topk_ids
-        )
-        activation_out_dim = self.adjust_N_for_activation(N, activation)
-
-        intermediate_cache1 = _resize_cache(workspace13, (E, max_num_tokens, N))
-        intermediate_cache2 = _resize_cache(
-            workspace2, (E, max_num_tokens, activation_out_dim)
-        )
-
-        # MM1: gate_up projection in batched mode (no routing/gather/scatter).
-        # matmul_ogs computes a dense per-expert GEMM over all max_tokens rows;
-        # padding rows are dropped later by finalize() via expert_num_tokens.
-        matmul_ogs(
-            hidden_states,
-            w1,
-            quant_config.w1_bias,
-            precision_config=quant_config.w1_precision,
-            fused_activation=None,
-            y=intermediate_cache1,
-        )
-
-        # Activation (SiLU+clamp for DeepSeek-V4, SwigluOAI for gpt-oss),
-        # applied element-wise on the flattened (E*max_tokens, *) view.
-        self.activation(
-            activation,
-            intermediate_cache2.view(-1, activation_out_dim),
-            intermediate_cache1.view(-1, N),
-        )
-
-        # MM2: down projection -> output (E, max_tokens, K). Top-k weighting and
-        # cross-expert reduction are deferred to finalize() (see
-        # finalize_weight_and_reduce_impl).
-        matmul_ogs(
-            intermediate_cache2,
-            w2,
-            quant_config.w2_bias,
-            precision_config=quant_config.w2_precision,
-            y=output,
-        )
 
 
 class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
