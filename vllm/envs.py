@@ -108,6 +108,7 @@ if TYPE_CHECKING:
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
+    VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
@@ -260,6 +261,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
+    VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
@@ -1027,9 +1029,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FASTSAFETENSORS_QUEUE_SIZE": lambda: int(
         os.getenv("VLLM_FASTSAFETENSORS_QUEUE_SIZE", "0")
     ),
-    # Time in ms for the zmq client to wait for a response from the backend
-    # server for simple data operations
-    "VLLM_RPC_TIMEOUT": lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
     # Timeout in seconds for keeping HTTP connections alive in API server
     "VLLM_HTTP_TIMEOUT_KEEP_ALIVE": lambda: int(
         os.environ.get("VLLM_HTTP_TIMEOUT_KEEP_ALIVE", "5")
@@ -1074,6 +1073,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
+    # If set, monkey-patch triton.runtime.autotuner.Autotuner.run to skip
+    # benchmarking and select the first valid config (walking past invalid
+    # ones). Used to eliminate autotuning variability when measuring kernel
+    # performance and applied before running any kernel.
+    "VLLM_TRITON_FORCE_FIRST_CONFIG": lambda: (
+        os.environ.get("VLLM_TRITON_FORCE_FIRST_CONFIG", "0").strip().lower()
+        in ("1", "true")
+    ),
     # If set, allow loading or unloading lora adapters in runtime,
     "VLLM_ALLOW_RUNTIME_LORA_UPDATING": lambda: (
         os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower()
@@ -1841,6 +1848,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable using UVA (Unified Virtual Addressing) for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
+    ),
+    # On WSL2 with a compatible kernel (>= 4.19.121), pinned memory is
+    # supported but disabled by default due to a small performance regression.
+    # Set to 1 when pinned memory or UVA is required (e.g. CPU offloading
+    # or v2 model runner).
+    "VLLM_WSL2_ENABLE_PIN_MEMORY": lambda: bool(
+        int(os.getenv("VLLM_WSL2_ENABLE_PIN_MEMORY", "0"))
     ),
     # Disable logging of vLLM logo at server startup time.
     "VLLM_DISABLE_LOG_LOGO": lambda: bool(int(os.getenv("VLLM_DISABLE_LOG_LOGO", "0"))),
