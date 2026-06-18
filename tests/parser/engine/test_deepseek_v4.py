@@ -275,6 +275,122 @@ class TestThinkingModeConfig:
         assert p.parser_engine_config.initial_state.name == "CONTENT"
 
 
+# ── Implicit reasoning end (missing </think> before tool calls) ─────
+
+
+class TestImplicitReasoningEnd:
+    """Tool call markers end reasoning implicitly when </think> is missing.
+
+    DeepSeek V4 models occasionally omit </think> before emitting tool calls.
+    The (REASONING, TOOL_START) transition handles this gracefully.
+    """
+
+    @pytest.fixture
+    def thinking_parser(self, mock_tokenizer):
+        return DeepSeekV4Parser(mock_tokenizer, chat_template_kwargs={"thinking": True})
+
+    def _reasoning_then_tool(self, reasoning_text: str) -> str:
+        return reasoning_text + _tool_calls(
+            _invoke("get_weather", ("location", "true", "NYC")),
+        )
+
+    def test_non_streaming_extract_reasoning_implicit_end(self, thinking_parser):
+        text = self._reasoning_then_tool("Let me look up the weather.\n\n")
+        reasoning, content = thinking_parser.extract_reasoning(text, None)
+        assert reasoning == "Let me look up the weather."
+        assert DSML_TOOL_START not in reasoning
+        assert DSML_INVOKE_PREFIX not in reasoning
+        assert content is None
+
+    def test_non_streaming_extract_tool_calls_implicit_end(
+        self, thinking_parser, mock_request
+    ):
+        text = self._reasoning_then_tool("Let me look up the weather.\n\n")
+        result = thinking_parser.extract_tool_calls(text, mock_request)
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "get_weather"
+        args = json.loads(result.tool_calls[0].function.arguments)
+        assert args == {"location": "NYC"}
+
+    def test_non_streaming_parse_implicit_end(self, thinking_parser, mock_request):
+        text = self._reasoning_then_tool("Let me look up the weather.\n\n")
+        reasoning, content, tool_calls = thinking_parser.parse(text, mock_request)
+        assert reasoning == "Let me look up the weather."
+        assert content is None
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0].name == "get_weather"
+        args = json.loads(tool_calls[0].arguments)
+        assert args == {"location": "NYC"}
+
+    def test_streaming_reasoning_implicit_end(self, thinking_parser):
+        chunks = [
+            "Let me look up the weather.\n\n",
+            DSML_TOOL_START,
+            DSML_INVOKE_PREFIX + "get_weather" + DSML_INVOKE_NAME_END,
+        ]
+        reasoning, content = simulate_reasoning_streaming(thinking_parser, chunks)
+        assert reasoning == "Let me look up the weather."
+        assert DSML_TOOL_START not in reasoning
+        assert DSML_INVOKE_PREFIX not in reasoning
+
+    def test_streaming_tool_extraction_implicit_end(
+        self, thinking_parser, mock_request
+    ):
+        chunks = [
+            "Let me check.\n\n",
+            DSML_TOOL_START,
+            DSML_INVOKE_PREFIX
+            + "get_weather"
+            + DSML_INVOKE_NAME_END
+            + "\n"
+            + _param("location", "true", "NYC")
+            + "\n"
+            + DSML_INVOKE_END,
+            DSML_TOOL_END,
+        ]
+        results = simulate_tool_streaming(thinking_parser, mock_request, chunks)
+        assert collect_function_name(results) == "get_weather"
+        args = json.loads(collect_tool_arguments(results))
+        assert args == {"location": "NYC"}
+
+    def test_thinking_false_explicit_think_then_tool_call(self, mock_tokenizer):
+        parser = DeepSeekV4Parser(mock_tokenizer)
+        chunks = [
+            DSML_THINK_START,
+            "Let me check the weather.",
+            DSML_TOOL_START,
+            DSML_INVOKE_PREFIX + "get_weather" + DSML_INVOKE_NAME_END,
+        ]
+        reasoning, content = simulate_reasoning_streaming(parser, chunks)
+        assert "Let me check the weather" in reasoning
+        assert DSML_TOOL_START not in reasoning
+        assert DSML_THINK_START not in reasoning
+
+    def test_non_streaming_parallel_tools_after_implicit_end(
+        self, thinking_parser, mock_request
+    ):
+        text = "I need both.\n\n" + _tool_calls(
+            _invoke("get_weather", ("location", "true", "NYC")),
+            _invoke("get_time", ("timezone", "true", "EST")),
+        )
+        result = thinking_parser.extract_tool_calls(text, mock_request)
+        assert result.tools_called is True
+        assert len(result.tool_calls) == 2
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert result.tool_calls[1].function.name == "get_time"
+
+    def test_streaming_implicit_end_trailing_whitespace_stripped(self, thinking_parser):
+        chunks = [
+            "Reasoning.\n\n\n",
+            DSML_TOOL_START,
+            DSML_INVOKE_PREFIX + "func" + DSML_INVOKE_NAME_END,
+        ]
+        reasoning, content = simulate_reasoning_streaming(thinking_parser, chunks)
+        assert reasoning == "Reasoning."
+
+
 # ── Wrapper argument unwrapping ──────────────────────────────────────
 
 
