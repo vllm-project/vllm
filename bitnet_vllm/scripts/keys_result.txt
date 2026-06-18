@@ -1,0 +1,22 @@
+=== Layer 0 ===
+  input_layernorm.weight                             [2560]                    BF16
+  mlp.down_proj.weight                               [2560, 6912]              BF16
+  mlp.ffn_sub_norm.weight                            [6912]                    BF16
+  mlp.gate_proj.weight                               [6912, 2560]              BF16
+  mlp.up_proj.weight                                 [6912, 2560]              BF16
+  post_attention_layernorm.weight                    [2560]                    BF16
+  self_attn.attn_sub_norm.weight                     [2560]                    BF16
+  self_attn.k_proj.weight                            [640, 2560]               BF16
+  self_attn.o_proj.weight                            [2560, 2560]              BF16
+  self_attn.q_proj.weight                            [2560, 2560]              BF16
+  self_attn.v_proj.weight                            [640, 2560]               BF16
+
+=== Non-layer keys ===
+  model.embed_tokens.weight                          [128256, 2560]            BF16
+  model.norm.weight                                  [2560]                    BF16
+
+Total keys: 332
+inner_attn_ln count: 0
+ffn_layernorm count: 0
+lm_head count: 0
+Keys per layer: 11

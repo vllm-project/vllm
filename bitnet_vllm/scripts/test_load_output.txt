@@ -1,0 +1,199 @@
+﻿python : c:\programming_pr
+oject\github\vllm\vllm\__i
+nit__.py:7: 
+RuntimeWarning: Failed to 
+read commit hash:
+At line:1 char:57
++ ... ct\github\vllm"; 
+python bitnet_vllm/scripts
+/test_load.py 2>&1 | 
+Out-F ...
++                      ~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~
+    + CategoryInfo        
+      : NotSpecified: (c  
+  :\programming_...ad c   
+ ommit hash::String) [    
+], RemoteException
+    + FullyQualifiedError 
+   Id : NativeCommandErr  
+  or
+ 
+No module named 
+'vllm._version'
+  from .version import 
+__version__, 
+__version_tuple__  # 
+isort:skip
+WARNING 04-12 21:47:30 [__init__.py:28] The vLLM package was not found, so its version could not be inspected. This may cause platform detection to fail.
+WARNING 04-12 21:47:30 [__init__.py:28] The vLLM package was not found, so its version could not be inspected. This may cause platform detection to fail.
+Traceback (most recent 
+call last):
+  File "C:\programming_pro
+ject\github\vllm\bitnet_vl
+lm\scripts\test_load.py", 
+line 16, in <module>
+    import bitnet_vllm  # 
+noqa: F401
+    ^^^^^^^^^^^^^^^^^^
+  File "c:\programming_pro
+ject\github\vllm\bitnet_vl
+lm\__init__.py", line 14, 
+in <module>
+    from vllm import 
+ModelRegistry
+  File "<frozen 
+importlib._bootstrap>", 
+line 1229, in 
+_handle_fromlist
+  File "c:\programming_pro
+ject\github\vllm\vllm\__in
+it__.py", line 70, in 
+__getattr__
+    module = import_module
+(module_name, __package__)
+             ^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Program Files\W
+indowsApps\PythonSoftwareF
+oundation.Python.3.11_3.11
+.2544.0_x64__qbz5n2kfra8p0
+\Lib\importlib\__init__.py
+", line 126, in 
+import_module
+    return _bootstrap._gcd
+_import(name[level:], 
+package, level)
+           ^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^
+  File "c:\programming_pro
+ject\github\vllm\vllm\mode
+l_executor\__init__.py", 
+line 4, in <module>
+    from vllm.model_execut
+or.parameter import 
+BasevLLMParameter, 
+PackedvLLMParameter
+  File "c:\programming_pro
+ject\github\vllm\vllm\mode
+l_executor\parameter.py", 
+line 11, in <module>
+    from vllm.distributed 
+import (
+  File "c:\programming_pro
+ject\github\vllm\vllm\dist
+ributed\__init__.py", 
+line 4, in <module>
+    from 
+.communication_op import *
+  File "c:\programming_pro
+ject\github\vllm\vllm\dist
+ributed\communication_op.p
+y", line 9, in <module>
+    from .parallel_state 
+import get_tp_group
+  File "c:\programming_pro
+ject\github\vllm\vllm\dist
+ributed\parallel_state.py"
+, line 283, in <module>
+    
+direct_register_custom_op(
+  File "c:\programming_pro
+ject\github\vllm\vllm\util
+s\torch_utils.py", line 
+817, in 
+direct_register_custom_op
+    schema_str = 
+infer_schema(op_func, 
+mutates_args=mutates_args)
+                 ^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^
+  File "C:\Users\yuton\App
+Data\Local\Packages\Python
+SoftwareFoundation.Python.
+3.11_qbz5n2kfra8p0\LocalCa
+che\local-packages\Python3
+11\site-packages\torch\_li
+brary\infer_schema.py", 
+line 106, in infer_schema
+    error_fn(
+  File "C:\Users\yuton\App
+Data\Local\Packages\Python
+SoftwareFoundation.Python.
+3.11_qbz5n2kfra8p0\LocalCa
+che\local-packages\Python3
+11\site-packages\torch\_li
+brary\infer_schema.py", 
+line 58, in error_fn
+    raise ValueError(
+ValueError: 
+infer_schema(func): 
+Parameter output_shape 
+has unsupported type 
+list[int]. The valid 
+types are: 
+dict_keys([<class 
+'torch.Tensor'>, typing.Op
+tional[torch.Tensor], typi
+ng.Sequence[torch.Tensor],
+ typing.List[torch.Tensor]
+, typing.Sequence[typing.O
+ptional[torch.Tensor]], ty
+ping.List[typing.Optional[
+torch.Tensor]], <class 
+'int'>, 
+typing.Optional[int], 
+typing.Sequence[int], 
+typing.List[int], typing.O
+ptional[typing.Sequence[in
+t]], typing.Optional[typin
+g.List[int]], <class 
+'float'>, 
+typing.Optional[float], 
+typing.Sequence[float], 
+typing.List[float], typing
+.Optional[typing.Sequence[
+float]], typing.Optional[t
+yping.List[float]], 
+<class 'bool'>, 
+typing.Optional[bool], 
+typing.Sequence[bool], 
+typing.List[bool], typing.
+Optional[typing.Sequence[b
+ool]], typing.Optional[typ
+ing.List[bool]], <class 
+'str'>, 
+typing.Optional[str], 
+typing.Union[int, float, 
+bool], typing.Union[int, 
+float, bool, NoneType], ty
+ping.Sequence[typing.Union
+[int, float, bool]], typin
+g.List[typing.Union[int, 
+float, bool]], <class 
+'torch.dtype'>, typing.Opt
+ional[torch.dtype], 
+<class 'torch.device'>, ty
+ping.Optional[torch.device
+]]). Got func with 
+signature (A: 
+torch.Tensor, B: 
+torch.Tensor, A_scale: 
+torch.Tensor, B_scale: 
+torch.Tensor, reduce_op: 
+str, orig_scatter_dim: 
+int, scatter_dim_after_may
+be_reshape: int, 
+group_name: str, 
+output_shape: list[int], 
+bias: torch.Tensor | None 
+= None, result_scale: 
+torch.Tensor | None = 
+None, out_dtype: 
+torch.dtype | None = 
+None, use_fast_accum: 
+bool = False) -> 
+torch.Tensor)
