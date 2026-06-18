@@ -189,17 +189,18 @@ class OpenAIServingRender:
         self.trust_request_chat_template = trust_request_chat_template
         self.enable_auto_tools = enable_auto_tools
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
+        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
         self.parser: type[Parser] | None = ParserManager.get_parser(
             tool_parser_name=tool_parser,
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=model_config.model,
+            is_harmony=self.use_harmony,
         )
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
         )
         self.log_error_stack = log_error_stack
-        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
         self.supports_browsing = False
         self.supports_code_interpreter = False
 
