@@ -129,6 +129,18 @@ class TestArgConverter:
         result = json.loads(_dsml_arg_converter(raw, partial=True))
         assert result == {"city": "Tokyo"}
 
+    def test_partial_value_with_angle_bracket(self):
+        raw = f"<{_PARAM_OPEN.format(name='code', is_str='true')}a<b"
+        result = json.loads(_dsml_arg_converter(raw, partial=True))
+        assert result == {"code": "a<b"}
+
+    def test_partial_value_with_angle_bracket_and_complete_param(self):
+        raw = self._raw(("city", "true", "Tokyo"))
+        raw += f"<{_PARAM_OPEN.format(name='expr', is_str='true')}x<5"
+        result = json.loads(_dsml_arg_converter(raw, partial=True))
+        assert result["city"] == "Tokyo"
+        assert result["expr"] == "x<5"
+
     def test_null_string_false(self):
         raw = self._raw(("val", "false", "null"))
         result = json.loads(_dsml_arg_converter(raw, partial=False))

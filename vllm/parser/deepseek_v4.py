@@ -56,7 +56,7 @@ _PARAM_RE = re.compile(
 )
 _PARTIAL_PARAM_RE = re.compile(
     rf'<{_ESCAPED_DSML}parameter\s+name="([^"]+)"\s+string="(true|false)">'
-    rf"([^<]*)$",
+    rf"(.*)$",
     re.DOTALL,
 )
 
@@ -64,6 +64,7 @@ _PARTIAL_PARAM_RE = re.compile(
 def _dsml_arg_converter(raw_args: str, partial: bool) -> str:
     params: dict[str, object] = {}
 
+    last_end = 0
     for m in _PARAM_RE.finditer(raw_args):
         name, is_str, value = m.group(1), m.group(2), m.group(3)
         if is_str == "true":
@@ -73,9 +74,10 @@ def _dsml_arg_converter(raw_args: str, partial: bool) -> str:
                 params[name] = json.loads(value)
             except (json.JSONDecodeError, ValueError):
                 params[name] = value
+        last_end = m.end()
 
     if partial:
-        pm = _PARTIAL_PARAM_RE.search(raw_args)
+        pm = _PARTIAL_PARAM_RE.search(raw_args, last_end)
         if pm:
             name, is_str, value = pm.group(1), pm.group(2), pm.group(3)
             if is_str == "true":
