@@ -5,7 +5,6 @@ from typing import Any
 
 import torch
 
-from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
 )
@@ -221,8 +220,7 @@ def maybe_make_prepare_finalize(
             use_fp8_dispatch=use_fp8_dispatch,
         )
         handle = all2all_manager.get_handle(all_to_all_args)
-        vllm_config = get_current_vllm_config()
-        use_cudagraph = not vllm_config.model_config.enforce_eager
+        use_cudagraph = not moe.enforce_eager
 
         prepare_finalize = DeepEPV2PrepareAndFinalize(
             buffer=handle,
@@ -282,9 +280,7 @@ def maybe_make_prepare_finalize(
 
     elif moe.use_fi_nvl_one_sided_kernels:
         assert quant_config is not None
-        max_num_tokens = (
-            get_current_vllm_config().scheduler_config.max_num_batched_tokens
-        )
+        max_num_tokens = moe.max_num_tokens
         if quant_config.quant_dtype is None:
             dispatch_dtype_bytes_per_elem = 2
             dispatch_scale_bytes_per_token = 0
