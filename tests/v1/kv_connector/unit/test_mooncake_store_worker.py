@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
+    PoolKey,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
@@ -238,6 +239,31 @@ def _patch_worker_runtime(monkeypatch, *, local_ip: str = "10.0.0.7") -> None:
     monkeypatch.setattr(worker, "get_pcp_group", lambda: single_rank_group)
     monkeypatch.setattr(worker, "get_dcp_group", lambda: single_rank_group)
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
+
+
+def test_pool_key_to_string_without_prefix_is_unchanged():
+    """Default (empty) cache_prefix keeps keys byte-identical to the
+    historical unprefixed format so existing deployments keep their hits."""
+    key = PoolKey(KeyMetadata("test-model", 0, 0, 0, 0), "deadbeef")
+    assert (
+        key.to_string() == "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
+    )
+
+
+def test_pool_key_cache_prefix_namespaces_and_disambiguates():
+    """A non-empty cache_prefix is prepended, and two instances with
+    different prefixes never collide on identical block hashes."""
+    md_a = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="depA")
+    md_b = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="depB")
+
+    key_a = PoolKey(md_a, "deadbeef")
+    key_b = PoolKey(md_b, "deadbeef")
+
+    assert key_a.to_string() == (
+        "depA@test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
+    )
+    assert key_a.to_string() != key_b.to_string()
+    assert hash(key_a) != hash(key_b)
 
 
 def test_default_local_buffer_size_matches_pr40900():
@@ -1205,6 +1231,67 @@ def test_lookup_swa_single_group_returns_full_when_tail_window_present():
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
     assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 64
+
+
+def test_lookup_checks_all_potential_swa_hit_boundaries():
+    """Lookup should skip SWA chunks that can never validate a hit, but still
+    check earlier aligned boundaries when sparse retention stores only the
+    current request's replay boundary.
+    """
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        SlidingWindowSpec,
+    )
+
+    worker = _make_bare_worker(block_size=8)
+    full = FullAttentionSpec(block_size=32, num_kv_heads=8, head_size=64, dtype=None)
+    swa = SlidingWindowSpec(
+        block_size=8, num_kv_heads=8, head_size=64, dtype=None, sliding_window=8
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["full"], full),
+        KVCacheGroupSpec(["swa"], swa),
+    ]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+            block_size=32,
+            hash_block_size=8,
+        ),
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+            block_size=8,
+            hash_block_size=8,
+        ),
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=32,
+        hash_block_size=8,
+        retention_interval=0,
+    )
+    # Candidate order: 3 full-attention chunks, then SWA chunks 3, 7, 11.
+    # Only the first full chunk and the SWA chunk ending at token 32 exist, so
+    # lookup should recover a 32-token external prefix hit. A sparse
+    # prompt-specific store mask for num_prompt_tokens=96 would only check SWA
+    # chunk 7 and miss this earlier reusable prefix.
+    worker.store.batch_is_exist.return_value = [1, 0, 0, 1, 0, 0]
+
+    result = worker.lookup(
+        96,
+        [f"h{i}".encode() for i in range(12)],
+    )
+
+    assert result == 32
+    keys = worker.store.batch_is_exist.call_args.args[0]
+    assert len(keys) == 6
+    swa_keys = [key for key in keys if "@group:1@" in key]
+    assert swa_keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6833",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6837",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@683131",
+    ]
 
 
 # ---------------------------------------------------------------------------
