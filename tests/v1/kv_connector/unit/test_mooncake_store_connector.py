@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import threading
 import time
 from unittest.mock import MagicMock, patch
 
@@ -407,7 +408,9 @@ def test_lookup_key_client_lookup_prepends_typed_tag():
     fake_socket = mock_make_socket.return_value
     fake_socket.recv.return_value = (5).to_bytes(4, "big")
 
-    assert client.lookup(token_len=128, block_hashes=[]) == 5
+    # Blocking lookup (non_block defaults to False) runs on the executor and
+    # returns the resolved hit length.
+    assert client.lookup("req0", token_len=128, block_hashes=[]) == 5
 
     sent_frames = fake_socket.send_multipart.call_args[0][0]
     assert sent_frames[0] == protocol.LOOKUP_MSG
@@ -436,19 +439,31 @@ def test_lookup_key_client_reset_uses_typed_protocol():
     assert client.reset() is False
 
 
-def _poll_get_or_submit(client, req_id, token_len=128, block_hashes=(), timeout=5.0):
-    """Drive get_or_submit until the background lookup completes."""
+def _poll_lookup(client, req_id, token_len=128, block_hashes=(), timeout=5.0):
+    """Drive non-blocking lookup until the executor completes it."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        result = client.get_or_submit(req_id, token_len, list(block_hashes))
+        result = client.lookup(req_id, token_len, list(block_hashes), non_block=True)
         if result is not None:
             return result
         time.sleep(0.005)
     return None
 
 
-def test_lookup_key_client_get_or_submit_async():
-    """get_or_submit() defers to the background thread: None first, hit later."""
+def _gated_recv(gate: threading.Event, value: int):
+    """Mock recv side-effect that blocks until ``gate`` is set, so the
+    executor's lookup can be held pending deterministically."""
+
+    def recv():
+        gate.wait()
+        return value.to_bytes(4, "big")
+
+    return recv
+
+
+def test_lookup_key_client_non_block_lookup_async():
+    """Non-blocking lookup defers to the executor: None first, hit once the
+    Future resolves."""
     vllm_config = _make_vllm_config()
 
     with patch(
@@ -458,20 +473,21 @@ def test_lookup_key_client_get_or_submit_async():
         client = worker.LookupKeyClient(vllm_config)
 
     fake_socket = mock_make_socket.return_value
-    fake_socket.recv.return_value = (7).to_bytes(4, "big")
+    # Hold the executor's lookup pending until we release the gate.
+    gate = threading.Event()
+    fake_socket.recv.side_effect = _gated_recv(gate, 7)
 
-    # First query submits the lookup and returns None immediately.
-    assert client.get_or_submit("req1", 128, []) is None
-    # The background thread resolves it; a later poll returns the hit length.
-    assert _poll_get_or_submit(client, "req1") == 7
-    # Result is consumed (popped) on read.
-    with client.state_lock:
-        assert "req1" not in client.results
-        assert "req1" not in client.inflight
+    # First query submits the lookup and returns None while it is in flight.
+    assert client.lookup("req1", 128, [], non_block=True) is None
+    # Release the executor; a later poll returns the hit length.
+    gate.set()
+    assert _poll_lookup(client, "req1") == 7
+    # Future is consumed (popped) on read.
+    assert "req1" not in client.futures
 
 
 def test_lookup_key_client_discard_clears_state():
-    """discard() drops a completed lookup result so it is not served stale."""
+    """discard() drops a completed lookup Future so it is not served stale."""
     vllm_config = _make_vllm_config()
 
     with patch(
@@ -481,21 +497,26 @@ def test_lookup_key_client_discard_clears_state():
         client = worker.LookupKeyClient(vllm_config)
 
     fake_socket = mock_make_socket.return_value
-    fake_socket.recv.return_value = (9).to_bytes(4, "big")
+    gate = threading.Event()
+    fake_socket.recv.side_effect = _gated_recv(gate, 9)
 
-    client.get_or_submit("req2", 128, [])
-    # Wait for the background thread to store the result, then discard it.
+    # Submit while gated so the call returns None and the Future stays in
+    # `futures` (unconsumed) once it resolves.
+    assert client.lookup("req2", 128, [], non_block=True) is None
+    gate.set()
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
-        with client.state_lock:
-            if "req2" in client.results:
-                break
+        if client.futures["req2"].done():
+            break
         time.sleep(0.005)
+    # discard() drops the completed result before any lookup consumes it.
     client.discard("req2")
-    with client.state_lock:
-        assert "req2" not in client.results
-    # A fresh query re-submits rather than returning a stale value.
-    assert client.get_or_submit("req2", 128, []) is None
+    assert "req2" not in client.futures
+    # A fresh query re-submits rather than returning a stale value: hold the
+    # gate so the resubmitted lookup stays in flight.
+    gate.clear()
+    assert client.lookup("req2", 128, [], non_block=True) is None
+    gate.set()  # release the executor so the worker thread can drain
 
 
 def test_get_num_new_matched_tokens_async_defers_then_reports():
@@ -526,13 +547,13 @@ def test_get_num_new_matched_tokens_async_defers_then_reports():
     request.block_hashes = []
 
     # Lookup not ready -> defer.
-    mock_client.get_or_submit.return_value = None
+    mock_client.lookup.return_value = None
     assert sched.get_num_new_matched_tokens(request, 0) == (None, False)
     assert "r1" not in sched.load_specs
 
     # Lookup ready with a hit -> report need_to_allocate + async-load flag.
     hit = 3 * block_size
-    mock_client.get_or_submit.return_value = hit
+    mock_client.lookup.return_value = hit
     need, load_async = sched.get_num_new_matched_tokens(request, 0)
     assert need == hit
     assert load_async == sched.load_async

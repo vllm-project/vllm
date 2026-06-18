@@ -86,18 +86,15 @@ class MooncakeStoreScheduler:
         if token_len < self._block_size:
             return 0, False
 
-        if self.lookup_async:
-            hit = self.client.try_lookup(
-                request.request_id, token_len, request.block_hashes
-            )
-            if hit is None:
-                # Lookup not ready yet; scheduler will retry on a later step.
-                return None, False
-            num_external_hit_tokens = hit
-        else:
-            num_external_hit_tokens = self.client.lookup(
-                token_len, request.block_hashes
-            )
+        num_external_hit_tokens = self.client.lookup(
+            request.request_id,
+            token_len,
+            request.block_hashes,
+            non_block=self.lookup_async,
+        )
+        if num_external_hit_tokens is None:
+            # Lookup not ready yet; scheduler will retry on a later step.
+            return None, False
 
         if num_external_hit_tokens == request.num_tokens:
             # Leave a sub-block tail uncomputed for sampling, on a block

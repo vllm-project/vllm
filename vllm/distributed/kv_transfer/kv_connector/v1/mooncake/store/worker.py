@@ -19,6 +19,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
@@ -1553,77 +1554,51 @@ class LookupKeyClient:
         )
 
         # Async lookup support
-        self.socket_lock = threading.Lock()
-        self.state_lock = threading.Lock()
-        self.results: dict[str, int] = {}
-        self.inflight: set[str] = set()
-        self.cancelled: set[str] = set()
-        self.job_queue: queue.Queue[tuple[str, int, list[BlockHash]] | None] = (
-            queue.Queue()
+        self.executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="MooncakeLookupClient"
         )
-        self.thread = threading.Thread(
-            target=self.process_lookups,
-            name="MooncakeLookupClient",
-            daemon=True,
-        )
-        self.thread.start()
+        self.futures: dict[str, Future[int]] = {}
 
-    def lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
+    def _lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         token_len_bytes = token_len.to_bytes(4, byteorder="big")
         all_frames = [LOOKUP_MSG, token_len_bytes] + list(hash_frames)
-        with self.socket_lock:
-            self.socket.send_multipart(all_frames, copy=False)
-            resp = self.socket.recv()
+        self.socket.send_multipart(all_frames, copy=False)
+        resp = self.socket.recv()
         result = int.from_bytes(resp, "big")
         return result
 
-    def try_lookup(
-        self, req_id: str, token_len: int, block_hashes: list[BlockHash]
+    def lookup(
+        self,
+        req_id: str,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        non_block: bool = False,
     ) -> int | None:
-        """Non-blocking lookup. Submits on first call; returns None until the
-        result is ready, so the caller retries on a later step."""
-        with self.state_lock:
-            if req_id in self.results:
-                return self.results.pop(req_id)
-            if req_id not in self.inflight:
-                self.inflight.add(req_id)
-                self.job_queue.put((req_id, token_len, list(block_hashes)))
+        """If non_block is True, will return None until the result is ready,
+        so the caller retries on a later step."""
+        future = self.futures.get(req_id)
+        if future is None:
+            future = self.executor.submit(self._lookup, token_len, list(block_hashes))
+            self.futures[req_id] = future
+        if non_block and not future.done():
             return None
+        try:
+            return future.result()
+        except Exception as e:
+            logger.error("Async Mooncake lookup failed for %s: %s", req_id, e)
+            return 0
+        finally:
+            del self.futures[req_id]
 
     def discard(self, req_id: str) -> None:
         """Drop any cached/in-flight lookup for ``req_id`` (e.g. on abort)."""
-        with self.state_lock:
-            self.results.pop(req_id, None)
-            if req_id in self.inflight:
-                self.inflight.discard(req_id)
-                self.cancelled.add(req_id)
+        future = self.futures.pop(req_id, None)
+        if future is not None:
+            future.cancel()
 
-    def process_lookups(self) -> None:
-        while True:
-            job = self.job_queue.get()
-            if job is None:
-                # Sentinel from close(): stop the background thread.
-                return
-            req_id, token_len, block_hashes = job
-            with self.state_lock:
-                if req_id in self.cancelled:
-                    self.cancelled.discard(req_id)
-                    continue
-            try:
-                res = self.lookup(token_len, block_hashes)
-            except Exception as e:
-                logger.error("Async Mooncake lookup failed for %s: %s", req_id, e)
-                res = 0
-            with self.state_lock:
-                if req_id in self.cancelled:
-                    self.cancelled.discard(req_id)
-                else:
-                    self.results[req_id] = res
-                    self.inflight.discard(req_id)
-
-    def reset(self) -> bool:
+    def _reset(self) -> bool:
         """Trigger ``store.remove_all(force=True)`` on worker rank 0.
 
         Ordering assumption: caller MUST ensure no in-flight Mooncake
@@ -1631,14 +1606,15 @@ class LookupKeyClient:
         holds naturally at the step boundary after weight updates and
         rollout drain. Returns True on ACK, False on NACK.
         """
-        with self.socket_lock:
-            self.socket.send(RESET_MSG)
-            resp = self.socket.recv()
+        self.socket.send(RESET_MSG)
+        resp = self.socket.recv()
         return bytes(resp) == RESP_OK
 
+    def reset(self) -> bool:
+        return self.executor.submit(self._reset).result()
+
     def close(self):
-        self.job_queue.put(None)
-        self.thread.join(timeout=1.0)
+        self.executor.shutdown(wait=False, cancel_futures=True)
         self.socket.close(linger=0)
 
 
