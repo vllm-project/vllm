@@ -2,7 +2,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
@@ -17,8 +16,16 @@ const SHUTDOWN_REFCOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 pub(crate) type ApiKeyHash = [u8; 32];
 
+#[cfg(not(feature = "openssl"))]
 pub(crate) fn hash_api_key(api_key: &str) -> ApiKeyHash {
+    use sha2::{Digest, Sha256};
+
     Sha256::digest(api_key.as_bytes()).into()
+}
+
+#[cfg(feature = "openssl")]
+pub(crate) fn hash_api_key(api_key: &str) -> ApiKeyHash {
+    openssl::sha::sha256(api_key.as_bytes())
 }
 
 /// Shared router state for the minimal single-model OpenAI server.

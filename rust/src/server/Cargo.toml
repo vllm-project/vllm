@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["rustls"]
+rustls = ["dep:sha2", "dep:subtle", "vllm-chat/rustls"]
+openssl = ["dep:openssl", "vllm-chat/openssl"]
+
 [dependencies]
 anyhow.workspace = true
 asynk-strim-attr.workspace = true
@@ -16,13 +21,14 @@ libc.workspace = true
 llm-multimodal.workspace = true
 prost.workspace = true
 prost-types.workspace = true
+openssl = { workspace = true, optional = true }
 rmpv.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
-sha2.workspace = true
+sha2 = { workspace = true, optional = true }
 socket2.workspace = true
-subtle.workspace = true
+subtle = { workspace = true, optional = true }
 thiserror-ext.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true

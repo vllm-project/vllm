@@ -5883,6 +5883,7 @@ dependencies = [
  "itertools 0.14.0",
  "libc",
  "llm-multimodal",
+ "openssl",
  "prost",
  "prost-types",
  "rmp-serde",

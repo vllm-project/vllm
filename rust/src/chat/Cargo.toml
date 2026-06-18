@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["rustls"]
+rustls = ["reqwest/rustls-tls"]
+openssl = ["reqwest/native-tls"]
+
 [dependencies]
 anyhow.workspace = true
 asynk-strim-attr.workspace = true

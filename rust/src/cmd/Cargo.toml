@@ -9,7 +9,9 @@ name = "vllm-rs"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["rustls"]
+rustls = ["vllm-server/rustls"]
+openssl = ["vllm-server/openssl"]
 native-tls-vendored = ["dep:native-tls-vendored"]
 
 [dependencies]
