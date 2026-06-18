@@ -1,4 +1,4 @@
---extra-index-url https://download.pytorch.org/whl/test/cu130
+--extra-index-url https://download.pytorch.org/whl/cu130
 # Common dependencies
 -r common.txt
 
