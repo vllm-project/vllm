@@ -315,13 +315,19 @@ def rotary_embedding(
 
 # layer norm ops
 def rms_norm(
-    out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor | None,
+    epsilon: float,
 ) -> None:
     torch.ops._C.rms_norm(out, input, weight, epsilon)
 
 
 def fused_add_rms_norm(
-    input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, epsilon: float
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor | None,
+    epsilon: float,
 ) -> None:
     # Note: this func is batch invariant
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
@@ -1128,76 +1134,6 @@ def cutlass_mxfp4_moe_mm(
         expert_offsets,
         sf_offsets,
     )
-
-
-def mxfp8_experts_quant(
-    input_tensor: torch.Tensor,
-    problem_sizes: torch.Tensor,
-    expert_offsets: torch.Tensor,
-    blockscale_offsets: torch.Tensor,
-    quant_output: torch.Tensor,
-    scale_factor: torch.Tensor,
-) -> None:
-    torch.ops._C.mxfp8_experts_quant(
-        input_tensor,
-        problem_sizes,
-        expert_offsets,
-        blockscale_offsets,
-        quant_output,
-        scale_factor,
-    )
-
-
-def cutlass_mxfp8_grouped_mm(
-    a_tensors: torch.Tensor,
-    b_tensors: torch.Tensor,
-    a_scales: torch.Tensor,
-    b_scales: torch.Tensor,
-    out_tensors: torch.Tensor,
-    problem_sizes: torch.Tensor,
-    expert_offsets: torch.Tensor,
-    blockscale_offsets: torch.Tensor,
-) -> None:
-    torch.ops._C.cutlass_mxfp8_grouped_mm(
-        a_tensors,
-        b_tensors,
-        a_scales,
-        b_scales,
-        out_tensors,
-        problem_sizes,
-        expert_offsets,
-        blockscale_offsets,
-    )
-
-
-if hasattr(torch.ops._C, "mxfp8_experts_quant"):
-
-    @register_fake("_C::mxfp8_experts_quant")
-    def _mxfp8_experts_quant_fake(
-        input_tensor: torch.Tensor,
-        problem_sizes: torch.Tensor,
-        expert_offsets: torch.Tensor,
-        blockscale_offsets: torch.Tensor,
-        quant_output: torch.Tensor,
-        scale_factor: torch.Tensor,
-    ) -> None:
-        return None
-
-
-if hasattr(torch.ops._C, "cutlass_mxfp8_grouped_mm"):
-
-    @register_fake("_C::cutlass_mxfp8_grouped_mm")
-    def _cutlass_mxfp8_grouped_mm_fake(
-        a_tensors: torch.Tensor,
-        b_tensors: torch.Tensor,
-        a_scales: torch.Tensor,
-        b_scales: torch.Tensor,
-        out_tensors: torch.Tensor,
-        problem_sizes: torch.Tensor,
-        expert_offsets: torch.Tensor,
-        blockscale_offsets: torch.Tensor,
-    ) -> None:
-        return None
 
 
 # gptq_marlin
