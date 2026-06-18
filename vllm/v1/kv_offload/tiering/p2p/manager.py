@@ -344,6 +344,36 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return result
 
     @override
+    def drain_jobs(self) -> None:
+        """Block until every submitted load/store job has completed or failed.
+
+        Loops calling ``_poll_once()`` until no session has outstanding
+        inbound loads or in-flight outbound stores. Mid-flight transfers
+        are NOT cancelled — the caller (``TieringOffloadingManager.reset_cache``)
+        needs the primary memoryview to be quiescent, not aborted. Results
+        accumulate in ``_finished_jobs`` and are surfaced by the next
+        ``get_finished_jobs()`` call.
+        """
+        start = time.monotonic()
+        warned = False
+        while True:
+            self._poll_once()
+            with self._lock:
+                pending = any(
+                    s._client._inbound or s._server._inflight
+                    for s in self._sessions.values()
+                )
+            if not pending:
+                return
+            if not warned and time.monotonic() - start > 5.0:
+                logger.warning(
+                    "P2PSecondaryTierManager.drain_jobs: still draining "
+                    "after 5s; a stuck transfer will block the engine.",
+                )
+                warned = True
+            time.sleep(self._poll_interval)
+
+    @override
     def on_schedule_end(self) -> None:
         """No-op. Each API method now manages its own lock acquire/release."""
         return
@@ -591,7 +621,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         surface as done/failed, and falls back to mode="immediate" once
         _SHUTDOWN_DRAIN_TIMEOUT_S elapses so a wedged peer can't hang us.
         """
-        ids = [tid for s in self._sessions.values() for tid in s._inflight]
+        ids = [tid for s in self._sessions.values() for tid in s._server._inflight]
         if not ids:
             return
         deadline = time.monotonic() + _SHUTDOWN_DRAIN_TIMEOUT_S
