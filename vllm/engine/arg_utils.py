@@ -73,6 +73,7 @@ from vllm.config.cache import (
 )
 from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
+from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import (
@@ -427,7 +428,9 @@ class EngineArgs:
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
     download_dir: str | None = LoadConfig.download_dir
-    safetensors_load_strategy: str | None = LoadConfig.safetensors_load_strategy
+    safetensors_load_strategy: SafetensorsLoadStrategy | None = (
+        LoadConfig.safetensors_load_strategy
+    )
     safetensors_prefetch_num_threads: int = LoadConfig.safetensors_prefetch_num_threads
     safetensors_prefetch_block_size: int = LoadConfig.safetensors_prefetch_block_size
     load_format: str | LoadFormats = LoadConfig.load_format
@@ -599,6 +602,7 @@ class EngineArgs:
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
+    prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
 
     watermark: float = SchedulerConfig.watermark
 
@@ -1418,6 +1422,10 @@ class EngineArgs:
         )
         scheduler_group.add_argument("--watermark", **scheduler_kwargs["watermark"])
         scheduler_group.add_argument(
+            "--prefill-schedule-interval",
+            **scheduler_kwargs["prefill_schedule_interval"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -2064,6 +2072,7 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
+            prefill_schedule_interval=self.prefill_schedule_interval,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,

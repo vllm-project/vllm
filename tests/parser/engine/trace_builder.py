@@ -30,6 +30,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.parser.engine.registered_adapters import (
     Gemma4Parser,
+    Glm47MoeParser,
+    MinimaxM2Parser,
     NemotronV3Parser,
     Qwen3Parser,
 )
@@ -393,6 +395,79 @@ def _build_qwen3(
     return sample
 
 
+# ── MiniMax M2 (XML invoke format, starts in REASONING) ──────────────
+
+_MINIMAX_M2_VOCAB: dict[str, int] = {
+    "<think>": 50,
+    "</think>": 51,
+    "<minimax:tool_call>": 60,
+    "</minimax:tool_call>": 61,
+}
+
+
+def _minimax_m2_arg_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _minimax_m2_tool_segments(tool_calls: list[ToolCallSpec]) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = [("<minimax:tool_call>", True)]
+    for tc in tool_calls:
+        segs.append((f'<invoke name="{tc.name}">', False))
+        for key, value in tc.arguments.items():
+            segs.append(
+                (
+                    f'<parameter name="{key}">'
+                    f"{_minimax_m2_arg_value(value)}"
+                    "</parameter>",
+                    False,
+                )
+            )
+        segs.append(("</invoke>", False))
+    segs.append(("</minimax:tool_call>", True))
+    return segs
+
+
+def _minimax_m2_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if scenario.reasoning is not None:
+        segs.append((scenario.reasoning, False))
+    if scenario.content is not None or scenario.tool_calls:
+        segs.append(("</think>", True))
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+    if scenario.tool_calls:
+        segs.extend(_minimax_m2_tool_segments(scenario.tool_calls))
+    return segs
+
+
+def _build_minimax_m2(scenario: Scenario, validate: bool = True) -> Sample:
+    expected_reasoning: str | None
+    if scenario.reasoning is not None:
+        expected_reasoning = scenario.reasoning.rstrip()
+    else:
+        expected_reasoning = ""
+
+    sample = _make_sample(
+        sample_id=f"minimax_m2-{scenario.id}",
+        description=scenario.description,
+        vocab=_MINIMAX_M2_VOCAB,
+        segments=_minimax_m2_segments(scenario),
+        expected_reasoning=expected_reasoning,
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, MinimaxM2Parser)
+    return sample
+
+
 # ── Gemma4 (channel reasoning, custom arg format) ────────────────────
 
 _GEMMA4_VOCAB: dict[str, int] = {
@@ -497,12 +572,88 @@ def _build_nemotron_v3(scenario: Scenario, validate: bool = True) -> Sample:
     )
 
 
+# ── GLM-4.7 MoE (XML tool format, starts in REASONING) ──────────────
+
+_GLM47_MOE_VOCAB: dict[str, int] = {
+    "<think>": 50,
+    "</think>": 51,
+    "<tool_call>": 60,
+    "</tool_call>": 61,
+    "<arg_key>": 62,
+    "</arg_key>": 63,
+    "<arg_value>": 64,
+    "</arg_value>": 65,
+}
+
+
+def _glm47_moe_arg_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _glm47_moe_tool_segments(tc: ToolCallSpec) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = [
+        ("<tool_call>", True),
+        (tc.name, False),
+    ]
+    for key, value in tc.arguments.items():
+        segs.extend(
+            [
+                ("<arg_key>", True),
+                (key, False),
+                ("</arg_key>", True),
+                ("<arg_value>", True),
+                (_glm47_moe_arg_value(value), False),
+                ("</arg_value>", True),
+            ]
+        )
+    segs.append(("</tool_call>", True))
+    return segs
+
+
+def _glm47_moe_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+    if scenario.reasoning is not None:
+        segs.append((scenario.reasoning, False))
+    if scenario.content is not None or scenario.tool_calls:
+        segs.append(("</think>", True))
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+    if scenario.tool_calls:
+        for tc in scenario.tool_calls:
+            segs.extend(_glm47_moe_tool_segments(tc))
+    return segs
+
+
+def _build_glm47_moe(scenario: Scenario, validate: bool = True) -> Sample:
+    sample = _make_sample(
+        sample_id=f"glm47_moe-{scenario.id}",
+        description=scenario.description,
+        vocab=_GLM47_MOE_VOCAB,
+        segments=_glm47_moe_segments(scenario),
+        expected_reasoning=scenario.reasoning if scenario.reasoning is not None else "",
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, Glm47MoeParser)
+    return sample
+
+
 # ── Registry and public API ──────────────────────────────────────────
 
 _BUILDERS: dict[str, Any] = {
     "qwen3": _build_qwen3,
     "gemma4": _build_gemma4,
+    "minimax_m2": _build_minimax_m2,
     "nemotron_v3": _build_nemotron_v3,
+    "glm47_moe": _build_glm47_moe,
 }
 
 

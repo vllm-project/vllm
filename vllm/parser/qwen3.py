@@ -49,7 +49,7 @@ _PARAM_RE = re.compile(
     r"(?:<\s*/\s*parameter\s*>|(?=<\s*parameter\s*=))",
     re.DOTALL,
 )
-_PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>([^<]*)$", re.DOTALL)
+_PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>(.*)$", re.DOTALL)
 
 
 def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
@@ -206,8 +206,14 @@ class Qwen3Parser(ParserEngine):
             return True
         tool_call_id = self._tool_call_token_id
         tool_call_end_id = self._tool_call_end_token_id
+        reasoning_start_id = self._reasoning_start_token_id
         if tool_call_id is not None:
             for i in range(len(input_ids) - 1, -1, -1):
+                if (
+                    reasoning_start_id is not None
+                    and input_ids[i] == reasoning_start_id
+                ):
+                    return False
                 if input_ids[i] == tool_call_id:
                     if tool_call_end_id is not None and any(
                         input_ids[j] == tool_call_end_id
