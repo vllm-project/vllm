@@ -188,9 +188,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             ):
                 reasoning_ended = True
             elif parser:
-                reasoning_ended = parser.is_reasoning_end(
-                    prompt_token_ids or []
-                )
+                reasoning_ended = parser.is_reasoning_end(prompt_token_ids or [])
             else:
                 reasoning_ended = None
             chat_template_kwargs = self._effective_chat_template_kwargs(single_request)
@@ -222,7 +220,6 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             request_metadata,
             single_requests,
             parser,
-            
         )
 
     async def chat_completion_full_generator_batch(
