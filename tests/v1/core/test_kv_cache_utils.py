@@ -1805,15 +1805,16 @@ def test_get_kv_cache_config_one_worker():
 
     # different hidden size that cannot be aligned by using different block size,
     # but can be aligned by padding the smaller physical page.
+    swa_spec = new_sliding_window_spec(head_size=96, indexes_kv_by_block_stride=True)
     kv_cache_specs_hybrid = {
-        "layer_1": new_kv_cache_spec(head_size=64),
-        "layer_2": new_sliding_window_spec(head_size=96),
+        "layer_1": new_kv_cache_spec(head_size=64, indexes_kv_by_block_stride=True),
+        "layer_2": swa_spec,
     }
 
     kv_cache_config_hybrid = get_kv_cache_configs(
         vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
     )[0]
-    padded_page_size = new_sliding_window_spec(head_size=96).page_size_bytes
+    padded_page_size = swa_spec.page_size_bytes
     assert kv_cache_config_hybrid == KVCacheConfig(
         num_blocks=42,
         kv_cache_tensors=[
@@ -1822,9 +1823,16 @@ def test_get_kv_cache_config_one_worker():
         kv_cache_groups=[
             KVCacheGroupSpec(
                 ["layer_1"],
-                new_kv_cache_spec(head_size=64, page_size_padded=padded_page_size),
+                new_kv_cache_spec(
+                    head_size=64,
+                    page_size_padded=padded_page_size,
+                    indexes_kv_by_block_stride=True,
+                ),
             ),
-            KVCacheGroupSpec(["layer_2"], new_sliding_window_spec(head_size=96)),
+            KVCacheGroupSpec(
+                ["layer_2"],
+                new_sliding_window_spec(head_size=96, indexes_kv_by_block_stride=True),
+            ),
         ],
     )
 

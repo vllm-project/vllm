@@ -7,7 +7,11 @@ from typing import Any, cast
 
 import torch
 
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_layers_from_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
@@ -49,10 +53,11 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         if spec := attn_module.get_kv_cache_spec(vllm_config):
             if isinstance(spec, AttentionSpec):
                 backend = attn_module.get_attn_backend()
-                spec = replace(
-                    spec,
-                    indexes_kv_by_block_stride=backend.indexes_kv_by_block_stride(),
-                )
+                # indexes_kv_by_block_stride() -> get_kv_cache_stride_order() ->
+                # get_kv_cache_layout() needs the current vLLM config.
+                with set_current_vllm_config(vllm_config):
+                    indexes = backend.indexes_kv_by_block_stride()
+                spec = replace(spec, indexes_kv_by_block_stride=indexes)
             kv_cache_spec[layer_name] = spec
     return kv_cache_spec
 
