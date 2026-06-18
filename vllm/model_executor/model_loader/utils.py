@@ -20,6 +20,8 @@ from vllm.model_executor.layers.attention import (
     MLAAttention,
     MMEncoderAttention,
 )
+from vllm.model_executor.layers.hpc.hpc_module import HpcModule
+from vllm.model_executor.layers.hpc.rope_norm import HpcRopeNorm
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -130,10 +132,8 @@ def process_weights_after_loading(
     # load_weights(). When using DummyModelLoader (e.g. profiling or
     # sleep/wake_up reload), the model's load_weights() is not called, so we
     # must handle HPC modules here generically.
-    from vllm.model_executor.layers.hpc.hpc_module import HpcModule
-
     for _, module in model.named_modules():
-        if isinstance(module, HpcModule):
+        if isinstance(module, (HpcModule, HpcRopeNorm)):
             module.process_weights_after_loading(model)
 
     # Needed for torchao model reloading via model.reload_weights

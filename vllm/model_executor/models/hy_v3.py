@@ -645,12 +645,6 @@ class HYV3Model(nn.Module):
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
-        # Extract QK-Norm weights into the HPC fused RoPE+Norm modules now that
-        # all weights have been loaded.
-        for _, module in self.named_modules():
-            if isinstance(module, HpcRopeNorm):
-                module.process_weights_after_loading(self)
-
         return loaded_params
 
 
