@@ -71,23 +71,19 @@ class XgrammarBackend(StructuredOutputBackend):
             cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )
 
-        # tokenizer_info is retained because deserialize_json needs it on a
-        # disk-cache hit (see get_xgrammar_disk_cache).
+        # Retained for deserialize_json on a disk-cache hit.
         self.tokenizer_info = tokenizer_info
         self._tokenizer_key: str | None = None
         try:
             self._disk_cache = get_xgrammar_disk_cache()
             if self._disk_cache is not None:
-                # serialize_json() captures the full vocab + metadata, so
-                # folding its hash into the key keeps two tokenizers from
-                # sharing an entry.
+                # Fold the tokenizer's vocab + metadata into the key so two
+                # tokenizers can never share an entry.
                 self._tokenizer_key = hashlib.sha256(
                     tokenizer_info.serialize_json().encode()
                 ).hexdigest()
         except Exception:
-            # A disk-cache setup failure (unwritable cache dir, corrupt db,
-            # serialization error) must never prevent serving requests; fall
-            # back to the no-cache compile path.
+            # A cache-setup failure must never block serving requests.
             logger.warning(
                 "Failed to initialize the xgrammar disk cache; "
                 "falling back to in-process compilation.",
@@ -121,18 +117,15 @@ class XgrammarBackend(StructuredOutputBackend):
     ) -> "xgr.CompiledGrammar":
         """Compile a grammar, consulting the optional persistent disk cache.
 
-        When the disk cache is disabled (the default) this is exactly the
-        original compile path with zero added overhead. When enabled, a hit
-        deserializes the grammar from disk instead of recompiling; a miss
-        recompiles and writes the serialized grammar back. A cache problem
-        never fails the request -- it falls back to a fresh compile.
+        A cache problem never fails the request -- it falls back to a fresh
+        compile. When the cache is disabled (the default) this is the original
+        compile path with zero added overhead.
         """
         if self._disk_cache is None:
             return self._compile(request_type, grammar_spec)
 
         key = self._disk_key(request_type, grammar_spec)
-        # .get() is inside the guard too: the read itself can raise (e.g. a
-        # corrupt db), and a cache problem must never fail a request.
+        # The read itself can raise (e.g. corrupt db); never fail the request.
         try:
             text = self._disk_cache.get(key, None)
             if text is not None:
@@ -142,16 +135,14 @@ class XgrammarBackend(StructuredOutputBackend):
             xgr.DeserializeFormatError,
             xgr.DeserializeVersionError,
         ):
-            # Corrupt / format- or version-mismatched entry: recompile and
-            # overwrite it below.
+            # Unusable entry; fall through to recompile + overwrite.
             logger.debug(
                 "Ignoring unusable xgrammar disk cache entry; recompiling.",
                 exc_info=True,
             )
         except Exception:
-            # warning_once: a persistently broken cache (e.g. corrupt db) would
-            # otherwise log per compile_grammar call. The debug branch above
-            # retains the traceback for the expected corrupt/skewed-entry case.
+            # warning_once: a persistently broken cache would otherwise log on
+            # every call.
             logger.warning_once(
                 "Unexpected error reading xgrammar disk cache; recompiling."
             )
@@ -172,8 +163,7 @@ class XgrammarBackend(StructuredOutputBackend):
         # missing factor would serve a valid-but-wrong grammar on a hit.
         # max_rollback_tokens is excluded on purpose: it parameterizes the
         # GrammarMatcher (rebuilt fresh every call), not the CompiledGrammar.
-        # _disk_key is only reached with the disk cache enabled, where
-        # _tokenizer_key is always set (see __post_init__).
+        # Always set when the cache is enabled (the only path that reaches here).
         assert self._tokenizer_key is not None
         return hashlib.sha256(
             "\x00".join(

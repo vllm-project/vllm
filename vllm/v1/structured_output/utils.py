@@ -242,25 +242,21 @@ def get_outlines_cache():
 
 
 def get_xgrammar_disk_cache():
-    """Get an optional persistent on-disk cache for compiled xgrammar grammars.
+    """Optional persistent on-disk cache for compiled xgrammar grammars.
 
-    Returns a bounded, LRU-evicting ``diskcache.Cache`` (keyed at the cache
-    level by the xgrammar serialization version) when
-    ``VLLM_XGRAMMAR_DISK_CACHE`` is enabled, or ``None`` otherwise.
-
-    Unlike :func:`get_outlines_cache`, there is no in-memory fallback:
-    ``xgr.GrammarCompiler`` already holds its own in-RAM LRU (sized by
-    ``VLLM_XGRAMMAR_CACHE_MB``), so returning ``None`` keeps the call site
-    explicit and adds zero overhead when the disk cache is off (the default).
+    Returns a bounded, LRU-evicting ``diskcache.Cache`` when
+    ``VLLM_XGRAMMAR_DISK_CACHE`` is enabled, else ``None``. There is no
+    in-memory fallback (unlike :func:`get_outlines_cache`): the
+    ``GrammarCompiler`` already holds an in-RAM LRU, so ``None`` adds zero
+    overhead on the default-off path.
     """
     if not envs.VLLM_XGRAMMAR_DISK_CACHE:
         return None
 
-    # Defense-in-depth: the grammar serialization API is present at the pinned
-    # xgrammar (>= 0.2.1), but if a build somehow lacks it, disable the disk
-    # cache rather than crash. The deserialize error classes are part of this
-    # API: the read path references them in an ``except`` tuple, which would
-    # raise AttributeError during exception handling if any were absent.
+    # Defense-in-depth: if a build lacks the serialization API, disable the
+    # cache rather than crash. The deserialize error classes are included
+    # because the read path names them in an ``except`` tuple -- a missing one
+    # would raise AttributeError during exception handling.
     if not (
         hasattr(xgr, "get_serialization_version")
         and hasattr(xgr, "CompiledGrammar")
@@ -286,10 +282,9 @@ def get_xgrammar_disk_cache():
         "trusted clients and a non-shared cache directory."
     )
     cache_dir = os.path.join(envs.VLLM_CACHE_ROOT, "xgrammar_cache")
-    # Bounded by size_limit + LRU eviction. This intentionally diverges from
-    # get_outlines_cache (eviction_policy="none"), which is unbounded.
-    # Floor at 1 MB: a size_limit of 0 (or negative) would make diskcache evict
-    # every entry on write, silently turning the cache into a no-op.
+    # Bounded, unlike get_outlines_cache (eviction_policy="none").
+    # Floor at 1 MB: size_limit=0 would evict every entry on write -- a
+    # silent no-op cache.
     size_limit_mb = max(1, envs.VLLM_XGRAMMAR_DISK_CACHE_MB)
     cache = Cache(
         cache_dir,
@@ -297,12 +292,10 @@ def get_xgrammar_disk_cache():
         eviction_policy="least-recently-used",
     )
 
-    # Version-key the whole cache: an xgrammar serialization-version bump wipes
-    # every entry, complementing the per-entry DeserializeVersionError that
-    # xgr.CompiledGrammar.deserialize_json raises on load. Concurrent workers
-    # may redundantly clear here on a bump, and a (very unlikely) LRU eviction
-    # of the "__version__" entry forces the same clear -- both only cost a
-    # recompile (diskcache ops are atomic), never incorrectness.
+    # Version-key the whole cache so a serialization-version bump wipes every
+    # entry, complementing the per-entry DeserializeVersionError on load. A
+    # redundant clear (concurrent workers on a bump, or LRU eviction of the
+    # "__version__" entry) only costs a recompile, never incorrectness.
     version = xgr.get_serialization_version()
     if cache.get("__version__", None) != version:
         cache.clear()
