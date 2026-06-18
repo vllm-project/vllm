@@ -27,7 +27,6 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
-    disable_inplace,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -752,13 +751,6 @@ class FusedMoEExperts(ABC):
         """
         return False
 
-    @abstractmethod
-    def supports_expert_map(self) -> bool:
-        """
-        A flag indicating whether or not this class supports expert maps
-        """
-        raise NotImplementedError
-
     def supports_packed_ue8m0_act_scales(self) -> bool:
         """
         A flag indicating whether or not this class can process packed ue8m0
@@ -888,9 +880,18 @@ class FusedMoEExpertsModular(FusedMoEExperts):
         return N if not activation.is_gated else N // 2
 
     def activation(
-        self, activation: MoEActivation, output: torch.Tensor, input: torch.Tensor
+        self,
+        activation: MoEActivation,
+        output: torch.Tensor,
+        input: torch.Tensor,
+        *,
+        clamp_limit: float | None = None,
+        alpha: float = 1.0,
+        beta: float = 0.0,
     ) -> None:
-        apply_moe_activation(activation, output, input)
+        apply_moe_activation(
+            activation, output, input, clamp_limit=clamp_limit, alpha=alpha, beta=beta
+        )
 
     @abstractmethod
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
@@ -1025,11 +1026,9 @@ class FusedMoEKernelModularImpl:
         self,
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
         fused_experts: FusedMoEExpertsModular,
-        inplace: bool = False,
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
-        self.inplace = inplace
         moe_parallel_config = fused_experts.moe_config.moe_parallel_config
         self.moe_parallel_config = moe_parallel_config
         self.is_dp_ep = (
@@ -1107,8 +1106,9 @@ class FusedMoEKernelModularImpl:
         shared_experts_input: torch.Tensor | None,
     ):
         if shared_experts is not None:
+            assert self.prepare_finalize.supports_async()
             assert shared_experts_input is not None
-            shared_experts.apply(
+            shared_experts(
                 shared_experts_input,
                 SharedExpertsOrder.MK_INTERNAL_OVERLAPPED,
             )
@@ -1392,12 +1392,7 @@ class FusedMoEKernelModularImpl:
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
-        if self.inplace:
-            assert shared_experts is None
-            assert not disable_inplace()
-            output = hidden_states
-        else:
-            output = torch.empty_like(hidden_states)
+        output = torch.empty_like(hidden_states)
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
@@ -1473,7 +1468,6 @@ class FusedMoEKernelMonolithicImpl:
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
 
-        # TODO(rob): add inplace support.
         a1q, a1q_scale, router_logits = self.prepare_finalize.prepare(
             hidden_states,
             router_logits=router_logits,
@@ -1509,7 +1503,6 @@ class FusedMoEKernel:
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         fused_experts: FusedMoEExperts,
-        inplace: bool = False,
     ):
         super().__init__()
 
@@ -1521,13 +1514,11 @@ class FusedMoEKernel:
             self.impl = FusedMoEKernelModularImpl(
                 prepare_finalize,
                 fused_experts,
-                inplace,
             )
 
         elif isinstance(
             prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic
         ) and isinstance(fused_experts, FusedMoEExpertsMonolithic):
-            assert not inplace
             self.impl = FusedMoEKernelMonolithicImpl(
                 prepare_finalize,
                 fused_experts,
@@ -1548,12 +1539,6 @@ class FusedMoEKernel:
             return self.impl.prepare_finalize.supports_async()
         else:
             return False
-
-    @property
-    def inplace(self) -> bool:
-        if isinstance(self.impl, FusedMoEKernelModularImpl):
-            return self.impl.inplace
-        return False
 
     @property
     def is_monolithic(self) -> bool:
@@ -1585,12 +1570,6 @@ class FusedMoEKernel:
             == self.fused_experts.activation_format()
         )
 
-    def supports_expert_map(self) -> bool:
-        """
-        A flag indicating whether or not this class supports expert maps.
-        """
-        return self.fused_experts.supports_expert_map()
-
     def output_is_reduced(self) -> bool:
         """
         Indicates whether or not the output of fused MoE kernel
@@ -1603,7 +1582,7 @@ class FusedMoEKernel:
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        router_logits: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        router_logits: torch.Tensor,
         activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,

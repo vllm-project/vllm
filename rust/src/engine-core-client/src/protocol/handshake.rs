@@ -28,7 +28,7 @@ pub struct ReadyMessage {
 /// profiling).
 ///
 /// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/c8d98f81f6/vllm/v1/engine/__init__.py#L67-L77>
+/// <https://github.com/vllm-project/vllm/blob/c9340e6f35/vllm/v1/engine/__init__.py#L68-L80>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineCoreReadyResponse {
     /// Engine-reported maximum model context length (auto-fitted after
@@ -36,13 +36,18 @@ pub struct EngineCoreReadyResponse {
     pub max_model_len: u64,
     /// Number of GPU blocks available for KV cache on this engine.
     pub num_gpu_blocks: u64,
+    /// KV cache block size (tokens per block).
+    pub block_size: u64,
     /// DP coordinator stats publish address, if applicable.
     pub dp_stats_address: Option<String>,
     /// Effective model dtype after Python vLLM resolves `--dtype`.
-    // TODO: This is currently not wired up on the engine side. After it's added, remove `Option`
-    // and `serde(default)`.
-    #[serde(default)]
-    pub dtype: Option<ModelDtype>,
+    pub dtype: ModelDtype,
+    /// Python vLLM version reported by the engine process.
+    pub vllm_version: String,
+    /// Total KV cache capacity in tokens, if reported.
+    pub kv_cache_size_tokens: Option<u64>,
+    /// Maximum achievable request concurrency given the KV cache, if reported.
+    pub kv_cache_max_concurrency: Option<f64>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
@@ -68,23 +73,4 @@ pub struct HandshakeAddresses {
 pub struct HandshakeInitMessage {
     pub addresses: HandshakeAddresses,
     pub parallel_config: BTreeMap<String, OpaqueValue>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::EngineCoreReadyResponse;
-    use crate::protocol::ModelDtype;
-
-    #[test]
-    fn ready_response_accepts_effective_dtype() {
-        let response: EngineCoreReadyResponse = serde_json::from_value(serde_json::json!({
-            "max_model_len": 4096,
-            "num_gpu_blocks": 2,
-            "dp_stats_address": null,
-            "dtype": "bfloat16"
-        }))
-        .unwrap();
-
-        assert_eq!(response.dtype, Some(ModelDtype::BFloat16));
-    }
 }

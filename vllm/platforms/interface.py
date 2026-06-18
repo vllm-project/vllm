@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import enum
+import functools
 import os
 import platform
 import sys
@@ -30,6 +31,7 @@ else:
 logger = init_logger(__name__)
 
 
+@functools.cache
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
     return "microsoft" in " ".join(platform.uname()).lower()
@@ -197,7 +199,15 @@ class Platform:
         # for ROCm, but currently we don't have a way to detect the
         # exact GPU model statelessly here. So we return True for
         # all ROCm platforms for now.
-        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM, PlatformEnum.XPU)
+
+    def is_cumem_allocator_available(self) -> bool:
+        try:
+            from vllm.device_allocator.cumem import cumem_available
+        except ImportError:
+            return False
+
+        return cumem_available
 
     @classmethod
     def get_pass_manager_cls(cls) -> str:
@@ -246,7 +256,7 @@ class Platform:
         except ImportError as e:
             logger.warning("Failed to import from vllm._C: %r", e)
         with contextlib.suppress(ImportError):
-            import vllm._moe_C  # noqa: F401
+            import vllm._moe_C_stable_libtorch  # noqa: F401
 
     @classmethod
     def get_attn_backend_cls(
@@ -380,6 +390,19 @@ class Platform:
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         """Get the total memory of a device in bytes."""
         raise NotImplementedError
+
+    @classmethod
+    def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
+        """Return a mapping of device index to PCI bus ID string.
+
+        Used by ``VLLM_GPU_NIC_PCIE_MAPPING`` for RDMA NIC selection.
+        Subclasses should override with platform-specific discovery
+        (e.g. pynvml for CUDA).
+        """
+        raise NotImplementedError(
+            "VLLM_GPU_NIC_PCIE_MAPPING is not supported on the "
+            f"current platform ({cls.device_name})"
+        )
 
     @classmethod
     def inference_mode(cls):
@@ -678,6 +701,13 @@ class Platform:
             )
 
     @classmethod
+    def register_custom_kv_cache_specs(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Register custom KVCacheSpec class on current platform.
+        """
+        pass
+
+    @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         """
         Verify whether the current platform supports the specified model
@@ -724,11 +754,13 @@ class Platform:
     def is_pin_memory_available(cls) -> bool:
         """Checks whether pin memory is available on the current platform."""
         if in_wsl():
-            # Pinning memory in WSL is not supported.
             # https://docs.nvidia.com/cuda/wsl-user-guide/index.html#known-limitations-for-linux-cuda-applications
+            # Pinned memory support under WSL depends on the vendor and driver
+            # version. Conservative default: return False. Platform subclasses
+            # that can verify support (e.g. CudaPlatformBase) override this.
             logger.warning(
                 "Using 'pin_memory=False' as WSL is detected. "
-                "This may slow down the performance."
+                "This may slow down performance."
             )
             return False
         return True
@@ -1015,6 +1047,13 @@ class Platform:
 
         # Native always used by default. Platforms can override this behavior.
         return IrOpPriorityConfig.with_default(["native"])
+
+    @classmethod
+    def is_arch_support_pdl(cls) -> bool:
+        """
+        Does the current platform support PDL (Programmatic Dependent Launch)?
+        """
+        return False
 
 
 class UnspecifiedPlatform(Platform):
