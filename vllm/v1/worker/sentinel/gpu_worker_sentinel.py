@@ -75,9 +75,7 @@ class WorkerSentinel:
 
         torch.accelerator.synchronize()
         self._clean_worker_state()
-        comm = get_ep_group().device_communicator
-        assert comm and comm.all2all_manager
-        mgr = comm.all2all_manager
+        mgr = self._get_all2all_manager()
         mgr.clean_buffers()
 
         dead_ep_ranks = compute_dead_ep_ranks(removed_dp_ranks, tp_size)
@@ -188,6 +186,11 @@ class WorkerSentinel:
 
         eplb_state.expert_rearrangement_step = 0
         eplb_state.expert_load_window_step = 0
+
+    def query_mask(self, ft_request: FaultToleranceRequest) -> dict:
+        """Return the current all2all active mask from the FT backend."""
+        mask = self._get_all2all_manager().query_active_mask()
+        return {"mask": mask.tolist()}
 
     def _reinit_gloo_group(
         self,

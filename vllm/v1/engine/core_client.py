@@ -1219,12 +1219,13 @@ class AsyncMPClient(MPClient):
     async def get_status(self):
         ft_request = FaultToleranceRequest(instruction="status", params={})
         res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
+        engine_info = {"id": res["engine_id"], "status": res["status"]}
+        if "mask" in res:
+            engine_info["mask"] = res["mask"]
         return {
             "schema_version": 1,
             "total_engines": len(self.engine_ranks_managed),
-            "engines": [
-                {"id": res["engine_id"], "status": res["status"]},
-            ],
+            "engines": [engine_info],
         }
 
 

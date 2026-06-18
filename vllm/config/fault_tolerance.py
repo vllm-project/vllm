@@ -16,3 +16,11 @@ class FaultToleranceConfig:
     to handle the error. If no instructions are received within this
     time, the original error is raised.
     """
+
+    auto_recovery: bool = False
+    """When enabled, the engine automatically recovers from faults
+    without waiting for external orchestrator commands. On fault,
+    it queries the worker's all2all mask: if all zeros (no dead peer
+    detected), it retries; if non-zero (dead peer detected), it
+    performs scale-down.
+    """
