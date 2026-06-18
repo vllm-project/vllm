@@ -362,38 +362,6 @@ class OpenAIServing(ServingMixin, BeamSearchOnlineMixin):
             status_code=e.status_code,
         )
 
-    def _validate_chat_template(
-        self,
-        request_chat_template: str | None,
-        chat_template_kwargs: dict[str, Any] | None,
-        trust_request_chat_template: bool,
-    ) -> ErrorResponse | None:
-        if not trust_request_chat_template and (
-            request_chat_template is not None
-            or (
-                chat_template_kwargs
-                and chat_template_kwargs.get("chat_template") is not None
-            )
-        ):
-            return self.create_error_response(
-                "Chat template is passed with request, but "
-                "--trust-request-chat-template is not set. "
-                "Refused request with untrusted chat template."
-            )
-        return None
-
-    @staticmethod
-    def _prepare_extra_chat_template_kwargs(
-        request_chat_template_kwargs: dict[str, Any] | None = None,
-        default_chat_template_kwargs: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Helper to merge server-default and request-specific chat template kwargs."""
-        request_chat_template_kwargs = request_chat_template_kwargs or {}
-        if default_chat_template_kwargs is None:
-            return request_chat_template_kwargs
-        # Apply server defaults first, then request kwargs override.
-        return default_chat_template_kwargs | request_chat_template_kwargs
-
     async def _get_trace_headers(
         self,
         headers: Headers,

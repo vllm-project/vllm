@@ -238,7 +238,7 @@ async def test_renderer_only_chat_request_skips_mm_cache():
         messages=[{"role": "user", "content": "Test prompt"}],
     )
 
-    result = await serving_render.online_renderer.render_chat_request(request)
+    result = await serving_render.render_chat_request(request)
 
     assert result.token_ids == [1, 2, 3]
     assert (
