@@ -6,10 +6,20 @@ import prometheus_client
 import regex as re
 from fastapi import FastAPI, Response
 from prometheus_client import make_asgi_app
-from prometheus_fastapi_instrumentator import Instrumentator
+from prometheus_fastapi_instrumentator import Instrumentator, routing as instrumentator_routing
 from starlette.routing import Mount
 
 from vllm.v1.metrics.prometheus import get_prometheus_registry
+
+# Workaround for AttributeError: '_IncludedRouter' object has no attribute 'path'
+# in prometheus-fastapi-instrumentator when using nested routers.
+def patched_get_route_name(request):
+    try:
+        return instrumentator_routing.get_route_name(request)
+    except AttributeError:
+        return "unknown_route"
+
+instrumentator_routing.get_route_name = patched_get_route_name
 
 
 class PrometheusResponse(Response):
