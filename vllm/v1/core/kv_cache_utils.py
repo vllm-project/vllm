@@ -182,18 +182,6 @@ class KVCacheBlock:
         )
 
 
-class KVCacheBlockListWithHitLength(list[KVCacheBlock]):
-    """A block list carrying the exact token length it represents."""
-
-    def __init__(
-        self,
-        blocks: Sequence[KVCacheBlock] = (),
-        hit_length: int | None = None,
-    ) -> None:
-        super().__init__(blocks)
-        self.hit_length = hit_length
-
-
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
     list of free blocks. We implement this class instead of using Python
@@ -742,8 +730,9 @@ class RequestBlockHasher:
         parent_block_hash = (
             full_block_hashes[full_block_idx - 1] if full_block_idx > 0 else None
         )
+        curr_mm_idx = -1 if block_start > 0 else 0
         extra_keys, _ = generate_block_hash_extra_keys(
-            request, block_start, num_tokens, 0
+            request, block_start, num_tokens, curr_mm_idx
         )
         return hash_block_tokens(
             self.caching_hash_fn,
@@ -2178,21 +2167,34 @@ def get_kv_cache_configs(
 
 
 class BlockHashListWithBlockSize:
-    """View request hashes at a larger block size.
+    """
+    Convert block-hash granularity from `hash_block_size` to `target_block_size`.
+    Used when KV cache groups have different block sizes: `hash_block_size`
+    is the size used to compute the original `block_hashes`; `target_block_size`
+    is the group's actual block size.
 
-    Some KV-transfer paths still receive the raw request block-hash list at
-    ``hash_block_size`` granularity, while the cache group they are processing
-    uses a larger ``block_size``. This wrapper preserves that legacy behavior by
-    lazily merging adjacent fine-grained hashes into the group's hash view.
+    Currently, only scaling up by an integer factor is supported (i.e.,
+    `target_block_size` is a multiple of `hash_block_size`). Conversion is
+    performed lazily on access for efficiency, by concatenating consecutive
+    hashes at `hash_block_size` to form each hash at `target_block_size`.
+
+    Example (`hash_block_size` = 16, `target_block_size` = 32):
+    concatenating two 16-size hashes yields one 32-size hash:
+
+    Block hashes with block_size 16:
+    | Token Range | 0-15 | 16-31 | 32-47 | 48-63 |
+    |-------------|------|-------|-------|-------|
+    | Hash        | A    | B     | C     | D     |
+
+    Block hashes with block_size 32:
+    | Token Range | 0-31 | 32-63 |
+    |-------------|------|-------|
+    | Hash        | AB   | CD    |
 
     Args:
-        block_hashes: Block hashes computed at ``hash_block_size`` granularity.
-        hash_block_size: Token size represented by each input hash.
-        target_block_size: Token size expected by the consuming cache group.
-
-    Raises:
-        AssertionError: If ``target_block_size`` is not an integer multiple of
-            ``hash_block_size``.
+        block_hashes: Block hashes to convert, computed at `hash_block_size`.
+        hash_block_size: Block size at which `block_hashes` were computed.
+        target_block_size: Desired block size; must be a multiple of `hash_block_size`.
     """
 
     def __init__(
@@ -2200,9 +2202,9 @@ class BlockHashListWithBlockSize:
         block_hashes: list[BlockHash],
         hash_block_size: int,
         target_block_size: int,
-    ) -> None:
-        assert target_block_size % hash_block_size == 0
+    ):
         self.block_hashes = block_hashes
+        assert target_block_size % hash_block_size == 0
         self.scale_factor = target_block_size // hash_block_size
 
     def __len__(self) -> int:
@@ -2214,12 +2216,14 @@ class BlockHashListWithBlockSize:
     @overload
     def __getitem__(self, idx: slice) -> list[BlockHash]: ...
 
-    def __getitem__(self, idx: int | slice) -> BlockHash | list[BlockHash]:
+    def __getitem__(self, idx):
         if isinstance(idx, int):
             return self._get_value_at(idx)
+
         if isinstance(idx, slice):
             start, stop, step = idx.indices(len(self))
             return [self._get_value_at(i) for i in range(start, stop, step)]
+
         raise TypeError(f"Invalid index type: {type(idx)!r}")
 
     def __iter__(self) -> Iterator[BlockHash]:

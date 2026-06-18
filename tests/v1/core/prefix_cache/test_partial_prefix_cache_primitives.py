@@ -164,49 +164,6 @@ def test_cache_block_alias_kv_cache_events():
     assert removed_event.group_idx == kv_cache_group_id
 
 
-def test_partial_block_replaces_previous_partial_alias():
-    hash_block_size = 2
-    block_size = 6
-    kv_cache_group_id = 0
-    req = make_request("0", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256)
-    pool = BlockPool(
-        num_gpu_blocks=3,
-        enable_caching=True,
-        hash_block_size=hash_block_size,
-    )
-    blocks = pool.get_new_blocks(2)
-
-    pool.cache_full_blocks(
-        request=req,
-        blocks=blocks,
-        num_cached_blocks=0,
-        num_full_blocks=1,
-        block_size=block_size,
-        kv_cache_group_id=kv_cache_group_id,
-    )
-    partial_hash_8 = req.block_hashes.get_partial_block_hash(block_size, 8)
-    assert pool.cache_block_alias(
-        request=req,
-        block=blocks[1],
-        num_tokens=8,
-        kv_cache_group_id=kv_cache_group_id,
-        block_size=block_size,
-    )
-    assert pool.get_cached_block(partial_hash_8, [kv_cache_group_id]) == [blocks[1]]
-
-    req.append_output_token_ids([4, 4])
-    partial_hash_10 = req.block_hashes.get_partial_block_hash(block_size, 10)
-    assert pool.cache_block_alias(
-        request=req,
-        block=blocks[1],
-        num_tokens=10,
-        kv_cache_group_id=kv_cache_group_id,
-        block_size=block_size,
-    )
-    assert pool.get_cached_block(partial_hash_8, [kv_cache_group_id]) is None
-    assert pool.get_cached_block(partial_hash_10, [kv_cache_group_id]) == [blocks[1]]
-
-
 def test_partial_block_replacement_emits_remove_then_store_events():
     hash_block_size = 2
     block_size = 6
@@ -236,6 +193,7 @@ def test_partial_block_replacement_emits_remove_then_store_events():
         kv_cache_group_id=kv_cache_group_id,
         block_size=block_size,
     )
+    assert pool.get_cached_block(partial_hash_8, [kv_cache_group_id]) == [blocks[1]]
     pool.take_events()
 
     req.append_output_token_ids([4, 4])
@@ -263,6 +221,8 @@ def test_partial_block_replacement_emits_remove_then_store_events():
     assert stored_event.token_ids == req.all_token_ids[block_size:10]
     assert stored_event.block_size == 4
     assert stored_event.group_idx == kv_cache_group_id
+    assert pool.get_cached_block(partial_hash_8, [kv_cache_group_id]) is None
+    assert pool.get_cached_block(partial_hash_10, [kv_cache_group_id]) == [blocks[1]]
 
 
 def test_later_request_hits_cached_partial_tail_alias():

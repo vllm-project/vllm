@@ -268,40 +268,20 @@ class BlockPool:
                 continue
             block_hash = new_block_hashes[i]
             num_hash_tokens = (num_cached_blocks + i + 1) * block_size
-            old_block_hash = blk.block_hash
-            if (
-                old_block_hash is not None
-                and blk.block_hash_num_tokens is not None
-                and blk.block_hash_num_tokens < num_hash_tokens
-            ):
-                old_hashes = [old_block_hash]
-                old_hashes.extend(
-                    self.cached_block_hashes_by_block.pop(blk.block_id, ())
-                )
-                removed_hashes: list[BlockHashWithGroupId] = []
-                for old_hash in old_hashes:
-                    if (
-                        self.cached_block_hash_to_block.pop(old_hash, blk.block_id)
-                        is not None
-                    ):
-                        removed_hashes.append(old_hash)
-                if self.enable_kv_cache_events:
-                    for old_hash in removed_hashes:
-                        self.kv_event_queue.append(
-                            BlockRemoved(
-                                block_hashes=[
-                                    maybe_convert_block_hash(get_block_hash(old_hash))
-                                ],
-                                medium=MEDIUM_GPU,
-                                group_idx=get_group_id(old_hash),
-                            )
-                        )
-                blk.reset_hash()
 
             # Update and added the full block to the cache.
             block_hash_with_group_id = make_block_hash_with_group_id(
                 block_hash, kv_cache_group_id
             )
+            if blk.block_hash is not None:
+                # The only valid case where a "new full block" already has a
+                # hash is partial->full promotion of the same cache block.
+                assert (
+                    blk.block_hash_num_tokens is not None
+                    and blk.block_hash_num_tokens < num_hash_tokens
+                )
+                removed_hashes = self._remove_cached_block_hashes(blk)
+                self._emit_block_removed_events(removed_hashes)
             self._insert_block_hash(
                 block_hash_with_group_id,
                 blk,
@@ -369,9 +349,9 @@ class BlockPool:
         """Register an additional prefix-cache key for an existing block.
 
         Prefix-cache lookup is normally one hash key per cached block. A
-        partial-cache entry needs the same memory block to be reachable from a
+        partial-cache entry needs a cache block to be reachable from a
         finer-grained hash boundary inside that block. This method records that
-        extra hash key without allocating or copying a new ``KVCacheBlock``.
+        hash key without allocating or copying a new ``KVCacheBlock``.
 
         The alias is lookup metadata owned by ``block``. If ``block`` already
         has a primary hash, the alias is also tracked in
@@ -416,27 +396,8 @@ class BlockPool:
             and block.block_hash_num_tokens is not None
             and block.block_hash_num_tokens < num_hash_blocks * self.hash_block_size
         ):
-            old_hashes = [block.block_hash]
-            old_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))
-            removed_hashes: list[BlockHashWithGroupId] = []
-            for old_hash in old_hashes:
-                if (
-                    self.cached_block_hash_to_block.pop(old_hash, block.block_id)
-                    is not None
-                ):
-                    removed_hashes.append(old_hash)
-            if self.enable_kv_cache_events:
-                for old_hash in removed_hashes:
-                    self.kv_event_queue.append(
-                        BlockRemoved(
-                            block_hashes=[
-                                maybe_convert_block_hash(get_block_hash(old_hash))
-                            ],
-                            medium=MEDIUM_GPU,
-                            group_idx=get_group_id(old_hash),
-                        )
-                    )
-            block.reset_hash()
+            removed_hashes = self._remove_cached_block_hashes(block)
+            self._emit_block_removed_events(removed_hashes)
         self._insert_block_hash(
             block_hash_with_group_id,
             block,
@@ -452,8 +413,9 @@ class BlockPool:
                 else None
             )
             block_end = num_tokens
+            curr_mm_idx = -1 if block_start > 0 else 0
             extra_keys, _ = generate_block_hash_extra_keys(
-                request, block_start, block_end, 0
+                request, block_start, block_end, curr_mm_idx
             )
             self.kv_event_queue.append(
                 BlockStored(
@@ -495,7 +457,7 @@ class BlockPool:
         )
         if get_partial_block_hash is not None:
             return get_partial_block_hash(block_size, num_tokens)
-        return request.block_hashes[num_hash_blocks - 1]
+        return None
 
     def get_block_alias_parent_hash_and_start(
         self,
@@ -519,6 +481,42 @@ class BlockPool:
 
         full_block_hashes = request.block_hashes.get_block_hashes(block_size)
         return full_block_hashes[full_block_idx - 1], block_start
+
+    def _remove_cached_block_hashes(
+        self,
+        block: KVCacheBlock,
+    ) -> list[BlockHashWithGroupId]:
+        block_hashes: list[BlockHashWithGroupId] = []
+        if block.block_hash is not None:
+            block_hashes.append(block.block_hash)
+        block_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))
+        if not block_hashes:
+            return []
+
+        removed_hashes: list[BlockHashWithGroupId] = []
+        for block_hash in block_hashes:
+            if (
+                self.cached_block_hash_to_block.pop(block_hash, block.block_id)
+                is not None
+            ):
+                removed_hashes.append(block_hash)
+        block.reset_hash()
+        return removed_hashes
+
+    def _emit_block_removed_events(
+        self,
+        block_hashes: list[BlockHashWithGroupId],
+    ) -> None:
+        if not self.enable_kv_cache_events:
+            return
+        for block_hash in block_hashes:
+            self.kv_event_queue.append(
+                BlockRemoved(
+                    block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
+                    medium=MEDIUM_GPU,
+                    group_idx=get_group_id(block_hash),
+                )
+            )
 
     def _insert_block_hash(
         self,
@@ -590,36 +588,13 @@ class BlockPool:
         if self.metrics_collector:
             self.metrics_collector.on_block_evicted(block)
 
-        block_hashes: list[BlockHashWithGroupId] = []
-        if block.block_hash is not None:
-            block_hashes.append(block.block_hash)
-        block_hashes.extend(self.cached_block_hashes_by_block.pop(block.block_id, ()))
-        if not block_hashes:
+        evicted_hashes = self._remove_cached_block_hashes(block)
+        if not evicted_hashes:
             # The block doesn't have hash, eviction is not needed
             return False
 
-        evicted_hashes: list[BlockHashWithGroupId] = []
-        for block_hash in block_hashes:
-            if (
-                self.cached_block_hash_to_block.pop(block_hash, block.block_id)
-                is not None
-            ):
-                evicted_hashes.append(block_hash)
-
-        block.reset_hash()
-
-        if self.enable_kv_cache_events:
-            for block_hash in evicted_hashes:
-                self.kv_event_queue.append(
-                    BlockRemoved(
-                        block_hashes=[
-                            maybe_convert_block_hash(get_block_hash(block_hash))
-                        ],
-                        medium=MEDIUM_GPU,
-                        group_idx=get_group_id(block_hash),
-                    )
-                )
-        return bool(evicted_hashes)
+        self._emit_block_removed_events(evicted_hashes)
+        return True
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
