@@ -122,91 +122,10 @@ class ServeContext(Generic[RequestT]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
-class OpenAIServing(BeamSearchOnlineMixin):
-    request_id_prefix: ClassVar[str] = """
-    A short string prepended to every request’s ID.
-    """
-
-    def __init__(
-        self,
-        engine_client: EngineClient,
-        models: OpenAIServingModels,
-        *,
-        request_logger: RequestLogger | None,
-        return_tokens_as_token_ids: bool = False,
-    ):
-        super().__init__()
-
-        self.engine_client = engine_client
-        self.models = models
-
-        self.request_logger = request_logger
-        self.return_tokens_as_token_ids = return_tokens_as_token_ids
-
-        self.model_config = engine_client.model_config
-        self.renderer = engine_client.renderer
-        self.input_processor = engine_client.input_processor
-        vllm_config = getattr(engine_client, "vllm_config", None)
-        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
-        self.has_kv_connector = kv_transfer_config is not None
-
-        # Computed once at startup (cached by ``vllm_config`` identity) and
-        # stamped on non-streaming responses. Streaming chunks deliberately
-        # omit it to avoid per-chunk overhead.
-        from vllm.entrypoints.serve.utils.fingerprint import get_system_fingerprint
-
-        try:
-            self.system_fingerprint: str | None = get_system_fingerprint(
-                engine_client.vllm_config
-            )
-        except Exception:
-            # Never fail server startup over the fingerprint.
-            self.system_fingerprint = None
-
-    @staticmethod
-    def create_error_response(
-        message: str | Exception,
-        err_type: str = "BadRequestError",
-        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
-        param: str | None = None,
-    ) -> ErrorResponse:
-        return create_error_response(message, err_type, status_code, param)
-
-    def create_streaming_error_response(
-        self,
-        message: str | Exception,
-        err_type: str = "BadRequestError",
-        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
-        param: str | None = None,
-    ) -> str:
-        json_str = json.dumps(
-            self.create_error_response(
-                message=message,
-                err_type=err_type,
-                status_code=status_code,
-                param=param,
-            ).model_dump()
-        )
-        return json_str
-
-    def _raise_if_error(self, finish_reason: str | None, request_id: str) -> None:
-        """Raise GenerationError if finish_reason indicates an error."""
-        if finish_reason == "error":
-            logger.error(
-                "Request %s failed with an internal error during generation",
-                request_id,
-            )
-            raise GenerationError("Internal server error")
-
-    def _convert_generation_error_to_streaming_response(
-        self, e: GenerationError
-    ) -> str:
-        """Convert GenerationError to streaming error response."""
-        return self.create_streaming_error_response(
-            str(e),
-            err_type="InternalServerError",
-            status_code=e.status_code,
-        )
+class ServingMixin:
+    models: OpenAIServingModels
+    model_config: ModelConfig
+    request_logger: RequestLogger | None
 
     async def _check_model(
         self,
@@ -237,6 +156,89 @@ class OpenAIServing(BeamSearchOnlineMixin):
             status_code=HTTPStatus.NOT_FOUND,
             param="model",
         )
+
+    def _is_model_supported(self, model_name: str | None) -> bool:
+        if not model_name:
+            return True
+        if envs.VLLM_SKIP_MODEL_NAME_VALIDATION:
+            return True
+        return self.models.is_base_model(model_name)
+
+    @staticmethod
+    def create_error_response(
+        message: str | Exception,
+        err_type: str = "BadRequestError",
+        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        param: str | None = None,
+    ) -> ErrorResponse:
+        return create_error_response(message, err_type, status_code, param)
+
+    def _extract_prompt_components(self, prompt: PromptType | EngineInput):
+        return extract_prompt_components(self.model_config, prompt)
+
+    def _extract_prompt_text(self, prompt: PromptType | EngineInput):
+        return self._extract_prompt_components(prompt).text
+
+    def _extract_prompt_len(self, prompt: EngineInput):
+        return extract_prompt_len(self.model_config, prompt)
+
+    def _log_inputs(
+        self,
+        request_id: str,
+        inputs: PromptType | EngineInput,
+        params: SamplingParams | BeamSearchParams | None,
+        lora_request: LoRARequest | None,
+    ) -> None:
+        if self.request_logger is None:
+            return
+
+        components = self._extract_prompt_components(inputs)
+
+        self.request_logger.log_inputs(
+            request_id,
+            components.text,
+            components.token_ids,
+            components.embeds,
+            params=params,
+            lora_request=lora_request,
+        )
+
+    @staticmethod
+    def _base_request_id(
+        raw_request: Request | None, default: str | None = None
+    ) -> str | None:
+        """Pulls the request id to use from a header, if provided"""
+        if raw_request is not None and (
+            (req_id := raw_request.headers.get("X-Request-Id")) is not None
+        ):
+            return req_id
+
+        return random_uuid() if default is None else default
+
+    def _get_message_types(self, request: AnyRequest) -> set[str]:
+        """Retrieve the set of types from message content dicts up
+        until `_`; we use this to match potential multimodal data
+        with default per modality loras.
+        """
+        message_types: set[str] = set()
+
+        if not hasattr(request, "messages"):
+            return message_types
+
+        messages = request.messages
+        if messages is None or isinstance(messages, (str, bytes)):
+            return message_types
+
+        for message in messages:
+            if (
+                isinstance(message, dict)
+                and "content" in message
+                and isinstance(message["content"], list)
+            ):
+                for content_dict in message["content"]:
+                    if "type" in content_dict:
+                        message_types.add(content_dict["type"].split("_")[0])
+        return message_types
 
     def _get_active_default_mm_loras(self, request: AnyRequest) -> LoRARequest | None:
         """Determine if there are any active default multimodal loras."""
@@ -282,30 +284,83 @@ class OpenAIServing(BeamSearchOnlineMixin):
         # if _check_model has been called earlier, this will be unreachable
         raise ValueError(f"The model `{request.model}` does not exist.")
 
-    def _get_message_types(self, request: AnyRequest) -> set[str]:
-        """Retrieve the set of types from message content dicts up
-        until `_`; we use this to match potential multimodal data
-        with default per modality loras.
-        """
-        message_types: set[str] = set()
 
-        if not hasattr(request, "messages"):
-            return message_types
+class OpenAIServing(ServingMixin, BeamSearchOnlineMixin):
+    request_id_prefix: ClassVar[str] = """
+    A short string prepended to every request’s ID.
+    """
 
-        messages = request.messages
-        if messages is None or isinstance(messages, (str, bytes)):
-            return message_types
+    def __init__(
+        self,
+        engine_client: EngineClient,
+        models: OpenAIServingModels,
+        *,
+        request_logger: RequestLogger | None,
+        return_tokens_as_token_ids: bool = False,
+    ):
+        super().__init__()
 
-        for message in messages:
-            if (
-                isinstance(message, dict)
-                and "content" in message
-                and isinstance(message["content"], list)
-            ):
-                for content_dict in message["content"]:
-                    if "type" in content_dict:
-                        message_types.add(content_dict["type"].split("_")[0])
-        return message_types
+        self.engine_client = engine_client
+        self.models = models
+
+        self.request_logger = request_logger
+        self.return_tokens_as_token_ids = return_tokens_as_token_ids
+
+        self.model_config = engine_client.model_config
+        self.renderer = engine_client.renderer
+        self.input_processor = engine_client.input_processor
+        vllm_config = getattr(engine_client, "vllm_config", None)
+        kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
+        self.has_kv_connector = kv_transfer_config is not None
+
+        # Computed once at startup (cached by ``vllm_config`` identity) and
+        # stamped on non-streaming responses. Streaming chunks deliberately
+        # omit it to avoid per-chunk overhead.
+        from vllm.entrypoints.serve.utils.fingerprint import get_system_fingerprint
+
+        try:
+            self.system_fingerprint: str | None = get_system_fingerprint(
+                engine_client.vllm_config
+            )
+        except Exception:
+            # Never fail server startup over the fingerprint.
+            self.system_fingerprint = None
+
+    def create_streaming_error_response(
+        self,
+        message: str | Exception,
+        err_type: str = "BadRequestError",
+        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+        param: str | None = None,
+    ) -> str:
+        json_str = json.dumps(
+            self.create_error_response(
+                message=message,
+                err_type=err_type,
+                status_code=status_code,
+                param=param,
+            ).model_dump()
+        )
+        return json_str
+
+    def _raise_if_error(self, finish_reason: str | None, request_id: str) -> None:
+        """Raise GenerationError if finish_reason indicates an error."""
+        if finish_reason == "error":
+            logger.error(
+                "Request %s failed with an internal error during generation",
+                request_id,
+            )
+            raise GenerationError("Internal server error")
+
+    def _convert_generation_error_to_streaming_response(
+        self, e: GenerationError
+    ) -> str:
+        """Convert GenerationError to streaming error response."""
+        return self.create_streaming_error_response(
+            str(e),
+            err_type="InternalServerError",
+            status_code=e.status_code,
+        )
 
     def _validate_chat_template(
         self,
@@ -339,36 +394,6 @@ class OpenAIServing(BeamSearchOnlineMixin):
         # Apply server defaults first, then request kwargs override.
         return default_chat_template_kwargs | request_chat_template_kwargs
 
-    def _extract_prompt_components(self, prompt: PromptType | EngineInput):
-        return extract_prompt_components(self.model_config, prompt)
-
-    def _extract_prompt_text(self, prompt: PromptType | EngineInput):
-        return self._extract_prompt_components(prompt).text
-
-    def _extract_prompt_len(self, prompt: EngineInput):
-        return extract_prompt_len(self.model_config, prompt)
-
-    def _log_inputs(
-        self,
-        request_id: str,
-        inputs: PromptType | EngineInput,
-        params: SamplingParams | BeamSearchParams | None,
-        lora_request: LoRARequest | None,
-    ) -> None:
-        if self.request_logger is None:
-            return
-
-        components = self._extract_prompt_components(inputs)
-
-        self.request_logger.log_inputs(
-            request_id,
-            components.text,
-            components.token_ids,
-            components.embeds,
-            params=params,
-            lora_request=lora_request,
-        )
-
     async def _get_trace_headers(
         self,
         headers: Headers,
@@ -382,18 +407,6 @@ class OpenAIServing(BeamSearchOnlineMixin):
             log_tracing_disabled_warning()
 
         return None
-
-    @staticmethod
-    def _base_request_id(
-        raw_request: Request | None, default: str | None = None
-    ) -> str | None:
-        """Pulls the request id to use from a header, if provided"""
-        if raw_request is not None and (
-            (req_id := raw_request.headers.get("X-Request-Id")) is not None
-        ):
-            return req_id
-
-        return random_uuid() if default is None else default
 
     @staticmethod
     def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
@@ -463,13 +476,6 @@ class OpenAIServing(BeamSearchOnlineMixin):
             )
 
         return tokenizer.decode([token_id])
-
-    def _is_model_supported(self, model_name: str | None) -> bool:
-        if not model_name:
-            return True
-        if envs.VLLM_SKIP_MODEL_NAME_VALIDATION:
-            return True
-        return self.models.is_base_model(model_name)
 
 
 def format_token_id_placeholder(token_id: int) -> str:

@@ -19,17 +19,17 @@ from vllm.entrypoints.serve.disagg.protocol import (
     DerenderCompletionRequest,
     GenerateRequest,
 )
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.utils.api_utils import validate_json_request
 from vllm.logger import init_logger
+from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = init_logger(__name__)
 
 router = APIRouter()
 
 
-def render(request: Request) -> OpenAIServingRender | None:
-    return getattr(request.app.state, "openai_serving_render", None)
+def render(request: Request) -> OnlineRenderer | None:
+    return getattr(request.app.state, "online_renderer", None)
 
 
 @router.post(
