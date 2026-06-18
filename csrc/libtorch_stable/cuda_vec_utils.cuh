@@ -21,7 +21,7 @@
 // together enable 256-bit (v8.u32) PTX load/store instructions.
 // Use for PTX instruction selection with architecture fallback paths.
 #if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && \
-    defined(CUDA_VERSION) && CUDA_VERSION >= 12090
+    defined(CUDART_VERSION) && CUDART_VERSION >= 12090
   #define VLLM_256B_PTX_ENABLED 1
 #else
   #define VLLM_256B_PTX_ENABLED 0

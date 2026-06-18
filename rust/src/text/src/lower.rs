@@ -1,12 +1,17 @@
 use std::collections::BTreeSet;
 
+pub(crate) mod logprobs;
+pub(crate) mod token_ids;
+
 use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
 use vllm_llm::GenerateRequest;
 use vllm_tokenizer::Tokenizer;
 
-use crate::backend::SamplingHints;
+use crate::backend::{SamplingHints, SamplingLimits};
 use crate::error::{Error, Result};
 use crate::request::{SamplingParams, TextRequest};
+use logprobs::validate_logprobs;
+use token_ids::{validate_prompt_token_ids, validate_vocab_range};
 
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
@@ -24,9 +29,12 @@ pub fn lower_text_request(
     request: TextRequest,
     prompt_token_ids: Vec<u32>,
     sampling_hints: SamplingHints,
+    sampling_limits: SamplingLimits,
     tokenizer: &dyn Tokenizer,
 ) -> Result<PreparedTextRequest> {
     let prompt_len = prompt_token_ids.len() as u32;
+    validate_prompt_token_ids(&prompt_token_ids, &sampling_limits)?;
+
     let generate_request = GenerateRequest {
         request_id: request.request_id.clone(),
         prompt_token_ids,
@@ -34,6 +42,7 @@ pub fn lower_text_request(
         sampling_params: lower_sampling_params(
             request.sampling_params.clone(),
             sampling_hints,
+            sampling_limits,
             prompt_len,
             tokenizer,
         )?,
@@ -66,8 +75,8 @@ pub fn lower_sampling_params(
         default_min_p,
         default_repetition_penalty,
         default_max_tokens,
-        max_model_len,
     }: SamplingHints,
+    sampling_limits: SamplingLimits,
     prompt_len: u32,
     tokenizer: &dyn Tokenizer,
 ) -> Result<EngineCoreSamplingParams> {
@@ -95,6 +104,13 @@ pub fn lower_sampling_params(
         vllm_xargs,
     } = sampling_params;
 
+    validate_logprobs(
+        logprobs,
+        prompt_logprobs,
+        logprob_token_ids.as_deref(),
+        sampling_limits,
+    )?;
+
     // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat
     // path: https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/openai/chat_completion/protocol.py#L424-L450
     // If neither the caller nor the model provides a value, fall back to 1.0 — the
@@ -105,7 +121,12 @@ pub fn lower_sampling_params(
     let top_k = top_k.or(default_top_k).unwrap_or(0);
     let min_p = min_p.or(default_min_p).unwrap_or(0.0);
     let repetition_penalty = repetition_penalty.or(default_repetition_penalty).unwrap_or(1.0);
-    let max_tokens = resolve_max_tokens(max_tokens, default_max_tokens, max_model_len, prompt_len)?;
+    let max_tokens = resolve_max_tokens(
+        max_tokens,
+        default_max_tokens,
+        sampling_limits.max_model_len,
+        prompt_len,
+    )?;
     let min_tokens = min_tokens.unwrap_or(0);
     let frequency_penalty = frequency_penalty.unwrap_or(0.0);
     let presence_penalty = presence_penalty.unwrap_or(0.0);
@@ -121,7 +142,7 @@ pub fn lower_sampling_params(
         merge_unique_token_ids(&mut stop_token_ids, extra_eos_token_ids.iter().copied());
     }
 
-    Ok(EngineCoreSamplingParams {
+    let params = EngineCoreSamplingParams {
         temperature,
         top_p,
         top_k,
@@ -144,7 +165,9 @@ pub fn lower_sampling_params(
         logprob_token_ids,
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
-    })
+    };
+    validate_vocab_range(&params, &sampling_limits)?;
+    Ok(params)
 }
 
 /// Convert bad-word strings into token-ID sequences, following the Python vLLM
@@ -189,33 +212,25 @@ fn tokenize_bad_words(
 /// Resolve the effective `max_tokens` for generation, mirroring vLLM Python's
 /// `get_max_tokens()` in `vllm/entrypoints/utils.py`.
 ///
-/// Takes the minimum of all available limits (user-specified, generation-config
-/// default, and `max_model_len - prompt_len`). When nothing is known, falls
-/// back to `u32::MAX` so the engine-core can apply its own context-window
-/// limit.
+/// Takes the minimum of all available limits: user-specified, generation-config
+/// default, and `max_model_len - prompt_len`.
 pub fn resolve_max_tokens(
     user_max_tokens: Option<u32>,
     default_max_tokens: Option<u32>,
-    max_model_len: Option<u32>,
+    max_model_len: u32,
     prompt_len: u32,
 ) -> Result<u32> {
-    let model_max_tokens = match max_model_len {
-        Some(max_model_len) if prompt_len >= max_model_len => {
-            return Err(Error::PromptTooLong {
-                max_model_len,
-                prompt_len,
-            });
-        }
-        Some(max_model_len) => Some(max_model_len - prompt_len),
-        None => None,
+    let model_max_tokens = if prompt_len >= max_model_len {
+        return Err(Error::PromptTooLong {
+            max_model_len,
+            prompt_len,
+        });
+    } else {
+        max_model_len - prompt_len
     };
 
-    let fallback_max_tokens = user_max_tokens.or(default_max_tokens);
-    Ok([fallback_max_tokens, model_max_tokens]
-        .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or(u32::MAX /* TODO: a reasonable fallback? */))
+    let request_max_tokens = user_max_tokens.or(default_max_tokens);
+    Ok(request_max_tokens.map_or(model_max_tokens, |n| n.min(model_max_tokens)))
 }
 
 fn merge_unique_token_ids(
@@ -233,13 +248,14 @@ fn merge_unique_token_ids(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap};
 
     use serial_test::file_serial;
 
     use super::*;
     use crate::backend::hf::HfTextBackend;
     use crate::backend::{SamplingHints, TextBackend as _};
+    use crate::error::{LogprobsError, OutOfVocabError};
     use crate::request::{Prompt, TextRequest};
 
     /// Stub tokenizer that returns empty token IDs — sufficient for tests that
@@ -290,8 +306,38 @@ mod tests {
             default_min_p: None,
             default_repetition_penalty: None,
             default_max_tokens: None,
-            max_model_len: None,
         }
+    }
+
+    fn sample_sampling_limits() -> SamplingLimits {
+        SamplingLimits {
+            max_model_len: 1_000_000,
+            max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
+            model_vocab_size: 1000,
+            tokenizer_vocab_size: 2000,
+        }
+    }
+
+    fn lower_sampling_params_with_limits(
+        sampling_params: SamplingParams,
+        sampling_limits: SamplingLimits,
+    ) -> Result<EngineCoreSamplingParams> {
+        lower_sampling_params(
+            sampling_params,
+            SamplingHints {
+                primary_eos_token_id: None,
+                extra_eos_token_ids: BTreeSet::new(),
+                default_temperature: None,
+                default_top_p: None,
+                default_top_k: None,
+                default_min_p: None,
+                default_repetition_penalty: None,
+                default_max_tokens: None,
+            },
+            sampling_limits,
+            3,
+            &stub_tokenizer(),
+        )
     }
 
     #[test]
@@ -300,6 +346,7 @@ mod tests {
             sample_request(),
             vec![1, 2, 3],
             sample_sampling_hints(),
+            sample_sampling_limits(),
             &stub_tokenizer(),
         )
         .unwrap();
@@ -311,7 +358,7 @@ mod tests {
                 top_p: 1.0,
                 top_k: 0,
                 seed: None,
-                max_tokens: 4294967295,
+                max_tokens: 999997,
                 min_tokens: 0,
                 logprobs: None,
                 prompt_logprobs: None,
@@ -350,6 +397,7 @@ mod tests {
             request,
             vec![1, 2, 3],
             sample_sampling_hints(),
+            sample_sampling_limits(),
             &stub_tokenizer(),
         )
         .unwrap();
@@ -361,7 +409,7 @@ mod tests {
                 top_p: 1.0,
                 top_k: 0,
                 seed: None,
-                max_tokens: 4294967295,
+                max_tokens: 999997,
                 min_tokens: 0,
                 logprobs: None,
                 prompt_logprobs: None,
@@ -385,6 +433,57 @@ mod tests {
             }
         "#]]
         .assert_debug_eq(&params);
+    }
+
+    #[test]
+    fn lower_text_request_uses_union_vocab_for_prompt_token_ids() {
+        lower_text_request(
+            sample_request(),
+            vec![1500],
+            sample_sampling_hints(),
+            SamplingLimits {
+                model_vocab_size: 2000,
+                tokenizer_vocab_size: 1000,
+                ..sample_sampling_limits()
+            },
+            &stub_tokenizer(),
+        )
+        .expect("model vocab extends prompt token range");
+
+        lower_text_request(
+            sample_request(),
+            vec![1500],
+            sample_sampling_hints(),
+            SamplingLimits {
+                model_vocab_size: 1000,
+                tokenizer_vocab_size: 2000,
+                ..sample_sampling_limits()
+            },
+            &stub_tokenizer(),
+        )
+        .expect("tokenizer vocab extends prompt token range");
+
+        let error = lower_text_request(
+            sample_request(),
+            vec![2000],
+            sample_sampling_hints(),
+            SamplingLimits {
+                model_vocab_size: 1000,
+                tokenizer_vocab_size: 2000,
+                ..sample_sampling_limits()
+            },
+            &stub_tokenizer(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::OutOfVocab(OutOfVocabError {
+                parameter: "prompt",
+                token_ids,
+                vocab_size: 2000,
+            }) if token_ids == vec![2000]
+        ));
     }
 
     #[tokio::test]
@@ -415,16 +514,23 @@ mod tests {
                 default_min_p: None,
                 default_repetition_penalty: None,
                 default_max_tokens: None,
-                max_model_len: Some(
-                    40960,
-                ),
             }
         "#]]
         .assert_debug_eq(&hints);
 
-        let prepared =
-            lower_text_request(sample_request(), vec![1, 2, 3], hints, &stub_tokenizer())
-                .expect("lower request");
+        let prepared = lower_text_request(
+            sample_request(),
+            vec![1, 2, 3],
+            hints,
+            SamplingLimits {
+                max_model_len: 40960,
+                max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
+                model_vocab_size: backend.model_vocab_size(),
+                tokenizer_vocab_size: backend.tokenizer_vocab_size(),
+            },
+            &stub_tokenizer(),
+        )
+        .expect("lower request");
         let params = prepared.generate_request.sampling_params;
 
         expect_test::expect![[r#"
@@ -481,8 +587,8 @@ mod tests {
                 default_min_p: None,
                 default_repetition_penalty: None,
                 default_max_tokens: None,
-                max_model_len: None,
             },
+            sample_sampling_limits(),
             3,
             &stub_tokenizer(),
         )
@@ -494,7 +600,7 @@ mod tests {
                 top_p: 1.0,
                 top_k: 0,
                 seed: None,
-                max_tokens: 4294967295,
+                max_tokens: 999997,
                 min_tokens: 0,
                 logprobs: None,
                 prompt_logprobs: None,
@@ -550,8 +656,8 @@ mod tests {
                 default_min_p: Some(0.1),
                 default_repetition_penalty: Some(1.2),
                 default_max_tokens: Some(128),
-                max_model_len: None,
             },
+            sample_sampling_limits(),
             3,
             &stub_tokenizer(),
         )
@@ -605,7 +711,10 @@ mod tests {
                 default_min_p: None,
                 default_repetition_penalty: None,
                 default_max_tokens: None,
-                max_model_len: None,
+            },
+            SamplingLimits {
+                max_logprobs: -1,
+                ..sample_sampling_limits()
             },
             3,
             &stub_tokenizer(),
@@ -614,6 +723,129 @@ mod tests {
 
         assert_eq!(params.logprobs, Some(3));
         assert_eq!(params.prompt_logprobs, Some(-1));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_full_vocab_logprobs_over_default_cap() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                logprobs: Some(-1),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::Logprobs(LogprobsError::TooManyCount {
+                parameter: "logprobs",
+                requested: 1000,
+                max_allowed: 20,
+            })
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_expands_full_vocab_logprobs_from_model_vocab() {
+        let params = lower_sampling_params_with_limits(
+            SamplingParams {
+                logprobs: Some(-1),
+                ..Default::default()
+            },
+            SamplingLimits {
+                max_logprobs: 1500,
+                ..sample_sampling_limits()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(params.logprobs, Some(-1));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_invalid_logprob_token_ids() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                logprobs: Some(1),
+                logprob_token_ids: Some(vec![1000]),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::OutOfVocab(OutOfVocabError {
+                parameter: "logprob_token_ids",
+                token_ids,
+                vocab_size: 1000,
+            }) if token_ids == vec![1000]
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_out_of_vocab_stop_token_ids() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                stop_token_ids: Some(vec![999, 1000]),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::OutOfVocab(OutOfVocabError {
+                parameter: "stop_token_ids",
+                token_ids,
+                vocab_size: 1000,
+            }) if token_ids == vec![1000]
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_out_of_vocab_allowed_token_ids() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                allowed_token_ids: Some(vec![1999, 2000]),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::OutOfVocab(OutOfVocabError {
+                parameter: "allowed_token_ids",
+                token_ids,
+                vocab_size: 2000,
+            }) if token_ids == vec![2000]
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_out_of_vocab_logit_bias() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                logit_bias: Some(HashMap::from([(1000, 1.0)])),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::OutOfVocab(OutOfVocabError {
+                parameter: "logit_bias",
+                token_ids,
+                vocab_size: 1000,
+            }) if token_ids == vec![1000]
+        ));
     }
 
     #[test]
@@ -629,8 +861,8 @@ mod tests {
                 default_min_p: Some(0.1),
                 default_repetition_penalty: Some(1.2),
                 default_max_tokens: Some(128),
-                max_model_len: None,
             },
+            sample_sampling_limits(),
             3,
             &stub_tokenizer(),
         )
@@ -667,7 +899,7 @@ mod tests {
 
     #[test]
     fn resolve_max_tokens_caps_by_model_len() {
-        let result = resolve_max_tokens(Some(150), None, Some(200), 100);
+        let result = resolve_max_tokens(Some(150), None, 200, 100);
         assert_eq!(result.unwrap(), 100);
     }
 
@@ -680,6 +912,7 @@ mod tests {
             request,
             vec![1, 2, 3],
             sample_sampling_hints(),
+            sample_sampling_limits(),
             &stub_tokenizer(),
         )
         .unwrap();
@@ -690,37 +923,31 @@ mod tests {
 
     #[test]
     fn resolve_max_tokens_user_smaller_than_model_limit() {
-        let result = resolve_max_tokens(Some(50), None, Some(200), 100);
+        let result = resolve_max_tokens(Some(50), None, 200, 100);
         assert_eq!(result.unwrap(), 50);
     }
 
     #[test]
     fn resolve_max_tokens_uses_default_when_user_omits() {
-        let result = resolve_max_tokens(None, Some(64), Some(200), 100);
+        let result = resolve_max_tokens(None, Some(64), 200, 100);
         assert_eq!(result.unwrap(), 64);
     }
 
     #[test]
     fn resolve_max_tokens_default_capped_by_model_len() {
-        let result = resolve_max_tokens(None, Some(256), Some(200), 100);
+        let result = resolve_max_tokens(None, Some(256), 200, 100);
         assert_eq!(result.unwrap(), 100);
     }
 
     #[test]
-    fn resolve_max_tokens_no_model_len_falls_back() {
-        let result = resolve_max_tokens(Some(9999), None, None, 100);
-        assert_eq!(result.unwrap(), 9999);
-    }
-
-    #[test]
-    fn resolve_max_tokens_no_limits_known_falls_back_to_u32_max() {
-        let result = resolve_max_tokens(None, None, None, 100);
-        assert_eq!(result.unwrap(), u32::MAX);
+    fn resolve_max_tokens_uses_model_limit_when_user_omits() {
+        let result = resolve_max_tokens(None, None, 200, 100);
+        assert_eq!(result.unwrap(), 100);
     }
 
     #[test]
     fn resolve_max_tokens_prompt_too_long() {
-        let result = resolve_max_tokens(Some(10), None, Some(100), 100);
+        let result = resolve_max_tokens(Some(10), None, 100, 100);
         assert!(matches!(
             result,
             Err(Error::PromptTooLong {
@@ -732,7 +959,7 @@ mod tests {
 
     #[test]
     fn resolve_max_tokens_prompt_exceeds_model_len() {
-        let result = resolve_max_tokens(Some(10), None, Some(100), 200);
+        let result = resolve_max_tokens(Some(10), None, 100, 200);
         assert!(matches!(
             result,
             Err(Error::PromptTooLong {
