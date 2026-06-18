@@ -56,6 +56,34 @@ def test_nvfp4_launch_config_large_full_decode_heads() -> None:
         8,
         3,
     )
+    assert _get_nvfp4_launch_config(
+        16, 128, 128, is_3d=False, sliding_window_val=1024
+    ) == (
+        16,
+        8,
+        3,
+    )
+    assert _get_nvfp4_launch_config(
+        16, 256, 256, is_3d=False, sliding_window_val=0
+    ) == (
+        16,
+        8,
+        1,
+    )
+    assert _get_nvfp4_launch_config(
+        16, 256, 256, is_3d=False, sliding_window_val=1024
+    ) == (
+        16,
+        4,
+        1,
+    )
+    assert _get_nvfp4_launch_config(
+        16, 512, 512, is_3d=False, sliding_window_val=0
+    ) == (
+        16,
+        8,
+        1,
+    )
     assert _get_nvfp4_launch_config(16, 128, 128, is_3d=True, sliding_window_val=0) == (
         16,
         8,

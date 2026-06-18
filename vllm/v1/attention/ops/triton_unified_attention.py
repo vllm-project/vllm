@@ -1698,6 +1698,8 @@ def _get_nvfp4_launch_config(
     # E4M3 block scales before the attention math.  Cap the per-program
     # dequant footprint instead of specializing for any model family.
     if not is_3d:
+        if sliding_window_val > 0 and head_size_padded >= 256:
+            return 16, 4, 1
         return 16, 8, 3 if head_size == 128 else 1
     if sliding_window_val > 0:
         if head_size_padded >= 256:
