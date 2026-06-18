@@ -31,14 +31,11 @@ class KVCacheScaleParameter(torch.nn.Parameter):
 
     @staticmethod
     def weight_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor) -> None:
-        # Per-head KV-cache scales (shape [num_kv_heads], e.g. from static
-        # FP8 checkpoints like Hy3-preview-FP8) are reduced to a single
-        # per-tensor scale by taking the max across heads. This keeps the
-        # largest-magnitude head representable and matches backends that
-        # expect a scalar k/v_scale (e.g. the HPC attention backend, whose
-        # FP8 kernels take per-tensor k_scale/v_scale of shape [1]).
         if loaded_weight.numel() != 1:
-            loaded_weight = loaded_weight.max()
+            raise ValueError(
+                f"KV-cache scale expects a scalar weight, got shape "
+                f"{tuple(loaded_weight.shape)}"
+            )
         param.data.copy_(loaded_weight.reshape(()))
 
 
