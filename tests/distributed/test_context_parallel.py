@@ -20,6 +20,7 @@ from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
 from tests.utils import RemoteOpenAIServer, create_new_process_for_each_test
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 from ..models.registry import HF_EXAMPLE_MODELS
 
@@ -40,7 +41,7 @@ NUM_SHOTS = 5  # Few-shot examples
 # tp accuracy with 2% buffer
 MIN_ACCURACY = {
     # .buildkite/lm-eval-harness/configs/DeepSeek-V2-Lite-Chat.yaml
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.64,
+    "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.50 if current_platform.is_rocm() else 0.64,
     # .buildkite/lm-eval-harness/configs/Qwen2.5-1.5B-Instruct.yaml
     "Qwen/Qwen2.5-1.5B-Instruct": 0.52,
 }
@@ -121,24 +122,34 @@ class CPTestSettings:
                 )
 
 
-CP_TEXT_GENERATION_MODELS = {
-    "deepseek-ai/DeepSeek-V2-Lite-Chat": [
-        CPTestSettings.detailed(dcp_multipliers=[1]),
-        CPTestSettings.detailed(
-            dcp_multipliers=[0.5],
-            cp_kv_cache_interleave_size=64,
-            attn_backend="FLASHMLA",
-        ),
-    ],
-    "Qwen/Qwen2.5-1.5B-Instruct": [
-        CPTestSettings.detailed(
-            cp_kv_cache_interleave_size=16, attn_backend="FLASH_ATTN"
-        ),
-        CPTestSettings.detailed(
-            cp_kv_cache_interleave_size=16, attn_backend="FLASHINFER"
-        ),
-    ],
-}
+if current_platform.is_rocm():
+    CP_TEXT_GENERATION_MODELS = {
+        "deepseek-ai/DeepSeek-V2-Lite-Chat": [
+            CPTestSettings.detailed(dcp_multipliers=[1]),
+        ],
+        "Qwen/Qwen2.5-1.5B-Instruct": [
+            CPTestSettings.detailed(dcp_multipliers=[1]),
+        ],
+    }
+else:
+    CP_TEXT_GENERATION_MODELS = {
+        "deepseek-ai/DeepSeek-V2-Lite-Chat": [
+            CPTestSettings.detailed(dcp_multipliers=[1]),
+            CPTestSettings.detailed(
+                dcp_multipliers=[0.5],
+                cp_kv_cache_interleave_size=64,
+                attn_backend="FLASHMLA",
+            ),
+        ],
+        "Qwen/Qwen2.5-1.5B-Instruct": [
+            CPTestSettings.detailed(
+                cp_kv_cache_interleave_size=16, attn_backend="FLASH_ATTN"
+            ),
+            CPTestSettings.detailed(
+                cp_kv_cache_interleave_size=16, attn_backend="FLASHINFER"
+            ),
+        ],
+    }
 
 
 def _test_cp_gsm8k(

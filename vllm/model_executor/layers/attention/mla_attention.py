@@ -188,6 +188,7 @@ return curr_o @ W_O
 """
 
 import functools
+import math
 from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
@@ -1668,6 +1669,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     # cannot handle `context_chunk_starts` that are not aligned
                     # to page_size
                     max_context_chunk = round_down(max_context_chunk, self.page_size)
+                elif self.dcp_world_size > 1:
+                    chunk_alignment = math.lcm(
+                        self.kv_cache_spec.block_size, self.dcp_virtual_block_size
+                    )
+                    max_context_chunk = round_down(max_context_chunk, chunk_alignment)
 
                 assert max_context_chunk > 0
                 num_chunks = cdiv(max_context_len_cpu, max_context_chunk)
