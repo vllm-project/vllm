@@ -106,6 +106,11 @@ class AnthropicMessagesRequest(BaseModel):
     tools: list[AnthropicTool] | None = None
     top_k: int | None = None
     top_p: float | None = None
+    # vLLM-specific opt-in echo fields. When true, the response (and the
+    # streaming ``message_delta`` event) gain top-level
+    # ``rendered_prompts`` / ``raw_output_texts`` arrays.
+    return_rendered_prompts: bool | None = None
+    return_raw_output: bool | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -204,6 +209,11 @@ class AnthropicStreamEvent(BaseModel):
     index: int | None = None
     error: AnthropicError | None = None
     usage: AnthropicUsage | None = None
+    # vLLM-specific opt-in echo, attached on the final ``message_delta``
+    # event when the request set ``return_rendered_prompts`` /
+    # ``return_raw_output``.
+    rendered_prompts: list[str | None] | None = None
+    raw_output_texts: list[str] | None = None
 
 
 class AnthropicMessagesResponse(BaseModel):
@@ -219,6 +229,9 @@ class AnthropicMessagesResponse(BaseModel):
     ) = None
     stop_sequence: str | None = None
     usage: AnthropicUsage | None = None
+    # vLLM-specific opt-in echo: only set when the request asked for it.
+    rendered_prompts: list[str | None] | None = None
+    raw_output_texts: list[str] | None = None
 
     def model_post_init(self, __context):
         if not self.id:

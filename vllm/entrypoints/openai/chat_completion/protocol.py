@@ -106,6 +106,11 @@ class ChatCompletionResponse(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None
+    # Optional echo of the chat-template-rendered prompt(s) and raw model
+    # output (pre-parser). Populated only when the request set
+    # `return_rendered_prompts` / `return_raw_output`.
+    rendered_prompts: list[str | None] | None = None
+    raw_output_texts: list[str] | None = None
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
@@ -130,6 +135,10 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     usage: UsageInfo | None = Field(default=None)
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
+    # Same opt-in echo as ChatCompletionResponse, attached on the final
+    # usage chunk only.
+    rendered_prompts: list[str | None] | None = None
+    raw_output_texts: list[str] | None = None
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
@@ -308,6 +317,28 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "only in the first chunk, and token_ids contains the delta tokens "
             "for each chunk. This is useful for debugging or when you "
             "need to map generated text back to input tokens."
+        ),
+    )
+    return_rendered_prompts: bool | None = Field(
+        default=None,
+        description=(
+            "If true, the response includes a top-level `rendered_prompts` "
+            "field with the chat-template-rendered prompt string(s) that "
+            "were tokenized and fed to the engine. May be null for "
+            "renderers that produce token ids directly (e.g. Mistral, "
+            "harmony / gpt-oss). In streaming mode the field is attached "
+            "to the final usage chunk."
+        ),
+    )
+    return_raw_output: bool | None = Field(
+        default=None,
+        description=(
+            "If true, the response includes a top-level `raw_output_texts` "
+            "field with the model's pristine output (one entry per choice) "
+            "before the reasoning_parser / tool_parser strips or rewrites "
+            "anything. In streaming mode the field is attached to the final "
+            "usage chunk; the per-choice value ends with the EOS token's "
+            "literal form when generation stopped on a natural EOS."
         ),
     )
 

@@ -113,8 +113,13 @@ class RequestResponseMetadata(BaseModel):
     final_usage_info: UsageInfo | None = None
     # Raw model output text, one entry per choice, captured before the
     # reasoning parser / tool parser strip or rewrite anything. The
-    # request-log hub uses this to record the unprocessed generation.
+    # request-log hub uses this to record the unprocessed generation,
+    # and the response-side opt-in echoes it back to the caller.
     raw_output_texts: list[str] | None = None
+    # Chat-template-rendered prompt(s), one entry per engine prompt
+    # (almost always length 1). Captured so the request-log hub and the
+    # opt-in HTTP response field can share the same source of truth.
+    rendered_prompts: list[str | None] | None = None
     # Resolved SamplingParams (or BeamSearchParams) the engine was given
     # for this request, serialized to a plain dict. Captured for the
     # request-log hub so the saved record is enough to re-run / replay

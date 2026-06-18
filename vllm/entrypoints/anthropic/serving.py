@@ -112,6 +112,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 # Handle complex content blocks
                 content_parts: list[dict[str, Any]] = []
                 tool_calls: list[dict[str, Any]] = []
+                reasoning_parts: list[str] = []
 
                 for block in msg.content:
                     if block.type == "text" and block.text:
@@ -123,6 +124,15 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 "image_url": {"url": block.source.get("data", "")},
                             }
                         )
+                    elif block.type == "thinking" and block.thinking:
+                        # Anthropic extended-thinking content from a prior
+                        # turn. Hand it to vLLM's chat-utils as the
+                        # ``reasoning`` field on this message; the chat
+                        # template decides how (or whether) to render it,
+                        # so non-reasoning models stay unaffected while
+                        # reasoning models can replay their own past
+                        # chain-of-thought.
+                        reasoning_parts.append(block.thinking)
                     elif block.type == "tool_use":
                         # Convert tool use to function call format
                         tool_call = {
@@ -161,13 +171,19 @@ class AnthropicServingMessages(OpenAIServingChat):
                 if tool_calls:
                     openai_msg["tool_calls"] = tool_calls  # type: ignore
 
+                # Carry reasoning across turns when present. Only meaningful
+                # on assistant messages; we still attach unconditionally so
+                # the downstream chat_utils handler decides.
+                if reasoning_parts:
+                    openai_msg["reasoning"] = "".join(reasoning_parts)
+
                 # Add content parts if any
                 if content_parts:
                     if len(content_parts) == 1 and content_parts[0]["type"] == "text":
                         openai_msg["content"] = content_parts[0]["text"]
                     else:
                         openai_msg["content"] = content_parts  # type: ignore
-                elif not tool_calls:
+                elif not tool_calls and not reasoning_parts:
                     continue
 
             openai_messages.append(openai_msg)
@@ -181,6 +197,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             temperature=anthropic_request.temperature,
             top_p=anthropic_request.top_p,
             top_k=anthropic_request.top_k,
+            return_rendered_prompts=anthropic_request.return_rendered_prompts,
+            return_raw_output=anthropic_request.return_raw_output,
         )
 
         if anthropic_request.stream:
@@ -262,6 +280,11 @@ class AnthropicServingMessages(OpenAIServingChat):
                 input_tokens=generator.usage.prompt_tokens,
                 output_tokens=generator.usage.completion_tokens,
             ),
+            # Forward the vLLM-specific opt-in echoes if the underlying
+            # chat-completion response carried them. They're already None
+            # when the request didn't enable the feature.
+            rendered_prompts=generator.rendered_prompts,
+            raw_output_texts=generator.raw_output_texts,
         )
         if generator.choices[0].finish_reason == "stop":
             result.stop_reason = "end_turn"
@@ -371,6 +394,11 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     if origin_chunk.usage
                                     else 0,
                                 ),
+                                # Forward the opt-in echoes attached by the
+                                # underlying chat completion final chunk.
+                                # Both are None when the caller didn't ask.
+                                rendered_prompts=origin_chunk.rendered_prompts,
+                                raw_output_texts=origin_chunk.raw_output_texts,
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
                             yield wrap_data_with_event(data, "message_delta")

@@ -382,15 +382,16 @@ class OpenAIServingChat(OpenAIServing):
         )
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
+        # Capture the chat-template-rendered prompt strings on the
+        # metadata object so both the request-log hub (via
+        # raw_request.state) and the response-side opt-in echo (read
+        # back from request_metadata inside the generators) share one
+        # source of truth. Cheap: just references to upstream strings.
+        rendered_prompts = [self._extract_prompt_text(ep) for ep in engine_prompts]
+        request_metadata.rendered_prompts = rendered_prompts
         if raw_request:
             raw_request.state.request_metadata = request_metadata
-            # Stash chat-template-rendered prompt strings so the
-            # request-log hub can persist them alongside the raw HTTP
-            # request body. Cheap: just a list of references to strings
-            # already produced upstream.
-            raw_request.state.rendered_prompts = [
-                self._extract_prompt_text(ep) for ep in engine_prompts
-            ]
+            raw_request.state.rendered_prompts = rendered_prompts
 
         try:
             lora_request = self._maybe_get_adapters(
@@ -1388,19 +1389,41 @@ class OpenAIServingChat(OpenAIServing):
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
 
-            # once the final token is handled, if stream_options.include_usage
-            # is sent, send the usage
-            if include_usage:
-                completion_tokens = sum(previous_num_tokens)
-                final_usage = UsageInfo(
-                    prompt_tokens=num_prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=num_prompt_tokens + completion_tokens,
+            # Compute pristine raw output now so it can ride along on the
+            # final stream chunk (when the caller asked for it) AND get
+            # written to request_metadata for the request-log hub.
+            raw_output_texts = [
+                "".join(raw_output_fragments[i])
+                + _eos_suffix_for_log(
+                    tokenizer,
+                    raw_finish_reasons[i],
+                    raw_stop_reasons[i],
+                    raw_last_token_ids[i],
                 )
-                if self.enable_prompt_tokens_details and num_cached_tokens:
-                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(
-                        cached_tokens=num_cached_tokens
+                for i in range(num_choices)
+            ]
+            request_metadata.raw_output_texts = raw_output_texts
+
+            # Decide whether to emit a final chunk. include_usage drives
+            # the OpenAI-compatible usage chunk; the two return-* flags
+            # piggyback on the same chunk, and force one out even when
+            # include_usage is false so the fields are never lost.
+            attach_rendered = bool(request.return_rendered_prompts)
+            attach_raw_output = bool(request.return_raw_output)
+            need_final_chunk = include_usage or attach_rendered or attach_raw_output
+            if need_final_chunk:
+                final_usage: UsageInfo | None = None
+                if include_usage:
+                    completion_tokens = sum(previous_num_tokens)
+                    final_usage = UsageInfo(
+                        prompt_tokens=num_prompt_tokens,
+                        completion_tokens=completion_tokens,
+                        total_tokens=num_prompt_tokens + completion_tokens,
                     )
+                    if self.enable_prompt_tokens_details and num_cached_tokens:
+                        final_usage.prompt_tokens_details = PromptTokenUsageInfo(
+                            cached_tokens=num_cached_tokens
+                        )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -1409,6 +1432,10 @@ class OpenAIServingChat(OpenAIServing):
                     choices=[],
                     model=model_name,
                     usage=final_usage,
+                    rendered_prompts=(
+                        request_metadata.rendered_prompts if attach_rendered else None
+                    ),
+                    raw_output_texts=raw_output_texts if attach_raw_output else None,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=True, exclude_none=True
@@ -1422,16 +1449,6 @@ class OpenAIServingChat(OpenAIServing):
                 completion_tokens=num_completion_tokens,
                 total_tokens=num_prompt_tokens + num_completion_tokens,
             )
-            request_metadata.raw_output_texts = [
-                "".join(raw_output_fragments[i])
-                + _eos_suffix_for_log(
-                    tokenizer,
-                    raw_finish_reasons[i],
-                    raw_stop_reasons[i],
-                    raw_last_token_ids[i],
-                )
-                for i in range(num_choices)
-            ]
 
             # Log complete streaming response if output logging is enabled
             if self.enable_log_outputs and self.request_logger:
@@ -1833,6 +1850,14 @@ class OpenAIServingChat(OpenAIServing):
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None
+            ),
+            rendered_prompts=(
+                request_metadata.rendered_prompts
+                if request.return_rendered_prompts
+                else None
+            ),
+            raw_output_texts=(
+                request_metadata.raw_output_texts if request.return_raw_output else None
             ),
             kv_transfer_params=final_res.kv_transfer_params,
         )
