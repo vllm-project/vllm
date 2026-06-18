@@ -11,15 +11,19 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.kv_cache_interface import KVQuantMode
+from vllm.v1.attention.ops.fp8e4nv_fp16_sm75 import fp16_to_fp8e4m3
 from vllm.v1.attention.ops.fp8e4nv_sm80 import bf16_to_fp8e4m3
 
 
 def _fp8_software_conv(kv_cache_dtype: str) -> bool:
-    """True when fp8 KV must be software-emulated (SM80/86, no native fp8e4nv)."""
+    """True when fp8 KV must be software-emulated (pre-SM89, no native fp8e4nv).
+
+    SM80/86 convert via bf16; SM75 (no bf16 hardware type) convert via fp16.
+    """
     return (
         is_quantized_kv_cache(kv_cache_dtype)
         and current_platform.is_cuda()
-        and current_platform.has_device_capability(80)
+        and current_platform.has_device_capability(75)
         and not current_platform.has_device_capability(89)
     )
 
@@ -35,9 +39,10 @@ def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
     ):
         return False
     if kv_cache_dtype.startswith("fp8"):
-        # SM89+ native fp8e4nv; SM80/86 supported via software emulation
-        # (explicit fp8e4nv<->bf16 conversion on the Triton path).
-        return current_platform.has_device_capability(80)
+        # fp8 KV: native fp8e4nv on SM89+; on SM75-88 supported via software
+        # conversion on the Triton path (bf16 on SM80/86, fp16 on SM75, since
+        # SM75 has no bf16 hardware type).
+        return current_platform.has_device_capability(75)
     if kv_cache_dtype == "bfloat16":
         return current_platform.has_device_capability(80)
     return True
@@ -143,18 +148,32 @@ def reshape_and_cache_kernel_flash(
         value_tile = value_load
 
     if FP8_SOFTWARE_CONV:
-        # SM80/86: no native fp8e4nv cast. Encode bf16 -> fp8e4nv bits in
-        # software and store into the uint8 cache (no implicit hardware cvt).
-        tl.store(
-            key_cache_ptr + tgt_idx_k,
-            bf16_to_fp8e4m3(key_tile.to(tl.bfloat16)),
-            mask=tile_pos < (num_heads * head_size),
-        )
-        tl.store(
-            value_cache_ptr + tgt_idx_v,
-            bf16_to_fp8e4m3(value_tile.to(tl.bfloat16)),
-            mask=tile_pos < (num_heads * head_size),
-        )
+        # Pre-SM89: no native fp8e4nv cast. Encode to fp8e4nv bits in software and
+        # store into the uint8 cache (no implicit hardware cvt). The activation
+        # (tile) dtype selects the encoder: fp16 (SM75, no bf16 hardware type) or
+        # bf16 (SM80/86).
+        if key_tile.dtype == tl.float16:
+            tl.store(
+                key_cache_ptr + tgt_idx_k,
+                fp16_to_fp8e4m3(key_tile),
+                mask=tile_pos < (num_heads * head_size),
+            )
+            tl.store(
+                value_cache_ptr + tgt_idx_v,
+                fp16_to_fp8e4m3(value_tile),
+                mask=tile_pos < (num_heads * head_size),
+            )
+        else:
+            tl.store(
+                key_cache_ptr + tgt_idx_k,
+                bf16_to_fp8e4m3(key_tile.to(tl.bfloat16)),
+                mask=tile_pos < (num_heads * head_size),
+            )
+            tl.store(
+                value_cache_ptr + tgt_idx_v,
+                bf16_to_fp8e4m3(value_tile.to(tl.bfloat16)),
+                mask=tile_pos < (num_heads * head_size),
+            )
     else:
         tl.store(
             key_cache_ptr + tgt_idx_k,
