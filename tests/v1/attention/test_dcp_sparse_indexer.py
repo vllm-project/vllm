@@ -19,10 +19,14 @@ import torch
 import vllm.model_executor.layers.sparse_attn_indexer as idx_mod
 import vllm.v1.attention.backends.mla.flashmla_sparse as sparse_mla_mod
 from vllm.model_executor.layers.sparse_attn_indexer import (
+    _dcp_finalize_topk_remap,
+    _dcp_pack_topk_candidates,
     _global_to_local_position,
     _local_to_global_position,
     _use_persistent_topk_decode,
 )
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.mla.indexer import (
     _dcp_local_indexer_seq_lens,
     split_indexer_prefill_chunks,
@@ -32,26 +36,40 @@ from vllm.v1.attention.backends.mla.indexer import (
 class _FakeDCPGroup:
     """Single-process stand-in for the DCP group coordinator.
 
-    `set_all` pre-stashes every rank's (global_pos, score) candidate tensors
-    (computed by the caller for each rank). `all_gather` then concatenates them
-    in rank order, emulating a real all-gather.
+    `set_all` pre-stashes every rank's packed (global_pos, score_bits)
+    candidate tensor. `all_gather` then concatenates them in rank order,
+    emulating the single packed all-gather used by the DCP remap.
     """
 
     def __init__(self, world_size: int, rank: int):
         self.world_size = world_size
         self.rank_in_group = rank
-        self._pos: list[torch.Tensor] | None = None
-        self._scores: list[torch.Tensor] | None = None
+        self._packed: list[torch.Tensor] | None = None
+        self.all_gather_calls = 0
 
     def set_all(self, pos_list, scores_list):
-        self._pos = list(pos_list)
-        self._scores = list(scores_list)
+        self._packed = []
+        for pos, scores in zip(pos_list, scores_list):
+            packed = torch.empty(
+                (pos.shape[0], 2, pos.shape[1]),
+                dtype=torch.int32,
+                device=pos.device,
+            )
+            packed[:, 0, :].copy_(pos)
+            packed[:, 1, :].copy_(
+                scores.to(torch.float32).contiguous().view(torch.int32)
+            )
+            self._packed.append(packed)
 
     def all_gather(self, tensor: torch.Tensor, dim: int = 0) -> torch.Tensor:
-        # `tensor` is this rank's contribution (already in self._* at its rank).
-        stash = self._pos if tensor.dtype != torch.float32 else self._scores
-        assert stash is not None
-        return torch.cat(stash, dim=dim)
+        self.all_gather_calls += 1
+        assert self._packed is not None
+        assert dim == 2
+        assert tensor.dtype == torch.int32
+        assert tensor.ndim == 3
+        assert tensor.shape[1] == 2
+        assert torch.equal(tensor, self._packed[self.rank_in_group])
+        return torch.cat(self._packed, dim=dim)
 
 
 def _local_to_global(local_idx, rank, world_size, interleave):
@@ -66,6 +84,163 @@ def test_decode_persistent_topk_disabled_for_dcp(monkeypatch):
     assert _use_persistent_topk_decode(2048, dcp_world_size=1)
     assert not _use_persistent_topk_decode(256, dcp_world_size=1)
     assert not _use_persistent_topk_decode(512, dcp_world_size=2)
+
+
+def test_pack_topk_candidates_preserves_score_bits_and_row_starts():
+    topk_indices = torch.tensor(
+        [
+            [0, 2, -1, 1],
+            [1, -1, 0, 3],
+        ],
+        dtype=torch.int32,
+    )
+    logits = torch.tensor(
+        [
+            [-100.0, -100.0, 1.0, 3.0, 5.0, 7.0, -100.0, -100.0],
+            [-100.0, -100.0, -100.0, -100.0, 2.0, 4.0, 6.0, 8.0],
+        ],
+        dtype=torch.float32,
+    )
+    row_starts = torch.tensor([2, 4], dtype=torch.int32)
+
+    packed = _dcp_pack_topk_candidates(
+        topk_indices,
+        logits,
+        topk_indices.shape[1],
+        rank=1,
+        world_size=3,
+        interleave=2,
+        row_starts=row_starts,
+    )
+
+    expected_pos = _local_to_global(
+        torch.clamp(topk_indices, min=0),
+        rank=1,
+        world_size=3,
+        interleave=2,
+    )
+    expected_pos = torch.where(
+        topk_indices < 0, expected_pos.new_full((), -1), expected_pos
+    )
+    expected_scores = torch.tensor(
+        [
+            [1.0, 5.0, float("-inf"), 3.0],
+            [4.0, float("-inf"), 2.0, 8.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    assert torch.equal(packed[:, 0, :], expected_pos)
+    torch.testing.assert_close(packed[:, 1, :].view(torch.float32), expected_scores)
+
+
+def test_finalize_topk_remap_matches_reference():
+    all_candidates = torch.empty((2, 2, 6), dtype=torch.int32)
+    all_candidates[:, 0, :] = torch.tensor(
+        [
+            [0, 2, 3, 4, 6, -1],
+            [1, 5, 6, 7, 8, -1],
+        ],
+        dtype=torch.int32,
+    )
+    all_candidates[:, 1, :] = 0
+    selected = torch.tensor([[1, 2, 4], [0, 3, 5]], dtype=torch.int64)
+    out = torch.zeros((2, 3), dtype=torch.int32)
+
+    _dcp_finalize_topk_remap(
+        all_candidates,
+        selected,
+        out,
+        topk_tokens=3,
+        rank=1,
+        world_size=2,
+        interleave=2,
+    )
+
+    assert out.tolist() == [[0, 1, 2], [-1, 3, -1]]
+
+
+@pytest.mark.skipif(
+    not (HAS_TRITON and current_platform.is_cuda() and torch.cuda.is_available()),
+    reason="CUDA Triton kernel test requires a CUDA Triton runtime",
+)
+def test_triton_pack_topk_candidates_matches_cpu_reference():
+    topk_indices_cpu = torch.tensor(
+        [
+            [0, 3, -1, 1],
+            [2, -1, 0, 4],
+        ],
+        dtype=torch.int32,
+    )
+    logits_cpu = torch.tensor(
+        [
+            [-100.0, 1.0, 2.0, 3.0, 4.0, -100.0],
+            [5.0, 6.0, 7.0, 8.0, 9.0, -100.0],
+        ],
+        dtype=torch.float32,
+    )
+    row_starts_cpu = torch.tensor([1, 0], dtype=torch.int32)
+    expected = _dcp_pack_topk_candidates(
+        topk_indices_cpu,
+        logits_cpu,
+        topk_indices_cpu.shape[1],
+        rank=1,
+        world_size=4,
+        interleave=2,
+        row_starts=row_starts_cpu,
+    )
+
+    got = _dcp_pack_topk_candidates(
+        topk_indices_cpu.cuda(),
+        logits_cpu.cuda(),
+        topk_indices_cpu.shape[1],
+        rank=1,
+        world_size=4,
+        interleave=2,
+        row_starts=row_starts_cpu.cuda(),
+    )
+
+    assert torch.equal(got.cpu(), expected)
+
+
+@pytest.mark.skipif(
+    not (HAS_TRITON and current_platform.is_cuda() and torch.cuda.is_available()),
+    reason="CUDA Triton kernel test requires a CUDA Triton runtime",
+)
+def test_triton_finalize_topk_remap_matches_cpu_reference():
+    all_candidates_cpu = torch.empty((2, 2, 8), dtype=torch.int32)
+    all_candidates_cpu[:, 0, :] = torch.tensor(
+        [
+            [0, 2, 3, 4, 6, 8, 9, -1],
+            [1, 5, 6, 7, 8, 10, 11, -1],
+        ],
+        dtype=torch.int32,
+    )
+    all_candidates_cpu[:, 1, :] = 0
+    selected_cpu = torch.tensor([[1, 2, 4, 6], [0, 3, 5, 7]], dtype=torch.int64)
+    expected = torch.zeros((2, 4), dtype=torch.int32)
+    _dcp_finalize_topk_remap(
+        all_candidates_cpu,
+        selected_cpu,
+        expected,
+        topk_tokens=4,
+        rank=1,
+        world_size=2,
+        interleave=2,
+    )
+
+    got = torch.zeros_like(expected, device="cuda")
+    _dcp_finalize_topk_remap(
+        all_candidates_cpu.cuda(),
+        selected_cpu.cuda(),
+        got,
+        topk_tokens=4,
+        rank=1,
+        world_size=2,
+        interleave=2,
+    )
+
+    assert torch.equal(got.cpu(), expected)
 
 
 @pytest.mark.parametrize("interleave", [1, 2, 4])
@@ -283,6 +458,7 @@ def test_global_topk_reconstructs_reference(interleave, world_size, monkeypatch)
         seed = lg.topk(k, dim=1).indices.to(torch.int32)
         topk_buf[:, :k] = seed
         idx_mod._dcp_global_topk_remap(topk_buf, lg, topk_tokens, interleave)
+        assert fake.all_gather_calls == 1
         per_rank_final.append(topk_buf)
 
     # Reference: global top-k of the FULL logits, as sets per row.
@@ -357,6 +533,7 @@ def test_prefill_global_topk_uses_row_starts(monkeypatch):
             interleave,
             row_starts=row_starts_per_rank[rank],
         )
+        assert fake.all_gather_calls == 1
         per_rank_final.append(topk_buf)
 
     ref = full_logits.topk(topk_tokens, dim=1).indices
@@ -402,6 +579,7 @@ def test_global_topk_remap_allows_empty_local_rank(monkeypatch):
             topk_tokens,
             interleave,
         )
+        assert fake.all_gather_calls == 1
         per_rank_final.append(topk_buf)
 
     assert per_rank_final[0].tolist() == [[0, 1]]
@@ -443,6 +621,7 @@ def test_global_topk_ownership_partition(monkeypatch):
         buf = torch.full((num_rows, topk_tokens), -1, dtype=torch.int32)
         buf[:, :k] = lg.topk(k, dim=1).indices.to(torch.int32)
         idx_mod._dcp_global_topk_remap(buf, lg, topk_tokens, interleave)
+        assert fake.all_gather_calls == 1
         # owned positions get a real (>=0) local idx; others are -1
         for local_idx in buf.flatten().tolist():
             if local_idx >= 0:
