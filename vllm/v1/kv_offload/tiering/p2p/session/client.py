@@ -164,7 +164,8 @@ class ClientRole:
         ``_ABORT_ACK_TIMEOUT_S`` are surfaced as failed loads.
         """
         now = time.monotonic()
-        for req_id, req in list(self._inbound.items()):
+        to_remove: list[str] = []
+        for req_id, req in self._inbound.items():
             if req.aborted_at is None:
                 if now - req.submitted_at >= _LOAD_TIMEOUT_S:
                     req.aborted_at = now
@@ -181,7 +182,7 @@ class ClientRole:
                     )
             else:
                 if now - req.aborted_at >= _ABORT_ACK_TIMEOUT_S:
-                    self._inbound.pop(req_id)
+                    to_remove.append(req_id)
                     self._completed_loads.append(
                         LoadResult(
                             job_id=req.job_id,
@@ -194,6 +195,8 @@ class ClientRole:
                         self._peer_id,
                         req_id,
                     )
+        for req_id in to_remove:
+            self._inbound.pop(req_id)
 
         results = self._completed_loads
         self._completed_loads = []
