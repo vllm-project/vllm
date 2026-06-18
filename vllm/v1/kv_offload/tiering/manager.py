@@ -33,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
+    LookupResult,
     OffloadingEvent,
     OffloadingManager,
     OffloadKey,
@@ -228,7 +229,7 @@ class TieringOffloadingManager(OffloadingManager):
                     )
 
     @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """
         Check whether a single block is offloaded and ready.
 
@@ -243,33 +244,34 @@ class TieringOffloadingManager(OffloadingManager):
             req_context: Per-request context.
 
         Returns:
-            True  — block is ready in the primary tier.
-            None  — block found but not yet ready (primary in-flight,
-                    promotion started, or a secondary tier is busy).
-            False — block not found in any tier, or primary is full
-                    and cannot accept a promotion.
+            HIT       — block is ready in the primary tier.
+            HIT_PENDING — block found but not yet readable (write
+                        in-flight on the primary tier).
+            RETRY     — promotion started or a secondary tier is busy.
+            MISS      — block not found in any tier, or primary is full
+                        and cannot accept a promotion.
         """
         self._maybe_process_finished_jobs()
 
         primary_hit = self.primary_tier.lookup(key, req_context)
-        if primary_hit is True:
-            return True
-        if primary_hit is None:
-            return None
+        if primary_hit is LookupResult.HIT:
+            return LookupResult.HIT
+        if primary_hit is LookupResult.HIT_PENDING:
+            return LookupResult.HIT_PENDING
 
-        any_none = False
+        any_retry = False
         for tier in self.secondary_tiers:
             result = tier.lookup(key, req_context)
             if result is True:
                 if not self._initiate_promotion(tier, key, req_context):
-                    return False  # primary full, block unavailable
-                return None  # promotion started, retry later
+                    return LookupResult.MISS
+                return LookupResult.RETRY
             if result is None:
-                any_none = True
+                any_retry = True
 
-        if any_none:
-            return None
-        return False
+        if any_retry:
+            return LookupResult.RETRY
+        return LookupResult.MISS
 
     def _initiate_promotion(
         self,
@@ -458,7 +460,9 @@ class TieringOffloadingManager(OffloadingManager):
         """
         # Filter out keys that are not ready in primary (e.g. in-flight)
         ready_keys = tuple(
-            k for k in keys if self.primary_tier.lookup(k, req_context) is True
+            k
+            for k in keys
+            if self.primary_tier.lookup(k, req_context) is LookupResult.HIT
         )
         if not ready_keys:
             return

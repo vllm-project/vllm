@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import (
+    LookupResult,
     OffloadingManager,
     OffloadPolicy,
     ReqContext,
@@ -480,7 +481,7 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
 
     # full 3 blocks hit [0, 1, 2]
     runner.new_request(token_ids=[0] * (block_size * 3 + 1))
-    runner.manager.lookup.return_value = True
+    runner.manager.lookup.return_value = LookupResult.HIT
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         # Group 0 (full attn): prefix lookup hits 3 → loads blocks 0,1,2
@@ -500,7 +501,7 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
     # 3 blocks are hit on GPU [0, 1, 2]
     # 1 block loaded [3,]
     runner.new_request(token_ids=[0] * (block_size * 4 + 1))
-    runner.manager.lookup.return_value = True
+    runner.manager.lookup.return_value = LookupResult.HIT
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
         # Group 0 (full attn): prefix lookup hits 3 → loads blocks 0,1,2
@@ -628,7 +629,7 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
     # 48 tokens (3 block) from the second group
     # Total 48 tokens can be loaded
     runner.new_request(token_ids=[0] * 48)
-    runner.manager.lookup.return_value = True
+    runner.manager.lookup.return_value = LookupResult.HIT
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output([])
     )
@@ -644,7 +645,7 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
     # extra tokens [0, 36] (blocks [4, 5, 6]) from the first group
     # extra tokens [0, 32] (block [3, 4]) from the second group
     runner.new_request(token_ids=[0] * (48 + 37))
-    runner.manager.lookup.return_value = True
+    runner.manager.lookup.return_value = LookupResult.HIT
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
         generate_store_output([])
     )
@@ -661,12 +662,12 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
 
 
 def _make_scheduler_with_lookup(
-    lookup_results: dict[int, bool | None],
+    lookup_results: dict[int, LookupResult],
 ) -> OffloadingConnectorScheduler:
     """Create an OffloadingConnectorScheduler with a mocked manager.lookup."""
     manager = MagicMock(spec=OffloadingManager)
     manager.lookup.side_effect = lambda key, req_context: lookup_results.get(
-        int(get_offload_block_hash(key).decode()), False
+        int(get_offload_block_hash(key).decode()), LookupResult.MISS
     )
 
     scheduler = object.__new__(OffloadingConnectorScheduler)
@@ -679,7 +680,7 @@ _EMPTY_REQ_CTX = ReqContext(req_id="")
 
 class TestMaximalPrefixLookup:
     def test_all_hit(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: True})
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
         assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) == 2
 
     def test_all_miss(self):
@@ -687,32 +688,44 @@ class TestMaximalPrefixLookup:
         assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) == 0
 
     def test_partial_prefix(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: True})
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
         assert sched._maximal_prefix_lookup(to_keys([1, 2, 3]), _EMPTY_REQ_CTX) == 2
 
     def test_miss_then_hit(self):
-        sched = _make_scheduler_with_lookup({2: True})
+        sched = _make_scheduler_with_lookup({2: LookupResult.HIT})
         assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) == 0
 
     def test_single_hit(self):
-        sched = _make_scheduler_with_lookup({1: True})
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT})
         assert sched._maximal_prefix_lookup(to_keys([1]), _EMPTY_REQ_CTX) == 1
 
     def test_empty(self):
         sched = _make_scheduler_with_lookup({})
         assert sched._maximal_prefix_lookup([], _EMPTY_REQ_CTX) == 0
 
-    def test_none_defers(self):
-        sched = _make_scheduler_with_lookup({1: None, 2: True})
+    def test_retry_defers(self):
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.RETRY, 2: LookupResult.HIT}
+        )
         assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) is None
 
-    def test_none_after_hit_defers(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: None})
+    def test_retry_after_hit_defers(self):
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT, 2: LookupResult.RETRY}
+        )
         assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) is None
 
-    def test_none_stops_at_miss(self):
-        """None is treated as hit for iteration, but miss stops the scan."""
-        sched = _make_scheduler_with_lookup({1: None, 2: False, 3: True})
+    def test_hit_pending_defers(self):
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT_PENDING, 2: LookupResult.HIT}
+        )
+        assert sched._maximal_prefix_lookup(to_keys([1, 2]), _EMPTY_REQ_CTX) is None
+
+    def test_retry_stops_at_miss(self):
+        """RETRY is treated as hit for iteration, but miss stops the scan."""
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.RETRY, 2: LookupResult.MISS, 3: LookupResult.HIT}
+        )
         assert sched._maximal_prefix_lookup(to_keys([1, 2, 3]), _EMPTY_REQ_CTX) is None
         # lookup should have been called for blocks 1 and 2 (stops at miss)
         assert sched.manager.lookup.call_count == 2
@@ -720,7 +733,7 @@ class TestMaximalPrefixLookup:
 
 class TestSlidingWindowLookup:
     def test_all_hit_exact_window(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: True})
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
         assert sched._sliding_window_lookup(to_keys([1, 2]), 2, _EMPTY_REQ_CTX) == 2
 
     def test_all_miss(self):
@@ -728,25 +741,27 @@ class TestSlidingWindowLookup:
         assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 1, _EMPTY_REQ_CTX) == 0
 
     def test_window_at_end(self):
-        sched = _make_scheduler_with_lookup({2: True, 3: True})
+        sched = _make_scheduler_with_lookup({2: LookupResult.HIT, 3: LookupResult.HIT})
         assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 2, _EMPTY_REQ_CTX) == 3
 
     def test_window_in_middle(self):
-        sched = _make_scheduler_with_lookup({2: True, 3: True})
+        sched = _make_scheduler_with_lookup({2: LookupResult.HIT, 3: LookupResult.HIT})
         assert (
             sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _EMPTY_REQ_CTX) == 3
         )
 
     def test_no_full_window_falls_back_to_prefix(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: True})
+        sched = _make_scheduler_with_lookup({1: LookupResult.HIT, 2: LookupResult.HIT})
         assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 3, _EMPTY_REQ_CTX) == 2
 
     def test_single_block_window(self):
-        sched = _make_scheduler_with_lookup({2: True, 3: True})
+        sched = _make_scheduler_with_lookup({2: LookupResult.HIT, 3: LookupResult.HIT})
         assert sched._sliding_window_lookup(to_keys([1, 2, 3]), 1, _EMPTY_REQ_CTX) == 3
 
     def test_gap_resets_consecutive(self):
-        sched = _make_scheduler_with_lookup({2: True, 3: True, 4: True})
+        sched = _make_scheduler_with_lookup(
+            {2: LookupResult.HIT, 3: LookupResult.HIT, 4: LookupResult.HIT}
+        )
         # [1, 2, 3, 0, 4] — gap at 0 resets, window of 2 found at [2,3]
         assert (
             sched._sliding_window_lookup(to_keys([1, 2, 3, 0, 4]), 2, _EMPTY_REQ_CTX)
@@ -754,7 +769,14 @@ class TestSlidingWindowLookup:
         )
 
     def test_window_prefers_rightmost(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: True, 4: True, 5: True})
+        sched = _make_scheduler_with_lookup(
+            {
+                1: LookupResult.HIT,
+                2: LookupResult.HIT,
+                4: LookupResult.HIT,
+                5: LookupResult.HIT,
+            }
+        )
         # two valid windows: [1,2] at positions 0-1 and [4,5] at positions 3-4
         # scans right-to-left, finds [4,5] first
         assert (
@@ -763,7 +785,14 @@ class TestSlidingWindowLookup:
         )
 
     def test_prefix_fallback_with_gap(self):
-        sched = _make_scheduler_with_lookup({2: True, 3: True, 4: True, 5: True})
+        sched = _make_scheduler_with_lookup(
+            {
+                2: LookupResult.HIT,
+                3: LookupResult.HIT,
+                4: LookupResult.HIT,
+                5: LookupResult.HIT,
+            }
+        )
         # window of 4 not found contiguously (gap at 1)
         assert (
             sched._sliding_window_lookup(to_keys([2, 1, 3, 4, 5]), 4, _EMPTY_REQ_CTX)
@@ -774,18 +803,45 @@ class TestSlidingWindowLookup:
         sched = _make_scheduler_with_lookup({})
         assert sched._sliding_window_lookup([], 1, _EMPTY_REQ_CTX) == 0
 
-    def test_none_defers(self):
-        sched = _make_scheduler_with_lookup({1: True, 2: None})
+    def test_retry_defers(self):
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT, 2: LookupResult.RETRY}
+        )
         assert sched._sliding_window_lookup(to_keys([1, 2]), 2, _EMPTY_REQ_CTX) is None
 
-    def test_none_with_full_window_still_defers(self):
-        """Even if a real window is found after a None, result is deferred."""
-        # Scan right-to-left: 4(True), 3(None) resets, 2(True), 1(True) = window
-        # but block 3 was None so defer_lookup is set
-        sched = _make_scheduler_with_lookup({1: True, 2: True, 3: None, 4: True})
+    def test_retry_with_full_window_still_defers(self):
+        """Even if a real window is found after a RETRY, result is deferred."""
+        # Scan right-to-left: 4(HIT), 3(RETRY) resets, 2(HIT), 1(HIT) = window
+        # but block 3 was RETRY so defer_lookup is set
+        sched = _make_scheduler_with_lookup(
+            {
+                1: LookupResult.HIT,
+                2: LookupResult.HIT,
+                3: LookupResult.RETRY,
+                4: LookupResult.HIT,
+            }
+        )
         assert (
             sched._sliding_window_lookup(to_keys([1, 2, 3, 4]), 2, _EMPTY_REQ_CTX)
             is None
+        )
+
+    def test_hit_pending_counts_as_hit(self):
+        """HIT_PENDING counts toward the consecutive-hit streak."""
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT, 2: LookupResult.HIT_PENDING}
+        )
+        # window=2: both count as hits, but defer_lookup is set
+        assert sched._sliding_window_lookup(to_keys([1, 2]), 2, _EMPTY_REQ_CTX) is None
+
+    def test_hit_pending_does_not_break_streak(self):
+        """HIT_PENDING in the middle of a window doesn't reset the streak."""
+        sched = _make_scheduler_with_lookup(
+            {1: LookupResult.HIT, 2: LookupResult.HIT_PENDING, 3: LookupResult.HIT}
+        )
+        # window=3: right-to-left finds 3(HIT),2(HIT_PENDING),1(HIT) = 3 consecutive
+        assert (
+            sched._sliding_window_lookup(to_keys([1, 2, 3]), 3, _EMPTY_REQ_CTX) is None
         )
 
 
@@ -1483,7 +1539,7 @@ def test_swa_alignment_skip(request_runner, async_scheduling: bool):
     # Verify that loads still work correctly for the stored SWA blocks.
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * num_tokens + [1])
-    runner.manager.lookup.return_value = True
+    runner.manager.lookup.return_value = LookupResult.HIT
     runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 2
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
@@ -1760,7 +1816,7 @@ class TestEagle:
             async_scheduling=False,
             kv_cache_groups=groups,
         )
-        runner.manager.lookup.return_value = False
+        runner.manager.lookup.return_value = LookupResult.MISS
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
             sched, num_tokens=8, offload_keys_per_group=[[1, 2]]
@@ -2271,7 +2327,7 @@ class TestEagle:
         runner.scheduler.reset_prefix_cache()
 
         runner.new_request(token_ids=[0] * offloaded_block_size * 3 + [1])
-        runner.manager.lookup.return_value = True
+        runner.manager.lookup.return_value = LookupResult.HIT
         runner.manager.prepare_store.side_effect = lambda keys, req_context: (
             generate_store_output([])
         )
