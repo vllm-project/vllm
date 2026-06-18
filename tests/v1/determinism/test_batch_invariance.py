@@ -9,11 +9,11 @@ import torch
 from utils import (
     BACKENDS,
     TEST_MODEL,
-    XPU_BACKENDS,
     _extract_step_logprobs,
     _random_prompt,
     skip_if_not_cuda,
     skip_unsupported_device,
+    skip_unsupported_xpu_backends,
 )
 
 import vllm.envs as envs
@@ -51,9 +51,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
       seed.
     - Keep max_tokens and max_model_len bounded for speed and memory use.
     """
-    # Skip backends not verified for batch invariance on XPU
-    if current_platform.is_xpu() and backend not in XPU_BACKENDS:
-        pytest.skip(f"Backend {backend} not verified for batch invariance on XPU")
+    skip_unsupported_xpu_backends(backend)
 
     # Not all batch-invariant kernels are registered on XPU yet
     # (e.g. attention, custom ops), so e2e determinism is not guaranteed.
@@ -168,9 +166,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     block_m,
     block_n,
 ):
-    # Skip backends not verified for batch invariance on XPU
-    if current_platform.is_xpu() and backend not in XPU_BACKENDS:
-        pytest.skip(f"Backend {backend} not verified for batch invariance on XPU")
+    skip_unsupported_xpu_backends(backend)
 
     # Not all batch-invariant kernels are registered on XPU yet
     # (e.g. attention, custom ops), so e2e determinism is not guaranteed.
@@ -405,9 +401,7 @@ def test_simple_generation(backend):
     Simple test that runs the model with a basic prompt and prints the output.
     Useful for quick smoke testing and debugging.
     """
-    # Skip backends not verified for batch invariance on XPU
-    if current_platform.is_xpu() and backend not in XPU_BACKENDS:
-        pytest.skip(f"Backend {backend} not verified for batch invariance on XPU")
+    skip_unsupported_xpu_backends(backend)
 
     model = TEST_MODEL
 
@@ -466,9 +460,7 @@ def test_logprobs_without_batch_invariance_should_fail(
     The test will PASS if we detect differences (proving batch invariance matters).
     The test will FAIL if everything matches (suggesting batch invariance isn't needed).
     """
-    # Skip backends not verified for batch invariance on XPU
-    if current_platform.is_xpu() and backend not in XPU_BACKENDS:
-        pytest.skip(f"Backend {backend} not verified for batch invariance on XPU")
+    skip_unsupported_xpu_backends(backend)
 
     # CRITICAL: Disable batch invariance for this test
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")

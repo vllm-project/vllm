@@ -56,6 +56,11 @@ XPU_BACKENDS: list[str] = [
 ]
 
 
+def skip_unsupported_xpu_backends(backend: str):
+    if current_platform.is_xpu() and backend not in XPU_BACKENDS:
+        pytest.skip(f"Backend {backend} not verified for batch invariance on XPU")
+
+
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
     # Generate more realistic prompts that will actually produce varied tokens
     # Use a mix of common English text patterns
