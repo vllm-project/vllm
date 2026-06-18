@@ -23,6 +23,7 @@ use vllm_chat::{
     ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
     NewChatOutputProcessorOptions,
 };
+use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
@@ -31,7 +32,6 @@ use vllm_engine_core_client::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, StopReason,
     decode_value,
 };
-use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
 };

@@ -166,11 +166,10 @@ async fn setup_mock_engine_with_ready(
     ready_response: EngineCoreReadyResponse,
 ) -> (DealerSocket, PushSocket) {
     let config = test_mock_engine_config_with_ready(ready_response);
-    let MockEngineSockets {
-        data_sockets, ..
-    } = connect_to_frontend(engine_handshake, engine_id, config)
-        .await
-        .expect("connect mock engine with custom ready response");
+    let MockEngineSockets { data_sockets, .. } =
+        connect_to_frontend(engine_handshake, engine_id, config)
+            .await
+            .expect("connect mock engine with custom ready response");
     let MockEngineDataSockets { dealer, push } =
         data_sockets.into_iter().next().expect("mock engine data socket");
     (dealer, push)

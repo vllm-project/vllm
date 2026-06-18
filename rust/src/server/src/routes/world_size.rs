@@ -4,7 +4,7 @@ use axum::Json;
 use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ApiError, server_error};
+use crate::error::ApiError;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -41,12 +41,10 @@ pub async fn get_world_size(
 ) -> Result<Json<WorldSizeResponse>, ApiError> {
     let client = state.engine_core_client();
 
-    let ws = client
-        .world_size()
-        .ok_or_else(|| server_error!("world_size not available in engine handshake response"))?;
+    let ws = client.world_size();
 
     let world_size = if params.include_dp {
-        let dp = client.data_parallel_size().unwrap_or(1);
+        let dp = client.data_parallel_size();
         ws * dp
     } else {
         ws
