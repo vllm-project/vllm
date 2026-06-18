@@ -1392,6 +1392,11 @@ class MooncakeStoreWorker:
             group_hashes = self.coord.block_hashes_for_spec(
                 block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
             )
+            metadata_templates = [
+                dataclasses.replace(db.metadata, tp_rank=tp, pp_rank=pp)
+                for tp in range(tp_count)
+                for pp in range(self.pp_size)
+            ]
             for chunk_id, h in enumerate(group_hashes):
                 start_idx = chunk_id * spec_block_size
                 if start_idx >= token_len:
@@ -1400,11 +1405,11 @@ class MooncakeStoreWorker:
                     chunk_id >= len(lookup_mask) or not lookup_mask[chunk_id]
                 ):
                     continue
-                for tp in range(tp_count):
-                    for pp in range(self.pp_size):
-                        md = dataclasses.replace(db.metadata, tp_rank=tp, pp_rank=pp)
-                        candidate_keys.append(PoolKey(md, h.hex()).to_string())
-                        candidate_meta.append((g_idx, bytes(h)))
+                h_hex = h.hex()
+                h_bytes = bytes(h)
+                for md in metadata_templates:
+                    candidate_keys.append(PoolKey(md, h_hex).to_string())
+                    candidate_meta.append((g_idx, h_bytes))
 
         if not candidate_keys:
             return 0
