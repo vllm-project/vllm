@@ -718,6 +718,45 @@ def test_eagle_correctness_heavy(
     )
 
 
+@single_gpu_only
+@large_gpu_mark(min_gb=24)
+@pytest.mark.parametrize("use_mrv2", [False, True])
+def test_eagle_correctness_parallel_drafting(
+    monkeypatch: pytest.MonkeyPatch, use_mrv2: bool
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
+
+    test_prompts = get_test_prompts(mm_enabled=False)
+
+    ref_llm = LLM(model="Qwen/Qwen3-8B", max_model_len=2048)
+    ref_outputs = ref_llm.chat(test_prompts, greedy_sampling())
+    del ref_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    spec_llm = LLM(
+        model="Qwen/Qwen3-8B",
+        speculative_config={
+            "method": "eagle3",
+            "model": "nm-testing/qwen3-8b-peagle-speculators",
+            "num_speculative_tokens": 3,
+            "parallel_drafting": True,
+        },
+        max_model_len=2048,
+    )
+    assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+    spec_outputs = spec_llm.chat(test_prompts, greedy_sampling())
+
+    matches = sum(
+        r.outputs[0].text == s.outputs[0].text
+        for r, s in zip(ref_outputs, spec_outputs)
+    )
+    assert matches > int(0.6 * len(ref_outputs))
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+
 @pytest.mark.parametrize(
     ["model_setup", "mm_enabled", "expected_accuracy_threshold"],
     [
@@ -932,15 +971,13 @@ def test_draft_model_realistic_example():
     assert_draft_model_correctness(args)
 
 
-@pytest.mark.parametrize("use_mrv2", [False, True])
 @single_gpu_only
 # TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
 @pytest.mark.xfail(
     raises=AsyncSchedulingNotEnabledError,
     reason="draft_model does not yet enable async_scheduling: issue #38929",
 )
-def test_draft_model_parallel_drafting(monkeypatch: pytest.MonkeyPatch, use_mrv2: bool):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
+def test_draft_model_parallel_drafting():
     args = ArgsTest(
         target_model="Qwen/Qwen3-1.7B",
         draft_model="amd/PARD-Qwen3-0.6B",
