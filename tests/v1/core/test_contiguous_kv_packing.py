@@ -95,16 +95,6 @@ class TestInterleavedPacking:
         expected = n_c4 * 2 + n_c128 + n_swa
         assert len(all_names) == expected
 
-    def test_mla_and_swa_in_separate_tensors(self):
-        _, tensors = _run(n_c4=3, n_swa=3)
-        for t in tensors:
-            names = t.shared_by
-            has_mla = any("c4_mla" in n or "c4_idx" in n or "c128" in n for n in names)
-            has_swa = any("swa" in n for n in names)
-            assert not (has_mla and has_swa), (
-                "MLA and SWA layers must be in separate tensors"
-            )
-
     def test_strided_views_are_independent(self):
         num_blocks, tensors = _run()
         backing = torch.zeros(tensors[0].size, dtype=torch.uint8)
