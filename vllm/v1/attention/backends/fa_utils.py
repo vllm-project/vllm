@@ -97,11 +97,16 @@ def get_flash_attn_version(
 
         # 3. fallback for unsupported combinations
         if device_capability.major >= 10 and fa_version == 3:
+            # FA4 is implemented by the CuTe SM100 kernel, which only supports
+            # SM100-SM110 (it asserts on init otherwise). On newer Blackwell
+            # such as SM120 the FA3 -> FA4 fallback must therefore degrade to
+            # FA2 rather than dispatching into an unsupported kernel.
+            fa4_arch_supported = device_capability.major in (10, 11)
             logger.warning_once(
                 "Cannot use FA version 3 on Blackwell platform, "
                 "defaulting to FA version 4 if supported, otherwise FA2."
             )
-            fa_version = 4 if is_fa_version_supported(4) else 2
+            fa_version = 4 if (fa4_arch_supported and is_fa_version_supported(4)) else 2
 
         if requires_alibi and fa_version == 3:
             logger.warning_once(
