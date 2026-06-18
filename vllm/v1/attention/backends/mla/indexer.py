@@ -24,6 +24,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.utils import (
+    get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
@@ -215,6 +216,13 @@ class DeepseekV32IndexerMetadata:
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
 
+    # DCP (Decode Context Parallelism) state. Under DCP the KV/indexer K cache is
+    # sharded across dcp_world_size ranks with cp_interleave_size-way interleaving;
+    # the indexer must select a global top-k (see _dcp_global_topk_remap).
+    dcp_world_size: int = 1
+    dcp_rank: int = 0
+    cp_interleave_size: int = 1
+
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     max_model_len = vllm_config.model_config.max_model_len
@@ -242,6 +250,22 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # DCP (Decode Context Parallelism) state. Under DCP the KV cache (and the
+        # indexer's own K cache) is sharded across these ranks; the decode logits
+        # must score only this rank's local shard (see the decode branch of
+        # build()). Mirror the try/except used by AttentionImplBase.__new__.
+        try:
+            from vllm.distributed.parallel_state import get_dcp_group
+
+            dcp_group = get_dcp_group()
+            self.dcp_world_size = dcp_group.world_size
+            self.dcp_rank = dcp_group.rank_in_group
+        except AssertionError:
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
+        self.cp_kv_cache_interleave_size = (
+            self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+        )
         scheduler_config = self.vllm_config.scheduler_config
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
@@ -507,6 +531,29 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
             compressed_seq_lens = seq_lens // self.compress_ratio
 
+        # Under DCP the KV/indexer-K cache is sharded across ranks, so the
+        # prefill context bounds must be LOCAL (per-rank) counts for the KV
+        # gather and the per-token context-length derivation to be correct.
+        # We keep full-length tensors (decode values left unchanged) and only
+        # overwrite the prefill rows, so the num_decodes-offset indexing used by
+        # build_prefill_chunk_metadata stays consistent.
+        prefill_seq_lens = seq_lens
+        prefill_compressed_seq_lens = compressed_seq_lens
+        if num_prefills > 0 and self.dcp_world_size > 1:
+            pre_local = get_dcp_local_seq_lens(
+                seq_lens[num_decodes : num_decodes + num_prefills],
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.cp_kv_cache_interleave_size,
+            )
+            prefill_seq_lens = seq_lens.clone()
+            prefill_seq_lens[num_decodes : num_decodes + num_prefills] = pre_local
+            prefill_compressed_seq_lens = (
+                prefill_seq_lens // self.compress_ratio
+                if self.compress_ratio > 1
+                else prefill_seq_lens
+            )
+
         prefill_metadata = None
         if num_prefills > 0:
             # This CPU value is an upper bound for async-spec extend rows.  It
@@ -519,14 +566,23 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 if self.compress_ratio > 1
                 else seq_lens_cpu
             )
+            if self.dcp_world_size > 1:
+                pre_local_cpu = get_dcp_local_seq_lens(
+                    seq_lens_cpu[num_decodes : num_decodes + num_prefills],
+                    self.dcp_world_size,
+                    self.dcp_rank,
+                    self.cp_kv_cache_interleave_size,
+                )
+                compressed_seq_lens_cpu = compressed_seq_lens_cpu.clone()
+                compressed_seq_lens_cpu[num_decodes : num_decodes + num_prefills] = (
+                    pre_local_cpu // self.compress_ratio
+                    if self.compress_ratio > 1
+                    else pre_local_cpu
+                )
             prefill_query_lens_cpu = torch.diff(
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
             max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-            # Upper bound is exact for prefill rows (the `[num_decodes:]`
-            # slice below).
-            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
-            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             chunk_specs = split_indexer_prefill_chunks(
                 compressed_seq_lens_cpu[num_decodes:],
                 prefill_query_lens_cpu,
@@ -542,8 +598,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     req_slice.stop,
                     query_start_loc,
                     query_start_loc_cpu,
-                    seq_lens,
-                    compressed_seq_lens,
+                    prefill_seq_lens,
+                    prefill_compressed_seq_lens,
                     compressed_seq_lens_cpu,
                     common_attn_metadata.block_table_tensor,
                     self.compress_ratio,
@@ -566,7 +622,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
             )
 
-            seq_lens = common_attn_metadata.seq_lens[:num_decodes]
+            # Under DCP each rank holds only its interleaved shard of the KV
+            # cache, so the decode logits kernel must score only the local
+            # shard: use dcp_local_seq_lens (the per-rank local counts) instead
+            # of the global seq_lens, mirroring MLAAttention's decode path.
+            if self.dcp_world_size > 1:
+                assert common_attn_metadata.dcp_local_seq_lens is not None, (
+                    "DCP is enabled but dcp_local_seq_lens is missing from the "
+                    "attention metadata."
+                )
+                seq_lens = common_attn_metadata.dcp_local_seq_lens[:num_decodes]
+            else:
+                seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
 
             max_decode_len = int(decode_lens_cpu.max().item())
@@ -638,6 +705,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            dcp_world_size=self.dcp_world_size,
+            dcp_rank=self.dcp_rank,
+            cp_interleave_size=self.cp_kv_cache_interleave_size,
         )
 
         return attn_metadata

@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -35,6 +36,100 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
+
+
+def _local_to_global_position(
+    local_idx: torch.Tensor, rank: int, world_size: int, interleave: int
+) -> torch.Tensor:
+    """Map a per-request LOCAL kv position on this rank to its GLOBAL position.
+
+    g(l, r) = (l // I) * (N * I) + r * I + (l % I)
+    with I = interleave, N = world_size. Matches get_dcp_local_seq_lens.
+    """
+    return (
+        (local_idx // interleave) * (world_size * interleave)
+        + rank * interleave
+        + (local_idx % interleave)
+    )
+
+
+def _global_to_local_position(
+    global_idx: torch.Tensor, interleave: int, world_size: int
+) -> torch.Tensor:
+    """Map a GLOBAL kv position to its LOCAL index on the rank that owns it.
+
+    local(g) = (g // (I * N)) * I + (g % I)
+    """
+    big = interleave * world_size
+    return (global_idx // big) * interleave + (global_idx % interleave)
+
+
+def _dcp_global_topk_remap(
+    topk_indices: torch.Tensor,
+    logits: torch.Tensor,
+    topk_tokens: int,
+    interleave: int,
+) -> None:
+    """In place: convert per-rank LOCAL top-k selection into the GLOBAL top-k,
+    restricted to the positions this rank owns (positions owned by other ranks
+    are written as -1).
+
+    Background: under DCP the KV cache is sharded across the DCP group (interleave
+    `I`-way, `N` ranks). Each rank's local top-k is selected from only its shard,
+    so naively LSE-merging per-rank sparse attention would reconstruct attention
+    over the *union* of per-rank selections (~N * topk positions) instead of the
+    true global top-k. To get exact global sparse attention after the DCP LSE
+    merge, every rank must select the SAME global set G and then attend only to
+    G ∩ (its own shard). This does exactly that:
+
+      1. recover local scores at the selected indices (-1 -> invalid/-inf),
+      2. map local positions -> global positions,
+      3. all-gather (global_pos, score) candidates across the DCP group,
+      4. take the global top-k per row,
+      5. map global -> local, keeping only positions owned by this rank (-1 else),
+      6. write back in place.
+
+    Rows are aligned across ranks because decode queries are replicated under
+    DCP. ``topk_indices`` and ``logits`` must share the same row count.
+
+    Args:
+        topk_indices: int32 [num_rows, topk_tokens], per-rank local indices
+            (a view into topk_indices_buffer); -1 marks an unused slot.
+        logits: float32 [num_rows, seq_pad], the per-row MQA scores the local
+            top-k was taken over.
+        topk_tokens: K, the desired global selection size.
+        interleave: cp_kv_cache_interleave_size (I).
+    """
+    dcp_group = get_dcp_group()
+    rank = dcp_group.rank_in_group
+    world_size = dcp_group.world_size
+
+    # 1. Recover local scores; clamp indices defensively and mask invalid slots.
+    invalid = topk_indices < 0
+    idx_safe = torch.clamp(topk_indices, min=0)
+    local_scores = torch.gather(logits, 1, idx_safe.to(torch.int64))
+    local_scores = local_scores.masked_fill(invalid, float("-inf"))
+
+    # 2. Local -> global positions; -1 stays -1.
+    global_pos = _local_to_global_position(idx_safe, rank, world_size, interleave)
+    global_pos = torch.where(invalid, global_pos.new_full((), -1), global_pos)
+
+    # 3. All-gather candidate (global_pos, score) pairs along the candidate dim.
+    all_pos = dcp_group.all_gather(global_pos.contiguous(), dim=1)
+    all_scores = dcp_group.all_gather(local_scores.contiguous(), dim=1)
+
+    # 4. Global top-k per row.
+    _, sel = torch.topk(all_scores, topk_tokens, dim=1)
+    sel_global = torch.gather(all_pos, 1, sel.to(torch.int64))
+
+    # 5. Global -> local; keep only this rank's owned positions, else -1.
+    owner = (sel_global // interleave) % world_size
+    local_of_g = _global_to_local_position(sel_global, interleave, world_size)
+    mine = (owner == rank) & (sel_global >= 0)
+    final = torch.where(mine, local_of_g, local_of_g.new_full((), -1))
+
+    # 6. Write back in place.
+    topk_indices.copy_(final.to(topk_indices.dtype))
 
 
 def _gather_workspace_shapes(
@@ -254,6 +349,15 @@ def sparse_attn_indexer(
                 logits.stride(1),
                 topk_tokens,
             )
+            # Under DCP, convert the per-rank local top-k into the global top-k
+            # restricted to this rank's owned positions. See _dcp_global_topk_remap.
+            if attn_metadata_narrowed.dcp_world_size > 1:
+                _dcp_global_topk_remap(
+                    topk_indices,
+                    logits,
+                    topk_tokens,
+                    attn_metadata_narrowed.cp_interleave_size,
+                )
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
@@ -357,6 +461,17 @@ def sparse_attn_indexer(
                 logits.stride(0),
                 logits.stride(1),
                 topk_tokens,
+            )
+
+        # Under DCP, convert the per-rank local top-k into the global top-k
+        # restricted to this rank's owned positions. Done before the padding
+        # unpack so rows align with `logits`. See _dcp_global_topk_remap.
+        if attn_metadata_narrowed.dcp_world_size > 1:
+            _dcp_global_topk_remap(
+                topk_indices,
+                logits,
+                topk_tokens,
+                attn_metadata_narrowed.cp_interleave_size,
             )
 
         if decode_metadata.requires_padding:
