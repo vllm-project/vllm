@@ -13,9 +13,11 @@ from vllm.v1.metrics.prometheus import get_prometheus_registry
 
 # Workaround for AttributeError: '_IncludedRouter' object has no attribute 'path'
 # in prometheus-fastapi-instrumentator when using nested routers.
+_original_get_route_name = instrumentator_routing.get_route_name
+
 def patched_get_route_name(request):
     try:
-        return instrumentator_routing.get_route_name(request)
+        return _original_get_route_name(request)
     except AttributeError:
         return "unknown_route"
 
