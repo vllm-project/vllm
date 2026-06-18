@@ -728,12 +728,6 @@ def test_eagle_correctness_parallel_drafting(
 
     test_prompts = get_test_prompts(mm_enabled=False)
 
-    ref_llm = LLM(model="Qwen/Qwen3-8B", max_model_len=2048)
-    ref_outputs = ref_llm.chat(test_prompts, greedy_sampling())
-    del ref_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
-
     spec_llm = LLM(
         model="Qwen/Qwen3-8B",
         speculative_config={
@@ -743,15 +737,24 @@ def test_eagle_correctness_parallel_drafting(
             "parallel_drafting": True,
         },
         max_model_len=2048,
+        disable_log_stats=False,
     )
     assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
-    spec_outputs = spec_llm.chat(test_prompts, greedy_sampling())
+    spec_llm.chat(test_prompts, greedy_sampling())
 
-    matches = sum(
-        r.outputs[0].text == s.outputs[0].text
-        for r, s in zip(ref_outputs, spec_outputs)
-    )
-    assert matches > int(0.6 * len(ref_outputs))
+    metrics = spec_llm.get_metrics()
+    acceptance_rate = compute_acceptance_rate(metrics)
+    acceptance_len = compute_acceptance_len(metrics)
+    assert acceptance_rate >= 0.6, (
+        f"Expected acceptance_rate >= 0.6, got {acceptance_rate:.3f}"
+    )  # ref: 0.74
+    assert acceptance_len >= 2.5, (
+        f"Expected acceptance_len >= 2.5, got {acceptance_len:.3f}"
+    )  # ref: 3.23
+
+    # evaluate after get_metrics to avoid polluting the acceptance rate
+    evaluate_llm_for_gsm8k(spec_llm, expected_accuracy_threshold=0.8)
+
     del spec_llm
     torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
