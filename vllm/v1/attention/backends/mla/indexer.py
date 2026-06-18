@@ -446,6 +446,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     def _prepare_decode_tensors(
         self,
         seq_lens: torch.Tensor,
+        dcp_local_seq_lens: torch.Tensor | None,
         block_table: torch.Tensor,
         decode_lens: torch.Tensor,
         decode_lens_cpu: torch.Tensor,
@@ -470,6 +471,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         for native MTP.
         """
         min_decode_len = int(decode_lens_cpu.min().item())
+        use_dcp = self.dcp_world_size > 1
         if not use_native and max_decode_len > 1:
             assert self.decode_seq_lens_buffer.dim() == 1
             if min_decode_len == max_decode_len:
@@ -488,6 +490,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
                 self.decode_seq_lens_buffer[num_decode_tokens:] = 0
                 seq_lens = self.decode_seq_lens_buffer[:num_decode_tokens]
+                if use_dcp:
+                    seq_lens.copy_(
+                        get_dcp_local_seq_lens(
+                            seq_lens,
+                            self.dcp_world_size,
+                            self.dcp_rank,
+                            self.cp_kv_cache_interleave_size,
+                        )
+                    )
                 block_table = self.expanded_block_table_buffer[:num_decode_tokens]
                 decode_lens = self.decode_lens_buffer[:num_decode_tokens]
                 return seq_lens, block_table, decode_lens, num_decode_tokens, False
@@ -520,6 +531,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
                 self.decode_seq_lens_buffer[actual_expanded:] = 0
                 seq_lens = self.decode_seq_lens_buffer[:num_decode_tokens]
+                if use_dcp:
+                    seq_lens.copy_(
+                        get_dcp_local_seq_lens(
+                            seq_lens,
+                            self.dcp_world_size,
+                            self.dcp_rank,
+                            self.cp_kv_cache_interleave_size,
+                        )
+                    )
 
                 # Give each of the flattened entries the same block table row as the
                 # original request.
@@ -560,7 +580,19 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     + 1
                     + self.offsets_buffer[:max_decode_len]
                 )
+                if use_dcp:
+                    seq_lens_buffer.copy_(
+                        get_dcp_local_seq_lens(
+                            seq_lens_buffer.reshape(-1),
+                            self.dcp_world_size,
+                            self.dcp_rank,
+                            self.cp_kv_cache_interleave_size,
+                        ).view_as(seq_lens_buffer)
+                    )
                 seq_lens = seq_lens_buffer
+            elif use_dcp:
+                assert dcp_local_seq_lens is not None
+                seq_lens = dcp_local_seq_lens
             return seq_lens, block_table, decode_lens, num_decodes, requires_padding
 
     def build(
@@ -702,18 +734,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
             )
 
-            # Under DCP each rank holds only its interleaved shard of the KV
-            # cache, so the decode logits kernel must score only the local
-            # shard: use dcp_local_seq_lens (the per-rank local counts) instead
-            # of the global seq_lens, mirroring MLAAttention's decode path.
+            # Multi-token decode must expand from global sequence lengths first:
+            # the DCP-local length for token j is not simply
+            # local_final_len - decode_len + j + 1 under interleaved ownership.
+            # _prepare_decode_tensors converts expanded per-token lengths to
+            # DCP-local lengths when needed.
+            seq_lens = common_attn_metadata.seq_lens[:num_decodes]
+            dcp_local_seq_lens = None
             if self.dcp_world_size > 1:
                 assert common_attn_metadata.dcp_local_seq_lens is not None, (
                     "DCP is enabled but dcp_local_seq_lens is missing from the "
                     "attention metadata."
                 )
-                seq_lens = common_attn_metadata.dcp_local_seq_lens[:num_decodes]
-            else:
-                seq_lens = common_attn_metadata.seq_lens[:num_decodes]
+                dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens[
+                    :num_decodes
+                ]
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
 
             max_decode_len = int(decode_lens_cpu.max().item())
@@ -723,6 +758,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             seq_lens, block_table, decode_lens, batch_size, requires_padding = (
                 self._prepare_decode_tensors(
                     seq_lens=seq_lens,
+                    dcp_local_seq_lens=dcp_local_seq_lens,
                     block_table=block_table,
                     decode_lens=decode_lens,
                     decode_lens_cpu=decode_lens_cpu,

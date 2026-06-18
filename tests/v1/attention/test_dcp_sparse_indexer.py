@@ -29,6 +29,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadataBuilder,
     _dcp_local_indexer_seq_lens,
     _decode_topk_max_seq_len,
     split_indexer_prefill_chunks,
@@ -149,6 +150,100 @@ def test_decode_topk_max_seq_len_derives_dcp_local_upper_bound():
     )
 
     assert got == 24
+
+
+def _make_decode_builder(next_n: int) -> DeepseekV32IndexerMetadataBuilder:
+    builder = object.__new__(DeepseekV32IndexerMetadataBuilder)
+    builder.decode_seq_lens_buffer = torch.zeros(16, dtype=torch.int32)
+    builder.decode_lens_buffer = torch.zeros(16, dtype=torch.int32)
+    builder.expanded_block_table_buffer = torch.zeros((16, 2), dtype=torch.int32)
+    builder.arange_buffer = torch.arange(16, dtype=torch.int32)
+    builder.offsets_buffer = torch.arange(next_n, dtype=torch.int32)
+    builder.dcp_world_size = 2
+    builder.dcp_rank = 1
+    builder.cp_kv_cache_interleave_size = 2
+    return builder
+
+
+def test_prepare_decode_tensors_expands_global_then_localizes_for_dcp_spec():
+    builder = _make_decode_builder(next_n=3)
+    global_seq_lens = torch.tensor([10, 11], dtype=torch.int32)
+    dcp_local_seq_lens = _dcp_local_indexer_seq_lens(
+        global_seq_lens,
+        compress_ratio=1,
+        dcp_world_size=2,
+        dcp_rank=1,
+        cp_interleave_size=2,
+    )
+    decode_lens = torch.tensor([3, 3], dtype=torch.int32)
+
+    seq_lens, _, _, batch_size, requires_padding = builder._prepare_decode_tensors(
+        seq_lens=global_seq_lens,
+        dcp_local_seq_lens=dcp_local_seq_lens,
+        block_table=torch.arange(4, dtype=torch.int32).view(2, 2),
+        decode_lens=decode_lens.clone(),
+        decode_lens_cpu=decode_lens,
+        query_start_loc=torch.tensor([0, 3, 6], dtype=torch.int32),
+        num_decodes=2,
+        num_decode_tokens=6,
+        use_native=True,
+        next_n=3,
+        max_decode_len=3,
+    )
+
+    global_per_token = torch.tensor(
+        [
+            [8, 9, 10],
+            [9, 10, 11],
+        ],
+        dtype=torch.int32,
+    )
+    expected = _dcp_local_indexer_seq_lens(
+        global_per_token.flatten(),
+        compress_ratio=1,
+        dcp_world_size=2,
+        dcp_rank=1,
+        cp_interleave_size=2,
+    ).view(2, 3)
+    wrong_old_math = (
+        dcp_local_seq_lens.view(2, 1) - 3 + torch.arange(1, 4, dtype=torch.int32)
+    )
+
+    assert batch_size == 2
+    assert not requires_padding
+    assert torch.equal(seq_lens, expected)
+    assert not torch.equal(seq_lens, wrong_old_math)
+
+
+def test_prepare_decode_tensors_uses_precomputed_dcp_local_for_plain_decode():
+    builder = _make_decode_builder(next_n=1)
+    global_seq_lens = torch.tensor([10, 11], dtype=torch.int32)
+    dcp_local_seq_lens = _dcp_local_indexer_seq_lens(
+        global_seq_lens,
+        compress_ratio=1,
+        dcp_world_size=2,
+        dcp_rank=1,
+        cp_interleave_size=2,
+    )
+    decode_lens = torch.tensor([1, 1], dtype=torch.int32)
+
+    seq_lens, _, _, batch_size, requires_padding = builder._prepare_decode_tensors(
+        seq_lens=global_seq_lens,
+        dcp_local_seq_lens=dcp_local_seq_lens,
+        block_table=torch.arange(4, dtype=torch.int32).view(2, 2),
+        decode_lens=decode_lens.clone(),
+        decode_lens_cpu=decode_lens,
+        query_start_loc=torch.tensor([0, 1, 2], dtype=torch.int32),
+        num_decodes=2,
+        num_decode_tokens=2,
+        use_native=True,
+        next_n=1,
+        max_decode_len=1,
+    )
+
+    assert batch_size == 2
+    assert not requires_padding
+    assert torch.equal(seq_lens, dcp_local_seq_lens)
 
 
 def test_pack_topk_candidates_preserves_score_bits_and_row_starts():
