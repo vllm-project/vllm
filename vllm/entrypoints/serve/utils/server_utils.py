@@ -427,6 +427,11 @@ async def validation_exception_handler(req: Request, exc: RequestValidationError
                 param = ctx_error.parameter
                 break
 
+    if param is None and errors:
+        loc = errors[0].get("loc")
+        if loc:
+            param = str(loc[-1])
+
     exc_str = str(exc)
     errors_str = str(errors)
 
