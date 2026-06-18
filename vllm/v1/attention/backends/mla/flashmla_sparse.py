@@ -859,15 +859,22 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         )
 
         # NOTE(Chen): kernel requires num_local_head to be a multiple of
-        # 64 on hopper and 128 on blackwell
-        if self.num_heads % self.prefill_padding != 0:
-            assert self.prefill_padding % self.num_heads == 0
+        # 64 on hopper and 128 on blackwell. Under DCP, q has already been
+        # all-gathered across the DCP group, so q.shape[1] can be larger than
+        # self.num_heads (the local TP/DCP head count).
+        actual_num_heads = q.shape[1]
+        padded_num_heads = (
+            (actual_num_heads + self.prefill_padding - 1)
+            // self.prefill_padding
+            * self.prefill_padding
+        )
+        if actual_num_heads < padded_num_heads:
             logger.warning_once(
-                f"Padding num_heads from {self.num_heads} to "
-                f"{self.prefill_padding} for BF16 sparse prefill kernel"
+                f"Padding num_heads from {actual_num_heads} to "
+                f"{padded_num_heads} for BF16 sparse prefill kernel"
             )
-            q_padded = q.new_empty((q.shape[0], self.prefill_padding, q.shape[2]))
-            q_padded[:, : self.num_heads, :] = q
+            q_padded = q.new_empty((q.shape[0], padded_num_heads, q.shape[2]))
+            q_padded[:, :actual_num_heads, :] = q
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
@@ -880,10 +887,10 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             topk_length=topk_length,
         )
 
-        # Slice away any padded heads. lse mirrors the output head slicing so it
-        # matches the [num_tokens, num_heads] contract consumed by the DCP merge.
-        output = output[:, : self.num_heads, :]
-        lse = lse[:, : self.num_heads]
+        # Slice away only the heads we added for kernel padding. Under DCP the
+        # remaining gathered heads are consumed by the outer DCP LSE reducer.
+        output = output[:, :actual_num_heads, :]
+        lse = lse[:, :actual_num_heads]
         return output, lse
 
     def forward_mqa(

@@ -17,6 +17,7 @@ import pytest
 import torch
 
 import vllm.model_executor.layers.sparse_attn_indexer as idx_mod
+import vllm.v1.attention.backends.mla.flashmla_sparse as sparse_mla_mod
 from vllm.model_executor.layers.sparse_attn_indexer import (
     _global_to_local_position,
     _local_to_global_position,
@@ -122,6 +123,57 @@ def test_dcp_prefill_visible_lengths_support_compressed_indexer_cache():
     )
 
     assert got.tolist() == [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2]
+
+
+@pytest.mark.parametrize(
+    ("input_heads", "kernel_heads", "output_heads"),
+    [
+        (4, 64, 4),
+        (64, 64, 64),
+    ],
+)
+def test_bf16_sparse_prefill_padding_uses_input_head_count(
+    input_heads, kernel_heads, output_heads, monkeypatch
+):
+    impl = object.__new__(sparse_mla_mod.FlashMLASparseImpl)
+    impl.num_heads = 4
+    impl.prefill_padding = 64
+    impl.softmax_scale = 1.0
+
+    seen = {}
+
+    def fake_flash_mla_sparse_fwd(q, kv_cache, topk_indices, softmax_scale):
+        seen["q_shape"] = tuple(q.shape)
+        seen["kv_shape"] = tuple(kv_cache.shape)
+        seen["topk_shape"] = tuple(topk_indices.shape)
+        seen["softmax_scale"] = softmax_scale
+        out = torch.zeros(q.shape[0], q.shape[1], 512, dtype=q.dtype)
+        max_logits = torch.zeros(q.shape[0], q.shape[1], dtype=q.dtype)
+        lse = torch.zeros(q.shape[0], q.shape[1], dtype=torch.float32)
+        return out, max_logits, lse
+
+    monkeypatch.setattr(
+        sparse_mla_mod,
+        "flash_mla_sparse_fwd",
+        fake_flash_mla_sparse_fwd,
+    )
+
+    q = torch.randn(3, input_heads, 576, dtype=torch.bfloat16)
+    kv_cache = torch.randn(8, 576, dtype=torch.bfloat16)
+    topk_indices = torch.zeros(3, 8, dtype=torch.int32)
+
+    out, lse = sparse_mla_mod.FlashMLASparseImpl._bf16_flash_mla_kernel(
+        impl, q, kv_cache, topk_indices
+    )
+
+    assert seen == {
+        "q_shape": (3, kernel_heads, 576),
+        "kv_shape": (8, 1, 576),
+        "topk_shape": (3, 1, 8),
+        "softmax_scale": 1.0,
+    }
+    assert out.shape == (3, output_heads, 512)
+    assert lse.shape == (3, output_heads)
 
 
 @pytest.mark.parametrize("interleave", [1, 2, 3])
