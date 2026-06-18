@@ -109,3 +109,21 @@ def test_unrecognized_env(monkeypatch):
         fail_on_environ_validation=True,
     )
     engine_args.create_engine_config()
+
+
+def test_mamba2_without_architectures_field_runs_config_hook():
+    """Checkpoints whose ``config.json`` omits the top-level ``architectures``
+    field (e.g. ``AntonV/mamba2-130m-hf``) get the base HF arch name
+    ``Mamba2Model`` injected by vLLM. The per-arch config hook that sets
+    ``mamba_block_size`` is keyed by the resolved arch ``Mamba2ForCausalLM``, so
+    dispatching it by the un-normalized ``Mamba2Model`` used to skip it and leave
+    ``mamba_block_size`` unset, crashing engine core init with
+    ``AssertionError: mamba_block_size is not None``.
+    """
+    engine_args = EngineArgs(
+        model="AntonV/mamba2-130m-hf",
+        max_model_len=2048,
+        enforce_eager=True,
+    )
+    vllm_config = engine_args.create_engine_config()
+    assert vllm_config.cache_config.mamba_block_size is not None
