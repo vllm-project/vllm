@@ -5726,6 +5726,7 @@ dependencies = [
  "vllm-text",
  "vllm-tokenizer",
  "vllm-tool-parser",
+ "xgrammar-structural-tag",
  "zeromq",
 ]
 
@@ -5980,6 +5981,7 @@ dependencies = [
  "thiserror-ext",
  "tool-parser",
  "winnow",
+ "xgrammar-structural-tag",
 ]
 
 [[package]]
@@ -6580,6 +6582,17 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+
+[[package]]
+name = "xgrammar-structural-tag"
+version = "0.1.0+xgrammar.0.2.2.4d145cc"
+source = "git+https://github.com/Inferact/xgrammar-structural-tag.git?rev=afffd968ecf3ec9ec0963953741dfdf6a00b4e10#afffd968ecf3ec9ec0963953741dfdf6a00b4e10"
+dependencies = [
+ "serde",
+ "serde_json",
+ "strum",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "y4m"

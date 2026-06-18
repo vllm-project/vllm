@@ -53,6 +53,12 @@ pub enum ResponseFormat {
 fn deserialize_structured_outputs(
     raw: &serde_json::Value,
 ) -> Result<StructuredOutputsParams, ApiError> {
+    if raw.get("_backend").is_some() {
+        return Err(ApiError::invalid_request(
+            "request-level structured output backend selection is not supported",
+            Some("structured_outputs._backend"),
+        ));
+    }
     serde_json::from_value(raw.clone()).map_err(|e| {
         ApiError::invalid_request(
             format!("invalid structured_outputs: {e}"),
@@ -129,4 +135,33 @@ pub fn convert_from_response_format_value(
         )
     })?;
     convert_from_response_format(Some(&fmt), &None)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::convert_from_response_format;
+
+    #[test]
+    fn rejects_request_level_structured_output_backend() {
+        let err = convert_from_response_format(
+            None,
+            &Some(json!({
+                "json_object": true,
+                "_backend": "guidance",
+            })),
+        )
+        .expect_err("request-level backend selection should be rejected");
+
+        let response = err.to_error_response();
+        assert_eq!(
+            response.error.message,
+            "request-level structured output backend selection is not supported"
+        );
+        assert_eq!(
+            response.error.param.as_deref(),
+            Some("structured_outputs._backend")
+        );
+    }
 }

@@ -1,5 +1,6 @@
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
+use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{ChatMessage, Tool, ToolChoice, ToolChoiceValue};
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
@@ -60,19 +61,10 @@ pub(super) fn validate_request_compat(
 
     if let Some(tool_choice) = &request.tool_choice {
         match tool_choice {
-            ToolChoice::Value(ToolChoiceValue::Auto | ToolChoiceValue::None) => {}
-            ToolChoice::Value(ToolChoiceValue::Required) => {
-                bail_invalid_request!(
-                    param = "tool_choice",
-                    "tool_choice=required is not supported yet."
-                );
-            }
-            ToolChoice::Function { .. } => {
-                bail_invalid_request!(
-                    param = "tool_choice",
-                    "Named function tool_choice is not supported yet."
-                );
-            }
+            ToolChoice::Value(
+                ToolChoiceValue::Auto | ToolChoiceValue::None | ToolChoiceValue::Required,
+            )
+            | ToolChoice::Function { .. } => {}
             ToolChoice::AllowedTools { .. } => {
                 bail_invalid_request!(
                     param = "tool_choice",
@@ -80,6 +72,20 @@ pub(super) fn validate_request_compat(
                 );
             }
         }
+    }
+
+    if has_explicit_structured_output_guidance(request)
+        && tool_choice_uses_structural_tag_constraint(request)
+    {
+        let param = request
+            .structured_outputs
+            .as_ref()
+            .map(|_| "structured_outputs")
+            .unwrap_or("response_format");
+        bail_invalid_request!(
+            param = param,
+            "Explicit structured output guidance cannot be combined with strict tool calling."
+        );
     }
 
     if request.use_beam_search {
@@ -125,6 +131,30 @@ pub(super) fn validate_request_compat(
     )?;
 
     Ok(())
+}
+
+fn has_explicit_structured_output_guidance(request: &ChatCompletionRequest) -> bool {
+    request.structured_outputs.is_some()
+        || matches!(
+            request.response_format.as_ref(),
+            Some(ResponseFormat::JsonObject | ResponseFormat::JsonSchema { .. })
+        )
+}
+
+fn tool_choice_uses_structural_tag_constraint(request: &ChatCompletionRequest) -> bool {
+    match &request.tool_choice {
+        Some(ToolChoice::Value(ToolChoiceValue::Required)) | Some(ToolChoice::Function { .. }) => {
+            true
+        }
+        Some(ToolChoice::Value(ToolChoiceValue::Auto)) => request
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.iter().any(|tool| tool.function.strict == Some(true))),
+        Some(ToolChoice::Value(ToolChoiceValue::None)) | Some(ToolChoice::AllowedTools { .. }) => {
+            false
+        }
+        None => false,
+    }
 }
 
 /// Reject one option unless it is entirely absent.
@@ -359,12 +389,23 @@ mod tests {
     }
 
     #[test]
-    fn validate_request_compat_rejects_required_and_named_tool_choices() {
+    fn validate_request_compat_accepts_required_and_named_tool_choices() {
+        let tools = Some(vec![Tool {
+            tool_type: "function".to_string(),
+            function: Function {
+                name: "tool".to_string(),
+                description: None,
+                parameters: json!({}),
+                strict: None,
+            },
+        }]);
         let required = ChatCompletionRequest {
             tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
+            tools: tools.clone(),
             ..base_request()
         };
-        assert!(validate_request_compat(&required, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+        validate_request_compat(&required, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("tool_choice=required should be accepted");
 
         let named = ChatCompletionRequest {
             tool_choice: Some(ToolChoice::Function {
@@ -373,10 +414,68 @@ mod tests {
                     name: "tool".to_string(),
                 },
             }),
+            tools,
+            ..base_request()
+        };
+        validate_request_compat(&named, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("named function tool_choice should be accepted");
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_guidance_with_strict_tool_calling() {
+        let strict_tools = Some(vec![Tool {
+            tool_type: "function".to_string(),
+            function: Function {
+                name: "tool".to_string(),
+                description: None,
+                parameters: json!({}),
+                strict: Some(true),
+            },
+        }]);
+        let named = ChatCompletionRequest {
+            response_format: Some(ResponseFormat::JsonObject),
+            tool_choice: Some(ToolChoice::Function {
+                tool_type: "function".to_string(),
+                function: FunctionChoice {
+                    name: "tool".to_string(),
+                },
+            }),
+            tools: strict_tools.clone(),
             ..base_request()
         };
         assert!(validate_request_compat(&named, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
 
+        let auto = ChatCompletionRequest {
+            structured_outputs: Some(json!({"json": {"type": "object"}})),
+            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
+            tools: strict_tools,
+            ..base_request()
+        };
+        assert!(validate_request_compat(&auto, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_allows_text_response_format_with_strict_tool_calling() {
+        let request = ChatCompletionRequest {
+            response_format: Some(ResponseFormat::Text),
+            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Required)),
+            tools: Some(vec![Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: "tool".to_string(),
+                    description: None,
+                    parameters: json!({}),
+                    strict: Some(true),
+                },
+            }]),
+            ..base_request()
+        };
+        validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"]))
+            .expect("response_format=text should not conflict with strict tool calling");
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_allowed_tools_choice() {
         let allowed_tools = ChatCompletionRequest {
             tool_choice: Some(ToolChoice::AllowedTools {
                 tool_type: "allowed_tools".to_string(),
