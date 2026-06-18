@@ -3,6 +3,7 @@
 
 import asyncio
 import functools
+import socket
 import ssl
 import time
 from collections.abc import Callable, Coroutine, Mapping, MutableMapping
@@ -11,6 +12,7 @@ from typing import Any, ParamSpec, TypeVar
 
 import aiohttp
 import requests
+from aiohttp.resolver import AsyncResolver, ResolveResult
 from requests.adapters import HTTPAdapter
 from urllib3.poolmanager import PoolManager
 from urllib3.util import Url, parse_url
@@ -28,6 +30,8 @@ _T = TypeVar("_T")
 # Attempt N uses: base_timeout * (_RETRY_BACKOFF_FACTOR ** N) for the
 # per-attempt timeout and sleeps _RETRY_BACKOFF_FACTOR ** N seconds.
 _RETRY_BACKOFF_FACTOR = 4
+
+_NUMERIC_SOCKET_FLAGS = socket.AI_NUMERICHOST | socket.AI_NUMERICSERV
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -277,6 +281,27 @@ class SSRFSafeAdapter(HTTPAdapter):
         self.poolmanager = PoolManager(*args, **kwargs)
 
 
+class SSRFSafeAsyncResolverWrapper(AsyncResolver):
+    def __init__(self, pre_validated_ip: str, *args: Any, **kwargs: Any):
+        self.pre_validated_ip = pre_validated_ip
+
+    async def resolve(
+        self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ):
+        return [
+            ResolveResult(
+                hostname=host,
+                host=self.pre_validated_ip,
+                port=port,
+                family=socket.AF_INET6
+                if ":" in self.pre_validated_ip
+                else socket.AF_INET,
+                proto=0,
+                flags=_NUMERIC_SOCKET_FLAGS,
+            )
+        ]
+
+
 class HTTPConnection:
     """Helper class to send HTTP requests."""
 
@@ -307,6 +332,13 @@ class HTTPConnection:
 
         return self._async_client
 
+    async def get_async_ssrf_safe_client(
+        self, pre_validated_ip: str
+    ) -> aiohttp.ClientSession:
+        resolver = SSRFSafeAsyncResolverWrapper(pre_validated_ip)
+        connector = aiohttp.TCPConnector(resolver=resolver)
+        return aiohttp.ClientSession(connector=connector)
+
     def _validate_http_url(self, url: str):
         parsed_url = parse_url(url)
 
@@ -333,7 +365,7 @@ class HTTPConnection:
         client = self.get_sync_client()
         if pre_validated_ip:
             # If a pre-validated IP has been provided, we use a custom client
-            # to enforce that IP and prevent DNS rebinding
+            # to enforce that IP in the request and prevent DNS rebinding.
             client = self.get_sync_ssrf_safe_client(url, pre_validated_ip)
         extra_headers = extra_headers or {}
 
@@ -356,10 +388,11 @@ class HTTPConnection:
     ):
         self._validate_http_url(url)
 
-        # TODO: if a pre-validated IP is provided, build a custom
-        # aiohttp.TCPConnector with custom resolver that returns the pre-validated IP
-
         client = await self.get_async_client()
+        if pre_validated_ip:
+            # If a pre-validated IP has been provided, we use a custom client
+            # to enforce that IP in the request and prevent DNS rebinding.
+            client = await self.get_async_ssrf_safe_client(pre_validated_ip)
         extra_headers = extra_headers or {}
 
         return client.get(
