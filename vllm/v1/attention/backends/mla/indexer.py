@@ -107,6 +107,10 @@ def split_indexer_prefill_chunks(
             end += 1
 
         req_slice = slice(start + request_offset, end + request_offset)
+        # Zero-query rows can appear from padded requests in full-CG/ubatch metadata.
+        # They produce no logits/indexer work, so skip the no-op chunk.
+        if chunk_m == 0:
+            continue
         max_q = max(1, max_logits_elems // chunk_n) if chunk_n > 0 else chunk_m
         for q_off in range(0, chunk_m, max_q):
             sub_m = min(max_q, chunk_m - q_off)
