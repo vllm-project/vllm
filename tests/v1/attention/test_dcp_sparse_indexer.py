@@ -32,6 +32,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadataBuilder,
     _dcp_local_indexer_seq_lens,
     _decode_topk_max_seq_len,
+    _localize_decode_seq_lens_inplace,
     split_indexer_prefill_chunks,
 )
 
@@ -244,6 +245,39 @@ def test_prepare_decode_tensors_uses_precomputed_dcp_local_for_plain_decode():
     assert batch_size == 2
     assert not requires_padding
     assert torch.equal(seq_lens, dcp_local_seq_lens)
+
+
+@pytest.mark.skipif(
+    not (HAS_TRITON and current_platform.is_cuda() and torch.cuda.is_available()),
+    reason="CUDA Triton kernel test requires a CUDA Triton runtime",
+)
+def test_localize_decode_seq_lens_inplace_cuda_matches_reference():
+    seq_lens_cpu = torch.tensor(
+        [
+            [8, 9, 10],
+            [9, 10, 11],
+        ],
+        dtype=torch.int32,
+    )
+    expected = _dcp_local_indexer_seq_lens(
+        seq_lens_cpu.flatten(),
+        compress_ratio=1,
+        dcp_world_size=2,
+        dcp_rank=1,
+        cp_interleave_size=2,
+    ).view_as(seq_lens_cpu)
+    seq_lens = seq_lens_cpu.cuda()
+    data_ptr = seq_lens.data_ptr()
+
+    _localize_decode_seq_lens_inplace(
+        seq_lens,
+        dcp_world_size=2,
+        dcp_rank=1,
+        cp_interleave_size=2,
+    )
+
+    assert seq_lens.data_ptr() == data_ptr
+    assert torch.equal(seq_lens.cpu(), expected)
 
 
 def test_pack_topk_candidates_preserves_score_bits_and_row_starts():

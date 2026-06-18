@@ -29,6 +29,9 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
+from vllm.v1.worker.gpu.cp_utils import (
+    prepare_dcp_local_seq_lens as prepare_dcp_local_seq_lens_inplace,
+)
 
 logger = init_logger(__name__)
 
@@ -136,6 +139,39 @@ def _dcp_local_indexer_seq_lens(
     if compress_ratio > 1:
         seq_lens = seq_lens // compress_ratio
     return seq_lens
+
+
+def _localize_decode_seq_lens_inplace(
+    seq_lens: torch.Tensor,
+    dcp_world_size: int,
+    dcp_rank: int,
+    cp_interleave_size: int,
+) -> None:
+    """Convert global decode lengths to rank-local DCP lengths in-place."""
+    if dcp_world_size == 1 or seq_lens.numel() == 0:
+        return
+
+    assert seq_lens.dtype == torch.int32
+    assert seq_lens.is_contiguous()
+    flat_seq_lens = seq_lens.view(-1)
+    if flat_seq_lens.is_cuda:
+        prepare_dcp_local_seq_lens_inplace(
+            flat_seq_lens,
+            flat_seq_lens,
+            flat_seq_lens.numel(),
+            dcp_world_size,
+            dcp_rank,
+            cp_interleave_size,
+        )
+    else:
+        flat_seq_lens.copy_(
+            get_dcp_local_seq_lens(
+                flat_seq_lens,
+                dcp_world_size,
+                dcp_rank,
+                cp_interleave_size,
+            )
+        )
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
@@ -491,13 +527,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.decode_seq_lens_buffer[num_decode_tokens:] = 0
                 seq_lens = self.decode_seq_lens_buffer[:num_decode_tokens]
                 if use_dcp:
-                    seq_lens.copy_(
-                        get_dcp_local_seq_lens(
-                            seq_lens,
-                            self.dcp_world_size,
-                            self.dcp_rank,
-                            self.cp_kv_cache_interleave_size,
-                        )
+                    _localize_decode_seq_lens_inplace(
+                        seq_lens,
+                        self.dcp_world_size,
+                        self.dcp_rank,
+                        self.cp_kv_cache_interleave_size,
                     )
                 block_table = self.expanded_block_table_buffer[:num_decode_tokens]
                 decode_lens = self.decode_lens_buffer[:num_decode_tokens]
@@ -532,13 +566,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.decode_seq_lens_buffer[actual_expanded:] = 0
                 seq_lens = self.decode_seq_lens_buffer[:num_decode_tokens]
                 if use_dcp:
-                    seq_lens.copy_(
-                        get_dcp_local_seq_lens(
-                            seq_lens,
-                            self.dcp_world_size,
-                            self.dcp_rank,
-                            self.cp_kv_cache_interleave_size,
-                        )
+                    _localize_decode_seq_lens_inplace(
+                        seq_lens,
+                        self.dcp_world_size,
+                        self.dcp_rank,
+                        self.cp_kv_cache_interleave_size,
                     )
 
                 # Give each of the flattened entries the same block table row as the
@@ -581,13 +613,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     + self.offsets_buffer[:max_decode_len]
                 )
                 if use_dcp:
-                    seq_lens_buffer.copy_(
-                        get_dcp_local_seq_lens(
-                            seq_lens_buffer.reshape(-1),
-                            self.dcp_world_size,
-                            self.dcp_rank,
-                            self.cp_kv_cache_interleave_size,
-                        ).view_as(seq_lens_buffer)
+                    _localize_decode_seq_lens_inplace(
+                        seq_lens_buffer,
+                        self.dcp_world_size,
+                        self.dcp_rank,
+                        self.cp_kv_cache_interleave_size,
                     )
                 seq_lens = seq_lens_buffer
             elif use_dcp:
