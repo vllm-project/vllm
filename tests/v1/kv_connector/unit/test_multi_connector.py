@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
+from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import KVConnectorOutput, KVConnectorWorkerMetadata
 
@@ -174,11 +175,14 @@ def _compare_directories(dir1: Path, dir2: Path) -> bool:
     return True
 
 
-def test_multi_example_connector_consistency():
+def test_multi_example_connector_consistency(monkeypatch):
     """
     Tests that MultiConnector with two ExampleConnectors saves
     identical KV cache data to separate storage locations.
     """
+    if current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+
     storage_1_path = Path("storage_1/")
     storage_2_path = Path("storage_2/")
     shutil.rmtree(storage_1_path, ignore_errors=True)
