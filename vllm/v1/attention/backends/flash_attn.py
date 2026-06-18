@@ -1128,10 +1128,30 @@ class FlashAttentionImpl(AttentionImpl):
                     )
                     _bt = pcp_attn_metadata.block_table
                     _raw6 = slot_mapping[: min(6, slot_mapping.shape[0])].tolist()
+                    # Isolation: if req1's slot>=0 but readback1!=key1, the
+                    # batch decode write dropped index 1. Re-issue a SINGLE-token
+                    # reshape for req1 alone and read back -- if it lands, the
+                    # multi-token decode write is the bug.
+                    _rewrite = ""
+                    if _sl[1] >= 0 and abs(_rb1 - key[1, 0, 0].item()) > 1e-4:
+                        reshape_and_cache_flash(
+                            key[1:2],
+                            value[1:2],
+                            key_cache,
+                            value_cache,
+                            decode_slot_mapping[1:2],
+                            self.kv_cache_dtype,
+                            layer._k_scale,
+                            layer._v_scale,
+                        )
+                        _rb1b = key_cache[
+                            _sl[1] // _bs, _sl[1] % _bs, 0, 0
+                        ].item()
+                        _rewrite = " single_rewrite=%.5f" % _rb1b
                     logger.warning(
                         "PCP_DUMP dec_slot n=%d rank=%d slot0=%d slot1=%d "
                         "collision=%s key0=%.5f readback0=%.5f key1=%.5f "
-                        "readback1=%.5f raw_slotmap=%s bt[0,0]=%d bt[1,0]=%d",
+                        "readback1=%.5f raw_slotmap=%s bt[0,0]=%d bt[1,0]=%d%s",
                         num_decode_tokens,
                         self.pcp_rank,
                         _sl[0],
@@ -1144,6 +1164,7 @@ class FlashAttentionImpl(AttentionImpl):
                         _raw6,
                         int(_bt[0, 0]),
                         int(_bt[1, 0]),
+                        _rewrite,
                     )
             local_padded_tokens = (
                 pcp_metadata.num_actual_tokens_pcp_padded // self.pcp_world_size
