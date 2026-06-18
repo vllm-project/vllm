@@ -116,6 +116,28 @@ def split_indexer_prefill_chunks(
     return chunks
 
 
+def _dcp_local_indexer_seq_lens(
+    seq_lens: torch.Tensor,
+    compress_ratio: int,
+    dcp_world_size: int,
+    dcp_rank: int,
+    cp_interleave_size: int,
+) -> torch.Tensor:
+    """Return per-rank indexer-K lengths for global uncompressed lengths."""
+    if dcp_world_size > 1:
+        seq_lens = get_dcp_local_seq_lens(
+            seq_lens,
+            dcp_world_size,
+            dcp_rank,
+            cp_interleave_size,
+        )
+    else:
+        seq_lens = seq_lens.to(torch.int32)
+    if compress_ratio > 1:
+        seq_lens = seq_lens // compress_ratio
+    return seq_lens
+
+
 class DeepseekV32IndexerBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
@@ -531,27 +553,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
             compressed_seq_lens = seq_lens // self.compress_ratio
 
-        # Under DCP the KV/indexer-K cache is sharded across ranks, so the
-        # prefill context bounds must be LOCAL (per-rank) counts for the KV
-        # gather and the per-token context-length derivation to be correct.
-        # We keep full-length tensors (decode values left unchanged) and only
-        # overwrite the prefill rows, so the num_decodes-offset indexing used by
-        # build_prefill_chunk_metadata stays consistent.
-        prefill_seq_lens = seq_lens
-        prefill_compressed_seq_lens = compressed_seq_lens
+        # Under DCP the indexer-K cache is sharded across ranks. The gather
+        # workspace uses LOCAL indexer-token counts, but per-query causal ends
+        # must still be derived from GLOBAL sequence positions.
+        prefill_local_indexer_seq_lens = compressed_seq_lens
         if num_prefills > 0 and self.dcp_world_size > 1:
-            pre_local = get_dcp_local_seq_lens(
+            pre_local = _dcp_local_indexer_seq_lens(
                 seq_lens[num_decodes : num_decodes + num_prefills],
+                self.compress_ratio,
                 self.dcp_world_size,
                 self.dcp_rank,
                 self.cp_kv_cache_interleave_size,
             )
-            prefill_seq_lens = seq_lens.clone()
-            prefill_seq_lens[num_decodes : num_decodes + num_prefills] = pre_local
-            prefill_compressed_seq_lens = (
-                prefill_seq_lens // self.compress_ratio
-                if self.compress_ratio > 1
-                else prefill_seq_lens
+            prefill_local_indexer_seq_lens = compressed_seq_lens.clone()
+            prefill_local_indexer_seq_lens[num_decodes : num_decodes + num_prefills] = (
+                pre_local
             )
 
         prefill_metadata = None
@@ -566,25 +582,25 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 if self.compress_ratio > 1
                 else seq_lens_cpu
             )
+            prefill_local_indexer_seq_lens_cpu = compressed_seq_lens_cpu
             if self.dcp_world_size > 1:
-                pre_local_cpu = get_dcp_local_seq_lens(
+                pre_local_cpu = _dcp_local_indexer_seq_lens(
                     seq_lens_cpu[num_decodes : num_decodes + num_prefills],
+                    self.compress_ratio,
                     self.dcp_world_size,
                     self.dcp_rank,
                     self.cp_kv_cache_interleave_size,
                 )
-                compressed_seq_lens_cpu = compressed_seq_lens_cpu.clone()
-                compressed_seq_lens_cpu[num_decodes : num_decodes + num_prefills] = (
-                    pre_local_cpu // self.compress_ratio
-                    if self.compress_ratio > 1
-                    else pre_local_cpu
-                )
+                prefill_local_indexer_seq_lens_cpu = compressed_seq_lens_cpu.clone()
+                prefill_local_indexer_seq_lens_cpu[
+                    num_decodes : num_decodes + num_prefills
+                ] = pre_local_cpu
             prefill_query_lens_cpu = torch.diff(
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
             max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
             chunk_specs = split_indexer_prefill_chunks(
-                compressed_seq_lens_cpu[num_decodes:],
+                prefill_local_indexer_seq_lens_cpu[num_decodes:],
                 prefill_query_lens_cpu,
                 self.max_prefill_buffer_size,
                 max_logits_bytes,
@@ -598,13 +614,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     req_slice.stop,
                     query_start_loc,
                     query_start_loc_cpu,
-                    prefill_seq_lens,
-                    prefill_compressed_seq_lens,
-                    compressed_seq_lens_cpu,
+                    seq_lens,
+                    prefill_local_indexer_seq_lens,
+                    prefill_local_indexer_seq_lens_cpu,
                     common_attn_metadata.block_table_tensor,
                     self.compress_ratio,
                     query_slice=query_slice,
                     skip_kv_gather=query_slice.start > 0,
+                    dcp_world_size=self.dcp_world_size,
+                    dcp_rank=self.dcp_rank,
+                    cp_interleave_size=self.cp_kv_cache_interleave_size,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
@@ -725,6 +744,9 @@ def build_prefill_chunk_metadata(
     compress_ratio: int,
     query_slice: slice | None = None,
     skip_kv_gather: bool = False,
+    dcp_world_size: int = 1,
+    dcp_rank: int = 0,
+    cp_interleave_size: int = 1,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     total_seq_lens = compressed_seq_lens_cpu[start_idx:end_idx].sum().item()
     if total_seq_lens == 0:
@@ -768,6 +790,9 @@ def build_prefill_chunk_metadata(
         qs_stop,
         BLOCK_SIZE=1024,
         COMPRESS_RATIO=compress_ratio,
+        DCP_WORLD_SIZE=dcp_world_size,
+        DCP_RANK=dcp_rank,
+        CP_INTERLEAVE_SIZE=cp_interleave_size,
     )
 
     token_start = query_start_loc_cpu[start_idx].item()
@@ -806,6 +831,9 @@ def _build_prefill_chunk_metadata_kernel(
     query_slice_stop,
     BLOCK_SIZE: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
+    DCP_WORLD_SIZE: tl.constexpr,
+    DCP_RANK: tl.constexpr,
+    CP_INTERLEAVE_SIZE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
 
@@ -833,8 +861,19 @@ def _build_prefill_chunk_metadata_kernel(
         # Compute cu_seq_len_ks
         tl.store(cu_compressed_seq_len_ks_ptr + out_pos, seq_start, mask=mask)
 
-        # Compute cu_seq_len_ke
-        seq_len_per_token = (start_pos + 1 + offset) // COMPRESS_RATIO
+        # Compute cu_seq_len_ke. Under DCP this is the number of LOCAL
+        # indexer-K tokens visible at the query token's GLOBAL causal position.
+        global_visible_len = start_pos + 1 + offset
+        if DCP_WORLD_SIZE > 1:
+            full_round = global_visible_len // (DCP_WORLD_SIZE * CP_INTERLEAVE_SIZE)
+            remainder = global_visible_len % (DCP_WORLD_SIZE * CP_INTERLEAVE_SIZE)
+            remainder = remainder - DCP_RANK * CP_INTERLEAVE_SIZE
+            remainder = tl.minimum(tl.maximum(remainder, 0), CP_INTERLEAVE_SIZE)
+            local_visible_len = full_round * CP_INTERLEAVE_SIZE + remainder
+        else:
+            local_visible_len = global_visible_len
+        seq_len_per_token = local_visible_len // COMPRESS_RATIO
+        seq_len_per_token = tl.minimum(seq_len_per_token, compressed_seq_len)
         tl.store(
             cu_compressed_seq_len_ke_ptr + out_pos,
             seq_start + seq_len_per_token,

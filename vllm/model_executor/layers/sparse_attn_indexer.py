@@ -69,6 +69,7 @@ def _dcp_global_topk_remap(
     logits: torch.Tensor,
     topk_tokens: int,
     interleave: int,
+    row_starts: torch.Tensor | None = None,
 ) -> None:
     """In place: convert per-rank LOCAL top-k selection into the GLOBAL top-k,
     restricted to the positions this rank owns (positions owned by other ranks
@@ -99,6 +100,8 @@ def _dcp_global_topk_remap(
             top-k was taken over.
         topk_tokens: K, the desired global selection size.
         interleave: cp_kv_cache_interleave_size (I).
+        row_starts: Optional per-row offset into ``logits``. Prefill top-k
+            indices are local to each row's valid [start, end) range.
     """
     dcp_group = get_dcp_group()
     rank = dcp_group.rank_in_group
@@ -107,7 +110,13 @@ def _dcp_global_topk_remap(
     # 1. Recover local scores; clamp indices defensively and mask invalid slots.
     invalid = topk_indices < 0
     idx_safe = torch.clamp(topk_indices, min=0)
-    local_scores = torch.gather(logits, 1, idx_safe.to(torch.int64))
+    score_idx = idx_safe.to(torch.int64)
+    if row_starts is not None:
+        score_idx = score_idx + row_starts.to(
+            device=score_idx.device, dtype=score_idx.dtype
+        ).view(-1, 1)
+        score_idx = torch.clamp(score_idx, min=0, max=logits.shape[1] - 1)
+    local_scores = torch.gather(logits, 1, score_idx)
     local_scores = local_scores.masked_fill(invalid, float("-inf"))
 
     # 2. Local -> global positions; -1 stays -1.
@@ -357,6 +366,7 @@ def sparse_attn_indexer(
                     logits,
                     topk_tokens,
                     attn_metadata_narrowed.cp_interleave_size,
+                    row_starts=chunk.cu_seqlen_ks,
                 )
 
     if has_decode:

@@ -21,6 +21,7 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
     _global_to_local_position,
     _local_to_global_position,
 )
+from vllm.v1.attention.backends.mla.indexer import _dcp_local_indexer_seq_lens
 
 
 class _FakeDCPGroup:
@@ -77,6 +78,50 @@ def test_position_roundtrip(interleave, world_size):
             interleave,
         )
         assert (((gg_all // interleave) % world_size) == rank).all()
+
+
+@pytest.mark.parametrize(
+    ("rank", "expected"),
+    [
+        (0, [1, 2, 2, 2]),
+        (1, [0, 0, 1, 2]),
+    ],
+)
+def test_dcp_prefill_visible_lengths_use_global_positions(rank, expected):
+    visible_global_lens = torch.arange(1, 5, dtype=torch.int32)
+
+    got = _dcp_local_indexer_seq_lens(
+        visible_global_lens,
+        compress_ratio=1,
+        dcp_world_size=2,
+        dcp_rank=rank,
+        cp_interleave_size=2,
+    )
+
+    total = _dcp_local_indexer_seq_lens(
+        torch.tensor([4], dtype=torch.int32),
+        compress_ratio=1,
+        dcp_world_size=2,
+        dcp_rank=rank,
+        cp_interleave_size=2,
+    ).item()
+    assert got.tolist() == expected
+    assert torch.all(got >= 0)
+    assert torch.all(got <= total)
+
+
+def test_dcp_prefill_visible_lengths_support_compressed_indexer_cache():
+    visible_global_lens = torch.arange(1, 17, dtype=torch.int32)
+
+    got = _dcp_local_indexer_seq_lens(
+        visible_global_lens,
+        compress_ratio=4,
+        dcp_world_size=2,
+        dcp_rank=0,
+        cp_interleave_size=2,
+    )
+
+    assert got.tolist() == [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2]
 
 
 @pytest.mark.parametrize("interleave", [1, 2, 3])
@@ -150,6 +195,74 @@ def test_global_topk_reconstructs_reference(interleave, world_size, monkeypatch)
             sorted(union),
             sorted(ref[row].tolist()),
         )
+
+
+def test_prefill_global_topk_uses_row_starts(monkeypatch):
+    interleave, world_size, topk_tokens = 1, 2, 2
+    full_logits = torch.tensor(
+        [
+            [1.0, 5.0, 2.0, 4.0, 3.0, 0.0],
+            [0.1, 10.0, 0.2, 9.0, 0.3, 8.0],
+        ],
+        dtype=torch.float32,
+    )
+    num_rows = full_logits.shape[0]
+    total_len = full_logits.shape[1]
+    g = torch.arange(total_len)
+    owner = (g // interleave) % world_size
+
+    per_rank_logits = []
+    row_starts_per_rank = []
+    seed_topk = []
+    pos_list, scores_list = [], []
+    for rank in range(world_size):
+        local_logits = full_logits[:, owner == rank].contiguous()
+        local_len = local_logits.shape[1]
+        row_starts = torch.arange(num_rows, dtype=torch.int32) * local_len
+        logits = full_logits.new_full((num_rows, num_rows * local_len), float("-inf"))
+        for row, row_start in enumerate(row_starts.tolist()):
+            logits[row, row_start : row_start + local_len] = local_logits[row]
+
+        local_topk = local_logits.topk(topk_tokens, dim=1).indices.to(torch.int32)
+        idx_safe = torch.clamp(local_topk, min=0)
+        score_idx = idx_safe.long() + row_starts.view(-1, 1).long()
+        scores = logits.gather(1, score_idx)
+        gp = _local_to_global(idx_safe, rank, world_size, interleave)
+
+        per_rank_logits.append(logits)
+        row_starts_per_rank.append(row_starts)
+        seed_topk.append(local_topk)
+        pos_list.append(gp.contiguous())
+        scores_list.append(scores.contiguous())
+
+    per_rank_final = []
+    for rank in range(world_size):
+        fake = _FakeDCPGroup(world_size, rank)
+        fake.set_all(pos_list, scores_list)
+        monkeypatch.setattr(idx_mod, "get_dcp_group", lambda f=fake: f)
+
+        topk_buf = seed_topk[rank].clone()
+        idx_mod._dcp_global_topk_remap(
+            topk_buf,
+            per_rank_logits[rank],
+            topk_tokens,
+            interleave,
+            row_starts=row_starts_per_rank[rank],
+        )
+        per_rank_final.append(topk_buf)
+
+    ref = full_logits.topk(topk_tokens, dim=1).indices
+    for row in range(num_rows):
+        union = set()
+        for rank in range(world_size):
+            for local_idx in per_rank_final[rank][row].tolist():
+                if local_idx >= 0:
+                    union.add(
+                        _local_to_global(
+                            torch.tensor([local_idx]), rank, world_size, interleave
+                        ).item()
+                    )
+        assert union == set(ref[row].tolist())
 
 
 def test_global_topk_ownership_partition(monkeypatch):
