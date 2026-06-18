@@ -310,9 +310,9 @@ class MoRIIOConfig:
         return cls(
             local_ip=resolve_host_ip(extra_config),
             local_kv_port=get_open_port(),
-            proxy_ip=extra_config["proxy_ip"],
+            proxy_ip=extra_config.get("proxy_ip", ""),
             local_ping_port=get_open_port(),
-            proxy_ping_port=int(extra_config["proxy_ping_port"]),
+            proxy_ping_port=int(extra_config.get("proxy_ping_port", 0)),
             http_port=int(extra_config["http_port"]),
             handshake_port=int(extra_config["handshake_port"]),
             notify_port=base_notify_port + port_offset,
@@ -436,17 +436,9 @@ class ReqMeta:
     remote_engine_id: str
     tp_size: int
     remote_dp_size: int
-    # Wide-EP multi-pod support: list of remote pod IPs to address when
-    # the remote DP fan-out is split across more than one pod. Indexed by
-    # ``remote_global_dp_rank // remote_dp_size_local`` -- i.e.
-    # ranks 0..dp_local-1 live on remote_hosts[0], ranks dp_local..2*dp_local-1
-    # live on remote_hosts[1], and so on. For single-pod deployments the
-    # sidecar may either emit a 1-element list or leave the field empty, in
-    # which case add_new_req falls back to ``[remote_host]`` so behaviour is
-    # bit-identical to the single-pod path.
+    # Multi-pod: list of remote pod IPs indexed by pod_idx.
     remote_hosts: list[str] = field(default_factory=list)
-    # The remote DP-size-local. When ``remote_dp_size_local == 0`` callers
-    # must treat it as "fall back to remote_dp_size" (single-pod).
+    # Per-pod DP size; 0 means fallback to remote_dp_size.
     remote_dp_size_local: int = 0
 
 
@@ -474,12 +466,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
     ):
         transfer_id = kv_transfer_params["transfer_id"]
 
-        # Parse host/ports from the request_id. The vLLM router embeds both
-        # zmq_addresses in the request_id; the llm-d routing sidecar does
-        # not, and instead populates ``remote_host``, ``remote_handshake_port``
-        # and ``remote_notify_port`` directly in ``kv_transfer_params``. Try
-        # the request_id form first for backwards compatibility and fall back
-        # to the explicit fields for sidecar-driven deployments.
+        # Try request_id embedded address first, fallback to explicit params.
         peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=write_mode)
         if peer_zmq is not None:
             remote_host, remote_handshake_port, remote_notify_port = (
@@ -506,11 +493,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
                     f"empty; cannot route MoRI-IO transfer"
                 )
 
-        # Wide-EP multi-pod support: derive the remote_hosts list from
-        # ``kv_transfer_params["remote_hosts"]`` (a list of pod IPs the
-        # router can address) with a fallback to ``[remote_host]`` so the
-        # single-pod path is unchanged. ``remote_dp_size_local`` tells the
-        # consumer how to map a global DP rank back to a pod index.
+        # Multi-pod: use remote_hosts list or fallback to single host.
         _remote_hosts = kv_transfer_params.get("remote_hosts") or [remote_host]
         if not isinstance(_remote_hosts, list):
             _remote_hosts = [str(_remote_hosts)]
