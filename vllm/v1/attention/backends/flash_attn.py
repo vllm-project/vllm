@@ -77,6 +77,7 @@ _PCP_DUMP_WRITE = [0]
 # see req0/req1 divergence develop over decode steps (e.g. decode-write bug).
 _PCP_DUMP_MERGE_STEP = [-1]
 _PCP_DUMP_MERGE_STEP_N = [0]
+_PCP_DUMP_DECSLOT = [0]
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -1099,6 +1100,38 @@ class FlashAttentionImpl(AttentionImpl):
                     layer._k_scale,
                     layer._v_scale,
                 )
+                # PCP_DUMP dec_slot: decode KV write check for >1 decode req.
+                # req0/req1 decode slots MUST be disjoint (different blocks).
+                # collision=True -> aliasing, one overwrites the other -> that
+                # req re-reads prefill cache next step ("<think><think>").
+                # readback_i must equal key_i; mismatch -> wrong slot/value.
+                import os as _os
+
+                if (
+                    _os.environ.get("PCP_DUMP")
+                    and self.pcp_rank == 0
+                    and num_decode_tokens > 1
+                    and _PCP_DUMP_DECSLOT[0] < 5
+                ):
+                    _PCP_DUMP_DECSLOT[0] += 1
+                    _sl = decode_slot_mapping.tolist()
+                    _bs = key_cache.shape[1]
+                    _collide = len(_sl) != len(set(_sl))
+                    _rb0 = key_cache[_sl[0] // _bs, _sl[0] % _bs, 0, 0].item()
+                    _rb1 = key_cache[_sl[1] // _bs, _sl[1] % _bs, 0, 0].item()
+                    logger.warning(
+                        "PCP_DUMP dec_slot n=%d slot0=%d slot1=%d "
+                        "collision=%s key0=%.5f readback0=%.5f key1=%.5f "
+                        "readback1=%.5f",
+                        num_decode_tokens,
+                        _sl[0],
+                        _sl[1],
+                        _collide,
+                        key[0, 0, 0].item(),
+                        _rb0,
+                        key[1, 0, 0].item(),
+                        _rb1,
+                    )
             local_padded_tokens = (
                 pcp_metadata.num_actual_tokens_pcp_padded // self.pcp_world_size
             )
