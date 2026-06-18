@@ -71,17 +71,14 @@ class XgrammarBackend(StructuredOutputBackend):
             cache_limit_bytes=vllm.envs.VLLM_XGRAMMAR_CACHE_MB * 1024 * 1024,
         )
 
-        # Optional persistent on-disk cache for compiled grammars. Off by
-        # default; when enabled it lets cold starts deserialize grammars from
-        # disk instead of recompiling them (see get_xgrammar_disk_cache).
-        # tokenizer_info is kept because deserialize_json needs it on a hit.
+        # tokenizer_info is retained because deserialize_json needs it on a
+        # disk-cache hit (see get_xgrammar_disk_cache).
         self.tokenizer_info = tokenizer_info
         self._disk_cache = get_xgrammar_disk_cache()
         self._tokenizer_key: str | None = None
         if self._disk_cache is not None:
-            # Stable per-tokenizer discriminator for the cache key (computed
-            # once). serialize_json() captures the full vocab + metadata, so
-            # different tokenizers never share a key.
+            # serialize_json() captures the full vocab + metadata, so folding
+            # its hash into the key keeps two tokenizers from sharing an entry.
             self._tokenizer_key = hashlib.sha256(
                 tokenizer_info.serialize_json().encode()
             ).hexdigest()
@@ -121,27 +118,28 @@ class XgrammarBackend(StructuredOutputBackend):
             return self._compile(request_type, grammar_spec)
 
         key = self._disk_key(request_type, grammar_spec)
-        text = self._disk_cache.get(key, None)
-        if text is not None:
-            try:
+        # .get() is inside the guard too: the read itself can raise (e.g. a
+        # corrupt db), and a cache problem must never fail a request.
+        try:
+            text = self._disk_cache.get(key, None)
+            if text is not None:
                 return xgr.CompiledGrammar.deserialize_json(text, self.tokenizer_info)
-            except (
-                xgr.InvalidJSONError,
-                xgr.DeserializeFormatError,
-                xgr.DeserializeVersionError,
-            ):
-                # Corrupt / format- or version-mismatched entry: recompile and
-                # overwrite it below.
-                logger.debug(
-                    "Ignoring unusable xgrammar disk cache entry; recompiling.",
-                    exc_info=True,
-                )
-            except Exception:
-                # A cache problem must never fail a request.
-                logger.warning(
-                    "Unexpected error reading xgrammar disk cache; recompiling.",
-                    exc_info=True,
-                )
+        except (
+            xgr.InvalidJSONError,
+            xgr.DeserializeFormatError,
+            xgr.DeserializeVersionError,
+        ):
+            # Corrupt / format- or version-mismatched entry: recompile and
+            # overwrite it below.
+            logger.debug(
+                "Ignoring unusable xgrammar disk cache entry; recompiling.",
+                exc_info=True,
+            )
+        except Exception:
+            logger.warning(
+                "Unexpected error reading xgrammar disk cache; recompiling.",
+                exc_info=True,
+            )
 
         ctx = self._compile(request_type, grammar_spec)
         try:
