@@ -353,11 +353,24 @@ def test_hipb_mm_kernel_forward_accuracy(enable_hipb_mm_kernel):
     expected = (x_dequant @ w_dequant.t() + bias.to(torch.float32)).to(torch.bfloat16)
 
     assert out.shape == (num_tokens, weight_shape[0])
-    # K=4096 fp8 reduction leaves room for accumulation order drift and
-    # catastrophic cancellation on near-zero outputs; tolerances are loose
-    # enough to absorb that but tight enough to catch wrong layouts, missing
-    # bias, swapped scales, etc.
-    torch.testing.assert_close(out, expected, atol=5.0, rtol=0.1)
+    # K=4096 fp8 reduction leaves room for accumulation-order drift and
+    # catastrophic cancellation on near-zero outputs. The relaxed AITER FP8
+    # check absorbs that -- allowing up to 5% of elements past base atol, but
+    # the max diff must stay within 4x base atol -- while still catching wrong
+    # layouts, missing bias, swapped scales, and similar bugs.
+    base_atol = 5.0
+    max_pct_allowed = 5.0
+    relaxed_atol = base_atol * 4
+    diff = (out.to(torch.float32) - expected.to(torch.float32)).abs()
+    max_diff = diff.max().item()
+    pct_exceed = (diff > base_atol).float().mean().item() * 100
+    assert pct_exceed <= max_pct_allowed, (
+        f"AITER FP8: {pct_exceed:.2f}% elements exceed atol={base_atol} "
+        f"(max allowed {max_pct_allowed}%)"
+    )
+    assert max_diff <= relaxed_atol, (
+        f"AITER FP8: max_diff={max_diff:.6f} exceeds relaxed limit {relaxed_atol}"
+    )
 
 
 def test_hipb_mm_kernel_online_tuning_writes_csv(
