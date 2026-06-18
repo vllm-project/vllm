@@ -72,6 +72,11 @@ _PCP_DUMP_N = [0]
 _PCP_DUMP_BT = [0]
 _PCP_DUMP_MERGE = [0]
 _PCP_DUMP_WRITE = [0]
+# per-step firing for merge_out/bt_chk: track last seen seqused_k[0] so each
+# decode STEP logs once (first layer), across the first few steps -- needed to
+# see req0/req1 divergence develop over decode steps (e.g. decode-write bug).
+_PCP_DUMP_MERGE_STEP = [-1]
+_PCP_DUMP_MERGE_STEP_N = [0]
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -1276,33 +1281,42 @@ class FlashAttentionImpl(AttentionImpl):
             #    content (slot_mapping wrote wrong K/V for reqs 1+).
             import os as _os
 
-            if _os.environ.get("PCP_DUMP") and num_decodes > 1 and _PCP_DUMP_BT[0] < 1:
+            if _os.environ.get("PCP_DUMP") and num_decodes > 1 and _PCP_DUMP_BT[0] < 3:
                 _PCP_DUMP_BT[0] += 1
                 _bt = attn_metadata.block_table
                 _bs = key_cache.shape[1]
                 _kv = attn_metadata.pcp_decode_context_kv_lens
-                # first block (shared prefix -> k0==k1 is expected) AND last
-                # valid block (unique question part -> k0 MUST differ from k1).
-                # If last-block k0==k1 -> req1's cache is a copy of req0's
-                # (slot_mapping wrote req0 K/V into req1 blocks) -> duplication.
                 _nb = lambda i: (int(_kv[i]) + _bs - 1) // _bs
                 _lb0 = int(_bt[0, _nb(0) - 1])
                 _lb1 = int(_bt[1, _nb(1) - 1])
-                _kfirst0 = key_cache[int(_bt[0, 0]), 0, 0, :4].tolist()
-                _kfirst1 = key_cache[int(_bt[1, 0]), 0, 0, :4].tolist()
+                # block_table overlap: do req0 and req1 share physical blocks?
+                # For 2 IDENTICAL prompts the prefix may be shared, but the
+                # decode/generation blocks must be disjoint -- if req0 and req1
+                # alias the same blocks, their decode writes collide -> garbage.
+                _nb0 = _nb(0)
+                _nb1 = _nb(1)
+                _bt0 = set(int(x) for x in _bt[0, :_nb0].tolist())
+                _bt1 = set(int(x) for x in _bt[1, :_nb1].tolist())
+                _overlap = sorted(_bt0 & _bt1)
+                # cache diff req0 vs req1 first block (full, head 0). For
+                # IDENTICAL prompts this MUST be ~0; nonzero -> req1's cache
+                # content differs from req0's (write/ownership bug for req1+).
+                _cf0 = key_cache[int(_bt[0, 0]), :, 0, :8].to(torch.float32)
+                _cf1 = key_cache[int(_bt[1, 0]), :, 0, :8].to(torch.float32)
+                _cdot = (_cf0 - _cf1).abs().max()
                 _klast0 = key_cache[_lb0, 0, 0, :4].tolist()
                 _klast1 = key_cache[_lb1, 0, 0, :4].tolist()
                 logger.warning(
                     "PCP_DUMP bt_chk bs=%d req0[blk0=%d,blkN=%d] req1[blk0=%d,"
-                    "blkN=%d] k_first0=%s k_first1=%s | k_last0=%s k_last1=%s "
-                    "rank=%d",
+                    "blkN=%d] block_overlap=%s firstblk_diff=%.5f | "
+                    "k_last0=%s k_last1=%s rank=%d",
                     _bs,
                     int(_bt[0, 0]),
                     _lb0,
                     int(_bt[1, 0]),
                     _lb1,
-                    _kfirst0,
-                    _kfirst1,
+                    _overlap[:8],
+                    float(_cdot),
                     _klast0,
                     _klast1,
                     self.pcp_rank,
@@ -1334,21 +1348,35 @@ class FlashAttentionImpl(AttentionImpl):
                 decode_attn_out,
                 decode_lse.transpose(0, 1),
             )
-            # PCP_DUMP (once): dump merged decode attn output for req0 vs req1.
-            # Distinct -> attention+merge fine, bug is downstream in
-            # get_restore_hidden_states. Equal/garbage -> attention/merge bug.
+            # PCP_DUMP merge_out (per decode step): req0 vs req1 decode-attention
+            # output. For TWO IDENTICAL prompts in the same batch, o0 MUST equal
+            # o1 (same query, same KV). o0!=o1 -> req1's attention INPUTS differ
+            # (cache content or block_table/seqused_k). Fires once per step
+            # (first layer) across the first few steps so we can watch req0/req1
+            # diverge -- e.g. a decode-write bug for req1 makes o0==o1 at step1
+            # (identical prefill) but o0!=o1 at step2 (req1 re-reads without its
+            # own just-written token, e.g. the "<think><think>" symptom).
             import os as _os
 
+            _sk0 = int(attn_metadata.pcp_decode_context_kv_lens[0])
             if (
                 _os.environ.get("PCP_DUMP")
                 and num_decodes > 1
-                and _PCP_DUMP_MERGE[0] < 1
+                and _sk0 != _PCP_DUMP_MERGE_STEP[0]
+                and _PCP_DUMP_MERGE_STEP_N[0] < 5
             ):
-                _PCP_DUMP_MERGE[0] += 1
+                _PCP_DUMP_MERGE_STEP[0] = _sk0
+                _PCP_DUMP_MERGE_STEP_N[0] += 1
+                _o0 = output[0].to(torch.float32)
+                _o1 = output[1].to(torch.float32)
+                _odiff = (_o0 - _o1).abs().max()
                 logger.warning(
-                    "PCP_DUMP merge_out o0=%s o1=%s rank=%d",
+                    "PCP_DUMP merge_out step_kv0=%d o0=%s o1=%s "
+                    "||o0-o1||max=%.5f rank=%d",
+                    _sk0,
                     output[0, 0, :4].tolist(),
                     output[1, 0, :4].tolist(),
+                    float(_odiff),
                     self.pcp_rank,
                 )
 
