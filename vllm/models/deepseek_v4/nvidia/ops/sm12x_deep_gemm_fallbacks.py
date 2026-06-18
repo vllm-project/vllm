@@ -261,7 +261,9 @@ def _fp8_mqa_logits_topk_triton(
         # buffer and copy back. The buffer is left uninitialized (new_empty)
         # rather than copied (.contiguous()) because the op overwrites every
         # element, so copying the placeholder -1s in would be wasted work.
-        work = selected if selected.is_contiguous() else selected.new_empty(selected.shape)
+        work = (
+            selected if selected.is_contiguous() else selected.new_empty(selected.shape)
+        )
         topk_op(
             logits,
             cu_seqlen_ks,
