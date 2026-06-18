@@ -54,8 +54,14 @@ MTPModelTypes = Literal[
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
+OrthrusModelTypes = Literal["orthrus"]
 EagleModelTypes = Literal[
-    "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
+    "eagle",
+    "eagle3",
+    "extract_hidden_states",
+    MTPModelTypes,
+    DFlashModelTypes,
+    OrthrusModelTypes,
 ]
 SpeculativeMethod = Literal[
     "ngram",
@@ -614,6 +620,12 @@ class SpeculativeConfig:
                 self.model = "suffix"
             elif self.method == "extract_hidden_states":
                 self.model = "extract_hidden_states"
+            elif self.method == "orthrus":
+                if self.target_model_config is None:
+                    raise ValueError("target_model_config must be present for Orthrus")
+                self.model = self.target_model_config.model
+                if not self.quantization:
+                    self.quantization = self.target_model_config.quantization
             elif self.method == "custom_class":
                 # method was set explicitly, but model should already contain the
                 # custom module path. If not, this is a configuration error.
@@ -733,7 +745,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash"):
+                if self.method in ("eagle", "eagle3", "dflash", "orthrus"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -791,7 +803,7 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config = eagle_config
                         self.update_arch_()
 
-                if self.method == "dflash":
+                if self.method in ("dflash", "orthrus"):
                     self.parallel_drafting = True
 
                 if self.num_speculative_tokens is not None and hasattr(
@@ -1080,6 +1092,12 @@ class SpeculativeConfig:
         Calculate the maximum number of new slots that might be added to the batch
         when drafting.
         """
+        if self.use_dflash() or self.use_orthrus():
+            # Block-diffusion drafters run their query block as a separate
+            # drafter batch. They reserve KV lookahead slots in the scheduler,
+            # but they do not append compute slots to the target batch.
+            return 0
+
         slots_per_req = 0  # for serial non-draft-model methods, no change needed
         if self.parallel_drafting:
             # For parallel drafting, we need one new slot per 'masked' token
@@ -1107,10 +1125,13 @@ class SpeculativeConfig:
         )
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp", "dflash")
+        return self.method in ("eagle", "eagle3", "mtp", "dflash", "orthrus")
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
+
+    def use_orthrus(self) -> bool:
+        return self.method == "orthrus"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
