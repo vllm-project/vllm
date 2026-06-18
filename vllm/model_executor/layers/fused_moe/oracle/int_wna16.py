@@ -746,18 +746,18 @@ def _process_weights_cpu(
     from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
         prepare_int4_moe_layer_for_cpu,
     )
+    from vllm.model_executor.layers.quantization.auto_awq import (
+        AutoAWQConfig,
+    )
     from vllm.model_executor.layers.quantization.auto_gptq import (
         AutoGPTQConfig,
-    )
-    from vllm.model_executor.layers.quantization.awq_marlin import (
-        AWQMarlinConfig,
     )
 
     # Detect packing format.
     # AWQ: qweight is [E, K, 2*N//8] (packed along output/N dim).
     # GPTQ: qweight is [E, K//8, 2*N] (packed along input/K dim).
     # compressed-tensors: qweight is [E, K//8, 2*N] (packed along input/K dim).
-    if isinstance(quant_config, AWQMarlinConfig):
+    if isinstance(quant_config, AutoAWQConfig):
         # AWQ: K is stored unpacked in dim 1.
         cpu_quant_algo = ops.CPUQuantAlgo.AWQ
     elif isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
@@ -771,7 +771,7 @@ def _process_weights_cpu(
         cpu_quant_algo = ops.CPUQuantAlgo.GPTQ
     else:
         raise TypeError(
-            "CPU WNA16 MoE backend requires AWQMarlinConfig, AutoGPTQConfig "
+            "CPU WNA16 MoE backend requires AutoAWQConfig, AutoGPTQConfig "
             f"or QuantizationArgs, got {type(quant_config).__name__}."
         )
 
@@ -934,14 +934,14 @@ def convert_to_wna16_moe_kernel_format(
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
+        from vllm.model_executor.layers.quantization.auto_awq import (
+            AutoAWQConfig,
+        )
         from vllm.model_executor.layers.quantization.auto_gptq import (
             AutoGPTQConfig,
         )
-        from vllm.model_executor.layers.quantization.awq_marlin import (
-            AWQMarlinConfig,
-        )
 
-        if isinstance(quant_config, AWQMarlinConfig):
+        if isinstance(quant_config, AutoAWQConfig):
             num_bits = quant_config.weight_bits
             pack_factor = quant_config.pack_factor
             group_size = quant_config.group_size
@@ -957,11 +957,11 @@ def convert_to_wna16_moe_kernel_format(
             actorder = quant_config.actorder
         else:
             raise TypeError(
-                "Marlin WNA16 MoE backend requires AutoGPTQConfig, AWQMarlinConfig or "
+                "Marlin WNA16 MoE backend requires AutoGPTQConfig, AutoAWQConfig or "
                 f"QuantizationArgs, got {type(quant_config).__name__}."
             )
 
-        if isinstance(quant_config, AWQMarlinConfig):
+        if isinstance(quant_config, AutoAWQConfig):
             if w13_qzeros is None or w2_qzeros is None:
                 raise ValueError("AWQ Marlin MoE requires zero-point tensors.")
 
