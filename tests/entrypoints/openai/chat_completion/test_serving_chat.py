@@ -621,7 +621,7 @@ async def _async_serving_chat_init():
     engine = MockEngine()
 
     models = OpenAIServingModels(engine, BASE_MODEL_PATHS)
-    online_renderer = _build_serving_render(engine, models.registry)
+    online_renderer = _build_online_renderer(engine, models.registry)
 
     serving_completion = OpenAIServingChat(
         engine,
@@ -1882,7 +1882,7 @@ async def test_tool_choice_validation_without_parser():
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    online_renderer = _build_serving_render(mock_engine, models.registry)
+    online_renderer = _build_online_renderer(mock_engine, models.registry)
 
     # Create serving_chat without tool_parser (enable_auto_tools=False)
     serving_chat = OpenAIServingChat(
@@ -1951,7 +1951,7 @@ async def test_streaming_n_gt1_independent_tool_parsers():
         engine_client=mock_engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    online_renderer = _build_serving_render(mock_engine, models.registry)
+    online_renderer = _build_online_renderer(mock_engine, models.registry)
 
     serving_chat = OpenAIServingChat(
         mock_engine,
