@@ -8,12 +8,8 @@
 #include <string>
 #include <vector>
 
-#ifndef USE_ROCM
-  #include <torch/csrc/stable/ops.h>
+#include <torch/csrc/stable/ops.h>
 
-// Requires torch::stable::from_blob with a custom deleter (PyTorch >= 2.11).
-// ROCm _C_stable_libtorch still targets 2.10; see the legacy declaration in
-// csrc/ops.h (ROCm _C).
 inline torch::stable::Tensor weak_ref_tensor(torch::stable::Tensor& tensor) {
   // Ensure tensor is on CUDA
   STD_TORCH_CHECK(tensor.device().is_cuda(), "Tensor must be on CUDA device");
@@ -21,12 +17,10 @@ inline torch::stable::Tensor weak_ref_tensor(torch::stable::Tensor& tensor) {
   // Get the raw data pointer
   void* data_ptr = tensor.mutable_data_ptr();
 
-  // Create a new tensor from the raw data pointer
+  /// Create a new tensor from the raw data pointer
   return torch::stable::from_blob(data_ptr, tensor.sizes(), tensor.strides(),
-                                  tensor.device(), tensor.scalar_type(),
-                                  [base = tensor](void*) {});
+                                  tensor.device(), tensor.scalar_type());
 }
-#endif
 
 void per_token_group_quant_fp8(const torch::stable::Tensor& input,
                                torch::stable::Tensor& output_q,

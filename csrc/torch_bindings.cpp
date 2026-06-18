@@ -20,10 +20,6 @@
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
-  //
-
-  ops.def("weak_ref_tensor(Tensor input) -> Tensor");
-  ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
 
 #ifdef USE_ROCM
   // TODO: Remove this once we upgrade to torch 2.11.

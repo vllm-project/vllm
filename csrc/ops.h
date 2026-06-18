@@ -9,30 +9,6 @@
 
 #include <vector>
 
-// This should be deleted when ROCm moves to torch >= 2.11 since a torch ABI
-// stable version is defined in vllm/csrc/libtorch_stable/ops.h
-torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
-  // Ensure tensor is on CUDA
-  if (!tensor.is_cuda()) {
-    throw std::runtime_error("Tensor must be on CUDA device");
-  }
-
-  // Get the raw data pointer
-  void* data_ptr = tensor.data_ptr();
-
-  // Get tensor sizes and strides
-  std::vector<int64_t> sizes = tensor.sizes().vec();
-  std::vector<int64_t> strides = tensor.strides().vec();
-
-  // Get tensor options (dtype, device)
-  auto options = tensor.options();
-
-  // Create a new tensor from the raw data pointer
-  auto new_tensor = torch::from_blob(data_ptr, sizes, strides, options);
-
-  return new_tensor;
-}
-
 // rms_norm and fused_add_rms_norm declarations also exist in
 // csrc/libtorch_stable/ops.h (torch::stable ABI for CUDA). They remain here
 // because the CPU build still uses these torch::Tensor declarations.
