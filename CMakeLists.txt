@@ -1396,9 +1396,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
-
-  if(VLLM_ROCM_HAS_GFX1100)
-    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
+  
+  # Needed to pass skip skinny flag to .cpp targets
+  if(VLLM_GPU_ARCHES MATCHES "gfx1250")                               
+    target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
   endif()
 endif()
 
