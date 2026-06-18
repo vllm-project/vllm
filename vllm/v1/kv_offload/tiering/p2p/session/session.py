@@ -213,7 +213,15 @@ class P2PSession:
 
         # Server-role state
         self._outbound: dict[str, _OutboundRequestState] = {}  # kv_request_id -> req
-        self._inflight: dict[int, _InflightXfer] = {}  # transfer_id → xfer
+        # transfer_id → xfer. Mutate ONLY via _inflight_add / _inflight_pop
+        # so the per-request count below stays in sync.
+        self._inflight: dict[int, _InflightXfer] = {}
+        # kv_request_id → number of entries in _inflight for that id.
+        # Kept in sync with _inflight; entries that hit zero are removed
+        # so `kv_request_id in self._inflight_per_req` is an exact
+        # "has any inflight transfer" predicate (O(1) replacement for
+        # the previous O(N) scan).
+        self._inflight_per_req: dict[str, int] = {}
         self._store_jobs: dict[int, float] = {}  # job_id → submitted_at
         self._pending_aborts: dict[str, float] = {}  # kv_request_id → start
         # StoreResults queued by _finalize_outbound for the next poll
@@ -348,7 +356,30 @@ class P2PSession:
         self._finalize_outbound(kv_request_id)
 
     def _has_inflight_for(self, kv_request_id: str) -> bool:
-        return any(x.kv_request_id == kv_request_id for x in self._inflight.values())
+        return kv_request_id in self._inflight_per_req
+
+    def _inflight_add(self, tid: int, xfer: _InflightXfer) -> None:
+        """Insert an inflight transfer and bump the per-request count."""
+        self._inflight[tid] = xfer
+        self._inflight_per_req[xfer.kv_request_id] = (
+            self._inflight_per_req.get(xfer.kv_request_id, 0) + 1
+        )
+
+    def _inflight_pop(self, tid: int) -> _InflightXfer | None:
+        """Pop an inflight transfer and decrement the per-request count.
+
+        Removes the per-request entry once the count hits zero so the
+        dict stays bounded and `_has_inflight_for` remains exact.
+        """
+        xfer = self._inflight.pop(tid, None)
+        if xfer is None:
+            return None
+        new_count = self._inflight_per_req.get(xfer.kv_request_id, 0) - 1
+        if new_count > 0:
+            self._inflight_per_req[xfer.kv_request_id] = new_count
+        else:
+            self._inflight_per_req.pop(xfer.kv_request_id, None)
+        return xfer
 
     def _finalize_outbound(
         self,
@@ -497,7 +528,7 @@ class P2PSession:
         poll_result = self._transport.poll()
 
         for tid in poll_result.done:
-            xfer = self._inflight.pop(tid, None)
+            xfer = self._inflight_pop(tid)
             if xfer is None:
                 # Bug signal: transport reported a transfer we have no
                 # bookkeeping for. Likely a double-completion in the
@@ -535,7 +566,7 @@ class P2PSession:
 
         failed_kv_request_ids: set[str] | None = None
         for tid in poll_result.failed:
-            xfer = self._inflight.pop(tid, None)
+            xfer = self._inflight_pop(tid)
             if xfer is None:
                 # See the matching error log in the done branch above.
                 logger.error(
@@ -576,7 +607,7 @@ class P2PSession:
                 if xfer.kv_request_id in failed_kv_request_ids
             ]
             for tid in ids_to_cancel:
-                del self._inflight[tid]
+                self._inflight_pop(tid)
             self._transport.cancel(ids_to_cancel)
 
         return results
@@ -825,7 +856,7 @@ class P2PSession:
         )
         if expired:
             for tid in ids:
-                self._inflight.pop(tid, None)
+                self._inflight_pop(tid)
             self._transport.cancel(ids, mode="immediate")
             logger.warning(
                 "P2PSession %s: cancel drain timed out for kv_request_id=%s,"
@@ -845,7 +876,7 @@ class P2PSession:
         still_set = set(still)
         for tid in ids:
             if tid not in still_set:
-                self._inflight.pop(tid, None)
+                self._inflight_pop(tid)
         if not still:
             self._finalize_abort(kv_request_id)
 
@@ -925,10 +956,13 @@ class P2PSession:
                 transfer_id,
                 len(result.local_idxs),
             )
-            self._inflight[transfer_id] = _InflightXfer(
-                kv_request_id=kv_request_id,
-                block_count=len(result.local_idxs),
-                job_ids=result.job_ids,
+            self._inflight_add(
+                transfer_id,
+                _InflightXfer(
+                    kv_request_id=kv_request_id,
+                    block_count=len(result.local_idxs),
+                    job_ids=result.job_ids,
+                ),
             )
         else:
             logger.warning(

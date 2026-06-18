@@ -452,8 +452,9 @@ class TestServerFlows:
         # Seed an inflight transfer for req-1 that the transport pretends
         # cannot be canceled yet.
         tid = 42
-        session._inflight[tid] = _InflightXfer(
-            kv_request_id="req-1", block_count=1, job_ids={1}
+        session._inflight_add(
+            tid,
+            _InflightXfer(kv_request_id="req-1", block_count=1, job_ids={1}),
         )
         transport._cancel_still_inflight.add(tid)
 
@@ -478,8 +479,9 @@ class TestServerFlows:
         session, conn, transport = _make_session()
         _activate(session, conn)
         tid = 42
-        session._inflight[tid] = _InflightXfer(
-            kv_request_id="req-1", block_count=1, job_ids={1}
+        session._inflight_add(
+            tid,
+            _InflightXfer(kv_request_id="req-1", block_count=1, job_ids={1}),
         )
         transport._cancel_still_inflight.add(tid)
 
@@ -510,8 +512,9 @@ class TestServerFlows:
         session, conn, transport = _make_session()
         _activate(session, conn)
         tid = 42
-        session._inflight[tid] = _InflightXfer(
-            kv_request_id="req-1", block_count=1, job_ids={1}
+        session._inflight_add(
+            tid,
+            _InflightXfer(kv_request_id="req-1", block_count=1, job_ids={1}),
         )
         transport._cancel_still_inflight.add(tid)
 
@@ -545,8 +548,9 @@ class TestServerFlows:
         session, conn, transport = _make_session()
         _activate(session, conn)
         tid = 42
-        session._inflight[tid] = _InflightXfer(
-            kv_request_id="req-1", block_count=1, job_ids={1}
+        session._inflight_add(
+            tid,
+            _InflightXfer(kv_request_id="req-1", block_count=1, job_ids={1}),
         )
         transport._cancel_still_inflight.add(tid)
 
@@ -1239,6 +1243,106 @@ class TestDispatchErrorHandling:
 
         assert session.alive
         assert session._dispatch_error_count == 0
+
+
+class TestInflightPerReqInvariant:
+    """`_inflight_per_req` is the O(1) replacement for the previous
+    O(N) scan in `_has_inflight_for`. These tests check that every
+    mutation site keeps the counter in sync with `_inflight` and that
+    the lookup is correct under high fan-out.
+    """
+
+    def test_invariant_holds_through_lifecycle(self):
+        """Run a full submit→complete sequence for two concurrent
+        kv_request_ids and assert the counter matches `_inflight` at
+        every observable step, including the empty-after-finish case."""
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+
+        def _invariant_holds() -> bool:
+            counted = sum(session._inflight_per_req.values())
+            return counted == len(session._inflight) and all(
+                v > 0 for v in session._inflight_per_req.values()
+            )
+
+        assert _invariant_holds()
+
+        # Two requests, two blocks each, all dispatched in one batch.
+        session.add_stored_blocks("req-A", [b"a1", b"a2"], [0, 1], job_id=10)
+        session.add_stored_blocks("req-B", [b"b1", b"b2"], [2, 3], job_id=11)
+        for kv_id, hashes, indexes in (
+            ("req-A", [b"a1", b"a2"], [100, 101]),
+            ("req-B", [b"b1", b"b2"], [102, 103]),
+        ):
+            conn.enqueue(
+                {
+                    TYPE_KEY: FetchMsg.TYPE,
+                    FetchMsg.KV_REQUEST_ID: kv_id,
+                    FetchMsg.BLOCK_HASHES: hashes,
+                    FetchMsg.BLOCK_INDEXES: indexes,
+                }
+            )
+        session.poll()
+
+        assert _invariant_holds()
+        assert session._has_inflight_for("req-A")
+        assert session._has_inflight_for("req-B")
+        assert not session._has_inflight_for("req-C")
+
+        # Complete req-A's transfer first; req-B should still be inflight.
+        a_tids = [
+            tid for tid, x in session._inflight.items() if x.kv_request_id == "req-A"
+        ]
+        for tid in a_tids:
+            transport._poll_done.append(tid)
+        session.poll()
+
+        assert _invariant_holds()
+        assert not session._has_inflight_for("req-A")
+        assert "req-A" not in session._inflight_per_req  # entry was removed
+        assert session._has_inflight_for("req-B")
+
+        # Complete req-B; counter must drain to empty.
+        b_tids = [
+            tid for tid, x in session._inflight.items() if x.kv_request_id == "req-B"
+        ]
+        for tid in b_tids:
+            transport._poll_done.append(tid)
+        session.poll()
+
+        assert _invariant_holds()
+        assert session._inflight == {}
+        assert session._inflight_per_req == {}
+
+    def test_has_inflight_for_correct_with_many_requests(self):
+        """Populate many inflight xfers across many ids; lookup must
+        match the actual presence in `_inflight` for both hits and
+        misses. The whole point of the counter is that this lookup is
+        constant-time, but we assert correctness, not timing."""
+        session, _, _ = _make_session()
+        for kv_id_idx in range(100):
+            kv_id = f"req-{kv_id_idx}"
+            for j in range(10):
+                tid = kv_id_idx * 10 + j
+                session._inflight_add(
+                    tid,
+                    _InflightXfer(kv_request_id=kv_id, block_count=1, job_ids={tid}),
+                )
+        assert sum(session._inflight_per_req.values()) == len(session._inflight)
+        assert session._has_inflight_for("req-0")
+        assert session._has_inflight_for("req-99")
+        assert not session._has_inflight_for("req-missing")
+
+        # Drain all entries for req-50 and confirm the entry disappears.
+        tids_50 = [
+            tid for tid, x in session._inflight.items() if x.kv_request_id == "req-50"
+        ]
+        for tid in tids_50:
+            session._inflight_pop(tid)
+        assert "req-50" not in session._inflight_per_req
+        assert not session._has_inflight_for("req-50")
+        # Other ids unaffected.
+        assert session._has_inflight_for("req-49")
 
 
 # ---------------------------------------------------------------------------
