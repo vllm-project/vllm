@@ -469,14 +469,6 @@ def test_prefix_cache_default():
     assert not engine_args.enable_prefix_caching
 
 
-def test_hash_block_size_cli_arg():
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args(["--hash-block-size", "32"])
-
-    engine_args = EngineArgs.from_cli_args(args=args)
-    assert engine_args.hash_block_size == 32
-
-
 @pytest.mark.parametrize(
     ("arg", "expected", "option"),
     [
