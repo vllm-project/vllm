@@ -527,16 +527,17 @@ def _load_v_tile_raw_current(
     current_token_idx = tl.maximum(seq_offset - context_len, 0)
     raw_token_idx = cur_batch_in_all_start_index + current_token_idx
     raw_offset = (
-        raw_token_idx[:, None] * stride_raw_tok
+        raw_token_idx[None, :] * stride_raw_tok
         + kv_head_idx * stride_raw_head
-        + offs_d[None, :] * stride_raw_dim
+        + offs_d[:, None] * stride_raw_dim
     )
     raw_mask = tile_mask & (seq_offset >= context_len)
-    return tl.load(
+    raw_values = tl.load(
         raw_value_ptr + raw_offset,
-        mask=raw_mask[:, None] & dim_mask[None, :],
+        mask=raw_mask[None, :] & dim_mask[:, None],
         other=0.0,
     ).to(Q.dtype)
+    return tl.trans(raw_values)
 
 
 # ---------------------------------------------------------------------------
