@@ -5,9 +5,33 @@ import pytest
 import torch
 
 from vllm.config import AttentionConfig, VllmConfig, set_current_vllm_config
+from vllm.platforms import current_platform
 from vllm.platforms.rocm import RocmPlatform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+    RocmAiterUnifiedAttentionBackend,
+)
+from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
 from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backend
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only test")
+def test_rocm_backends_do_not_support_mm_prefix():
+    """Regression test: ROCm backends must not claim mm_prefix support.
+
+    If they do, prefix-LM multimodal models that attend vision tokens
+    bidirectionally (e.g. Gemma3 4B) will use bidirectional attention
+    via the ROCm backend instead of falling back to Triton, producing
+    incorrect results. Remove this test only if support is properly added.
+    """
+    assert not RocmAttentionBackend.supports_mm_prefix(), (
+        "RocmAttentionBackend must not support mm_prefix — "
+        "defer to Triton unified attention instead"
+    )
+    assert not RocmAiterUnifiedAttentionBackend.supports_mm_prefix(), (
+        "RocmAiterUnifiedAttentionBackend must not support mm_prefix — "
+        "defer to Triton unified attention instead"
+    )
 
 
 @pytest.fixture(autouse=True)
