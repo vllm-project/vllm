@@ -4,15 +4,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::runtime::Runtime;
 use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
+use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 
 use crate::config::{ApiServerOptions, CorsConfig};
 use crate::lora::{LoadLoraError, LoraManager, LoraModelResolution, UnloadLoraError};
-use crate::runtime::RequestRuntime;
+use crate::runtime::build_request_runtime;
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
 const SHUTDOWN_REFCOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -45,7 +47,7 @@ pub struct AppState {
     /// Backend model path reported as `root` for base-model cards.
     model_path: Option<String>,
     /// Lazily initialized runtime for heavyweight request paths.
-    request_runtime: OnceLock<RequestRuntime>,
+    request_runtime: OnceLock<BackgroundShutdownRuntime>,
 }
 
 impl AppState {
@@ -192,8 +194,8 @@ impl AppState {
 
     /// Runtime used by middleware to isolate heavyweight request handlers from
     /// the HTTP reactor.
-    pub(crate) fn request_runtime(&self) -> &RequestRuntime {
-        self.request_runtime.get_or_init(RequestRuntime::new)
+    pub(crate) fn request_runtime(&self) -> &Runtime {
+        self.request_runtime.get_or_init(build_request_runtime)
     }
 
     /// Return the current in-flight inference request count for the `/load`

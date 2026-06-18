@@ -1,56 +1,24 @@
-use std::future::Future;
-use std::sync::Mutex;
-
-use tokio::runtime::{Builder, Handle, Runtime};
-use tokio::task::JoinHandle;
+use tokio::runtime::Builder;
 use tracing::{info, warn};
+use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 
 const REQUEST_WORKER_THREADS_ENV: &str = "VLLM_RS_REQUEST_WORKER_THREADS";
 const DEFAULT_MAX_REQUEST_WORKER_THREADS: usize = 64;
 
-/// Tokio runtime used to run heavyweight request paths outside the HTTP
-/// runtime.
+/// Build a Tokio runtime for heavyweight request paths outside the HTTP runtime.
 ///
 /// The server middleware uses this runtime for inference and tokenization
 /// routes so CPU-heavy request preparation does not monopolize the HTTP
 /// runtime's worker queue. Dropping the wrapper shuts the runtime down in the
 /// background.
-pub(crate) struct RequestRuntime {
-    runtime: Mutex<Option<Runtime>>,
-    handle: Handle,
-}
-
-impl RequestRuntime {
-    pub(crate) fn new() -> Self {
-        let worker_threads = request_worker_threads();
-        let runtime = Builder::new_multi_thread()
-            .enable_all()
-            .thread_name("vllm-request")
-            .worker_threads(worker_threads)
-            .build()
-            .expect("failed to build request runtime");
-        let handle = runtime.handle().clone();
-        Self {
-            runtime: Mutex::new(Some(runtime)),
-            handle,
-        }
-    }
-
-    pub(crate) fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
-    where
-        F: Future + Send + 'static,
-        F::Output: Send + 'static,
-    {
-        self.handle.spawn(future)
-    }
-}
-
-impl Drop for RequestRuntime {
-    fn drop(&mut self) {
-        if let Some(runtime) = self.runtime.lock().expect("request runtime mutex poisoned").take() {
-            runtime.shutdown_background();
-        }
-    }
+pub(crate) fn build_request_runtime() -> BackgroundShutdownRuntime {
+    Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("vllm-request")
+        .worker_threads(request_worker_threads())
+        .build()
+        .expect("failed to build request runtime")
+        .into()
 }
 
 /// Get the number of worker threads to use for the request runtime.

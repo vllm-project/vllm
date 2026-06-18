@@ -4,7 +4,6 @@ use std::time::Duration;
 use futures::future::{join_all, try_join_all};
 use itertools::Itertools;
 use serde::Serialize;
-use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info, trace};
@@ -16,7 +15,7 @@ use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
 use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
 use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, ModelDtype};
-use crate::runtime::build_zmq_runtime;
+use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
 pub(crate) mod imp;
@@ -204,7 +203,7 @@ pub struct EngineCoreClient {
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
 
     /// Runtime used to send messages to the engine and drive all background tasks.
-    runtime: Runtime,
+    runtime: BackgroundShutdownRuntime,
     // Background tasks
     output_task: AbortOnDropHandle<()>,
     dispatcher_task: AbortOnDropHandle<()>,
@@ -747,7 +746,7 @@ impl EngineCoreClient {
         tasks.iter().for_each(|t| t.abort());
         join_all(tasks).await;
         drop(inner);
-        runtime.shutdown_background();
+        drop(runtime);
 
         info!("engine-core client shut down");
         Ok(())
