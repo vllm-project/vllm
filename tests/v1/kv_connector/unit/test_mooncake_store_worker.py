@@ -1233,6 +1233,67 @@ def test_lookup_swa_single_group_returns_full_when_tail_window_present():
     assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 64
 
 
+def test_lookup_checks_all_potential_swa_hit_boundaries():
+    """Lookup should skip SWA chunks that can never validate a hit, but still
+    check earlier aligned boundaries when sparse retention stores only the
+    current request's replay boundary.
+    """
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        SlidingWindowSpec,
+    )
+
+    worker = _make_bare_worker(block_size=8)
+    full = FullAttentionSpec(block_size=32, num_kv_heads=8, head_size=64, dtype=None)
+    swa = SlidingWindowSpec(
+        block_size=8, num_kv_heads=8, head_size=64, dtype=None, sliding_window=8
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["full"], full),
+        KVCacheGroupSpec(["swa"], swa),
+    ]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+            block_size=32,
+            hash_block_size=8,
+        ),
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+            block_size=8,
+            hash_block_size=8,
+        ),
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=32,
+        hash_block_size=8,
+        retention_interval=0,
+    )
+    # Candidate order: 3 full-attention chunks, then SWA chunks 3, 7, 11.
+    # Only the first full chunk and the SWA chunk ending at token 32 exist, so
+    # lookup should recover a 32-token external prefix hit. A sparse
+    # prompt-specific store mask for num_prompt_tokens=96 would only check SWA
+    # chunk 7 and miss this earlier reusable prefix.
+    worker.store.batch_is_exist.return_value = [1, 0, 0, 1, 0, 0]
+
+    result = worker.lookup(
+        96,
+        [f"h{i}".encode() for i in range(12)],
+    )
+
+    assert result == 32
+    keys = worker.store.batch_is_exist.call_args.args[0]
+    assert len(keys) == 6
+    swa_keys = [key for key in keys if "@group:1@" in key]
+    assert swa_keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6833",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6837",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@683131",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # register_kv_caches tests
 # ---------------------------------------------------------------------------
