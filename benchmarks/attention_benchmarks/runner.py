@@ -9,7 +9,6 @@ This module provides helpers for running standard attention backends
 """
 
 import logging
-import os
 import statistics
 import types
 from contextlib import contextmanager
@@ -137,17 +136,10 @@ def _create_vllm_config(
     max_num_blocks: int,
 ) -> VllmConfig:
     """Create a VllmConfig for benchmarking with mock model methods."""
-    # The concrete model only provides a valid config.json; every model
-    # dimension consumed by the benchmark is overridden by the mock methods
-    # below.  Allow overriding the model (and enabling trust_remote_code) via
-    # env vars so the suite can run in network-restricted environments with a
-    # locally available model.
-    bench_model = os.environ.get("VLLM_BENCH_MODEL", "meta-llama/Meta-Llama-3-8B")
-    bench_trust_remote_code = os.environ.get("VLLM_BENCH_TRUST_REMOTE_CODE", "0") == "1"
     model_config = ModelConfig(
-        model=bench_model,
-        tokenizer=bench_model,
-        trust_remote_code=bench_trust_remote_code,
+        model="meta-llama/Meta-Llama-3-8B",
+        tokenizer="meta-llama/Meta-Llama-3-8B",
+        trust_remote_code=False,
         dtype="auto",  # Use model's native dtype
         seed=0,
         max_model_len=1024,
@@ -263,9 +255,9 @@ def _create_metadata_builder(
     layer_names = ["layer_0"]
     builder_cls = backend_class.get_builder_cls()
 
-    # Flashinfer and HPC_ATTN need get_per_layer_parameters mocked since we
-    # don't have real model layers registered in static_forward_context
-    if backend_name in ["FLASHINFER", "HPC_ATTN"]:
+    # Flashinfer needs get_per_layer_parameters mocked since we don't have
+    # real model layers registered
+    if backend_name == "FLASHINFER":
         import unittest.mock
 
         from vllm.v1.attention.backends.utils import PerLayerParameters
@@ -281,21 +273,8 @@ def _create_metadata_builder(
                 for layer_name in layer_names
             }
 
-        # Each backend imports get_per_layer_parameters into its own module,
-        # so we must patch the reference in the correct module.
-        if backend_name == "FLASHINFER":
-            patch_target = (
-                "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters"
-            )
-        elif backend_name == "HPC_ATTN":
-            patch_target = (
-                "vllm.v1.attention.backends.hpc_attn.get_per_layer_parameters"
-            )
-        else:
-            raise ValueError(f"Unknown backend name: {backend_name}")
-
         with unittest.mock.patch(
-            patch_target,
+            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
             mock_get_per_layer_parameters,
         ):
             return builder_cls(
