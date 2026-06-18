@@ -321,9 +321,7 @@ class Eagle3DeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
             base_vocab_size = getattr(self.config, "vocab_size", None)
             self.config.draft_vocab_size = base_vocab_size
 
-        target_layer_num = vllm_config.model_config.get_num_layers(
-            vllm_config.parallel_config
-        )
+        target_layer_num = vllm_config.model_config.get_total_num_hidden_layers()
 
         # Store target layer count in draft config
         self.config.target_layer_count = target_layer_num

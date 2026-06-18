@@ -129,19 +129,17 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        if get_pp_group().is_first_rank:
-            if inputs_embeds is None:
-                inputs_embeds = self.embed_input_ids(input_ids)
-            assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
-            inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
-            hidden_states = self.pre_fc_norm_hidden(hidden_states)
-            hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
-            hidden_states = self.fc(hidden_states)
-            residual = None
-        else:
-            assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
+        # The MTP drafter is loaded locally on the last PP stage and always
+        # combines token embeddings with the target hidden states.
+        # It does not consume PP intermediate tensors from previous stages.
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_input_ids(input_ids)
+        assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
+        inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
+        hidden_states = self.pre_fc_norm_hidden(hidden_states)
+        hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
+        hidden_states = self.fc(hidden_states)
+        residual = None
 
         current_step_idx = spec_step_idx % self.num_mtp_layers
         hidden_states, residual = self.layers[current_step_idx](
