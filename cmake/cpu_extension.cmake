@@ -403,13 +403,6 @@ if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
         ${VLLM_EXT_SRC})
 endif()
 
-if (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
-    message(STATUS "Power detected! Compiling shm.cpp for PowerPC!")	
-    set(VLLM_EXT_SRC
-        "csrc/cpu/shm.cpp"
-        ${VLLM_EXT_SRC})
-endif()
-
 if(USE_ONEDNN)
     set(VLLM_EXT_SRC
         "csrc/cpu/dnnl_kernels.cpp"
