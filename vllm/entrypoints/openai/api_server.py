@@ -34,7 +34,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
 from vllm.entrypoints.serve.render.serving import ServingRender
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
-from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
+from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
     cli_env_setup,
     log_non_default_args,
@@ -379,7 +379,7 @@ async def init_app_state(
 
     state.serving_render = ServingRender(state.online_renderer)
 
-    state.openai_serving_tokenization = OpenAIServingTokenization(
+    state.serving_tokenization = ServingTokenization(
         state.openai_serving_models,
         state.online_renderer,
         request_logger=request_logger,
@@ -464,7 +464,7 @@ async def init_render_app_state(
 
     state.serving_render = ServingRender(state.online_renderer)
 
-    state.openai_serving_tokenization = OpenAIServingTokenization(
+    state.serving_tokenization = ServingTokenization(
         state.openai_serving_models,
         state.online_renderer,
         request_logger=request_logger,
