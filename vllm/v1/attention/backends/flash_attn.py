@@ -1087,9 +1087,16 @@ class FlashAttentionImpl(AttentionImpl):
             key_cache, value_cache = kv_cache.unbind(1)
             num_decode_tokens = pcp_attn_metadata.pcp_num_decode_tokens
             if num_decode_tokens > 0:
+                # NOTE: the strided slice [:N*pcp:pcp] is NON-contiguous (it
+                # picks every pcp-th entry out of the padded [req0,PAD,req1,
+                # PAD,...] layout). reshape_and_cache_flash reads slot_mapping
+                # assuming stride==1, so a non-contiguous view makes tok>=1
+                # read the underlying PAD (-1) entries and get SKIPPED -- only
+                # req0's decode KV is cached, req1+ silently dropped -> batched
+                # decode garbage. Materialize a contiguous tensor.
                 decode_slot_mapping = slot_mapping[
                     : num_decode_tokens * self.pcp_world_size : self.pcp_world_size
-                ]
+                ].contiguous()
                 reshape_and_cache_flash(
                     key[:num_decode_tokens],
                     value[:num_decode_tokens],
@@ -1144,9 +1151,7 @@ class FlashAttentionImpl(AttentionImpl):
                             layer._k_scale,
                             layer._v_scale,
                         )
-                        _rb1b = key_cache[
-                            _sl[1] // _bs, _sl[1] % _bs, 0, 0
-                        ].item()
+                        _rb1b = key_cache[_sl[1] // _bs, _sl[1] % _bs, 0, 0].item()
                         _rewrite = " single_rewrite=%.5f" % _rb1b
                     logger.warning(
                         "PCP_DUMP dec_slot n=%d rank=%d slot0=%d slot1=%d "
