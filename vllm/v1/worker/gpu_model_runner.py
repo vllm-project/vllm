@@ -7126,7 +7126,7 @@ class GPUModelRunner(
                     else:
                         shape_block_size = kernel_block_size
 
-                    unpermuted_kv_cache_shape = attn_backend.get_kv_cache_shape(
+                    kv_cache_shape = attn_backend.get_kv_cache_shape(
                         kernel_num_blocks,
                         shape_block_size,
                         kv_cache_spec.num_kv_heads,
@@ -7136,18 +7136,14 @@ class GPUModelRunner(
                     dtype = kv_cache_spec.dtype
                     try:
                         kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
-                        assert len(kv_cache_stride_order) == len(
-                            unpermuted_kv_cache_shape
-                        )
+                        assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
-                        kv_cache_stride_order = tuple(
-                            range(len(unpermuted_kv_cache_shape))
-                        )
+                        kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
                     raw_tensor = kv_cache_raw_tensors[layer_name].view(dtype)
                     kv_caches[layer_name] = _reshape_attention_kv_cache(
                         raw_tensor,
                         kv_cache_spec,
-                        unpermuted_kv_cache_shape,
+                        kv_cache_shape,
                         kv_cache_stride_order,
                         kernel_num_blocks,
                     )
