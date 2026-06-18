@@ -125,6 +125,56 @@ class TestRemoteIdFromParams:
 
 
 # ---------------------------------------------------------------------------
+# Tests for _build_config_fields (delegates to FileMapper)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildConfigFields:
+    """`_build_config_fields` reuses FileMapper for the model+parallelism
+    portion and augments with P2P-specific block-layout fields."""
+
+    @staticmethod
+    def _mock_offloading_spec(
+        model: str = "test-model",
+        cache_dtype: str = "torch.float16",
+        hash_block_size: int = 16,
+        block_size_factor: int = 1,
+        gpu_block_size: tuple[int, ...] = (16,),
+        tp_size: int = 1,
+    ):
+        from unittest.mock import MagicMock
+
+        from vllm.v1.kv_offload.base import OffloadingSpec
+
+        spec = MagicMock(spec=OffloadingSpec)
+        spec.vllm_config = MagicMock()
+        spec.vllm_config.model_config.model = model
+        spec.vllm_config.cache_config.block_size = hash_block_size
+        spec.vllm_config.cache_config.cache_dtype = cache_dtype
+        spec.vllm_config.parallel_config.tensor_parallel_size = tp_size
+        spec.vllm_config.parallel_config.pipeline_parallel_size = 1
+        spec.vllm_config.parallel_config.prefill_context_parallel_size = 1
+        spec.vllm_config.parallel_config.decode_context_parallel_size = 1
+        spec.vllm_config.parallel_config.rank = 0
+        spec.kv_cache_config = MagicMock()
+        spec.kv_cache_config.kv_cache_groups = []
+        spec.hash_block_size = hash_block_size
+        spec.block_size_factor = block_size_factor
+        spec.gpu_block_size = gpu_block_size
+        return spec
+
+    def test_returns_p2p_specific_fields(self):
+        spec = self._mock_offloading_spec(
+            hash_block_size=32, block_size_factor=2, gpu_block_size=(16, 16)
+        )
+        fields = P2PSecondaryTierManager._build_config_fields(spec)
+        assert fields is not None
+        assert fields["hash_block_size"] == 32
+        assert fields["block_size_factor"] == 2
+        assert fields["gpu_block_size"] == [16, 16]
+
+
+# ---------------------------------------------------------------------------
 # Tests for lookup
 # ---------------------------------------------------------------------------
 

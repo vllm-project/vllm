@@ -21,6 +21,7 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     RequestOffloadingContext,
 )
+from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -348,21 +349,18 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @staticmethod
     def _build_config_fields(offloading_spec: OffloadingSpec) -> dict | None:
-        """Extract config fields for fingerprint from the offloading spec."""
+        """Extract config fields for the peer-compatibility fingerprint."""
         try:
-            model_config = offloading_spec.vllm_config.model_config
-            parallel_config = offloading_spec.vllm_config.parallel_config
-            gpu_block_sizes = list(offloading_spec.gpu_block_size)
-            fields: dict = {
-                "model": model_config.model,
-                "dtype": str(model_config.dtype),
-                "hash_block_size": offloading_spec.hash_block_size,
-                "block_size_factor": offloading_spec.block_size_factor,
-                "gpu_block_size": gpu_block_sizes,
-            }
-            # TP size only matters with multiple kv_cache_groups
-            if len(gpu_block_sizes) > 1:
-                fields["tp_size"] = parallel_config.tensor_parallel_size
+            mapper = FileMapper.from_offloading_spec(
+                root_dir="",
+                offloading_spec=offloading_spec,
+                gpu_blocks_per_file=offloading_spec.block_size_factor,
+                parallel_agnostic=True,
+            )
+            fields = mapper.get_run_config()
+            fields["hash_block_size"] = offloading_spec.hash_block_size
+            fields["block_size_factor"] = offloading_spec.block_size_factor
+            fields["gpu_block_size"] = list(offloading_spec.gpu_block_size)
             return fields
         except (AttributeError, TypeError):
             return None
