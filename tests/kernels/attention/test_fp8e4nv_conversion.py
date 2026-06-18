@@ -24,11 +24,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.fp8e4nv_bf16 import bf16_to_fp8e4m3, fp8e4m3_to_bf16
-from vllm.v1.attention.ops.fp8e4nv_fp16 import (
-    fp8e4m3_to_fp16,
-    fp16_to_fp8e4m3,
-    fp16_to_fp8e4m3_trunc,
-)
+from vllm.v1.attention.ops.fp8e4nv_fp16 import fp8e4m3_to_fp16, fp16_to_fp8e4m3
 
 if not current_platform.is_cuda():
     pytest.skip("fp8e4nv software conversions require CUDA", allow_module_level=True)
@@ -36,10 +32,8 @@ if not current_platform.is_cuda():
 FP8_DTYPE = torch.float8_e4m3fn
 FP8_MAX = 448.0  # largest finite fp8 e4m3fn magnitude
 
-# Encode KIND codes for the wrapper kernel.
-KIND_FP16_RNE = 0
-KIND_FP16_TRUNC = 1
-KIND_BF16_RNE = 2
+# Max fp8-code ULP per encode rounding mode (vs the round-to-nearest-even ref).
+_ROUND_ULP = {"rne": 0, "rn": 1, "trunc": 2}
 
 
 @triton.jit
@@ -52,16 +46,13 @@ def _decode_kernel(x_ptr, out_ptr, n, IS_FP16: tl.constexpr, BLOCK: tl.constexpr
 
 
 @triton.jit
-def _encode_kernel(x_ptr, out_ptr, n, KIND: tl.constexpr, BLOCK: tl.constexpr):
+def _encode_kernel(
+    x_ptr, out_ptr, n, IS_FP16: tl.constexpr, ROUND: tl.constexpr, BLOCK: tl.constexpr
+):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mask = offs < n
     x = tl.load(x_ptr + offs, mask=mask, other=0.0)
-    if KIND == KIND_FP16_RNE:
-        y = fp16_to_fp8e4m3(x)
-    elif KIND == KIND_FP16_TRUNC:
-        y = fp16_to_fp8e4m3_trunc(x)
-    else:
-        y = bf16_to_fp8e4m3(x)
+    y = fp16_to_fp8e4m3(x, round=ROUND) if IS_FP16 else bf16_to_fp8e4m3(x, round=ROUND)
     tl.store(out_ptr + offs, y, mask=mask)
 
 
@@ -80,10 +71,12 @@ def _run_decode(x_u8: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     return out
 
 
-def _run_encode(x: torch.Tensor, kind: int) -> torch.Tensor:
+def _run_encode(x: torch.Tensor, round: str) -> torch.Tensor:
     out = torch.empty(x.numel(), dtype=torch.uint8, device="cuda")
     n = x.numel()
-    _encode_kernel[(triton.cdiv(n, 256),)](x, out, n, KIND=kind, BLOCK=256)
+    _encode_kernel[(triton.cdiv(n, 256),)](
+        x, out, n, IS_FP16=(x.dtype == torch.float16), ROUND=round, BLOCK=256
+    )
     return out
 
 
@@ -187,33 +180,30 @@ def test_decode_exact_all_bytes(dtype: torch.dtype, min_cap: int):
 
 # --------------------------- encode (write path) ---------------------------
 @pytest.mark.parametrize(
-    "kind,dtype,min_cap",
-    [
-        (KIND_FP16_RNE, torch.float16, 75),
-        (KIND_FP16_TRUNC, torch.float16, 75),
-        (KIND_BF16_RNE, torch.bfloat16, 80),
-    ],
+    "dtype,min_cap",
+    [(torch.float16, 75), (torch.bfloat16, 80)],
 )
-def test_encode_sampled_edge_cases(kind: int, dtype: torch.dtype, min_cap: int):
+@pytest.mark.parametrize("round", ["rn", "rne", "trunc"])
+def test_encode_sampled_edge_cases(dtype: torch.dtype, min_cap: int, round: str):
     """Encode over a sampled set incl. edge cases, vs the saturating reference.
 
     Runs on SM75-SM88 (reference oracle) and SM89+ (reference lowers to native).
-    RNE is bit-exact; truncation is within 2 fp8-code ULP.
+    rne is bit-exact; rn within 1 fp8-code ULP; trunc within 2.
     """
     if not current_platform.has_device_capability(min_cap):
         pytest.skip(f"requires SM{min_cap}+")
     x = _edge_case_inputs(dtype)
-    actual = _run_encode(x, kind)
+    actual = _run_encode(x, round)
     ref = _saturating_fp8_ref(x)
-    if kind == KIND_FP16_TRUNC:
-        _assert_code_ulp(actual, ref, max_ulp=2)
-    else:
+    if round == "rne":
         torch.testing.assert_close(
             actual.view(FP8_DTYPE).float(),
             ref.view(FP8_DTYPE).float(),
             atol=0.0,
             rtol=0.0,
         )
+    else:
+        _assert_code_ulp(actual, ref, max_ulp=_ROUND_ULP[round])
 
 
 # ----------------- SM89+ exhaustive cross-check vs native ------------------
@@ -235,26 +225,17 @@ def test_decode_matches_native_on_sm89(dtype: torch.dtype):
     not current_platform.has_device_capability(89),
     reason="native fp8e4nv cast cross-check requires SM89+",
 )
-@pytest.mark.parametrize(
-    "kind,dtype,exact",
-    [
-        (KIND_FP16_RNE, torch.float16, True),  # RNE: bit-exact vs native
-        (KIND_FP16_TRUNC, torch.float16, False),  # trunc: <=2 fp8-code ULP (closeness)
-        (KIND_BF16_RNE, torch.bfloat16, True),  # RNE: bit-exact vs native
-    ],
-)
-def test_encode_full_barrage_matches_native_on_sm89(
-    kind: int, dtype: torch.dtype, exact: bool
-):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("round", ["rn", "rne", "trunc"])
+def test_encode_full_barrage_matches_native_on_sm89(dtype: torch.dtype, round: str):
     """On SM89+, encode is cross-checked against the native float -> fp8 cvt over
     EVERY one of the 65,536 input bit patterns (normals, subnormals, signed zeros,
-    overflow, +-inf, +-NaN -- all saturating, never NaN). RNE must match the native
-    cvt exactly; truncation is checked for CLOSENESS (within 2 fp8-code ULP), since
-    round-toward-zero legitimately differs from the native round-to-nearest."""
+    overflow, +-inf, +-NaN -- all saturating, never NaN). rne matches native
+    exactly; rn within 1 fp8-code ULP, trunc within 2."""
     x = _all_uint16_as(dtype)
-    actual = _run_encode(x, kind)
+    actual = _run_encode(x, round)
     native = _saturating_fp8_ref(x)  # native hardware cvt on SM89+ (clamped input)
-    if exact:
+    if round == "rne":
         torch.testing.assert_close(
             actual.view(FP8_DTYPE).float(),
             native.view(FP8_DTYPE).float(),
@@ -262,4 +243,4 @@ def test_encode_full_barrage_matches_native_on_sm89(
             rtol=0.0,
         )
     else:
-        _assert_code_ulp(actual, native, max_ulp=2)
+        _assert_code_ulp(actual, native, max_ulp=_ROUND_ULP[round])
