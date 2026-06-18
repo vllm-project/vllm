@@ -748,9 +748,9 @@ class TestGetInputModality:
 # ---------------------------------------------------------------------------
 
 # DeepSeek-VL2 mock constants (kept small for fast capture)
-_DSV2_H = 2          # projector output side per tile (h = w)
-_DSV2_DIM = 16       # hidden size
-_DSV2_IMG_SIZE = 4   # each tile is 4×4 pixels
+_DSV2_H = 2  # projector output side per tile (h = w)
+_DSV2_DIM = 16  # hidden size
+_DSV2_IMG_SIZE = 4  # each tile is 4×4 pixels
 _DSV2_BUDGETS = [16, 64]
 _DSV2_MAX_BATCH = 4
 
@@ -845,9 +845,7 @@ class MockDeepseekVL2Model(torch.nn.Module, SupportsEncoderCudaGraph):
         for t in tiles_per_image:
             cum.append(cum[-1] + t)
 
-        selected_pv = torch.cat(
-            [pixel_values[cum[i] : cum[i + 1]] for i in indices]
-        )
+        selected_pv = torch.cat([pixel_values[cum[i] : cum[i + 1]] for i in indices])
         return {
             "pixel_values": selected_pv,
             "images_spatial_crop": images_spatial_crop[list(indices)],
