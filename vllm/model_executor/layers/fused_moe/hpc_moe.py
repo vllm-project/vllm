@@ -88,6 +88,14 @@ class HPCExperts(mk.FusedMoEExpertsModular):
         ]
 
     @staticmethod
+    def _supports_shape(hidden_dim: int) -> bool:
+        # HPC fused MoE kernels process hidden_size in blocks of 128:
+        # block-wise fp8 requires hidden_size % 128 == 0 (per-128 quant), and
+        # the group GEMM tiles N by 128. Require 128-alignment to cover all
+        # code paths.
+        return hidden_dim % 128 == 0
+
+    @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
