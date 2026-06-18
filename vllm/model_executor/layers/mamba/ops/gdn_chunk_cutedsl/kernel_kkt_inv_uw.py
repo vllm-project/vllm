@@ -11,6 +11,8 @@ from quack.compile_utils import make_fake_tensor
 
 from vllm.cute_utils import (
     EVICT_FIRST,
+    _bf16x2_neg,
+    _bf16x2_sub,
     _tcgen05,
     cvt,
     fence_before_tma_store,
@@ -438,18 +440,10 @@ class Sm100ChunkUWKernel:
                     # pack to BF16
                     # CuteDSL doesn't generate cvt.bf16x2.f32 here for some reasons
                     packed = cute.make_rmem_tensor(4, Uint32)
-                    packed[0] = cvt.fp32x2_to_bf16x2(
-                        A_masked[0, 0, 0], A_masked[1, 0, 0]
-                    )
-                    packed[1] = cvt.fp32x2_to_bf16x2(
-                        A_masked[0, 1, 0], A_masked[1, 1, 0]
-                    )
-                    packed[2] = cvt.fp32x2_to_bf16x2(
-                        A_masked[0, 0, 1], A_masked[1, 0, 1]
-                    )
-                    packed[3] = cvt.fp32x2_to_bf16x2(
-                        A_masked[0, 1, 1], A_masked[1, 1, 1]
-                    )
+                    for j in cutlass.range_constexpr(4):
+                        packed[j] = cvt.fp32x2_to_bf16x2(
+                            A_masked[j * 2], A_masked[j * 2 + 1]
+                        )
 
                     # store to smem
                     cute.copy(
@@ -472,15 +466,6 @@ class Sm100ChunkUWKernel:
                 zeros_f32 = cute.make_rmem_tensor(4, Float32)
                 zeros_f32.fill(0.0)
 
-                def set_diagonal(A: cute.Tensor, lane_id: Int32):
-                    "Set the diagonal to 1s"
-                    if lane_id % 9 == 0:
-                        A[0] = (A[0] & Uint32(0xFFFF0000)) | Uint32(0x00003F80)
-                        A[3] = (A[3] & Uint32(0xFFFF0000)) | Uint32(0x00003F80)
-                    elif lane_id % 9 == 4:
-                        A[0] = (A[0] & Uint32(0x0000FFFF)) | Uint32(0x3F800000)
-                        A[3] = (A[3] & Uint32(0x0000FFFF)) | Uint32(0x3F800000)
-
                 Ai_bf16 = cute.make_rmem_tensor(8, BFloat16)
                 mma_B_bf16 = cute.make_rmem_tensor(8, BFloat16)
                 M_bf16 = cute.make_rmem_tensor(8, BFloat16)
@@ -491,20 +476,28 @@ class Sm100ChunkUWKernel:
                 mma_B = cute.logical_divide(cute.recast_tensor(mma_B_bf16, Uint32), 2)
                 M = cute.logical_divide(cute.recast_tensor(M_bf16, Uint32), 2)
 
+                # construct rmem-backed identity matrix
+                eye_bf16 = cute.make_rmem_tensor(8, BFloat16)
+                eye = cute.recast_tensor(eye_bf16, Uint32)
+                eye[0] = Uint32(lane_id % 9 == 0) * Uint32(0x00003F80) + Uint32(
+                    lane_id % 9 == 4
+                ) * Uint32(0x3F800000)
+                eye[1] = 0
+                eye[2] = 0
+                eye[3] = eye[0]
+
                 # initial guess: Ai = I-A
                 cute.copy(ldsm_atom, sA_ldsm[None, (warp_id_, warp_id_)], Ai_bf16)
                 for i in cutlass.range_constexpr(4):
-                    Ai[i] ^= Uint32(0x80008000)  # negate A
-                set_diagonal(Ai, lane_id)
+                    Ai[i] = _bf16x2_sub(eye[i], Ai[i])
 
                 # (4, 2)
                 Ai_f32 = cute.logical_divide(cvt.bf16x2_to_fp32x2(Ai), 4)
 
                 # M is holding -(I+A), stay constant throughout the iterations
                 cute.copy(ldsm_trans_atom, sA_ldsm[None, (warp_id_, warp_id_)], M_bf16)
-                set_diagonal(M, lane_id)
                 for i in cutlass.range_constexpr(4):
-                    M[i] ^= Uint32(0x80008000)
+                    M[i] = _bf16x2_sub(_bf16x2_neg(eye[i]), M[i])
 
                 # 3 rounds of Newton-Schulz
                 for _ in cutlass.range_constexpr(3):
@@ -542,7 +535,7 @@ class Sm100ChunkUWKernel:
                 if warp_id_ > 0:
                     neg_Ai = cute.make_rmem_tensor(4, Uint32)
                     for i in cutlass.range_constexpr(4):
-                        neg_Ai[i] = Ai[i] ^ Uint32(0x80008000)
+                        neg_Ai[i] = _bf16x2_neg(Ai[i])
 
                     cute.copy(
                         ldsm_trans_atom,
@@ -607,7 +600,7 @@ class Sm100ChunkUWKernel:
                         ldsm_atom, sAi_ldsm[None, (warp_id_ + 2, warp_id_ + 2)], Ai_bf16
                     )
                     for i in cutlass.range_constexpr(4):
-                        Ai[i] ^= Uint32(0x80008000)
+                        Ai[i] = _bf16x2_neg(Ai[i])
                     cute.copy(
                         ldsm_trans_atom,
                         sAi_ldsm[None, (warp_id_ + 2, warp_id_)],
@@ -640,7 +633,7 @@ class Sm100ChunkUWKernel:
 
                     cute.copy(ldsm_atom, sAi_ldsm[None, (3, 3)], Ai_bf16)
                     for i in cutlass.range_constexpr(4):
-                        Ai[i] ^= Uint32(0x80008000)
+                        Ai[i] = _bf16x2_neg(Ai[i])
                     cute.copy(ldsm_trans_atom, sAi_ldsm[None, (3, 0)], mma_B_bf16)
                     acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
                     acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], zeros_f32)
