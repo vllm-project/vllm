@@ -720,7 +720,7 @@ pyjwt==2.11.0
     # via msal
 pyparsing==3.2.0
     # via matplotlib
-pyrate-limiter==3.7.0
+pyrate-limiter==4.2.0
     # via schemathesis
 pystemmer==3.0.0
     # via mteb
