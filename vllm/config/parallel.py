@@ -42,6 +42,7 @@ All2AllBackend = Literal[
     "pplx",
     "deepep_high_throughput",
     "deepep_low_latency",
+    "deepep_v2",
     "mori_high_throughput",
     "mori_low_latency",
     "nixl_ep",
@@ -93,13 +94,20 @@ class EPLBConfig:
     - "torch_gloo": Use torch.distributed gloo with CPU staging
     - "nixl": Use NIXL/ RIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
-    - None: Auto-select backend ("torch_gloo" for async, "torch_nccl" for sync)
+    - None: Auto-select backend (prefers "nixl", falls back to "torch_gloo")
     """
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.use_async and self.policy != "default":
             raise ValueError("Async EPLB is only supported with the default policy.")
+        if self.use_async and self.communicator in ("torch_nccl", "pynccl"):
+            raise ValueError(
+                f"{self.communicator} communicator is incompatible with "
+                "async EPLB due to NCCL multi-stream conflicts. Use "
+                "'torch_gloo' or 'nixl' instead, or leave communicator "
+                "unset for automatic selection."
+            )
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
         return self
@@ -786,6 +794,13 @@ class ParallelConfig:
         if self.enable_elastic_ep:
             if not self.enable_eplb:
                 raise ValueError("Elastic EP is only supported with enable_eplb=True.")
+            if self.eplb_config.use_async:
+                raise ValueError(
+                    "Elastic EP requires the pynccl communicator, which is "
+                    "incompatible with async EPLB due to NCCL multi-stream "
+                    "conflicts. Disable async EPLB (eplb_config.use_async=False) "
+                    "to use elastic EP."
+                )
             if self.pipeline_parallel_size > 1:
                 raise ValueError(
                     "Elastic EP is not supported with pipeline parallelism "

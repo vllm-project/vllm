@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kInt4Static,
+    kInt4Static32,
     kMxfp4Static,
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -213,7 +214,7 @@ class XPUExpertsFp8(XPUExperts):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-class XPUExpertsMxfp8(XPUExpertsFp8):
+class XPUExpertsMxFp8(XPUExpertsFp8):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -302,10 +303,13 @@ class XPUExpertsWNA16(XPUExperts):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return (weight_key, activation_key) == (kInt4Static, None)
+        return (weight_key, activation_key) in (
+            (kInt4Static, None),
+            (kInt4Static32, None),
+        )
 
 
-class XPUExpertsMXFp4(XPUExperts):
+class XPUExpertsMxFp4(XPUExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,

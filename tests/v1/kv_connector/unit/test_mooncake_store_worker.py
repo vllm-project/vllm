@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
+    PoolKey,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
@@ -134,7 +135,6 @@ def _make_store_req(req_id: str, block_hashes: list[bytes]) -> ReqMeta:
         block_ids=([0, 1],),
         block_hashes=block_hashes,
         can_save=True,
-        original_block_size=16,
     )
 
 
@@ -241,6 +241,31 @@ def _patch_worker_runtime(monkeypatch, *, local_ip: str = "10.0.0.7") -> None:
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
 
 
+def test_pool_key_to_string_without_prefix_is_unchanged():
+    """Default (empty) cache_prefix keeps keys byte-identical to the
+    historical unprefixed format so existing deployments keep their hits."""
+    key = PoolKey(KeyMetadata("test-model", 0, 0, 0, 0), "deadbeef")
+    assert (
+        key.to_string() == "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
+    )
+
+
+def test_pool_key_cache_prefix_namespaces_and_disambiguates():
+    """A non-empty cache_prefix is prepended, and two instances with
+    different prefixes never collide on identical block hashes."""
+    md_a = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="depA")
+    md_b = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="depB")
+
+    key_a = PoolKey(md_a, "deadbeef")
+    key_b = PoolKey(md_b, "deadbeef")
+
+    assert key_a.to_string() == (
+        "depA@test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
+    )
+    assert key_a.to_string() != key_b.to_string()
+    assert hash(key_a) != hash(key_b)
+
+
 def test_default_local_buffer_size_matches_pr40900():
     """PR-40900 shipped a 4 GiB default for local_buffer_size; the dual-mode
     patch preserves it (and the JSON key) so unchanged PR-40900 configs work."""
@@ -282,94 +307,6 @@ def test_get_configured_preferred_segment_returns_env_override(monkeypatch):
 def test_get_configured_preferred_segment_rejects_empty_override():
     with pytest.raises(ValueError, match="preferred_segment"):
         rdma_utils.get_configured_preferred_segment({"preferred_segment": "  "})
-
-
-def test_get_configured_worker_rnic_prefers_explicit_device_name(monkeypatch):
-    store_config = worker.MooncakeStoreConfig(
-        metadata_server="",
-        local_buffer_size=1,
-        protocol="rdma",
-        device_name="rocep139s0",
-        master_server_address="",
-    )
-
-    assert (
-        rdma_utils.get_configured_worker_rnic(
-            protocol=store_config.protocol,
-            configured_device=store_config.device_name,
-        )
-        == "rocep139s0"
-    )
-
-
-def test_get_configured_worker_rnic_selects_device_from_explicit_csv(monkeypatch):
-    monkeypatch.setattr(
-        rdma_utils,
-        "get_current_physical_gpu_index",
-        lambda: 1,
-    )
-    store_config = worker.MooncakeStoreConfig(
-        metadata_server="",
-        local_buffer_size=1,
-        protocol="rdma",
-        device_name="rocep139s0,rocep140s0",
-        master_server_address="",
-    )
-
-    assert (
-        rdma_utils.get_configured_worker_rnic(
-            protocol=store_config.protocol,
-            configured_device=store_config.device_name,
-        )
-        == "rocep140s0"
-    )
-
-
-def test_get_configured_worker_rnic_warns_and_returns_empty_for_rdma_with_no_device(
-    caplog, monkeypatch
-):
-    """No device configured + protocol=rdma → emit a clear warning and return ""
-    so the C++ side handles auto-selection. There is no Python-side fallback."""
-    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
-    with caplog.at_level(logging.WARNING):
-        result = rdma_utils.get_configured_worker_rnic(
-            protocol="rdma",
-            configured_device="",
-        )
-    assert result == ""
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert any("No RDMA devices specified" in r.message for r in warnings), (
-        f"expected fallback warning, got {[r.message for r in warnings]}"
-    )
-
-
-def test_get_configured_worker_rnic_silent_for_tcp_with_no_device(caplog, monkeypatch):
-    """protocol=tcp + no device → return "" silently (no RDMA, no warning)."""
-    monkeypatch.setattr(logging.getLogger("vllm"), "propagate", True)
-    with caplog.at_level(logging.WARNING):
-        result = rdma_utils.get_configured_worker_rnic(
-            protocol="tcp",
-            configured_device="",
-        )
-    assert result == ""
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert not any("RDMA" in r.message for r in warnings), (
-        "did not expect RDMA warning for tcp protocol, got "
-        f"{[r.message for r in warnings]}"
-    )
-
-
-def test_get_configured_worker_rnic_rejects_short_explicit_csv(monkeypatch):
-    monkeypatch.setattr(
-        rdma_utils,
-        "get_current_physical_gpu_index",
-        lambda: 2,
-    )
-    with pytest.raises(ValueError, match="does not cover local GPU 2"):
-        rdma_utils.get_configured_worker_rnic(
-            protocol="rdma",
-            configured_device="rocep139s0,rocep140s0",
-        )
 
 
 class _ReplicaDesc:
@@ -970,7 +907,6 @@ def test_store_sending_thread_clamps_token_len_to_lcm():
             block_ids=([0, 1, 2],),
             block_hashes=[b"a0", b"a1", b"a2"],
             can_save=True,
-            original_block_size=16,
         )
     )
 
@@ -1010,7 +946,6 @@ def test_store_sending_thread_skips_when_token_len_below_lcm():
             block_ids=([0, 1],),
             block_hashes=[b"a0", b"a1"],
             can_save=True,
-            original_block_size=64,
         )
     )
 
@@ -1088,7 +1023,6 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
             block_ids=([0, 1], list(range(8))),
             block_hashes=hs,
             can_save=True,
-            original_block_size=32,
         )
     )
 
@@ -1102,6 +1036,84 @@ def test_store_sending_thread_only_stores_swa_blocks_in_window():
     assert len(swa_keys) == 2
     swa_hashes = {k.rsplit("@", 1)[-1] for k in swa_keys}
     assert swa_hashes == {hs[3].hex(), hs[7].hex()}
+
+
+def test_store_sending_thread_kv_events_use_group_chunk_metadata():
+    from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        SlidingWindowSpec,
+    )
+
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [256, 256]
+
+    full_spec = FullAttentionSpec(
+        block_size=32, num_kv_heads=8, head_size=64, dtype=None
+    )
+    swa_spec = SlidingWindowSpec(
+        block_size=8,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=None,
+        sliding_window=8,
+    )
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [KVCacheGroupSpec(["L0"], full_spec), KVCacheGroupSpec(["L1"], swa_spec)],
+        scheduler_block_size=32,
+        hash_block_size=8,
+    )
+
+    db_full = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+        block_size=32,
+        hash_block_size=8,
+    )
+    db_full.set_kv_caches_base_addr([0x1000])
+    db_full.set_block_len([512])
+    db_swa = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+        block_size=8,
+        hash_block_size=8,
+    )
+    db_swa.set_kv_caches_base_addr([0x2000])
+    db_swa.set_block_len([128])
+
+    thread = _make_store_sending_thread(
+        store,
+        coord=coord,
+        token_databases=[db_full, db_swa],
+        block_size=32,
+    )
+    thread.enable_kv_event = True
+
+    hs = [bytes([i + 1]) * 4 for i in range(4)]
+    thread.add_stored_request("r0")
+    thread._handle_request(
+        ReqMeta(
+            req_id="r0",
+            token_len_chunk=32,
+            block_ids=([0], list(range(4))),
+            block_hashes=hs,
+            can_save=True,
+            token_ids=list(range(32)),
+        )
+    )
+
+    full_event, swa_event = thread.get_kv_events()
+    assert full_event.group_idx == 0
+    assert full_event.block_size == 32
+    assert full_event.token_ids == list(range(32))
+    assert full_event.block_hashes == [
+        maybe_convert_block_hash(BlockHash(b"".join(hs)))
+    ]
+
+    assert swa_event.group_idx == 1
+    assert swa_event.block_size == 8
+    assert swa_event.token_ids == list(range(24, 32))
+    assert swa_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
 
 
 def _auto_set_ready_event(*args, **kwargs):
@@ -1219,6 +1231,67 @@ def test_lookup_swa_single_group_returns_full_when_tail_window_present():
     )
     worker.store.batch_is_exist.return_value = [0, 0, 1, 1]
     assert worker.lookup(64, [b"h0", b"h1", b"h2", b"h3"]) == 64
+
+
+def test_lookup_checks_all_potential_swa_hit_boundaries():
+    """Lookup should skip SWA chunks that can never validate a hit, but still
+    check earlier aligned boundaries when sparse retention stores only the
+    current request's replay boundary.
+    """
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        SlidingWindowSpec,
+    )
+
+    worker = _make_bare_worker(block_size=8)
+    full = FullAttentionSpec(block_size=32, num_kv_heads=8, head_size=64, dtype=None)
+    swa = SlidingWindowSpec(
+        block_size=8, num_kv_heads=8, head_size=64, dtype=None, sliding_window=8
+    )
+    worker._kv_cache_groups = [
+        KVCacheGroupSpec(["full"], full),
+        KVCacheGroupSpec(["swa"], swa),
+    ]
+    worker.token_dbs = [
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=0),
+            block_size=32,
+            hash_block_size=8,
+        ),
+        ChunkedTokenDatabase(
+            KeyMetadata("test-model", 0, 0, 0, 0, group_id=1),
+            block_size=8,
+            hash_block_size=8,
+        ),
+    ]
+    worker.coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        worker._kv_cache_groups,
+        scheduler_block_size=32,
+        hash_block_size=8,
+        retention_interval=0,
+    )
+    # Candidate order: 3 full-attention chunks, then SWA chunks 3, 7, 11.
+    # Only the first full chunk and the SWA chunk ending at token 32 exist, so
+    # lookup should recover a 32-token external prefix hit. A sparse
+    # prompt-specific store mask for num_prompt_tokens=96 would only check SWA
+    # chunk 7 and miss this earlier reusable prefix.
+    worker.store.batch_is_exist.return_value = [1, 0, 0, 1, 0, 0]
+
+    result = worker.lookup(
+        96,
+        [f"h{i}".encode() for i in range(12)],
+    )
+
+    assert result == 32
+    keys = worker.store.batch_is_exist.call_args.args[0]
+    assert len(keys) == 6
+    swa_keys = [key for key in keys if "@group:1@" in key]
+    assert swa_keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6833",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@6837",
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:1@683131",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1572,3 +1645,34 @@ def test_lookup_records_mooncake_metrics():
     assert isinstance(stats, MooncakeStoreConnectorStats)
     assert len(stats.data["lookup_exists"]) == 1
     assert stats.data["lookup_exists"][0]["num_keys"] == 2
+
+
+def test_store_worker_close_releases_store():
+    worker = _make_bare_worker()
+    store = worker.store
+
+    worker.close()
+
+    store.close.assert_called_once_with()
+    assert worker.store is None
+
+
+def test_store_worker_close_is_idempotent():
+    worker = _make_bare_worker()
+    store = worker.store
+
+    worker.close()
+    worker.close()
+
+    # Second call short-circuits because store was already released.
+    store.close.assert_called_once_with()
+
+
+def test_store_worker_close_swallows_store_errors():
+    worker = _make_bare_worker()
+    worker.store.close.side_effect = RuntimeError("boom")
+
+    # A failure tearing down the store must not propagate out of close().
+    worker.close()
+
+    assert worker.store is None
