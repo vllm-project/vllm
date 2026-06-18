@@ -67,7 +67,7 @@ def test_nvfp4_launch_config_large_full_decode_heads() -> None:
         16, 256, 256, is_3d=False, sliding_window_val=0
     ) == (
         16,
-        8,
+        4,
         1,
     )
     assert _get_nvfp4_launch_config(
@@ -91,7 +91,7 @@ def test_nvfp4_launch_config_large_full_decode_heads() -> None:
     )
     assert _get_nvfp4_launch_config(16, 256, 256, is_3d=True, sliding_window_val=0) == (
         16,
-        8,
+        4,
         1,
     )
     assert _get_nvfp4_launch_config(16, 320, 512, is_3d=True, sliding_window_val=0) == (

@@ -1699,7 +1699,9 @@ def _get_nvfp4_launch_config(
     # E4M3 block scales before the attention math.  Cap the per-program
     # dequant footprint instead of specializing for any model family.
     if not is_3d:
-        if sliding_window_val > 0 and head_size_padded >= 256:
+        if head_size_padded == 256 or (
+            sliding_window_val > 0 and head_size_padded >= 256
+        ):
             return 16, 4, 1
         return 16, 8, 3 if head_size == 128 else 1
     if sliding_window_val > 0:
@@ -1708,6 +1710,8 @@ def _get_nvfp4_launch_config(
         return default_tile_size, 8, 1
     max_tile_size = max(16, 4096 // head_size_padded)
     tile_size = min(default_tile_size, max_tile_size)
+    if head_size_padded == 256:
+        return tile_size, 4, 1
     if head_size == 128:
         return tile_size, 8, 2
     return tile_size, 8, 1
