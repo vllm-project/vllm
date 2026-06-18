@@ -1288,6 +1288,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
+  
+  # Needed to pass skip skinny flag to .cpp targets
+  if(VLLM_GPU_ARCHES MATCHES "gfx1250")                               
+    target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
+  endif()
 endif()
 
 # Must run after the last HIP `define_extension_target` so every extension
