@@ -158,11 +158,8 @@ class Sm100ChunkUWKernel:
         sU = allocate_tensor(smem, BFloat16, sU_layout)[None, 0, None, 0]
         sW = allocate_tensor(smem, BFloat16, sW_layout)[None, 0, None, 0]
 
-        swizzle_128B = cute.make_swizzle(3, 4, 3)
-        sA_layout = cute.make_layout((BT, (64, 1)), stride=(64, (1, BT * 64)))
-        sA_layout = cute.make_composed_layout(swizzle_128B, 0, sA_layout)
-        sA = allocate_tensor(smem, BFloat16, sA_layout)
-        sAi = allocate_tensor(smem, BFloat16, sA_layout)
+        sA_ptr = smem.allocate_array(BFloat16, BT * BT, byte_alignment=16)
+        sAi_ptr = smem.allocate_array(BFloat16, BT * BT, byte_alignment=16)
 
         s_beta = smem.allocate_array(Float32, BT)
         s_g_cu_exp = smem.allocate_array(Float32, BT)
@@ -323,16 +320,25 @@ class Sm100ChunkUWKernel:
             stage_id = 0
             parity = 0
 
-            # view into (16,16) sub-tiles, then ldmatrix layout
-            sA_ldsm = cute.logical_divide(sA, (16, cute.make_layout((8, 2))))
-            sAi_ldsm = cute.logical_divide(sAi, (16, cute.make_layout((8, 2))))
-            sA_ldsm = sA_ldsm[(lane_id % 16, None), ((None, lane_id // 16), None)]
-            sAi_ldsm = sAi_ldsm[(lane_id % 16, None), ((None, lane_id // 16), None)]
+            # for sA, we can avoid bank conflict without using swizzling because
+            # this is only used as tmp buffer between rmem<->smem, no gmem interactions.
+            # to do so, we can put (8,8) tile contiguous in memory. logically, we are
+            # partitioning (64,64) tile into 4x (16,16) tiles. to make indexing easier
+            # later, we view (16,16) tile as (32,8) tile here.
+            # (4,4) is (row_tile, col_tile).
+            sA_layout = cute.make_layout(((8, 32), (4, 4)))
+            sA = cute.make_tensor(sA_ptr, sA_layout)
+            sAi = cute.make_tensor(sAi_ptr, sA_layout)
+
+            # pre-compute ldmatrix addresses
+            sA_ldsm = sA[(None, lane_id), None]
+            sAi_ldsm = sAi[(None, lane_id), None]
 
             # init Ai smem buffer with zeros (only the first 48 rows)
-            for i in cutlass.range_constexpr((BT // 4 * 3) * BT // 128):
-                idx = i * 128 + tid_
-                sAi[idx // BT, idx % BT] = BFloat16(0.0)
+            zeros_bf16 = cute.make_rmem_tensor(8, BFloat16)
+            zeros_bf16.fill(0.0)
+            for i in cutlass.range_constexpr(3):
+                cute.copy(stsm_atom, zeros_bf16, sAi_ldsm[None, (i, warp_id_)])
 
             # indices for ldmatrix layout later
             row_indices = cute.make_rmem_tensor((1, 2, 1), Int32)
@@ -454,7 +460,7 @@ class Sm100ChunkUWKernel:
                     cute.copy(
                         stsm_atom,
                         cute.recast_tensor(packed, BFloat16),
-                        sA_ldsm[warp_id_, None, i],
+                        sA_ldsm[None, (warp_id_, i)],
                     )
 
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
@@ -491,7 +497,7 @@ class Sm100ChunkUWKernel:
                 M = cute.logical_divide(cute.recast_tensor(M_bf16, Uint32), 2)
 
                 # initial guess: Ai = I-A
-                cute.copy(ldsm_atom, sA_ldsm[warp_id_, None, warp_id_], Ai_bf16)
+                cute.copy(ldsm_atom, sA_ldsm[None, (warp_id_, warp_id_)], Ai_bf16)
                 for i in cutlass.range_constexpr(4):
                     Ai[i] ^= Uint32(0x80008000)  # negate A
                 set_diagonal(Ai, lane_id)
@@ -500,7 +506,7 @@ class Sm100ChunkUWKernel:
                 Ai_f32 = cute.logical_divide(cvt.bf16x2_to_fp32x2(Ai), 4)
 
                 # M is holding -(I+A), stay constant throughout the iterations
-                cute.copy(ldsm_trans_atom, sA_ldsm[warp_id_, None, warp_id_], M_bf16)
+                cute.copy(ldsm_trans_atom, sA_ldsm[None, (warp_id_, warp_id_)], M_bf16)
                 set_diagonal(M, lane_id)
                 for i in cutlass.range_constexpr(4):
                     M[i] ^= Uint32(0x80008000)
@@ -508,7 +514,7 @@ class Sm100ChunkUWKernel:
                 # 3 rounds of Newton-Schulz
                 for _ in cutlass.range_constexpr(3):
                     # First MMA: -AiM = Ai @ (-M)
-                    cute.copy(stsm_atom, Ai_bf16, sA_ldsm[warp_id_, None, warp_id_])
+                    cute.copy(stsm_atom, Ai_bf16, sA_ldsm[None, (warp_id_, warp_id_)])
                     cute.arch.sync_warp()
                     acc[None, 0] = mma_bf16(Ai, M[None, 0], zeros_f32)
                     acc[None, 1] = mma_bf16(Ai, M[None, 1], zeros_f32)
@@ -519,14 +525,14 @@ class Sm100ChunkUWKernel:
                         Ai_f32[j] *= 2.0
                     cute.copy(
                         ldsm_trans_atom,
-                        sA_ldsm[warp_id_, None, warp_id_],
+                        sA_ldsm[None, (warp_id_, warp_id_)],
                         mma_B_bf16,
                     )
                     Ai_f32[None, 0] = mma_bf16(Ai, mma_B[None, 0], Ai_f32[None, 0])
                     Ai_f32[None, 1] = mma_bf16(Ai, mma_B[None, 1], Ai_f32[None, 1])
                     Ai_bf16.store(Ai_f32.load().to(BFloat16))
 
-                cute.copy(stsm_atom, Ai_bf16, sAi_ldsm[warp_id_, None, warp_id_])
+                cute.copy(stsm_atom, Ai_bf16, sAi_ldsm[None, (warp_id_, warp_id_)])
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
 
                 # off-diagonal by 1
@@ -545,7 +551,7 @@ class Sm100ChunkUWKernel:
 
                     cute.copy(
                         ldsm_trans_atom,
-                        sA_ldsm[warp_id_, None, warp_id_ - 1],
+                        sA_ldsm[None, (warp_id_, warp_id_ - 1)],
                         mma_B_bf16,
                     )
                     acc[None, 0] = mma_bf16(neg_Ai, mma_B[None, 0], zeros_f32)
@@ -554,7 +560,7 @@ class Sm100ChunkUWKernel:
 
                     cute.copy(
                         ldsm_trans_atom,
-                        sAi_ldsm[warp_id_ - 1, None, warp_id_ - 1],
+                        sAi_ldsm[None, (warp_id_ - 1, warp_id_ - 1)],
                         mma_B_bf16,
                     )
                     acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
@@ -563,7 +569,7 @@ class Sm100ChunkUWKernel:
                     cute.copy(
                         stsm_atom,
                         Ai_bf16,
-                        sAi_ldsm[warp_id_, None, warp_id_ - 1],
+                        sAi_ldsm[None, (warp_id_, warp_id_ - 1)],
                     )
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
 
@@ -573,12 +579,12 @@ class Sm100ChunkUWKernel:
                 if warp_id_ < 2:
                     cute.copy(
                         ldsm_atom,
-                        sA_ldsm[warp_id_ + 2, None, warp_id_],
+                        sA_ldsm[None, (warp_id_ + 2, warp_id_)],
                         Ai_bf16,
                     )
                     cute.copy(
                         ldsm_trans_atom,
-                        sAi_ldsm[warp_id_, None, warp_id_],
+                        sAi_ldsm[None, (warp_id_, warp_id_)],
                         mma_B_bf16,
                     )
                     acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
@@ -586,12 +592,12 @@ class Sm100ChunkUWKernel:
 
                     cute.copy(
                         ldsm_atom,
-                        sA_ldsm[warp_id_ + 2, None, warp_id_ + 1],
+                        sA_ldsm[None, (warp_id_ + 2, warp_id_ + 1)],
                         Ai_bf16,
                     )
                     cute.copy(
                         ldsm_trans_atom,
-                        sAi_ldsm[warp_id_ + 1, None, warp_id_],
+                        sAi_ldsm[None, (warp_id_ + 1, warp_id_)],
                         mma_B_bf16,
                     )
                     acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], acc[None, 0])
@@ -599,52 +605,52 @@ class Sm100ChunkUWKernel:
 
                     tmp = cute.make_rmem_tensor(8, BFloat16)
                     tmp.store(acc.load().to(BFloat16))
-                    cute.copy(stsm_atom, tmp, sAi_ldsm[warp_id_ + 2, None, warp_id_])
+                    cute.copy(stsm_atom, tmp, sAi_ldsm[None, (warp_id_ + 2, warp_id_)])
                     cute.arch.sync_warp()
 
                     cute.copy(
-                        ldsm_atom, sAi_ldsm[warp_id_ + 2, None, warp_id_ + 2], Ai_bf16
+                        ldsm_atom, sAi_ldsm[None, (warp_id_ + 2, warp_id_ + 2)], Ai_bf16
                     )
                     for i in cutlass.range_constexpr(4):
                         Ai[i] ^= Uint32(0x80008000)
                     cute.copy(
                         ldsm_trans_atom,
-                        sAi_ldsm[warp_id_ + 2, None, warp_id_],
+                        sAi_ldsm[None, (warp_id_ + 2, warp_id_)],
                         mma_B_bf16,
                     )
                     acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
                     acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], zeros_f32)
                     tmp.store(acc.load().to(BFloat16))
-                    cute.copy(stsm_atom, tmp, sAi_ldsm[warp_id_ + 2, None, warp_id_])
+                    cute.copy(stsm_atom, tmp, sAi_ldsm[None, (warp_id_ + 2, warp_id_)])
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
 
                 # off-diagonal by 3
                 # warp0: Ai30 = -Ai33 @ (A30 @ Ai00 + A31 @ Ai10 + A32 @ Ai20)
                 if warp_id_ == 0:
-                    cute.copy(ldsm_atom, sA_ldsm[3, None, 0], Ai_bf16)
-                    cute.copy(ldsm_trans_atom, sAi_ldsm[0, None, 0], mma_B_bf16)
+                    cute.copy(ldsm_atom, sA_ldsm[None, (3, 0)], Ai_bf16)
+                    cute.copy(ldsm_trans_atom, sAi_ldsm[None, (0, 0)], mma_B_bf16)
                     acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
                     acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], zeros_f32)
 
                     for i in cutlass.range_constexpr(1, 3):
-                        cute.copy(ldsm_atom, sA_ldsm[3, None, i], Ai_bf16)
-                        cute.copy(ldsm_trans_atom, sAi_ldsm[i, None, 0], mma_B_bf16)
+                        cute.copy(ldsm_atom, sA_ldsm[None, (3, i)], Ai_bf16)
+                        cute.copy(ldsm_trans_atom, sAi_ldsm[None, (i, 0)], mma_B_bf16)
                         acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], acc[None, 0])
                         acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], acc[None, 1])
 
                     tmp = cute.make_rmem_tensor(8, BFloat16)
                     tmp.store(acc.load().to(BFloat16))
-                    cute.copy(stsm_atom, tmp, sAi_ldsm[3, None, 0])
+                    cute.copy(stsm_atom, tmp, sAi_ldsm[None, (3, 0)])
                     cute.arch.sync_warp()
 
-                    cute.copy(ldsm_atom, sAi_ldsm[3, None, 3], Ai_bf16)
+                    cute.copy(ldsm_atom, sAi_ldsm[None, (3, 3)], Ai_bf16)
                     for i in cutlass.range_constexpr(4):
                         Ai[i] ^= Uint32(0x80008000)
-                    cute.copy(ldsm_trans_atom, sAi_ldsm[3, None, 0], mma_B_bf16)
+                    cute.copy(ldsm_trans_atom, sAi_ldsm[None, (3, 0)], mma_B_bf16)
                     acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
                     acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], zeros_f32)
                     tmp.store(acc.load().to(BFloat16))
-                    cute.copy(stsm_atom, tmp, sAi_ldsm[3, None, 0])
+                    cute.copy(stsm_atom, tmp, sAi_ldsm[None, (3, 0)])
 
                 ##### Phase 4: compute Ab, Abg #####
                 if warp_id_ == 3:
@@ -652,7 +658,7 @@ class Sm100ChunkUWKernel:
                 cute.arch.barrier(barrier_id=1, number_of_threads=128)
 
                 for i in cutlass.range_constexpr(BT // 16):
-                    cute.copy(ldsm_atom, sAi_ldsm[warp_id_, None, i], Ai_bf16)
+                    cute.copy(ldsm_atom, sAi_ldsm[None, (warp_id_, i)], Ai_bf16)
 
                     col_coord = (None, lane_id % 4, None, i)
                     s_beta_view = cute.make_tensor(s_beta, (2, 4, 2, BT // 16))
