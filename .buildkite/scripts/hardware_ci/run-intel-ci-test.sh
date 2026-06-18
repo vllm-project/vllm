@@ -41,7 +41,7 @@ case "${test_suite}" in
     pip install av
     cd tests
 
-    pytest -v -s entrypoints/openai/chat_completion/test_audio_in_video.py
+    pytest -v -s entrypoints/multimodal/openai/chat_completion/test_audio_in_video.py
     pytest -v -s benchmarks/test_serve_cli.py
     ;;
   *)

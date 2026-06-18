@@ -223,10 +223,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BailingMoeV2_5ForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ring-2.5-1T", trust_remote_code=True
     ),
-    "BambaForCausalLM": _HfExamplesInfo(
-        "ibm-ai-platform/Bamba-9B-v1",
-        extras={"tiny": "hmellor/tiny-random-BambaForCausalLM"},
-    ),
     "BloomForCausalLM": _HfExamplesInfo(
         "bigscience/bloom-560m", {"1b": "bigscience/bloomz-1b1"}
     ),
@@ -595,7 +591,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiMoV2ForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2.5-Pro", trust_remote_code=True
     ),
-    "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst"),
 }
 
 _EMBEDDING_EXAMPLE_MODELS = {
