@@ -327,7 +327,9 @@ class OrthrusForCausalLM(
         self.model = OrthrusModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.diffusion_model = OrthrusDiffusionModel(self.model)
+        self.diffusion_model = OrthrusDiffusionModel(
+            self.model, vllm_config=vllm_config
+        )
 
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
