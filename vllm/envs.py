@@ -284,6 +284,7 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
+    VLLM_ENGINE_HANDSHAKE_TIMEOUT_MINUTES: int = 5
 
 
 def get_default_cache_root():
@@ -746,6 +747,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # during startup. Default is 600 seconds (10 minutes).
     "VLLM_ENGINE_READY_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_READY_TIMEOUT_S", "600")
+    ),
+    # Timeout in minutes for the EngineCore <-> front-end startup handshake
+    # (the engine waits this long for the coordinator's init message during
+    # distributed bring-up). Default is 5 minutes. Increase for multi-pod
+    # deployments with slow weight load or JIT warm-up (e.g. DeepSeek-V3 DP=16
+    # cold start with ROCm AITER on MI300X, which can exceed 5 minutes).
+    "VLLM_ENGINE_HANDSHAKE_TIMEOUT_MINUTES": lambda: int(
+        os.environ.get("VLLM_ENGINE_HANDSHAKE_TIMEOUT_MINUTES", "5")
     ),
     # API key for vLLM API server
     "VLLM_API_KEY": lambda: os.environ.get("VLLM_API_KEY", None),
