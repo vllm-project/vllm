@@ -16,7 +16,6 @@ class CustomMLAPrefillBackend(MLAPrefillBackend):
     """Mock custom MLA prefill backend for testing."""
 
     supported_dtypes = [torch.bfloat16, torch.float16]
-    requires_r1_mla_dimensions = False
 
     @staticmethod
     def get_name() -> str:
@@ -83,7 +82,6 @@ def test_register_custom_backend_as_decorator():
     @register_mla_prefill_backend(MLAPrefillBackendEnum.CUSTOM)
     class DecoratedPrefillBackend(MLAPrefillBackend):
         supported_dtypes = [torch.bfloat16]
-        requires_r1_mla_dimensions = False
 
         @staticmethod
         def get_name() -> str:
