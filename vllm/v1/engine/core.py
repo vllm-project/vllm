@@ -1527,6 +1527,8 @@ class EngineCoreProc(EngineCore):
                 dp_stats_address=self.frontend_stats_publish_address,
                 dtype=str(self.vllm_config.model_config.dtype).removeprefix("torch."),
                 vllm_version=VLLM_VERSION,
+                world_size=self.vllm_config.parallel_config.world_size,
+                data_parallel_size=self.vllm_config.parallel_config.data_parallel_size,
                 kv_cache_size_tokens=(
                     self.vllm_config.cache_config.kv_cache_size_tokens
                 ),
