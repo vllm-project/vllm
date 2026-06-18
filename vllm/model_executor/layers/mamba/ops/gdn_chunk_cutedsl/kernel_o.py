@@ -302,8 +302,8 @@ class Sm100ChunkOKernel:
                 cute.arch.mbarrier_wait(qk_full_mbar + stage_id, tma_parity)
                 _tcgen05.fence_after_thread_sync()
 
-                for i in cutlass.range_constexpr(K_dim // BT):
-                    for j in cutlass.range_constexpr(BT // 16):
+                for i in cutlass.range_constexpr(K_dim // 64):
+                    for j in cutlass.range_constexpr(64 // 16):
                         qdesc = qdesc_base | ((i * BT * 128 + j * 32) >> 4)
                         kdesc = kdesc_base | ((i * BT * 128 + j * 32) >> 4)
                         _tcgen05.mma_f16(
@@ -314,8 +314,8 @@ class Sm100ChunkOKernel:
                 ##### 2nd MMA: Q @ H.T #####
                 cute.arch.mbarrier_wait(hv_full_mbar + stage_id, tma_parity)
                 _tcgen05.fence_after_thread_sync()
-                for i in cutlass.range_constexpr(K_dim // BT):
-                    for j in cutlass.range_constexpr(BT // 16):
+                for i in cutlass.range_constexpr(K_dim // 64):
+                    for j in cutlass.range_constexpr(64 // 16):
                         qdesc = qdesc_base | ((i * BT * 128 + j * 32) >> 4)
                         hdesc = hdesc_base | ((i * V_dim * 128 + j * 32) >> 4)
                         _tcgen05.mma_f16(
