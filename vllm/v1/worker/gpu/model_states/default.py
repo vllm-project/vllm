@@ -7,6 +7,8 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.models.interfaces import supports_multimodal_pruning
+from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.tasks import GenerationTask
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -33,6 +35,7 @@ class DefaultModelState(ModelState):
         self.scheduler_config = vllm_config.scheduler_config
         self.model = model
         self.device = device
+        self.req_states: RequestState | None = None
 
         self.supports_mm_inputs = encoder_cache is not None
         self.max_model_len = self.model_config.max_model_len
@@ -40,6 +43,11 @@ class DefaultModelState(ModelState):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
         self.dtype = self.model_config.dtype
+        self.is_multimodal_pruning_enabled = (
+            supports_multimodal_pruning(model)
+            and self.model_config.multimodal_config is not None
+            and self.model_config.multimodal_config.is_multimodal_pruning_enabled()
+        )
 
         if self.supports_mm_inputs:
             assert encoder_cache is not None
@@ -98,6 +106,82 @@ class DefaultModelState(ModelState):
         if self.rope_state is not None:
             self.rope_state.apply_staged_writes()
 
+    def _recompute_mrope_positions(
+        self,
+        mm_embeds: list[torch.Tensor],
+        input_batch: InputBatch,
+    ) -> list[torch.Tensor]:
+        assert self.rope_state is not None
+        assert self.req_states is not None
+        req_states = self.req_states
+
+        mm_embeds_out: list[torch.Tensor] = []
+        mm_embed_idx = 0
+        for batch_idx, req_id in enumerate(input_batch.req_ids):
+            req_idx = req_states.req_id_to_index[req_id]
+            num_computed_tokens = int(req_states.num_computed_tokens_np[req_idx])
+
+            mm_features = self.encoder_cache.mm_features[req_id]
+            query_start = num_computed_tokens
+            query_end = query_start + int(input_batch.num_scheduled_tokens[batch_idx])
+
+            num_req_mm_embeds = 0
+            lo, hi = get_mm_features_in_window(
+                mm_features,
+                start=query_start,
+                end=query_end,
+            )
+            # iterate and get the mm_embeds num in current window
+            for mm_feature in mm_features[lo:hi]:
+                start_pos = mm_feature.mm_position.offset
+                num_encoder_tokens = mm_feature.mm_position.length
+                start_idx = max(query_start - start_pos, 0)
+                end_idx = min(query_end - start_pos, num_encoder_tokens)
+                curr_embeds_start, curr_embeds_end = (
+                    mm_feature.mm_position.get_embeds_indices_in_range(
+                        start_idx, end_idx
+                    )
+                )
+                if curr_embeds_start != curr_embeds_end:
+                    num_req_mm_embeds += 1
+
+            if num_req_mm_embeds == 0:
+                continue
+
+            req_mm_embeds = mm_embeds[mm_embed_idx : mm_embed_idx + num_req_mm_embeds]
+            mm_embed_idx += num_req_mm_embeds
+
+            # get prompttoken ids
+            prompt_len = int(req_states.prompt_len.np[req_idx])
+            prompt_token_ids = req_states.all_token_ids._uva_buf.np[
+                req_idx, :prompt_len
+            ].tolist()
+            # get mrope positions
+            start = req_idx * self.rope_state.num_dims
+            end = start + self.rope_state.num_dims
+            mrope_positions = torch.tensor(
+                self.rope_state.prefill_positions._uva_buf.np[start:end, :prompt_len],
+                dtype=torch.long,
+            )
+            req_mm_embeds, new_positions, new_delta = (
+                self.model.recompute_mrope_positions(
+                    input_ids=prompt_token_ids,
+                    multimodal_embeddings=tuple(req_mm_embeds),
+                    mrope_positions=mrope_positions,
+                    num_computed_tokens=num_computed_tokens,
+                )
+            )
+            new_positions_cpu = new_positions.to(device="cpu", dtype=torch.int32)
+            self.rope_state.prefill_positions._uva_buf.cpu[
+                start:end, : new_positions_cpu.shape[1]
+            ].copy_(new_positions_cpu)
+            self.rope_state.prefill_delta.np[req_idx] = new_delta
+            self.rope_state.prefill_delta.copy_to_uva()
+            mm_embeds_out.extend(req_mm_embeds)
+
+        assert mm_embed_idx == len(mm_embeds)
+        return mm_embeds_out
+
     def get_mm_embeddings(
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
@@ -120,6 +204,13 @@ class DefaultModelState(ModelState):
             input_batch.prefill_len_np,
             input_batch.num_computed_prefill_tokens_np,
         )
+        if (
+            mm_embeds
+            and self.is_multimodal_pruning_enabled
+            and self.rope_state is not None
+            and self.rope_state.has_delta
+        ):
+            mm_embeds = self._recompute_mrope_positions(mm_embeds, input_batch)
         # Use unpadded input_ids to match is_mm_embed size (num_tokens).
         # input_batch.input_ids may be padded for CUDA graphs.
         input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
