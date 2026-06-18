@@ -5,13 +5,13 @@ Information about prefill/decode disaggregate serving: https://docs.vllm.ai/en/s
 ### nvidia
 Install nvidia tools (setup_gpu_1.sh)
 ```
+# install nvidia drivers and tools
 sudo apt update
-sudo apt install -y nvidia-utils-535
-sudo add-apt-repository restricted
-sudo add-apt-repository universe
+sudo add-apt-repository -y restricted
+sudo add-apt-repository -y universe
 sudo apt update
-sudo apt install -y nvidia-driver-535
-sudo nvidia-smi -mig 0
+sudo apt install -y nvidia-utils-550 nvidia-driver-550
+sudo nvidia-smi -mig 0 # disable multi instance GPU
 sudo reboot
 ```
 
@@ -48,6 +48,22 @@ Install VLLM
 ```
 VLLM_USE_PRECOMPILED=1 uv pip install --editable .
 ```
+
+If you get an error like:
+```
+[stdout]
+      VLLM_PRECOMPILED_WHEEL_COMMIT not valid: nightly, trying to fetch base commit in main branch
+      Upstream main branch latest commit: 4ce2d0145312809ef6122ccb7be8ae7cafa462a9
+      Using precompiled wheel commit 4ce2d0145312809ef6122ccb7be8ae7cafa462a9 with variant cu128
+      Trying to fetch nightly build metadata from https://wheels.vllm.ai/4ce2d0145312809ef6122ccb7be8ae7cafa462a9/cu128/vllm/metadata.json
+      Trying the default variant from remote
+      Trying to fetch nightly build metadata from https://wheels.vllm.ai/4ce2d0145312809ef6122ccb7be8ae7cafa462a9/vllm/metadata.json
+```
+and, you have cloned `vllm` (not using `hcasalet/villum`), then you should change to the latest release which will have the precompiled wheel. For example:
+```
+git checkout releases/v0.23.0
+```
+If for some reason vllm is looking for cuda13.0, try setting `VLLM_PRECOMPILED_WHEEL_VARIANT=cu128`
 
 ```
 export MODEL="facebook/opt-125m"
@@ -104,8 +120,8 @@ source .venv/bin/activate
 ```
 
 ```
-uv pip install -r requirements/cpu-build.txt --torch-backend cpu
-uv pip install -r requirements/cpu.txt --torch-backend cpu
+uv pip install -r requirements/build/cpu.txt --torch-backend cpu --index-strategy unsafe-best-match
+uv pip install -r requirements/cpu.txt --torch-backend cpu --index-strategy unsafe-best-match
 ```
 
 ```

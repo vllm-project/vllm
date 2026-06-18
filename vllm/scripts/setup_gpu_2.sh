@@ -14,7 +14,7 @@ echo 'export PATH=/usr/local/cuda-12.8/bin:$PATH' >> ~/.bashrc
 echo 'export LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
 source ~/.bashrc
 
-cd /holly
+cd ~/
 git clone git@github.com:hcasalet/villum.git
 cd villum
 source .venv/bin/activate
