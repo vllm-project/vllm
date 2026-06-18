@@ -244,6 +244,77 @@ def test_request_preemption(request_runner, async_scheduling: bool):
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
+def test_no_offload_call_after_on_request_finished(
+    request_runner, async_scheduling: bool
+):
+    """on_request_finished is not issued before a per-request offload
+    call.
+
+    A request can finish while its GPU->primary store is still in flight; the
+    later worker completion then drives complete_store. The scheduler defers
+    on_request_finished until the request is finished AND has no in-flight
+    transfer jobs, so complete_store is observed BEFORE on_request_finished,
+    and it is called exactly once.
+    """
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        block_size_factor=block_size_factor,
+    )
+
+    # Record the order of per-request connector calls on the (mocked) manager.
+    # The external list survives manager.reset_mock() between run() calls.
+    calls: list[tuple[str, str]] = []
+    runner.manager.on_request_finished.side_effect = lambda req_context: calls.append(
+        ("on_request_finished", req_context.req_id)
+    )
+    runner.manager.complete_store.side_effect = (
+        lambda keys, req_context, *args, **kwargs: calls.append(
+            ("complete_store", req_context.req_id)
+        )
+    )
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
+    )
+
+    # Decode a couple of blocks, keeping every transfer in flight
+    # (complete_transfers=False) so no store completes while the request runs.
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
+    runner.run(decoded_tokens=[0], complete_transfers=False)
+    runner.run(
+        decoded_tokens=[0] * (2 * offloaded_block_size),
+        complete_transfers=False,
+    )
+
+    # Finish the request, completing its pending stores. on_request_finished is
+    # deferred until the stores drain, so it lands after the last complete_store.
+    # 4 offloaded blocks are stored (2 prompt + 2 decode) -> 4 * block_size_factor
+    # GPU blocks.
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=tuple(range(4 * block_size_factor)),
+    )
+
+    req_id = str(runner.req_id)
+
+    # on_request_finished is issued exactly once.
+    assert calls.count(("on_request_finished", req_id)) == 1, calls
+
+    finished_idx = calls.index(("on_request_finished", req_id))
+    store_indices = [i for i, c in enumerate(calls) if c == ("complete_store", req_id)]
+
+    # All of the request's complete_store calls must precede its single
+    # on_request_finished.
+    assert store_indices, calls
+    assert max(store_indices) < finished_idx, calls
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
 def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling: bool):
     block_size = 4
     block_size_factor = 3
@@ -1147,6 +1218,64 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     for req_status in runner.connector_scheduler._req_status.values():
         for group_state in req_status.group_states:
             assert group_state.next_stored_block_idx == 0
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_reset_cache_finalizes_finished_request_with_pending_store(
+    request_runner, async_scheduling: bool
+):
+    """reset_cache must finalize a finished request whose in-flight stores it
+    discards: call on_request_finished and drop its _req_status entry.
+
+    Otherwise the deferred hook (which waits for the now-discarded jobs to
+    complete) never fires and the entry leaks.
+    """
+    block_size = 4
+    block_size_factor = 3
+    offloaded_block_size = block_size * block_size_factor
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+        block_size_factor=block_size_factor,
+    )
+
+    finalized: list[str] = []
+    runner.manager.on_request_finished.side_effect = (
+        lambda req_context: finalized.append(req_context.req_id)
+    )
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+
+    # Decode a couple of blocks and keep every transfer in flight, so the
+    # request has pending store jobs.
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
+    runner.run(decoded_tokens=[0], complete_transfers=False)
+    runner.run(
+        decoded_tokens=[0] * (2 * offloaded_block_size),
+        complete_transfers=False,
+    )
+
+    cs = runner.connector_scheduler
+    req_id = str(runner.req_id)
+    req_status = cs._req_status[req_id]
+    assert req_status.transfer_jobs, "expected an in-flight store before finish"
+    assert any(job.is_store for job in cs._jobs.values())
+
+    # Finish the request while its store is still in flight. request_finished
+    # takes the defer branch (pending jobs), so on_request_finished is NOT
+    # called yet and the entry stays tracked.
+    req_status.req.status = RequestStatus.FINISHED_STOPPED
+    cs.request_finished(req_status.req)
+    assert finalized == []
+    assert req_id in cs._req_status
+
+    # reset_cache discards the in-flight store; it must finalize the request.
+    cs.reset_cache()
+    assert finalized == [req_id]
+    assert req_id not in cs._req_status
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
