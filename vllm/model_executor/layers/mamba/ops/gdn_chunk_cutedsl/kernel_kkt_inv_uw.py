@@ -276,13 +276,8 @@ class Sm100ChunkUWKernel:
                 for i in cutlass.range_constexpr(K_dim // 64):
                     for j in cutlass.range_constexpr(64 // 16):
                         kdesc = kdesc_base | ((i * BT * 128 + j * 32) >> 4)
-                        _tcgen05.mma_f16(
-                            kkt_tmem,
-                            kdesc,
-                            kdesc,
-                            kkt_idesc,
-                            (i > 0) or (j > 0),
-                        )
+                        enable_d = (i > 0) or (j > 0)
+                        _tcgen05.mma_f16(kkt_tmem, kdesc, kdesc, kkt_idesc, enable_d)
                 _tcgen05.commit(mma_kkt_mbar + stage_id)
 
                 ##### U/W MMA: U = Ab @ V, W = Abg @ K #####
