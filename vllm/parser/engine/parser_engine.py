@@ -101,6 +101,7 @@ class ParserEngine(Parser):
 
         self._reasoning_ended: bool = False
         self._streaming_initialized: bool = False
+        self._prompt_streaming_prepared: bool = False
 
         self._tool_slots: list[ToolCallSlot] = []
         self._deferred_content: str = ""
@@ -165,6 +166,10 @@ class ParserEngine(Parser):
             self._streaming_initialized = True
             self._reset(initial_state=initial_state)
 
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        """See :meth:`ReasoningParser.adjust_initial_state_from_prompt`."""
+        return
+
     def finish_streaming(self) -> DeltaMessage | None:
         events = self._engine.finish()
         return self._events_to_delta(events) if events else None
@@ -176,6 +181,7 @@ class ParserEngine(Parser):
         self._deferred_content = ""
         self._deferred_reasoning = ""
         self._content_has_nonws = False
+        self._prompt_streaming_prepared = False
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -364,6 +370,12 @@ class ParserEngine(Parser):
         *,
         finished: bool,
     ) -> DeltaMessage | None:
+        if not self._prompt_streaming_prepared and prompt_token_ids is not None:
+            # NOTE: call the hook BEFORE setting the flag, because the hook
+            # may invoke ``_reset`` (e.g. via ``initialize_streaming``) which
+            # clears ``_prompt_streaming_prepared``.
+            self.adjust_initial_state_from_prompt(prompt_token_ids)
+            self._prompt_streaming_prepared = True
         self._check_skip_tool_parsing(request)
         events = self._feed(delta_text, delta_token_ids)
         if finished:
