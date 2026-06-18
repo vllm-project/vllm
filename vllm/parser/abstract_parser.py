@@ -36,6 +36,20 @@ from vllm.tool_parsers.streaming import (
 logger = init_logger(__name__)
 
 
+def _reasoning_tail_overlap(text: str, marker: str) -> int:
+    """Length of the longest non-empty suffix of ``text`` that is a proper
+    prefix of ``marker``.
+
+    Used while streaming reasoning to hold back a partial tool-call-start token
+    so it is not emitted as reasoning content before we know whether it
+    completes into a real tool call.
+    """
+    for k in range(min(len(text), len(marker) - 1), 0, -1):
+        if marker.startswith(text[-k:]):
+            return k
+    return 0
+
+
 @dataclass
 class StreamState:
     """Mutable state for ``Parser.parse_delta()``. One per stream."""
@@ -51,6 +65,9 @@ class StreamState:
     # tracks whether function name has been fully returned in the stream yet
     function_name_returned: bool = False
     engine_based: bool = False
+    # Buffered reasoning tail that may be the start of a tool call emitted before
+    # the reasoning-end marker. Held back so it is not streamed as reasoning.
+    reasoning_holdback: str = ""
 
     def advance(
         self,
@@ -808,6 +825,54 @@ class DelegatingParser(Parser):
                         else ""
                     )
                     delta_text = current_text
+                if state.reasoning_holdback:
+                    # Flush any buffered tool-call-start prefix as reasoning.
+                    if delta_message is None:
+                        delta_message = DeltaMessage()
+                    delta_message.reasoning = state.reasoning_holdback + (
+                        delta_message.reasoning or ""
+                    )
+                    state.reasoning_holdback = ""
+            elif (
+                not self._engine_based
+                and self._tool_parser is not None
+                and (tc_start := self._tool_parser.tool_call_start_token)
+            ):
+                # Recovery: some reasoning models occasionally begin a tool call
+                # before emitting the reasoning-end marker (e.g. </think>).
+                # Without this the call leaks into reasoning content and is never
+                # parsed. Buffer any partial tool-call-start token so it is not
+                # emitted as reasoning; once the full start token appears, treat
+                # it as the reasoning end and hand it (and what follows) to the
+                # tool parser.
+                pending = state.reasoning_holdback + (
+                    delta_message.reasoning
+                    if delta_message and delta_message.reasoning
+                    else ""
+                )
+                state.reasoning_holdback = ""
+                tc_idx = pending.find(tc_start)
+                if tc_idx != -1:
+                    state.reasoning_ended = True
+                    reasoning_transitioned = True
+                    if delta_message is None:
+                        delta_message = DeltaMessage()
+                    delta_message.reasoning = pending[:tc_idx] or None
+                    delta_message.content = None
+                    current_text = pending[tc_idx:]
+                    delta_text = current_text
+                else:
+                    overlap = _reasoning_tail_overlap(pending, tc_start)
+                    state.reasoning_holdback = (
+                        pending[len(pending) - overlap :] if overlap else ""
+                    )
+                    emitted = pending[: len(pending) - overlap]
+                    if emitted:
+                        if delta_message is None:
+                            delta_message = DeltaMessage()
+                        delta_message.reasoning = emitted
+                    elif delta_message is not None:
+                        delta_message.reasoning = None
 
         # Tool call extraction
         if self._in_tool_call_phase(state):
@@ -861,6 +926,16 @@ class DelegatingParser(Parser):
             and not self._in_tool_call_phase(state)
         ):
             delta_message = DeltaMessage(content=delta_text)
+
+        if finished and state.reasoning_holdback and not state.reasoning_ended:
+            # Stream ended while still reasoning with a buffered tail that never
+            # completed into a tool call; emit it as reasoning.
+            if delta_message is None:
+                delta_message = DeltaMessage()
+            delta_message.reasoning = (
+                delta_message.reasoning or ""
+            ) + state.reasoning_holdback
+            state.reasoning_holdback = ""
 
         state.commit(current_text, current_token_ids)
 

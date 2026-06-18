@@ -365,3 +365,50 @@ def test_parse_delta_tool_choice_none_with_reasoning(tokenizer, request_obj):
     assert len(tool_calls) == 0
     assert "<tool_call>" in content
     assert "get_weather" in content
+
+
+# A tool call that begins *before* the reasoning-end marker (the model skipped
+# </think>). The tool call must still be parsed, and the raw tool-call syntax
+# must not leak into the reasoning channel.
+TOOL_CALL_IN_REASONING_OUTPUT = (
+    "<think>checking the weather now"
+    '<tool_call>\n{"name": "get_weather", '
+    '"arguments": {"city": "Dallas"}}\n</tool_call>'
+)
+
+
+def test_parse_delta_recovers_tool_call_before_reasoning_end(tokenizer, request_obj):
+    parser = make_parser(tokenizer, reasoning=True, tool=True)
+    results = stream_text(
+        parser,
+        tokenizer,
+        TOOL_CALL_IN_REASONING_OUTPUT,
+        request_obj,
+        prompt_token_ids=[],
+    )
+    reasoning, content, tool_calls = collect_fields(results)
+
+    # reasoning is preserved, but the tool-call syntax is not leaked into it
+    assert "checking the weather now" in reasoning
+    assert "<tool_call>" not in reasoning
+
+    # the tool call is recovered and parsed
+    assert len(tool_calls) > 0
+    assert tool_calls[0].function.name == "get_weather"
+    tool_args = "".join(
+        tc.function.arguments for tc in tool_calls if tc.function.arguments
+    )
+    assert json.loads(tool_args) == {"city": "Dallas"}
+
+
+def test_parse_delta_reasoning_with_lt_char_not_corrupted(tokenizer, request_obj):
+    # A "<" in reasoning that is *not* the start of a tool call must still be
+    # emitted as reasoning (the hold-back buffer must flush false prefixes).
+    output = "<think>compare a < b and c < d here</think>regular answer"
+    parser = make_parser(tokenizer, reasoning=True, tool=True)
+    results = stream_text(parser, tokenizer, output, request_obj, prompt_token_ids=[])
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert "compare a < b and c < d here" in reasoning
+    assert len(tool_calls) == 0
+    assert "regular answer" in content
