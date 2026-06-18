@@ -3820,7 +3820,40 @@ def fusedQuantizeNv(
         padded_rows, padded_cols, dtype=torch.float8_e4m3fn, device=a.device
     )
 
-    return torch.ops._qutlass_C.fusedQuantizeNv(a, b, xh_e2m1, xh_e4m3, global_scale)
+    safeFusedQuantizeNv(a, b, xh_e2m1, xh_e4m3, global_scale)
+    return xh_e2m1, xh_e4m3
+
+
+@torch.library.custom_op(
+    "vllm::safeFusedQuantizeNv", mutates_args=("xh_e2m1", "xh_e4m3")
+)
+def safeFusedQuantizeNv(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    xh_e2m1: torch.Tensor,
+    xh_e4m3: torch.Tensor,
+    global_scale: torch.Tensor,
+) -> None:
+    """
+    Wrapper for QUTLASS fusedQuantizeNv method that operates on tensors in-place
+    rather than returning them, to prevent torch 2.12+ errors that outputs of custom
+    operators may not alias any inputs to the custom operator.
+    """
+    torch.ops._qutlass_C.fusedQuantizeNv(a, b, xh_e2m1, xh_e4m3, global_scale)
+    return
+
+
+if hasattr(torch.ops._qutlass_C, "fusedQuantizeNv"):
+
+    @register_fake("vllm::safeFusedQuantizeNv")
+    def _fake_fused_quantize_nv(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        xh_e2m1: torch.Tensor,
+        xh_e4m3: torch.Tensor,
+        global_scale: torch.Tensor,
+    ) -> None:
+        return
 
 
 def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
