@@ -3,8 +3,8 @@
 """Correctness tests for the software fp8e4m3 <-> {fp16, bf16} Triton conversions.
 
 These back the pre-SM89 fp8 KV cache path of the Triton attention backend:
-fp8 <-> bf16 on SM80/86 (``fp8e4nv_sm80``) and fp8 <-> fp16 on SM75
-(``fp8e4nv_fp16_sm75``), since bf16 is an SM80+ hardware type. Each helper is a
+fp8 <-> bf16 on SM80/86 (``fp8e4nv_bf16``) and fp8 <-> fp16 on SM75
+(``fp8e4nv_fp16``), since bf16 is an SM80+ hardware type. Each helper is a
 ``pack=4`` inline-asm function driven here through a tiny wrapper kernel.
 
 Oracle (per the test plan):
@@ -23,12 +23,12 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.fp8e4nv_fp16_sm75 import (
+from vllm.v1.attention.ops.fp8e4nv_bf16 import bf16_to_fp8e4m3, fp8e4m3_to_bf16
+from vllm.v1.attention.ops.fp8e4nv_fp16 import (
     fp8e4m3_to_fp16,
     fp16_to_fp8e4m3,
     fp16_to_fp8e4m3_trunc,
 )
-from vllm.v1.attention.ops.fp8e4nv_sm80 import bf16_to_fp8e4m3, fp8e4m3_to_bf16
 
 if not current_platform.is_cuda():
     pytest.skip("fp8e4nv software conversions require CUDA", allow_module_level=True)
