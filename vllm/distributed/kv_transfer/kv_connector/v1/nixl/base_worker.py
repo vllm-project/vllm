@@ -647,31 +647,31 @@ class NixlBaseConnectorWorker:
         NOT directly supported by NIXL (e.g., tpu)
         """
         xfer_buffers: dict[str, torch.Tensor] = {}
-        inv_order = [0, 1, 3, 2, 4]
         try:
             for layer_name, kv_cache in kv_caches.items():
                 kv_shape = kv_cache.shape
                 kv_dtype = kv_cache.dtype
                 permute_shape = False
-                if (
-                    self.kv_cache_layout == "NHD"
-                    and self.vllm_config.kv_transfer_config is not None
-                    and self.vllm_config.kv_transfer_config.enable_permute_local_kv
-                ):
-                    logger.info_once(
-                        "'enable_permute_local_kv' flag is enabled while "
-                        "device KV Layout is NHD. Init host buffer with"
-                        " HND to better support Decode/Prefill TP_ratio > 1."
-                    )
-                    # Since NHD will not support Decode/Prefill TP_ratio > 1,
-                    # we can leverage host_buffer for permute
-                    self.host_buffer_kv_cache_layout = "HND"
-                    kv_shape = (
-                        tuple(kv_shape[i] for i in inv_order)
-                        if not self.use_mla
-                        else kv_shape
-                    )
-                    permute_shape = not self.use_mla
+                inv_order = (0, 2, 1, 3)
+                if not self.use_mla:
+                    assert kv_cache.ndim == 4
+
+                    if self.kv_cache_layout == "NHD":
+                        if self.kv_transfer_config.enable_permute_local_kv:
+                            logger.info_once(
+                                "'enable_permute_local_kv' flag is enabled while "
+                                "device KV Layout is NHD. Init host buffer with"
+                                " HND to better support Decode/Prefill TP_ratio > 1."
+                            )
+                            # Since NHD will not support Decode/Prefill TP_ratio > 1,
+                            # we can leverage host_buffer for permute.
+                            self.host_buffer_kv_cache_layout = "HND"
+                        else:
+                            # Packed KV layout is logical (B, H, N, 2*C). Allocate
+                            # (B, N, H, 2*C) and view it as logical (B, H, N, 2*C)
+                            # so raw NIXL transfers see NHD physical strides.
+                            kv_shape = tuple(kv_shape[i] for i in inv_order)
+                            permute_shape = True
 
                 xfer_buffers[layer_name] = torch.empty(
                     kv_shape, dtype=kv_dtype, device="cpu"
