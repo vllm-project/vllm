@@ -924,9 +924,9 @@ def _create_rope_norm(
             fallback_qnorm=fallback_qnorm,
             fallback_knorm=fallback_knorm,
             kv_cache_dtype="fp8_e4m3",
+            layer_name=layer_name,
         )
     rope_norm.process_weights_after_loading()
-    rope_norm.register_layer_name(layer_name)
     return rope_norm
 
 

@@ -118,6 +118,7 @@ class HpcRopeNorm(CustomOp, HpcModule):
         fallback_qnorm: torch.nn.Module | None,
         fallback_knorm: torch.nn.Module | None,
         kv_cache_dtype: str,
+        layer_name: str,
         qk_norm_policy: QkNormPolicy = QkNormPolicy.ROPE_THEN_NORM,
     ) -> None:
         super().__init__()
@@ -165,7 +166,11 @@ class HpcRopeNorm(CustomOp, HpcModule):
         # QK-Norm before RoPE -> NORM_THEN_ROPE), so it is supplied by the
         # caller. When QK-Norm is disabled the policy is forced to NONE.
         self.qk_norm_policy = qk_norm_policy if use_qk_norm else QkNormPolicy.NONE
+
+        # Register layer_name + add self to the global instance registry so the
+        # module-level custom op (hpc_rope_norm_forward) can route back here.
         self.layer_name: str | None = None
+        self.register_layer_name(layer_name)
 
     @classmethod
     def support(

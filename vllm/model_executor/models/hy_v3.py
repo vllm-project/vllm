@@ -316,9 +316,9 @@ class HYV3Attention(nn.Module):
                 fallback_qnorm=self.q_norm if self.use_qk_norm else None,
                 fallback_knorm=self.k_norm if self.use_qk_norm else None,
                 kv_cache_dtype=kv_cache_dtype,
+                layer_name=self.attn.layer_name,
                 qk_norm_policy=QkNormPolicy.NORM_THEN_ROPE,
             )
-            self.hpc_rope_norm.register_layer_name(self.attn.layer_name)
             # FP8 Q is produced by HpcRopeNorm, so the attention layer must not
             # re-quantize the query.
             if self.hpc_rope_norm.use_fp8 and hasattr(self.attn, "query_quant"):
