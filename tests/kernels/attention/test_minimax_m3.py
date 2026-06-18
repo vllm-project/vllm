@@ -134,6 +134,7 @@ def _reference_index_topk(
     topk: int,
     init_blocks: int,
     local_blocks: int,
+    sm_scale: float = 1.0,
 ) -> torch.Tensor:
     total_q, num_idx_heads, _ = idx_q.shape
     out = torch.full(
@@ -149,7 +150,7 @@ def _reference_index_topk(
         num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
         pages = block_table[req_id, :num_blocks]
         k = index_kv_cache[pages].reshape(num_blocks * BLOCK_SIZE, -1)
-        score = torch.einsum("qhd,kd->hqk", q.float(), k.float())
+        score = torch.einsum("qhd,kd->hqk", q.float(), k.float()) * sm_scale
 
         q_pos = prefix_len + torch.arange(q_len, device=idx_q.device)
         k_pos = torch.arange(k.shape[0], device=idx_q.device)
