@@ -521,6 +521,38 @@ class Worker(WorkerBase):
                     suggested_util,
                 )
 
+        # ── DP num_gpu_blocks coordination ───────────────────────────────────
+        # Each DP replica is an independent EngineCore that profiles KV memory
+        # on its own, so per-rank available memory (hence num_gpu_blocks) drifts
+        # by a few thousand blocks. get_kv_cache_configs() already pins all TP
+        # ranks WITHIN an engine to the smallest num_blocks; this extends the
+        # same min-reduce ACROSS DP replicas so every rank lands on an identical
+        # num_gpu_blocks. Mismatched per-rank block counts otherwise make
+        # disaggregated cross-instance KV reads overflow the smaller memory
+        # region at high concurrency. Mirrors the TP min in
+        # ExecutorWithExternalLauncher.determine_available_memory, but over the
+        # DP group's CPU (gloo) communicator.
+        if self.parallel_config.data_parallel_size > 1:
+            import torch.distributed as dist
+
+            from vllm.distributed.parallel_state import get_dp_group
+
+            mem = int(self.available_kv_cache_memory_bytes)
+            mem_tensor = torch.tensor([mem], device="cpu", dtype=torch.int64)
+            dist.all_reduce(
+                mem_tensor, group=get_dp_group().cpu_group, op=dist.ReduceOp.MIN
+            )
+            synced_mem = int(mem_tensor.item())
+            if synced_mem != mem:
+                logger.info(
+                    "DP KV-cache sync: available KV memory %s GiB -> %s GiB "
+                    "(min across %d DP ranks) for a uniform num_gpu_blocks",
+                    format_gib(mem),
+                    format_gib(synced_mem),
+                    self.parallel_config.data_parallel_size,
+                )
+            self.available_kv_cache_memory_bytes = synced_mem
+
         return int(self.available_kv_cache_memory_bytes)
 
     def get_kv_connector_handshake_metadata(
