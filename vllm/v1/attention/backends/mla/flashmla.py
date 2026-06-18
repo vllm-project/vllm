@@ -164,7 +164,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         # we use the max but all should be the same due to uniform length requirement
         max_query_len = query_lens_cpu.max().item()
         num_q_heads = self.num_q_heads
-        if self.is_fp8_kvcache and self.dcp_world_size > 1:
+        if self.dcp_world_size > 1:
             num_q_heads *= self.dcp_world_size
         num_q_tokens_per_head_k = max_query_len * num_q_heads // 1
         scheduler_metadata, _ = get_mla_metadata(

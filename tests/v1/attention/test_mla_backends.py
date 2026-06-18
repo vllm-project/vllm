@@ -693,7 +693,10 @@ def test_mock_mla_dcp_fp8_decode_gathers_quantized_query(
     )
 
 
-def test_flashmla_dcp_fp8_decode_metadata_uses_gathered_query_heads(monkeypatch):
+@pytest.mark.parametrize("is_fp8_kvcache", [False, True], ids=["bf16", "fp8"])
+def test_flashmla_dcp_decode_metadata_uses_gathered_query_heads(
+    monkeypatch, is_fp8_kvcache
+):
     class _FakeSchedulerMetadata:
         tile_scheduler_metadata = None
         num_splits = None
@@ -740,7 +743,7 @@ def test_flashmla_dcp_fp8_decode_metadata_uses_gathered_query_heads(monkeypatch)
     builder = object.__new__(flashmla_module.FlashMLAMetadataBuilder)
     builder.num_q_heads = 4
     builder.dcp_world_size = 2
-    builder.is_fp8_kvcache = True
+    builder.is_fp8_kvcache = is_fp8_kvcache
     builder.compilation_config = type(
         "_CompilationConfig",
         (),
@@ -766,14 +769,19 @@ def test_flashmla_dcp_fp8_decode_metadata_uses_gathered_query_heads(monkeypatch)
         dcp_tot_seq_lens_device=None,
     )
 
-    assert metadata.scheduler_metadata.tile_scheduler_metadata is not None
-    assert metadata.scheduler_metadata.num_splits is not None
     assert base_call is not None
     assert base_call[0] is seq_lens
-    assert base_call[1:] == (8, 1, True)
-    assert fp8_call is not None
-    assert fp8_call[0] is seq_lens
-    assert fp8_call[1:] == (8, 1)
+    assert base_call[1:] == (8, 1, is_fp8_kvcache)
+    if is_fp8_kvcache:
+        assert metadata.scheduler_metadata.tile_scheduler_metadata is not None
+        assert metadata.scheduler_metadata.num_splits is not None
+        assert fp8_call is not None
+        assert fp8_call[0] is seq_lens
+        assert fp8_call[1:] == (8, 1)
+    else:
+        assert metadata.scheduler_metadata.tile_scheduler_metadata is None
+        assert metadata.scheduler_metadata.num_splits is None
+        assert fp8_call is None
 
 
 def run_attention_backend(
