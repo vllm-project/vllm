@@ -10,6 +10,7 @@ use utils::{feed_external_parser, feed_parser, openai_tools};
 
 const CHUNK_CHARS: usize = 7;
 const LONG_NORMAL_TEXT_REPEATS: usize = 2048;
+const LONG_TOOL_BODY_REPEATS: usize = 8192;
 
 fn mixed_fixture() -> String {
     concat!(
@@ -37,6 +38,17 @@ fn mixed_fixture() -> String {
 fn long_normal_text_fixture() -> String {
     let line = "This is ordinary assistant text with no Qwen Coder tool markers at all.\n";
     line.repeat(LONG_NORMAL_TEXT_REPEATS)
+}
+
+fn long_tool_call_fixture() -> String {
+    let location = "x".repeat(LONG_TOOL_BODY_REPEATS);
+    format!(
+        "<tool_call>\n\
+         <function=get_weather>\n\
+         <parameter=location>{location}</parameter>\n\
+         </function>\n\
+         </tool_call>"
+    )
 }
 
 fn native_parser(tools: &[Tool]) -> Box<dyn ToolParser> {
@@ -112,6 +124,7 @@ fn bench_qwen3_coder(c: &mut Criterion) {
     let tools = test_tools();
     let mixed_text = mixed_fixture();
     let long_normal_text = long_normal_text_fixture();
+    let long_tool_call = long_tool_call_fixture();
 
     run_stream_group(
         c,
@@ -131,6 +144,16 @@ fn bench_qwen3_coder(c: &mut Criterion) {
         CHUNK_CHARS,
         &long_normal_text,
         0,
+    );
+
+    run_stream_group(
+        c,
+        "qwen3_coder/long_tool_call_body",
+        &tools,
+        &long_tool_call,
+        CHUNK_CHARS,
+        "",
+        1,
     );
 }
 

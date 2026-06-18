@@ -5,7 +5,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{parse_buffered_event, safe_text_len};
+use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
 use crate::Tool;
 
@@ -18,10 +18,10 @@ const PARAMETER_END: &str = "</parameter>";
 
 type MinimaxM2Input<'i> = Partial<&'i str>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MinimaxM2Mode {
     Text,
-    ToolBlock,
+    ToolBlock { invoke_end_scan: MarkerScanState },
     Done,
 }
 
@@ -74,7 +74,11 @@ impl MinimaxM2ToolParser {
             MinimaxM2Event::Text { len: consumed_len } => {
                 output.normal_text.push_str(&self.buffer[..consumed_len]);
             }
-            MinimaxM2Event::ToolBlockStart => self.mode = MinimaxM2Mode::ToolBlock,
+            MinimaxM2Event::ToolBlockStart => {
+                self.mode = MinimaxM2Mode::ToolBlock {
+                    invoke_end_scan: MarkerScanState::default(),
+                };
+            }
             MinimaxM2Event::Invoke { name, raw_params } => {
                 let arguments = self.tool_parameters.convert_params_with_schema(&name, raw_params);
                 let arguments = serde_json::to_string(&arguments)
@@ -112,7 +116,7 @@ impl ToolParser for MinimaxM2ToolParser {
         self.buffer.push_str(chunk);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_minimax_m2_event(input, self.mode)
+            parse_next_minimax_m2_event(input, &mut self.mode)
         })? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
@@ -127,7 +131,7 @@ impl ToolParser for MinimaxM2ToolParser {
             MinimaxM2Mode::Text => {
                 output.normal_text.push_str(&self.buffer);
             }
-            MinimaxM2Mode::ToolBlock => {
+            MinimaxM2Mode::ToolBlock { .. } => {
                 return Err(parsing_failed!("incomplete MiniMax M2 tool call"));
             }
             MinimaxM2Mode::Done => {}
@@ -144,11 +148,13 @@ impl ToolParser for MinimaxM2ToolParser {
 /// Parse a MiniMax M2 event for the current parser mode.
 fn parse_next_minimax_m2_event(
     input: &mut MinimaxM2Input<'_>,
-    mode: MinimaxM2Mode,
+    mode: &mut MinimaxM2Mode,
 ) -> ModalResult<MinimaxM2Event> {
     match mode {
         MinimaxM2Mode::Text => parse_text_event(input),
-        MinimaxM2Mode::ToolBlock => parse_tool_block_event(input),
+        MinimaxM2Mode::ToolBlock { invoke_end_scan } => {
+            parse_tool_block_event(input, invoke_end_scan)
+        }
         MinimaxM2Mode::Done => ignored_rest_event(input),
     }
 }
@@ -169,8 +175,14 @@ fn safe_text_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event
 }
 
 /// Parse one event inside a MiniMax M2 tool block.
-fn parse_tool_block_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
-    alt((tool_block_end_event, invoke_event)).parse_next(input)
+fn parse_tool_block_event(
+    input: &mut MinimaxM2Input<'_>,
+    invoke_end_scan: &mut MarkerScanState,
+) -> ModalResult<MinimaxM2Event> {
+    alt((tool_block_end_event, |input: &mut MinimaxM2Input<'_>| {
+        invoke_event(input, invoke_end_scan)
+    }))
+    .parse_next(input)
 }
 
 /// Parse a MiniMax M2 tool-block end marker.
@@ -181,14 +193,17 @@ fn tool_block_end_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2
 }
 
 /// Parse a complete MiniMax M2 invoke block.
-fn invoke_event(input: &mut MinimaxM2Input<'_>) -> ModalResult<MinimaxM2Event> {
+fn invoke_event(
+    input: &mut MinimaxM2Input<'_>,
+    invoke_end_scan: &mut MarkerScanState,
+) -> ModalResult<MinimaxM2Event> {
     let (name, body) = seq!(
         _: ws0,
         _: literal(INVOKE_START),
         _: (ws1, literal("name=")),
         partial_attr_value,
         _: literal(">"),
-        take_until(0.., INVOKE_END),
+        take_until_marker(INVOKE_END, invoke_end_scan),
         _: literal(INVOKE_END),
     )
     .parse_next(input)?;

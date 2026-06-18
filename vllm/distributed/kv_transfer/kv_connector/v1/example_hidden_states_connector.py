@@ -150,7 +150,14 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Worker-side state (set by register_kv_caches).
         self._kv_cache: torch.Tensor | None = None
+
+        # Identify which KV cache group holds the hidden-states layer.
         self._hs_group_idx: int = 0
+        if self._kv_cache_config is not None:
+            for i, group in enumerate(self._kv_cache_config.kv_cache_groups):
+                if any("cache_only_layers" in n for n in group.layer_names):
+                    self._hs_group_idx = i
+                    break
         # Only TP rank 0 writes hidden states to disk; other TP ranks no-op.
         # Set in register_kv_caches (after distributed init).
         self._is_tp_rank_zero: bool = True
