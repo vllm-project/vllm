@@ -1353,7 +1353,7 @@ class ModelConfig:
             if hasattr(self.hf_text_config, "model_type") and (
                 self.hf_text_config.model_type == "zaya"
             ):
-                return self.hf_text_config.num_layers
+                return self.hf_text_config.num_hidden_layers
             # Hybrid model Minimax
             attn_type_list = getattr(self.hf_config, "attn_type_list", None)
             if attn_type_list:
