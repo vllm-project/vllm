@@ -8,7 +8,6 @@ using fake transport and session objects.
 
 from __future__ import annotations
 
-import threading
 import time
 
 import numpy as np
@@ -21,25 +20,6 @@ from vllm.v1.kv_offload.tiering.p2p.manager import (
     P2PSecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.p2p.session import LoadResult, StoreResult
-
-
-def _init_threading_state(mgr: P2PSecondaryTierManager) -> None:
-    """Populate the threading-related attrs that __init__ would set.
-
-    Tests bypass __init__ via __new__, so these have to be filled in by
-    hand. Background poller is disabled; get_finished_jobs() drives a
-    synchronous _poll_once() in that mode.
-    """
-    mgr._lock = threading.RLock()
-    mgr._stop_event = threading.Event()
-    mgr._poller_enabled = False
-    mgr._poll_interval = 0.001
-    mgr._poller_thread = None
-    mgr._poll_acquire_count = 0
-    mgr._poll_wait_warned_at = 0.0
-    mgr._poll_max_wait_s = 0.0
-    mgr._poll_max_held_s = 0.0
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -93,7 +73,6 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._failed_req_ids = set()
     mgr._sessions = {}
     mgr._pending_session_created_at = {}
-    _init_threading_state(mgr)
     return mgr
 
 
@@ -278,6 +257,16 @@ class TestOnRequestFinished:
 # ---------------------------------------------------------------------------
 
 
+class _FakeServerHalf:
+    def __init__(self) -> None:
+        self._inflight: dict[int, object] = {}
+
+
+class _FakeClientHalf:
+    def __init__(self) -> None:
+        self._inbound: dict[int, object] = {}
+
+
 class _FakeSession:
     """Fake bidirectional session that returns canned poll() results."""
 
@@ -301,9 +290,11 @@ class _FakeSession:
         self._close_stores = close_stores or []
         self.requests: list[tuple[int, str]] = []
         self.finishes: list[str] = []
-        # Mirror P2PSession._inflight (transfer_id → handle/state). The
-        # shutdown-drain test populates this; other tests leave it empty.
-        self._inflight: dict[int, object] = {}
+        # Mirror P2PSession._server._inflight (transfer_id → handle) and
+        # P2PSession._client._inbound for the shutdown-drain and drain_jobs
+        # paths. Tests populate _server._inflight when needed.
+        self._server = _FakeServerHalf()
+        self._client = _FakeClientHalf()
 
     def poll(self):
         loads = self._loads
@@ -433,139 +424,24 @@ class TestGetFinished:
 
 
 # ---------------------------------------------------------------------------
-# Background poller thread
+# has_pending_work
 # ---------------------------------------------------------------------------
 
 
-class _CountingControl:
-    """Fake control transport that counts poll() calls."""
+class TestHasPendingWork:
+    """has_pending_work() must always return True so the engine keeps
+    ticking the offload pipeline — that's the only thread driving
+    _control.poll() (incoming peer connects) and session.poll()
+    (incoming fetch messages on existing sessions)."""
 
-    def __init__(self) -> None:
-        self.poll_count = 0
-        self._lock = threading.Lock()
-
-    def poll(self):
-        with self._lock:
-            self.poll_count += 1
-        return []
-
-    def close(self):
-        pass
-
-
-class TestPollerThread:
-    """Verify the background poller thread runs and shuts down cleanly."""
-
-    def _make_manager_with_thread(
-        self, poll_interval: float = 0.001
-    ) -> tuple[P2PSecondaryTierManager, _CountingControl]:
-        mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
-        mgr._local_id = "127.0.0.1:7777"
-        mgr._finished_jobs = []
-        mgr._failed_req_ids = set()
-        mgr._sessions = {}
-        mgr._lock = threading.RLock()
-        mgr._stop_event = threading.Event()
-        mgr._poller_enabled = True
-        mgr._poll_interval = poll_interval
-        mgr._poll_acquire_count = 0
-        mgr._poll_wait_warned_at = 0.0
-        mgr._poll_max_wait_s = 0.0
-        mgr._poll_max_held_s = 0.0
-        control = _CountingControl()
-        mgr._control = control  # type: ignore[assignment]
-        mgr._data = None  # type: ignore[assignment]
-        mgr._poller_thread = threading.Thread(
-            target=mgr._poll_loop,
-            name="p2p-poller-test",
-            daemon=True,
-        )
-        mgr._poller_thread.start()
-        return mgr, control
-
-    def test_thread_runs_and_polls(self):
-        mgr, control = self._make_manager_with_thread(poll_interval=0.001)
-        try:
-            deadline = 1.0
-            step = 0.01
-            elapsed = 0.0
-            while control.poll_count < 3 and elapsed < deadline:
-                threading.Event().wait(step)
-                elapsed += step
-            assert control.poll_count >= 3
-        finally:
-            mgr._stop_event.set()
-            assert mgr._poller_thread is not None
-            mgr._poller_thread.join(timeout=2.0)
-            assert not mgr._poller_thread.is_alive()
-
-    def test_shutdown_signals_and_joins(self):
-        mgr, _ = self._make_manager_with_thread(poll_interval=0.001)
-        assert mgr._poller_thread is not None
-        assert mgr._poller_thread.is_alive()
-        mgr._stop_event.set()
-        mgr._poller_thread.join(timeout=2.0)
-        assert not mgr._poller_thread.is_alive()
-        assert mgr._stop_event.is_set()
-
-    def test_scheduler_thread_concurrent_with_poller(self):
-        """submit_load runs cleanly while poller spins concurrently."""
-        mgr, control = self._make_manager_with_thread(poll_interval=0.0005)
-        try:
-            session = _FakeSession(peer_id="10.0.0.1:8000")
-            with mgr._lock:
-                mgr._sessions["10.0.0.1:8000"] = session  # type: ignore[assignment]
-
-            for i in range(50):
-                job = _job_metadata(
-                    job_id=i, kv_params=_kv_params(kv_request_id=f"req-{i}")
-                )
-                mgr.submit_load(job)
-                results = list(mgr.get_finished_jobs())
-                assert all(isinstance(r, JobResult) for r in results)
-            assert len(session.requests) == 50
-
-            assert mgr._poller_thread is not None
-            assert mgr._poller_thread.is_alive()
-            deadline = 1.0
-            step = 0.01
-            elapsed = 0.0
-            while control.poll_count == 0 and elapsed < deadline:
-                threading.Event().wait(step)
-                elapsed += step
-            assert control.poll_count > 0
-        finally:
-            mgr._stop_event.set()
-            assert mgr._poller_thread is not None
-            mgr._poller_thread.join(timeout=2.0)
-
-
-class TestPerCallLocking:
-    """Each API method acquires/releases the lock around its body."""
-
-    def test_api_call_does_not_hold_lock_after_return(self):
+    def test_returns_true_with_no_state(self):
         mgr = _make_manager()
-        mgr.lookup(b"key", _req_context(kv_params=None))
-        assert mgr._lock.acquire(timeout=0.1)
-        mgr._lock.release()
+        assert mgr.has_pending_work() is True
 
-    def test_on_schedule_end_is_no_op(self):
+    def test_returns_true_with_active_sessions(self):
         mgr = _make_manager()
-        mgr.on_schedule_end()
-        assert mgr._lock.acquire(timeout=0.1)
-        mgr._lock.release()
-        mgr.lookup(b"key", _req_context(kv_params=None))
-        mgr.on_schedule_end()
-        assert mgr._lock.acquire(timeout=0.1)
-        mgr._lock.release()
-
-    def test_multiple_api_calls_each_release_lock(self):
-        mgr = _make_manager()
-        ctx = _req_context(kv_params=None)
-        mgr.lookup(b"key", ctx)
-        mgr.on_request_finished(ctx)
-        assert mgr._lock.acquire(timeout=0.1)
-        mgr._lock.release()
+        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")  # type: ignore[assignment]
+        assert mgr.has_pending_work() is True
 
 
 # ---------------------------------------------------------------------------
@@ -633,7 +509,7 @@ class TestShutdownDrain:
         mgr._control = control  # type: ignore[assignment]
         if inflight_ids:
             session = _FakeSession(peer_id="peer:1", connected=True)
-            session._inflight = {tid: object() for tid in inflight_ids}
+            session._server._inflight = {tid: object() for tid in inflight_ids}
             mgr._sessions["peer:1"] = session  # type: ignore[assignment]
         return mgr, data, control
 
@@ -663,7 +539,6 @@ class TestShutdownDrain:
             still_queue=[[42]],
             inflight_ids=[42],
         )
-        mgr._poll_interval = 0.001
         mgr.shutdown()
 
         wait_calls = [c for c in data.cancel_calls if c[1] == "wait"]
@@ -832,8 +707,8 @@ def _build_paired_managers() -> tuple[P2PSecondaryTierManager, P2PSecondaryTierM
     """Two managers each acting as both client and server toward the other.
 
     Wires _LoopbackControl pair + per-side _FakeData so transfers complete
-    on the next poll. The poller thread is disabled; the test drives polling
-    by calling get_finished_jobs(), which invokes _poll_once synchronously.
+    on the next poll. The test drives polling by calling get_finished_jobs(),
+    which invokes _poll_once synchronously on the calling thread.
     """
     mgr_a = _make_manager()
     mgr_b = _make_manager()
