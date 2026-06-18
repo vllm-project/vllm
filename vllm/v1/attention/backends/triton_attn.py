@@ -583,20 +583,17 @@ class TritonAttentionImpl(AttentionImpl):
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
-        # Pre-SM89: no native fp8e4nv cast -> emulate fp8 KV in software (explicit
-        # fp8e4nv<->{bf16 on SM80/86, fp16 on SM75} conversion in the reshape store
-        # + unified_attention read; the conversion dtype follows the activation dtype).
+        # Pre-SM89 CUDA has no native fp8e4nv cast -> software-convert fp8 KV in
+        # the reshape store and the unified_attention read.
         self._fp8_software_conv = (
             is_quantized_kv_cache(kv_cache_dtype)
             and current_platform.is_cuda()
             and current_platform.has_device_capability(75)
             and not current_platform.has_device_capability(89)
         )
-        # When fp8 KV is software-emulated there is no native fp8e4nv cast, so we
-        # cannot quantize the query to fp8 either (torch.compile would fuse a
-        # query->fp8e4nv cast into the RoPE kernel, which fails to compile on
-        # SM80/86). Keep the query in bf16/fp16; _cast_kv_tile dequantizes K/V to
-        # the query dtype, so attention runs in the query's dtype.
+        # With software fp8 KV the query cannot be quantized to fp8 (no native
+        # cast for torch.compile to fuse into RoPE); _cast_kv_tile dequantizes
+        # K/V to the query dtype instead.
         self.supports_quant_query_input = (
             current_platform.is_cuda() and not self._fp8_software_conv
         )
