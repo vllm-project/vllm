@@ -1206,9 +1206,7 @@ class ModelConfig:
         if (
             pipeline_parallel_size > 1
             and not is_local_drafter
-            and not self.registry.is_pp_supported_model(
-                self.architectures, self
-            )
+            and not self.registry.is_pp_supported_model(self.architectures, self)
         ):
             raise NotImplementedError(
                 "Pipeline parallelism is not supported for this model. "
