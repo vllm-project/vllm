@@ -82,9 +82,6 @@ class ECCPUConsumer:
         # Locally cached mm_hashes pinned for mmap->GPU re-copy this step.
         self._pending_reload: set[str] = set()
 
-        # Set to True once _poll_step() runs; reset in build_loads().
-        self._step_polled: bool = False
-
     # ── public API ────────────────────────────────────────────────────────────
 
     def has_cache_item(self, identifier: str) -> bool:
@@ -194,8 +191,6 @@ class ECCPUConsumer:
         (the only place session.poll() advances xfer state machines), so
         _step_completed / _tombstones / etc. are up to date here.
         """
-        self._step_polled = False
-
         loads: dict[str, list[int]] = {}
         for mm_hash in self._step_completed:
             if mm_hash in self._blocks:
@@ -228,11 +223,12 @@ class ECCPUConsumer:
     # ── internal ──────────────────────────────────────────────────────────────
 
     def _poll_step(self) -> None:
-        """Poll all connections once per step and advance every session."""
-        if self._step_polled:
-            return
-        self._step_polled = True
+        """Poll all connections once per step and advance every session.
 
+        Called exactly once per scheduling step: ensure_cache_available()
+        invokes it only when the scheduler passes first_in_batch=True, which
+        the scheduler arms once per step.
+        """
         now = time.monotonic()
         all_messages = self._transport.poll()  # dict[PeerAddr, list[bytes]]
 
