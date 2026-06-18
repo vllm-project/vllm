@@ -21,6 +21,12 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     # TODO: create another `optional` test group for slow tests
     - pytest -v -s -m 'not slow_test' v1/spec_decode
+  mirror:
+    amd:
+      device: mi300_1
+      timeout_in_minutes: 65
+      depends_on:
+      - image-build-amd
 
 - label: V1 Sample + Logits
   key: v1-sample-logits
