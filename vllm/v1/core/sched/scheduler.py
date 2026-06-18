@@ -1730,7 +1730,24 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
-        for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
+        has_pooler_outputs = bool(pooler_outputs)
+        has_logprobs = logprobs is not None
+        has_num_nans_in_logits = num_nans_in_logits is not None
+        use_simple_update_global = self._can_use_simple_update_path_global(
+            scheduler_output,
+            model_runner_output,
+            failed_kv_load_req_ids,
+            has_logprobs=has_logprobs,
+            has_pooler_outputs=has_pooler_outputs,
+            has_num_nans_in_logits=has_num_nans_in_logits,
+        )
+        requests = self.requests
+        scheduled_spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
+        num_sampled_tokens_per_step = getattr(self, "num_sampled_tokens_per_step", 1)
+        structured_output_manager = self.structured_output_manager
+        enable_return_routed_experts = self.enable_return_routed_experts
+        for req_index, req_id in enumerate(model_runner_output.req_ids):
+            num_tokens_scheduled = num_scheduled_tokens[req_id]
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
             output_is_stale = False
@@ -1742,35 +1759,78 @@ class Scheduler(SchedulerInterface):
                     request.num_stale_output_tokens -= num_tokens_scheduled
                     assert request.num_stale_output_tokens >= 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
-                # skip failed or rescheduled requests from KV load failure
                 continue
             if request is None or request.is_finished():
-                # The request is already finished. This can happen if the
-                # request is aborted while the model is executing it (e.g.,
-                # in pipeline parallelism or in async scheduling).
-                # NOTE(Kuntai): When delay_free_blocks=True (for async KV
-                # cache transfer in KV connector), the aborted request will not
-                # be set to None (in order to finish async KV transfer).
-                # In this case, we use is_finished() to check.
                 continue
 
             # Drop-mode stale output (same-step resume) is discarded entirely.
             if output_is_stale and request.drop_stale_output:
                 continue
 
-            req_index = model_runner_output.req_id_to_index[req_id]
+            use_simple_request = (
+                use_simple_update_global
+                and not request.has_encoder_inputs
+                and not request.use_structured_output
+                and request.pooling_params is None
+            )
+            if use_simple_request:
+                new_token_ids = (
+                    sampled_token_ids[req_index] if sampled_token_ids else []
+                )
+                if not new_token_ids:
+                    continue
+
+                status_before_stop = request.status
+                new_token_ids, stopped = self._update_request_with_output(
+                    request, new_token_ids
+                )
+
+                finish_reason = None
+                kv_transfer_params = None
+                if stopped:
+                    finish_reason = request.get_finished_reason()
+                    finished = self._handle_stopped_request(request)
+                    if finished:
+                        kv_transfer_params = self._free_request(request)
+                    if status_before_stop == RequestStatus.RUNNING:
+                        stopped_running_reqs.add(request)
+                    else:
+                        stopped_preempted_reqs.add(request)
+
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=new_token_ids,
+                        finish_reason=finish_reason,
+                        new_logprobs=None,
+                        new_prompt_logprobs_tensors=None,
+                        pooling_output=None,
+                        stop_reason=request.stop_reason,
+                        events=request.take_events(),
+                        prefill_stats=request.take_prefill_stats(),
+                        kv_transfer_params=kv_transfer_params,
+                        trace_headers=request.trace_headers,
+                        routed_experts=None,
+                        num_nans_in_logits=request.num_nans_in_logits,
+                    )
+                )
+                continue
+
+
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
 
-            scheduled_spec_token_ids = (
-                scheduler_output.scheduled_spec_decode_tokens.get(req_id)
-            )
-            if scheduled_spec_token_ids and (
-                generated_token_ids or self.num_sampled_tokens_per_step == 0
+            scheduled_spec_token_ids = scheduled_spec_decode_tokens.get(req_id)
+            # Skip a stale frame still pending discard (async_tokens_to_discard
+            # > 0): its pre-reset rejection count would underflow the counters.
+            if (
+                scheduled_spec_token_ids
+                and (generated_token_ids or num_sampled_tokens_per_step == 0)
+                and request.async_tokens_to_discard == 0
             ):
                 num_draft_tokens = len(scheduled_spec_token_ids)
-                num_sampled = self.num_sampled_tokens_per_step
+                num_sampled = num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
                 num_rejected = num_draft_tokens - num_accepted
                 # Rejections roll back num_computed_tokens (and, under async
@@ -1790,31 +1850,28 @@ class Scheduler(SchedulerInterface):
                     request_id=req_id,
                 )
 
-            # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:
                 self._free_encoder_inputs(request)
 
             stopped = False
             new_logprobs = None
             new_token_ids = generated_token_ids
-            pooler_output = pooler_outputs[req_index] if pooler_outputs else None
+            pooler_output = pooler_outputs[req_index] if has_pooler_outputs else None
             kv_transfer_params = None
             ec_transfer_params = None
             prefill_stats = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
 
-            # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids, is_stale=output_is_stale
                 )
             elif request.pooling_params and pooler_output is not None:
-                # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
-            if new_token_ids and self.structured_output_manager.should_advance(
+            if new_token_ids and structured_output_manager.should_advance(
                 request, new_token_ids=new_token_ids
             ):
                 struct_output_request = request.structured_output_request
@@ -1844,7 +1901,7 @@ class Scheduler(SchedulerInterface):
 
             routed_experts = None
             if (
-                self.enable_return_routed_experts
+                enable_return_routed_experts
                 and routing_data is not None
                 and new_token_ids
             ):
@@ -1852,9 +1909,6 @@ class Scheduler(SchedulerInterface):
                 end = req_offset + num_tokens_scheduled
                 block_ids = self._re_block_ids.pop(req_id, [])
                 if num_output_tokens_before == 0:
-                    # Prefill completed: read full prompt routing from
-                    # slot buffer using the block-ID snapshot taken at
-                    # schedule time (immune to async preemption).
                     if (
                         request.sampling_params is not None
                         and request.sampling_params.routed_experts_prompt_start
@@ -1873,13 +1927,10 @@ class Scheduler(SchedulerInterface):
                     )
                 else:
                     if scheduled_spec_token_ids:
-                        # Spec decode: accepted tokens at the START of
-                        # the scheduled range, rejected at the end.
                         routed_experts = routing_data[
                             req_offset : req_offset + len(new_token_ids)
                         ]
                     else:
-                        # Normal decode / re-prefill: token(s) at the END.
                         routed_experts = routing_data[end - len(new_token_ids) : end]
 
             should_emit_output = bool(
@@ -1894,8 +1945,6 @@ class Scheduler(SchedulerInterface):
 
             finish_reason = None
             if stopped:
-                # Capture finish_reason BEFORE _handle_stopped_request, which may
-                # reset the status to WAITING for streaming requests that continue.
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
@@ -1906,21 +1955,24 @@ class Scheduler(SchedulerInterface):
                 else:
                     stopped_preempted_reqs.add(request)
 
-            # Extract sample logprobs if needed.
             if (
                 request.sampling_params is not None
                 and request.sampling_params.num_logprobs is not None
-                and logprobs
+                and has_logprobs
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
-            if num_nans_in_logits is not None and req_id in num_nans_in_logits:
+            if has_num_nans_in_logits and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
 
-            # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
-            if should_emit_output:
-                # Add EngineCoreOutput for this Request.
+            if (
+                new_token_ids
+                or pooler_output is not None
+                or kv_transfer_params
+                or ec_transfer_params
+                or stopped
+            ):
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=req_id,
@@ -1940,7 +1992,6 @@ class Scheduler(SchedulerInterface):
                     )
                 )
             else:
-                # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
 
         # Remove the stopped requests from the running and waiting queues.
@@ -2072,6 +2123,40 @@ class Scheduler(SchedulerInterface):
             return self.waiting if waiting_req < skipped_req else self.skipped_waiting
 
         return self.waiting or self.skipped_waiting or None
+
+    def _can_use_simple_update_path_global(
+        self,
+        scheduler_output: SchedulerOutput,
+        model_runner_output: ModelRunnerOutput,
+        failed_kv_load_req_ids: set[str] | None,
+        *,
+        has_logprobs: bool,
+        has_pooler_outputs: bool,
+        has_num_nans_in_logits: bool,
+    ) -> bool:
+        if failed_kv_load_req_ids:
+            return False
+        if scheduler_output.scheduled_spec_decode_tokens:
+            return False
+        if has_logprobs:
+            return False
+        if model_runner_output.prompt_logprobs_dict:
+            return False
+        if self.enable_return_routed_experts:
+            return False
+        if model_runner_output.routed_experts is not None:
+            return False
+        if has_pooler_outputs:
+            return False
+        if has_num_nans_in_logits:
+            return False
+        if getattr(self, "num_sampled_tokens_per_step", 1) == 0:
+            return False
+
+        num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        if not num_scheduled_tokens:
+            return False
+        return all(num_tokens == 1 for num_tokens in num_scheduled_tokens.values())
 
     def _handle_stopped_request(self, request: Request) -> bool:
         """Return True if finished (can be False for resumable requests)."""
