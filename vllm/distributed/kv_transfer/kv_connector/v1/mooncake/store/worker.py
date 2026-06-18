@@ -19,6 +19,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
@@ -1560,7 +1561,13 @@ class LookupKeyClient:
             bind=False,
         )
 
-    def lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
+        # Async lookup support
+        self.executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="MooncakeLookupClient"
+        )
+        self.futures: dict[str, Future[int]] = {}
+
+    def _lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         token_len_bytes = token_len.to_bytes(4, byteorder="big")
@@ -1570,7 +1577,36 @@ class LookupKeyClient:
         result = int.from_bytes(resp, "big")
         return result
 
-    def reset(self) -> bool:
+    def lookup(
+        self,
+        req_id: str,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        non_block: bool = False,
+    ) -> int | None:
+        """If non_block is True, will return None until the result is ready,
+        so the caller retries on a later step."""
+        future = self.futures.get(req_id)
+        if future is None:
+            future = self.executor.submit(self._lookup, token_len, list(block_hashes))
+            self.futures[req_id] = future
+        if non_block and not future.done():
+            return None
+        try:
+            return future.result()
+        except Exception as e:
+            logger.error("Async Mooncake lookup failed for %s: %s", req_id, e)
+            return 0
+        finally:
+            del self.futures[req_id]
+
+    def discard(self, req_id: str) -> None:
+        """Drop any cached/in-flight lookup for ``req_id`` (e.g. on abort)."""
+        future = self.futures.pop(req_id, None)
+        if future is not None:
+            future.cancel()
+
+    def _reset(self) -> bool:
         """Trigger ``store.remove_all(force=True)`` on worker rank 0.
 
         Ordering assumption: caller MUST ensure no in-flight Mooncake
@@ -1582,7 +1618,11 @@ class LookupKeyClient:
         resp = self.socket.recv()
         return bytes(resp) == RESP_OK
 
+    def reset(self) -> bool:
+        return self.executor.submit(self._reset).result()
+
     def close(self):
+        self.executor.shutdown(wait=False, cancel_futures=True)
         self.socket.close(linger=0)
 
 
