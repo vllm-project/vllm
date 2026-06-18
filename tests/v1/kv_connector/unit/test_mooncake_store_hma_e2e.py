@@ -26,13 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.worker import (
     KVCacheStoreRecvingThread,
     KVCacheStoreSendingThread,
 )
-from vllm.sampling_params import SamplingParams
-from vllm.utils.hashing import sha256
-from vllm.v1.core.kv_cache_utils import (
-    BlockHash,
-    get_request_block_hasher,
-    init_none_hash,
-)
+from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -40,7 +34,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     SlidingWindowSpec,
 )
-from vllm.v1.request import Request
 
 
 class _DictStore:
@@ -65,23 +58,6 @@ class _DictStore:
 
     def batch_get_into_multi_buffers(self, keys, addrs, sizes, *_args, **_kwargs):
         return [0 if k in self._data else -1 for k in keys]
-
-
-def _make_request(
-    request_id: str,
-    token_ids: list[int],
-    hash_block_size: int,
-) -> Request:
-    init_none_hash(sha256)
-    sampling_params = SamplingParams(max_tokens=1)
-    sampling_params.update_from_generation_config({}, eos_token_id=100)
-    return Request(
-        request_id=request_id,
-        prompt_token_ids=token_ids,
-        sampling_params=sampling_params,
-        pooling_params=None,
-        block_hasher=get_request_block_hasher(hash_block_size, sha256),
-    )
 
 
 def _minimal_vllm_config(cache_block_size=16):
@@ -347,17 +323,20 @@ def test_recv_skips_swa_blocks_before_window():
 
 def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     """DSv4-style: hash_block_size=4, group block_size=16 — process_tokens
-    must use the request's direct full-block hash view for group chunks."""
+    must merge every 4 fine hashes into one chunk hash via
+    BlockHashListWithBlockSize."""
     md = KeyMetadata("m", 0, 0, 0, 0, group_id=3)
     db = ChunkedTokenDatabase(md, block_size=16, hash_block_size=4)
     db.set_kv_caches_base_addr([0])
     db.set_block_len([512])
-    req = _make_request("r0", list(range(32)), hash_block_size=4)
-    full_hashes = req.block_hashes.get_block_hashes(16)
-
-    out = list(db.process_tokens(token_len=32, block_hashes=req.block_hashes))
+    # 8 fine-grained hashes (32 tokens at hash_block_size=4) → 2 group chunks.
+    fine_hashes = [BlockHash(bytes([i + 1]) * 4) for i in range(8)]
+    out = list(db.process_tokens(token_len=32, block_hashes=fine_hashes))
     assert len(out) == 2
     assert out[0][0] == 0 and out[0][1] == 16
     assert out[1][0] == 16 and out[1][1] == 32
-    assert out[0][2].chunk_hash == full_hashes[0].hex()
-    assert out[1][2].chunk_hash == full_hashes[1].hex()
+    # Each chunk's hash is the concatenation of 4 fine hashes.
+    expected0 = b"".join(fine_hashes[0:4]).hex()
+    expected1 = b"".join(fine_hashes[4:8]).hex()
+    assert out[0][2].chunk_hash == expected0
+    assert out[1][2].chunk_hash == expected1

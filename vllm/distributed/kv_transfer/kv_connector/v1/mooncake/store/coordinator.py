@@ -8,6 +8,7 @@ from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
+    BlockHashListWithBlockSize,
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -206,12 +207,8 @@ class MooncakeStoreCoordinator:
     ) -> BlockHashList:
         if spec.block_size == self.hash_block_size:
             return block_hashes
-        get_block_hashes = getattr(block_hashes, "get_block_hashes", None)
-        if get_block_hashes is not None:
-            return get_block_hashes(spec.block_size)
-        raise NotImplementedError(
-            "Mooncake KV transfer requires request block hashes with direct "
-            "block-size views when block_size differs from hash_block_size."
+        return BlockHashListWithBlockSize(
+            block_hashes, self.hash_block_size, spec.block_size
         )
 
     def _find_hit_blocks(

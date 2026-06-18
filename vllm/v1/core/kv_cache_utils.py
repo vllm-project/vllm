@@ -7,10 +7,10 @@ import hashlib
 import math
 import os
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, NewType, TypeAlias, cast
+from typing import Any, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -2177,4 +2177,59 @@ def get_kv_cache_configs(
     return kv_cache_configs
 
 
-BlockHashList = list[BlockHash]
+class BlockHashListWithBlockSize:
+    """View request hashes at a larger block size.
+
+    Some KV-transfer paths still receive the raw request block-hash list at
+    ``hash_block_size`` granularity, while the cache group they are processing
+    uses a larger ``block_size``. This wrapper preserves that legacy behavior by
+    lazily merging adjacent fine-grained hashes into the group's hash view.
+
+    Args:
+        block_hashes: Block hashes computed at ``hash_block_size`` granularity.
+        hash_block_size: Token size represented by each input hash.
+        target_block_size: Token size expected by the consuming cache group.
+
+    Raises:
+        AssertionError: If ``target_block_size`` is not an integer multiple of
+            ``hash_block_size``.
+    """
+
+    def __init__(
+        self,
+        block_hashes: list[BlockHash],
+        hash_block_size: int,
+        target_block_size: int,
+    ) -> None:
+        assert target_block_size % hash_block_size == 0
+        self.block_hashes = block_hashes
+        self.scale_factor = target_block_size // hash_block_size
+
+    def __len__(self) -> int:
+        return len(self.block_hashes) // self.scale_factor
+
+    @overload
+    def __getitem__(self, idx: int) -> BlockHash: ...
+
+    @overload
+    def __getitem__(self, idx: slice) -> list[BlockHash]: ...
+
+    def __getitem__(self, idx: int | slice) -> BlockHash | list[BlockHash]:
+        if isinstance(idx, int):
+            return self._get_value_at(idx)
+        if isinstance(idx, slice):
+            start, stop, step = idx.indices(len(self))
+            return [self._get_value_at(i) for i in range(start, stop, step)]
+        raise TypeError(f"Invalid index type: {type(idx)!r}")
+
+    def __iter__(self) -> Iterator[BlockHash]:
+        for i in range(len(self)):
+            yield self._get_value_at(i)
+
+    def _get_value_at(self, idx: int) -> BlockHash:
+        base = idx * self.scale_factor
+        end = base + self.scale_factor
+        return BlockHash(b"".join(self.block_hashes[base:end]))
+
+
+BlockHashList = list[BlockHash] | BlockHashListWithBlockSize
