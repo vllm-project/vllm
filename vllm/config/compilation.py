@@ -485,8 +485,9 @@ class CompilationConfig:
     distributed setting. When the compilation mode is 1 or 2, the backend is
     used for the compilation directly (it sees the whole graph). When the
     compilation mode is 3, the backend supports both whole graph and piecewise
-    compilation, available backends include eager, inductor, and custom backends,
-    the latter of which can be defined via `get_compile_backend`. Furthermore,
+    compilation, available backends include eager, aot_eager, inductor, and
+    custom backends, the latter of which can be defined via
+    `get_compile_backend`. Furthermore,
     compilation is only piecewise if splitting ops is set accordingly and
     use_inductor_graph_partition is off. Note that the default options for
     splitting ops are sufficient for piecewise compilation.
@@ -1021,12 +1022,13 @@ class CompilationConfig:
                 f"{', '.join(conflicting_ops)}. Remove either the '+' or '-' directive"
             )
 
-        # Currently only eager and inductor backend are supported.
+        # Currently only eager, aot_eager and inductor backend are supported
         # for piecewise compilation. Custom backends are not supported for
         # piecewise compilation. Update when more backends are supported.
         if self.mode == CompilationMode.VLLM_COMPILE and self.backend not in [
             "",
             "eager",
+            "aot_eager",
             "inductor",
         ]:
             raise ValueError(
@@ -1102,7 +1104,7 @@ class CompilationConfig:
             return resolve_obj_by_qualname(self.backend)
 
         assert self.mode == CompilationMode.VLLM_COMPILE
-        if self.backend not in ["eager", "inductor"]:
+        if self.backend not in ["eager", "aot_eager", "inductor"]:
             logger.info("Using OOT custom backend for compilation.")
 
         from vllm.compilation.backends import VllmBackend
