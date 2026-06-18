@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::runtime::Runtime;
 
-const ZMQ_WORKER_THREADS_ENV: &str = "VLLM_ZMQ_WORKER_THREADS";
+const ZMQ_WORKER_THREADS_ENV: &str = "VLLM_RS_ZMQ_WORKER_THREADS";
 /// The number of tasks running on the ZMQ runtime is fixed and expected to remain
 /// small, and multiple engines share the same ZMQ socket. Therefore, based on
 /// benchmarks, a default value of 4 is generally sufficient.
@@ -26,7 +26,7 @@ pub(crate) fn build_zmq_runtime() -> Runtime {
 }
 
 /// Get the number of worker threads to use for the ZMQ runtime. If env var
-/// `VLLM_ZMQ_WORKER_THREADS` is set and a valid positive integer, it will be used.
+/// `VLLM_RS_ZMQ_WORKER_THREADS` is set and a valid positive integer, it will be used.
 /// Otherwise, the default value of `DEFAULT_ZMQ_WORKER_THREADS` will be used.
 fn zmq_worker_threads() -> usize {
     std::env::var(ZMQ_WORKER_THREADS_ENV)

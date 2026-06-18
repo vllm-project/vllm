@@ -108,6 +108,10 @@ fn build_router_with_options(
         .with_state(state.clone())
         .layer(from_fn_with_state(
             state.clone(),
+            middleware::offload_inference_routes,
+        ))
+        .layer(from_fn_with_state(
+            state.clone(),
             middleware::track_server_load,
         ))
         .layer(from_fn(middleware::track_http_metrics))

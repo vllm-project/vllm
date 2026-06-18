@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
@@ -11,6 +12,7 @@ use vllm_engine_core_client::protocol::lora::LoraRequest;
 
 use crate::config::{ApiServerOptions, CorsConfig};
 use crate::lora::{LoadLoraError, LoraManager, LoraModelResolution, UnloadLoraError};
+use crate::runtime::RequestRuntime;
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
 const SHUTDOWN_REFCOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -42,6 +44,8 @@ pub struct AppState {
     lora_manager: LoraManager,
     /// Backend model path reported as `root` for base-model cards.
     model_path: Option<String>,
+    /// Lazily initialized runtime for heavyweight request paths.
+    request_runtime: OnceLock<RequestRuntime>,
 }
 
 impl AppState {
@@ -68,6 +72,7 @@ impl AppState {
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
             model_path: None,
+            request_runtime: OnceLock::new(),
         }
     }
 
@@ -185,6 +190,12 @@ impl AppState {
         self.chat.engine_core_client()
     }
 
+    /// Runtime used by middleware to isolate heavyweight request handlers from
+    /// the HTTP reactor.
+    pub(crate) fn request_runtime(&self) -> &RequestRuntime {
+        self.request_runtime.get_or_init(RequestRuntime::new)
+    }
+
     /// Return the current in-flight inference request count for the `/load`
     /// endpoint.
     pub fn server_load(&self) -> u64 {
@@ -214,6 +225,7 @@ impl AppState {
             match Arc::try_unwrap(self) {
                 Ok(state) => {
                     state.chat.shutdown().await?;
+                    drop(state.request_runtime); // shutdown in background
                     return Ok(());
                 }
                 Err(state) => self = state,
