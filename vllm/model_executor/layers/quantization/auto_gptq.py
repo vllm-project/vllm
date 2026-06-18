@@ -60,6 +60,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
@@ -577,25 +578,25 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_scales, extra_weight_attrs)
         # don't shard the w2 scales when running act order
         set_weight_attrs(w2_scales, {"load_full_w2": self.quant_config.desc_act})
-        # up_proj scales
+        # up_proj zero points
         w13_qzeros = torch.nn.Parameter(
             torch.empty(
                 num_experts,
                 scales_size13,
                 2 * intermediate_size_per_partition // self.quant_config.pack_factor,
-                dtype=params_dtype,
+                dtype=torch.int32,
             ),
             requires_grad=False,
         )
         layer.register_parameter("w13_qzeros", w13_qzeros)
         set_weight_attrs(w13_qzeros, extra_weight_attrs)
-        # down_proj scales
+        # down_proj zero points
         w2_qzeros = torch.nn.Parameter(
             torch.empty(
                 num_experts,
                 scales_size2,
                 hidden_size // self.quant_config.pack_factor,
-                dtype=params_dtype,
+                dtype=torch.int32,
             ),
             requires_grad=False,
         )
@@ -668,6 +669,9 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             "W8A8-INT8 is not supported by marlin kernel."
         )
 
+        # CPU int_wna16 can't handle ZP correctly.
+        is_cpu = current_platform.is_cpu()
+
         (
             w13,
             w2,
@@ -696,8 +700,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_g_idx=layer.w2_g_idx,
             w13_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
-            w13_qzeros=getattr(layer, "w13_qzeros", None),
-            w2_qzeros=getattr(layer, "w2_qzeros", None),
+            w13_qzeros=getattr(layer, "w13_qzeros", None) if not is_cpu else None,
+            w2_qzeros=getattr(layer, "w2_qzeros", None) if not is_cpu else None,
         )
 
         replace_parameter(layer, "w13_qweight", w13)
