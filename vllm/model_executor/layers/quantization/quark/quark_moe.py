@@ -1300,6 +1300,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w2_bias=getattr(layer, "w2_bias", None),
                 a1_scale=getattr(layer, "w13_input_scale", None),
                 a2_scale=getattr(layer, "w2_input_scale", None),
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                swiglu_limit=getattr(layer, "swiglu_limit", None),
             )
 
         # Emulation and other schemes
@@ -1336,6 +1339,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 a1_scale=None,
                 a2_scale=None,
                 block_shape=None,
+                gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+                gemm1_beta=getattr(layer, "swiglu_beta", None),
+                gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
             )
 
     @property

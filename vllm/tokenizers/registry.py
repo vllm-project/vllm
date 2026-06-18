@@ -11,7 +11,7 @@ from typing_extensions import TypeVar, assert_never
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import get_config
+from vllm.transformers_utils.config import _maybe_register_hf_config, get_config
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
     is_mistral_model_repo,
@@ -245,6 +245,8 @@ cached_get_tokenizer = lru_cache(get_tokenizer)
 def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
     if model_config.skip_tokenizer_init:
         return None
+
+    _maybe_register_hf_config(getattr(model_config, "hf_config", None))
 
     return cached_get_tokenizer(
         model_config.tokenizer,
