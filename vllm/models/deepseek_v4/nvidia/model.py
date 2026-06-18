@@ -1092,19 +1092,17 @@ class DeepseekV4Model(nn.Module):
         # Pre-compute expert mapping ONCE.
         expert_mapping = self.get_expert_mapping()
 
-        # Slice block-FP8 shared experts per-rank below; replicated (SP) or
-        # unquantized ones load via the standard stacked path.
-        shard_shared_expert = (
+        # Block-FP8 shared experts: pad the intermediate up to the TP-uniform
+        # block count so the standard loaders below slice it evenly (trailing
+        # ranks land on the zero pad). SP / unquantized ones need no padding.
+        pad_shared_expert = (
             getattr(self.quant_config, "weight_block_size", None) is not None
             and not self.parallel_config.use_sequence_parallel_moe
         )
 
         for name, loaded_weight in weights:
-            if shard_shared_expert and ".shared_experts." in name:
-                self._load_shared_expert_weight(
-                    name, loaded_weight, params_dict, tp_size, tp_rank, loaded_params
-                )
-                continue
+            if pad_shared_expert and ".shared_experts." in name:
+                loaded_weight = self._pad_shared_expert_weight(name, loaded_weight)
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if ".experts." in name:
@@ -1179,18 +1177,13 @@ class DeepseekV4Model(nn.Module):
 
         return loaded_params
 
-    def _load_shared_expert_weight(
-        self,
-        name: str,
-        loaded_weight: torch.Tensor,
-        params_dict: dict[str, torch.nn.Parameter],
-        tp_size: int,
-        tp_rank: int,
-        loaded_params: set[str],
-    ) -> None:
-        """Load this rank's block slice of a block-FP8 shared-expert weight/scale.
-
-        Uniform cdiv split matching DeepseekV4MLP; ranks past n_blocks are zeroed.
+    def _pad_shared_expert_weight(
+        self, name: str, loaded_weight: torch.Tensor
+    ) -> torch.Tensor:
+        """Zero-pad a block-FP8 shared-expert weight/scale on its intermediate
+        axis up to cdiv(n_blocks, tp_size) * tp_size blocks so the standard TP
+        loaders split it evenly. gate (w1)/up (w3) [I, H] pad dim 0; down
+        (w2 -> down_proj) [H, I] pads dim 1.
         """
         block_size = getattr(self.quant_config, "weight_block_size", None)
         assert block_size is not None
@@ -1198,30 +1191,15 @@ class DeepseekV4Model(nn.Module):
         n_blocks = (
             self.config.moe_intermediate_size * (self.config.n_shared_experts or 1)
         ) // block
-        n_local = cdiv(n_blocks, tp_size)
-        start = tp_rank * n_local
-        n_real = max(0, min(start + n_local, n_blocks) - start)
+        tp_size = get_tensor_model_parallel_world_size()
+        pad_blocks = cdiv(n_blocks, tp_size) * tp_size - n_blocks
+        if pad_blocks == 0:
+            return loaded_weight
         step = 1 if name.endswith("weight_scale_inv") else block
-        src_lo, src_hi = start * step, (start + n_real) * step
-        real, total = n_real * step, n_local * step
-
-        if ".down_proj." in name:  # down [H, I]: slice input blocks (dim 1)
-            if is_pp_missing_parameter(name, self):
-                return
-            region = params_dict[name].data[:, :total]
-            region[:, :real].copy_(loaded_weight[:, src_lo:src_hi])
-            region[:, real:].zero_()
-        else:  # gate (w1) / up (w3) [I, H]: output blocks (dim 0), up = 2nd half
-            off = total if ".w3." in name else 0
-            name = name.replace(".w1.", ".gate_up_proj.").replace(
-                ".w3.", ".gate_up_proj."
-            )
-            if is_pp_missing_parameter(name, self):
-                return
-            region = params_dict[name].data[off : off + total]
-            region[:real].copy_(loaded_weight[src_lo:src_hi])
-            region[real:].zero_()
-        loaded_params.add(name)
+        dim = 1 if ".down_proj." in name else 0
+        pad_shape = list(loaded_weight.shape)
+        pad_shape[dim] = pad_blocks * step
+        return torch.cat([loaded_weight, loaded_weight.new_zeros(pad_shape)], dim=dim)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         first_layer = next(iter(islice(self.layers, self.start_layer, self.end_layer)))
