@@ -480,6 +480,7 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
             assert input_quant_op._forward_method in (
                 input_quant_op.forward_cuda,
                 input_quant_op.forward_hip,
+                input_quant_op.forward_xpu,
             )
 
         llm.apply_model(check_model)
