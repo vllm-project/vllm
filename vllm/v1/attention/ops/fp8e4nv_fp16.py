@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Software fp8e4m3 (E4M3FN / fp8e4nv) <-> fp16 conversion for Triton, SM75+.
 
-Companion to fp8e4nv_sm80.py (which converts fp8 <-> *bf16*). bf16 is an SM80+
+Companion to fp8e4nv_bf16.py (which converts fp8 <-> *bf16*). bf16 is an SM80+
 hardware type, so the bf16 path cannot serve SM75 (Turing, e.g. Tesla T4). On
 SM75 the only software dtype for an fp8 KV cache is fp16, so these helpers
 convert fp8e4m3 <-> fp16 directly (NOT via bf16) using ONLY SM75-legal integer
