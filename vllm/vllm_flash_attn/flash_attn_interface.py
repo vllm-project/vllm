@@ -200,6 +200,8 @@ def flash_attn_varlen_func(
     k_descale=None,
     v_descale=None,
     num_splits: int = 0,
+    # FA4 Only
+    output_scale=None,
     # Version selector
     fa_version: int = DEFAULT_FA_VERSION,
     s_aux=None,
@@ -271,6 +273,11 @@ def flash_attn_varlen_func(
     )
     assert block_table is None or seqused_k is not None, (
         "seqused_k must be provided if block_table is provided"
+    )
+
+    assert output_scale is None or fa_version == 4, (
+        f"Fused FP8 output (output_scale) is only supported by FA4, "
+        f"got fa_version={fa_version}"
     )
 
     if softmax_scale is None:
@@ -403,6 +410,7 @@ def flash_attn_varlen_func(
             learnable_sink=s_aux,
             mask_mod=mask_mod,
             aux_tensors=aux_tensors,
+            output_scale=output_scale,
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")
