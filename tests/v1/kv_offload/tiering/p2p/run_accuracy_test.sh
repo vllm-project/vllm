@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
-# Accuracy test driver for the p2p_connector
-# (OffloadingConnector + TieringOffloadingSpec + p2p_connector tier).
+# Accuracy test driver for the p2p connector
+# (OffloadingConnector + TieringOffloadingSpec + p2p tier).
 #
 # Mirrors tests/v1/kv_connector/nixl_integration/run_accuracy_test.sh:
 # brings up N prefillers + M decoders on the local host, fronts them
@@ -150,7 +150,7 @@ get_num_gpus() {
 # Mirrors deploy_local.sh:131.
 build_kv_config() {
   local pd_port=$1
-  printf '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":%s,"secondary_tiers":[{"type":"p2p_connector","host":"%s","port":%s}]}}' \
+  printf '{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"spec_name":"TieringOffloadingSpec","cpu_bytes_to_use":%s,"secondary_tiers":[{"type":"p2p","host":"%s","port":%s}]}}' \
     "${CPU_BYTES}" "${P2P_HOST}" "${pd_port}"
 }
 

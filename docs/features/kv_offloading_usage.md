@@ -121,11 +121,11 @@ PYTHONHASHSEED=0 vllm serve ...
 
 ### P2P Connector
 
-The P2P tier (`type: "p2p_connector"`) shares completed KV blocks between vLLM instances over RDMA via NIXL. Each instance binds a control socket on `host:port` and exchanges blocks directly with peers — no shared filesystem required.
+The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances over RDMA via NIXL. Each instance binds a control socket on `host:port` and exchanges blocks directly with peers — no shared filesystem required.
 
 | Key | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `type` | yes | — | Must be `p2p_connector`. |
+| `type` | yes | — | Must be `p2p`. |
 | `host` | no | `0.0.0.0` | Address the control socket binds to. |
 | `port` | no | `7777` | Port for the control socket. Must be reachable from peers. |
 | `backends` | no | `["UCX"]` | NIXL transport backends. See [NixlConnector Usage Guide](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin) for available backends and selection guidance. |
