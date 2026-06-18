@@ -156,83 +156,9 @@ class DFlashQwen3Attention(nn.Module):
 
         q, k = self.rotary_emb(positions, q, k)
 
-        ctx_k = getattr(self.attn, "_dflash_ctx_k", None)
-        if ctx_k is not None:
-            ctx_v = self.attn._dflash_ctx_v
-            ctx_pos = getattr(self.attn, "_dflash_ctx_pos", None)
-            # Clear so a later non-drafter / dummy call can't reuse stale state.
-            self.attn._dflash_ctx_k = None
-            self.attn._dflash_ctx_v = None
-            self.attn._dflash_ctx_pos = None
-            attn_output = self._dflash_dense_attn(q, k, v, ctx_k, ctx_v, ctx_pos)
-        else:
-            attn_output = self.attn(q, k, v)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
-
-    def _dflash_dense_attn(self, q, k, v, ctx_k, ctx_v, ctx_pos=None):
-        """Dense bidirectional (non-causal) attention for the DFlash drafter.
-
-        Bypasses the paged KV cache (whose non-causal multi-query read is
-        unreliable on CPU) but mirrors its semantics with a position-indexed
-        accumulation buffer. Each step's precompute only produces the *new*
-        context tokens; we scatter them into a per-layer running buffer by
-        their absolute positions and attend to ``buffer[:valid_ctx]``. This
-        gives the drafter the full history, overwrites stale slots, and drops
-        rejected drafts (written past ``valid_ctx``). Single-sequence (batch=1).
-        """
-        ql = q.shape[0]
-        nh, nkv, hd = self.num_heads, self.num_kv_heads, self.head_dim
-        from vllm.forward_context import get_forward_context
-
-        am = get_forward_context().attn_metadata
-        if isinstance(am, dict):
-            am = am.get(self.attn.layer_name, next(iter(am.values())))
-        valid_ctx = None
-        if am is not None and getattr(am, "seq_lens", None) is not None:
-            valid_ctx = int(am.seq_lens[0].item()) - ql
-
-        if ctx_pos is not None and valid_ctx is not None:
-            pos = ctx_pos.to(torch.long)
-            kf = ctx_k.reshape(ctx_k.shape[0], nkv, hd)
-            vf = ctx_v.reshape(ctx_v.shape[0], nkv, hd)
-            needed = max(int(pos.max().item()) + 1, valid_ctx)
-            acc_k = getattr(self, "_dflash_acc_k", None)
-            fresh = acc_k is None or int(pos.min().item()) == 0
-            if fresh:
-                acc_k = kf.new_zeros((needed, nkv, hd))
-                acc_v = vf.new_zeros((needed, nkv, hd))
-            else:
-                acc_v = self._dflash_acc_v
-                if acc_k.shape[0] < needed:
-                    grow = needed - acc_k.shape[0]
-                    acc_k = torch.cat([acc_k, acc_k.new_zeros((grow, nkv, hd))], 0)
-                    acc_v = torch.cat([acc_v, acc_v.new_zeros((grow, nkv, hd))], 0)
-            acc_k.index_copy_(0, pos, kf.to(acc_k.dtype))
-            acc_v.index_copy_(0, pos, vf.to(acc_v.dtype))
-            self._dflash_acc_k = acc_k
-            self._dflash_acc_v = acc_v
-            ctx_k = acc_k[:valid_ctx]
-            ctx_v = acc_v[:valid_ctx]
-        elif valid_ctx is not None and 0 <= valid_ctx <= ctx_k.shape[0]:
-            ctx_k = ctx_k[:valid_ctx]
-            ctx_v = ctx_v[:valid_ctx]
-        q_ = q.view(ql, nh, hd)
-        k_q = k.view(ql, nkv, hd)
-        v_q = v.view(ql, nkv, hd)
-        full_k = torch.cat([ctx_k.to(k_q.dtype), k_q], dim=0)  # [ctx+ql, nkv, hd]
-        full_v = torch.cat([ctx_v.to(v_q.dtype), v_q], dim=0)
-        out = F.scaled_dot_product_attention(
-            q_.transpose(0, 1).unsqueeze(0),       # [1, nh, ql, hd]
-            full_k.transpose(0, 1).unsqueeze(0),   # [1, nkv, L, hd]
-            full_v.transpose(0, 1).unsqueeze(0),
-            attn_mask=None,
-            dropout_p=0.0,
-            is_causal=False,
-            scale=self.scaling,
-            enable_gqa=(nh != nkv),
-        )
-        return out.squeeze(0).transpose(0, 1).reshape(ql, nh * hd)
 
 
 class DFlashQwen3DecoderLayer(nn.Module):
@@ -522,26 +448,22 @@ class DFlashQwen3Model(nn.Module):
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
         for i in range(L):
             attn = self._attn_layers[i]
+            kv_cache = attn.kv_cache
             if current_platform.is_cpu():
-                # On CPU the drafter uses dense non-causal attention over the
-                # context K/V instead of the paged cache (whose non-causal
-                # multi-query read is unreliable on CPU). Stash the context K/V
-                # on the layer for DFlashQwen3Attention.forward to consume; the
-                # dense path reconstructs the full context from a
-                # position-indexed accumulation of these tensors. This also
-                # avoids an out-of-bounds reshape_and_cache write that the wide
-                # speculative slot-mapping can trigger after KV-block reuse.
-                attn._dflash_ctx_k = all_k_final[i].contiguous()
-                attn._dflash_ctx_v = all_v[i].contiguous()
-                attn._dflash_ctx_pos = context_positions
-            else:
-                kv_cache = attn.kv_cache
-                attn.impl.do_kv_cache_update(
-                    attn,
-                    all_k_final[i],
-                    all_v[i],
-                    kv_cache,
-                    context_slot_mapping,
+                # do_kv_cache_update splits K/V with chunk(2, dim=2), which
+                # requires the cache reshaped to
+                # (num_blocks, num_kv_heads, block_size*2, head_size) — the same
+                # contract forward() uses. The CPU cache is stored as
+                # (num_blocks, num_kv_heads, block_size, 2*head_size), so reshape
+                # it here (forward() does the equivalent view before its call).
+                nb, nkvh, bs, _ = kv_cache.shape
+                kv_cache = kv_cache.view(nb, nkvh, bs * 2, -1)
+            attn.impl.do_kv_cache_update(
+                attn,
+                all_k_final[i],
+                all_v[i],
+                kv_cache,
+                context_slot_mapping,
                 )
 
     def forward(
