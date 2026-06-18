@@ -15,6 +15,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.fp8e4nv_fp16_sm75 import fp8e4m3_to_fp16
 from vllm.v1.attention.ops.fp8e4nv_sm80 import fp8e4m3_to_bf16
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
@@ -53,10 +54,14 @@ def _cast_kv_tile(
     """
     if KV_QUANT_MODE == 1:
         if FP8_SOFTWARE_CONV:
-            # SM80/86: the cache holds raw fp8e4nv bytes (uint8). Decode in
-            # software (no native fp8 cvt), then dequantize with the scale.
-            deq = fp8e4m3_to_bf16(data).to(tl.float32) * tl.load(tensor_scale)
-            return deq.to(Q.dtype)
+            # Pre-SM89: the cache holds raw fp8e4nv bytes (uint8). Decode in
+            # software (no native fp8 cvt) directly to the activation dtype and
+            # apply the per-tensor scale in that dtype -- no fp32. The activation
+            # dtype is the platform's native float: bf16 where bf16 is supported
+            # directly (SM80/86), fp16 where only fp16 is (SM75 has no bf16).
+            if Q.dtype == tl.float16:
+                return fp8e4m3_to_fp16(data) * tl.load(tensor_scale).to(tl.float16)
+            return fp8e4m3_to_bf16(data) * tl.load(tensor_scale).to(tl.bfloat16)
         if Q.dtype.is_fp8():
             return data.to(Q.dtype)
         return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
@@ -280,7 +285,7 @@ def kernel_unified_attention(
     # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4 (4) uses its own
     # int4_per_token_head kernel, not this one.
     KV_QUANT_MODE: tl.constexpr = 0,
-    # SM80/86 software fp8e4nv emulation: cache holds uint8 fp8 bytes, decode
+    # Pre-SM89 software fp8e4nv emulation: cache holds uint8 fp8 bytes, decode
     # explicitly in _cast_kv_tile (no native fp8 cvt).
     FP8_SOFTWARE_CONV: tl.constexpr = False,
     FP8_MIN: tl.constexpr = float8_info.min,

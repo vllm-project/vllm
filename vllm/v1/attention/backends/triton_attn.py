@@ -521,26 +521,36 @@ class TritonAttentionImpl(AttentionImpl):
             if self.kv_cache_dtype.startswith("fp8") and not (
                 current_platform.has_device_capability(89)
             ):
-                if current_platform.has_device_capability(80):
-                    # SM80/SM86: no native fp8e4nv cast, so the fp8 KV cache is
-                    # emulated in software (explicit fp8e4nv<->bf16 conversion on
-                    # the Triton path). Allowed, but warn about the trade-off.
+                if current_platform.has_device_capability(75):
+                    # Pre-SM89 has no native fp8e4nv cast, so fp8 KV is supported
+                    # on the Triton path via software conversion: K/V are
+                    # decoded/encoded to the platform's native float -- bf16 where
+                    # bf16 is supported directly (SM80/86), fp16 where only fp16 is
+                    # (SM75). The conversion adds emulation overhead; warn about it.
+                    alt = (
+                        "bfloat16"
+                        if current_platform.has_device_capability(80)
+                        else "float16"
+                    )
                     logger.warning(
-                        "FP8 KV cache on %s (compute capability %s) has no "
-                        "native fp8e4nv; it is emulated in software on the "
-                        "Triton attention path, which lowers throughput. fp8 KV "
-                        "halves the KV-cache footprint (longer supportable "
-                        "context); --kv-cache-dtype bfloat16 runs faster on this "
-                        "GPU but uses ~2x the KV cache (shorter max context).",
+                        "FP8 KV cache on %s (compute capability %s) is supported "
+                        "on the Triton attention path via software conversion "
+                        "(this GPU has no native fp8e4nv), which adds emulation "
+                        "overhead and lowers throughput. fp8 KV halves the "
+                        "KV-cache footprint (longer supportable context); "
+                        "--kv-cache-dtype %s runs faster on this GPU but uses "
+                        "~2x the KV cache (shorter max context).",
                         dev,
                         cap_str,
+                        alt,
                     )
                 else:
                     raise ValueError(
-                        f"FP8 KV cache is not supported by the Triton attention "
-                        f"backend on {dev} (compute capability {cap_str}); native "
-                        f"FP8 (fp8e4nv) requires SM89+ and software emulation "
-                        f"requires SM80+. Re-run with --kv-cache-dtype float16."
+                        f"FP8 KV cache on the Triton attention backend is "
+                        f"supported via software conversion on SM75-88 and "
+                        f"natively on SM89+, but {dev} (compute capability "
+                        f"{cap_str}) is below SM75. Re-run with "
+                        f"--kv-cache-dtype float16."
                     )
             if self.kv_cache_dtype == "bfloat16" and not (
                 current_platform.has_device_capability(80)
@@ -573,12 +583,13 @@ class TritonAttentionImpl(AttentionImpl):
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
-        # SM80/86: no native fp8e4nv cast -> emulate fp8 KV in software (explicit
-        # fp8e4nv<->bf16 conversion in the reshape store + unified_attention read).
+        # Pre-SM89: no native fp8e4nv cast -> emulate fp8 KV in software (explicit
+        # fp8e4nv<->{bf16 on SM80/86, fp16 on SM75} conversion in the reshape store
+        # + unified_attention read; the conversion dtype follows the activation dtype).
         self._fp8_software_conv = (
             is_quantized_kv_cache(kv_cache_dtype)
             and current_platform.is_cuda()
-            and current_platform.has_device_capability(80)
+            and current_platform.has_device_capability(75)
             and not current_platform.has_device_capability(89)
         )
         # When fp8 KV is software-emulated there is no native fp8e4nv cast, so we
