@@ -1,4 +1,3 @@
---extra-index-url https://download.pytorch.org/whl/cu130
 -r ../common.txt
 
 # testing

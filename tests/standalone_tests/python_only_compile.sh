@@ -94,11 +94,7 @@ _vllm_target_lower="$(printf '%s' "${VLLM_TARGET_DEVICE:-}" | tr '[:upper:]' '[:
 if [[ "${_vllm_target_lower}" == "rocm" ]]; then
   VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 python3 setup.py develop
 else
-  # torch==2.12.1+cu130 wheels are only published to the PyTorch CUDA channel
-  # (not PyPI), so pull them from there (matches docker/Dockerfile and the other
-  # CI install paths). Drop this once torch 2.12.1 is on PyPI.
-  VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e . \
-      --extra-index-url https://download.pytorch.org/whl/cu130
+  VLLM_PRECOMPILED_WHEEL_COMMIT=$merge_base_commit VLLM_USE_PRECOMPILED=1 pip3 install -vvv -e .
 fi
 unset -v _vllm_target_lower
 # Run the script
