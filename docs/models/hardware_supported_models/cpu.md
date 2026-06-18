@@ -1,5 +1,8 @@
 # CPU - Intel® Xeon®
 
+!!! note "AMD Zen CPUs"
+    On AMD Zen 4 / Zen 5 CPUs, AMD Zen optimizations are auto-enabled when the [`zentorch`](https://github.com/amd/ZenDNN-pytorch-plugin) package is installed. All models supported by vLLM on CPU are supported on AMD Zen as well; model compatibility does not change. This page reflects the current CPU reference validation matrix on Intel systems. See [AMD Zen optimizations](../../getting_started/installation/cpu.md#amd-zen-optimizations) for details.
+
 ## Validated Hardware
 
 | Hardware |

@@ -46,6 +46,9 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.v1.attention.backends.flash_attn_diffkv.FlashAttentionDiffKVBackend"
     )
     TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
+    TRITON_ATTN_DIFFKV = (
+        "vllm.v1.attention.backends.triton_attn_diffkv.TritonAttentionDiffKVBackend"
+    )
     ROCM_ATTN = "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"
     ROCM_AITER_MLA = "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"
     ROCM_AITER_TRITON_MLA = (
@@ -76,7 +79,21 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     FLASHMLA_SPARSE = (
         "vllm.v1.attention.backends.mla.flashmla_sparse.FlashMLASparseBackend"
     )
+    # DeepSeek V4 sparse MLA backends (model-driven; selected via the V4 layer).
+    FLASHMLA_SPARSE_DSV4 = (
+        "vllm.models.deepseek_v4.sparse_mla.DeepseekV4FlashMLABackend"
+    )
+    FLASHINFER_MLA_SPARSE_DSV4 = (
+        "vllm.models.deepseek_v4.nvidia.flashinfer_sparse."
+        "DeepseekV4FlashInferMLASparseBackend"
+    )
+    ROCM_FLASHMLA_SPARSE_DSV4 = (
+        "vllm.models.deepseek_v4.amd.rocm.DeepseekV4ROCMAiterMLASparseBackend"
+    )
     FLASH_ATTN_MLA = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
+    MINIMAX_M3_SPARSE = (
+        "vllm.models.minimax_m3.common.sparse_attention.MiniMaxM3SparseBackend"
+    )
     NO_ATTENTION = "vllm.v1.attention.backends.no_attention.NoAttentionBackend"
     FLEX_ATTENTION = "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
     ROCM_AITER_UNIFIED_ATTN = (

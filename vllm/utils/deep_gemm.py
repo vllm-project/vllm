@@ -120,8 +120,9 @@ def is_deep_gemm_e8m0_used() -> bool:
 def _missing(*_: Any, **__: Any) -> NoReturn:
     """Placeholder for unavailable DeepGEMM backend."""
     raise RuntimeError(
-        "DeepGEMM backend is not available or outdated. Please install or "
-        "update the `deep_gemm` to a newer version to enable FP8 kernels."
+        "DeepGEMM backend is unavailable in the current vLLM environment, "
+        "or the available DeepGEMM package does not provide the required APIs "
+        "for these kernels."
     )
 
 
@@ -140,6 +141,7 @@ _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 _transform_sf_into_required_layout_impl: Callable[..., Any] | None = None
 
 
+@functools.cache
 def _import_deep_gemm():
     """Import the deep_gemm module.
 
@@ -155,7 +157,7 @@ def _import_deep_gemm():
         logger.debug_once("Imported deep_gemm module from site-packages")
         return module
     except ImportError:
-        logger.debug_once(
+        logger.info_once(
             "deep_gemm not found in site-packages, "
             "trying vendored vllm.third_party.deep_gemm"
         )
@@ -166,7 +168,7 @@ def _import_deep_gemm():
         logger.debug_once("Imported deep_gemm module from vllm.third_party.deep_gemm")
         return module
     except ImportError:
-        logger.debug_once("Vendored deep_gemm not found either")
+        logger.info_once("Vendored deep_gemm not found either")
     except Exception as e:
         # The vendored module may raise RuntimeError during _C.init()
         # if JIT include files are missing (e.g. incomplete wheel).
