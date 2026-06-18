@@ -809,6 +809,8 @@ class MoRIIOConnectorWorker:
         self.kv_cache_shape = None
         self.block_shape = None
         self.kv_element_size = 0
+        self.kv_cache_shapes: dict[str, torch.Size] = {}
+        self.block_lens: dict[str, int] = {}
 
         # Map of engine_id -> {agent_name0, agent_name1..}.
         self._remote_agents: dict[EngineId, set[str]] = {}
@@ -1221,7 +1223,17 @@ class MoRIIOConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in moriio."""
 
-        _, first_kv_cache = next(iter(kv_caches.items()))
+        # Prefer a normal K/V cache as the representative shape. MiniMax-M3
+        # sparse layers also register 3D key-only indexer side caches.
+        first_kv_cache = next(
+            (
+                kv_cache
+                for kv_cache in kv_caches.values()
+                if len(kv_cache.shape) == 5
+                and (kv_cache.shape[0] == 2 or kv_cache.shape[1] == 2)
+            ),
+            next(iter(kv_caches.values())),
+        )
         kv_elem_size = first_kv_cache.element_size()
 
         use_mla = len(first_kv_cache.shape) == 3
@@ -1236,7 +1248,11 @@ class MoRIIOConnectorWorker:
             self.slot_size_bytes = kv_elem_size * kv_latent_dim
         else:
             # [2 (k and v), num_blocks, ...]
-            self.num_blocks = first_kv_cache.shape[1]
+            self.num_blocks = (
+                first_kv_cache.shape[1]
+                if first_kv_cache.shape[0] == 2
+                else first_kv_cache.shape[0]
+            )
             block_rank = 3  # [block_size, kv_heads, head_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
             block_size, n_kv_heads, head_dim = block_shape[-3:]
@@ -1255,14 +1271,41 @@ class MoRIIOConnectorWorker:
 
         self.dst_num_blocks[self.engine_id] = self.num_blocks
         self.kv_caches = kv_caches  # layer name to kv cache
+        self.kv_cache_shapes = {
+            layer_name: kv_cache.shape for layer_name, kv_cache in kv_caches.items()
+        }
         kv_caches_base_addr = []
         caches_data = []
 
-        for cache_or_caches in kv_caches.values():
-            cache_list = [cache_or_caches] if use_mla else cache_or_caches
+        for layer_name, cache_or_caches in kv_caches.items():
+            # MiniMax-M3 sparse layers register both a normal 5D K/V cache and a
+            # 3D key-only indexer side cache. Only separated 5D K/V caches should
+            # be split into K and V regions; interleaved K/V and key-only caches
+            # must remain one region.
+            if len(cache_or_caches.shape) == 5 and cache_or_caches.shape[0] == 2:
+                cache_list = list(cache_or_caches)
+                layer_block_shape = cache_or_caches.shape[-3:]
+                regions_per_block = 1
+            elif len(cache_or_caches.shape) == 5 and cache_or_caches.shape[1] == 2:
+                cache_list = [cache_or_caches]
+                layer_block_shape = cache_or_caches.shape[-3:]
+                regions_per_block = 2
+            elif len(cache_or_caches.shape) == 3:
+                cache_list = [cache_or_caches]
+                layer_block_shape = cache_or_caches.shape[-2:]
+                regions_per_block = 1
+            else:
+                raise ValueError(
+                    "Unsupported MoRIIO KV cache shape for layer "
+                    f"{layer_name}: {tuple(cache_or_caches.shape)}"
+                )
+            layer_block_len = cache_or_caches.element_size() * math.prod(
+                layer_block_shape
+            )
+            self.block_lens[layer_name] = layer_block_len
             for cache in cache_list:
                 base_addr = cache.data_ptr()
-                region_len = self.num_blocks * self.block_len
+                region_len = self.num_blocks * regions_per_block * layer_block_len
                 caches_data.append((base_addr, region_len, cache.device.index, ""))
                 kv_caches_base_addr.append(base_addr)
 
@@ -1275,7 +1318,9 @@ class MoRIIOConnectorWorker:
                 moriio_mem_metadata
             )
 
-            self.local_kv_cache_size.append(cache.nelement() * cache.element_size())
+            self.local_kv_cache_size.append(
+                kv_cache.nelement() * kv_cache.element_size()
+            )
 
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
@@ -1666,22 +1711,36 @@ class MoRIIOConnectorWorker:
         Returns:
             Tuple of (local_offsets, remote_offsets, transfer_sizes)
         """
-        assert self.kv_cache_shape is not None, "KV caches shape not initialized"
-        is_mla = len(self.kv_cache_shape) == 3
-        stride = self.kv_caches[layer_name].stride()
-        sz = self.kv_caches[layer_name].element_size()
-        if is_mla:
-            blknum, blksize, hs = self.kv_cache_shape
+        kv_cache = self.kv_caches[layer_name]
+        kv_cache_shape = self.kv_cache_shapes[layer_name]
+        is_key_only = len(kv_cache_shape) == 3
+        stride = kv_cache.stride()
+        sz = kv_cache.element_size()
+        if is_key_only:
+            blknum, blksize, hs = kv_cache_shape
             hn = 1
             block_stride = stride[0]
         else:
-            _, blknum, blksize, hn, hs = self.kv_cache_shape
-            local_ktov_stride = stride[0]
-            block_stride = stride[1]
-            remote_ktov_stride = block_stride * remote_moriio_meta.num_blocks
+            if kv_cache_shape[0] == 2:
+                _, blknum, blksize, hn, hs = kv_cache_shape
+                local_ktov_stride = stride[0]
+                block_stride = stride[1]
+                remote_ktov_stride = (
+                    blksize * hn * hs * remote_moriio_meta.num_blocks
+                )
+            elif kv_cache_shape[1] == 2:
+                blknum, _, blksize, hn, hs = kv_cache_shape
+                block_stride = stride[0]
+                local_ktov_stride = stride[1]
+                remote_ktov_stride = blksize * hn * hs
+            else:
+                raise ValueError(
+                    "Unsupported MoRIIO KV cache shape for layer "
+                    f"{layer_name}: {tuple(kv_cache_shape)}"
+                )
 
         transfer_size_byte = blksize * hn * hs * sz
-        per_block = 1 if is_mla else 2
+        per_block = 1 if is_key_only else 2
         total = len(local_block_ids) * per_block
         offset_local = [0] * total
         offset_remote = [0] * total
@@ -1694,7 +1753,7 @@ class MoRIIOConnectorWorker:
             offset_local[w] = sz * (lb * block_stride)
             offset_remote[w] = sz * (rb * block_stride)
             w += 1
-            if not is_mla:
+            if not is_key_only:
                 # V
                 # Handle num_block variations originating from PD (different kv strides)
                 # TODO: address block_sz differences in heterogeneous TP scenarios
@@ -1724,14 +1783,12 @@ class MoRIIOConnectorWorker:
         dp0_engine_id = self.get_engine_name_with_dp(dst_engine_id, 0)
         sessions, remote_moriio_meta = self._get_built_session(dp0_engine_id)
 
-        first_layer = list(self.layer_name_to_local_kv_cache_metadata.keys())[0]
-        offs = self._compute_block_transfer_offsets(
-            first_layer, local_block_ids, remote_block_ids, remote_moriio_meta
-        )
-
         for layer_name in self.layer_name_to_local_kv_cache_metadata:
             sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(
                 layer_name
+            )
+            offs = self._compute_block_transfer_offsets(
+                layer_name, local_block_ids, remote_block_ids, remote_moriio_meta
             )
             # TODO : apply multi-session batch-read when moriio support it
             transfer_status = self.moriio_wrapper.read_remote_data(
