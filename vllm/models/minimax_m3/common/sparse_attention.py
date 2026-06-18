@@ -22,6 +22,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import (
     SPARSE_BLOCK_SIZE,
     minimax_m3_sparse_attn,
@@ -43,6 +44,8 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
+
+logger = init_logger(__name__)
 
 
 class MiniMaxM3SparseBackend(AttentionBackend):
@@ -291,9 +294,14 @@ class MiniMaxM3SparseImpl(AttentionImplBase[MiniMaxM3SparseMetadata]):
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.kv_cache_dtype = kv_cache_dtype
         self.use_fp8_kv = is_quantized_kv_cache(kv_cache_dtype)
-        self.kv_cache_fp8_dtype = (
-            torch.float8_e5m2 if "e5m2" in kv_cache_dtype else torch.float8_e4m3fn
-        )
+        if "e5m2" in kv_cache_dtype:
+            self.kv_cache_fp8_dtype = (
+                torch.float8_e5m2fnuz
+                if current_platform.is_fp8_fnuz()
+                else torch.float8_e5m2
+            )
+        else:
+            self.kv_cache_fp8_dtype = current_platform.fp8_dtype()
         # Sparse selection parameters (block_size == page size == SPARSE_BLOCK_SIZE).
         self.topk_blocks = topk_blocks
         self.block_size = sparse_block_size
@@ -380,16 +388,25 @@ def select_main_impl_cls(
 ) -> type[MiniMaxM3SparseImpl]:
     """Pick the main attend impl off the main KV-cache dtype.
 
-    bf16 on Blackwell (SM100) uses the MSA attend; fp8 or non-Blackwell falls
+    Blackwell (SM100) uses the MSA attend for supported top-k block counts
+    when the KV cache is BF16 or FP8 E4M3; non-Blackwell and FP8 E5M2 fall
     back to Triton. The MSA module is imported lazily so AMD/non-SM100 never
     import fmha_sm100.
     """
-    if (
+    use_msa = (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
         and topk_blocks in (4, 8, 16, 32)
-        and not is_quantized_kv_cache(kv_cache_dtype)
-    ):
+        and kv_cache_dtype != "fp8_e5m2"
+    )
+    selected = "MSA" if use_msa else "Triton"
+    logger.info_once(
+        "MiniMax M3 sparse attention selected %s (kv_cache_dtype=%s, topk_blocks=%s)",
+        selected,
+        kv_cache_dtype,
+        topk_blocks,
+    )
+    if use_msa:
         from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
             MiniMaxM3SparseMSAImpl,
         )
