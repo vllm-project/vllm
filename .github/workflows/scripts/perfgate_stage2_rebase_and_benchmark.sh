@@ -91,7 +91,7 @@ if [[ "$rebase_rc" -ne 0 ]]; then
 fi
 
 if [[ -n "${PYTHON_BIN:-}" ]]; then
-  "$PYTHON_BIN" -m pip install -e . --no-build-isolation --no-deps
+  VLLM_USE_PRECOMPILED=0 "$PYTHON_BIN" -m pip install -e . --no-build-isolation --no-deps
 fi
 
 run_stage2_benchmark() {

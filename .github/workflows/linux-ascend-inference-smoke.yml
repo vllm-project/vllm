@@ -42,6 +42,7 @@ jobs:
       VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
       HUST_ASCEND_MANAGER_REPO_URL: git@github.com:vLLM-HUST/ascend-runtime-manager.git
+      VLLM_USE_PRECOMPILED: "0"
 
     steps:
       - name: Pre-clean stale checkout state
