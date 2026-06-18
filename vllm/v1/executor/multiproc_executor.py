@@ -371,6 +371,17 @@ class MultiprocExecutor(Executor):
             send_method = method
         else:
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
+
+        # Swap large `prompt_embeds` tensors for filename-based shm handles so the
+        # broadcast does not ship the full tensor. shm_keepalive holds the shared
+        # storages alive until all workers have rebuilt
+        from vllm import _shm_embeds
+
+        shm_keepalive = (
+            _shm_embeds.externalize_prompt_embeds(args)
+            if send_method == "execute_model"
+            else []
+        )
         self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
@@ -398,6 +409,8 @@ class MultiprocExecutor(Executor):
         future = FutureWrapper(
             self.futures_queue, get_response=get_response, aggregate=aggregate
         )
+        if shm_keepalive:
+            future._shm_keepalive = shm_keepalive  # type: ignore[attr-defined]
 
         return future if non_block else future.result()
 
@@ -973,6 +986,11 @@ class WorkerProc:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                 indefinite=True
             )
+            # Load prompt_embeds shm handles into mmap tensors before the worker method runs.
+            # No-ops unless a handle is present, so safe to call unconditionally.
+            from vllm import _shm_embeds
+
+            _shm_embeds.internalize_prompt_embeds(args)
             try:
                 if isinstance(method, str):
                     func = getattr(self.worker, method)

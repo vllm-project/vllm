@@ -582,13 +582,13 @@ class MPClient(EngineCoreClient):
                         coordinator.get_stats_publish_address()
                     )
 
-            # Serialization setup with tensor queues for multimodal tensor IPC.
-            tensor_ipc_sender: TensorIpcSender | None = None
-            model_config = getattr(vllm_config, "model_config", None)
-            if model_config is not None and model_config.multimodal_config is not None:
-                mm_tensor_ipc = model_config.multimodal_config.mm_tensor_ipc
-                if mm_tensor_ipc == "torch_shm" and tensor_queue is not None:
-                    tensor_ipc_sender = TensorIpcSender(tensor_queue)
+            # Serialization setup with tensor queues for tensor IPC.
+            # The queue is created (in launch_core_engines) when shared-memory
+            # tensor IPC is wanted: either multimodal mm_tensor_ipc="torch_shm" or
+            # enable_prompt_embeds.
+            tensor_ipc_sender: TensorIpcSender | None = (
+                TensorIpcSender(tensor_queue) if tensor_queue is not None else None
+            )
 
             self.encoder = MsgpackEncoder(oob_tensor_consumer=tensor_ipc_sender)
             self.decoder = MsgpackDecoder(EngineCoreOutputs)

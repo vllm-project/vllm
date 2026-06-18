@@ -1075,9 +1075,13 @@ def launch_core_engines(
     # Create a single tensor IPC queue for sharing multimodal tensors between
     # API servers and engine core. Returns a single queue since we only support
     # DP=1 for this data flow.
+    # Also create the IPC queue when prompt_embeds is enabled so the
+    # large prompt_embeds tensor is handed to EngineCore via shared memory (zero-copy).
     tensor_queue: Queue | None = None
     multimodal_config = vllm_config.model_config.multimodal_config
-    if multimodal_config is not None and multimodal_config.mm_tensor_ipc == "torch_shm":
+    if (
+        multimodal_config is not None and multimodal_config.mm_tensor_ipc == "torch_shm"
+    ) or vllm_config.model_config.enable_prompt_embeds:
         tensor_queue = get_mp_context().Queue()
 
     # Run the DP Coordinator process with rank 0 when in online DP mode.
