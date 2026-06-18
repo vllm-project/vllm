@@ -104,6 +104,8 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     Skips the parts of __init__ that require a real VllmConfig / model
     by patching the attributes directly after construction.
     """
+    from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
     mgr = object.__new__(EncoderCudaGraphManager)
     mgr.token_budgets = sorted(budgets)
     mgr.max_batch_size = 16
@@ -113,6 +115,11 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     mgr.graph_hits = 0
     mgr.graph_misses = 0
     mgr.log_stats_interval = 100
+    mgr.config = EncoderCudaGraphConfig(
+        modalities=["image"],
+        buffer_keys=["pixel_values"],
+        out_hidden_size=16,
+    )
     return mgr
 
 
