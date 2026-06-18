@@ -480,7 +480,6 @@ def convert_to_fp8_moe_kernel_format(
             Fp8MoeBackend.VLLM_CUTLASS,
             Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
             Fp8MoeBackend.XPU,
-            # HPC consumes the fp8 weights as-is; no load-time layout change.
             Fp8MoeBackend.HPC,
             # EMULATION dequantizes weights at runtime; NATIVE_MXFP8 consumes
             # the MXFP8 weights as-is — neither needs a load-time layout change.

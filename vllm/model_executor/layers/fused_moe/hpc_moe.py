@@ -73,14 +73,13 @@ class HPCExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        p = current_platform
         scheme = (weight_key, activation_key)
         # The following are supported by HPCExperts:
         return scheme in [
             # fp8 static per-tensor on 9.0+
             (kFp8StaticTensorSym, kFp8StaticTensorSym),
             (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-        ] and p.has_device_capability(90)
+        ]
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
