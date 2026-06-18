@@ -107,8 +107,7 @@ def _make_dummy_inner_model(
         **kwargs,
     ):
         if input_ids is not None:
-            seq_len = input_ids.shape[0] if input_ids.ndim == 1 else \
-                input_ids.shape[-1]
+            seq_len = input_ids.shape[0] if input_ids.ndim == 1 else input_ids.shape[-1]
         elif inputs_embeds is not None:
             seq_len = inputs_embeds.shape[0]
         else:
@@ -125,20 +124,21 @@ def _make_dummy_inner_model(
         for idx in range(start_layer, end_layer):
             layer = model.layers[idx]
             if idx in model.aux_hidden_state_layers:
-                val = (hidden_states + residual
-                       if residual is not None else hidden_states)
+                val = (
+                    hidden_states + residual if residual is not None else hidden_states
+                )
                 aux_hidden_states.append(val)
-            hidden_states, residual = layer(
-                positions, hidden_states, residual
-            )
+            hidden_states, residual = layer(positions, hidden_states, residual)
 
         # Non-last rank: return IntermediateTensors (dropping aux — the bug)
         # We simulate this behavior to verify the wrapper overrides it.
         if not get_pp_group_mock().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "residual": residual,
-            })
+            return IntermediateTensors(
+                {
+                    "hidden_states": hidden_states,
+                    "residual": residual,
+                }
+            )
 
         if aux_hidden_states:
             return hidden_states, aux_hidden_states
@@ -151,10 +151,8 @@ def _make_dummy_inner_model(
         make_empty_intermediate_tensors_factory,
     )
 
-    model.make_empty_intermediate_tensors = (
-        make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], hidden_size
-        )
+    model.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+        ["hidden_states", "residual"], hidden_size
     )
 
     return model
@@ -180,19 +178,23 @@ class TestExtractAuxHiddenStates:
         assert extract_aux_hidden_states(None) == []
 
     def test_no_aux_keys_returns_empty_list(self):
-        it = IntermediateTensors({
-            "hidden_states": torch.randn(4, 8),
-            "residual": torch.randn(4, 8),
-        })
+        it = IntermediateTensors(
+            {
+                "hidden_states": torch.randn(4, 8),
+                "residual": torch.randn(4, 8),
+            }
+        )
         assert extract_aux_hidden_states(it) == []
 
     def test_single_aux_key(self):
         t = torch.randn(4, 8)
-        it = IntermediateTensors({
-            "hidden_states": torch.randn(4, 8),
-            "residual": torch.randn(4, 8),
-            f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}0": t,
-        })
+        it = IntermediateTensors(
+            {
+                "hidden_states": torch.randn(4, 8),
+                "residual": torch.randn(4, 8),
+                f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}0": t,
+            }
+        )
         result = extract_aux_hidden_states(it)
         assert len(result) == 1
         assert torch.equal(result[0], t)
@@ -201,12 +203,14 @@ class TestExtractAuxHiddenStates:
         t0 = torch.zeros(4, 8)
         t1 = torch.ones(4, 8)
         t2 = torch.full((4, 8), 2.0)
-        it = IntermediateTensors({
-            "hidden_states": torch.randn(4, 8),
-            f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}2": t2,
-            f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}0": t0,
-            f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}1": t1,
-        })
+        it = IntermediateTensors(
+            {
+                "hidden_states": torch.randn(4, 8),
+                f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}2": t2,
+                f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}0": t0,
+                f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}1": t1,
+            }
+        )
         result = extract_aux_hidden_states(it)
         assert len(result) == 3
         assert torch.equal(result[0], t0)
@@ -216,10 +220,12 @@ class TestExtractAuxHiddenStates:
     def test_non_sequential_indices(self):
         t0 = torch.zeros(4, 8)
         t5 = torch.full((4, 8), 5.0)
-        it = IntermediateTensors({
-            f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}0": t0,
-            f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}5": t5,
-        })
+        it = IntermediateTensors(
+            {
+                f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}0": t0,
+                f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}5": t5,
+            }
+        )
         result = extract_aux_hidden_states(it)
         assert len(result) == 2
         assert torch.equal(result[0], t0)
@@ -296,9 +302,7 @@ class TestForwardWrapperNonLastRank:
     """Verify the forward wrapper packs aux states into IntermediateTensors
     on non-last PP ranks."""
 
-    def test_non_last_rank_packs_aux_into_intermediate_tensors(
-        self, mock_pp
-    ):
+    def test_non_last_rank_packs_aux_into_intermediate_tensors(self, mock_pp):
         """Rank 0 (layers 0-2) captures aux_layer 2 (from layer index 1)
         and packs it into IntermediateTensors."""
         mock_pp["world_size"] = 2
@@ -340,7 +344,9 @@ class TestForwardWrapperNonLastRank:
         mock_pp["is_last_rank"] = False
 
         model = _make_dummy_inner_model(
-            total_layers=6, start_layer=0, end_layer=3,
+            total_layers=6,
+            start_layer=0,
+            end_layer=3,
             aux_layers=(2,),
         )
         install_eagle3_pp_aux_propagation(model)
@@ -387,11 +393,13 @@ class TestForwardWrapperLastRank:
 
         # Simulate incoming aux from rank 0 (aux_layer 2 was on rank 0).
         incoming_aux_tensor = torch.full((5, 8), 99.0)
-        intermediate_tensors = IntermediateTensors({
-            "hidden_states": torch.zeros(5, 8),
-            "residual": torch.zeros(5, 8),
-            f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}0": incoming_aux_tensor,
-        })
+        intermediate_tensors = IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(5, 8),
+                "residual": torch.zeros(5, 8),
+                f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}0": incoming_aux_tensor,
+            }
+        )
 
         input_ids = None
         positions = torch.arange(5)
@@ -421,7 +429,9 @@ class TestForwardWrapperLastRank:
         mock_pp["is_last_rank"] = True
 
         model = _make_dummy_inner_model(
-            total_layers=6, start_layer=0, end_layer=6,
+            total_layers=6,
+            start_layer=0,
+            end_layer=6,
             aux_layers=(2,),
         )
         install_eagle3_pp_aux_propagation(model)
@@ -450,7 +460,9 @@ class TestMakeEmptyWrapper:
         mock_pp["is_last_rank"] = False
 
         model = _make_dummy_inner_model(
-            total_layers=6, start_layer=0, end_layer=3,
+            total_layers=6,
+            start_layer=0,
+            end_layer=3,
             aux_layers=(2, 4),
         )
         install_eagle3_pp_aux_propagation(model)
@@ -463,8 +475,7 @@ class TestMakeEmptyWrapper:
         assert "residual" in result.tensors
         # First rank: no aux placeholders.
         aux_keys = [
-            k for k in result.tensors
-            if k.startswith(AUX_HIDDEN_STATE_TENSOR_PREFIX)
+            k for k in result.tensors if k.startswith(AUX_HIDDEN_STATE_TENSOR_PREFIX)
         ]
         assert len(aux_keys) == 0
 
@@ -475,7 +486,9 @@ class TestMakeEmptyWrapper:
         mock_pp["is_last_rank"] = True
 
         model = _make_dummy_inner_model(
-            total_layers=6, start_layer=3, end_layer=6,
+            total_layers=6,
+            start_layer=3,
+            end_layer=6,
             aux_layers=(2, 4, 5),
         )
         install_eagle3_pp_aux_propagation(model)
@@ -491,8 +504,7 @@ class TestMakeEmptyWrapper:
         #   aux 5 → layer 4 >= 3 → NOT incoming (local)
         # So num_incoming = 1.
         aux_keys = sorted(
-            k for k in result.tensors
-            if k.startswith(AUX_HIDDEN_STATE_TENSOR_PREFIX)
+            k for k in result.tensors if k.startswith(AUX_HIDDEN_STATE_TENSOR_PREFIX)
         )
         assert len(aux_keys) == 1
         assert aux_keys[0] == f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}0"
@@ -507,7 +519,9 @@ class TestMakeEmptyWrapper:
         mock_pp["is_last_rank"] = True
 
         model = _make_dummy_inner_model(
-            total_layers=6, start_layer=0, end_layer=6,
+            total_layers=6,
+            start_layer=0,
+            end_layer=6,
             aux_layers=(2, 4),
         )
         # Force non-first-rank to test the logic.
@@ -518,8 +532,7 @@ class TestMakeEmptyWrapper:
         )
 
         aux_keys = [
-            k for k in result.tensors
-            if k.startswith(AUX_HIDDEN_STATE_TENSOR_PREFIX)
+            k for k in result.tensors if k.startswith(AUX_HIDDEN_STATE_TENSOR_PREFIX)
         ]
         assert len(aux_keys) == 0
 
@@ -562,7 +575,8 @@ class TestSimulatedPP2AuxFlow:
 
         # Verify rank 0 packed the aux state (aux_layer 2 → layer 1, in [0,3)).
         packed_aux_keys = [
-            k for k in rank0_output.tensors
+            k
+            for k in rank0_output.tensors
             if k.startswith(AUX_HIDDEN_STATE_TENSOR_PREFIX)
         ]
         assert len(packed_aux_keys) == 1
@@ -581,9 +595,7 @@ class TestSimulatedPP2AuxFlow:
         install_eagle3_pp_aux_propagation(rank1_model)
 
         # Rank 1 receives the IntermediateTensors from rank 0.
-        result = rank1_model.forward(
-            None, positions, intermediate_tensors=rank0_output
-        )
+        result = rank1_model.forward(None, positions, intermediate_tensors=rank0_output)
 
         # Last rank returns (hidden_states, aux_list).
         assert isinstance(result, tuple)
@@ -611,7 +623,9 @@ class TestSimulatedPP2AuxFlow:
         mock_pp["is_last_rank"] = True
 
         model = _make_dummy_inner_model(
-            total_layers=6, start_layer=0, end_layer=6,
+            total_layers=6,
+            start_layer=0,
+            end_layer=6,
             aux_layers=(2, 4),
         )
         result = install_eagle3_pp_aux_propagation(model)
@@ -642,7 +656,9 @@ class TestHookEdgeCases:
         mock_pp["is_last_rank"] = False
 
         model = _make_dummy_inner_model(
-            total_layers=6, start_layer=0, end_layer=3,
+            total_layers=6,
+            start_layer=0,
+            end_layer=3,
             aux_layers=(0, 2),
         )
         result = install_eagle3_pp_aux_propagation(model)
@@ -653,8 +669,7 @@ class TestHookEdgeCases:
         output = model.forward(input_ids, positions)
 
         aux_keys = [
-            k for k in output.tensors
-            if k.startswith(AUX_HIDDEN_STATE_TENSOR_PREFIX)
+            k for k in output.tensors if k.startswith(AUX_HIDDEN_STATE_TENSOR_PREFIX)
         ]
         # Only aux_layer 2 (layer 1) is hookable. aux_layer 0 is skipped.
         assert len(aux_keys) == 1
@@ -666,7 +681,9 @@ class TestHookEdgeCases:
         mock_pp["is_last_rank"] = False
 
         model = _make_dummy_inner_model(
-            total_layers=6, start_layer=0, end_layer=3,
+            total_layers=6,
+            start_layer=0,
+            end_layer=3,
             aux_layers=(2,),
         )
 
@@ -699,7 +716,9 @@ class TestHookEdgeCases:
 
         # start_layer=3 means layers 0-2 are PPMissingLayer.
         model = _make_dummy_inner_model(
-            total_layers=6, start_layer=3, end_layer=6,
+            total_layers=6,
+            start_layer=3,
+            end_layer=6,
             aux_layers=(2, 4),
         )
 
@@ -710,15 +729,16 @@ class TestHookEdgeCases:
         # aux_layer 4 → layer 3, which is real → hook.
         input_ids = None
         positions = torch.arange(5)
-        intermediate_tensors = IntermediateTensors({
-            "hidden_states": torch.zeros(5, 8),
-            "residual": torch.zeros(5, 8),
-        })
+        intermediate_tensors = IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(5, 8),
+                "residual": torch.zeros(5, 8),
+            }
+        )
         output = model.forward(input_ids, positions, intermediate_tensors)
 
         aux_keys = [
-            k for k in output.tensors
-            if k.startswith(AUX_HIDDEN_STATE_TENSOR_PREFIX)
+            k for k in output.tensors if k.startswith(AUX_HIDDEN_STATE_TENSOR_PREFIX)
         ]
         # Only 1 local aux (from layer 3), 0 incoming (non-first rank but
         # aux_layer 2's layer 1 is PPMissingLayer so num_incoming counts it).

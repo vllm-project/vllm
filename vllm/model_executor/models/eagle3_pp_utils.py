@@ -136,9 +136,7 @@ def install_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
             return hidden_states, all_aux
         return hidden_states
 
-    inner_model.forward = pp_aux_forward.__get__(
-        inner_model, type(inner_model)
-    )
+    inner_model.forward = pp_aux_forward.__get__(inner_model, type(inner_model))
 
     # ------------------------------------------------------------------
     # 3.  Wrap make_empty_intermediate_tensors – pre-allocate placeholders.
@@ -154,12 +152,10 @@ def install_eagle3_pp_aux_propagation(inner_model: nn.Module) -> bool:
                 if layer_idx > 0 and (layer_idx - 1) < start_layer
             )
             for i in range(num_incoming):
-                result.tensors[f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}{i}"] = (
-                    torch.zeros(
-                        (batch_size, hidden_size),
-                        dtype=dtype,
-                        device=device,
-                    )
+                result.tensors[f"{AUX_HIDDEN_STATE_TENSOR_PREFIX}{i}"] = torch.zeros(
+                    (batch_size, hidden_size),
+                    dtype=dtype,
+                    device=device,
                 )
         return result
 
