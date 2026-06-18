@@ -237,6 +237,91 @@ def test_triton_unified_attn(
     )
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="byte-identical check is CUDA-only"
+)
+@torch.inference_mode()
+def test_triton_unified_attn_swa_residue_byte_identical():
+    """Issue #44575: the SWA loop now starts exactly at ``first_allowed_key``,
+    so the online-softmax reduction order no longer depends on the window's
+    residue mod ``TILE_SIZE``. Identical Q over identical (K, V) window content
+    must give byte-identical output whether ``first_allowed_key`` is tile
+    aligned or not. Forces the 2D-pointer decode path (``seq_threshold_3D=0``);
+    with ``head_size=128`` and ``block_size=16`` the decode tile size is 16.
+    """
+    torch.set_default_device(DEVICE_TYPE)
+    set_random_seed(0)
+
+    dtype = torch.bfloat16
+    num_query_heads, num_kv_heads = 8, 2
+    head_size = 128
+    block_size = 16  # TILE_SIZE_DECODE == 16 for this config
+    window = 256
+    scale = head_size**-0.5
+    num_blocks = 2048
+
+    # Shared query and windowed K/V content, reused verbatim in both runs.
+    query = torch.randn(1, num_query_heads, head_size, dtype=dtype)
+    win_k = torch.randn(window, num_kv_heads, head_size, dtype=dtype)
+    win_v = torch.randn_like(win_k)
+
+    def run(first_allowed_key: int) -> torch.Tensor:
+        # Decode query at position kv_len - 1 attends to [kv_len - window,
+        # kv_len - 1], so kv_len = first_allowed_key + window.
+        kv_len = first_allowed_key + window
+        n_logical = (kv_len + block_size - 1) // block_size
+        key_cache = torch.randn(
+            num_blocks, block_size, num_kv_heads, head_size, dtype=dtype
+        )
+        value_cache = torch.randn_like(key_cache)
+        # Place the identical window content at absolute positions
+        # [first_allowed_key, kv_len - 1] via an identity block table.
+        pos = torch.arange(window) + first_allowed_key
+        key_cache[pos // block_size, pos % block_size] = win_k
+        value_cache[pos // block_size, pos % block_size] = win_v
+        block_table = torch.arange(n_logical, dtype=torch.int32).view(1, n_logical)
+
+        out = torch.empty_like(query)
+        unified_attention(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=out,
+            cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32),
+            seqused_k=torch.tensor([kv_len], dtype=torch.int32),
+            max_seqlen_q=1,
+            max_seqlen_k=kv_len,
+            softmax_scale=scale,
+            causal=True,
+            window_size=(window - 1, 0),
+            block_table=block_table,
+            softcap=0,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            seq_threshold_3D=0,
+            num_par_softmax_segments=16,
+            softmax_segm_output=torch.empty(
+                (0, num_query_heads, 16, next_power_of_2(head_size)),
+                dtype=torch.float32,
+            ),
+            softmax_segm_max=torch.empty((0, num_query_heads, 16), dtype=torch.float32),
+            softmax_segm_expsum=torch.empty(
+                (0, num_query_heads, 16), dtype=torch.float32
+            ),
+            kv_quant_mode=KVQuantMode.NONE,
+        )
+        return out
+
+    out_aligned = run(first_allowed_key=0)  # residue 0
+    out_shifted = run(first_allowed_key=block_size // 2)  # residue 8
+
+    assert torch.equal(out_aligned, out_shifted), (
+        "SWA output depends on first_allowed_key residue mod TILE_SIZE; "
+        f"max abs diff = {(out_aligned - out_shifted).abs().max().item()}"
+    )
+
+
 @pytest.mark.parametrize(
     "seq_lens", [[(1, 1328), (5, 18), (129, 463)], [(1, 523), (1, 37), (1, 2011)]]
 )
