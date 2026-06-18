@@ -3,7 +3,7 @@ use tracing::{info, warn};
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 
 const REQUEST_WORKER_THREADS_ENV: &str = "VLLM_RS_REQUEST_WORKER_THREADS";
-const DEFAULT_MAX_REQUEST_WORKER_THREADS: usize = 64;
+const DEFAULT_MAX_REQUEST_WORKER_THREADS: usize = 32;
 
 /// Build a Tokio runtime for heavyweight request paths outside the HTTP runtime.
 ///
