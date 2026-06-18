@@ -216,6 +216,7 @@ class BlockPool:
         num_full_blocks: int,
         block_size: int,
         kv_cache_group_id: int,
+        block_mask: list[bool] | None = None,
     ) -> None:
         """Cache a list of full blocks for prefix caching.
         This function takes a list of blocks that will have their block hash
@@ -233,11 +234,19 @@ class BlockPool:
                 be cached after this function.
             block_size: Number of tokens in each block.
             kv_cache_group_id: The id of the KV cache group.
+            block_mask: Optional mask aligned with
+                ``blocks[num_cached_blocks:num_full_blocks]``. When provided,
+                blocks where the mask is False are skipped (treated like null
+                blocks). Used by groups whose ``find_longest_cache_hit`` only
+                consults a subset of blocks (e.g. SWA tail-window), so blocks
+                that can never serve a hit stay out of the prefix-cache hash
+                map.
         """
         if num_cached_blocks >= num_full_blocks:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert len(request.block_hashes) >= num_full_blocks
+        assert block_mask is None or len(block_mask) == len(new_full_blocks)
         if block_size == self.hash_block_size:
             # Common case.
             block_hashes: BlockHashList = request.block_hashes
@@ -256,10 +265,10 @@ class BlockPool:
             [] if self.enable_kv_cache_events else None
         )
         for i, blk in enumerate(new_full_blocks):
-            # Some blocks may be null blocks when enabling sparse attention like
-            # sliding window attention, or Mamba models with prefix-caching in
-            # align mode. We skip null blocks here.
-            if blk.is_null:
+            # Some blocks may be null or masked out when enabling sparse attention
+            # like sliding window attention, or Mamba models with prefix-caching
+            # in align mode. We skip null blocks here.
+            if blk.is_null or (block_mask is not None and not block_mask[i]):
                 continue
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
@@ -288,11 +297,13 @@ class BlockPool:
             # Generate extra keys for each block individually.
             # Each block may have different extra_keys (e.g., different MM
             # features, or cache_salt only for the first block).
-            # Skip null blocks to match the length of new_hashes.
+            # Skip null/masked-out blocks to match the length of new_hashes.
             extra_keys_list: list[tuple[Any, ...] | None] = []
             curr_mm_idx = 0
             for i in range(num_cached_blocks, num_full_blocks):
                 if blocks[i].is_null:
+                    continue
+                if block_mask is not None and not block_mask[i - num_cached_blocks]:
                     continue
                 block_start = i * block_size
                 block_end = block_start + block_size
@@ -413,13 +424,20 @@ class BlockPool:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
         """
-        # Materialize the iterable to allow multiple passes.
-        blocks_list = list(ordered_blocks)
-        for block in blocks_list:
+        # Identify blocks with hash (LRU cache) and without it (will never match in APC)
+        blocks_with_hash = []
+        blocks_without_hash = []
+        for block in ordered_blocks:
             block.ref_cnt -= 1
-        self.free_block_queue.append_n(
-            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
-        )
+            if block.ref_cnt == 0 and not block.is_null:
+                if block.block_hash is None:
+                    blocks_without_hash.append(block)
+                else:
+                    blocks_with_hash.append(block)
+
+        # Blocks without hash always get evicted first - prepend them last to the tail
+        self.free_block_queue.prepend_n(blocks_without_hash)
+        self.free_block_queue.append_n(blocks_with_hash)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

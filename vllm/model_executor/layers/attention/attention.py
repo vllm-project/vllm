@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -228,9 +229,14 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             calculate_kv_scales = False
 
-        # llm-compressor mdls need to set cache_dtype to "fp8" manually.
+        # llm-compressor models declare an FP8 KV-cache scheme in their
+        # checkpoint config. Honor it only when the user did not explicitly
+        # pick a kv_cache_dtype; an explicit choice (e.g. bfloat16) must win.
+        # The "auto" case is normally resolved upstream in
+        # resolve_kv_cache_dtype_string, but we re-apply here defensively in
+        # case anything bypassed that path.
         kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
-        if kv_cache_scheme is not None:
+        if kv_cache_scheme is not None and kv_cache_dtype == "auto":
             kv_cache_dtype = "fp8"
             calculate_kv_scales = False
             if cache_config is not None:
@@ -725,6 +731,7 @@ direct_register_custom_op(
 )
 
 
+@eager_break_during_capture
 @maybe_transfer_kv_layer
 def unified_attention_with_output(
     query: torch.Tensor,
