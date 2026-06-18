@@ -120,8 +120,9 @@ def is_deep_gemm_e8m0_used() -> bool:
 def _missing(*_: Any, **__: Any) -> NoReturn:
     """Placeholder for unavailable DeepGEMM backend."""
     raise RuntimeError(
-        "DeepGEMM backend is not available or outdated. Please install or "
-        "update the `deep_gemm` to a newer version to enable FP8 kernels."
+        "DeepGEMM backend is unavailable in the current vLLM environment, "
+        "or the available DeepGEMM package does not provide the required APIs "
+        "for these kernels."
     )
 
 
@@ -156,7 +157,7 @@ def _import_deep_gemm():
         logger.debug_once("Imported deep_gemm module from site-packages")
         return module
     except ImportError:
-        logger.debug_once(
+        logger.info_once(
             "deep_gemm not found in site-packages, "
             "trying vendored vllm.third_party.deep_gemm"
         )
@@ -167,13 +168,29 @@ def _import_deep_gemm():
         logger.debug_once("Imported deep_gemm module from vllm.third_party.deep_gemm")
         return module
     except ImportError:
-        logger.debug_once("Vendored deep_gemm not found either")
+        logger.info_once("Vendored deep_gemm not found either")
     except Exception as e:
         # The vendored module may raise RuntimeError during _C.init()
         # if JIT include files are missing (e.g. incomplete wheel).
         logger.warning_once("Failed to import vendored deep_gemm: %s", e)
 
     return None
+
+
+def _apply_pdl(mod, enable: bool = True) -> None:
+    mod_name = getattr(mod, "__name__", str(mod))
+    try:
+        set_pdl_fn = getattr(mod, "set_pdl", None)
+        if set_pdl_fn is None:
+            return
+        set_pdl_fn(enable)
+        logger.info_once(
+            "DeepGEMM PDL %s on %s.",
+            "enabled" if enable else "disabled",
+            mod_name,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning_once("Failed to set DeepGEMM PDL on %s: %s", mod_name, e)
 
 
 def _lazy_init() -> None:
@@ -218,6 +235,9 @@ def _lazy_init() -> None:
     if _dg is None:
         return
 
+    # Enable PDL for DeepGEMM on architectures that support it (SM90+).
+    if current_platform.is_arch_support_pdl():
+        _apply_pdl(_dg, True)
     _cublaslt_gemm_nt_impl = getattr(_dg, "cublaslt_gemm_nt", None)
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
     _fp8_einsum_impl = getattr(_dg, "fp8_einsum", None)
