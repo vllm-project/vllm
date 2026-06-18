@@ -100,9 +100,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             "length": "max_tokens",
             "tool_calls": "tool_use",
         }
-        self._merge_inline_system = self._detect_merge_inline_system(
-            chat_template
-        )
+        self._merge_inline_system = self._detect_merge_inline_system(chat_template)
 
     @staticmethod
     def _detect_merge_inline_system(chat_template: str | None) -> bool:
@@ -156,7 +154,8 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @classmethod
     def _convert_anthropic_to_openai_request(
-        cls, anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+        cls,
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
         *,
         merge_inline_system: bool = False,
     ) -> ChatCompletionRequest:
@@ -164,11 +163,13 @@ class AnthropicServingMessages(OpenAIServingChat):
         openai_messages: list[dict[str, Any]] = []
 
         cls._convert_system_message(
-            anthropic_request, openai_messages,
+            anthropic_request,
+            openai_messages,
             merge_inline_system=merge_inline_system,
         )
         cls._convert_messages(
-            anthropic_request.messages, openai_messages,
+            anthropic_request.messages,
+            openai_messages,
             merge_inline_system=merge_inline_system,
         )
         req = cls._build_base_request(anthropic_request, openai_messages)
@@ -234,7 +235,9 @@ class AnthropicServingMessages(OpenAIServingChat):
 
     @classmethod
     def _convert_messages(
-        cls, messages: list, openai_messages: list[dict[str, Any]],
+        cls,
+        messages: list,
+        openai_messages: list[dict[str, Any]],
         *,
         merge_inline_system: bool = False,
     ) -> None:
@@ -556,7 +559,8 @@ class AnthropicServingMessages(OpenAIServingChat):
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Received messages request %s", request.model_dump_json())
         chat_req = self._convert_anthropic_to_openai_request(
-            request, merge_inline_system=self._merge_inline_system,
+            request,
+            merge_inline_system=self._merge_inline_system,
         )
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug("Convert to OpenAI request %s", chat_req.model_dump_json())
@@ -966,7 +970,8 @@ class AnthropicServingMessages(OpenAIServingChat):
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
         chat_req = self._convert_anthropic_to_openai_request(
-            request, merge_inline_system=self._merge_inline_system,
+            request,
+            merge_inline_system=self._merge_inline_system,
         )
         result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):

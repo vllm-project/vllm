@@ -1125,19 +1125,20 @@ class TestDetectMergeInlineSystem:
 
     def test_qwen_template_requires_merge(self):
         """Template with loop.first guard rejects mid-conversation system."""
-        assert AnthropicServingMessages._detect_merge_inline_system(
-            Q35_TEMPLATE
-        ) is True
+        assert (
+            AnthropicServingMessages._detect_merge_inline_system(Q35_TEMPLATE) is True
+        )
 
     def test_no_restriction_no_merge(self):
         """Template without restriction accepts mid-conversation system."""
-        assert AnthropicServingMessages._detect_merge_inline_system(
-            (
+        assert (
+            AnthropicServingMessages._detect_merge_inline_system(
                 "{%- for message in messages %}"
                 "{{- message.role }}: {{ message.content }}\n"
                 "{%- endfor %}"
             )
-        ) is False
+            is False
+        )
 
     def test_no_template_defaults_merge(self):
         """No chat_template → conservative default: merge."""
