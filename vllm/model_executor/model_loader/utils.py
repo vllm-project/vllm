@@ -20,8 +20,7 @@ from vllm.model_executor.layers.attention import (
     MLAAttention,
     MMEncoderAttention,
 )
-from vllm.model_executor.layers.hpc.hpc_module import HpcModule
-from vllm.model_executor.layers.hpc.rope_norm import HpcRopeNorm
+from vllm.model_executor.layers.hpc import HpcModule, HpcRopeNorm
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,

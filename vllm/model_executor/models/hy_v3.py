@@ -48,7 +48,7 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.hpc.rope_norm import HpcRopeNorm, QkNormPolicy
+from vllm.model_executor.layers.hpc import HpcRopeNorm, QkNormPolicy
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,

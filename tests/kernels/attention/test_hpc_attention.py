@@ -39,11 +39,8 @@ except ImportError:
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import ForwardContext, override_forward_context
-from vllm.model_executor.layers.hpc.rope_norm import (
-    HpcRopeNorm,
-    QkNormPolicy,
-    _hpc_rope_norm_instances,
-)
+from vllm.model_executor.layers.hpc import HpcRopeNorm, QkNormPolicy
+from vllm.model_executor.layers.hpc.rope_norm import _hpc_rope_norm_instances
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
