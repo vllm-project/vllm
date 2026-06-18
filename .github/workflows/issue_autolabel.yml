@@ -16,6 +16,7 @@ jobs:
         id: label-step
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
         with:
+          retries: 3
           script: |
             // Configuration: Add new labels and keywords here
             const labelConfig = {
@@ -317,6 +318,7 @@ jobs:
         if: steps.label-step.outputs.labels_added != '[]'
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
         with:
+          retries: 3
           script: |
             // Configuration: Map labels to GitHub users to CC
             // You can add multiple users per label, and multiple label configurations
@@ -394,6 +396,7 @@ jobs:
         if: contains(steps.label-step.outputs.labels_added, 'rocm') && contains(toJSON(github.event.issue.labels.*.name), 'bug')
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd  # v8.0.0
         with:
+          retries: 3
           script: |
             const body = (context.payload.issue.body || '').toLowerCase();
 
