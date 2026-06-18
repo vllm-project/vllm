@@ -85,6 +85,14 @@ pub(crate) fn validate_vocab_range(
         )?;
     }
 
+    if let Some(bad_words_token_ids) = params.bad_words_token_ids.as_deref() {
+        validate_param(
+            "bad_words",
+            bad_words_token_ids.iter().flatten().copied(),
+            limits.tokenizer_vocab_size,
+        )?;
+    }
+
     Ok(())
 }
 
