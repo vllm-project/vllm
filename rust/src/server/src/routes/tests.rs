@@ -23,6 +23,7 @@ use vllm_chat::{
     ChatTextBackend, DefaultChatOutputProcessor, DynChatOutputProcessor, DynChatRenderer,
     NewChatOutputProcessorOptions,
 };
+use vllm_engine_core_client::mock_engine::default_ready_response;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
@@ -31,7 +32,9 @@ use vllm_engine_core_client::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, StopReason,
     decode_value,
 };
-use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
+use vllm_engine_core_client::test_utils::{
+    IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
+};
 use vllm_engine_core_client::{
     ENGINE_CORE_DEAD_SENTINEL, EngineCoreClient, EngineCoreClientConfig, EngineId,
 };
@@ -786,6 +789,45 @@ async fn test_app_with_dev_mode(dev_mode_enabled: bool) -> axum::Router {
         )),
         dev_mode_enabled,
     )
+}
+
+/// Build a dev-mode router backed by a mock engine using a custom ready
+/// response, returning the router and the engine task handle so the engine
+/// stays alive for the duration of the test.
+async fn test_dev_mode_app_with_ready(
+    ready_response: vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse,
+) -> (axum::Router, MockEngineTask) {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-world-size".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        engine_id.clone(),
+        ready_response,
+        |_dealer, _push| boxed_test_future(async {}),
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let app = build_router_with_dev_mode(
+        Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )),
+        true,
+    );
+    (app, engine_task)
 }
 
 async fn test_app_with_request_id_headers() -> (axum::Router, MockEngineTask) {
@@ -5875,4 +5917,73 @@ async fn tokenize_chat_continue_final_vs_new_assistant_differs() {
     let continue_len = continue_final["tokens"].as_array().unwrap().len();
     let new_len = new_assistant["tokens"].as_array().unwrap().len();
     assert!(new_len > continue_len);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn world_size_endpoint_is_dev_mode_only() {
+    let mut app = test_app().await;
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/get_world_size")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn world_size_includes_data_parallelism_by_default() {
+    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+        world_size: 2,
+        data_parallel_size: 4,
+        ..default_ready_response()
+    };
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/get_world_size")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json, json!({"world_size": 8}));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn world_size_excludes_data_parallelism_when_include_dp_false() {
+    let ready = vllm_engine_core_client::protocol::handshake::EngineCoreReadyResponse {
+        world_size: 2,
+        data_parallel_size: 4,
+        ..default_ready_response()
+    };
+    let (mut app, _engine_task) = test_dev_mode_app_with_ready(ready).await;
+
+    let response = app
+        .call(
+            Request::builder()
+                .uri("/get_world_size?include_dp=false")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+    assert_eq!(json, json!({"world_size": 2}));
 }
