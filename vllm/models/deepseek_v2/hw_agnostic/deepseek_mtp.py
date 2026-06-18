@@ -25,6 +25,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.model_executor.models.utils import get_pp_missing_layer_names, maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -35,7 +36,6 @@ from .deepseek_v2 import (
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
-from .utils import get_pp_missing_layer_names, maybe_prefix
 
 logger = init_logger(__name__)
 

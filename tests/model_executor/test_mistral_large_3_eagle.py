@@ -8,8 +8,8 @@ import torch
 import torch.nn as nn
 
 from vllm.config.compilation import CompilationMode
-from vllm.model_executor.models import deepseek_v2 as deepseek_mod
 from vllm.model_executor.models import mistral_large_3_eagle as eagle_mod
+from vllm.models import deepseek_v2 as deepseek_mod
 
 
 class DummyPPGroup:

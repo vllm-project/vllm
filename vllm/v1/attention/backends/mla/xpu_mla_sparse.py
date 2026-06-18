@@ -30,7 +30,7 @@ from vllm.v1.attention.ops.xpu_mla_sparse import triton_bf16_mla_sparse_interfac
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
-    from vllm.model_executor.models.deepseek_v2 import Indexer
+    from vllm.models.deepseek_v2 import Indexer
 logger = init_logger(__name__)
 
 

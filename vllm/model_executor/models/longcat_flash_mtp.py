@@ -21,9 +21,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.longcat_flash import FlashConfig
+from vllm.models.deepseek_v2 import DeepseekV2DecoderLayer
 from vllm.sequence import IntermediateTensors
 
-from .deepseek_v2 import DeepseekV2DecoderLayer
 from .utils import maybe_prefix
 
 

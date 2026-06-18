@@ -46,7 +46,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
-    from vllm.model_executor.models.deepseek_v2 import Indexer
+    from vllm.models.deepseek_v2 import Indexer
 
 logger = init_logger(__name__)
 

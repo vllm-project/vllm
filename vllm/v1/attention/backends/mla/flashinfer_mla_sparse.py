@@ -45,7 +45,7 @@ from vllm.v1.attention.backends.utils import KVCacheLayoutType
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
-    from vllm.model_executor.models.deepseek_v2 import Indexer
+    from vllm.models.deepseek_v2 import Indexer
 
 logger = init_logger(__name__)
 

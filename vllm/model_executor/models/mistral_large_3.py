@@ -5,7 +5,7 @@ from collections.abc import Iterable
 import regex as re
 import torch
 
-from vllm.model_executor.models.deepseek_v2 import DeepseekV3ForCausalLM
+from vllm.models.deepseek_v2 import DeepseekV3ForCausalLM
 
 
 class MistralLarge3ForCausalLM(DeepseekV3ForCausalLM):

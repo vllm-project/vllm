@@ -15,11 +15,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models.deepseek_v2 import (
+from vllm.model_executor.models.mistral_large_3 import MistralLarge3ForCausalLM
+from vllm.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV2Model,
 )
-from vllm.model_executor.models.mistral_large_3 import MistralLarge3ForCausalLM
 
 from .interfaces import SupportsMultiModal
 from .utils import make_empty_intermediate_tensors_factory, maybe_prefix

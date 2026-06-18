@@ -21,7 +21,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.deepseek_v2 import (
+from vllm.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV3ForCausalLM,
 )
