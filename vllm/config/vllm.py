@@ -185,7 +185,10 @@ def enable_aiter_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
-    if rocm_aiter_ops.is_mla_enabled() and rocm_aiter_ops.has_fused_rope_mla_kv_cache():
+    if (
+        rocm_aiter_ops.is_mla_enabled()
+        and rocm_aiter_ops.has_fused_rope_mla_kv_cache()
+    ):
         return True
     return enable_rope_kvcache_mla_fusion(cfg)
 
