@@ -234,7 +234,7 @@ class Platform:
         import vllm.kernels  # noqa: F401
 
     @classmethod
-    def device_id_to_physical_device_id(cls, device_id: int):
+    def device_id_to_physical_device_id(cls, device_id: int) -> int | str:
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
         # a CPU-only placement group located on a GPU node.
