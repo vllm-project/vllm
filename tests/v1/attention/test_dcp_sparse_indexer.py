@@ -21,8 +21,12 @@ import vllm.v1.attention.backends.mla.flashmla_sparse as sparse_mla_mod
 from vllm.model_executor.layers.sparse_attn_indexer import (
     _global_to_local_position,
     _local_to_global_position,
+    _use_persistent_topk_decode,
 )
-from vllm.v1.attention.backends.mla.indexer import _dcp_local_indexer_seq_lens
+from vllm.v1.attention.backends.mla.indexer import (
+    _dcp_local_indexer_seq_lens,
+    split_indexer_prefill_chunks,
+)
 
 
 class _FakeDCPGroup:
@@ -52,6 +56,16 @@ class _FakeDCPGroup:
 
 def _local_to_global(local_idx, rank, world_size, interleave):
     return _local_to_global_position(local_idx, rank, world_size, interleave)
+
+
+def test_decode_persistent_topk_disabled_for_dcp(monkeypatch):
+    monkeypatch.setattr(idx_mod.current_platform, "is_cuda", lambda: True)
+
+    assert _use_persistent_topk_decode(512, dcp_world_size=1)
+    assert _use_persistent_topk_decode(1024, dcp_world_size=1)
+    assert _use_persistent_topk_decode(2048, dcp_world_size=1)
+    assert not _use_persistent_topk_decode(256, dcp_world_size=1)
+    assert not _use_persistent_topk_decode(512, dcp_world_size=2)
 
 
 @pytest.mark.parametrize("interleave", [1, 2, 4])
@@ -123,6 +137,48 @@ def test_dcp_prefill_visible_lengths_support_compressed_indexer_cache():
     )
 
     assert got.tolist() == [0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2]
+
+
+def _chunk_specs_as_tuples(chunks):
+    return [(req.start, req.stop, query.start, query.stop) for req, query in chunks]
+
+
+def test_dcp_prefill_chunking_uses_all_rank_max_lengths_for_collective_order():
+    seq_lens_cpu = torch.tensor([1, 3], dtype=torch.int32)
+    query_lens_cpu = torch.tensor([1, 1], dtype=torch.int32)
+    workspace_size = 2
+    max_logits_bytes = 1024 * 1024
+
+    all_local = _dcp_local_indexer_seq_lens(
+        seq_lens_cpu,
+        compress_ratio=1,
+        dcp_world_size=2,
+        dcp_rank=None,
+        cp_interleave_size=1,
+    )
+
+    rank_specs = [
+        _chunk_specs_as_tuples(
+            split_indexer_prefill_chunks(
+                all_local[:, rank],
+                query_lens_cpu,
+                workspace_size,
+                max_logits_bytes,
+            )
+        )
+        for rank in range(2)
+    ]
+    safe_specs = _chunk_specs_as_tuples(
+        split_indexer_prefill_chunks(
+            all_local.max(dim=1).values,
+            query_lens_cpu,
+            workspace_size,
+            max_logits_bytes,
+        )
+    )
+
+    assert rank_specs[0] != rank_specs[1]
+    assert safe_specs == [(0, 1, 0, 1), (1, 2, 0, 1)]
 
 
 @pytest.mark.parametrize(
@@ -315,6 +371,41 @@ def test_prefill_global_topk_uses_row_starts(monkeypatch):
                         ).item()
                     )
         assert union == set(ref[row].tolist())
+
+
+def test_global_topk_remap_allows_empty_local_rank(monkeypatch):
+    interleave, world_size, topk_tokens = 1, 2, 2
+    pos_list = [
+        torch.tensor([[0, 2]], dtype=torch.int32),
+        torch.tensor([[-1, -1]], dtype=torch.int32),
+    ]
+    scores_list = [
+        torch.tensor([[5.0, 4.0]], dtype=torch.float32),
+        torch.full((1, topk_tokens), float("-inf"), dtype=torch.float32),
+    ]
+
+    per_rank_final = []
+    for rank in range(world_size):
+        fake = _FakeDCPGroup(world_size, rank)
+        fake.set_all(pos_list, scores_list)
+        monkeypatch.setattr(idx_mod, "get_dcp_group", lambda f=fake: f)
+
+        topk_buf = (
+            torch.tensor([[0, 1]], dtype=torch.int32)
+            if rank == 0
+            else torch.full((1, topk_tokens), -1, dtype=torch.int32)
+        )
+        logits = torch.tensor([[5.0, 4.0]], dtype=torch.float32) if rank == 0 else None
+        idx_mod._dcp_global_topk_remap(
+            topk_buf,
+            logits,
+            topk_tokens,
+            interleave,
+        )
+        per_rank_final.append(topk_buf)
+
+    assert per_rank_final[0].tolist() == [[0, 1]]
+    assert per_rank_final[1].tolist() == [[-1, -1]]
 
 
 def test_global_topk_ownership_partition(monkeypatch):

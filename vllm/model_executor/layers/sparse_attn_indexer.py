@@ -38,6 +38,15 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 MXFP4_BLOCK_SIZE = 32
 
 
+def _use_persistent_topk_decode(topk_tokens: int, dcp_world_size: int) -> bool:
+    """Return whether decode top-k should use the persistent CUDA kernel."""
+    return (
+        current_platform.is_cuda()
+        and dcp_world_size == 1
+        and topk_tokens in (512, 1024, 2048)
+    )
+
+
 def _local_to_global_position(
     local_idx: torch.Tensor, rank: int, world_size: int, interleave: int
 ) -> torch.Tensor:
@@ -66,7 +75,7 @@ def _global_to_local_position(
 
 def _dcp_global_topk_remap(
     topk_indices: torch.Tensor,
-    logits: torch.Tensor,
+    logits: torch.Tensor | None,
     topk_tokens: int,
     interleave: int,
     row_starts: torch.Tensor | None = None,
@@ -97,7 +106,8 @@ def _dcp_global_topk_remap(
         topk_indices: int32 [num_rows, topk_tokens], per-rank local indices
             (a view into topk_indices_buffer); -1 marks an unused slot.
         logits: float32 [num_rows, seq_pad], the per-row MQA scores the local
-            top-k was taken over.
+            top-k was taken over. None means this rank has no local candidates
+            for these rows, but must still participate in the DCP collective.
         topk_tokens: K, the desired global selection size.
         interleave: cp_kv_cache_interleave_size (I).
         row_starts: Optional per-row offset into ``logits``. Prefill top-k
@@ -110,13 +120,21 @@ def _dcp_global_topk_remap(
     # 1. Recover local scores; clamp indices defensively and mask invalid slots.
     invalid = topk_indices < 0
     idx_safe = torch.clamp(topk_indices, min=0)
-    score_idx = idx_safe.to(torch.int64)
-    if row_starts is not None:
-        score_idx = score_idx + row_starts.to(
-            device=score_idx.device, dtype=score_idx.dtype
-        ).view(-1, 1)
-        score_idx = torch.clamp(score_idx, min=0, max=logits.shape[1] - 1)
-    local_scores = torch.gather(logits, 1, score_idx)
+    if logits is None:
+        local_scores = torch.full(
+            topk_indices.shape,
+            float("-inf"),
+            dtype=torch.float32,
+            device=topk_indices.device,
+        )
+    else:
+        score_idx = idx_safe.to(torch.int64)
+        if row_starts is not None:
+            score_idx = score_idx + row_starts.to(
+                device=score_idx.device, dtype=score_idx.dtype
+            ).view(-1, 1)
+            score_idx = torch.clamp(score_idx, min=0, max=logits.shape[1] - 1)
+        local_scores = torch.gather(logits, 1, score_idx).to(torch.float32)
     local_scores = local_scores.masked_fill(invalid, float("-inf"))
 
     # 2. Local -> global positions; -1 stays -1.
@@ -296,6 +314,20 @@ def sparse_attn_indexer(
         for chunk in prefill_metadata.chunks:
             k_quant = k_quant_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
+            topk_indices = topk_indices_buffer[
+                chunk.token_start : chunk.token_end, :topk_tokens
+            ]
+
+            if chunk.total_seq_lens == 0:
+                topk_indices.fill_(-1)
+                if attn_metadata_narrowed.dcp_world_size > 1:
+                    _dcp_global_topk_remap(
+                        topk_indices,
+                        None,
+                        topk_tokens,
+                        attn_metadata_narrowed.cp_interleave_size,
+                    )
+                continue
 
             if not chunk.skip_kv_gather:
                 ops.cp_gather_indexer_k_quant_cache(
@@ -343,10 +375,6 @@ def sparse_attn_indexer(
                     clean_logits=False,
                 )
             num_rows = logits.shape[0]
-
-            topk_indices = topk_indices_buffer[
-                chunk.token_start : chunk.token_end, :topk_tokens
-            ]
 
             ops.top_k_per_row_prefill(
                 logits,
@@ -448,7 +476,9 @@ def sparse_attn_indexer(
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if current_platform.is_cuda() and topk_tokens in (512, 1024, 2048):
+        if _use_persistent_topk_decode(
+            topk_tokens, attn_metadata_narrowed.dcp_world_size
+        ):
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),

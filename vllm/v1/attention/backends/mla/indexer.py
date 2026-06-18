@@ -120,7 +120,7 @@ def _dcp_local_indexer_seq_lens(
     seq_lens: torch.Tensor,
     compress_ratio: int,
     dcp_world_size: int,
-    dcp_rank: int,
+    dcp_rank: int | None,
     cp_interleave_size: int,
 ) -> torch.Tensor:
     """Return per-rank indexer-K lengths for global uncompressed lengths."""
@@ -583,6 +583,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 else seq_lens_cpu
             )
             prefill_local_indexer_seq_lens_cpu = compressed_seq_lens_cpu
+            prefill_chunk_indexer_seq_lens_cpu = compressed_seq_lens_cpu
             if self.dcp_world_size > 1:
                 pre_local_cpu = _dcp_local_indexer_seq_lens(
                     seq_lens_cpu[num_decodes : num_decodes + num_prefills],
@@ -595,12 +596,23 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 prefill_local_indexer_seq_lens_cpu[
                     num_decodes : num_decodes + num_prefills
                 ] = pre_local_cpu
+                pre_all_local_cpu = _dcp_local_indexer_seq_lens(
+                    seq_lens_cpu[num_decodes : num_decodes + num_prefills],
+                    self.compress_ratio,
+                    self.dcp_world_size,
+                    None,
+                    self.cp_kv_cache_interleave_size,
+                )
+                prefill_chunk_indexer_seq_lens_cpu = compressed_seq_lens_cpu.clone()
+                prefill_chunk_indexer_seq_lens_cpu[
+                    num_decodes : num_decodes + num_prefills
+                ] = pre_all_local_cpu.max(dim=1).values
             prefill_query_lens_cpu = torch.diff(
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
             max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
             chunk_specs = split_indexer_prefill_chunks(
-                prefill_local_indexer_seq_lens_cpu[num_decodes:],
+                prefill_chunk_indexer_seq_lens_cpu[num_decodes:],
                 prefill_query_lens_cpu,
                 self.max_prefill_buffer_size,
                 max_logits_bytes,
@@ -749,7 +761,7 @@ def build_prefill_chunk_metadata(
     cp_interleave_size: int = 1,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     total_seq_lens = compressed_seq_lens_cpu[start_idx:end_idx].sum().item()
-    if total_seq_lens == 0:
+    if total_seq_lens == 0 and dcp_world_size == 1:
         return None
 
     num_reqs = end_idx - start_idx
