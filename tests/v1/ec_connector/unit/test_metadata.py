@@ -8,7 +8,7 @@ import pytest
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.metadata import (
+from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.protocol import (
     XferAck,
     XferReq,
     XferStatus,

@@ -42,7 +42,6 @@ def _make_producer(region: ECSharedRegion) -> ECCPUProducer:
     )
     return ECCPUProducer(
         memory_context=ctx,
-        engine=MagicMock(),
         compat_hash="hash",
         addr=("localhost", 12345),
         local_encodings={},
@@ -67,7 +66,7 @@ def _make_consumer(region: ECSharedRegion) -> ECCPUConsumer:
     return ECCPUConsumer(
         memory_context=ctx,
         transport=MagicMock(),
-        engine=MagicMock(),
+        data=MagicMock(),
         compat_hash="hash",
         local_encodings={},
         blocks={},
