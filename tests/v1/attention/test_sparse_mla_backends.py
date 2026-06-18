@@ -794,6 +794,15 @@ def test_split_indexer_prefill_chunks_single_request_overflow():
     assert out == expected
 
 
+def test_split_indexer_prefill_chunks_skips_zero_query_noop_chunk():
+    seq_lens = torch.tensor([0, 100])
+    query_lens = torch.tensor([0, 5])
+
+    out = split_indexer_prefill_chunks(seq_lens, query_lens, 50, 10000)
+
+    assert out == [(slice(1, 2), slice(0, 5))]
+
+
 def test_triton_convert_returns_valid_counts():
     """Test that return_valid_counts correctly counts non-negative indices."""
     device = torch.device(DEVICE_TYPE)
