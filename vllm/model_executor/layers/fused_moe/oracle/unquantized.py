@@ -19,9 +19,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
+    align_moe_weights_for_fi,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
-    get_flashinfer_moe_backend,
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
@@ -67,6 +66,12 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
             UnquantizedMoeBackend.TRITON,
             UnquantizedMoeBackend.BATCHED_TRITON,
         ]
+
+        # On Hopper (SM90), the FlashInfer unquantized MoE kernels are slower
+        # than Triton, so prefer Triton by default.
+        if current_platform.is_device_capability_family(90):
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_TRTLLM)
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
 
         # HACK: Qwen3.5 has crash with FLASHINFER_CUTLASS BF16 if DEP.
         # Updating the oracle querying logic is out of the scope of this
@@ -224,49 +229,6 @@ def select_unquantized_moe_backend(
 
         return _return_or_raise(requested_backend, moe_config, activation_format)
 
-    # Handle explicit FlashInfer FP16 configuration.
-    if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP16"):
-        if not envs.VLLM_USE_FLASHINFER_MOE_FP16:
-            if UnquantizedMoeBackend.FLASHINFER_TRTLLM in AVAILABLE_BACKENDS:
-                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.FLASHINFER_TRTLLM)
-            if UnquantizedMoeBackend.FLASHINFER_CUTLASS in AVAILABLE_BACKENDS:
-                AVAILABLE_BACKENDS.remove(UnquantizedMoeBackend.FLASHINFER_CUTLASS)
-
-        elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
-            # If user is explicit about backend, validate it.
-            fi_backend = get_flashinfer_moe_backend()
-            if fi_backend == FlashinferMoeBackend.CUTLASS:
-                backend = UnquantizedMoeBackend.FLASHINFER_CUTLASS
-            elif fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
-                backend = UnquantizedMoeBackend.FLASHINFER_TRTLLM
-            else:
-                raise ValueError(
-                    f"FlashInfer MOE backend {fi_backend} "
-                    "does not support unquantized MoE."
-                )
-            k_cls = backend_to_kernel_cls(backend)
-            return _return_or_raise(backend, moe_config, activation_format)
-        else:
-            # If the user is not explicit about the backend, try both.
-            for backend in [
-                UnquantizedMoeBackend.FLASHINFER_TRTLLM,
-                UnquantizedMoeBackend.FLASHINFER_CUTLASS,
-            ]:
-                k_cls = backend_to_kernel_cls(backend)
-                supported, reason = k_cls.is_supported_config(
-                    k_cls, moe_config, None, None, activation_format
-                )
-                if supported:
-                    logger.info_once(_make_log_backend(backend))
-                    return backend, k_cls
-                else:
-                    logger.debug_once(_make_log_unsupported(backend, reason))
-
-            raise NotImplementedError(
-                "Found VLLM_USE_FLASHINFER_MOE_FP16=1, but no "
-                "FlashInfer unquantized MoE backend supports the configuration."
-            )
-
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
         if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
@@ -308,13 +270,22 @@ def convert_to_unquantized_kernel_format(
             w13_weight = swap_w13_to_w31(w13_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
-        # Swap halves to arrange as [w3; w1] (kernel expectation)
-        w13_weight = swap_w13_to_w31(w13_weight)
+        is_act_and_mul = layer.moe_config.is_act_and_mul
+        if not is_act_and_mul:
+            # Kernel requires intermediate_size_per_partition % 128 == 0 (BlockMajorK
+            # weight layout uses block_k=128). Pad along the intermediate dim when
+            # the model + TP split don't satisfy the constraint.
+            w13_weight, w2_weight, padded_intermediate = align_moe_weights_for_fi(
+                w13_weight, w2_weight, is_act_and_mul, min_alignment=128
+            )
+            layer.moe_config.intermediate_size_per_partition = padded_intermediate
+
         _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         w13_weight, w2_weight = convert_moe_weights_to_flashinfer_trtllm_block_layout(
             _cache_permute_indices,
             w13_weight,
             w2_weight,
+            is_gated_act_gemm=is_act_and_mul,
         )
 
     return w13_weight.contiguous(), w2_weight.contiguous()
@@ -359,7 +330,6 @@ def make_unquantized_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        inplace=(not moe_config.disable_inplace and not is_monolithic),
     )
 
     return kernel

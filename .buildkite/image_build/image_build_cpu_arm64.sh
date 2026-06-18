@@ -21,12 +21,6 @@ else
   exit 0
 fi
 
-# The rust frontend lives in a git submodule under rust/. Buildkite's default
-# checkout does not recurse submodules, and the Dockerfile only sees what's in
-# the build context, so initialize the submodule here before building.
-git submodule sync --recursive
-git submodule update --init --recursive
-
 # build
 docker build --file docker/Dockerfile.cpu \
   --build-arg max_jobs=16 \

@@ -21,6 +21,9 @@ from vllm.model_executor.layers.quantization.fp8 import (
     Fp8LinearMethod,
     Fp8MoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    Fp8PerTensorOnlineLinearMethod,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
@@ -64,70 +67,6 @@ def test_model_load_and_run(
         print(outputs[0][1])
 
 
-KV_CACHE_MODELS = [
-    # AutoFP8 format using separate .k_scale and .v_scale
-    # The original checkpoint below was removed from the Hub. To unblock CI and
-    # until a small replacement with split K/V scales is found, skip this case.
-    # See PR #27717 for context.
-    pytest.param(
-        "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
-        marks=pytest.mark.skip(
-            reason=(
-                "Checkpoint removed from HF; temporarily disabling this "
-                "AutoFP8 split K/V case (PR #27717)."
-            )
-        ),
-    ),
-]
-
-
-@pytest.mark.skipif(
-    not is_quant_method_supported("fp8"),
-    reason="FP8 is not supported on this GPU type.",
-)
-@pytest.mark.parametrize("model_id", KV_CACHE_MODELS)
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
-)
-def test_kv_cache_model_load_and_run(
-    vllm_runner, model_id: str, use_rocm_aiter: bool, monkeypatch
-):
-    if use_rocm_aiter:
-        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-
-    # `LLM.apply_model` requires pickling a function.
-    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    with vllm_runner(model_id, kv_cache_dtype="fp8", enforce_eager=True) as llm:
-
-        def check_model(model):
-            attn = model.model.layers[0].self_attn.attn
-
-            assert isinstance(attn.quant_method, Fp8KVCacheMethod)
-
-            if not current_platform.is_rocm():
-                # NOTE: This code path requires validation on Non-CUDA platform
-                # NOTE: it is valid for scales to be 1.0 (default value), but
-                # we know these checkpoints have scales < 1.0
-                assert 0.0 < attn._k_scale < 1.0
-                assert 0.0 < attn._v_scale < 1.0
-            else:
-                # NOTE: This code path is for ROCm platform
-                # NOTE: it is valid for scales to be 1.0 (default value), but
-                # we know these checkpoints have scales < 1.0
-                # However on ROCm platform, the _k_scale and _v_scale will be
-                # scaled by a factor of 2 as described in
-                # vllm/model_executor/layers/quantization/kv_cache.py
-                assert 0.0 < attn._k_scale < (1.0 * 2.0)
-                assert 0.0 < attn._v_scale < (1.0 * 2.0)
-
-        llm.apply_model(check_model)
-
-        # note: this does not test accuracy, just that we can run through
-        # see lm-eval tests for accuracy
-        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
-        print(outputs[0][1])
-
-
 @pytest.mark.skipif(
     not is_quant_method_supported("fp8"),
     reason="FP8 is not supported on this GPU type.",
@@ -164,7 +103,7 @@ def test_online_quantization(
 
         def check_model(model):
             fc1 = model.model.decoder.layers[0].fc1
-            assert isinstance(fc1.quant_method, Fp8LinearMethod)
+            assert isinstance(fc1.quant_method, Fp8PerTensorOnlineLinearMethod)
             if kv_cache_dtype == "fp8":
                 attn = model.model.decoder.layers[0].self_attn.attn
                 assert isinstance(attn.quant_method, Fp8KVCacheMethod)
@@ -440,6 +379,7 @@ def test_fp8_reloading(
                 hidden_size=1,
                 intermediate_size=1,
             )
+            layer = layer.routed_experts
             method = method_cls(config, layer)
             method.create_weights(
                 layer=layer,
@@ -465,11 +405,9 @@ def test_fp8_reloading(
     method.process_weights_after_loading(layer)
 
     # test reloading works after loading
-    # assuming that no reshaping occurred
-    for name, shape, original_weight_loader in original_metadata:
+    for name, shape, _ in original_metadata:
         param = getattr(layer, name)
         weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        assert weight_loader is original_weight_loader
         weight_loader(param, torch.zeros(shape))  # cannot use empty
 
     method.process_weights_after_loading(layer)

@@ -12,8 +12,10 @@ from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -27,7 +29,10 @@ class ExtractHiddenStatesProposer:
     def __init__(self, vllm_config: VllmConfig, device):
         assert vllm_config.speculative_config is not None
 
-        assert vllm_config.speculative_config.num_speculative_tokens == 1
+        self.num_speculative_tokens = (
+            vllm_config.speculative_config.num_speculative_tokens
+        )
+        assert self.num_speculative_tokens == 1
         if vllm_config.speculative_config.disable_padded_drafter_batch:
             raise ValueError(
                 "disable_padded_drafter_batch is not supported with "
@@ -48,6 +53,14 @@ class ExtractHiddenStatesProposer:
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.max_num_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens + max_batch_size
+        )
+
+        self.backup_next_token_ids = CpuGpuBuffer(
+            max_batch_size,
+            dtype=torch.int32,
+            pin_memory=is_pin_memory_available(),
+            device=device,
+            with_numpy=True,
         )
 
         self.hf_config = vllm_config.speculative_config.draft_model_config.hf_config
@@ -72,6 +85,7 @@ class ExtractHiddenStatesProposer:
 
     def propose(
         self,
+        num_speculative_tokens: int,
         sampled_token_ids: torch.Tensor,
         target_hidden_states: list[torch.Tensor],
         common_attn_metadata: CommonAttentionMetadata,
@@ -102,6 +116,7 @@ class ExtractHiddenStatesProposer:
                 - Draft tokens matching sampled tokens, shape [batch_size, 1]
                 - KV connector output (if KV transfer is active), else None
         """
+        assert num_speculative_tokens == self.num_speculative_tokens
         assert self.model is not None and isinstance(target_hidden_states, list)
 
         # target_hidden_states is a list of tensors (one per layer)
@@ -303,18 +318,15 @@ class ExtractHiddenStatesProposer:
         (if valid and not discarded) or a backup token from the request state.
         """
         num_reqs = gpu_input_batch.num_reqs
-        device = sampled_token_ids.device
 
-        # Compute backup tokens for discarded / invalid requests
-        seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
-        backup_tokens_gpu = torch.tensor(
-            [
-                requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])
-                for i in range(num_reqs)
-            ],
-            dtype=torch.int32,
-            device=device,
-        )
+        # Precompute backup token IDs for discarded requests.
+        num_reqs = gpu_input_batch.num_reqs
+        for i in range(num_reqs):
+            self.backup_next_token_ids.np[i] = requests[
+                gpu_input_batch.req_ids[i]
+            ].get_token_id(gpu_input_batch.num_tokens_no_spec[i] - 1)
+        self.backup_next_token_ids.copy_to_gpu(num_reqs)
+        backup_tokens_gpu = self.backup_next_token_ids.gpu[:num_reqs]
 
         assert discard_request_mask.dtype == torch.bool
 

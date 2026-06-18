@@ -9,6 +9,7 @@ import ray
 import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -25,14 +26,32 @@ from ..utils import (
     ensure_model_parallel_initialized,
     init_test_distributed_environment,
     multi_process_parallel,
+    set_random_seed,
 )
 
-torch.manual_seed(42)
-random.seed(44)
+
+def on_gfx942() -> bool:
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx942 as rocm_on_gfx942
+
+        return rocm_on_gfx942()
+    return False
+
+
+set_random_seed(42)
+_test_size_rng = random.Random(44)
 # Size over 8MB is sufficient for custom quick allreduce.
-test_sizes = [random.randint(8 * 1024 * 1024, 10 * 1024 * 1024) for _ in range(8)]
+test_sizes = [
+    _test_size_rng.randint(8 * 1024 * 1024, 10 * 1024 * 1024) for _ in range(8)
+]
 for i, v in enumerate(test_sizes):
     test_sizes[i] -= v % 8
+
+
+def _assert_quickreduce(fa, inp):
+    assert fa is not None
+    assert not fa.disabled
+    assert fa.should_quick_allreduce(inp)
 
 
 @pytest.fixture
@@ -216,11 +235,14 @@ def graph_quickreduce(
 ):
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        m.delenv("ROCR_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
         init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
         ensure_model_parallel_initialized(tp_size, pp_size)
         group = get_tp_group().device_group
+        fa = get_tp_group().device_communicator.qr_comm
 
         # A small all_reduce for warmup.
         # this is needed because device communicators might be created lazily
@@ -246,6 +268,8 @@ def graph_quickreduce(
                     device_idx = torch.accelerator.current_device_index()
                     inp1 = torch.randint(1, 23, (sz,), dtype=dtype, device=device_idx)
                     inp2 = torch.randint(-23, 1, (sz,), dtype=dtype, device=device_idx)
+                    _assert_quickreduce(fa, inp1)
+                    _assert_quickreduce(fa, inp2)
 
                     torch.accelerator.synchronize()
                     graph = torch.cuda.CUDAGraph()
@@ -270,6 +294,8 @@ def eager_quickreduce(
 ):
     with monkeypatch.context() as m:
         m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        m.delenv("ROCR_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
 
@@ -281,12 +307,42 @@ def eager_quickreduce(
         inp = torch.tensor(
             [1.0 * ((i) % 23) for i in range(sz)], dtype=torch.float16, device=device
         )
+        _assert_quickreduce(fa, inp)
         out = fa.quick_all_reduce(inp)
         torch.testing.assert_close(out, inp * tp_size, atol=2.5, rtol=0.1)
 
         inp = torch.tensor(
             [1.0 * ((i) % 23) for i in range(sz)], dtype=torch.bfloat16, device=device
         )
+        _assert_quickreduce(fa, inp)
+        out = fa.quick_all_reduce(inp)
+        torch.testing.assert_close(out, inp * tp_size, atol=2.5, rtol=0.1)
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def bf16_cast_quickreduce(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+):
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        m.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+        m.setenv("VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16", "1")
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+
+        sz = 16 * 1024 * 1024
+        fa = get_tp_group().device_communicator.qr_comm
+        inp = torch.tensor(
+            [1.0 * (i % 23) for i in range(sz)], dtype=torch.bfloat16, device=device
+        )
+        _assert_quickreduce(fa, inp)
+        assert fa.use_fp16_kernels
         out = fa.quick_all_reduce(inp)
         torch.testing.assert_close(out, inp * tp_size, atol=2.5, rtol=0.1)
 
@@ -308,10 +364,25 @@ def test_custom_quick_allreduce(
     world_size = tp_size * pipeline_parallel_size
     if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
+    if test_target is graph_quickreduce and on_gfx942():
+        pytest.xfail(
+            "CUDA graph capture with quick reduce hits "
+            "hipErrorStreamCaptureInvalidated on gfx942"
+        )
 
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", quant_mode)
 
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(), reason="only test quick allreduce for rocm"
+)
+def test_custom_quick_allreduce_bf16_cast(monkeypatch: pytest.MonkeyPatch):
+    if torch.accelerator.device_count() < 2:
+        pytest.skip("Not enough GPUs to run the test.")
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", "FP")
+    multi_process_parallel(monkeypatch, 2, 1, bf16_cast_quickreduce)
 
 
 def qr_variable_input(rank, world_size):
@@ -327,13 +398,27 @@ def qr_variable_input(rank, world_size):
     ranks = []
     for i in range(world_size):
         ranks.append(i)
-    dist.init_process_group(
-        backend="nccl",
-        init_method="tcp://127.0.0.1:29500",
-        rank=rank,
-        world_size=world_size,
-    )
-    cpu_group = torch.distributed.new_group(ranks, backend="nccl")
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        dist.init_process_group(
+            backend="cpu:gloo,cuda:nccl",
+            init_method="tcp://127.0.0.1:29500",
+            rank=rank,
+            world_size=world_size,
+            device_id=device,
+        )
+    else:
+        dist.init_process_group(
+            backend="nccl",
+            init_method="tcp://127.0.0.1:29500",
+            rank=rank,
+            world_size=world_size,
+        )
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        cpu_group = torch.distributed.split_group(
+            split_ranks=[ranks], backend="cpu:gloo,cuda:nccl"
+        )
+    else:
+        cpu_group = torch.distributed.new_group(ranks, backend="nccl")
 
     handle = ops.qr_get_handle(_ptr)
     world_size = dist.get_world_size(group=cpu_group)
