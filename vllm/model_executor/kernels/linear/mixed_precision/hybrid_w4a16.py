@@ -23,7 +23,7 @@ from vllm.model_executor.parameter import (
     permute_param_layout_,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx1x, on_gfx1103, on_gfx1151
+from vllm.platforms.rocm import on_gfx1x, on_gfx1103, on_gfx1150, on_gfx1151
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -275,6 +275,16 @@ def _select_skinny_gfx11_config(
 ) -> tuple[int, int, int, int]:
     """Return (BLOCK_M, BLOCK_N, BLOCK_K, num_warps) for the gfx11 skinny GEMM."""
     if dtype == torch.float16:
+        # Profile-guided default for Qwen3-VL-like multimodal prefill.
+        qwen3_prefill_shapes = {
+            (19456, 2560),  # gate_up_proj-like
+            (2560, 9728),  # down_proj-like
+            (6144, 2560),  # qkv_proj-like
+            (2560, 4096),  # o_proj-like
+        }
+        if on_gfx1150() and 576 <= M <= 832 and (N, K) in qwen3_prefill_shapes:
+            return 64, 256, 64, 8
+
         # Packed-dequant path (fp16 on gfx1x). Cold-optimal tiers from a broad
         # rotating-buffer cudagraph sweep over the catalog (weights row-padded
         # exactly as production via pack_skinny_int4, so the K%4096 cliff is
