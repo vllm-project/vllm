@@ -54,11 +54,8 @@ def _cast_kv_tile(
     """
     if KV_QUANT_MODE == 1:
         if FP8_SOFTWARE_CONV:
-            # Pre-SM89: the cache holds raw fp8e4nv bytes (uint8). Decode in
-            # software (no native fp8 cvt) directly to the activation dtype and
-            # apply the per-tensor scale in that dtype -- no fp32. The activation
-            # dtype is the platform's native float: bf16 where bf16 is supported
-            # directly (SM80/86), fp16 where only fp16 is (SM75 has no bf16).
+            # Software-decode the fp8 bytes to the activation dtype and apply the
+            # per-tensor scale in that dtype (no fp32).
             if Q.dtype == tl.float16:
                 return fp8e4m3_to_fp16(data) * tl.load(tensor_scale).to(tl.float16)
             return fp8e4m3_to_bf16(data) * tl.load(tensor_scale).to(tl.bfloat16)
