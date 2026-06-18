@@ -33,9 +33,9 @@ if TYPE_CHECKING:
 class RequestBlockHashes(list["BlockHash"]):
     """Fine-grained hashes with cached larger-block views.
 
-    The list itself stores hashes at the prefix-cache hash block size. Larger
-    full-block views are computed on demand with ``get_block_hashes``. Partial
-    boundary hashes are computed one boundary at a time with
+    The list itself stores hashes at the request's ``partial_cache_unit``.
+    Larger full-block views are computed on demand with ``get_block_hashes``.
+    Partial boundary hashes are computed one boundary at a time with
     ``get_partial_block_hash``.
     """
 
