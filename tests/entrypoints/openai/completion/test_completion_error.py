@@ -77,7 +77,7 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    serving_render = OnlineRenderer(
+    online_renderer = OnlineRenderer(
         model_config=engine.model_config,
         renderer=engine.renderer,
         model_registry=models.registry,
@@ -88,7 +88,7 @@ def _build_serving_completion(engine: AsyncLLM) -> OpenAIServingCompletion:
     return OpenAIServingCompletion(
         engine,
         models,
-        online_renderer=serving_render,
+        online_renderer=online_renderer,
         request_logger=None,
     )
 

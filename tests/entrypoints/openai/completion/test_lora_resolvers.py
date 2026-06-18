@@ -144,7 +144,7 @@ def mock_serving_setup():
         base_model_paths=BASE_MODEL_PATHS,
     )
 
-    serving_render = OnlineRenderer(
+    online_renderer = OnlineRenderer(
         model_config=mock_engine.model_config,
         renderer=mock_engine.renderer,
         model_registry=models.registry,
@@ -153,7 +153,7 @@ def mock_serving_setup():
         chat_template_content_format="auto",
     )
     serving_completion = OpenAIServingCompletion(
-        mock_engine, models, online_renderer=serving_render, request_logger=None
+        mock_engine, models, online_renderer=online_renderer, request_logger=None
     )
 
     return mock_engine, serving_completion

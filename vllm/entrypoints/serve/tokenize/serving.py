@@ -17,6 +17,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
     TokenizerInfoResponse,
 )
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.renderers.online_renderer import OnlineRenderer
@@ -31,6 +32,7 @@ class ServingTokenization(ServingMixin):
         models: OpenAIServingModels,
         online_renderer: OnlineRenderer,
         *,
+        request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         default_chat_template_kwargs: dict[str, Any] | None = None,
@@ -39,6 +41,7 @@ class ServingTokenization(ServingMixin):
         self.models = models
         self.renderer = online_renderer.renderer
         self.online_renderer = online_renderer
+        self.request_logger = request_logger
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}

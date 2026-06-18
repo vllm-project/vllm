@@ -63,7 +63,7 @@ def _build_serving_tokenization(engine: AsyncLLM) -> ServingTokenization:
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
     )
-    serving_render = OnlineRenderer(
+    online_renderer = OnlineRenderer(
         model_config=engine.model_config,
         renderer=engine.renderer,
         model_registry=models.registry,
@@ -72,10 +72,8 @@ def _build_serving_tokenization(engine: AsyncLLM) -> ServingTokenization:
         chat_template_content_format="auto",
     )
     return ServingTokenization(
-        engine,
         models,
-        online_renderer=serving_render,
-        request_logger=None,
+        online_renderer=online_renderer,
         chat_template=None,
         chat_template_content_format="auto",
     )
