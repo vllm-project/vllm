@@ -89,6 +89,7 @@ def gumbel_block_argmax(
     processed_logits_stride,
     processed_logits_col_ptr,
     vocab_size,
+    vocab_start,
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr = False,
@@ -130,9 +131,9 @@ def gumbel_block_argmax(
         gumbel_seed = tl.randint(seed, pos)
 
         if USE_FP64:
-            u = tl_rand64(gumbel_seed, block, includes_zero=False)
+            u = tl_rand64(gumbel_seed, block + vocab_start, includes_zero=False)
         else:
-            u = tl.rand(gumbel_seed, block)
+            u = tl.rand(gumbel_seed, block + vocab_start)
             u = tl.maximum(u, _FP32_TINY)
         gumbel_noise = -tl.log(-tl.log(u))
 
@@ -188,6 +189,7 @@ def _gumbel_sample_kernel(
         processed_logits_stride,
         processed_logits_col_ptr,
         vocab_size,
+        0,  # vocab_start
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
         USE_FP64=USE_FP64,
         PER_TOKEN_COL=PER_TOKEN_COL,
