@@ -1670,6 +1670,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     # to page_size
                     max_context_chunk = round_down(max_context_chunk, self.page_size)
                 elif self.dcp_world_size > 1:
+                    # Need to make sure the chunks are aligned when context is
+                    # split across GPUs. Shrink the chunk to the nearest size
+                    # that divides evenly across GPUs and lands on a clean
+                    # cache-block boundary
                     chunk_alignment = math.lcm(
                         self.kv_cache_spec.block_size, self.dcp_virtual_block_size
                     )
