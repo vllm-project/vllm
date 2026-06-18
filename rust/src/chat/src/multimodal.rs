@@ -365,6 +365,7 @@ impl MultimodalModelInfo {
         let processor = self.image_processor.raw;
         let images = image_frames.iter().map(|frame| frame.data().clone()).collect::<Vec<_>>();
 
+        // TODO: is it still necessary given that we've already in a dedicated runtime?
         tokio::task::spawn_blocking(move || {
             processor.preprocess(&images, &config).map_err(|error| multimodal!("{error}"))
         })
