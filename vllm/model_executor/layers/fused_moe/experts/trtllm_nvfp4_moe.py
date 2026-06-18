@@ -66,16 +66,26 @@ class TrtLlmNvFp4ExpertsBase:
         else:
             self.g1_scale_c = self.quant_config.a2_gscale.clone()
 
-        if moe_config.is_act_and_mul and quant_config.gemm1_clamp_limit is not None:
-            device = torch.accelerator.current_device_index()
-            self.gemm1_clamp_limit = torch.full(
-                (self.local_num_experts,),
-                quant_config.gemm1_clamp_limit,
-                dtype=torch.float32,
-                device=device,
+        device = torch.accelerator.current_device_index()
+
+        def _per_expert(value: float | None) -> torch.Tensor | None:
+            if not moe_config.is_act_and_mul or value is None:
+                return None
+            return torch.full(
+                (self.local_num_experts,), value, dtype=torch.float32, device=device
             )
-        else:
-            self.gemm1_clamp_limit = None
+
+        self.gemm1_clamp_limit = _per_expert(quant_config.gemm1_clamp_limit)
+        self.gemm1_alpha = _per_expert(quant_config.gemm1_alpha)
+        self.gemm1_beta = _per_expert(quant_config.gemm1_beta)
+
+        logger.info_once(
+            "activation=%s, gemm1_alpha=%s, gemm1_beta=%s, gemm1_clamp_limit=%s",
+            moe_config.activation,
+            quant_config.gemm1_alpha,
+            quant_config.gemm1_beta,
+            quant_config.gemm1_clamp_limit,
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
@@ -109,6 +119,25 @@ class TrtLlmNvFp4ExpertsBase:
             )
             self.gemm1_clamp_limit = layer.gemm1_clamp_limit
 
+        # beta shifts the raw GEMM1 accumulator, so fold by g1_alphas like the
+        # clamp limit. alpha is applied to the dequantized gate, so it stays
+        # raw. Register both on the layer so EPLB rearranges them with the
+        # other per-expert tensors.
+        if self.gemm1_beta is not None:
+            gemm1_beta = self.gemm1_beta / self.quant_config.g1_alphas
+            layer.register_parameter(
+                "gemm1_beta",
+                torch.nn.Parameter(gemm1_beta, requires_grad=False),
+            )
+            self.gemm1_beta = layer.gemm1_beta
+
+        if self.gemm1_alpha is not None:
+            layer.register_parameter(
+                "gemm1_alpha",
+                torch.nn.Parameter(self.gemm1_alpha, requires_grad=False),
+            )
+            self.gemm1_alpha = layer.gemm1_alpha
+
     @staticmethod
     def _supports_current_device() -> bool:
         """Supports only Blackwell-family GPUs."""
@@ -137,12 +166,14 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports only SiLU, RELU^2 non-gated and GELU activation."""
+        """Supports SiLU, RELU^2 non-gated, GELU, and clamped SwiGLU-OAI."""
         return activation in [
             MoEActivation.SILU,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -248,8 +279,8 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
             gemm1_bias=None,
-            gemm1_alpha=None,
-            gemm1_beta=None,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
             gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
@@ -409,8 +440,8 @@ class TrtLlmNvFp4ExpertsMonolithic(
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
             gemm1_bias=None,
-            gemm1_alpha=None,
-            gemm1_beta=None,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
             gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),

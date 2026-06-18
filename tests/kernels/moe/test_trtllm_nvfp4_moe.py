@@ -5,8 +5,9 @@ Tests for the FlashInfer TRTLLM NvFP4 MoE backend
 (`TrtLlmNvFp4ExpertsModular`).
 
 Covers the activations the wrapper claims to support — SiLU, RELU^2 (non-gated),
-and GELU — including a Gemma4-shaped case (128 experts, top-k 8,
-intermediate_size 704) that exercises the non-256-aligned padding path.
+GELU, and clamped SwiGLU-OAI (MiniMax-M3) — including a Gemma4-shaped case
+(128 experts, top-k 8, intermediate_size 704) that exercises the non-256-aligned
+padding path.
 """
 
 import pytest
@@ -80,6 +81,29 @@ if _CLAMP_OP_NAME not in op_registry:
 
 SILU_WITH_CLAMP = op_registry[_CLAMP_OP_NAME]
 
+# Clamped SwiGLU-OAI (MiniMax-M3): non-default alpha/beta so the kernel must
+# honor gemm1_alpha (raw) and gemm1_beta (folded by g1_alphas), not just clamp.
+_SWIGLU_ALPHA = 1.702
+_SWIGLU_BETA = 1.0
+_OAI_OP_NAME = "test_swigluoai_with_clamp"
+
+if _OAI_OP_NAME not in op_registry:
+
+    @CustomOp.register(_OAI_OP_NAME)
+    class _SwigluOAIWithClampTest(SiluAndMulWithClamp):
+        custom_op_name = _OAI_OP_NAME
+
+        def __init__(self, *, compile_native: bool = True) -> None:
+            super().__init__(
+                _SWIGLU_LIMIT,
+                alpha=_SWIGLU_ALPHA,
+                beta=_SWIGLU_BETA,
+                compile_native=compile_native,
+            )
+
+
+SWIGLUOAI_REF = op_registry[_OAI_OP_NAME]
+
 
 ACTIVATION_CASES = [
     pytest.param(MoEActivation.SILU, MoEActivation.SILU, None, id="silu"),
@@ -91,6 +115,12 @@ ACTIVATION_CASES = [
         id="relu2_no_mul",
     ),
     pytest.param(MoEActivation.GELU, MoEActivation.GELU, None, id="gelu"),
+    pytest.param(
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        SWIGLUOAI_REF,
+        _SWIGLU_LIMIT,
+        id="swigluoai_uninterleave",
+    ),
 ]
 
 
@@ -148,6 +178,10 @@ def test_trtllm_fp4_moe_no_graph(
             is_scale_swizzled=False,
         )
         quant_config.gemm1_clamp_limit = swiglu_limit
+        is_oai = activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
+        if is_oai:
+            quant_config.gemm1_alpha = _SWIGLU_ALPHA
+            quant_config.gemm1_beta = _SWIGLU_BETA
         if swiglu_limit is not None:
             assert quant_config.g1_alphas is not None
             assert quant_config.a2_gscale is not None
@@ -191,6 +225,27 @@ def test_trtllm_fp4_moe_no_graph(
         fake_layer.w13_input_scale = torch.ones_like(quant_config.g1_alphas)
         fake_layer.w2_input_scale = torch.ones_like(quant_config.g2_alphas)
         trtllm_inner.process_weights_after_loading(fake_layer)
+
+        if is_oai:
+            # alpha stays raw; beta and clamp are folded by g1_alphas
+            # (== _LARGE_OUTPUT1_SCALE here), so the fold is load-bearing.
+            assert torch.allclose(
+                trtllm_inner.gemm1_alpha,
+                torch.full_like(trtllm_inner.gemm1_alpha, _SWIGLU_ALPHA),
+            )
+            assert torch.allclose(
+                trtllm_inner.gemm1_beta,
+                torch.full_like(
+                    trtllm_inner.gemm1_beta, _SWIGLU_BETA / _LARGE_OUTPUT1_SCALE
+                ),
+            )
+            assert torch.allclose(
+                trtllm_inner.gemm1_clamp_limit,
+                torch.full_like(
+                    trtllm_inner.gemm1_clamp_limit,
+                    _SWIGLU_LIMIT / _LARGE_OUTPUT1_SCALE,
+                ),
+            )
 
         trtllm_experts = mk.FusedMoEKernel(
             maybe_make_prepare_finalize(
