@@ -49,7 +49,7 @@ _PARAM_RE = re.compile(
     r"(?:<\s*/\s*parameter\s*>|(?=<\s*parameter\s*=))",
     re.DOTALL,
 )
-_PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>([^<]*)$", re.DOTALL)
+_PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>(.*)$", re.DOTALL)
 
 
 def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
