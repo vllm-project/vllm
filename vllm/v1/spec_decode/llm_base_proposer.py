@@ -1565,28 +1565,53 @@ class SpecDecodeBaseProposer:
             use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
         return use_aux_hidden_state
 
-    def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
-        """
-        Validate that all drafting layers belong to the same KVCacheGroup.
-        Need this assumption to ensure all drafting layers can use the
-        same AttentionMetadata.
-        May extend to multiple AttentionMetadata in the future.
-        """
-        kv_cache_groups: dict[str, int] = {}
-        for id, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-            for layer_name in kv_cache_group.layer_names:
-                kv_cache_groups[layer_name] = id
-        assert (
-            len(
-                set(
-                    [
-                        kv_cache_groups[layer_name]
-                        for layer_name in self._draft_attn_layer_names
-                    ]
-                )
+    def _resolve_draft_layer_kv_cache_groups(
+        self,
+        kv_cache_config: KVCacheConfig,
+    ) -> dict[str, int]:
+        """Resolve KV cache group ids for draft attention layers."""
+        layer_to_candidate_gids: dict[str, list[int]] = {
+            layer_name: [] for layer_name in self._draft_attn_layer_names
+        }
+        for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            group_layer_names = set(kv_cache_group.layer_names)
+            for layer_name in self._draft_attn_layer_names:
+                if layer_name in group_layer_names:
+                    layer_to_candidate_gids[layer_name].append(gid)
+
+        missing_layers = [
+            layer_name
+            for layer_name, gids in layer_to_candidate_gids.items()
+            if not gids
+        ]
+        if missing_layers:
+            raise ValueError(
+                f"Failed to resolve KV cache groups for draft layers: {missing_layers}"
             )
-            == 1
-        ), "All drafting layers should belong to the same kv cache group"
+
+        # Prefer a gid common to all draft layers if one exists.
+        common_gids = set(layer_to_candidate_gids[next(iter(layer_to_candidate_gids))])
+        for gids in layer_to_candidate_gids.values():
+            common_gids &= set(gids)
+
+        if common_gids:
+            selected_gid = min(common_gids)
+            return {
+                layer_name: selected_gid for layer_name in self._draft_attn_layer_names
+            }
+
+        # Fallback: resolve per-layer gid deterministically.
+        layer_to_gid: dict[str, int] = {}
+        for layer_name, gids in layer_to_candidate_gids.items():
+            layer_to_gid[layer_name] = min(gids)
+
+        unique_gids = sorted(set(layer_to_gid.values()))
+        logger.info(
+            "Draft layers span multiple KV cache groups (%s). "
+            "Using per-layer KV group metadata builders.",
+            unique_gids,
+        )
+        return layer_to_gid
 
     def initialize_attn_backend(
         self,
@@ -1602,47 +1627,43 @@ class SpecDecodeBaseProposer:
             AttentionLayerBase,  # type: ignore[type-abstract]
         )
 
-        # Find which kv_cache_group the draft layers belong to
-        self.validate_same_kv_cache_group(kv_cache_config)
-        kv_cache_spec = None
-        for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-            if self._draft_attn_layer_names & set(group.layer_names):
-                self.kv_cache_gid = gid
-                kv_cache_spec = group.kv_cache_spec
-                break
+        layer_to_gid = self._resolve_draft_layer_kv_cache_groups(kv_cache_config)
+        self.kv_cache_gid = min(layer_to_gid.values())
 
-        attention_groups: dict[tuple[str, str], AttentionGroup] = {}
-        if kv_cache_spec is not None:
-            for layer_name in self._draft_attn_layer_names:
-                attn_backend = all_attn_layers[layer_name].get_attn_backend()
-                backend_key = attn_backend.full_cls_name()
-                if backend_key not in attention_groups:
-                    layer_kv_cache_spec = kv_cache_spec
-                    if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
-                        layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[
-                            layer_name
-                        ]
+        attention_groups: dict[tuple[tuple[str, str], int], AttentionGroup] = {}
+        for layer_name in self._draft_attn_layer_names:
+            gid = layer_to_gid[layer_name]
+            group = kv_cache_config.kv_cache_groups[gid]
+            kv_cache_spec = group.kv_cache_spec
 
-                    kernel_block_size = (
-                        kernel_block_sizes[self.kv_cache_gid]
-                        if kernel_block_sizes is not None
-                        and self.kv_cache_gid < len(kernel_block_sizes)
-                        else None
-                    )
-                    attn_group = AttentionGroup(
-                        backend=attn_backend,
-                        layer_names=[layer_name],
-                        kv_cache_spec=layer_kv_cache_spec,
-                        kv_cache_group_id=self.kv_cache_gid,
-                    )
-                    attn_group.create_metadata_builders(
-                        self.vllm_config,
-                        self.device,
-                        kernel_block_size=kernel_block_size,
-                    )
-                    attention_groups[backend_key] = attn_group
-                else:
-                    attention_groups[backend_key].layer_names.append(layer_name)
+            attn_backend = all_attn_layers[layer_name].get_attn_backend()
+            backend_key = attn_backend.full_cls_name()
+            group_key = (backend_key, gid)
+
+            if group_key not in attention_groups:
+                layer_kv_cache_spec = kv_cache_spec
+                if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
+                    layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+
+                kernel_block_size = (
+                    kernel_block_sizes[gid]
+                    if kernel_block_sizes is not None and gid < len(kernel_block_sizes)
+                    else None
+                )
+                attn_group = AttentionGroup(
+                    backend=attn_backend,
+                    layer_names=[layer_name],
+                    kv_cache_spec=layer_kv_cache_spec,
+                    kv_cache_group_id=gid,
+                )
+                attn_group.create_metadata_builders(
+                    self.vllm_config,
+                    self.device,
+                    kernel_block_size=kernel_block_size,
+                )
+                attention_groups[group_key] = attn_group
+            else:
+                attention_groups[group_key].layer_names.append(layer_name)
 
         self.draft_attn_groups = list(attention_groups.values())
         self.block_size = (
