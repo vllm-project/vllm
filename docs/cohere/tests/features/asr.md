@@ -1,32 +1,33 @@
 <!-- markdownlint-disable MD024 -->
 # Cohere ASR Tests
 
-> **Registry**: [`observability_matrix.md`](../observability_matrix.md) entries 7.1.1, 7.1.2, 7.1.3, 7.1.4 |
+> **Registry**: [`observability_matrix.md`](../observability_matrix.md) entries 7.1.1-7.1.7 |
 > **Compatibility**: [`feature_matrix.md`](../feature_matrix.md) section ASR
 
-Validates Cohere speech-to-text serving for both short-form transcription
-correctness and long-audio streaming with WER gating.
+Validates Cohere speech-to-text serving for preprocess-worker configuration,
+short- and long-form transcription correctness, and long-audio streaming with
+WER gating.
 
 <details>
-<summary>Test case 1: Tiny WER correctness</summary>
+<summary>Test case 1: ASR preprocess worker configuration</summary>
 
 ## How it runs
 
-1. `run_asr()` invokes the dedicated tiny WER pytest node as part of the `asr`
+1. `run_asr()` invokes the dedicated ASR config pytest node as part of the `asr`
    test group.
    - [`tests/cohere/scripts/run_tests.sh`](../../../../tests/cohere/scripts/run_tests.sh) -- `run_asr`
-   - [`tests/cohere/test_asr_wer_tiny.py`](../../../../tests/cohere/test_asr_wer_tiny.py) -- `test_cohere_transcribe_wer_correctness`
-2. The pytest entry resolves the model to the CI-downloaded local checkpoint at
-   `${ENGINES_DIR}/cohere-transcribe-03-2026` when present, otherwise falls
-   back to the canonical HF model id, then launches a `RemoteOpenAIServer`
-   exposing the served model name `CohereLabs/cohere-transcribe-03-2026`.
-   - [`tests/cohere/test_asr_wer_tiny.py`](../../../../tests/cohere/test_asr_wer_tiny.py) -- `_get_server_model`, `test_cohere_transcribe_wer_correctness`
-   - [`tests/utils.py`](../../../../tests/utils.py) -- `RemoteOpenAIServer`
-3. The test reuses the upstream transcription correctness helpers to load the
-   filtered Earnings22 dataset and compute WER through the OpenAI-compatible
-   transcription endpoint.
-   - [`tests/entrypoints/openai/correctness/test_transcription_api_correctness.py`](../../../../tests/entrypoints/openai/correctness/test_transcription_api_correctness.py) -- `load_hf_dataset`, `run_evaluation`
-   - [`tests/cohere/test_asr_wer_tiny.py`](../../../../tests/cohere/test_asr_wer_tiny.py) -- `test_cohere_transcribe_wer_correctness`
+   - [`tests/cohere/test_asr_config.py`](../../../../tests/cohere/test_asr_config.py)
+2. The first test clears any `VLLM_MAX_AUDIO_PREPROCESS_WORKERS` override,
+   patches `os.cpu_count()` above the cap, clears env caching if needed, and
+   verifies that the exported default remains fixed at `2`.
+   - [`tests/cohere/test_asr_config.py`](../../../../tests/cohere/test_asr_config.py) -- `DEFAULT_NUM_WORKERS`, `test_audio_preprocess_workers_default`
+   - [`vllm/envs.py`](../../../../vllm/envs.py) -- `VLLM_MAX_AUDIO_PREPROCESS_WORKERS`
+3. The second test patches `ThreadPoolExecutor` and
+   `make_async_with_semaphore(...)`, constructs `OpenAISpeechToText`, and
+   verifies that frontend speech preprocessing is wired to a dedicated executor
+   with `max_workers=2`.
+   - [`tests/cohere/test_asr_config.py`](../../../../tests/cohere/test_asr_config.py) -- `test_speech_to_text_preprocess_executor_num_workers`
+   - [`vllm/entrypoints/openai/speech_to_text/speech_to_text.py`](../../../../vllm/entrypoints/openai/speech_to_text/speech_to_text.py) -- `OpenAISpeechToText`
 4. CI shape: this runs inside the dedicated `asr` test group and is currently
    routed only to the 1xH100 runner.
    - [`tests/cohere/configs/runner_map.json`](../../../../tests/cohere/configs/runner_map.json) -- `h100.asr`
@@ -34,17 +35,21 @@ correctness and long-audio streaming with WER gating.
 
 ## Checks
 
-1. **WER regression**: the computed WER for
-   `CohereLabs/cohere-transcribe-03-2026` on the tiny filtered dataset matches
-   the expected baseline `11.92` within `atol=1e-1, rtol=1e-2`.
-   - `test_cohere_transcribe_wer_correctness`
+1. **Capped default**: `envs.VLLM_MAX_AUDIO_PREPROCESS_WORKERS` resolves to the
+   Cohere-specific default of `2` when unset, even when `os.cpu_count()` is
+   higher.
+   - `test_audio_preprocess_workers_default`
+2. **Executor wiring**: `OpenAISpeechToText` constructs its preprocessing
+   executor with `max_workers=2` and passes that executor into the async
+   preprocessing wrapper.
+   - `test_speech_to_text_preprocess_executor_num_workers`
 
 ## Measurements
 
 1. Pytest emits **JUnit XML** for the `asr` group, and
    `dorny/test-reporter@v2` surfaces it in GitHub Actions as an `asr Test
    Report`.
-   - `test_cohere_transcribe_wer_correctness` -- `PRESENT`
+   - `test_asr_config` suite -- `PRESENT`
    - [`.github/workflows/test-pipeline.yaml`](../../../../.github/workflows/test-pipeline.yaml) -- `Test Report` step
 
 No `upload-results` summary JSON is emitted for the `asr` group.
@@ -67,7 +72,92 @@ No `upload-results` summary JSON is emitted for the `asr` group.
 ## Implementation
 
 Primary test:
-[`tests/cohere/test_asr_wer_tiny.py`](../../../../tests/cohere/test_asr_wer_tiny.py)
+[`tests/cohere/test_asr_config.py`](../../../../tests/cohere/test_asr_config.py)
+Runtime paths:
+[`vllm/envs.py`](../../../../vllm/envs.py),
+[`vllm/entrypoints/openai/speech_to_text/speech_to_text.py`](../../../../vllm/entrypoints/openai/speech_to_text/speech_to_text.py)
+CI entry:
+[`tests/cohere/scripts/run_tests.sh`](../../../../tests/cohere/scripts/run_tests.sh) -- `run_asr`
+
+### Setup
+
+1. **Default cap**: `DEFAULT_NUM_WORKERS = 2` captures the intended Cohere
+   default for ASR preprocessing.
+2. **Env path**: the config test clears `VLLM_MAX_AUDIO_PREPROCESS_WORKERS`,
+   patches CPU count high, and validates the exported env getter path.
+3. **Serving path**: the constructor test stubs the transcription model and
+   patches the executor factory so it can assert the exact
+   `ThreadPoolExecutor(max_workers=2, thread_name_prefix="stt-preprocess")`
+   call without loading a checkpoint or starting a server.
+
+</details>
+
+<details>
+<summary>Test case 2: Short- and long-form WER correctness</summary>
+
+## How it runs
+
+1. The ASR WER regression file contains both the short-form filtered-dataset
+   check and a long-form correctness check against the same served Cohere model.
+   - [`tests/cohere/test_asr_wer.py`](../../../../tests/cohere/test_asr_wer.py) -- `test_cohere_transcribe_wer_correctness`, `test_cohere_transcribe_long_audio_wer_correctness`
+2. The pytest entry resolves the model to the CI-downloaded local checkpoint at
+   `${ENGINES_DIR}/cohere-transcribe-03-2026` when present, otherwise falls
+   back to the canonical HF model id, then launches a `RemoteOpenAIServer`
+   exposing the served model name `CohereLabs/cohere-transcribe-03-2026`.
+   - [`tests/cohere/test_asr_wer.py`](../../../../tests/cohere/test_asr_wer.py) -- `_get_server_model`, `test_cohere_transcribe_wer_correctness`, `test_cohere_transcribe_long_audio_wer_correctness`
+   - [`tests/utils.py`](../../../../tests/utils.py) -- `RemoteOpenAIServer`
+3. The short-form test reuses the shared ASRDataset-aware loader for
+   `D4nt3/esb-datasets-earnings22-validation-tiny-filtered`, while the
+   long-form test reuses the shared Earnings22 cleaned dataset loader and
+   long-form evaluation helpers.
+   - [`tests/entrypoints/openai/correctness/test_transcription_api_correctness.py`](../../../../tests/entrypoints/openai/correctness/test_transcription_api_correctness.py) -- `load_shortform_eval_dataset`, `load_longform_dataset`, `run_evaluation`, `run_longform_evaluation`
+   - [`tests/cohere/test_asr_wer.py`](../../../../tests/cohere/test_asr_wer.py)
+4. CI shape: this suite is documented under the dedicated `asr` group and is
+   currently routed only to the 1xH100 runner.
+   - [`tests/cohere/configs/runner_map.json`](../../../../tests/cohere/configs/runner_map.json) -- `h100.asr`
+   - [`.github/workflows/test-pipeline.yaml`](../../../../.github/workflows/test-pipeline.yaml) -- Docker test execution + JUnit reporting
+
+## Checks
+
+1. **Short-form WER regression**: the computed WER for
+   `CohereLabs/cohere-transcribe-03-2026` on the tiny filtered dataset matches
+   the expected baseline `11.92` within `atol=1e-1, rtol=1e-2`.
+   - `test_cohere_transcribe_wer_correctness`
+2. **Long-form WER regression**: the same model on the shared long-form
+   Earnings22 correctness slice matches the expected baseline `7.5` within
+   `atol=1e-1, rtol=1e-2`.
+   - `test_cohere_transcribe_long_audio_wer_correctness`
+
+## Measurements
+
+1. Pytest emits **JUnit XML** for the `asr` group, and
+   `dorny/test-reporter@v2` surfaces it in GitHub Actions as an `asr Test
+   Report`.
+   - `test_asr_wer` suite -- `PRESENT`
+   - [`.github/workflows/test-pipeline.yaml`](../../../../.github/workflows/test-pipeline.yaml) -- `Test Report` step
+
+No `upload-results` summary JSON is emitted for the `asr` group.
+
+## Compatibility
+
+1. **Input**:
+   - Audio (compatible)
+   - Long Context (compatible)
+2. **Cohere Feature**:
+3. **Model Architecture**:
+4. **Quantization**:
+5. **Hardware**:
+   - H100 (compatible)
+   - A100 (not tested)
+   - B200 (not tested)
+   - GB200 (not tested)
+   - MI300x (not tested)
+6. **vLLM Feature**:
+
+## Implementation
+
+Primary test:
+[`tests/cohere/test_asr_wer.py`](../../../../tests/cohere/test_asr_wer.py)
 Shared helpers:
 [`tests/entrypoints/openai/correctness/test_transcription_api_correctness.py`](../../../../tests/entrypoints/openai/correctness/test_transcription_api_correctness.py)
 CI entry:
@@ -82,14 +172,17 @@ Runtime helpers:
    `CohereLabs/cohere-transcribe-03-2026`.
 2. **Server args**: pass `--served-model-name=CohereLabs/cohere-transcribe-03-2026`
    and `--trust-remote-code` when required by the model registry entry.
-3. **Dataset**: use the filtered HF dataset
-   `D4nt3/esb-datasets-earnings22-validation-tiny-filtered` through the shared
-   correctness helpers.
+3. **Short-form dataset**: use the filtered dataset
+   `D4nt3/esb-datasets-earnings22-validation-tiny-filtered` through
+   `load_shortform_eval_dataset(...)`.
+4. **Long-form dataset**: use the shared long-form Earnings22 cleaned dataset
+   via `load_longform_dataset(...)`, then evaluate with
+   `run_longform_evaluation(...)`.
 
 </details>
 
 <details>
-<summary>Test case 2: Long-audio streaming WER</summary>
+<summary>Test case 3: Long-audio streaming WER</summary>
 
 ## How it runs
 
@@ -110,7 +203,7 @@ Runtime helpers:
    outputs with a shared Whisper English normalizer before computing WER.
    - [`tests/cohere/test_asr_long_audio_with_output_streaming.py`](../../../../tests/cohere/test_asr_long_audio_with_output_streaming.py) -- `test_asr_long_audio_with_output_streaming`, `stream_long_audio`
    - [`tests/utils.py`](../../../../tests/utils.py) -- `RemoteOpenAIServer`
-4. CI shape: this runs only on the 1xH100 `asr` runner, same as the tiny WER
+4. CI shape: this runs only on the 1xH100 `asr` runner, same as the WER
    case.
    - [`tests/cohere/configs/runner_map.json`](../../../../tests/cohere/configs/runner_map.json) -- `h100.asr`
    - [`.github/workflows/test-pipeline.yaml`](../../../../.github/workflows/test-pipeline.yaml) -- Docker test execution + JUnit reporting
@@ -167,7 +260,7 @@ Runtime helpers:
 
 ### Setup
 
-1. **Model resolution**: same local-checkpoint-first resolution as the tiny WER
+1. **Model resolution**: same local-checkpoint-first resolution as the WER
    test via `ENGINES_DIR`.
 2. **Dataset resolution**: use `ASR_LONG_AUDIO_DATASET_DIR` when set; otherwise
    read `${DATA_DIR}/longform-audio-transcription` with `DATA_DIR` defaulting to
@@ -180,7 +273,7 @@ Runtime helpers:
 </details>
 
 <details>
-<summary>Test case 3: Inter-chunk spacing and language-specific joins</summary>
+<summary>Test case 4: Inter-chunk spacing and language-specific joins</summary>
 
 ## How it runs
 
@@ -267,7 +360,7 @@ CI entry:
 </details>
 
 <details>
-<summary>Test case 4: Speech-to-text cancellation propagation</summary>
+<summary>Test case 5: Speech-to-text cancellation propagation</summary>
 
 ## How it runs
 

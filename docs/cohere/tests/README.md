@@ -187,7 +187,7 @@ compatibility.
 | `speculative_decoding` | ~15m | EAGLE speculative decoding tests, validates mean acceptance length metrics. |
 | `performance` | ~1.5h | Serving benchmarks for CR7B (TP=1) or Command A (TP=2+). Configurable via `TP_SIZE` and `MODELS`. |
 | `vision` | ~10m | Vision model tests with Command-A Vision, verifies multi-image input handling. |
-| `asr` | ~5m | Speech-to-text regression bucket for Cohere ASR. See [Cohere ASR](./features/asr.md). Currently routed only to the 1xH100 runner. Downloads `cohere-transcribe-03-2026`, runs the tiny WER regression, long-audio streaming WER gate, plus transcription spacing and cancellation endpoint tests. |
+| `asr` | ~5m | Speech-to-text regression bucket for Cohere ASR. See [Cohere ASR](./features/asr.md). Currently routed only to the 1xH100 runner. Downloads `cohere-transcribe-03-2026`, covers ASR preprocess-worker config checks, short- and long-form WER regressions, the long-audio streaming WER gate, plus transcription spacing and cancellation endpoint tests. |
 | `model_arch` | ~10m | Model architecture regression bucket combining reward model checks and C5 sanity checks. |
 | `quantization` | ~20m | Quantization regression bucket. Expands into `quantization_32bit_logits` (LM-head fp32 microbenchmark and C5 fp32 logits consistency). |
 | ↳ `quantization_32bit_logits` | ~20m | *(internal group, use `quantization` or `all`)* LM-head fp32 microbenchmark (`test_logits_processor.py`) and full C5 fp32 logits consistency check (`test_c5_fp32_logits.py`). Runs on H100, A100, B200, GB200; not supported on MI300x. |

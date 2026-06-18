@@ -75,6 +75,9 @@ if TYPE_CHECKING:
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
+    # COHERE START
+    VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
+    # COHERE END
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
@@ -859,6 +862,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", "25")
     ),
+    # COHERE START
+    # Maximum number of worker threads used for STT preprocessing. The default
+    # intentionally caps at 2 because that performed best in profiling.
+    # https://github.com/vllm-project/vllm/pull/44612#issuecomment-4662757781
+    "VLLM_MAX_AUDIO_PREPROCESS_WORKERS": lambda: int(
+        os.getenv(
+            "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
+            str(max(1, min(os.cpu_count() or 1, 2))),
+        )
+    ),
+    # COHERE END
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
     # - "opencv_dynamic": duration-aware dynamic sampling.
@@ -1952,6 +1966,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
+        "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",  # COHERE
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",

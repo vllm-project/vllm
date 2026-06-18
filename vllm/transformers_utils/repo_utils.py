@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TypeVar
 
 import huggingface_hub
-from huggingface_hub import hf_hub_download, try_to_load_from_cache
+from huggingface_hub import HfApi, hf_hub_download, try_to_load_from_cache  # COHERE
 from huggingface_hub import list_repo_files as hf_list_repo_files
 from huggingface_hub.utils import (
     EntryNotFoundError,
@@ -24,9 +24,26 @@ from huggingface_hub.utils import (
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.version import __version__ as VLLM_VERSION  # COHERE
 
 logger = init_logger(__name__)
 
+# COHERE START
+_hf_api: HfApi | None = None
+
+
+def hf_api() -> HfApi:
+    """Return a shared HfApi instance tagged with vLLM's library info."""
+    global _hf_api
+    if _hf_api is None:
+        _hf_api = HfApi(
+            library_name="vllm",
+            library_version=VLLM_VERSION,
+        )
+    return _hf_api
+
+
+# COHERE END
 
 _R = TypeVar("_R")
 

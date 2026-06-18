@@ -468,6 +468,15 @@ async def lifespan(app: FastAPI):
         finally:
             if task is not None:
                 task.cancel()
+            # COHERE START
+            for attr_name in (
+                "openai_serving_transcription",
+                "openai_serving_translation",
+            ):
+                serving = getattr(app.state, attr_name, None)
+                if serving is not None and hasattr(serving, "shutdown"):
+                    serving.shutdown()
+            # COHERE END
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state

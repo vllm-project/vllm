@@ -123,6 +123,9 @@ This matrix is part of a three-layer documentation structure:
 - 7.1.2 `test_asr_long_audio_with_output_streaming`
 - 7.1.3 `test_create_transcription_non_streaming_joins_chunks_by_language`
 - 7.1.4 `test_non_streaming_cancel_aborts_engine_requests`
+- 7.1.5 `test_audio_preprocess_workers_default`
+- 7.1.6 `test_speech_to_text_preprocess_executor_num_workers`
+- 7.1.7 `test_cohere_transcribe_long_audio_wer_correctness`
 
 ## Benchmarks
 
