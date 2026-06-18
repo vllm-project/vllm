@@ -11,7 +11,6 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -160,7 +159,15 @@ class HpcRopeNorm(CustomOp, HpcModule):
         kv_cache_dtype: str,
     ) -> bool:
         """Check whether HpcRopeNorm is supported for the given config."""
-        if not envs.VLLM_ENABLE_HPC_ROPE_NORM:
+        from vllm.config import get_current_vllm_config_or_none
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        # HpcRopeNorm is only enabled together with the HPC attention backend.
+        vllm_config = get_current_vllm_config_or_none()
+        if (
+            vllm_config is None
+            or vllm_config.attention_config.backend != AttentionBackendEnum.HPC_ATTN
+        ):
             return False
 
         if kv_cache_dtype not in ("fp8_e4m3", "auto"):

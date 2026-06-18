@@ -13,7 +13,6 @@ from typing import ClassVar
 import torch
 from typing_extensions import override
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -290,17 +289,6 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
             raise ValueError(
                 f"HPC attention only supports kv_cache_dtype 'auto' or "
                 f"'fp8_e4m3', got '{kv_cache_dtype}'"
-            )
-
-        # FP8 KV cache requires HpcRopeNorm (fused RoPE+Norm+KV-Write+Q-Quant).
-        # Without it, the FP8 attention path cannot obtain required Q scales.
-        if kv_cache_dtype == "fp8_e4m3" and not envs.VLLM_ENABLE_HPC_ROPE_NORM:
-            raise ValueError(
-                "HPC attention with FP8 KV cache (kv_cache_dtype='fp8_e4m3') "
-                "requires HpcRopeNorm to be enabled. Please set the "
-                "environment variable VLLM_ENABLE_HPC=1 to enable it. "
-                "Without HpcRopeNorm, the FP8 path cannot obtain the "
-                "required Q scales and split-K flags for attention."
             )
 
         self.num_heads = num_heads

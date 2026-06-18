@@ -37,7 +37,6 @@ except ImportError:
         allow_module_level=True,
     )
 
-import vllm.envs as envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.layers.hpc.rope_norm import (
@@ -45,6 +44,7 @@ from vllm.model_executor.layers.hpc.rope_norm import (
     _hpc_rope_norm_instances,
 )
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 # =====================================================================
 # Constants
@@ -823,16 +823,14 @@ def test_rope_norm_mixed(decode_kv_lens, prefill_seq_lens, num_heads, use_qk_nor
 # =====================================================================
 
 
-# FP8 KV cache path requires VLLM_ENABLE_HPC_ROPE_NORM=1 (HpcRopeNorm dependency).
-# Set it here so that HpcAttentionImpl(kv_cache_dtype="fp8_e4m3") does not
-# raise ValueError during test initialization.
-envs.VLLM_ENABLE_HPC_ROPE_NORM = True
-
 FP8_HEADS = [(8, 1)]
 
 # Minimal VllmConfig needed for CustomOp (HpcRopeNorm) initialization.
 # CustomOp.__init__ -> dispatch_forward -> get_cached_compilation_config()
+# The attention backend is set to HPC_ATTN since HpcRopeNorm is only enabled
+# together with the HPC attention backend (HpcRopeNorm.support() checks it).
 _test_vllm_config = VllmConfig()
+_test_vllm_config.attention_config.backend = AttentionBackendEnum.HPC_ATTN
 
 
 class _MockAttnLayer(nn.Module):
