@@ -992,6 +992,42 @@ class VllmBackend:
             ),
         )
 
+    def _build_config_details(
+        self,
+        vllm_config: VllmConfig,
+        config_hash: str,
+    ) -> dict[str, str | None]:
+        """Return a per-sub-config hash breakdown for cache-miss diagnostics.
+
+        The ``_hash`` entry is the aggregated value used for the actual cache
+        key; all other entries are informational only.
+        """
+        cc = vllm_config
+        return {
+            "_hash": config_hash,
+            "model": cc.model_config.compute_hash() if cc.model_config else None,
+            "cache": cc.cache_config.compute_hash() if cc.cache_config else None,
+            "parallel": (
+                cc.parallel_config.compute_hash() if cc.parallel_config else None
+            ),
+            "scheduler": (
+                cc.scheduler_config.compute_hash() if cc.scheduler_config else None
+            ),
+            "device": cc.device_config.compute_hash() if cc.device_config else None,
+            "load": cc.load_config.compute_hash() if cc.load_config else None,
+            "compilation": (
+                cc.compilation_config.compute_hash()
+                if cc.compilation_config
+                else None
+            ),
+            "lora": cc.lora_config.compute_hash() if cc.lora_config else None,
+            "speculative": (
+                cc.speculative_config.compute_hash()
+                if cc.speculative_config
+                else None
+            ),
+        }
+
     def _write_cache_key_factors(
         self,
         local_cache_dir: str,
@@ -1015,47 +1051,7 @@ class VllmBackend:
             )
             meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
             if not os.path.exists(meta_path):
-                cc = vllm_config
-                # _hash is the aggregated value used for the actual cache key;
-                # individual entries are informational only.
-                config_details: dict[str, str | None] = {
-                    "_hash": config_hash,
-                    "model": (
-                        cc.model_config.compute_hash() if cc.model_config else None
-                    ),
-                    "cache": (
-                        cc.cache_config.compute_hash() if cc.cache_config else None
-                    ),
-                    "parallel": (
-                        cc.parallel_config.compute_hash()
-                        if cc.parallel_config
-                        else None
-                    ),
-                    "scheduler": (
-                        cc.scheduler_config.compute_hash()
-                        if cc.scheduler_config
-                        else None
-                    ),
-                    "device": (
-                        cc.device_config.compute_hash() if cc.device_config else None
-                    ),
-                    "load": (
-                        cc.load_config.compute_hash() if cc.load_config else None
-                    ),
-                    "compilation": (
-                        cc.compilation_config.compute_hash()
-                        if cc.compilation_config
-                        else None
-                    ),
-                    "lora": (
-                        cc.lora_config.compute_hash() if cc.lora_config else None
-                    ),
-                    "speculative": (
-                        cc.speculative_config.compute_hash()
-                        if cc.speculative_config
-                        else None
-                    ),
-                }
+                config_details = self._build_config_details(vllm_config, config_hash)
                 with open(meta_path, "w") as f:
                     json.dump(
                         {
