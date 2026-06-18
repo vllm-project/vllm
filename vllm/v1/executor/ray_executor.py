@@ -280,7 +280,10 @@ class RayDistributedExecutor(Executor):
             # NOTE: physical GPU IDs can be larger than 9 (e.g. 16 GPUs),
             # string sorting is not sufficient.
             # see https://github.com/vllm-project/vllm/issues/5590
-            physical_gpu_ids = [int(x) for x in physical_gpu_ids]
+            physical_gpu_ids = [
+                current_platform.device_control_id_to_physical_device_id(str(x))
+                for x in physical_gpu_ids
+            ]
             node_physical_gpu_ids[node_id].extend(physical_gpu_ids)
         for node_id, physical_gpu_ids in node_physical_gpu_ids.items():
             node_physical_gpu_ids[node_id] = sorted(physical_gpu_ids)

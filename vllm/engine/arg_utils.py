@@ -988,7 +988,9 @@ class EngineArgs:
             help="Comma-separated physical GPU device IDs or UUIDs to use "
             '(e.g. --device-ids "2,3,5,7"). Avoids setting '
             "CUDA_VISIBLE_DEVICES, preserving full GPU topology "
-            "visibility for GPU-NIC affinity and DeepGEMM.",
+            "visibility for GPU-NIC affinity and DeepGEMM. "
+            "Note: has no effect with Ray executors; use Ray "
+            "placement groups for GPU selection instead.",
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -1730,6 +1732,11 @@ class EngineArgs:
     def _resolve_device_ids(self) -> list[int] | None:
         if not self.device_ids:
             return None
+        if self.distributed_executor_backend == "ray":
+            logger.warning(
+                "--device-ids has no effect when using the Ray executor. "
+                "Use Ray placement groups for GPU selection instead."
+            )
         ids = self.device_ids
         if len(set(ids)) != len(ids):
             raise ValueError(f"--device-ids must not contain duplicates: {ids}")
