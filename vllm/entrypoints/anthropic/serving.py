@@ -44,6 +44,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     StreamOptions,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.utils.api_utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 
 if TYPE_CHECKING:
@@ -158,21 +159,24 @@ class AnthropicServingMessages(OpenAIServingChat):
                             continue
                         system_parts.append(block.text)
 
-        # System messages embedded inside the messages array
-        for msg in anthropic_request.messages:
-            if msg.role != "system":
-                continue
-            if isinstance(msg.content, str):
-                system_parts.append(msg.content)
-            else:
-                for block in msg.content:
-                    if block.type == "text" and block.text:
-                        if block.text.startswith("x-anthropic-billing-header"):
-                            continue
-                        system_parts.append(block.text)
-
         if system_parts:
             openai_messages.append({"role": "system", "content": "".join(system_parts)})
+
+    @classmethod
+    def _extract_system_text(cls, msg) -> str | None:
+        """Extract text from a system message, stripping billing headers."""
+        if isinstance(msg.content, str):
+            text = msg.content
+            if text.startswith("x-anthropic-billing-header"):
+                return None
+            return text
+        parts: list[str] = []
+        for block in msg.content:
+            if block.type == "text" and block.text:
+                if block.text.startswith("x-anthropic-billing-header"):
+                    continue
+                parts.append(block.text)
+        return "".join(parts) if parts else None
 
     @classmethod
     def _convert_messages(
@@ -180,7 +184,15 @@ class AnthropicServingMessages(OpenAIServingChat):
     ) -> None:
         """Convert Anthropic messages to OpenAI format"""
         for msg in messages:
+            # Handle system messages in-place: extract text, strip billing
+            # headers, and only emit if there is real content.  This avoids
+            # going through _convert_block / _convert_message_content which
+            # doesn't strip billing headers and may produce messages with
+            # no "content" key.
             if msg.role == "system":
+                text = cls._extract_system_text(msg)
+                if text:
+                    openai_messages.append({"role": "system", "content": text})
                 continue
 
             openai_msg: dict[str, Any] = {"role": msg.role}  # type: ignore
@@ -461,6 +473,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             "name": tool.name,
                             "description": tool.description,
                             "parameters": tool.input_schema,
+                            "strict": tool.strict,
                             "defer_loading": tool.defer_loading,
                         },
                     }
@@ -572,6 +585,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                     self.block_signature: str | None = None
                     self.signature_emitted: bool = False
                     self.tool_use_id: str | None = None
+                    self.pending_content: list[str] = []
 
                 def reset(self) -> None:
                     self.block_type = None
@@ -579,6 +593,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                     self.block_signature = None
                     self.signature_emitted = False
                     self.tool_use_id = None
+                    self.pending_content.clear()
 
                 def start(self, block: AnthropicContentBlock) -> None:
                     self.block_type = block.type
@@ -643,10 +658,30 @@ class AnthropicServingMessages(OpenAIServingChat):
                 state.start(block)
                 return event
 
+            def stop_and_flush() -> list[str]:
+                buffered = list(state.pending_content)
+                state.pending_content.clear()
+                events = stop_active_block()
+                if not buffered:
+                    return events
+                text = "".join(buffered)
+                events.append(start_block(AnthropicContentBlock(type="text", text="")))
+                pc_chunk = AnthropicStreamEvent(
+                    index=state.block_index,
+                    type="content_block_delta",
+                    delta=AnthropicDelta(type="text_delta", text=text),
+                )
+                pc_data = pc_chunk.model_dump_json(exclude_unset=True)
+                events.append(wrap_data_with_event(pc_data, "content_block_delta"))
+                events.extend(stop_active_block())
+                return events
+
             async for item in generator:
                 if item.startswith("data:"):
                     data_str = item[5:].strip().rstrip("\n")
                     if data_str == "[DONE]":
+                        for event in stop_and_flush():
+                            yield event
                         stop_message = AnthropicStreamEvent(
                             type="message_stop",
                         )
@@ -672,6 +707,13 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 type="message_start",
                                 message=AnthropicMessagesResponse(
                                     id=origin_chunk.id,
+                                    # Set explicitly: this event is serialized
+                                    # with exclude_unset=True, which drops
+                                    # default-valued fields, while strict
+                                    # Anthropic SDK clients require
+                                    # message.type/role (issue #45367).
+                                    type="message",
+                                    role="assistant",
                                     content=[],
                                     model=origin_chunk.model,
                                     stop_reason=None,
@@ -700,7 +742,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
                         # last chunk including usage info
                         if len(origin_chunk.choices) == 0:
-                            for event in stop_active_block():
+                            for event in stop_and_flush():
                                 yield event
                             stop_reason = self.stop_reason_map.get(
                                 finish_reason or "stop"
@@ -750,7 +792,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 pass
                             else:
                                 if state.block_type != "thinking":
-                                    for event in stop_active_block():
+                                    for event in stop_and_flush():
                                         yield event
                                     start_event = start_block(
                                         AnthropicContentBlock(
@@ -776,9 +818,13 @@ class AnthropicServingMessages(OpenAIServingChat):
                         if origin_chunk.choices[0].delta.content is not None:
                             if origin_chunk.choices[0].delta.content == "":
                                 pass
+                            elif state.block_type == "tool_use":
+                                state.pending_content.append(
+                                    origin_chunk.choices[0].delta.content
+                                )
                             else:
                                 if state.block_type != "text":
-                                    for event in stop_active_block():
+                                    for event in stop_and_flush():
                                         yield event
                                     start_event = start_block(
                                         AnthropicContentBlock(type="text", text="")
@@ -816,7 +862,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         state.tool_use_id != tool_call.id
                                         and tool_name is not None
                                     ):
-                                        for event in stop_active_block():
+                                        for event in stop_and_flush():
                                             yield event
                                         start_event = start_block(
                                             AnthropicContentBlock(
@@ -890,7 +936,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             logger.exception("Error in message stream converter.")
             error_response = AnthropicStreamEvent(
                 type="error",
-                error=AnthropicError(type="internal_error", message=str(e)),
+                error=AnthropicError(
+                    type="internal_error", message=sanitize_message(str(e))
+                ),
             )
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")

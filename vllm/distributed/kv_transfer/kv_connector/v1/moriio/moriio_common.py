@@ -177,6 +177,18 @@ def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
     return (dp_rank) * tp_size + tp_rank
 
 
+def resolve_host_ip(extra_config: dict) -> str:
+    """The IP this MoRIIO process advertises for KV transfer.
+
+    Honors an explicit ``host_ip`` in ``kv_connector_extra_config`` before
+    falling back to ``get_ip()``. An external router/orchestrator can set it to
+    the node's routable address; this is required under frameworks (e.g. Ray)
+    where ``get_ip()`` resolves to an unroutable public IP and ``VLLM_HOST_IP``
+    cannot be propagated to the worker processes that bind the transfer engine.
+    """
+    return extra_config.get("host_ip") or get_ip()
+
+
 _DEPRECATED_ENV_VARS: dict[str, str] = {
     "VLLM_MORIIO_CONNECTOR_READ_MODE": "read_mode",
     "VLLM_MORIIO_QP_PER_TRANSFER": "qp_per_transfer",
@@ -276,7 +288,7 @@ class MoRIIOConfig:
         )
 
         return cls(
-            local_ip=get_ip(),
+            local_ip=resolve_host_ip(extra_config),
             local_kv_port=get_open_port(),
             proxy_ip=extra_config["proxy_ip"],
             local_ping_port=get_open_port(),
@@ -324,7 +336,7 @@ class MoRIIOConstants:
     DEFAULT_DEFER_TIMEOUT = 60.0
 
 
-# The router embeds both zmq_addresses in the request_id (similar to P2pNcclConnector):
+# The router embeds both zmq_addresses in the request_id:
 #   "___prefill_addr_{zmq}___decode_addr_{zmq}_{32-hex-uuid}"
 # MoRIIO zmq_address format: "host:IP,handshake:PORT,notify:PORT"
 #

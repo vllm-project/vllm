@@ -210,7 +210,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             )
         return None
 
-    def _add_fused_moe_to_target_scheme_map(self):
+    def _add_fused_moe_to_target_scheme_map(self):  # XXXXXXXXXXXXXXXXXXXXXX
         """
         Helper function to update target_scheme_map
         since linear layers get fused into FusedMoE
@@ -219,10 +219,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         """
         if (
             "Linear" not in self.target_scheme_map
-            or "FusedMoE" in self.target_scheme_map
+            or "RoutedExperts" in self.target_scheme_map
         ):
             return
-        self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
+        self.target_scheme_map["RoutedExperts"] = self.target_scheme_map["Linear"]
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
@@ -396,7 +396,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     )
             return supported
         else:
-            return False
+            return not match_exact
 
     @staticmethod
     def _is_nvfp4_format(quant_args: QuantizationArgs):
@@ -983,7 +983,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         type_ = kv_cache_scheme.get("type")
         num_bits = kv_cache_scheme.get("num_bits")
 
-        if type_ != "float" and num_bits != 8:
+        if type_ != "float" or num_bits != 8:
             raise NotImplementedError(
                 "Currently supported kv cache quantization is "
                 "num_bits=8, type=float, however "

@@ -14,6 +14,7 @@ import torch
 from openai import BadRequestError
 
 from tests.utils import VLLM_PATH, RemoteOpenAIServer
+from vllm.platforms import current_platform
 
 MODEL_NAME = "facebook/opt-125m"
 CHAT_TEMPLATE = VLLM_PATH / "examples/template_chatml.jinja"
@@ -41,7 +42,11 @@ def server_args() -> list[str]:
 
 
 @pytest.fixture(scope="module")
-def server(server_args):
+def server(server_args, request):
+    if current_platform.is_rocm():
+        # Materialize HF embeddings before the server reserves ROCm VRAM.
+        request.getfixturevalue("prompt_embeds_b64")
+        request.getfixturevalue("aligned_content_and_embeds_b64")
     with RemoteOpenAIServer(MODEL_NAME, server_args) as remote_server:
         yield remote_server
 
