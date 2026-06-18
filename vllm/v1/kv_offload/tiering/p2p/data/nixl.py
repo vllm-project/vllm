@@ -187,7 +187,7 @@ class NixlTransport(DataTransport):
         done_ids: list[int] | None = None
         failed_ids: list[int] | None = None
 
-        for transfer_id, handle in list(self._inflight.items()):
+        for transfer_id, handle in self._inflight.items():
             try:
                 state = self._agent.check_xfer_state(handle)
             except Exception as exc:
