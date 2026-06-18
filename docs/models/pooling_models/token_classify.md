@@ -15,7 +15,7 @@ Many classification models support both (sequence) classification and token clas
 
 !!! note
 
-    Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task (classify) is not
+    Pooling multitask support has been removed since v0.21. When the default pooling task (classify) is not
     what you want, you need to manually specify it via `PoolerConfig(task="token_classify")` offline or
     `--pooler-config.task token_classify` online.
 
@@ -44,7 +44,6 @@ The BAAI/bge-m3 model leverages token classification for sparse retrieval. For m
 | Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | --------------------------- | --------------------------------------- |
 | `BertForTokenClassification` | bert-based | `boltuix/NeuroBERT-NER` (see note), etc. | | |
-| `ErnieForTokenClassification` | BERT-like Chinese ERNIE | `gyr66/Ernie-3.0-base-chinese-finetuned-ner` | | |
 | `ModernBertForTokenClassification` | ModernBERT-based | `disham993/electrical-ner-ModernBERT-base` | | |
 | `Qwen3ForTokenClassification`<sup>C</sup> | Qwen3-based | `bd2lcco/Qwen3-0.6B-finetuned` | | |
 | `*Model`<sup>C</sup>, `*ForCausalLM`<sup>C</sup>, etc. | Generative models | N/A | \* | \* |
@@ -103,7 +102,7 @@ print(f"Data: {data!r}")
 
 ## Online Serving
 
-Please refer to the [pooling API](README.md#pooling-api) and use `"task":"token_classify"`.
+Please refer to the [Pooling API](README.md#pooling-api) and use `"task":"token_classify"`.
 
 ## More examples
 
