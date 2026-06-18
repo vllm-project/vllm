@@ -430,7 +430,7 @@ async def validation_exception_handler(req: Request, exc: RequestValidationError
     if param is None and errors:
         loc = errors[0].get("loc")
         if loc:
-            param = str(loc[-1])
+            param = ".".join(str(part) for part in loc)
 
     exc_str = str(exc)
     errors_str = str(errors)

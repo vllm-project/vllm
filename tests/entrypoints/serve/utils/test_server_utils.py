@@ -50,4 +50,4 @@ class TestValidationErrorParamFallback:
         response = await validation_exception_handler(_fake_request(), exc)
         body = json.loads(response.body)
 
-        assert body["error"]["param"] == "messages"
+        assert body["error"]["param"] == "body.messages"
