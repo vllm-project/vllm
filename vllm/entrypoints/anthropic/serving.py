@@ -462,6 +462,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             "name": tool.name,
                             "description": tool.description,
                             "parameters": tool.input_schema,
+                            "strict": tool.strict,
                             "defer_loading": tool.defer_loading,
                         },
                     }

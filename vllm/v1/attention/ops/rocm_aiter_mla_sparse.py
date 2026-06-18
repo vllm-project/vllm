@@ -639,7 +639,6 @@ def rocm_aiter_sparse_attn_indexer(
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
-    from vllm import _custom_ops as ops
     from vllm.utils.torch_utils import _resolve_layer_name
 
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
@@ -716,22 +715,13 @@ def rocm_aiter_sparse_attn_indexer(
         raise ValueError("k must be provided when skip_k_cache_insert is False")
 
     if not skip_k_cache_insert:
-        if _ON_GFX942:
-            ops.indexer_k_quant_and_cache(
-                k,
-                kv_cache,
-                slot_mapping,
-                quant_block_size,
-                scale_fmt,
-            )
-        else:
-            indexer_k_quant_and_cache_triton(
-                k,
-                kv_cache,
-                slot_mapping,
-                quant_block_size,
-                scale_fmt,
-            )
+        indexer_k_quant_and_cache_triton(
+            k,
+            kv_cache,
+            slot_mapping,
+            quant_block_size,
+            scale_fmt,
+        )
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
@@ -746,23 +736,14 @@ def rocm_aiter_sparse_attn_indexer(
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
-            if _ON_GFX942:
-                ops.cp_gather_indexer_k_quant_cache(
-                    kv_cache,
-                    k_fp8,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.cu_seq_lens,
-                )
-            else:
-                cp_gather_indexer_k_quant_cache_triton(
-                    kv_cache,
-                    k_fp8,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.cu_seq_lens,
-                    token_to_seq=chunk.token_to_seq,
-                )
+            cp_gather_indexer_k_quant_cache_triton(
+                kv_cache,
+                k_fp8,
+                k_scale,
+                chunk.block_table,
+                chunk.cu_seq_lens,
+                token_to_seq=chunk.token_to_seq,
+            )
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
