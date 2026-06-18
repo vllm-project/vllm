@@ -51,7 +51,9 @@ def quantize_to_nvfp4(
     x_f32 = x.float().reshape(-1, n_blocks, NVFP4_BLOCK_SIZE)
 
     amax = x_f32.abs().amax(dim=-1, keepdim=True).clamp(min=6.0 * (2**-126))
-    scale = amax * (1.0 / 6.0)
+    # Use float64 to get the correctly-rounded float32 quotient, matching
+    # tl.div_rn(amax, 6.0) in the Triton kernel (CUDA fdiv can be 1 ULP off).
+    scale = (amax.double() / 6.0).float()
     scales = scale.squeeze(-1).to(torch.float8_e4m3fn)
 
     x_scaled = (x_f32 / scale).clamp(-6.0, 6.0)

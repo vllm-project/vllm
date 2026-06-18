@@ -71,25 +71,6 @@ def _quantize_mxfp4_pair(x_lo, x_hi):
 
 
 @triton.jit
-def _div_rn_f32(x, y):
-    """IEEE 754 correctly-rounded fp32 division (PTX div.rn.f32).
-
-    Triton's default '/' lowers to div.full.f32 (≤2 ULP error).  For NVFP4
-    quantization we need div.rn.f32 (correctly-rounded) so that values exactly
-    at E2M1 code boundaries (e.g. 5.0, which is the midpoint between 4.0 and
-    6.0) round to the same code as PyTorch's accurate reference computation.
-    """
-    return tl.inline_asm_elementwise(
-        "div.rn.f32 $0, $1, $2;",
-        constraints="=f,f,f",
-        args=[x, y],
-        dtype=tl.float32,
-        is_pure=True,
-        pack=1,
-    )
-
-
-@triton.jit
 def _quantize_nvfp4_block(x_lo, x_hi):
     """Quantize a block of NVFP4_BLOCK_SIZE fp32 values given as two
     interleaved halves. Returns:
@@ -100,13 +81,10 @@ def _quantize_nvfp4_block(x_lo, x_hi):
     """
     amax = tl.maximum(tl.max(tl.abs(x_lo)), tl.max(tl.abs(x_hi)))
     amax = tl.maximum(amax, 6.0 * (2**-126))
-    # Compute scale as amax * (1/6) to match the reference formula.  Use
-    # _div_rn_f32 (PTX div.rn.f32) rather than '/' (div.full.f32, ≤2 ULP) so
-    # that values exactly at E2M1 boundaries round identically to PyTorch's
-    # accurate IEEE 754 tensor division in the reference.
-    scale = amax * (1.0 / 6.0)
+    # tl.div_rn (div.rn.f32) for correct rounding at E2M1 boundaries.
+    scale = tl.div_rn(amax, 6.0)
     nvfp4_scale = scale.to(tl.float8e4nv)
-    packed = _fp32x2_to_fp4x2(_div_rn_f32(x_lo, scale), _div_rn_f32(x_hi, scale))
+    packed = _fp32x2_to_fp4x2(tl.div_rn(x_lo, scale), tl.div_rn(x_hi, scale))
     return packed, nvfp4_scale
 
 
