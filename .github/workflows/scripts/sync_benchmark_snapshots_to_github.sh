@@ -38,14 +38,17 @@ write_github_env() {
 configure_push_remote() {
   local remote_url=
 
-  if [[ -n "$BENCHMARK_REPO_GH_TOKEN" ]]; then
-    remote_url="https://x-access-token:${BENCHMARK_REPO_GH_TOKEN}@github.com/${BENCHMARK_REPO_SLUG}.git"
+  # Prefer SSH key over GH token: the SSH key is provisioned specifically
+  # for the benchmark repo, while the GH token may belong to a user
+  # without write access to the target repository.
+  if [[ -n "$BENCHMARK_REPO_SSH_KEY" ]]; then
+    remote_url="git@github.com:${BENCHMARK_REPO_SLUG}.git"
     git -C "$BENCHMARK_REPO_DIR" remote set-url "$BENCHMARK_REPO_REMOTE" "$remote_url"
     return 0
   fi
 
-  if [[ -n "$BENCHMARK_REPO_SSH_KEY" ]]; then
-    remote_url="git@github.com:${BENCHMARK_REPO_SLUG}.git"
+  if [[ -n "$BENCHMARK_REPO_GH_TOKEN" ]]; then
+    remote_url="https://x-access-token:${BENCHMARK_REPO_GH_TOKEN}@github.com/${BENCHMARK_REPO_SLUG}.git"
     git -C "$BENCHMARK_REPO_DIR" remote set-url "$BENCHMARK_REPO_REMOTE" "$remote_url"
     return 0
   fi
