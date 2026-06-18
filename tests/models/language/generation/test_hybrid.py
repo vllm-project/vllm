@@ -37,10 +37,10 @@ HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
     "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
+    "tiny-random/qwen3-next-moe",
     "ibm-granite/granite-4.0-tiny-preview",
     "tiiuae/Falcon-H1-0.5B-Base",
     "LiquidAI/LFM2-1.2B",
-    "tiny-random/qwen3-next-moe",
 ]
 
 FULL_CUDA_GRAPH_MODELS = [
