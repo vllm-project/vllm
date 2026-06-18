@@ -40,6 +40,8 @@ pub struct AppState {
     server_load: AtomicU64,
     /// Dynamic LoRA adapter registry.
     lora_manager: LoraManager,
+    /// Backend model path reported as `root` for base-model cards.
+    model_path: Option<String>,
 }
 
 impl AppState {
@@ -65,6 +67,7 @@ impl AppState {
             api_key_hashes: Vec::new(),
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
+            model_path: None,
         }
     }
 
@@ -77,6 +80,12 @@ impl AppState {
     /// Set the CORS settings applied to every HTTP response.
     pub fn with_cors(mut self, cors: CorsConfig) -> Self {
         self.cors = cors;
+        self
+    }
+
+    /// Set the backend model path reported as `root` for base-model cards.
+    pub fn with_model_path(mut self, model_path: String) -> Self {
+        self.model_path = Some(model_path);
         self
     }
 
@@ -123,10 +132,14 @@ impl AppState {
         &self.served_model_names
     }
 
-    /// Return base served model names plus dynamically loaded LoRA adapter
-    /// names.
-    pub async fn served_model_names_with_loras(&self) -> Vec<String> {
-        self.lora_manager.served_model_names(&self.served_model_names).await
+    /// Backend model path reported as `root` for base-model cards, if known.
+    pub fn model_path(&self) -> Option<&str> {
+        self.model_path.as_deref()
+    }
+
+    /// Snapshot the loaded LoRA adapters in load order, for `/v1/models` cards.
+    pub async fn served_lora_requests(&self) -> Vec<LoraRequest> {
+        self.lora_manager.served_lora_requests().await
     }
 
     /// Resolve the requested model against one dynamic LoRA registry snapshot.
