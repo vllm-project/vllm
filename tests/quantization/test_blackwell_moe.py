@@ -283,7 +283,7 @@ def test_nemotron_fp8_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
     )
 
 
-def test_nemotron_fp4_moe_flashinfer_throughput(monkeypatch: pytest.MonkeyPatch):
+def test_nemotron_fp4_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
         hf_overrides=HF_OVERRIDE_TEXT,
@@ -291,14 +291,7 @@ def test_nemotron_fp4_moe_flashinfer_throughput(monkeypatch: pytest.MonkeyPatch)
     )
 
 
-@pytest.mark.skip(
-    reason=(
-        "FP4 MoE backend FLASHINFER_TRTLLM does not support the "
-        "deployment configuration since kernel does not support "
-        "hidden_dim % 512 != 0."
-    )
-)
-def test_nemotron_fp4_moe_flashinfer_latency(monkeypatch: pytest.MonkeyPatch):
+def test_nemotron_fp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
         hf_overrides=HF_OVERRIDE_TEXT,
