@@ -34,7 +34,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature
-from transformers.models.qwen2_vl import Qwen2VLImageProcessorFast
+from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     smart_resize as image_smart_resize,
 )
@@ -872,7 +872,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             **kwargs,
         )
 
-    def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessorFast:
+    def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_video_processor(self, **kwargs: object) -> Qwen3VLVideoProcessor:
@@ -892,7 +892,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         image_height: int,
         num_frames: int = 2,
         do_resize: bool = True,
-        image_processor: Qwen2VLImageProcessorFast | Qwen3VLVideoProcessor,
+        image_processor: Qwen2VLImageProcessor | Qwen3VLVideoProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> tuple[ImageSize, int]:
         is_video = isinstance(image_processor, Qwen3VLVideoProcessor)
@@ -1918,6 +1918,7 @@ class Qwen3VLForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1998,6 +1999,7 @@ class Qwen3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         modality = self.get_input_modality(mm_kwargs)
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
@@ -2023,6 +2025,7 @@ class Qwen3VLForConditionalGeneration(
     def encoder_cudagraph_forward(
         self,
         values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         pixel_values = values.pop("pixel_values")
         metadata = values
@@ -2031,6 +2034,7 @@ class Qwen3VLForConditionalGeneration(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)

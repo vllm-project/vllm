@@ -351,8 +351,7 @@ def prepare_int4_moe_layer_for_cpu(
                   If None, synthetic zeros are created for symmetric quant.
 
     Returns:
-        (blocked_w13, blocked_w2, blocked_s13, blocked_s2,
-         blocked_z13, blocked_z2)
+        (blocked_w13, blocked_w2, blocked_s13, blocked_s2, blocked_z13, blocked_z2)
     """
     E = w13_packed.size(0)
 
