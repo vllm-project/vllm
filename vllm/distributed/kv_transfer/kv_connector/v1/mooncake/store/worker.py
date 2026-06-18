@@ -548,7 +548,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 for chunk_idx, (start, end, key) in enumerate(
                     db.process_tokens(token_len, req_meta.block_hashes)
                 ):
-                    if chunk_idx >= len(mask) or not mask[chunk_idx]:
+                    if mask is not None and (
+                        chunk_idx >= len(mask) or not mask[chunk_idx]
+                    ):
                         continue
                     starts.append(start)
                     ends.append(end)
@@ -982,6 +984,11 @@ class MooncakeStoreWorker:
             pcp_rank=self.pcp_rank,
             dcp_rank=self.dcp_rank,
             pp_rank=self.pp_rank,
+            cache_prefix=str(
+                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                    "cache_prefix", ""
+                )
+            ),
         )
 
         # Initialize MooncakeDistributedStore with its own TransferEngine
@@ -1370,9 +1377,11 @@ class MooncakeStoreWorker:
         # candidate_meta[i] is the (group_id, hash_bytes) for candidate_keys[i].
         candidate_keys: list[str] = []
         candidate_meta: list[tuple[int, bytes]] = []
+        lookup_masks = self.coord.lookup_mask(token_len)
         tp_count = min(self.tp_size, self.num_kv_head)
         for g_idx, db in enumerate(self.token_dbs):
             spec_block_size = db.block_size
+            lookup_mask = lookup_masks[g_idx]
             group_hashes = self.coord.block_hashes_for_spec(
                 block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
             )
@@ -1380,6 +1389,10 @@ class MooncakeStoreWorker:
                 start_idx = chunk_id * spec_block_size
                 if start_idx >= token_len:
                     break
+                if lookup_mask is not None and (
+                    chunk_id >= len(lookup_mask) or not lookup_mask[chunk_id]
+                ):
+                    continue
                 for tp in range(tp_count):
                     for pp in range(self.pp_size):
                         md = dataclasses.replace(db.metadata, tp_rank=tp, pp_rank=pp)
@@ -1425,6 +1438,22 @@ class MooncakeStoreWorker:
         if self.enable_kv_events and self.kv_send_thread is not None:
             return self.kv_send_thread.get_kv_events()
         return []
+
+    def close(self) -> None:
+        """Release the MooncakeDistributedStore handle on teardown.
+
+        Closing the store frees its TransferEngine, the registered RDMA
+        buffers, and the connection to the master server. Idempotent so it is
+        safe to call from both the explicit shutdown path and ``__del__``.
+        """
+        store = getattr(self, "store", None)
+        if store is None:
+            return
+        self.store = None
+        try:
+            store.close()
+        except Exception as e:
+            logger.warning("Error closing MooncakeDistributedStore: %s", e)
 
 
 # ============================================================

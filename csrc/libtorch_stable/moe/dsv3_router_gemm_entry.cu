@@ -144,8 +144,7 @@ void dsv3_router_gemm(
       "output must be float32 or bf16");
 
   const int sm = getSMVersion();
-  STD_TORCH_CHECK(sm >= 90 && sm <= 103,
-                  "required SM_103 >= CUDA ARCH >= SM_90");
+  STD_TORCH_CHECK(sm >= 90, "required CUDA ARCH >= SM_90");
 
   const cudaStream_t stream = get_current_cuda_stream(mat_a.get_device_index());
 
