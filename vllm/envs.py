@@ -114,6 +114,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
@@ -1094,6 +1095,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Acts as a parent switch to enable the rest of the other operations.
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+    ),
+    # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
+    # CudaCommunicator on ROCm.
+    "VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE", "False").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter paged attention.
     # By default is disabled.
