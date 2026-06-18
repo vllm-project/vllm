@@ -61,6 +61,7 @@ def _make_groups(n_c4, n_c128, n_swa):
 def _mock_vllm_config():
     config = MagicMock()
     config.scheduler_config.num_gpu_blocks_override = None
+    config.cache_config.num_gpu_blocks_override = None
     return config
 
 
