@@ -51,3 +51,15 @@ class TestValidationErrorParamFallback:
         body = json.loads(response.body)
 
         assert body["error"]["param"] == "body.messages"
+
+    @pytest.mark.asyncio
+    async def test_param_fallback_does_not_crash_on_non_dict_error(self):
+        """Schemathesis fuzzing found that errors[0] isn't always a dict.
+        The fallback must not crash in that case - it should just leave
+        param as None instead of raising."""
+        exc = RequestValidationError(["some unexpected non-dict error"])
+
+        response = await validation_exception_handler(_fake_request(), exc)
+        body = json.loads(response.body)
+
+        assert body["error"]["param"] is None
