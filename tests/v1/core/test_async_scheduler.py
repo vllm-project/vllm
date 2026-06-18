@@ -321,3 +321,58 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     assert request.status == RequestStatus.FINISHED_ERROR
     assert request.request_id not in scheduler.requests
     assert not scheduler.running
+
+
+def test_no_placeholder_underflow_on_discarded_spec_frame():
+    # A spec frame discarded after a reset_prefix_cache force-preempt must not
+    # adjust the resumed request's counters or drive num_output_placeholders < 0.
+    num_spec = 5
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        num_speculative_tokens=num_spec,
+        speculative_method="ngram_gpu",
+    )
+    req = create_requests(num_requests=1, max_tokens=20)[0]
+    req.num_computed_tokens = req.num_tokens
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+    req.status = RequestStatus.RUNNING
+
+    # State just after a reset_prefix_cache force-preempt + resume: placeholders
+    # were zeroed then a small count re-added, while the frames in flight at
+    # reset time are still pending discard.
+    req.num_output_placeholders = 1
+    req.async_tokens_to_discard = num_spec
+    computed_before = req.num_computed_tokens
+
+    # A stale in-flight spec frame returns with every draft token rejected, so
+    # num_rejected (== num_spec) exceeds the resumed placeholder count and the
+    # spec-rejection subtraction in update_from_output would underflow it.
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: num_spec + 1},
+        total_num_scheduled_tokens=num_spec + 1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={req.request_id: [10] * num_spec},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[req.request_id],
+        req_id_to_index={req.request_id: 0},
+        sampled_token_ids=[[999]],  # only the bonus token, every draft rejected
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # The stale frame is discarded, so the resumed request's counters are
+    # untouched and the discard counter ticks down by one.
+    assert req.num_output_placeholders == 1
+    assert req.num_computed_tokens == computed_before
+    assert req.async_tokens_to_discard == num_spec - 1
+    assert req.status == RequestStatus.RUNNING
