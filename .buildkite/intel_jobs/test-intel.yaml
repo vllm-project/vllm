@@ -40,7 +40,9 @@ steps:
         python3 examples/basic/offline_inference/generate.py --model superjob/Qwen3-4B-Instruct-2507-GPTQ-Int4 --block-size 64 --enforce-eager --max-model-len 8192 &&
         python3 examples/basic/offline_inference/generate.py --model ibm-research/PowerMoE-3b --block-size 64 --enforce-eager -tp 2 &&
         python3 examples/basic/offline_inference/generate.py --model ibm-research/PowerMoE-3b --block-size 64 --enforce-eager -tp 2 --enable-expert-parallel &&
-        python3 examples/basic/offline_inference/generate.py --model superjob/Qwen3-4B-Instruct-2507-GPTQ-Int4 --max-model-len 8192
+        python3 examples/basic/offline_inference/generate.py --model superjob/Qwen3-4B-Instruct-2507-GPTQ-Int4 --max-model-len 8192 &&
+        VLLM_XPU_FUSED_MOE_USE_REF=1 python3 examples/basic/offline_inference/generate.py --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --enforce-eager -tp 2 --max-model-len 8192 &&
+        python3 examples/basic/offline_inference/generate.py --model INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP4-LLMC --enforce-eager -tp 2 --max-model-len 8192
         '
   - label: "XPU V1 test"
     depends_on:
@@ -58,6 +60,7 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
+        bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh &&
         pytest -v -s v1/core --ignore=v1/core/test_reset_prefix_cache_e2e.py --ignore=v1/core/test_scheduler_e2e.py &&
         pytest -v -s v1/engine --ignore=v1/engine/test_output_processor.py &&
         pytest -v -s v1/sample --ignore=v1/sample/test_logprobs.py --ignore=v1/sample/test_logprobs_e2e.py -k "not test_topk_only and not test_topp_only and not test_topk_and_topp" &&
@@ -83,5 +86,22 @@ steps:
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'pip install av &&
         cd tests &&
-        pytest -v -s entrypoints/openai/chat_completion/test_audio_in_video.py &&
+        pytest -v -s entrypoints/multimodal/openai/chat_completion/test_audio_in_video.py &&
         pytest -v -s benchmarks/test_serve_cli.py'
+  - label: "XPU quantization test"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 30
+    device: intel_gpu
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+    source_file_dependencies:
+      - vllm/
+      - .buildkite/intel_jobs/test-intel.yaml 
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'cd tests &&
+        pytest -v -s quantization/test_auto_round.py'

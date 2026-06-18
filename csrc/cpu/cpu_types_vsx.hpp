@@ -1,11 +1,11 @@
 
 #ifndef CPU_TYPES_VSX_HPP
-#define CPU_TYPES_VSX_HPP
+  #define CPU_TYPES_VSX_HPP
 
-#include <altivec.h>
-#include <cmath>
-#include <algorithm>
-#include <torch/all.h>
+  #include <altivec.h>
+  #include <cmath>
+  #include <algorithm>
+  #include <torch/all.h>
 
 namespace vec_op {
 
@@ -13,25 +13,26 @@ namespace vec_op {
 struct fp8_e4m3_tag {};
 struct fp8_e5m2_tag {};
 
-#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
-  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
-  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
-  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)
+  #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
+    AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
+    AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
+    AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)
 
-#define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
-  AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
+  #define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
+    AT_DISPATCH_SWITCH(TYPE, NAME,                      \
+                       VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
 
-#ifndef CPU_OP_GUARD
-  #define CPU_KERNEL_GUARD_IN(NAME)
-  #define CPU_KERNEL_GUARD_OUT(NAME)
-#else
-  #define CPU_KERNEL_GUARD_IN(NAME) \
-    std::cout << #NAME << " invoked." << std::endl;
-  #define CPU_KERNEL_GUARD_OUT(NAME) \
-    std::cout << #NAME << " exit." << std::endl;
-#endif
+  #ifndef CPU_OP_GUARD
+    #define CPU_KERNEL_GUARD_IN(NAME)
+    #define CPU_KERNEL_GUARD_OUT(NAME)
+  #else
+    #define CPU_KERNEL_GUARD_IN(NAME) \
+      std::cout << #NAME << " invoked." << std::endl;
+    #define CPU_KERNEL_GUARD_OUT(NAME) \
+      std::cout << #NAME << " exit." << std::endl;
+  #endif
 
-#define FORCE_INLINE __attribute__((always_inline)) inline
+  #define FORCE_INLINE __attribute__((always_inline)) inline
 
 namespace {
 
@@ -202,7 +203,7 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
   }
 
   void save(void* ptr, int elem_num) const {
-    int num = std::min(elem_num, VEC_ELEM_NUM);
+    int num = std::max(0, std::min(elem_num, VEC_ELEM_NUM));
     if (num <= 8) {
       vec_xst_len(reg.val[0], (signed short*)ptr, num * 2);
     } else {
@@ -533,6 +534,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     reg.val[3] = data.reg.val[1];
   }
 
+  explicit FP32Vec16(const FP16Vec16& v);
   explicit FP32Vec16(const BF16Vec16& v) {
     reg.val[0] = (__vector float)vec_mergeh(zero, v.reg.val[0]);
     reg.val[1] = (__vector float)vec_mergel(zero, v.reg.val[0]);
@@ -836,30 +838,30 @@ inline void storeFP32<c10::Half>(float v, c10::Half* ptr) {
   *reinterpret_cast<unsigned short*>(ptr) = result;
 }
 
-#ifndef __VEC_CLASS_FP_NAN
-  #define __VEC_CLASS_FP_NAN (1 << 6)
-#endif
+  #ifndef __VEC_CLASS_FP_NAN
+    #define __VEC_CLASS_FP_NAN (1 << 6)
+  #endif
 
 const static __vector unsigned char omask = {0,  1,  4,  5,  8,  9,  12, 13,
                                              16, 17, 20, 21, 24, 25, 28, 29};
-#ifndef _ARCH_PWR10
+  #ifndef _ARCH_PWR10
 const static __vector unsigned int bias = {0x00007fff, 0x00007fff, 0x00007fff,
                                            0x00007fff};
 const static __vector unsigned int nan = {0x7fc00000, 0x7fc00000, 0x7fc00000,
                                           0x7fc00000};
 const static __vector unsigned int sh16 = {16, 16, 16, 16};
 const static __vector unsigned int one = {1, 1, 1, 1};
-#endif
+  #endif
 
 inline BF16Vec8::BF16Vec8(const FP32Vec8& v) {
-#ifdef _ARCH_PWR10
+  #ifdef _ARCH_PWR10
   __vector signed short ret[2];
   ret[0] = (__vector signed short)__builtin_vsx_xvcvspbf16(
       (__vector unsigned char)v.reg.val[0]);
   ret[1] = (__vector signed short)__builtin_vsx_xvcvspbf16(
       (__vector unsigned char)v.reg.val[1]);
   reg = vec_perm(ret[0], ret[1], omask);
-#elif defined(_ARCH_PWR9)
+  #elif defined(_ARCH_PWR9)
   __vector unsigned int inp0 = (__vector unsigned int)(v.reg.val[0]);
   __vector unsigned int inp1 = (__vector unsigned int)(v.reg.val[1]);
   __vector unsigned int lsb0 = vec_sr(inp0, sh16);
@@ -879,9 +881,10 @@ inline BF16Vec8::BF16Vec8(const FP32Vec8& v) {
   inp0 = vec_sr(inp0, sh16);
   inp1 = vec_sr(inp1, sh16);
   reg = (__vector signed short)vec_perm(inp0, inp1, omask);
-#endif
+  #endif
 }
 
+<<<<<<< HEAD
 inline FP16Vec8::FP16Vec8(const FP32Vec8& v) {
   __vector unsigned int fp16_hi = fp32_to_fp16_bits(v.reg.val[0]);
   __vector unsigned int fp16_lo = fp32_to_fp16_bits(v.reg.val[1]);
@@ -918,7 +921,7 @@ inline FP32Vec16::FP32Vec16(const FP16Vec16& v) {
 }
 
 inline BF16Vec16::BF16Vec16(const FP32Vec16& v) {
-#ifdef _ARCH_PWR10
+    #ifdef _ARCH_PWR10
   __vector signed short ret[4];
   ret[0] = (__vector signed short)__builtin_vsx_xvcvspbf16(
       (__vector unsigned char)v.reg.val[0]);
@@ -930,7 +933,7 @@ inline BF16Vec16::BF16Vec16(const FP32Vec16& v) {
       (__vector unsigned char)v.reg.val[3]);
   reg.val[0] = vec_perm(ret[0], ret[1], omask);
   reg.val[1] = vec_perm(ret[2], ret[3], omask);
-#elif defined(_ARCH_PWR9)
+    #elif defined(_ARCH_PWR9)
   __vector unsigned int inp0 = (__vector unsigned int)(v.reg.val[0]);
   __vector unsigned int inp1 = (__vector unsigned int)(v.reg.val[1]);
   __vector unsigned int inp2 = (__vector unsigned int)(v.reg.val[2]);
@@ -969,7 +972,7 @@ inline BF16Vec16::BF16Vec16(const FP32Vec16& v) {
   inp3 = vec_sr(inp3, sh16);
   reg.val[0] = (__vector signed short)vec_perm(inp0, inp1, omask);
   reg.val[1] = (__vector signed short)vec_perm(inp2, inp3, omask);
-#endif
+    #endif
 }
 
 inline void prefetch(const void* addr) {
@@ -978,7 +981,6 @@ inline void prefetch(const void* addr) {
 
 struct INT8Vec64 {
   __vector signed char data[4];
-
   INT8Vec64() = default;
 
   explicit INT8Vec64(const int8_t* ptr) {
@@ -999,6 +1001,7 @@ struct INT8Vec64 {
 
   void save(int8_t* ptr, int elem_num) const {
     if (elem_num <= 0) return;
+
     int full_vecs = elem_num / 16;
     for (int i = 0; i < full_vecs && i < 4; i++) {
       vec_xst(data[i], i * 16, ptr);
@@ -1013,4 +1016,40 @@ struct INT8Vec64 {
   void nt_save(int8_t* ptr) const { save(ptr); }
 };
 }  // namespace vec_op
-#endif
+
+INT8Vec64() = default;
+
+explicit INT8Vec64(const int8_t* ptr) {
+  data[0] = vec_xl(0, ptr);
+  data[1] = vec_xl(16, ptr);
+  data[2] = vec_xl(32, ptr);
+  data[3] = vec_xl(48, ptr);
+}
+
+explicit INT8Vec64(bool, const int8_t* ptr) : INT8Vec64(ptr) {}
+
+void save(int8_t* ptr) const {
+  vec_xst(data[0], 0, ptr);
+  vec_xst(data[1], 16, ptr);
+  vec_xst(data[2], 32, ptr);
+  vec_xst(data[3], 48, ptr);
+}
+
+void save(int8_t* ptr, int elem_num) const {
+  if (elem_num <= 0) return;
+  int full_vecs = elem_num / 16;
+  for (int i = 0; i < full_vecs && i < 4; i++) {
+    vec_xst(data[i], i * 16, ptr);
+  }
+
+  int remaining = elem_num % 16;
+  if (remaining > 0 && full_vecs < 4) {
+    vec_xst_len(data[full_vecs], ptr + full_vecs * 16, remaining);
+  }
+}
+
+void nt_save(int8_t* ptr) const { save(ptr); }
+}
+;
+}  // namespace vec_op
+  #endif

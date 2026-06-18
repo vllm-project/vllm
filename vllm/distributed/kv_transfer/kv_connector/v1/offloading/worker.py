@@ -5,20 +5,12 @@ from dataclasses import replace
 
 import torch
 
-from vllm.config import get_layers_from_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVConnectorStats,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
     ReqId,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
-    OffloadingConnectorStats,
-)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -46,7 +38,6 @@ class OffloadingConnectorWorker:
         self.spec = spec
         self.worker = OffloadingWorker()
 
-        self.kv_connector_stats = OffloadingConnectorStats()
         # job_id -> req_id for in-flight loads.
         self._load_jobs: dict[int, ReqId] = {}
         self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
@@ -59,25 +50,9 @@ class OffloadingConnectorWorker:
     def register_kv_caches(
         self, kv_caches: dict[str, torch.Tensor | list[torch.Tensor]]
     ):
-        layer_names = list(kv_caches.keys())
-        layers = get_layers_from_vllm_config(
-            self.spec.vllm_config,
-            AttentionLayerBase,  # type: ignore[type-abstract]
-            layer_names,
-        )
-        attn_backends = {
-            layer_name: layers[layer_name].get_attn_backend()
-            for layer_name in layer_names
-            if layer_name in layers
-        }
-
         num_blocks = self.spec.kv_cache_config.num_blocks
 
-        # layer_name -> list of matching KV cache tensors
-        # such that each tensor starts with the num_blocks dimension.
-        # FlashAttention layers which use the (2, num_blocks, ...) layout
-        # will possibly map to 2 tensors, one per K and one per V.
-        # All other layers will probably map to a single tensor.
+        # layer_name -> (num_blocks, page_size_bytes) tensor
         tensors_per_block: dict[str, tuple[torch.Tensor, ...]] = {}
         # layer_name -> size of (un-padded) page in bytes
         unpadded_page_size_bytes: dict[str, int] = {}
@@ -99,70 +74,21 @@ class OffloadingConnectorWorker:
                     assert isinstance(layer_kv_cache, torch.Tensor)
                     assert layer_kv_cache.storage_offset() == 0
 
-                    # get the logical dimension for num_blocks
-                    test_shape = attn_backends[layer_name].get_kv_cache_shape(
-                        num_blocks=1234,
-                        block_size=16,
-                        num_kv_heads=1,
-                        head_size=256,
+                    storage = layer_kv_cache.untyped_storage()
+                    page = layer_kv_cache_spec.page_size_bytes
+                    tensors_per_block[layer_name] = (
+                        torch.tensor(
+                            [],
+                            dtype=torch.int8,
+                            device=layer_kv_cache.device,
+                        )
+                        .set_(storage)
+                        .view(num_blocks, page),
                     )
-                    num_blocks_logical_dim = test_shape.index(1234)
-
-                    # sort the logical dimensions by stride (high to low)
-                    # to get a physical-to-logical mapping:
-                    # physical_to_logical[physical_pos] = logical_dim
-                    logical_strides = layer_kv_cache.stride()
-                    physical_to_logical = sorted(
-                        range(len(logical_strides)),
-                        key=lambda idx: logical_strides[idx],
-                        reverse=True,
+                    page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
+                    unpadded_page_size_bytes[layer_name] = (
+                        layer_kv_cache_spec.real_page_size_bytes
                     )
-
-                    num_blocks_physical_dim = physical_to_logical.index(
-                        num_blocks_logical_dim
-                    )
-                    if num_blocks_physical_dim == 0:
-                        storage = layer_kv_cache.untyped_storage()
-                        page = layer_kv_cache_spec.page_size_bytes
-                        tensors_per_block[layer_name] = (
-                            torch.tensor(
-                                [],
-                                dtype=torch.int8,
-                                device=layer_kv_cache.device,
-                            )
-                            .set_(storage)
-                            .view(num_blocks, page),
-                        )
-                        page_size_bytes[layer_name] = (
-                            layer_kv_cache_spec.page_size_bytes
-                        )
-                        unpadded_page_size_bytes[layer_name] = (
-                            layer_kv_cache_spec.real_page_size_bytes
-                        )
-                    else:
-                        # Flash Attention case: (2, num_blocks, ...)
-                        assert test_shape[0] == 2
-                        assert physical_to_logical[0] == 0
-                        assert num_blocks_physical_dim == 1
-
-                        # unbind the tensor to separate K and V tensors
-                        half_page_size = layer_kv_cache_spec.page_size_bytes // 2
-                        storage = layer_kv_cache.untyped_storage()
-                        raw = (
-                            torch.tensor(
-                                [],
-                                dtype=torch.int8,
-                                device=layer_kv_cache.device,
-                            )
-                            .set_(storage)
-                            .view(2, num_blocks, half_page_size)
-                        )
-                        tensors_per_block[layer_name] = tuple(raw.unbind(0))
-
-                        page_size_bytes[layer_name] = half_page_size
-                        unpadded_page_size_bytes[layer_name] = (
-                            layer_kv_cache_spec.real_page_size_bytes // 2
-                        )
 
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
                     state_tensors = kv_caches[layer_name]
@@ -338,15 +264,18 @@ class OffloadingConnectorWorker:
             # we currently do not support job failures
             job_id = transfer_result.job_id
             assert transfer_result.success
+            is_load = job_id in self._load_jobs
             if (
-                transfer_result.transfer_time
+                transfer_result.transfer_time is not None
                 and transfer_result.transfer_size is not None
-                and transfer_result.transfer_type is not None
             ):
-                self.kv_connector_stats.record_transfer(
-                    num_bytes=transfer_result.transfer_size,
-                    time=transfer_result.transfer_time,
-                    transfer_type=transfer_result.transfer_type,
+                if is_load:
+                    stats = self._connector_worker_meta.transfer_stats.load
+                else:
+                    stats = self._connector_worker_meta.transfer_stats.store
+                stats.record(
+                    transfer_result.transfer_size,
+                    transfer_result.transfer_time,
                 )
 
             self._connector_worker_meta.mark_completed(job_id)
@@ -363,18 +292,6 @@ class OffloadingConnectorWorker:
         meta = self._connector_worker_meta
         self._connector_worker_meta = OffloadingWorkerMetadata()
         return meta
-
-    def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        """
-        Get the KV transfer stats for the connector.
-        """
-
-        if self.kv_connector_stats.is_empty():
-            return None
-        # Clear stats for next iteration
-        kv_connector_stats = self.kv_connector_stats
-        self.kv_connector_stats = OffloadingConnectorStats()
-        return kv_connector_stats
 
     def shutdown(self) -> None:
         self._unsubmitted_store_jobs.clear()
