@@ -1059,12 +1059,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo(
         "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
     ),
-    "MantisForConditionalGeneration": _HfExamplesInfo(
-        "TIGER-Lab/Mantis-8B-siglip-llama3",
-        max_transformers_version="4.48",
-        transformers_version_reason={"hf": "HF model is not compatible."},
-        hf_overrides={"architectures": ["MantisForConditionalGeneration"]},
-    ),
     "MiDashengLMModel": _HfExamplesInfo(
         "mispeech/midashenglm-7b", trust_remote_code=True
     ),
