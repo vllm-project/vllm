@@ -855,6 +855,8 @@ class GPUModelRunner(
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
+        self._knorm_scores: dict | None = None
+        self._knorm_wrapper_installed: bool = False
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
         self.layerwise_nvtx_hooks_registered = False
@@ -3864,6 +3866,13 @@ class GPUModelRunner(
                 "after execute_model() returns None."
             )
 
+        # Knorm: install Ascend attention wrapper on first forward.
+        if not getattr(self, "_knorm_wrapper_installed", False):
+            from vllm.knorm.attention_backend import install_ascend_wrapper
+
+            install_ascend_wrapper()
+            self._knorm_wrapper_installed = True
+
         if self.routed_experts_initialized:
             capturer = RoutedExpertsCapturer.get_instance()
             if capturer is not None:
@@ -4203,6 +4212,12 @@ class GPUModelRunner(
         if deferred_state_corrections_fn:
             deferred_state_corrections_fn()
 
+        # Knorm: collect key L2 norms from attention backend after forward.
+        if self.is_last_pp_rank:
+            from vllm.knorm.hooks import collect_knorm_scores
+
+            collect_knorm_scores(self, self.execute_model_state.input_batch)
+
         return None
 
     @torch.inference_mode
@@ -4419,6 +4434,9 @@ class GPUModelRunner(
             )
 
         if not self.use_async_scheduling:
+            from vllm.knorm.hooks import attach_knorm_scores
+
+            attach_knorm_scores(self, output)
             return output
 
         with record_function_or_nullcontext(
@@ -4442,6 +4460,9 @@ class GPUModelRunner(
                 async_output.async_copy_ready_event,
             )
 
+        from vllm.knorm.hooks import attach_knorm_scores
+
+        attach_knorm_scores(self, async_output)
         return async_output
 
     def _pp_broadcast_prev_sampled_token_ids(
