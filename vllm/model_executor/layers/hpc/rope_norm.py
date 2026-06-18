@@ -7,20 +7,38 @@ Decoupled from HpcAttentionImpl; extra params are passed via layer attrs.
 
 from __future__ import annotations
 
+from enum import IntEnum
 from typing import Any
 
 import torch
 
+from vllm.config import get_current_vllm_config_or_none
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.hpc.hpc_module import HpcModule
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.hpc_attn import HpcAttnMetadata
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
 
 _hpc_rope_norm_instances: dict[str, HpcRopeNorm] = {}
+
+
+class QkNormPolicy(IntEnum):
+    """Order of QK-RMSNorm relative to RoPE in the fused HPC rope_norm kernel.
+
+    The values are part of the HPC kernel ABI (passed through as ints), so they
+    must stay in sync with the kernel's expectations.
+    """
+
+    # No QK-Norm: apply RoPE only.
+    NONE = 0
+    # Apply RoPE first, then QK-RMSNorm.
+    ROPE_THEN_NORM = 1
+    # Apply QK-RMSNorm first, then RoPE (e.g. HunYuan V3).
+    NORM_THEN_ROPE = 2
 
 
 def hpc_rope_norm_forward(
@@ -100,7 +118,7 @@ class HpcRopeNorm(CustomOp, HpcModule):
         fallback_qnorm: torch.nn.Module | None,
         fallback_knorm: torch.nn.Module | None,
         kv_cache_dtype: str,
-        qk_norm_policy: int = 1,
+        qk_norm_policy: QkNormPolicy = QkNormPolicy.ROPE_THEN_NORM,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -143,11 +161,10 @@ class HpcRopeNorm(CustomOp, HpcModule):
             self.knorm_weight = None
 
         self.use_fp8 = "fp8" in kv_cache_dtype
-        # qk_norm_policy: 0 = no RMSNorm, 1 = RoPE then RMSNorm,
-        # 2 = RMSNorm then RoPE.  The order is model dependent (e.g. HunYuan
-        # V3 applies QK-Norm before RoPE -> policy 2), so it is supplied by
-        # the caller. When QK-Norm is disabled the policy is forced to 0.
-        self.qk_norm_policy = qk_norm_policy if use_qk_norm else 0
+        # The RMSNorm/RoPE ordering is model dependent (e.g. HunYuan V3 applies
+        # QK-Norm before RoPE -> NORM_THEN_ROPE), so it is supplied by the
+        # caller. When QK-Norm is disabled the policy is forced to NONE.
+        self.qk_norm_policy = qk_norm_policy if use_qk_norm else QkNormPolicy.NONE
         self.layer_name: str | None = None
 
     @classmethod
@@ -159,9 +176,6 @@ class HpcRopeNorm(CustomOp, HpcModule):
         kv_cache_dtype: str,
     ) -> bool:
         """Check whether HpcRopeNorm is supported for the given config."""
-        from vllm.config import get_current_vllm_config_or_none
-        from vllm.v1.attention.backends.registry import AttentionBackendEnum
-
         # HpcRopeNorm is only enabled together with the HPC attention backend.
         vllm_config = get_current_vllm_config_or_none()
         if (
@@ -283,8 +297,12 @@ class HpcRopeNorm(CustomOp, HpcModule):
         k_scale = attn_layer._k_scale.reshape(1)
         v_scale = attn_layer._v_scale.reshape(1)
 
-        q_norm_weight = self.qnorm_weight if self.qk_norm_policy > 0 else None
-        k_norm_weight = self.knorm_weight if self.qk_norm_policy > 0 else None
+        q_norm_weight = (
+            self.qnorm_weight if self.qk_norm_policy != QkNormPolicy.NONE else None
+        )
+        k_norm_weight = (
+            self.knorm_weight if self.qk_norm_policy != QkNormPolicy.NONE else None
+        )
 
         # Dynamic per-token-per-head Q quant + per-tensor K/V (dqskv).
         # The hpc kernel expects a hpc.QuantType enum (it reads

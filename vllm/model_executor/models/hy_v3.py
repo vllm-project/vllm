@@ -48,7 +48,7 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.hpc.rope_norm import HpcRopeNorm
+from vllm.model_executor.layers.hpc.rope_norm import HpcRopeNorm, QkNormPolicy
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -304,7 +304,7 @@ class HYV3Attention(nn.Module):
             self.k_norm = RMSNorm(self.head_dim, rms_norm_eps)
 
         # HPC fused RoPE + QK-Norm + KV-Cache-Write (+ optional FP8 Q quant).
-        # HunYuan V3 applies QK-Norm *before* RoPE, so qk_norm_policy=2.
+        # HunYuan V3 applies QK-Norm *before* RoPE, so NORM_THEN_ROPE.
         self.hpc_rope_norm: HpcRopeNorm | None = None
         if rope_support:
             self.hpc_rope_norm = HpcRopeNorm(
@@ -316,7 +316,7 @@ class HYV3Attention(nn.Module):
                 fallback_qnorm=self.q_norm if self.use_qk_norm else None,
                 fallback_knorm=self.k_norm if self.use_qk_norm else None,
                 kv_cache_dtype=kv_cache_dtype,
-                qk_norm_policy=2,
+                qk_norm_policy=QkNormPolicy.NORM_THEN_ROPE,
             )
             self.hpc_rope_norm.register_layer_name(self.attn.layer_name)
             # FP8 Q is produced by HpcRopeNorm, so the attention layer must not

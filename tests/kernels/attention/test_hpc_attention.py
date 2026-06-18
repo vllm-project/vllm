@@ -41,6 +41,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.model_executor.layers.hpc.rope_norm import (
     HpcRopeNorm,
+    QkNormPolicy,
     _hpc_rope_norm_instances,
 )
 from vllm.utils.torch_utils import set_random_seed
@@ -587,7 +588,9 @@ def test_rope_norm_prefill(seq_lens, num_heads, use_qk_norm):
         True,
         q_norm_weight=qw,
         k_norm_weight=kw,
-        qk_norm_policy=(1 if use_qk_norm else 0),
+        qk_norm_policy=(
+            QkNormPolicy.ROPE_THEN_NORM if use_qk_norm else QkNormPolicy.NONE
+        ),
     )
 
     out_hpc = torch.empty(tot, nqh, HEAD_SIZE, dtype=dtype)
@@ -658,7 +661,9 @@ def test_rope_norm_decode(kv_lens, num_heads, use_qk_norm):
         False,
         q_norm_weight=qw,
         k_norm_weight=kw,
-        qk_norm_policy=(1 if use_qk_norm else 0),
+        qk_norm_policy=(
+            QkNormPolicy.ROPE_THEN_NORM if use_qk_norm else QkNormPolicy.NONE
+        ),
     )
 
     out_hpc = torch.empty(n, nqh, HEAD_SIZE, dtype=dtype)
@@ -752,7 +757,9 @@ def test_rope_norm_mixed(decode_kv_lens, prefill_seq_lens, num_heads, use_qk_nor
             True,
             q_norm_weight=qw,
             k_norm_weight=kw,
-            qk_norm_policy=(1 if use_qk_norm else 0),
+            qk_norm_policy=(
+                QkNormPolicy.ROPE_THEN_NORM if use_qk_norm else QkNormPolicy.NONE
+            ),
         )
         hpc.attention_with_kvcache_prefill_bf16(
             q_pf,
@@ -778,7 +785,9 @@ def test_rope_norm_mixed(decode_kv_lens, prefill_seq_lens, num_heads, use_qk_nor
             False,
             q_norm_weight=qw,
             k_norm_weight=kw,
-            qk_norm_policy=(1 if use_qk_norm else 0),
+            qk_norm_policy=(
+                QkNormPolicy.ROPE_THEN_NORM if use_qk_norm else QkNormPolicy.NONE
+            ),
         )
         hpc.attention_decode_bf16(
             q_dc,
@@ -1217,7 +1226,7 @@ def _bf16_ref_prefill(
         True,
         q_norm_weight=qw,
         k_norm_weight=kw,
-        qk_norm_policy=1,
+        qk_norm_policy=QkNormPolicy.ROPE_THEN_NORM,
     )
     output = torch.empty(tot, nqh, HEAD_SIZE, dtype=torch.bfloat16, device="cuda")
     hpc.attention_with_kvcache_prefill_bf16(
@@ -1264,7 +1273,7 @@ def _bf16_ref_prefill_then_decode(
         True,
         q_norm_weight=qw,
         k_norm_weight=kw,
-        qk_norm_policy=1,
+        qk_norm_policy=QkNormPolicy.ROPE_THEN_NORM,
     )
     # Decode
     sl_dec = torch.tensor(kv_lens, dtype=torch.int32, device="cuda")
@@ -1279,7 +1288,7 @@ def _bf16_ref_prefill_then_decode(
         False,
         q_norm_weight=qw,
         k_norm_weight=kw,
-        qk_norm_policy=1,
+        qk_norm_policy=QkNormPolicy.ROPE_THEN_NORM,
     )
     output = torch.empty(n, nqh, HEAD_SIZE, dtype=torch.bfloat16, device="cuda")
     hpc.attention_decode_bf16(
