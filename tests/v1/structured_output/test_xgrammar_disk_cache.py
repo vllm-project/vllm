@@ -141,6 +141,20 @@ def test_disk_cache_recompiles_when_deserialize_fails(monkeypatch, tmp_path):
     grammar.fill_bitmask(bitmask, 0)
 
 
+def test_disk_cache_recompiles_when_read_raises(monkeypatch, tmp_path):
+    """A raising cache read (e.g. corrupt SQLite db) must fall back to a fresh
+    compile, never 500 -- the read is guarded, not just deserialize."""
+    backend = _make_backend(monkeypatch, tmp_path)
+    with mock.patch.object(
+        backend._disk_cache, "get", side_effect=RuntimeError("corrupt db")
+    ):
+        grammar = backend.compile_grammar(StructuredOutputOptions.JSON, SCHEMA_A)
+
+    # The fallback grammar is valid and usable.
+    bitmask = backend.allocate_token_bitmask(1)
+    grammar.fill_bitmask(bitmask, 0)
+
+
 def test_disk_cache_wiped_on_serialization_version_bump(monkeypatch, tmp_path):
     """A serialization-version change wipes the whole cache on next open."""
     b1 = _make_backend(monkeypatch, tmp_path)

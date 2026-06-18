@@ -121,27 +121,29 @@ class XgrammarBackend(StructuredOutputBackend):
             return self._compile(request_type, grammar_spec)
 
         key = self._disk_key(request_type, grammar_spec)
-        text = self._disk_cache.get(key, None)
-        if text is not None:
-            try:
+        # The read (.get + deserialize) is fully guarded: a cache problem must
+        # never fail a request, so any failure falls back to a fresh compile.
+        try:
+            text = self._disk_cache.get(key, None)
+            if text is not None:
                 return xgr.CompiledGrammar.deserialize_json(text, self.tokenizer_info)
-            except (
-                xgr.InvalidJSONError,
-                xgr.DeserializeFormatError,
-                xgr.DeserializeVersionError,
-            ):
-                # Corrupt / format- or version-mismatched entry: recompile and
-                # overwrite it below.
-                logger.debug(
-                    "Ignoring unusable xgrammar disk cache entry; recompiling.",
-                    exc_info=True,
-                )
-            except Exception:
-                # A cache problem must never fail a request.
-                logger.warning(
-                    "Unexpected error reading xgrammar disk cache; recompiling.",
-                    exc_info=True,
-                )
+        except (
+            xgr.InvalidJSONError,
+            xgr.DeserializeFormatError,
+            xgr.DeserializeVersionError,
+        ):
+            # Corrupt / format- or version-mismatched entry: recompile and
+            # overwrite it below.
+            logger.debug(
+                "Ignoring unusable xgrammar disk cache entry; recompiling.",
+                exc_info=True,
+            )
+        except Exception:
+            # e.g. a corrupt SQLite db or lock contention on the read itself.
+            logger.warning(
+                "Unexpected error reading xgrammar disk cache; recompiling.",
+                exc_info=True,
+            )
 
         ctx = self._compile(request_type, grammar_spec)
         try:
