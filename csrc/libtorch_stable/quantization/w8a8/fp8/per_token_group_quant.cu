@@ -304,9 +304,17 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
   const int sf_k_idx = blockIdx.x * kGroupsPerBlockX + sf_k_local;
   const int mn_idx = blockIdx.y * kRowsPerBlock + row_local;
 
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.wait;");
+#endif
+
   if (mn_idx >= tma_aligned_mn) {
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.launch_dependents;");
+#endif
     return;
   }
+
   const bool is_valid_group = (mn_idx < mn) && (sf_k_idx < groups_per_row);
 
   // Load 16 input elements (32 B) into registers as two adjacent uint4
@@ -417,6 +425,10 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
       static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
       sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
   *reinterpret_cast<uint4*>(group_output) = packed_out;
+
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.launch_dependents;");
+#endif
 }
 
 // Public entry point: register-resident packed quant kernel.
@@ -497,20 +509,29 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
 
 #define LAUNCH_REG_KERNEL_INST(T, DST_DTYPE, KX, RY)                         \
   do {                                                                       \
-    dim3 grid(static_cast<unsigned int>(blocks_x),                           \
-              static_cast<unsigned int>(blocks_y));                          \
-    dim3 block(num_threads);                                                 \
-    per_token_group_quant_8bit_packed_register_kernel<T, DST_DTYPE, 128, KX, \
-                                                      RY>                    \
-        <<<grid, block, 0, stream>>>(                                        \
-            static_cast<const T*>(input.data_ptr()), output_q.data_ptr(),    \
-            reinterpret_cast<unsigned int*>(output_s_packed.data_ptr()),     \
-            static_cast<int>(padded_groups_per_row),                         \
-            static_cast<int>(groups_per_row), static_cast<int>(mn),          \
-            static_cast<int>(output_q_mn_extent),                            \
-            static_cast<int>(tma_aligned_mn), num_scale_elems,               \
-            static_cast<float>(eps), static_cast<float>(min_8bit),           \
-            static_cast<float>(max_8bit));                                   \
+    cudaLaunchConfig_t config = {};                                          \
+    config.gridDim = dim3(static_cast<unsigned int>(blocks_x),               \
+                          static_cast<unsigned int>(blocks_y));              \
+    config.blockDim = dim3(num_threads);                                     \
+    config.dynamicSmemBytes = 0;                                             \
+    config.stream = stream;                                                  \
+    cudaLaunchAttribute attrs[1];                                            \
+    attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;        \
+    attrs[0].val.programmaticStreamSerializationAllowed = 1;                 \
+    config.numAttrs = 1;                                                     \
+    config.attrs = attrs;                                                    \
+    cudaLaunchKernelEx(                                                      \
+        &config,                                                             \
+        per_token_group_quant_8bit_packed_register_kernel<T, DST_DTYPE, 128, \
+                                                          KX, RY>,           \
+        static_cast<const T*>(input.data_ptr()), output_q.data_ptr(),        \
+        reinterpret_cast<unsigned int*>(output_s_packed.data_ptr()),         \
+        static_cast<int>(padded_groups_per_row),                             \
+        static_cast<int>(groups_per_row), static_cast<int>(mn),              \
+        static_cast<int>(output_q_mn_extent),                                \
+        static_cast<int>(tma_aligned_mn), num_scale_elems,                   \
+        static_cast<float>(eps), static_cast<float>(min_8bit),               \
+        static_cast<float>(max_8bit));                                       \
   } while (0)
 
 #define LAUNCH_REG_KERNEL(T, DST_DTYPE)                    \

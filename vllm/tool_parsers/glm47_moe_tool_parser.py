@@ -24,6 +24,7 @@ logger = init_logger(__name__)
 
 class Glm47MoeModelToolParser(Glm4MoeModelToolParser):
     supports_required_and_named = False
+    structural_tag_model = "glm_4_7"
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
