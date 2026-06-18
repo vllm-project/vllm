@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -277,7 +277,7 @@ def build_model_context(
     dtype: ModelDType = "auto",
     model_config_kwargs: dict[str, Any] | None = None,
     mm_processor_kwargs: dict[str, Any] | None = None,
-    limit_mm_per_prompt: dict[str, int] | None = None,
+    limit_mm_per_prompt: Mapping[str, int | Mapping[str, int]] | None = None,
     mm_processor_cache_gb: int = 0,
 ):
     """Creates an InputProcessingContext for a given model.
@@ -300,7 +300,10 @@ def build_model_context(
     )
 
     model_config_kwargs = model_config_kwargs or {}
-    limit_mm_per_prompt = limit_mm_per_prompt or {}
+    limit_mm_per_prompt = {
+        modality: dict(limit) if isinstance(limit, Mapping) else limit
+        for modality, limit in (limit_mm_per_prompt or {}).items()
+    }
     model_config = ModelConfig(
         model_id,
         runner=runner,
@@ -483,6 +486,7 @@ def dummy_hf_overrides(
                 "Gemma3nForConditionalGeneration",
                 "Gemma4ForCausalLM",
                 "Gemma4ForConditionalGeneration",
+                "DiffusionGemmaForBlockDiffusion",
             )
             else 1
         )
@@ -503,12 +507,13 @@ def dummy_hf_overrides(
     # Only set MoE related config when the model has MoE layers.
     # Otherwise all models detected as MoE by _get_transformers_backend_cls.
     if model_arch_config.num_experts > 0:
+        num_experts_per_tok = 1 if model_arch == "Llama4ForConditionalGeneration" else 2
         update_dict.update(
             {
                 "num_experts": num_experts,
-                "num_experts_per_tok": 2,
+                "num_experts_per_tok": num_experts_per_tok,
                 # Kimi uses `num_experts_per_token`.
-                "num_experts_per_token": 2,
+                "num_experts_per_token": num_experts_per_tok,
                 "num_local_experts": num_experts,
                 # Otherwise there will not be any expert layers
                 "first_k_dense_replace": 0,
@@ -555,7 +560,8 @@ def dummy_hf_overrides(
         )
 
     # e.g.: Qwen/Qwen2-Audio-7B-Instruct
-    if hasattr(hf_config, "audio_config"):
+    # audio_config may exist but be None (e.g. audio-less Gemma4 variants).
+    if getattr(hf_config, "audio_config", None) is not None:
         hf_config.audio_config.update(
             {
                 "num_layers": 1,

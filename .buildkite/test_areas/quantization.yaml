@@ -21,11 +21,23 @@ steps:
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
+- label: Quantized Fusions
+  key: quantized-fusions
+  timeout_in_minutes: 30
+  source_file_dependencies:
+  - tests/fusion
+  - vllm/model_executor/layers/fusion
+  - vllm/model_executor/kernels/linear
+  - vllm/model_executor/layers/quantization/compressed_tensors
+  - vllm/model_executor/layers/quantization/modelopt.py
+  commands:
+    - pytest -v -s fusion/
+
 - label: Quantized MoE Test (B200)
   key: quantized-moe-test-b200
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
-  device: b200
+  device: b200-k8s
   source_file_dependencies:
   - tests/quantization/test_blackwell_moe.py
   - vllm/model_executor/models/deepseek_v2.py

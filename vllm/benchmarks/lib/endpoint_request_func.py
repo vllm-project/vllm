@@ -66,7 +66,7 @@ class StreamedResponseHandler:
 class RequestFuncInput:
     """The input for the request function."""
 
-    prompt: str | list[str]
+    prompt: str | list[str] | list[dict[str, Any]]
     api_url: str
     prompt_len: int
     output_len: int
@@ -79,6 +79,10 @@ class RequestFuncInput:
     ignore_eos: bool = False
     language: str | None = None
     request_id: str | None = None
+    # Pre-built chat messages. When set, `async_request_openai_chat_completions`
+    # uses this list directly and skips building messages from `prompt` and
+    # `multi_modal_content`.
+    chat_messages: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -268,8 +272,6 @@ def _get_chat_content(
     request_func_input: RequestFuncInput,
     mm_position: Literal["first", "last"] = "last",
 ) -> list[dict[str, Any]]:
-    text_contents = [{"type": "text", "text": request_func_input.prompt}]
-
     mm_contents = []
     if request_func_input.multi_modal_content:
         mm_content = request_func_input.multi_modal_content
@@ -282,10 +284,58 @@ def _get_chat_content(
                 "multi_modal_content must be a dict or list[dict] for openai-chat"
             )
 
+    prompt = request_func_input.prompt
+    if (
+        isinstance(prompt, list)
+        and prompt
+        and all(
+            isinstance(item, dict) and isinstance(item.get("type"), str)
+            for item in prompt
+        )
+    ):
+        if mm_position == "first":
+            return mm_contents + prompt
+
+        return prompt + mm_contents
+
+    text_contents = [{"type": "text", "text": prompt}]
+
     if mm_position == "first":
         return mm_contents + text_contents
 
     return text_contents + mm_contents
+
+
+def _is_chat_messages(prompt: Any) -> bool:
+    return (
+        isinstance(prompt, list)
+        and prompt
+        and all(
+            isinstance(item, dict)
+            and isinstance(item.get("role"), str)
+            and isinstance(item.get("content"), (str, list))
+            for item in prompt
+        )
+    )
+
+
+def _get_chat_messages(
+    request_func_input: RequestFuncInput,
+    mm_position: Literal["first", "last"] = "last",
+) -> list[dict[str, Any]]:
+    prompt = request_func_input.prompt
+    if _is_chat_messages(prompt):
+        return prompt
+
+    return [
+        {
+            "role": "user",
+            "content": _get_chat_content(
+                request_func_input,
+                mm_position=mm_position,
+            ),
+        }
+    ]
 
 
 async def async_request_openai_chat_completions(
@@ -297,15 +347,16 @@ async def async_request_openai_chat_completions(
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Chat Completions API", "chat/completions")
 
-    content = _get_chat_content(request_func_input, mm_position=mm_position)
+    if request_func_input.chat_messages is not None:
+        messages = request_func_input.chat_messages
+    else:
+        messages = _get_chat_messages(request_func_input, mm_position=mm_position)
 
     payload = {
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,
-        "messages": [
-            {"role": "user", "content": content},
-        ],
+        "messages": messages,
         "max_completion_tokens": request_func_input.output_len,
         "stream": True,
         "stream_options": {
@@ -394,7 +445,6 @@ async def async_request_openai_audio(
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Audio API", {"transcriptions", "translations"})
 
-    content = [{"type": "text", "text": request_func_input.prompt}]
     payload = {
         "model": request_func_input.model_name
         if request_func_input.model_name
@@ -418,19 +468,26 @@ async def async_request_openai_audio(
         buffer.seek(0)
         return buffer
 
-    mm_audio = request_func_input.multi_modal_content
-    if not isinstance(mm_audio, dict) or "audio" not in mm_audio:
-        raise TypeError("multi_modal_content must be a dict containing 'audio'")
-    with to_bytes(*mm_audio["audio"]) as f:
+    async def send_audio_file(
+        audio_file: io.BytesIO | Any,
+        *,
+        input_audio_duration: float,
+        filename: str | None = None,
+        content_type: str | None = None,
+    ) -> RequestFuncOutput:
         form = aiohttp.FormData()
-        form.add_field("file", f, content_type="audio/wav")
+        add_field_kwargs: dict[str, str] = {}
+        if filename is not None:
+            add_field_kwargs["filename"] = filename
+        if content_type is not None:
+            add_field_kwargs["content_type"] = content_type
+        form.add_field("file", audio_file, **add_field_kwargs)
         for key, value in payload.items():
             form.add_field(key, str(value))
 
         output = RequestFuncOutput()
         output.prompt_len = request_func_input.prompt_len
-        output.input_audio_duration = soundfile.info(f).duration
-        f.seek(0)
+        output.input_audio_duration = input_audio_duration
 
         generated_text = ""
         ttft = 0.0
@@ -490,9 +547,36 @@ async def async_request_openai_audio(
             exc_info = sys.exc_info()
             output.error = "".join(traceback.format_exception(*exc_info))
 
-    if pbar:
-        pbar.update(1)
-    return output
+        if pbar:
+            pbar.update(1)
+        return output
+
+    mm_audio = request_func_input.multi_modal_content
+    if not isinstance(mm_audio, dict):
+        raise TypeError(
+            "multi_modal_content must be a dict containing 'audio' or 'audio_path'"
+        )
+    if "audio" in mm_audio:
+        with to_bytes(*mm_audio["audio"]) as f:
+            input_audio_duration = soundfile.info(f).duration
+            f.seek(0)
+            return await send_audio_file(
+                f,
+                input_audio_duration=input_audio_duration,
+                filename="audio.wav",
+                content_type="audio/wav",
+            )
+    if "audio_path" in mm_audio:
+        audio_path = mm_audio["audio_path"]
+        with open(audio_path, "rb") as f:
+            return await send_audio_file(
+                f,
+                input_audio_duration=soundfile.info(audio_path).duration,
+                filename=os.path.basename(audio_path),
+            )
+    raise TypeError(
+        "multi_modal_content must be a dict containing 'audio' or 'audio_path'"
+    )
 
 
 async def _run_pooling_request(
@@ -608,15 +692,13 @@ async def async_request_openai_embeddings_chat(
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Embeddings API", "embeddings")
 
-    content = _get_chat_content(request_func_input, mm_position=mm_position)
+    messages = _get_chat_messages(request_func_input, mm_position=mm_position)
 
     payload = {
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,
-        "messages": [
-            {"role": "user", "content": content},
-        ],
+        "messages": messages,
         # Many embedding models have short context length,
         # this is to avoid dropping some of the requests.
         "truncate_prompt_tokens": -1,

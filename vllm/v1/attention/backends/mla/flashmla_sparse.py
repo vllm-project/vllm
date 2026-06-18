@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import numpy as np
 import torch
@@ -15,8 +15,6 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
@@ -29,7 +27,6 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     SparseMLAAttentionImpl,
 )
-from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
@@ -112,13 +109,13 @@ class FlashMLASparseBackend(AttentionBackend):
         return FlashMLASparseMetadataBuilder
 
     @staticmethod
-    def get_impl_cls() -> type["FlashMLASparseImpl"]:
+    def get_impl_cls() -> type[SparseMLAAttentionImpl[Any]]:
         return FlashMLASparseImpl
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        # V3.2: 576 (512 NoPE + 64 RoPE); DeepseekV4: 512 (448 NoPE + 64 RoPE)
-        return [512, 576]
+        # DeepSeek V3.2 layout: 512 NoPE + 64 RoPE = 576.
+        return [576]
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -143,31 +140,6 @@ class FlashMLASparseBackend(AttentionBackend):
         if cache_dtype_str == "fp8_ds_mla":
             # V3.2 main MLA: 656-byte custom storage format. See module docstring.
             return (num_blocks, block_size, 656)
-        else:
-            return (num_blocks, block_size, head_size)
-
-
-class DeepseekV4FlashMLASparseBackend(FlashMLASparseBackend):
-    @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [256]
-
-    @staticmethod
-    def get_name() -> str:
-        return "V4_FLASHMLA_SPARSE"
-
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if cache_dtype_str == "fp8_ds_mla":
-            # DeepseekV4 main MLA: 584B per token (448 NoPE + 128 RoPE + 8 fp8 scale).
-            # head_size passed in is the semantic head_dim (512).
-            return (num_blocks, block_size, 584)
         else:
             return (num_blocks, block_size, head_size)
 
@@ -244,13 +216,6 @@ class FlashMLASparseMetadata(AttentionMetadata):
 
     fp8_extra_metadata: FP8SeparatePrefillDecode | FP8KernelMetadata | None = None
     fp8_use_mixed_batch: bool = False
-
-    # Pre-computed C128A metadata (DeepseekV4 only, compress_ratio == 128).
-    # Decode: global slot ids + valid-entry counts (fused from positions).
-    c128a_global_decode_topk_indices: torch.Tensor | None = None
-    c128a_decode_topk_lens: torch.Tensor | None = None
-    # Prefill: local topk indices (used by combine_topk_swa_indices).
-    c128a_prefill_topk_indices: torch.Tensor | None = None
 
 
 def get_prefill_workspace_size(max_model_len: int):
@@ -346,68 +311,6 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             dtype=torch.int32,
             device=device,
         )
-
-        # DeepseekV4: has compress_ratios in hf_config.
-        hf_config = vllm_config.model_config.hf_config
-        self.is_deepseek_v4 = (
-            hasattr(hf_config, "compress_ratios") and len(hf_config.compress_ratios) > 0
-        )
-        self.compress_ratio = 1
-        if self.is_deepseek_v4:
-            assert hasattr(self.kv_cache_spec, "compress_ratio")
-            self.compress_ratio = self.kv_cache_spec.compress_ratio
-            # Pre-allocate compressed slot mapping buffer for CUDA graph
-            # address stability when compress_ratio > 1.
-            if self.compress_ratio > 1:
-                max_num_batched_tokens = (
-                    vllm_config.scheduler_config.max_num_batched_tokens
-                )
-                self.compressed_slot_mapping_buffer = torch.empty(
-                    max_num_batched_tokens,
-                    dtype=torch.int64,
-                    device=self.device,
-                )
-
-            # Pre-allocate C128A topk buffers for CUDA graph address stability.
-            if self.compress_ratio == 128:
-                max_num_batched_tokens = (
-                    vllm_config.scheduler_config.max_num_batched_tokens
-                )
-                # Pad to B_TOPK alignment (128 covers both h_q=64 B_TOPK=64 and
-                # h_q=128 B_TOPK=128). FlashMLA decode asserts extra_topk % B_TOPK
-                # == 0; unaligned widths (e.g. 17 = ceil(2136/128)) crash the
-                # sm100 head64 kernel. Padded slots stay -1 and decode_lens caps
-                # them via topk_length, so the pad is a no-op at kernel level.
-                # Mirrors _SPARSE_PREFILL_TOPK_ALIGNMENT in cache_utils.py.
-                _C128A_TOPK_ALIGNMENT = 128
-                c128a_max_compressed = cdiv(
-                    self.model_config.max_model_len, self.compress_ratio
-                )
-                c128a_max_compressed = (
-                    cdiv(c128a_max_compressed, _C128A_TOPK_ALIGNMENT)
-                    * _C128A_TOPK_ALIGNMENT
-                )
-                # Stored so _build_c128a_metadata passes it as the kernel's
-                # max_compressed_tokens, matching the buffer stride. Otherwise
-                # the kernel's default 8192 iterates past row width and spills
-                # writes into adjacent rows (present in both decode and prefill
-                # branches of _build_c128a_topk_metadata_kernel).
-                self.c128a_max_compressed = c128a_max_compressed
-                self.c128a_global_decode_buffer = torch.empty(
-                    (max_num_batched_tokens, c128a_max_compressed),
-                    dtype=torch.int32,
-                    device=self.device,
-                )
-                self.c128a_decode_lens_buffer = torch.empty(
-                    max_num_batched_tokens,
-                    dtype=torch.int32,
-                    device=self.device,
-                )
-                self.c128a_prefill_buffer = torch.empty(
-                    (max_num_batched_tokens, c128a_max_compressed),
-                    dtype=torch.int32,
-                    device=self.device,
-                )
 
     def _build_fp8_mixed_decode_prefill(
         self,
@@ -604,41 +507,17 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         )
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
 
-        slot_mapping = cm.slot_mapping
-        if self.compress_ratio > 1:
-            slot_mapping = get_compressed_slot_mapping(
-                common_attn_metadata.num_actual_tokens,
-                common_attn_metadata.query_start_loc,
-                common_attn_metadata.seq_lens,
-                common_attn_metadata.block_table_tensor.clamp(min=0),
-                int(self.kv_cache_spec.storage_block_size),
-                self.compress_ratio,
-                out=self.compressed_slot_mapping_buffer,
-            )
-
         fp8_extra_metadata: (
             FlashMLASparseMetadata.FP8SeparatePrefillDecode
             | FlashMLASparseMetadata.FP8KernelMetadata
             | None
         ) = None
-        fp8_use_mixed_batch = (
-            self.num_heads < MIN_HEADS_FOR_BF16_PREFILL and not self.is_deepseek_v4
-        )
-        # DeepseekV4 has its own attention impl (DeepseekV4MLAAttention) that does not
-        # consume fp8_extra_metadata. Skipping the build here avoids a
-        # forced D2H sync on seq_lens that would otherwise fire on every
-        # prefill-bearing step, lifting GPU utilization on long-prefill
-        # workloads (e.g. LongBench) from ~83% to ~100%.
-        if self.use_fp8_kv_cache and not self.is_deepseek_v4:
+        fp8_use_mixed_batch = self.num_heads < MIN_HEADS_FOR_BF16_PREFILL
+        if self.use_fp8_kv_cache:
             if fp8_use_mixed_batch:
                 fp8_extra_metadata = self._build_fp8_mixed_decode_prefill(cm)
             else:
                 fp8_extra_metadata = self._build_fp8_separate_prefill_decode(cm)
-
-        # Pre-compute C128A topk indices for DeepseekV4.
-        c128a_fields = {}
-        if self.is_deepseek_v4 and self.compress_ratio == 128:
-            c128a_fields = self._build_c128a_metadata(cm, req_id_per_token)
 
         metadata = FlashMLASparseMetadata(
             num_reqs=cm.num_reqs,
@@ -646,66 +525,16 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             max_seq_len=cm.max_seq_len,
             num_actual_tokens=cm.num_actual_tokens,
             query_start_loc=cm.query_start_loc,
-            slot_mapping=slot_mapping,
+            slot_mapping=cm.slot_mapping,
             block_table=cm.block_table_tensor,
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
             fp8_extra_metadata=fp8_extra_metadata,
             fp8_use_mixed_batch=fp8_use_mixed_batch,
-            **c128a_fields,
         )
 
         return metadata
-
-    def _build_c128a_metadata(
-        self,
-        cm: CommonAttentionMetadata,
-        req_id_per_token: torch.Tensor,
-    ) -> dict[str, torch.Tensor | None]:
-        """Pre-compute C128A topk indices for DeepseekV4 (compress_ratio >= 128)."""
-        # Must match SWA's decode split (no `require_uniform=True`) so
-        # `c128a_global_decode_topk_indices.shape[0]` lines up with q in
-        # `_forward_decode`. The per-token C128A kernel handles non-uniform
-        # query lengths.
-        (num_decodes, _, num_decode_tokens, num_prefill_tokens) = (
-            split_decodes_and_prefills(
-                cm,
-                decode_threshold=self.reorder_batch_threshold or 1,
-            )
-        )
-
-        num_total = num_decode_tokens + num_prefill_tokens
-        if num_total == 0:
-            return {}
-
-        assert cm.positions is not None, (
-            "positions is required for C128A metadata build"
-        )
-        block_size = self.kv_cache_spec.block_size // self.compress_ratio
-        global_decode, decode_lens, prefill_local = build_c128a_topk_metadata(
-            cm.positions[:num_total],
-            self.compress_ratio,
-            num_decode_tokens,
-            req_id_per_token,
-            cm.block_table_tensor[:num_decodes],
-            block_size,
-            cm.slot_mapping,
-            self.c128a_global_decode_buffer,
-            self.c128a_decode_lens_buffer,
-            self.c128a_prefill_buffer,
-            max_compressed_tokens=self.c128a_max_compressed,
-        )
-
-        result: dict[str, torch.Tensor | None] = {}
-        if num_decode_tokens > 0:
-            result["c128a_global_decode_topk_indices"] = global_decode.view(
-                num_decode_tokens, 1, -1
-            )
-            result["c128a_decode_topk_lens"] = decode_lens
-        if num_prefill_tokens > 0:
-            result["c128a_prefill_topk_indices"] = prefill_local
-        return result
 
 
 class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
@@ -783,18 +612,20 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
     ) -> torch.Tensor:
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill).
-        topk_indices = triton_convert_req_index_to_global_index(
+        topk_indices, topk_length = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
             NUM_TOPK_TOKENS=topk_indices.shape[1],
+            return_valid_counts=True,
         )
 
         return self._bf16_flash_mla_kernel(
             q,
             kv_c_and_k_pe_cache,
             topk_indices,
+            topk_length,
         )
 
     def _forward_fp8_kv_separate_prefill_decode(
@@ -822,7 +653,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         # For BF16 cache: always use global cache slots (no workspace)
         # prefill_workspace_starts has been adjusted in-place per chunk so
         # prefill indices automatically come out chunk-local
-        topk_indices = triton_convert_req_index_to_global_index(
+        topk_indices, topk_length = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
             topk_indices,
@@ -831,6 +662,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             HAS_PREFILL_WORKSPACE=has_prefill_workspace,
             prefill_workspace_request_ids=prefill_request_ids,
             prefill_workspace_starts=prefill_workspace_starts,
+            return_valid_counts=True,
         )
 
         fp8_metadata = attn_metadata.fp8_extra_metadata
@@ -893,11 +725,13 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
 
                 chunk_q = q[chunk.tokens_slice]
                 chunk_topk_indices_workspace = topk_indices[chunk.tokens_slice]
+                chunk_topk_length = topk_length[chunk.tokens_slice]
 
                 attn_out[chunk.tokens_slice] = self._bf16_flash_mla_kernel(
                     chunk_q,
                     chunk_workspace,
                     chunk_topk_indices_workspace,
+                    chunk_topk_length,
                 )
 
         return attn_out
@@ -985,6 +819,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
+        topk_length: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
@@ -1005,7 +840,11 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
         output = flash_mla_sparse_fwd(
-            q, kv_c_and_k_pe_cache, topk_indices, self.softmax_scale
+            q,
+            kv_c_and_k_pe_cache,
+            topk_indices,
+            self.softmax_scale,
+            topk_length=topk_length,
         )[0]
 
         output = output[:, : self.num_heads, :]
@@ -1049,123 +888,3 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             )
 
         return attn_out, None
-
-
-def build_c128a_topk_metadata(
-    positions: torch.Tensor,
-    compress_ratio: int,
-    num_decode_tokens: int,
-    token_to_req_indices: torch.Tensor,
-    block_table: torch.Tensor,
-    block_size: int,
-    slot_mapping: torch.Tensor,
-    global_decode_buffer: torch.Tensor,
-    decode_lens_buffer: torch.Tensor,
-    prefill_buffer: torch.Tensor,
-    max_compressed_tokens: int = 8192,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Single kernel for all C128A tokens (decode + prefill).
-
-    Decode tokens: position → block_table lookup → global slot ids + topk_lens.
-    Prefill tokens: position → local indices [0, ..., n-1, -1, ...].
-
-    Writes into pre-allocated buffers for CUDA graph address stability.
-    Returns slices of the buffers.
-    """
-    num_tokens = positions.shape[0]
-    num_prefill_tokens = num_tokens - num_decode_tokens
-
-    global_decode = global_decode_buffer[:num_decode_tokens]
-    decode_lens = decode_lens_buffer[:num_decode_tokens]
-    prefill_local = prefill_buffer[:num_prefill_tokens]
-
-    if num_tokens == 0:
-        return global_decode, decode_lens, prefill_local
-
-    _build_c128a_topk_metadata_kernel[(num_tokens,)](
-        global_decode_buffer,
-        global_decode_buffer.stride(0),
-        decode_lens_buffer,
-        prefill_buffer,
-        prefill_buffer.stride(0),
-        positions,
-        compress_ratio,
-        max_compressed_tokens,
-        num_decode_tokens,
-        token_to_req_indices,
-        block_table,
-        block_table.stride(0),
-        block_size,
-        slot_mapping,
-        BLOCK_SIZE=1024,
-    )
-    return global_decode, decode_lens, prefill_local
-
-
-@triton.jit
-def _build_c128a_topk_metadata_kernel(
-    # Decode outputs
-    global_decode_ptr,
-    global_decode_stride,
-    decode_lens_ptr,
-    # Prefill output
-    prefill_local_ptr,
-    prefill_local_stride,
-    # Inputs
-    positions_ptr,
-    compress_ratio,
-    max_compressed_tokens,
-    num_decode_tokens,
-    token_to_req_indices_ptr,
-    block_table_ptr,
-    block_table_stride,
-    block_size,
-    slot_mapping_ptr,
-    BLOCK_SIZE: tl.constexpr,
-):
-    token_idx = tl.program_id(0)
-    position = tl.load(positions_ptr + token_idx)
-    num_compressed = (position + 1) // compress_ratio
-    num_compressed = tl.minimum(num_compressed, max_compressed_tokens)
-    is_decode = token_idx < num_decode_tokens
-
-    if is_decode:
-        # --- Decode: block-table lookup → global slot ids + count ---
-        is_valid_token = tl.load(slot_mapping_ptr + token_idx) >= 0
-        req_idx = tl.load(token_to_req_indices_ptr + token_idx)
-        count = tl.zeros((), dtype=tl.int32)
-        for i in range(0, max_compressed_tokens, BLOCK_SIZE):
-            offset = i + tl.arange(0, BLOCK_SIZE)
-            mask = offset < max_compressed_tokens
-            is_valid = offset < num_compressed
-
-            block_indices = offset // block_size
-            block_numbers = tl.load(
-                block_table_ptr + req_idx * block_table_stride + block_indices,
-                mask=mask & is_valid,
-            )
-            block_offsets = offset % block_size
-            slot_ids = block_numbers * block_size + block_offsets
-            slot_ids = tl.where(is_valid, slot_ids, -1)
-            tl.store(
-                global_decode_ptr + token_idx * global_decode_stride + offset,
-                slot_ids,
-                mask=mask,
-            )
-            count += tl.sum(is_valid.to(tl.int32), axis=0)
-
-        tl.store(
-            decode_lens_ptr + token_idx,
-            tl.where(is_valid_token, count, 0),
-        )
-    else:
-        # --- Prefill: write local indices ---
-        pfx_idx = token_idx - num_decode_tokens
-        for i in range(0, max_compressed_tokens, BLOCK_SIZE):
-            offset = i + tl.arange(0, BLOCK_SIZE)
-            mask = offset < max_compressed_tokens
-            tl.store(
-                prefill_local_ptr + pfx_idx * prefill_local_stride + offset,
-                tl.where(offset < num_compressed, offset, -1),
-                mask=mask,
-            )

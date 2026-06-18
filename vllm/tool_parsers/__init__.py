@@ -94,6 +94,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "jamba_tool_parser",
         "JambaToolParser",
     ),
+    "lfm2": (
+        "lfm2_tool_parser",
+        "Lfm2ToolParser",
+    ),
     "kimi_k2": (
         "kimi_k2_tool_parser",
         "KimiK2ToolParser",
@@ -115,16 +119,24 @@ _TOOL_PARSERS_TO_REGISTER = {
         "LongcatFlashToolParser",
     ),
     "mimo": (
-        "qwen3xml_tool_parser",
-        "Qwen3XMLToolParser",
+        "qwen3_engine_tool_parser",
+        "Qwen3EngineToolParser",
     ),
     "minimax_m2": (
         "minimax_m2_tool_parser",
         "MinimaxM2ToolParser",
     ),
+    "minimax_m3": (
+        "minimax_m3_tool_parser",
+        "MinimaxM3ToolParser",
+    ),
     "minimax": (
         "minimax_tool_parser",
         "MinimaxToolParser",
+    ),
+    "minicpm5": (
+        "minicpm5xml_tool_parser",
+        "MiniCPM5XMLToolParser",
     ),
     "mistral": (
         "mistral_tool_parser",
@@ -135,8 +147,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Olmo3PythonicToolParser",
     ),
     "openai": (
-        "openai_tool_parser",
-        "OpenAIToolParser",
+        "gptoss_tool_parser",
+        "GptOssToolParser",
     ),
     "phi4_mini_json": (
         "phi4mini_tool_parser",
@@ -147,12 +159,12 @@ _TOOL_PARSERS_TO_REGISTER = {
         "PythonicToolParser",
     ),
     "qwen3_coder": (
-        "qwen3coder_tool_parser",
-        "Qwen3CoderToolParser",
+        "qwen3_engine_tool_parser",
+        "Qwen3EngineToolParser",
     ),
     "qwen3_xml": (
-        "qwen3xml_tool_parser",
-        "Qwen3XMLToolParser",
+        "qwen3_engine_tool_parser",
+        "Qwen3EngineToolParser",
     ),
     "seed_oss": (
         "seed_oss_tool_parser",
@@ -179,8 +191,12 @@ _TOOL_PARSERS_TO_REGISTER = {
         "FunctionGemmaToolParser",
     ),
     "gemma4": (
-        "gemma4_tool_parser",
-        "Gemma4ToolParser",
+        "gemma4_engine_tool_parser",
+        "Gemma4EngineToolParser",
+    ),
+    "apertus": (
+        "apertus_tool_parser",
+        "ApertusToolParser",
     ),
 }
 

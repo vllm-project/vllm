@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import copy
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
@@ -39,10 +38,7 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.async_utils import (
-    AsyncMicrobatchTokenizer,
-    make_async,
-)
+from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -93,8 +89,9 @@ class BaseRenderer(ABC, Generic[_T]):
         # to keep the asyncio event loop responsive under concurrent load.
         self._mm_executor: Executor = self._executor
 
-        # Lazy initialization since offline LLM doesn't use async
-        self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
+        # Offloading tokenizer encode & decode to thread pool.
+        self._async_tokenizer_encode = make_async(self._encode, executor=self._executor)
+        self._async_tokenizer_decode = make_async(self._decode, executor=self._executor)
 
         self.mm_processor: BaseMultiModalProcessor | None = None
         self._readonly_mm_processor: BaseMultiModalProcessor | None = None
@@ -105,20 +102,16 @@ class BaseRenderer(ABC, Generic[_T]):
         self._process_multimodal_async = make_async(
             self._process_multimodal, executor=self._mm_executor
         )
+        self._safe_load_prompt_embeds_async = make_async(
+            safe_load_prompt_embeds, executor=self._executor
+        )
         if mm_registry.supports_multimodal_inputs(config.model_config):
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
-
-            # Deep-copy the tokenizer so the multimodal processor gets its
-            # own Rust tokenizer backend.  Without this, concurrent access
-            # from AsyncMicrobatchTokenizer and call_hf_processor causes
-            # "RuntimeError: Already borrowed" from the Rust RefCell.
-            # See: https://github.com/huggingface/tokenizers/issues/537
-            mm_tokenizer = copy.deepcopy(tokenizer)
 
             with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
                     config.model_config,
-                    tokenizer=mm_tokenizer,
+                    tokenizer=self.tokenizer,
                     cache=mm_processor_cache,
                 )
 
@@ -130,11 +123,10 @@ class BaseRenderer(ABC, Generic[_T]):
             # requests don't pollute the sender cache.
             ro_cache = mm_registry.processor_only_cache_from_config(config)
             if ro_cache is not None:
-                ro_tokenizer = copy.deepcopy(tokenizer)
                 with set_default_torch_num_threads():
                     self._readonly_mm_processor = mm_registry.create_processor(
                         config.model_config,
-                        tokenizer=ro_tokenizer,
+                        tokenizer=self.tokenizer,
                         cache=ro_cache,
                     )
 
@@ -152,13 +144,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return tokenizer
 
-    def get_async_tokenizer(self) -> AsyncMicrobatchTokenizer:
-        if self._async_tokenizer is None:
-            self._async_tokenizer = AsyncMicrobatchTokenizer(
-                self.get_tokenizer(), executor=self._executor
-            )
+    def _decode(self, *args, **kwargs):
+        return self.get_tokenizer().decode(*args, **kwargs)
 
-        return self._async_tokenizer
+    def _encode(self, *args, **kwargs):
+        return self.get_tokenizer().encode(*args, **kwargs)
 
     def get_mm_processor(self) -> "BaseMultiModalProcessor":
         if self.mm_processor is None:
@@ -385,11 +375,28 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return [self.render_prompt(prompt) for prompt in prompts]
 
+    async def _render_prompt_async(
+        self,
+        prompt: DictPrompt | bytes,
+    ) -> DictPrompt:
+        if isinstance(prompt, bytes):
+            embeds = await self._safe_load_prompt_embeds_async(
+                self.model_config, prompt
+            )
+            return EmbedsPrompt(prompt_embeds=embeds)
+
+        return prompt
+
     async def render_prompts_async(
         self,
         prompts: Sequence[DictPrompt | bytes],
     ) -> list[DictPrompt]:
-        return self.render_prompts(prompts)
+        if len(prompts) == 0:
+            raise ValueError("You must pass at least one prompt")
+
+        return await asyncio.gather(
+            *(self._render_prompt_async(prompt) for prompt in prompts)
+        )
 
     @abstractmethod
     def render_messages(
@@ -425,8 +432,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: TextPrompt,
         params: TokenizeParams,
     ) -> TokensPrompt:
-        tokenizer = self.get_async_tokenizer()
-        prompt_token_ids = await tokenizer.encode(
+        prompt_token_ids = await self._async_tokenizer_encode(
             prompt["prompt"],
             **params.get_encode_kwargs(),
         )
@@ -440,8 +446,9 @@ class BaseRenderer(ABC, Generic[_T]):
         return prompt
 
     async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
-        tokenizer = self.get_async_tokenizer()
-        prompt["prompt"] = await tokenizer.decode(prompt["prompt_token_ids"])
+        prompt["prompt"] = await self._async_tokenizer_decode(
+            prompt["prompt_token_ids"]
+        )
 
         return prompt
 

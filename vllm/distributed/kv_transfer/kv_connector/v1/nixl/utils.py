@@ -6,10 +6,12 @@ import contextlib
 from collections.abc import Iterator
 from typing import Any
 
+import regex as re
 import zmq
 
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_socket
+from vllm.v1.kv_cache_interface import KVCacheSpec, UniformTypeKVCacheSpecs
 
 # Supported platforms and types of kv transfer buffer.
 # {device: tuple of supported kv buffer types}
@@ -46,3 +48,21 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
+
+
+def get_representative_spec_type(spec: KVCacheSpec) -> type[KVCacheSpec]:
+    if isinstance(spec, UniformTypeKVCacheSpecs):
+        # All inner specs are the same type; pick any.
+        inner = next(iter(spec.kv_cache_specs.values()))
+        return type(inner)
+    return type(spec)
+
+
+# Trailing 8-hex randomization suffix appended by
+# ``input_processor.assign_request_id`` as ``-{random_uuid():.8}``.
+_RANDOM_SUFFIX_RE = re.compile(r"-[0-9a-f]{8}$", re.IGNORECASE)
+
+
+def get_base_request_id(request_id: str) -> str:
+    """Strip the per-request ``-<8 hex>`` randomization suffix, if present."""
+    return _RANDOM_SUFFIX_RE.sub("", request_id)

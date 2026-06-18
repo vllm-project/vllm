@@ -514,6 +514,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         num_slices: int,
         fully_sharded: bool,
         use_tuned_config: bool,
+        add_inputs: bool = True,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor | None,
         torch.Tensor | None,
@@ -521,6 +523,10 @@ class PunicaWrapperBase(PunicaWrapperABC):
         torch.Tensor | None,
     ]:
         """Apply w13 LoRA to y (intermediate_cache1) in-place before activation.
+
+        When `token_lora_mapping` is provided it overrides the punica_wrapper's
+        global mapping — used by EP+LoRA to pass the per-rank-local mapping
+        after all-to-all dispatch.
 
         Returns (sorted_token_ids_lora, expert_ids_lora,
                  num_tokens_post_padded_lora, token_lora_mapping)
@@ -549,6 +555,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         fully_sharded: bool,
         tp_rank: int,
         use_tuned_config: bool,
+        add_inputs: bool = True,
     ) -> None:
         """Apply w2 LoRA to y (intermediate_cache3) in-place before moe_sum.
 

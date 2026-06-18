@@ -33,7 +33,6 @@ arctic-inference==0.1.1
 attrs==26.1.0
     # via
     #   aiohttp
-    #   jsonlines
     #   jsonschema
     #   referencing
 audioread==3.0.1
@@ -225,10 +224,9 @@ joblib==1.5.3
     #   librosa
     #   nltk
     #   scikit-learn
-jsonlines==4.0.0
-    # via lm-eval
 jsonschema==4.26.0
     # via
+    #   -c requirements/common.txt
     #   hypothesis-jsonschema
     #   mistral-common
     #   schemathesis
@@ -246,7 +244,7 @@ librosa==0.10.2.post1
     # via -r requirements/test/xpu.in
 llvmlite==0.47.0
     # via numba
-lm-eval==0.4.11
+lm-eval==0.4.12
     # via -r requirements/test/xpu.in
 lxml==6.0.2
     # via
@@ -266,7 +264,7 @@ mbstrdecoder==1.1.4
     #   typepy
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.11.0
+mistral-common==1.11.3
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/xpu.in
@@ -539,6 +537,7 @@ sacrebleu==2.6.0
     # via lm-eval
 safetensors==0.7.0
     # via
+    #   -c requirements/common.txt
     #   accelerate
     #   timm
     #   transformers
@@ -645,7 +644,7 @@ tokenizers==0.22.2
     # via
     #   -c requirements/common.txt
     #   transformers
-torch==2.11.0+xpu
+torch==2.12.0+xpu
     # via
     #   -c requirements/xpu.txt
     #   accelerate
@@ -653,7 +652,7 @@ torch==2.11.0+xpu
     #   sentence-transformers
     #   timm
     #   torchvision
-torchvision==0.26.0+xpu
+torchvision==0.27.0+xpu
     # via timm
 tqdm==4.67.3
     # via
@@ -671,7 +670,7 @@ transformers==5.5.3
     # via
     #   -c requirements/common.txt
     #   sentence-transformers
-triton-xpu==3.7.0
+triton-xpu==3.7.1
     # via torch
 typepy==1.3.4
     # via
@@ -732,5 +731,3 @@ xxhash==3.6.0
     #   evaluate
 yarl==1.23.0
     # via aiohttp
-zstandard==0.25.0
-    # via lm-eval

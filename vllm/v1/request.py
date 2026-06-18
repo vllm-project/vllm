@@ -75,6 +75,8 @@ class Request:
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
         resumable: bool = False,
         reasoning_ended: bool | None = None,
+        reasoning_parser_kwargs: dict[str, Any] | None = None,
+        abort_immediately: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -87,6 +89,9 @@ class Request:
         )
         if self.structured_output_request is not None:
             self.structured_output_request.reasoning_ended = reasoning_ended
+            self.structured_output_request.reasoning_parser_kwargs = (
+                reasoning_parser_kwargs
+            )
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
@@ -134,8 +139,15 @@ class Request:
 
         # Used in async scheduling.
         self.num_output_placeholders = 0
-        # Used in forced preemption (reset_prefix_cache) with async scheduling.
-        self.discard_latest_async_tokens = False
+        self.async_tokens_to_discard = 0
+
+        # V2+PP+async: Enforces `pp_size` cadence between same-request decode steps
+        # so the worker's broadcast slot ring stays consistent.
+        self.next_decode_eligible_step = 0
+
+        # Seq of the most recent step this request was scheduled in; fences
+        # deferred block freeing (see Scheduler._free_request_blocks).
+        self.last_sched_seq = 0
 
         self.spec_token_ids: list[int] = []
         self.num_computed_tokens = 0
@@ -178,6 +190,10 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
+        # If True, request should be aborted immediately after being added to
+        # the scheduler so the connector's request_finished hook runs.
+        self.abort_immediately = abort_immediately
+
     @classmethod
     def from_engine_core_request(
         cls,
@@ -201,6 +217,8 @@ class Request:
             block_hasher=block_hasher,
             resumable=request.resumable,
             reasoning_ended=request.reasoning_ended,
+            reasoning_parser_kwargs=request.reasoning_parser_kwargs,
+            abort_immediately=request.abort_immediately,
         )
 
     def append_output_token_ids(

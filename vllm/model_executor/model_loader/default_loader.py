@@ -76,6 +76,11 @@ class DefaultModelLoader(BaseModelLoader):
         self.local_expert_ids: set[int] | None = None
 
         extra_config = load_config.model_loader_extra_config
+        if not isinstance(extra_config, dict):
+            raise ValueError(
+                f"model_loader_extra_config must be a dict for load format "
+                f"{load_config.load_format}, got {type(extra_config).__name__}"
+            )
         allowed_keys = {
             "enable_multithread_load",
             "num_threads",
@@ -90,9 +95,35 @@ class DefaultModelLoader(BaseModelLoader):
                 f"{unexpected_keys}"
             )
 
+        enable_multithread_load = extra_config.get("enable_multithread_load", False)
+        if not isinstance(enable_multithread_load, bool):
+            raise ValueError(
+                f"enable_multithread_load must be a bool, got "
+                f"{type(enable_multithread_load).__name__}"
+            )
+        num_threads = extra_config.get("num_threads")
+        if num_threads is not None and not (
+            isinstance(num_threads, int) and num_threads > 0
+        ):
+            raise ValueError(
+                f"num_threads must be a positive integer, got {num_threads!r}"
+            )
+
         self.enable_weights_track: bool | None = extra_config.get(
             "enable_weights_track", None
         )
+
+        # The multi-thread loader ignores safetensors_load_strategy, so reject
+        # the combination instead of silently dropping the requested strategy.
+        if extra_config.get("enable_multithread_load") and (
+            load_config.safetensors_load_strategy not in (None, "lazy")
+        ):
+            raise ValueError(
+                "enable_multithread_load does not support "
+                "safetensors_load_strategy="
+                f"{load_config.safetensors_load_strategy!r}; the multi-thread "
+                "loader only implements the default lazy strategy."
+            )
 
     def _prepare_weights(
         self,
@@ -152,7 +183,9 @@ class DefaultModelLoader(BaseModelLoader):
         else:
             raise ValueError(f"Unknown load_format: {load_format}")
 
-        if fall_back_to_pt:
+        # Don't fall back to .pt for explicit safetensors formats; otherwise a
+        # .pt file is matched and later opened as safetensors.
+        if fall_back_to_pt and not use_safetensors:
             allow_patterns += ["*.pt"]
 
         if allow_patterns_overrides is not None:
@@ -177,7 +210,7 @@ class DefaultModelLoader(BaseModelLoader):
         for pattern in allow_patterns:
             hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
             if len(hf_weights_files) > 0:
-                if pattern == "*.safetensors":
+                if pattern.endswith(".safetensors"):
                     use_safetensors = True
                 break
 
@@ -256,6 +289,12 @@ class DefaultModelLoader(BaseModelLoader):
                         self.load_config.use_tqdm_on_load,
                         self.load_config.safetensors_load_strategy,
                         local_expert_ids=self.local_expert_ids,
+                        safetensors_prefetch_num_threads=(
+                            self.load_config.safetensors_prefetch_num_threads
+                        ),
+                        safetensors_prefetch_block_size=(
+                            self.load_config.safetensors_prefetch_block_size
+                        ),
                     )
         else:
             if extra_config.get("enable_multithread_load"):
