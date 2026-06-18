@@ -520,14 +520,6 @@ class VllmConfig:
 
     @property
     def use_v2_model_runner(self) -> bool:
-        cached = getattr(self, "_use_v2_model_runner", None)
-        if cached is not None:
-            return cached
-        cached = self._resolve_use_v2_model_runner()
-        self._use_v2_model_runner = cached
-        return cached
-
-    def _resolve_use_v2_model_runner(self) -> bool:
         use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
         if use_v2_model_runner is not None:
             return use_v2_model_runner

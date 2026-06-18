@@ -26,10 +26,12 @@ if HAS_TRITON:
             x.driver for x in backends.values() if x.driver and x.driver.is_active()
         ]
 
-        # Check if we're in a distributed environment where CUDA_VISIBLE_DEVICES
-        # might be temporarily empty (e.g., Ray sets it to "" during actor init)
         cuda_visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
-        is_distributed_env = (
+        in_ray_worker = (
+            os.environ.get("RAY_RAYLET_PID") is not None
+            or os.environ.get("RAY_JOB_ID") is not None
+        )
+        is_distributed_env = in_ray_worker or (
             cuda_visible_devices is not None and len(cuda_visible_devices.strip()) == 0
         )
 
