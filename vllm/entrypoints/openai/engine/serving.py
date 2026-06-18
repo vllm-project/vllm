@@ -5,7 +5,7 @@ import time
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
+from typing import ClassVar, Generic, Protocol, TypeAlias, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict

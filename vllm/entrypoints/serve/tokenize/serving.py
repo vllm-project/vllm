@@ -32,13 +32,14 @@ class ServingTokenization(ServingMixin):
         models: OpenAIServingModels,
         online_renderer: OnlineRenderer,
         *,
-        request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         default_chat_template_kwargs: dict[str, Any] | None = None,
         trust_request_chat_template: bool = False,
+        request_logger: RequestLogger | None = None,
     ) -> None:
         self.models = models
+        self.model_config = online_renderer.model_config
         self.renderer = online_renderer.renderer
         self.online_renderer = online_renderer
         self.request_logger = request_logger
