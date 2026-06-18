@@ -6211,11 +6211,7 @@ class GPUModelRunner(
             sampler_output = self.sampler(
                 logits=logits, sampling_metadata=dummy_metadata
             )
-            # Skip the second sampler warm-up on ROCm. The first sampler
-            # call JITs the AITER top_k_top_p kernel, which leaves an HSA
-            # signal that is never retired on MI300X; the second warm-up's
-            # implicit device sync then hangs. The second pass is not
-            # essential, so gate it to non-ROCm platforms only.
+            # Skip second sampler warm-up on ROCm (AITER top_k_top_p hang).
             enable_second_sampler_warmup = not current_platform.is_rocm()
             if enable_second_sampler_warmup and (
                 self.sampler.logprobs_mode
@@ -6423,10 +6419,7 @@ class GPUModelRunner(
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True
         )
-        # Skip the profile-time sampler run on ROCm: the AITER top_k_top_p
-        # kernel queued by the first sampler call hangs _sync_device on
-        # MI300X. Non-ROCm platforms keep the upstream run, which also
-        # contributes to peak-memory / KV-cache sizing.
+        # Skip profile-time sampler on ROCm (AITER top_k_top_p hang).
         skip_sampler_warmup = current_platform.is_rocm()
         if skip_sampler_warmup:
             output = None

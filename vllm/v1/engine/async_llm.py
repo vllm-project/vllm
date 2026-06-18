@@ -284,36 +284,7 @@ class AsyncLLM(EngineClient):
         request_id: str,
         params: SamplingParams | PoolingParams,
     ) -> int | None:
-        """Pick a stable ``data_parallel_rank`` for a request.
-
-        When the OpenAI server is run with ``--api-server-count N`` (N > 1),
-        Linux SO_REUSEPORT shuffles incoming connections across ApiServer
-        processes. Two legs of a disaggregated prefill/decode pair (which
-        share a ``request_id``) can land on different ApiServers and be
-        load-balanced to different DP ranks. KV-transfer protocols that
-        pin source/target by DP rank (MoRI-IO, NIXL WRITE-mode, ...) then
-        end up exchanging handshakes with the wrong peer and the request
-        deadlocks at the connector level.
-
-        To work around this we synthesize a per-request DP rank that both
-        legs will independently agree on, in this order:
-
-          1. ``params.extra_args["kv_transfer_params"]["dp_rank_hint"]``
-             if the caller (or an upstream routing sidecar) has already
-             picked the rank.
-          2. Otherwise a stable ``blake2s(request_id) % effective_dp_size``
-             hash.
-
-        When ``data_parallel_size_local`` is set and smaller than
-        ``data_parallel_size`` (multi-pod DP, "Wide-EP"), the modulus is
-        capped to the local pod size so that both legs route to a rank in
-        the same pod -- cross-pod handshake requires a coordinator that
-        may not exist in the disagg orchestrator.
-
-        Returns ``None`` when there is no DP fan-out to disambiguate
-        (``effective_dp_size <= 1``); callers should leave
-        ``data_parallel_rank`` unset in that case.
-        """
+        """Pick stable DP rank via dp_rank_hint or hash(transfer_id)."""
         pc = self.vllm_config.parallel_config
         try:
             dp_size = int(pc.data_parallel_size)
@@ -330,15 +301,28 @@ class AsyncLLM(EngineClient):
             pass
         if dp_size <= 1:
             return None
-        extra = getattr(params, "extra_args", None) or {}
-        if isinstance(extra, dict):
-            ktp = extra.get("kv_transfer_params") or {}
-            if isinstance(ktp, dict):
-                hint = ktp.get("dp_rank_hint")
-                if isinstance(hint, int) and 0 <= hint < dp_size:
-                    return hint
+
+        extra = getattr(params, "extra_args", None)
+        if extra is None:
+            extra = {}
+            params.extra_args = extra
+        ktp = extra.get("kv_transfer_params")
+        if ktp is None:
+            ktp = {}
+            extra["kv_transfer_params"] = ktp
+
+        hint = ktp.get("dp_rank_hint")
+        if isinstance(hint, int) and 0 <= hint < dp_size:
+            return hint
+
+        # Use transfer_id for hashing; synthesize if not present.
+        hash_key = ktp.get("transfer_id")
+        if not hash_key:
+            hash_key = f"synth-{request_id}"
+            ktp["transfer_id"] = hash_key
+
         digest = hashlib.blake2s(
-            str(request_id).encode("utf-8"), digest_size=8
+            str(hash_key).encode("utf-8"), digest_size=8
         ).digest()
         return int.from_bytes(digest, "big") % dp_size
 
@@ -362,11 +346,7 @@ class AsyncLLM(EngineClient):
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
-        # ROCm-only: stable per-request DP-rank fallback to neutralise the
-        # SO_REUSEPORT shuffle on disagg P/D pairs (MoRI-IO, NIXL WRITE).
-        # Gated to ROCm because (a) MoRI-IO is the in-tree consumer that
-        # exercises this path and (b) we don't want to silently change the
-        # default DP load-balancing behaviour for CUDA users.
+        # ROCm: auto-route disagg P/D pairs to matching DP rank.
         if current_platform.is_rocm() and data_parallel_rank is None:
             data_parallel_rank = self._pick_dp_rank_for_request(request_id, params)
             if data_parallel_rank is not None:
