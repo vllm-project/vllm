@@ -108,3 +108,85 @@ class TestGetSequenceParallelismThreshold:
                 element_size=2,
             )
             assert result is not None
+
+
+# XPU-specific constants (must match sequence_parallelism.py values)
+_XPU_MIN_HIDDEN_SIZE = 4096
+_XPU_MIN_PER_GPU_SIZE_MB = 8.0
+
+
+class TestGetSequenceParallelismThresholdXPU:
+    """Tests for get_sequence_parallelism_threshold on XPU platform."""
+
+    def test_xpu_small_hidden_size_returns_none(self, mock_xpu_platform):
+        """XPU with hidden_size below threshold should return None."""
+        with mock_xpu_platform():
+            result = get_sequence_parallelism_threshold(
+                hidden_size=_XPU_MIN_HIDDEN_SIZE - 1,
+                tp_size=2,
+                element_size=2,
+            )
+        assert result is None
+
+    def test_xpu_large_model_returns_threshold(self, mock_xpu_platform):
+        """XPU with hidden_size >= threshold should return calculated value."""
+        with mock_xpu_platform():
+            hidden_size = _XPU_MIN_HIDDEN_SIZE
+            tp_size = 2
+            element_size = 2
+            result = get_sequence_parallelism_threshold(
+                hidden_size=hidden_size,
+                tp_size=tp_size,
+                element_size=element_size,
+            )
+        # (8 * 2 * 1024 * 1024) // (4096 * 2) = 2048
+        MiB = 1024 * 1024
+        expected = int(
+            (_XPU_MIN_PER_GPU_SIZE_MB * tp_size * MiB) // (hidden_size * element_size)
+        )
+        assert result == expected
+        assert result == 2048
+
+    @pytest.mark.parametrize(
+        "hidden_size,tp_size,element_size,expected",
+        [
+            # (8 * 1 * 1024 * 1024) // (4096 * 2) = 1024
+            (4096, 1, 2, 1024),
+            # (8 * 4 * 1024 * 1024) // (4096 * 2) = 4096
+            (4096, 4, 2, 4096),
+            # (8 * 2 * 1024 * 1024) // (8192 * 2) = 1024
+            (8192, 2, 2, 1024),
+            # (8 * 2 * 1024 * 1024) // (4096 * 4) = 1024
+            (4096, 2, 4, 1024),
+        ],
+    )
+    def test_xpu_threshold_calculation_variations(
+        self, mock_xpu_platform, hidden_size, tp_size, element_size, expected
+    ):
+        """Test XPU threshold calculation with various parameter combinations."""
+        with mock_xpu_platform():
+            result = get_sequence_parallelism_threshold(
+                hidden_size=hidden_size,
+                tp_size=tp_size,
+                element_size=element_size,
+            )
+        assert result == expected
+
+    def test_xpu_hidden_size_boundary(self, mock_xpu_platform):
+        """Test behavior at the exact XPU hidden_size boundary."""
+        with mock_xpu_platform():
+            # Just below threshold
+            result = get_sequence_parallelism_threshold(
+                hidden_size=_XPU_MIN_HIDDEN_SIZE - 1,
+                tp_size=2,
+                element_size=2,
+            )
+            assert result is None
+
+            # Exactly at threshold
+            result = get_sequence_parallelism_threshold(
+                hidden_size=_XPU_MIN_HIDDEN_SIZE,
+                tp_size=2,
+                element_size=2,
+            )
+            assert result is not None

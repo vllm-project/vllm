@@ -141,7 +141,7 @@ class MooncakeStoreConfig:
         )
 
     @staticmethod
-    def load_from_env() -> "MooncakeStoreConfig":
+    def load_from_config() -> "MooncakeStoreConfig":
         config_path = os.getenv("MOONCAKE_CONFIG_PATH")
         if not config_path:
             raise ValueError(
@@ -507,7 +507,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         return True
 
     def _handle_request(self, req_meta: ReqMeta):
-        # Cache hits are always a multiple of ``lcm_block_size`` tokens
+        # Cache hits are always a multiple of ``lcm_block_size`` tokens, which
+        # is also ``store_mask``'s precondition.
         lcm_block_size = self.coord.lcm_block_size
         token_len = req_meta.token_len_chunk // lcm_block_size * lcm_block_size
         block_ids_per_group = req_meta.block_ids
@@ -534,7 +535,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             # Within each lcm region only per-spec relevant chunks are loaded
             # (e.g., SWA or linear attn), so mask out irrelevant chunks
-            store_masks = self.coord.store_mask(token_len)
+            store_masks = self.coord.store_mask(
+                token_len, num_prompt_tokens=req_meta.num_prompt_tokens
+            )
             starts: list[int] = []
             ends: list[int] = []
             keys: list[str] = []
@@ -545,12 +548,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 for chunk_idx, (start, end, key) in enumerate(
                     db.process_tokens(token_len, req_meta.block_hashes)
                 ):
-                    if chunk_idx >= len(mask) or not mask[chunk_idx]:
+                    if mask is not None and (
+                        chunk_idx >= len(mask) or not mask[chunk_idx]
+                    ):
                         continue
                     starts.append(start)
                     ends.append(end)
                     keys.append(key.to_string())
-                    block_hashes.append(req_meta.block_hashes[chunk_idx])
+                    block_hashes.append(BlockHash(bytes.fromhex(key.chunk_hash)))
                     group_indices.append(g_idx)
 
             # Apply put_step striding for TP
@@ -627,10 +632,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
                         block_hashes=[new_block_hashes[idx]],
                         parent_block_hash=prev_key_per_group.get(g_idx),
                         token_ids=token_ids,
-                        block_size=req_meta.original_block_size,
+                        block_size=db.block_size,
                         lora_id=None,
                         medium="cpu",
                         lora_name=None,
+                        group_idx=g_idx,
                     )
                     stored_events.append(stored_event)
                     prev_key_per_group[g_idx] = new_block_hashes[idx]
@@ -947,7 +953,6 @@ class MooncakeStoreWorker:
             "load_async", True
         )
         self.cache_config = vllm_config.cache_config
-        self.original_block_size = self.cache_config.block_size
         self.block_size, self.hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
@@ -979,18 +984,19 @@ class MooncakeStoreWorker:
             pcp_rank=self.pcp_rank,
             dcp_rank=self.dcp_rank,
             pp_rank=self.pp_rank,
+            cache_prefix=str(
+                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                    "cache_prefix", ""
+                )
+            ),
         )
 
         # Initialize MooncakeDistributedStore with its own TransferEngine
-        store_config = MooncakeStoreConfig.load_from_env()
+        store_config = MooncakeStoreConfig.load_from_config()
         extra_config = (
             vllm_config.kv_transfer_config.kv_connector_extra_config
             if vllm_config.kv_transfer_config
             else {}
-        )
-        store_config.device_name = rdma_utils.get_configured_worker_rnic(
-            protocol=store_config.protocol,
-            configured_device=store_config.device_name,
         )
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
@@ -1094,6 +1100,7 @@ class MooncakeStoreWorker:
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
             use_eagle=use_eagle,
+            retention_interval=envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL,
         )
         # One ChunkedTokenDatabase per group; addresses populated in
         # register_kv_caches once the kv-cache layout is known.
@@ -1370,9 +1377,11 @@ class MooncakeStoreWorker:
         # candidate_meta[i] is the (group_id, hash_bytes) for candidate_keys[i].
         candidate_keys: list[str] = []
         candidate_meta: list[tuple[int, bytes]] = []
+        lookup_masks = self.coord.lookup_mask(token_len)
         tp_count = min(self.tp_size, self.num_kv_head)
         for g_idx, db in enumerate(self.token_dbs):
             spec_block_size = db.block_size
+            lookup_mask = lookup_masks[g_idx]
             group_hashes = self.coord.block_hashes_for_spec(
                 block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
             )
@@ -1380,6 +1389,10 @@ class MooncakeStoreWorker:
                 start_idx = chunk_id * spec_block_size
                 if start_idx >= token_len:
                     break
+                if lookup_mask is not None and (
+                    chunk_id >= len(lookup_mask) or not lookup_mask[chunk_id]
+                ):
+                    continue
                 for tp in range(tp_count):
                     for pp in range(self.pp_size):
                         md = dataclasses.replace(db.metadata, tp_rank=tp, pp_rank=pp)
@@ -1425,6 +1438,22 @@ class MooncakeStoreWorker:
         if self.enable_kv_events and self.kv_send_thread is not None:
             return self.kv_send_thread.get_kv_events()
         return []
+
+    def close(self) -> None:
+        """Release the MooncakeDistributedStore handle on teardown.
+
+        Closing the store frees its TransferEngine, the registered RDMA
+        buffers, and the connection to the master server. Idempotent so it is
+        safe to call from both the explicit shutdown path and ``__del__``.
+        """
+        store = getattr(self, "store", None)
+        if store is None:
+            return
+        self.store = None
+        try:
+            store.close()
+        except Exception as e:
+            logger.warning("Error closing MooncakeDistributedStore: %s", e)
 
 
 # ============================================================
