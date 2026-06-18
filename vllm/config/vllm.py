@@ -114,15 +114,17 @@ IS_DENSE = False
 def _should_auto_enable_deepseek_v4_breakable_cudagraph(
     model_config: ModelConfig,
 ) -> bool:
-    if not any(
+    # Auto-enable breakable cudagraph for DeepSeek-V4 on all SM12x platforms.
+    # The earlier SM121 carve-out (breakable cudagraph produced garbage on
+    # trivial prompts there) was removed after upstream reverted #45309 in
+    # #45972: with the full @eager_break_during_capture split restored,
+    # breakable cudagraph generates correctly on SM121 again (verified on 2x
+    # GB10, EP off: "2+2等于几" and arithmetic clean) and is on-par-or-faster
+    # than FULL_AND_PIECEWISE.
+    return any(
         arch in DEEPSEEK_V4_CUDAGRAPH_ARCHITECTURES
         for arch in model_config.architectures
-    ):
-        return False
-
-    from vllm.platforms import current_platform
-
-    return not current_platform.is_device_capability(121)
+    )
 
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
