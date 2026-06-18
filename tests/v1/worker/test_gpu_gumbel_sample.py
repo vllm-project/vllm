@@ -83,6 +83,30 @@ def _z_score(observed: int, expected: float, num_trials: int) -> float:
     return (observed - expected) / math.sqrt(num_trials * p * (1 - p))
 
 
+def _sample_histogram(
+    logits_1d: torch.Tensor, num_samples: int, *, chunk: int = 1_000_000
+) -> torch.Tensor:
+    """Histogram of `num_samples` draws, accumulated in chunks.
+
+    Chunking keeps the kernel's per-sample scratch ([chunk, num_blocks]) bounded
+    so a large sample count does not blow up memory.
+    """
+    vocab_size = logits_1d.shape[0]
+    hist = torch.zeros(vocab_size, dtype=torch.float64, device=DEVICE)
+    for start in range(0, num_samples, chunk):
+        size = min(chunk, num_samples - start)
+        logits = logits_1d.unsqueeze(0).expand(size, vocab_size)
+        idx_mapping = torch.zeros(size, dtype=torch.int32, device=DEVICE)
+        temp = torch.tensor([1.0], dtype=torch.float32, device=DEVICE)
+        seed = torch.tensor([0xABCD], dtype=torch.int64, device=DEVICE)
+        pos = torch.arange(start, start + size, dtype=torch.int64, device=DEVICE)
+        out = gumbel_sample(
+            logits, idx_mapping, temp, seed, pos, apply_temperature=True
+        )
+        hist += torch.bincount(out, minlength=vocab_size).double()
+    return hist
+
+
 # ----------------------------- Accuracy ------------------------------------
 
 
@@ -107,6 +131,37 @@ def test_sampling_matches_target_distribution(use_fp64: bool):
         f"sampled tail mass {tail_count / NUM_SAMPLES:.3e} != target "
         f"{tail_prob:.3e} (z={z:.2f})"
     )
+
+
+def test_full_vocab_distribution_fidelity():
+    """The sampled distribution matches the target across the WHOLE vocab.
+
+    A near-flat count tensor makes every one of the 200K bins individually
+    measurable. With ~20 samples/bin, a goodness-of-fit over all bins checks
+    that no part of the vocab is over- or under-represented (the heavy-tailed
+    test above only resolves head vs aggregate tail). Empirically the fp32
+    sampler is as faithful here as torch.multinomial; the residual error is the
+    multinomial sampling-noise floor, not the kernel.
+    """
+    gen = torch.Generator(device=DEVICE).manual_seed(2024)
+    counts = torch.randint(
+        500, 1500, (VOCAB_SIZE,), generator=gen, dtype=torch.int64, device=DEVICE
+    )
+    total = counts.sum().item()
+    logits = _counts_to_logits(counts)
+
+    num_samples = 4_000_000
+    hist = _sample_histogram(logits, num_samples)
+
+    # Diversity: essentially every token must be reachable (no starved region).
+    coverage = (hist > 0).sum().item() / VOCAB_SIZE
+    assert coverage > 0.99, f"only {coverage:.4f} of the vocab was ever sampled"
+
+    # Goodness-of-fit across all bins (each has expected count >= ~10).
+    expected = (counts.double() / total) * num_samples
+    chi2 = (((hist - expected) ** 2) / expected).sum().item()
+    df = VOCAB_SIZE - 1
+    assert chi2 < df + 10 * math.sqrt(2 * df), f"chi2={chi2:.0f}, df={df}"
 
 
 # ----------------------------- Edge cases ----------------------------------
