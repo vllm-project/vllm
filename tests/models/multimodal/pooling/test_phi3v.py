@@ -53,6 +53,7 @@ def _get_cherry_blossom_image() -> Image.Image:
     )
 
 
+@torch.inference_mode()
 def _run_test(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
@@ -77,19 +78,18 @@ def _run_test(
         all_inputs = hf_model.get_inputs(input_texts, images=input_images)
 
         all_outputs = []
-        with torch.no_grad():
-            for inputs in all_inputs:
-                # Based on: https://github.com/TIGER-AI-Lab/VLM2Vec/blob/db3b951bccabba220c1f53ab46a734e50dd2fc08/src/model.py
-                outputs = hf_model.model(
-                    **hf_model.wrap_device(inputs),
-                    return_dict=True,
-                    output_hidden_states=True,
-                )
-                last_hidden_state = outputs.hidden_states[-1][0]
-                reps = last_hidden_state[inputs.attention_mask[0].sum() - 1]
-                pooled_output = F.normalize(reps, p=2, dim=-1)
+        for inputs in all_inputs:
+            # Based on: https://github.com/TIGER-AI-Lab/VLM2Vec/blob/db3b951bccabba220c1f53ab46a734e50dd2fc08/src/model.py
+            outputs = hf_model.model(
+                **hf_model.wrap_device(inputs),
+                return_dict=True,
+                output_hidden_states=True,
+            )
+            last_hidden_state = outputs.hidden_states[-1][0]
+            reps = last_hidden_state[inputs.attention_mask[0].sum() - 1]
+            pooled_output = F.normalize(reps, p=2, dim=-1)
 
-                all_outputs.append(pooled_output.tolist())
+            all_outputs.append(pooled_output.tolist())
 
         hf_outputs = all_outputs
 
