@@ -11,7 +11,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-
 SCENARIO_ALIASES = {
     "random": "random-online",
     "random-online": "random-online",

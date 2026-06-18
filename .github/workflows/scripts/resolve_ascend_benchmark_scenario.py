@@ -82,9 +82,7 @@ def _validate_selection(selection: ScenarioSelection) -> ScenarioSelection:
     if not selection.constraints_file:
         missing.append("BENCH_CONSTRAINTS_FILE")
     if missing:
-        raise ValueError(
-            "sharegpt-online requires " + ", ".join(missing)
-        )
+        raise ValueError("sharegpt-online requires " + ", ".join(missing))
     return selection
 
 
@@ -155,8 +153,7 @@ def select_scenario(
             ScenarioSelection(
                 scenario=default_scenario,
                 reason=(
-                    "no L2 benchmark label found; using default PR "
-                    "benchmark scenario"
+                    "no L2 benchmark label found; using default PR benchmark scenario"
                 ),
                 mode="l1-smoke",
                 dataset_path=default_dataset_path,

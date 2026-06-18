@@ -6,7 +6,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
     / ".github/workflows/scripts/resolve_ascend_benchmark_scenario.py"
