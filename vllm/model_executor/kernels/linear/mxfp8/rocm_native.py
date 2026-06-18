@@ -27,6 +27,12 @@ from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
 logger = init_logger(__name__)
 
+# Optional aiter small-M HIP GEMV (gfx950). Imported once; absent -> Triton.
+try:
+    from aiter.ops.smallm_gemm_mxfp8 import mxfp8_gemv as _aiter_smallm_gemv
+except ImportError:
+    _aiter_smallm_gemv = None
+
 
 @triton.jit
 def _mxfp8_linear_kernel(
@@ -92,21 +98,17 @@ def _mxfp8_dot_scaled_linear(
     M, K = x.shape
     N = w.shape[0]
     x_q, x_scale = mxfp8_e4m3_quantize(x)
-    # aiter small-M HIP path (gfx950); returns None outside its measured
-    # envelope (or on failure), so this degrades cleanly to Triton.
-    if rocm_aiter_ops.is_linear_enabled():
-        try:
-            from aiter.ops.smallm_gemm_mxfp8 import mxfp8_gemv as _aiter_smallm_gemv
-
-            aiter_out = _aiter_smallm_gemv(x_q, x_scale, w, w_scale, x.dtype)
-            if aiter_out is not None:
-                logger.info_once(
-                    "MiniMax-M3 MXFP8 dense linear: using aiter small-M HIP GEMV."
-                )
-                return aiter_out
-        except Exception as err:
-            logger.debug("aiter dense GEMV failed, falling back to Triton: %s", err)
-    elif current_platform.supports_mx():
+    # aiter small-M HIP path (gfx950). The wrapper does the explicit shape gating
+    # (arch, K alignment, allowlist) and returns None on a miss, so this is a
+    # plain None-check -- no try/except.
+    if _aiter_smallm_gemv is not None and rocm_aiter_ops.is_linear_enabled():
+        aiter_out = _aiter_smallm_gemv(x_q, x_scale, w, w_scale, x.dtype)
+        if aiter_out is not None:
+            logger.info_once(
+                "MiniMax-M3 MXFP8 dense linear: using aiter small-M HIP GEMV."
+            )
+            return aiter_out
+    elif _aiter_smallm_gemv is not None and current_platform.supports_mx():
         # On gfx950 the slower Triton dot_scaled path runs when aiter is off;
         # surface it once so silent non-engagement is visible in the log.
         logger.info_once(

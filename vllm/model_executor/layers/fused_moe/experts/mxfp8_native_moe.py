@@ -35,6 +35,12 @@ from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 
+# Optional aiter small-M HIP grouped GEMM (gfx950). Imported once; absent -> Triton.
+try:
+    from aiter.ops.smallm_gemm_mxfp8 import grouped_gemm_mxfp8 as _aiter_smallm_moe
+except ImportError:
+    _aiter_smallm_moe = None
+
 
 @triton.jit
 def _mxfp8_grouped_gemm_kernel(
@@ -227,51 +233,47 @@ def _grouped_gemm_mxfp8(
     num_warps: int = 8,
     num_stages: int = 2,
 ) -> torch.Tensor:
-    """Decode grouped GEMM dispatcher: try the aiter small-M HIP kernel, else
-    fall back to the Triton ``dot_scaled`` path.
+    """Decode grouped GEMM dispatcher: the aiter small-M HIP kernel, else the
+    Triton ``dot_scaled`` path.
 
-    The aiter wrapper returns ``None`` when the shape is outside its measured
-    envelope (or on any failure), so this degrades cleanly. Expert parallelism
-    (``expert_map`` set) always uses Triton. ``block_n``/``num_warps``/
-    ``num_stages`` tune only the Triton fallback (the aiter kernel autotunes its
-    own tiles).
+    The aiter wrapper does the explicit shape gating (arch, K alignment, 2 GB
+    raw-buffer guard, allowlist) and returns ``None`` on a miss, so this is a
+    plain ``None``-check -- no try/except. Expert parallelism (``expert_map``
+    set) always uses Triton. ``block_n``/``num_warps``/``num_stages`` tune only
+    the Triton fallback (the aiter kernel autotunes its own tiles).
     """
     if (
-        topk_ids is not None
+        _aiter_smallm_moe is not None
+        and topk_ids is not None
         and expert_map is None
         and rocm_aiter_ops.is_fused_moe_enabled()
     ):
-        try:
-            from aiter.ops.smallm_gemm_mxfp8 import (
-                grouped_gemm_mxfp8 as _aiter_smallm_moe,
+        out = _aiter_smallm_moe(
+            a_q,
+            a_scale,
+            w,
+            w_scale,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            num_valid_tokens,
+            top_k,
+            block_m,
+            out_dtype,
+            a_div,
+            mul_weight_by,
+            topk_ids=topk_ids,
+        )
+        if out is not None:
+            logger.info_once(
+                "MiniMax-M3 MXFP8 decode MoE: using aiter small-M HIP grouped GEMM."
             )
-
-            out = _aiter_smallm_moe(
-                a_q,
-                a_scale,
-                w,
-                w_scale,
-                sorted_token_ids,
-                expert_ids,
-                num_tokens_post_padded,
-                num_valid_tokens,
-                top_k,
-                block_m,
-                out_dtype,
-                a_div,
-                mul_weight_by,
-                topk_ids=topk_ids,
-            )
-            if out is not None:
-                logger.info_once(
-                    "MiniMax-M3 MXFP8 decode MoE: using aiter small-M HIP grouped GEMM."
-                )
-                return out
-        except Exception as err:
-            logger.debug(
-                "aiter MoE grouped GEMM failed, falling back to Triton: %s", err
-            )
-    elif expert_map is None and current_platform.supports_mx():
+            return out
+    elif (
+        _aiter_smallm_moe is not None
+        and expert_map is None
+        and current_platform.supports_mx()
+    ):
         # On gfx950 with aiter disabled the slower Triton dot_scaled path runs;
         # surface it once so silent non-engagement is visible in the log.
         logger.info_once(
