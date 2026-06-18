@@ -1223,8 +1223,8 @@ class MoRIIOConnectorWorker:
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in moriio."""
 
-        # Prefer a normal K/V cache as the representative shape. MiniMax-M3
-        # sparse layers also register 3D key-only indexer side caches.
+        # Prefer a normal K/V cache as the representative shape. Some models
+        # also register 3D key-only side caches.
         first_kv_cache = next(
             (
                 kv_cache
@@ -1278,10 +1278,10 @@ class MoRIIOConnectorWorker:
         caches_data = []
 
         for layer_name, cache_or_caches in kv_caches.items():
-            # MiniMax-M3 sparse layers register both a normal 5D K/V cache and a
-            # 3D key-only indexer side cache. Only separated 5D K/V caches should
-            # be split into K and V regions; interleaved K/V and key-only caches
-            # must remain one region.
+            # Some models register both 5D K/V caches and 3D key-only side
+            # caches. Only separated 5D K/V caches should be split into K and V
+            # regions; interleaved K/V and key-only caches must remain one
+            # region.
             if len(cache_or_caches.shape) == 5 and cache_or_caches.shape[0] == 2:
                 cache_list = list(cache_or_caches)
                 layer_block_shape = cache_or_caches.shape[-3:]
