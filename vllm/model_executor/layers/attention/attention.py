@@ -471,6 +471,13 @@ class Attention(nn.Module, AttentionLayerBase):
             if self.impl.supports_quant_query_input:
                 query, _ = self.query_quant(query, self._q_scale)
 
+        # HPC kernels always produce bf16 output regardless of input dtype.
+        # HpcRopeNorm quantizes query to FP8 *before* Attention.forward(),
+        # so query.dtype would be FP8 here, but allocating an FP8 output
+        # buffer would corrupt the attention results.  Force bf16 for HPC.
+        if self.backend == AttentionBackendEnum.HPC_ATTN:
+            output_dtype = self.dtype
+
         if output_shape is None:
             # Handle both 2D [num_tokens, hidden] and
             # 3D [num_tokens, heads, head_dim] query
