@@ -69,10 +69,6 @@ class OffloadingHandler(ABC):
             job_ids: The set of job IDs to wait for.
         """
 
-    def wait_all(self) -> None:
-        """Synchronize all in-flight transfers without destroying state."""
-        return
-
     def shutdown(self) -> None:
         """Shutdown the handler and release any resources."""
         return
@@ -174,11 +170,6 @@ class OffloadingWorker:
         """
         for handler in self.handlers:
             handler.wait(job_ids)
-
-    def wait_all(self) -> None:
-        """Synchronize all in-flight transfers across all handlers."""
-        for handler in self.handlers:
-            handler.wait_all()
 
     def shutdown(self) -> None:
         for handler in self.handlers:
