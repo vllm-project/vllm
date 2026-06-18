@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
+    PoolKey,
     ReqMeta,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
@@ -238,6 +239,31 @@ def _patch_worker_runtime(monkeypatch, *, local_ip: str = "10.0.0.7") -> None:
     monkeypatch.setattr(worker, "get_pcp_group", lambda: single_rank_group)
     monkeypatch.setattr(worker, "get_dcp_group", lambda: single_rank_group)
     monkeypatch.setattr(worker, "get_ip", lambda: local_ip)
+
+
+def test_pool_key_to_string_without_prefix_is_unchanged():
+    """Default (empty) cache_prefix keeps keys byte-identical to the
+    historical unprefixed format so existing deployments keep their hits."""
+    key = PoolKey(KeyMetadata("test-model", 0, 0, 0, 0), "deadbeef")
+    assert (
+        key.to_string() == "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
+    )
+
+
+def test_pool_key_cache_prefix_namespaces_and_disambiguates():
+    """A non-empty cache_prefix is prepended, and two instances with
+    different prefixes never collide on identical block hashes."""
+    md_a = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="depA")
+    md_b = KeyMetadata("test-model", 0, 0, 0, 0, cache_prefix="depB")
+
+    key_a = PoolKey(md_a, "deadbeef")
+    key_b = PoolKey(md_b, "deadbeef")
+
+    assert key_a.to_string() == (
+        "depA@test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@deadbeef"
+    )
+    assert key_a.to_string() != key_b.to_string()
+    assert hash(key_a) != hash(key_b)
 
 
 def test_default_local_buffer_size_matches_pr40900():
@@ -1558,3 +1584,34 @@ def test_lookup_records_mooncake_metrics():
     assert isinstance(stats, MooncakeStoreConnectorStats)
     assert len(stats.data["lookup_exists"]) == 1
     assert stats.data["lookup_exists"][0]["num_keys"] == 2
+
+
+def test_store_worker_close_releases_store():
+    worker = _make_bare_worker()
+    store = worker.store
+
+    worker.close()
+
+    store.close.assert_called_once_with()
+    assert worker.store is None
+
+
+def test_store_worker_close_is_idempotent():
+    worker = _make_bare_worker()
+    store = worker.store
+
+    worker.close()
+    worker.close()
+
+    # Second call short-circuits because store was already released.
+    store.close.assert_called_once_with()
+
+
+def test_store_worker_close_swallows_store_errors():
+    worker = _make_bare_worker()
+    worker.store.close.side_effect = RuntimeError("boom")
+
+    # A failure tearing down the store must not propagate out of close().
+    worker.close()
+
+    assert worker.store is None
