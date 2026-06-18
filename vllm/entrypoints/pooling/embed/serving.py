@@ -188,7 +188,12 @@ class ServingEmbedding(PoolingServing):
         ]
         total_tokens = get_pooling_usage(ctx.final_res_batch).prompt_tokens
 
-        image_tokens = total_tokens if request.images is not None else 0
+        has_image_input = request.images is not None or any(
+            content.type == "image_url"
+            for input_item in request.inputs or []
+            for content in input_item.content
+        )
+        image_tokens = total_tokens if has_image_input else 0
         texts_echo = request.texts
 
         embedding_types = request.embedding_types or ["float"]
