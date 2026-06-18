@@ -58,8 +58,19 @@ def _worker_forward_qk(
     torch.manual_seed(seed + 1000 + local_rank)
     qkv = torch.randn(num_tokens, hq + hk + hk, dtype=dtype, device="cuda")
 
-    q_ref, k_ref, v_ref = qkv.clone().split([hq, hk, hk], dim=-1)
-    ref_q, ref_k = MiniMaxText01RMSNormTP.forward_qk(q_norm, k_norm, q_ref, k_ref)
+    # Reference: eager all-reduce path. ``forward_qk`` no longer all-reduces
+    # the variance (it is the tp==1 / already-reduced building block), so the
+    # multi-rank reference must use the eager path that performs the global
+    # variance all-reduce, matching the fused kernel below.
+    ref_q, ref_k = rms_norm_tp._minimax_qk_norm_tp_eager(
+        qkv.clone(),
+        q_norm.weight,
+        k_norm.weight,
+        hq,
+        hk,
+        world_size,
+        eps,
+    )
 
     # Set up Lamport workspace.
     from vllm.distributed.parallel_state import get_tp_group
