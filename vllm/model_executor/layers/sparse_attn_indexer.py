@@ -39,19 +39,14 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 MXFP4_BLOCK_SIZE = 32
 
 
-def _use_persistent_topk_decode(topk_tokens: int, dcp_world_size: int) -> bool:
+def _use_persistent_topk_decode(topk_tokens: int) -> bool:
     """Return whether decode top-k should use the persistent CUDA kernel.
 
-    Under DCP, every rank enters a global top-k all-gather immediately after
-    local top-k. Avoid the optimized persistent_topk wrapper there because it
-    has load-dependent CUDA subpaths, including a large-batch FilteredTopK
-    branch, and a stalled rank would block peers in the following collective.
+    The caller must pass persistent_topk a max sequence length in the same
+    coordinate system as its seq_lens tensor. Under DCP this is rank-local, not
+    the global attention max.
     """
-    return (
-        current_platform.is_cuda()
-        and dcp_world_size == 1
-        and topk_tokens in (512, 1024, 2048)
-    )
+    return current_platform.is_cuda() and topk_tokens in (512, 1024, 2048)
 
 
 def _local_to_global_position(
@@ -701,9 +696,7 @@ def sparse_attn_indexer(
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if _use_persistent_topk_decode(
-            topk_tokens, attn_metadata_narrowed.dcp_world_size
-        ):
+        if _use_persistent_topk_decode(topk_tokens):
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
@@ -714,7 +707,7 @@ def sparse_attn_indexer(
                 topk_indices,
                 topk_workspace,
                 topk_tokens,
-                attn_metadata_narrowed.max_seq_len,
+                decode_metadata.max_seq_len,
             )
         else:
             ops.top_k_per_row_decode(

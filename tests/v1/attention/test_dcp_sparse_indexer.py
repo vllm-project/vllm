@@ -27,8 +27,10 @@ from vllm.model_executor.layers.sparse_attn_indexer import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
     _dcp_local_indexer_seq_lens,
+    _decode_topk_max_seq_len,
     split_indexer_prefill_chunks,
 )
 
@@ -76,14 +78,77 @@ def _local_to_global(local_idx, rank, world_size, interleave):
     return _local_to_global_position(local_idx, rank, world_size, interleave)
 
 
-def test_decode_persistent_topk_disabled_for_dcp(monkeypatch):
+def _make_common_metadata(
+    seq_lens_cpu: torch.Tensor,
+    max_seq_len: int,
+    *,
+    dcp_local_seq_lens_cpu: torch.Tensor | None = None,
+    seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+    exact_seq_lens_cpu: torch.Tensor | None = None,
+) -> CommonAttentionMetadata:
+    num_reqs = seq_lens_cpu.shape[0]
+    query_start_loc_cpu = torch.arange(num_reqs + 1, dtype=torch.int32)
+    return CommonAttentionMetadata(
+        query_start_loc=query_start_loc_cpu,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens_cpu,
+        num_reqs=num_reqs,
+        num_actual_tokens=num_reqs,
+        max_query_len=1,
+        max_seq_len=max_seq_len,
+        block_table_tensor=torch.empty((num_reqs, 1), dtype=torch.int32),
+        slot_mapping=torch.empty(num_reqs, dtype=torch.int64),
+        dcp_local_seq_lens_cpu=dcp_local_seq_lens_cpu,
+        seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+        _seq_lens_cpu=exact_seq_lens_cpu,
+    )
+
+
+def test_decode_persistent_topk_enabled_for_dcp(monkeypatch):
     monkeypatch.setattr(idx_mod.current_platform, "is_cuda", lambda: True)
 
-    assert _use_persistent_topk_decode(512, dcp_world_size=1)
-    assert _use_persistent_topk_decode(1024, dcp_world_size=1)
-    assert _use_persistent_topk_decode(2048, dcp_world_size=1)
-    assert not _use_persistent_topk_decode(256, dcp_world_size=1)
-    assert not _use_persistent_topk_decode(512, dcp_world_size=2)
+    assert _use_persistent_topk_decode(512)
+    assert _use_persistent_topk_decode(1024)
+    assert _use_persistent_topk_decode(2048)
+    assert not _use_persistent_topk_decode(256)
+
+
+def test_decode_topk_max_seq_len_uses_dcp_local_lengths():
+    common = _make_common_metadata(
+        torch.tensor([100, 80, 0], dtype=torch.int32),
+        max_seq_len=100,
+        dcp_local_seq_lens_cpu=torch.tensor([13, 11, 0], dtype=torch.int32),
+    )
+
+    got = _decode_topk_max_seq_len(
+        common,
+        num_decodes=2,
+        compress_ratio=4,
+        dcp_world_size=8,
+        dcp_rank=7,
+        cp_interleave_size=16,
+    )
+
+    assert got == 3
+
+
+def test_decode_topk_max_seq_len_derives_dcp_local_upper_bound():
+    common = _make_common_metadata(
+        torch.tensor([100, 65], dtype=torch.int32),
+        max_seq_len=100,
+        seq_lens_cpu_upper_bound=torch.tensor([100, 65], dtype=torch.int32),
+    )
+
+    got = _decode_topk_max_seq_len(
+        common,
+        num_decodes=2,
+        compress_ratio=1,
+        dcp_world_size=4,
+        dcp_rank=1,
+        cp_interleave_size=8,
+    )
+
+    assert got == 24
 
 
 def test_pack_topk_candidates_preserves_score_bits_and_row_starts():

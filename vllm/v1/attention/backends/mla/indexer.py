@@ -215,6 +215,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     #   - native MTP path: 2D (B, next_n) where [b,j] = L_b - next_n + j + 1
     # Both fp8_fp4_paged_mqa_logits and the topk kernels accept both shapes.
     seq_lens: torch.Tensor
+    max_seq_len: int
     decode_lens: torch.Tensor
     requires_padding: bool
     schedule_metadata: torch.Tensor
@@ -257,6 +258,54 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     # For DeepSeek-V3.2, the max_model_len is 163840.
     #   40 * 163840 * 132 = 865075200 bytes = 825 MB
     return max_model_len * 40
+
+
+def _decode_topk_max_seq_len(
+    common_attn_metadata: CommonAttentionMetadata,
+    num_decodes: int,
+    compress_ratio: int,
+    dcp_world_size: int,
+    dcp_rank: int,
+    cp_interleave_size: int,
+) -> int:
+    """Return host max seq len in the same units as decode top-k seq_lens."""
+    if num_decodes == 0:
+        return 0
+
+    seq_lens_cpu = None
+    is_dcp_local = False
+    if dcp_world_size > 1 and common_attn_metadata.dcp_local_seq_lens_cpu is not None:
+        seq_lens_cpu = common_attn_metadata.dcp_local_seq_lens_cpu[:num_decodes]
+        is_dcp_local = True
+    elif common_attn_metadata._seq_lens_cpu is not None:
+        seq_lens_cpu = common_attn_metadata._seq_lens_cpu[:num_decodes]
+    elif common_attn_metadata.seq_lens_cpu_upper_bound is not None:
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound[:num_decodes]
+
+    if seq_lens_cpu is not None:
+        if dcp_world_size > 1 and not is_dcp_local:
+            seq_lens_cpu = get_dcp_local_seq_lens(
+                seq_lens_cpu,
+                dcp_world_size,
+                dcp_rank,
+                cp_interleave_size,
+            )
+        max_seq_len = int(seq_lens_cpu.max().item())
+    elif dcp_world_size > 1:
+        max_seq_len = int(
+            get_dcp_local_seq_lens(
+                torch.tensor([common_attn_metadata.max_seq_len], dtype=torch.int32),
+                dcp_world_size,
+                dcp_rank,
+                cp_interleave_size,
+            ).item()
+        )
+    else:
+        max_seq_len = common_attn_metadata.max_seq_len
+
+    if compress_ratio > 1:
+        max_seq_len //= compress_ratio
+    return max(max_seq_len, 0)
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
@@ -704,6 +753,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.expanded_seq_lens_buffer[num_decodes:num_decode_tokens] = 0
                     seq_lens = self.expanded_seq_lens_buffer[:num_decode_tokens]
 
+            max_seq_len = _decode_topk_max_seq_len(
+                common_attn_metadata,
+                num_decodes,
+                self.compress_ratio,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.cp_kv_cache_interleave_size,
+            )
+
             # Non-MTP: deep_gemm paged MQA logits requires 2D context_lens
             # (csrc/apis/attention.hpp). Unsqueeze to (B, 1) so downstream
             # kernels see the same (B, next_n) layout as the MTP path.
@@ -721,6 +779,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
                 seq_lens=seq_lens,
+                max_seq_len=max_seq_len,
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
