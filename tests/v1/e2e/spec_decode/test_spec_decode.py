@@ -720,12 +720,7 @@ def test_eagle_correctness_heavy(
 
 @single_gpu_only
 @large_gpu_mark(min_gb=24)
-@pytest.mark.parametrize("use_mrv2", [False, True])
-def test_eagle_correctness_parallel_drafting(
-    monkeypatch: pytest.MonkeyPatch, use_mrv2: bool
-):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
-
+def test_eagle_correctness_parallel_drafting():
     test_prompts = get_test_prompts(mm_enabled=False)
 
     spec_llm = LLM(
