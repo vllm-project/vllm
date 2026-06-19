@@ -1381,3 +1381,31 @@ class TestDetectMergeInlineSystem:
     def test_no_template_defaults_merge(self):
         """No chat_template → conservative default: merge."""
         assert AnthropicServingMessages._detect_merge_inline_system(None) is True
+
+    def test_glm_template_does_not_merge(self):
+        """GLM accepts mid-conversation system messages, so the resolved
+        template must not trigger the merge path.
+
+        Regression test for the case where a client (e.g. Claude Code)
+        appends a trailing ``system`` message to the ``messages`` array.
+        With ``--chat-template`` unset the old code defaulted to merging
+        (because the arg is ``None``), which hoisted the trailing system
+        into the leading block and broke prefix caching. Resolving the
+        model's own template shows it accepts mid-conversation system
+        messages, so ``_merge_inline_system`` must be ``False``.
+        """
+        glm_template = (
+            "{%- set ns = namespace(last_user_index=-1) -%}"
+            "{%- for m in messages %}"
+            "{%- if m.role == 'user' %}"
+            "{%- set ns.last_user_index = loop.index0 -%}"
+            "{%- endif %}"
+            "{%- endfor %}"
+            "{%- for m in messages %}"
+            "{%- if m.role == 'system' %}\n{{ m.content }}"
+            "{%- endif %}"
+            "{%- endfor %}"
+        )
+        assert AnthropicServingMessages._detect_merge_inline_system(
+            glm_template
+        ) is False
