@@ -23,7 +23,7 @@ on:
     inputs:
       pytorch_index:
         description: 'PyTorch index URL (only needed for build-time torch import)'
-        default: 'https://rocm.nightlies.amd.com/v2-staging/gfx1151'
+        default: 'https://rocm.nightlies.amd.com/whl-multi-arch'
         required: false
       flash_attn_repo:
         description: 'Flash Attention repository URL'
@@ -39,7 +39,7 @@ on:
         required: false
 
 env:
-  PYTORCH_INDEX_URL: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/v2-staging/gfx1151' }}
+  PYTORCH_INDEX_URL: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/whl-multi-arch' }}
   FLASH_ATTN_REPO: ${{ github.event.inputs.flash_attn_repo || 'https://github.com/ROCm/flash-attention' }}
   FLASH_ATTN_REF: ${{ github.event.inputs.flash_attn_ref || 'main' }}
   # Enable Triton backend - this skips CK compilation and makes the wheel arch-agnostic
@@ -179,7 +179,7 @@ jobs:
 
             ### Installation
             ```bash
-            pip install torch --extra-index-url https://rocm.nightlies.amd.com/v2-staging/gfx1151
+            pip install torch --extra-index-url https://rocm.nightlies.amd.com/whl-multi-arch
             pip install flash-attn --extra-index-url https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/wheels
             ```
 
@@ -289,7 +289,7 @@ jobs:
               <p>Pre-built wheels for AMD ROCm (gfx11 / Strix Halo / RDNA3+)</p>
               <p><em>Generated: {datetime.now().isoformat()}</em></p>
               <h2>Installation</h2>
-              <pre>pip install torch --extra-index-url https://rocm.nightlies.amd.com/v2-staging/gfx1151
+              <pre>pip install torch --extra-index-url https://rocm.nightlies.amd.com/whl-multi-arch
           pip install vllm --extra-index-url {BASE_URL}</pre>
               <h2>Available Packages</h2>
           """

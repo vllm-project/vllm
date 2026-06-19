@@ -116,10 +116,9 @@ jobs:
           # torchvision/torchaudio pins sharing the same +rocm build-date
           # suffix. Without this, the vllm wheel's `torch==2.11.0` dep is
           # satisfied by the vanilla PyPI wheel (PyTorch 2.11.0+cu130,
-          # HIP: None), and tests fail to find any GPU. Pin the +rocm
-          # build-date to match the build workflow: the 20260612 nightly
-          # segfaults on `import torch`.
-          echo 'torch==2.11.0+rocm7.14.0a20260608' > constraints.in
+          # HIP: None), and tests fail to find any GPU. See the build
+          # workflow for the same trick.
+          echo 'torch==2.11.*' > constraints.in
           uv pip compile constraints.in \
             --index-url ${{ env.PYTORCH_INDEX_URL }} \
             --prerelease allow \
@@ -132,9 +131,15 @@ jobs:
           cat constraints.txt
           uv pip install --system \
             -c constraints.txt \
-            dist/*.whl \
-            pytest pytest-timeout numpy \
-            tblib transformers huggingface_hub sentencepiece pillow \
+            "$(echo dist/vllm-*.whl)[device-gfx1151]" \
+            "huggingface_hub" \
+            "numpy" \
+            "pillow" \
+            "pytest" \
+            "pytest-timeout" \
+            "sentencepiece" \
+            "tblib" \
+            "transformers" \
             --index-url ${{ env.PYTORCH_INDEX_URL }} \
             --extra-index-url https://pypi.org/simple/ \
             --index-strategy unsafe-best-match \

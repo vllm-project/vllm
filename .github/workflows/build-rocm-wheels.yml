@@ -11,15 +11,15 @@ on:
     inputs:
       pytorch_index:
         description: 'PyTorch index URL for ROCm nightly wheels'
-        default: 'https://rocm.nightlies.amd.com/v2-staging/gfx1151'
+        default: 'https://rocm.nightlies.amd.com/whl-multi-arch'
         required: false
       rocm_arch:
-        description: 'ROCm architecture (e.g., gfx1151, gfx1150;gfx1151)'
+        description: 'ROCm architecture (e.g., gfx1103;gfx1150;gfx1151)'
         default: 'gfx1103;gfx1150;gfx1151'
         required: false
 
 env:
-  PYTORCH_INDEX_URL: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/v2-staging/gfx1151' }}
+  PYTORCH_INDEX_URL: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/whl-multi-arch' }}
   PYTORCH_ROCM_ARCH: ${{ github.event.inputs.rocm_arch || 'gfx1103;gfx1150;gfx1151' }}
   CI_IMAGE: ghcr.io/rocm/vllm/gfx11-ci:latest
 
@@ -55,13 +55,11 @@ jobs:
           # Resolve torch on the ROCm nightly index, then derive matching
           # torchvision/torchaudio pins. The nightly publishes multiple
           # base versions side-by-side (2.9, 2.10, 2.11, 2.12); pin to
-          # 2.11 to match requirements/build/rocm.txt. Pin the +rocm
-          # build-date too: the 20260612 nightly segfaults on `import
-          # torch`, so floating to the latest breaks the build/test jobs.
-          # The three packages must share the same +rocm build-date suffix
-          # or they ABI-mismatch at import ("operator torchvision::nms does
-          # not exist").
-          echo 'torch==2.11.0+rocm7.14.0a20260608' > constraints.in
+          # 2.11 to match requirements/build/rocm.txt. The three packages
+          # must share the same +rocm build-date suffix or they
+          # ABI-mismatch at import ("operator torchvision::nms does not
+          # exist").
+          echo 'torch==2.11.*' > constraints.in
           # --no-deps: torch pins exact rocm[libraries]/triton versions
           # in its metadata (e.g. rocm[libraries]==7.14.0a..., triton==
           # 3.7.0+rocm...); we don't want those locked in constraints.
@@ -83,9 +81,13 @@ jobs:
           # indexes and let the +rocm constraint pick the nightly wheel.
           # --prerelease=allow: rocm-sdk transitive deps are alpha-tagged
           # nightlies (e.g. rocm==7.14.0a20260518).
+          # shellcheck disable=SC2046
+          DEVICE_EXTRAS=$(printf "device-%s," $(echo "$PYTORCH_ROCM_ARCH" | tr ';' ' '))
           uv pip install --system \
             -c constraints.txt \
             "rocm[devel,libraries]" \
+            "torch[${DEVICE_EXTRAS%,}]" \
+            "torchvision[${DEVICE_EXTRAS%,}]" \
             -r requirements/build/rocm.txt \
             --index-url ${{ env.PYTORCH_INDEX_URL }} \
             --extra-index-url https://pypi.org/simple/ \
@@ -156,7 +158,7 @@ jobs:
       test_name: correctness
       runs_on: linux-strix-halo-gpu-rocm-oem
       ci_image: ghcr.io/rocm/vllm/gfx11-ci:latest
-      pytorch_index: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/v2-staging/gfx1151' }}
+      pytorch_index: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/whl-multi-arch' }}
       timeout: 300
       pytest_args: >-
         tests/kernels/moe/test_exllama_moe.py
@@ -180,7 +182,7 @@ jobs:
       test_name: performance
       runs_on: linux-strix-halo-gpu-rocm-noneng
       ci_image: ghcr.io/rocm/vllm/gfx11-ci:latest
-      pytorch_index: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/v2-staging/gfx1151' }}
+      pytorch_index: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/whl-multi-arch' }}
       timeout: 300
       pytest_args: >-
         tests/kernels/quantization/test_hybrid_w4a16_perf.py
