@@ -12,7 +12,6 @@ For sparse MLA:
 - sparse_mla_top_k parameter must be set to the topk value
 """
 
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
@@ -50,8 +49,6 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
 logger = init_logger(__name__)
-
-FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE = 2048 * 1024 * 1024
 
 
 class FlashInferMLASparseBackend(AttentionBackend):
@@ -246,8 +243,6 @@ def _get_workspace_buffer(device: torch.device) -> torch.Tensor:
     global _fi_sparse_workspace
     if _fi_sparse_workspace is None:
         buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
-        if "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE" not in os.environ:
-            buffer_size = max(buffer_size, FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE)
         _fi_sparse_workspace = torch.zeros(
             buffer_size,
             dtype=torch.uint8,
