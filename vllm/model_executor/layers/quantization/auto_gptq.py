@@ -61,7 +61,6 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
-from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
@@ -670,9 +669,6 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             "W8A8-INT8 is not supported by marlin kernel."
         )
 
-        # CPU int_wna16 can't handle ZP correctly.
-        is_cpu = current_platform.is_cpu()
-
         (
             w13,
             w2,
@@ -701,8 +697,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w2_g_idx=layer.w2_g_idx,
             w13_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
-            w13_qzeros=getattr(layer, "w13_qzeros", None) if not is_cpu else None,
-            w2_qzeros=getattr(layer, "w2_qzeros", None) if not is_cpu else None,
+            w13_qzeros=getattr(layer, "w13_qzeros", None),
+            w2_qzeros=getattr(layer, "w2_qzeros", None),
         )
 
         replace_parameter(layer, "w13_qweight", w13)
