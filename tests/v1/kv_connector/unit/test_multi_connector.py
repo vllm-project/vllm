@@ -180,9 +180,6 @@ def test_multi_example_connector_consistency(monkeypatch):
     Tests that MultiConnector with two ExampleConnectors saves
     identical KV cache data to separate storage locations.
     """
-    if current_platform.is_rocm():
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-
     storage_1_path = Path("storage_1/")
     storage_2_path = Path("storage_2/")
     shutil.rmtree(storage_1_path, ignore_errors=True)
@@ -223,6 +220,7 @@ def test_multi_example_connector_consistency(monkeypatch):
         enforce_eager=True,
         gpu_memory_utilization=0.5,
         kv_transfer_config=kv_transfer_config,
+        async_scheduling=(not current_platform.is_rocm()),
     )
     # Run generation - this should trigger saving KV cache
     # Use a single prompt to avoid race conditions depending on the order of scheduling

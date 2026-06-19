@@ -111,15 +111,6 @@ steps:
       timeout_in_minutes: 60
       depends_on:
       - image-build-amd
-      source_file_dependencies:
-      - vllm/
-      - tests/v1/core
-      - tests/v1/executor
-      - tests/v1/kv_offload
-      - tests/v1/worker
-      - tests/v1/kv_connector/unit
-      - tests/v1/metrics
-      - tests/entrypoints/openai/correctness/test_lmeval.py
 
 - label: V1 Others (CPU)
   key: v1-others-cpu

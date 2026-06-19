@@ -238,10 +238,6 @@ def test_cpu_offloading(
     """
     Tests OffloadingConnector with CPUOffloadingSpec.
     """
-    if current_platform.is_rocm():
-        # TODO: Remove once MRV2 supports cross layer KV Cache.
-        # See https://github.com/vllm-project/vllm/pull/45947
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     # configure OffloadingConnector (spec_name=CPUOffloadingSpec by default)
     extra_config: dict = {"cpu_bytes_to_use": 500 << 20}
     if cpu_block_size is not None:
@@ -295,7 +291,10 @@ def test_cpu_offloading(
         subscriber = MockSubscriber(events_endpoint, topic=kv_events_config.topic)
 
     try:
-        _latency_test(llm, subscriber)
+        if not current_platform.is_rocm():
+            # TODO: Reintroduce latency test on ROCm once MRV2 supports cross
+            # layer KV Cache. See https://github.com/vllm-project/vllm/pull/45947
+            _latency_test(llm, subscriber)
         _accuracy_test(llm, subscriber)
     finally:
         if subscriber is not None:
@@ -450,10 +449,6 @@ def test_cpu_offloading_metrics() -> None:
 
 def test_tiering_offloading(monkeypatch) -> None:
     """Tests OffloadingConnector with TieringOffloadingSpec."""
-    if current_platform.is_rocm():
-        # TODO: Remove once MRV2 supports cross layer KV Cache.
-        # See https://github.com/vllm-project/vllm/pull/45947
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     extra_config: dict = {
         "cpu_bytes_to_use": 500 << 20,
         "block_size": CPU_BLOCK_SIZES,
@@ -490,7 +485,10 @@ def test_tiering_offloading(monkeypatch) -> None:
         topic=kv_events_config.topic,
     )
     try:
-        _latency_test(llm, subscriber)
+        if not current_platform.is_rocm():
+            # TODO: Reintroduce latency test on ROCm once MRV2 supports cross
+            # layer KV Cache. See https://github.com/vllm-project/vllm/pull/45947
+            _latency_test(llm, subscriber)
         _accuracy_test(llm, subscriber)
     finally:
         subscriber.close()
@@ -500,10 +498,6 @@ def test_tiering_offloading(monkeypatch) -> None:
 def test_fs_tiering_offloading(tmp_path, monkeypatch) -> None:
     """Tests OffloadingConnector with TieringOffloadingSpec
     + fs secondary tier."""
-    if current_platform.is_rocm():
-        # TODO: Remove once MRV2 supports cross layer KV Cache.
-        # See https://github.com/vllm-project/vllm/pull/45947
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
     extra_config: dict = {
         "cpu_bytes_to_use": 1 << 30,
         "block_size": CPU_BLOCK_SIZES,
@@ -540,7 +534,10 @@ def test_fs_tiering_offloading(tmp_path, monkeypatch) -> None:
         topic=kv_events_config.topic,
     )
     try:
-        _latency_test(llm, subscriber)
+        if not current_platform.is_rocm():
+            # TODO: Reintroduce latency test on ROCm once MRV2 supports cross
+            # layer KV Cache. See https://github.com/vllm-project/vllm/pull/45947
+            _latency_test(llm, subscriber)
         _accuracy_test(llm, subscriber)
     finally:
         subscriber.close()
