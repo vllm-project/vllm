@@ -365,10 +365,15 @@ def test_wer_correctness(
 # checks for long audio transcription correctness and RMS split.
 @pytest.mark.parametrize(
     "model_config",
-    [("openai/whisper-large-v3", 9.5)],
+    # (model_name, expected_wer, use_vad)
+    [
+        ("openai/whisper-large-v3", 9.5, False),
+        # using VAD improves the WER from 9.5 to 8.22
+        ("openai/whisper-large-v3", 8.22, True),
+    ],
 )
 def test_long_audio_wer_correctness(model_config):
-    model_name, expected_wer = model_config
+    model_name, expected_wer, use_vad = model_config
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_name)
     server_args = [
         f"--tokenizer_mode={model_info.tokenizer_mode}",
@@ -389,11 +394,13 @@ def test_long_audio_wer_correctness(model_config):
     ) as remote_server:
         dataset = load_longform_dataset()
         client = remote_server.get_async_client()
+        extra_body = {"vad_config.enabled": use_vad}
         wer = run_longform_evaluation(
             model=model_name,
             client=client,
             dataset=dataset,
             max_concurrent_reqs=LONGFORM_NUM_SAMPLES,
+            extra_body=extra_body,
         )
 
     print(f"Expected WER: {expected_wer}, Actual WER: {wer}")
