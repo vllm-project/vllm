@@ -588,9 +588,23 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         self.fp8_decode_padded_heads = self._compute_fp8_decode_padded_heads(num_heads)
 
         vllm_config = get_current_vllm_config()
-        self.cp_interleave = (
-            vllm_config.parallel_config.cp_kv_cache_interleave_size
-        )
+        self.cp_interleave = vllm_config.parallel_config.cp_kv_cache_interleave_size
+        # Sparse MLA DCP shards the indexer's top-k selection across DCP ranks
+        # and assumes token-interleaved KV layout (CP_INTERLEAVE == 1: rank r
+        # owns global positions {r, r+N, ...}). The local->global remap in the
+        # distributed top-k merge and the per-rank seq_lens formula are only
+        # correct under that layout. Fail closed rather than silently producing
+        # a wrong global top-k; the slot conversion itself is general (mirrors
+        # block_table.py) but the indexer merge is not.
+        if self.dcp_world_size > 1 and self.cp_interleave != 1:
+            raise ValueError(
+                "Sparse MLA with Decode Context Parallelism currently "
+                "requires cp_kv_cache_interleave_size == 1, but got "
+                f"{self.cp_interleave}. The distributed top-k merge and "
+                "per-rank seq_lens assume token-interleaved KV sharding. "
+                "Set --cp-kv-cache-interleave-size 1 (the default) or "
+                "disable DCP."
+            )
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         q_concat_shape = (max_tokens, num_heads, head_size)
         if is_quantized_kv_cache(kv_cache_dtype):
