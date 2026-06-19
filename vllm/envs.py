@@ -182,6 +182,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES: bool = True
     VLLM_ENABLE_DEEPSEEK_V4_SPARSE_MLA_WARMUP: bool = True
     VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL: bool = True
+    VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS: int = 4096
     VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_WARMUP: bool = True
     VLLM_DEEPSEEK_V4_INDEXED_D512_CHUNKED_PREFILL: bool = True
     VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE: bool = False
@@ -1470,6 +1471,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL": lambda: bool(
         int(os.getenv("VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL", "1"))
+    ),
+    # Minimum prefill sequence length to admit a row to the indexed-D512 fast
+    # prefill path. Lower = more (shorter / early-chunk) prefills use the fast
+    # kernel. 4096 measured +9-59% short/medium-prefill tok/s (biggest at the
+    # 4-8k band), GSM8K-clean and KV-cache-neutral on SM12x; set 8192 to revert
+    # to the prior conservative threshold.
+    "VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS": lambda: int(
+        os.getenv("VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS", "4096")
     ),
     # Pre-compile the D512-split sparse-MLA prefill Triton kernels at startup
     # (one per 128-aligned combined_topk in [256, 1152]) so the first long
