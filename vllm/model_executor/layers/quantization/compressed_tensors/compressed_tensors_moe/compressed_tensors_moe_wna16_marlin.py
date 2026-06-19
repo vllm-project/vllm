@@ -100,6 +100,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             WNA16MoEBackend.MARLIN,
             WNA16MoEBackend.BATCHED_MARLIN,
         ]
+        self.is_transposed = self.wna16_backend != WNA16MoEBackend.FLASHINFER_TRTLLM
 
     def get_weight_shape(
         self,
@@ -183,7 +184,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 ),
             },
         }
-        backend_key = "Marlin" if self.is_marlin else "Flashinfer"
+        backend_key = "Marlin" if self.is_transposed else "Flashinfer"
         return shape_map[weight_name][backend_key]
 
     def create_weights(
@@ -201,7 +202,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
         extra_weight_attrs.update(
-            {"is_transposed": self.is_marlin, "quant_method": self.strategy}
+            {"is_transposed": self.is_transposed, "quant_method": self.strategy}
         )
 
         w13_weight = torch.nn.Parameter(
