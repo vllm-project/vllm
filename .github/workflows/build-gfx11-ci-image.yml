@@ -2,15 +2,6 @@ name: Build gfx11 CI image
 
 on:
   workflow_dispatch:
-    inputs:
-      rocm_nightly_index:
-        description: 'ROCm nightly wheel index URL'
-        default: 'https://rocm.nightlies.amd.com/v2/gfx1151'
-        required: false
-      pytorch_version:
-        description: 'PyTorch version to pre-install'
-        default: '2.10.0'
-        required: false
   push:
     branches: [gfx11]
     paths:
@@ -71,8 +62,5 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          build-args: |
-            ROCM_NIGHTLY_INDEX=${{ github.event.inputs.rocm_nightly_index || 'https://rocm.nightlies.amd.com/v2/gfx1151' }}
-            PYTORCH_VERSION=${{ github.event.inputs.pytorch_version || '2.10.0' }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

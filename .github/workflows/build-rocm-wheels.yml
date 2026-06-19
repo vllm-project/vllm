@@ -95,6 +95,11 @@ jobs:
             --prerelease allow
           # rocm-sdk-devel ships a tarball that must be unpacked after install
           rocm-sdk init
+          # Stash constraints.txt for the test workflow so it pins the same
+          # torch/torchvision/torchaudio +rocm build that the wheel was built
+          # against. Lives next to the wheel in the uploaded artifact.
+          mkdir -p dist
+          cp constraints.txt dist/
 
       - name: Expose GitHub Actions cache env vars
         uses: actions/github-script@v7
@@ -147,7 +152,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: vllm-rocm-wheel
-          path: dist/*.whl
+          path: |
+            dist/*.whl
+            dist/constraints.txt
           retention-days: 90
 
   test-kernels-correctness:
