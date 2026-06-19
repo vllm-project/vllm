@@ -29,8 +29,12 @@ from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
 
 
 class FlashAttnMLASparseBackend(AttentionBackend):
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16"]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "float16",
+        "bfloat16",
+    ]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -77,8 +81,10 @@ class FlashAttnMLASparseBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        if kv_cache_dtype not in (None, "auto", "bfloat16"):
-            return "FlashAttention MLA Sparse currently supports only BF16 KV cache"
+        if kv_cache_dtype not in (None, "auto", "float16", "bfloat16"):
+            return (
+                "FlashAttention MLA Sparse currently supports only FP16/BF16 KV cache"
+            )
 
         if not flash_attn_supports_mla():
             return "FlashAttention MLA not supported on this device"
@@ -205,9 +211,9 @@ class FlashAttnMLASparseImpl(SparseMLAAttentionImpl[FlashAttnMLASparseMetadata])
                 "FlashAttnMLASparseImpl does not support alibi, sliding window, "
                 "or logits soft cap."
             )
-        if kv_cache_dtype not in ("auto", "bfloat16"):
+        if kv_cache_dtype not in ("auto", "float16", "bfloat16"):
             raise NotImplementedError(
-                "FlashAttnMLASparseImpl currently supports only BF16 KV cache."
+                "FlashAttnMLASparseImpl currently supports only FP16/BF16 KV cache."
             )
 
         self.num_heads = num_heads
