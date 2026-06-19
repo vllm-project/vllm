@@ -97,7 +97,8 @@ LONG_WAIT_TIME_LOG_MSG = (
     "in %d seconds. This typically happens "
     "when some processes are hanging or doing some "
     "time-consuming work (e.g. compilation, "
-    "weight/kv cache quantization)."
+    "weight/kv cache quantization), or when a GPU device "
+    "error (e.g. device lost) has occurred on a peer worker."
 )
 
 
