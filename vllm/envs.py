@@ -121,6 +121,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
+    VLLM_ROCM_USE_AITER_MXFP8_MOE: bool = False
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
@@ -1148,6 +1149,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MOE", "True").lower() in ("true", "1")
+    ),
+    # Auto-select AITER's FlyDSL two-stage MXFP8 MoE (gfx950) instead of the
+    # native dot_scaled path. Independent of the VLLM_ROCM_USE_AITER master
+    # switch (which pulls in unrelated aiter ops); ``--moe-backend aiter``
+    # selects it explicitly without this flag.
+    "VLLM_ROCM_USE_AITER_MXFP8_MOE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MXFP8_MOE", "False").lower() in ("true", "1")
     ),
     # MoE sorting dispatch policy for AITER fused MoE kernels.
     #   0 = auto (default): single-pass for small batches, multi-pass

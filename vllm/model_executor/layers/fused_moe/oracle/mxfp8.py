@@ -28,6 +28,7 @@ _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "deep_gemm": Fp8MoeBackend.DEEPGEMM,
     "marlin": Fp8MoeBackend.MARLIN,
     "xpu": Fp8MoeBackend.XPU,
+    "aiter": Fp8MoeBackend.AITER_MXFP8,
 }
 
 
@@ -46,6 +47,12 @@ def _mxfp8_backend_to_kernel_cls(
         )
 
         return [DeepGemmExperts]
+    if backend == Fp8MoeBackend.AITER_MXFP8:
+        from vllm.model_executor.layers.fused_moe.experts.flydsl_mxfp8_moe import (
+            FlydslMxfp8Experts,
+        )
+
+        return [FlydslMxfp8Experts]
     return backend_to_kernel_cls(backend)
 
 
@@ -78,6 +85,20 @@ def _select_kernel_cls(
 
 def _select_rocm_mxfp8_backend() -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
     """ROCm fallback when vendor MXFP8 backends are unavailable."""
+
+    # Auto: select the aiter FlyDSL MoE when VLLM_ROCM_USE_AITER_MXFP8_MOE is set,
+    # else native. ``--moe-backend aiter`` selects it explicitly without the env.
+    # Neither needs the VLLM_ROCM_USE_AITER master switch (which pulls in unrelated
+    # aiter ops that conflict on MiniMax-M3).
+    import vllm.envs as envs
+    from vllm.model_executor.layers.fused_moe.experts.flydsl_mxfp8_moe import (
+        FlydslMxfp8Experts,
+        is_flydsl_mxfp8_moe_available,
+    )
+
+    if envs.VLLM_ROCM_USE_AITER_MXFP8_MOE and is_flydsl_mxfp8_moe_available():
+        logger.info_once("Using AITER FlyDSL two-stage MXFP8 MoE backend (gfx950).")
+        return Fp8MoeBackend.AITER_MXFP8, FlydslMxfp8Experts
 
     if current_platform.supports_mx():
         from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (

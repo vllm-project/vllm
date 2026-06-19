@@ -59,6 +59,8 @@ class Fp8MoeBackend(Enum):
     # (gfx950) native MX matrix-core ops. Weights stay in MXFP8 (no load-time
     # format conversion); the FP8 values + E8M0 scales are consumed directly.
     NATIVE_MXFP8 = "NATIVE_MXFP8"
+    # MXFP8 MoE via AITER (FlyDSL two-stage grouped GEMM) on gfx950.
+    AITER_MXFP8 = "AITER_MXFP8"
 
 
 def _get_priority_backends(
@@ -413,6 +415,22 @@ def convert_to_fp8_moe_kernel_format(
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
+    elif fp8_backend == Fp8MoeBackend.AITER_MXFP8:
+        # Preshuffle into AITER's FlyDSL layout (per aiter's test_moe_2stage):
+        # interleaved scale shuffle for the gate/up weight, plain for the down
+        # weight (the interleaved variant is gate/up-only and misaligns w2).
+        from aiter.ops.shuffle import shuffle_scale, shuffle_weight
+
+        num_experts = w13.shape[0]
+        w13 = shuffle_weight(w13, is_guinterleave=True, gate_up=True)
+        w2 = shuffle_weight(w2, is_guinterleave=True, gate_up=False)
+        w13_scale = shuffle_scale(
+            w13_scale.reshape(-1, w13_scale.shape[-1]),
+            num_experts,
+            is_guinterleave=True,
+            gate_up=True,
+        )
+        w2_scale = shuffle_scale(w2_scale.reshape(-1, w2_scale.shape[-1]))
     elif fp8_backend == Fp8MoeBackend.MARLIN:
         weight_block_size = getattr(layer, "weight_block_size", None)
         if weight_block_size == [1, 32]:
