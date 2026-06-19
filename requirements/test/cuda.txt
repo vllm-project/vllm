@@ -604,9 +604,9 @@ numpy==2.2.6
     #   xgrammar
 nvidia-cublas==13.1.0.3
     # via
-    #   cuda-toolkit
     #   nvidia-cudnn-cu13
     #   nvidia-cusolver
+    #   torch
 nvidia-cuda-cupti==13.0.85
     # via cuda-toolkit
 nvidia-cuda-nvrtc==13.0.88
