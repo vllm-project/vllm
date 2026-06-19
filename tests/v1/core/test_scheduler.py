@@ -144,36 +144,41 @@ def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
     assert req.request_id in output.num_scheduled_tokens
 
 
-def test_cached_request_data_resumed_all_token_ids_async():
-    """Under async scheduling, a resumed request's all_token_ids must carry
-    only its output tokens (what the runner restores via
-    resumed_token_ids[-num_output_tokens:]), not the full prompt history.
+def test_cached_request_data_resumed_all_token_ids_mrv1_only():
+    """all_token_ids carries a resumed request's token ids to the connector
+    for the V1 model runner, but is skipped entirely for the V2 model runner.
     """
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 
-    scheduler = create_scheduler(async_scheduling=True)
-    scheduler.scheduler_config.async_scheduling = True
+    scheduler = create_scheduler()
     (req,) = create_requests(num_requests=1, num_tokens=8)
-
-    output_tokens = [101, 102, 103]
-    req.append_output_token_ids(output_tokens)
+    req.append_output_token_ids([101, 102, 103])
 
     # A resumed request was not scheduled in the previous step.
     assert req.request_id not in scheduler.prev_step_scheduled_req_ids
 
     empty_blocks = KVCacheBlocks(blocks=((),))
-    cached = scheduler._make_cached_request_data(
-        running_reqs=[],
-        resumed_reqs=[req],
-        num_scheduled_tokens={req.request_id: 1},
-        spec_decode_tokens={},
-        req_to_new_blocks={req.request_id: empty_blocks},
-    )
 
+    def make_cached():
+        return scheduler._make_cached_request_data(
+            running_reqs=[],
+            resumed_reqs=[req],
+            num_scheduled_tokens={req.request_id: 1},
+            spec_decode_tokens={},
+            req_to_new_blocks={req.request_id: empty_blocks},
+        )
+
+    # V1 model runner: the full token id list is propagated.
+    assert not scheduler.use_v2_model_runner
+    cached = make_cached()
     assert req.request_id in cached.resumed_req_ids
-    sent = cached.all_token_ids[req.request_id]
-    assert sent == output_tokens
-    assert len(sent) < len(req._all_token_ids)
+    assert cached.all_token_ids[req.request_id] == req.all_token_ids
+
+    # V2 model runner: all_token_ids is skipped entirely.
+    scheduler.use_v2_model_runner = True
+    cached = make_cached()
+    assert req.request_id in cached.resumed_req_ids
+    assert cached.all_token_ids == {}
 
 
 def test_schedule_partial_requests():
@@ -2949,11 +2954,13 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv(
 
     # Preempted request resumed in scheduled_cached_reqs
     assert len(scheduled_cached_reqs.resumed_req_ids) == 1
-    # all_token_ids is only populated in async scheduling mode (V1 only).
-    # This scheduler uses the default (non-async) config, so it is empty.
-    assert len(scheduled_cached_reqs.all_token_ids) == 0
+    assert len(scheduled_cached_reqs.all_token_ids) == 1
     assert scheduled_cached_reqs.req_ids[0] == request_low.request_id
     assert request_low.request_id in scheduled_cached_reqs.resumed_req_ids
+    assert request_low.request_id in scheduled_cached_reqs.all_token_ids
+    # Resumed tokens include 30 prompt tokens and 2 decoded tokens
+    assert len(scheduled_cached_reqs.all_token_ids[request_low.request_id]) == 32
+    assert scheduled_cached_reqs.all_token_ids[request_low.request_id][31] == 100
 
 
 @pytest.mark.parametrize(
@@ -3801,11 +3808,13 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
 
     # Preempted request resumed in scheduled_cached_reqs
     assert len(scheduled_cached_reqs.resumed_req_ids) == 1
-    # all_token_ids is only populated in async scheduling mode (V1 only).
-    # This scheduler uses the default (non-async) config, so it is empty.
-    assert len(scheduled_cached_reqs.all_token_ids) == 0
+    assert len(scheduled_cached_reqs.all_token_ids) == 1
     assert scheduled_cached_reqs.req_ids[0] == request_low.request_id
     assert request_low.request_id in scheduled_cached_reqs.resumed_req_ids
+    assert request_low.request_id in scheduled_cached_reqs.all_token_ids
+    ## Resumed tokens include 94 prompt tokens and 2 decoded tokens
+    assert len(scheduled_cached_reqs.all_token_ids[request_low.request_id]) == 96
+    assert scheduled_cached_reqs.all_token_ids[request_low.request_id][95] == 100
     assert scheduler.running[0].request_id == request_low.request_id
     assert request_high.request_id in output.finished_req_ids
 

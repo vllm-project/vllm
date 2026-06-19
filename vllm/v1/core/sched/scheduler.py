@@ -101,6 +101,7 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids_dict: dict[int, set[str]] | None = (
             defaultdict(set) if include_finished_set else None
         )
+        # Track requests scheduled in prior step (MRV1-only).
         self.prev_step_scheduled_req_ids: set[str] = set()
 
         # Scheduling constraints.
@@ -1010,8 +1011,8 @@ class Scheduler(SchedulerInterface):
 
         # Construct the scheduler output.
         if self.use_v2_model_runner:
-            scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
-            scheduled_resumed_reqs = []
+            scheduled_new_reqs.extend(scheduled_resumed_reqs)
+            scheduled_resumed_reqs.clear()
             new_reqs_data = [
                 NewRequestData.from_request(
                     req,
@@ -1037,9 +1038,10 @@ class Scheduler(SchedulerInterface):
                 req_to_new_blocks,
             )
 
-        # Record the request ids that were scheduled in this step.
-        self.prev_step_scheduled_req_ids.clear()
-        self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
+        # Record the request ids that were scheduled in this step (MRV1-only).
+        if not self.use_v2_model_runner:
+            self.prev_step_scheduled_req_ids.clear()
+            self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
         new_block_ids_to_zero = (
             (self.kv_cache_manager.take_new_block_ids() or None)
@@ -1252,24 +1254,11 @@ class Scheduler(SchedulerInterface):
                     req.num_computed_tokens : req.num_computed_tokens + num_tokens
                 ]
                 new_token_ids.append(token_ids)
-            scheduled_in_prev_step = req_id in self.prev_step_scheduled_req_ids
             if idx >= num_running_reqs:
-                assert not scheduled_in_prev_step
                 resumed_req_ids.add(req_id)
-            # all_token_ids is only read by the V1 model runner, to restore a
-            # resumed request's output tokens under async scheduling. Skip it
-            # for the V2 runner and when async scheduling is off. A request
-            # resumed here was not scheduled in the previous step, so it has no
-            # in-flight placeholder tokens, and we only need its output tokens.
-            if (
-                not self.use_v2_model_runner
-                and not scheduled_in_prev_step
-                and self.scheduler_config.async_scheduling
-            ):
-                assert req.num_output_placeholders == 0
-                num_out = req.num_output_tokens
-                if num_out > 0:
-                    all_token_ids[req_id] = req._all_token_ids[-num_out:]
+            if not self.use_v2_model_runner:  # noqa: SIM102
+                if req_id not in self.prev_step_scheduled_req_ids:
+                    all_token_ids[req_id] = req.all_token_ids.copy()
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
