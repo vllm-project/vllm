@@ -946,7 +946,9 @@ class OAITritonExperts(BaseOAITritonExperts):
             self.quant_config: FusedMoEQuantConfig = FUSED_MOE_UNQUANTIZED_CONFIG
 
         if expert_map is not None:
-            topk_ids = expert_map[topk_ids]
+            # Preserve -1 (invalid / non-local slots, e.g. from EP dispatch):
+            # expert_map[-1] would wrap to a valid local id and misroute it.
+            topk_ids = torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
@@ -1091,7 +1093,11 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
 
         global_topk_ids = topk_ids
         if expert_map is not None:
-            topk_ids = expert_map[topk_ids]
+            # Preserve -1 (invalid / non-local slots, e.g. from EP dispatch):
+            # a plain expert_map[topk_ids] would wrap -1 to expert_map[-1] (a
+            # valid local id) and misroute it. make_routing_data treats -1 as
+            # the skip sentinel.
+            topk_ids = torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
@@ -1184,6 +1190,13 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         # y[dst_indx // n_expts_act, :] += x
         # Set n_expts_act to 1 to unfuse the sum so we can do it manually via moe_sum.
         routing_data.n_expts_act = 1
+
+        # matmul_ogs only writes the scattered (valid) gate positions. Unwritten
+        # slots -- non-local / -1 topk entries and padding rows of EP-dispatched
+        # (e.g. deepep_v2) buffers -- otherwise retain uninitialized workspace
+        # garbage that the moe_sum below would fold into each token's output.
+        # Zero first so those slots contribute 0.
+        intermediate_cache3.zero_()
 
         matmul_ogs(
             intermediate_cache2[gather_indx.src_indx],

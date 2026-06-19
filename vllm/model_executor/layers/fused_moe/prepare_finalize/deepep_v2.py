@@ -6,6 +6,7 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -196,18 +197,31 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 )
             recv_topk_idx = recv_topk_idx.unsqueeze(1)
         else:
-            # do_expand=False (decode/cudagraph mode): recv_topk_idx has
-            # LOCAL expert IDs (-1 for non-local and padding rows).
-            # Convert valid local IDs to global. Rows with -1 are
-            # skipped by expert kernels (TrtLLM tile-level skipping,
-            # DeepGemm is_computation_valid), so no need to zero
-            # hidden states, scales, or weights for padding rows.
-            valid_mask = recv_topk_idx >= 0
-            recv_topk_idx = torch.where(
-                valid_mask,
-                recv_topk_idx + self.rank_expert_offset,
-                recv_topk_idx,
+            # do_expand=False (decode/cudagraph mode): the dispatch only writes
+            # rows [0, num_recv_tokens); the rest of the worst-case-allocated
+            # buffer is left UNINITIALIZED. For valid rows recv_topk_idx holds
+            # LOCAL expert IDs (-1 for non-local slots). Convert valid local IDs
+            # to global and force everything else to -1:
+            #   * non-local / out-of-range expert slots, and
+            #   * every row >= num_recv_tokens (uninitialized padding): its
+            #     stale contents can alias valid expert IDs and would otherwise
+            #     be treated as real routed tokens by experts that build routing
+            #     over *all* rows (e.g. Triton's make_routing_data), polluting
+            #     the per-expert token lists and corrupting real tokens.
+            # `num_recv_tokens` is the last entry of the per-scaleup-rank prefix
+            # sum (matches the dispatch kernel's own bound), read on-device so
+            # this stays cudagraph-capturable.
+            num_recv_tokens = psum_recv_per_rank[-1]
+            row_idx = torch.arange(
+                recv_topk_idx.shape[0], device=recv_topk_idx.device
+            ).unsqueeze(1)
+            global_topk_idx = recv_topk_idx + self.rank_expert_offset
+            valid_mask = (
+                (recv_topk_idx >= 0)
+                & (global_topk_idx < self.num_experts)
+                & (row_idx < num_recv_tokens)
             )
+            recv_topk_idx = torch.where(valid_mask, global_topk_idx, -1)
 
         # Reshape recv_topk_weights to match recv_topk_idx shape [N, 1]
         if recv_topk_weights is not None and recv_topk_weights.ndim == 1:
@@ -258,6 +272,12 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 "apply_router_weight_on_input is only implemented for topk=1"
             )
             a1 = a1 * topk_weights.to(a1.dtype)
+
+        is_padding = get_forward_context().is_padding
+        if is_padding is not None:
+            n = topk_ids.shape[0]
+            # TODO: Properly support DBO.
+            topk_ids = torch.where(is_padding[:n].unsqueeze(1), -1, topk_ids)
 
         if quant_config.is_block_quantized and not defer_input_quant:
             a1q, a1q_scale = moe_kernel_quantize_input(

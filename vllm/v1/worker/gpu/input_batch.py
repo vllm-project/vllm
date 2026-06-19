@@ -22,6 +22,10 @@ class InputBuffers:
 
         self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
+        # Persistent per-token padding mask (True = cudagraph-padding row, not a
+        # real token). Filled in place each step so its stable pointer can be
+        # captured into cuda graphs and read at replay.
+        self.is_padding = torch.zeros(max_num_tokens, dtype=torch.bool, device=device)
         self.query_start_loc = torch.zeros(
             max_num_reqs + 1, dtype=torch.int32, device=device
         )
@@ -83,6 +87,8 @@ class InputBatch:
     input_ids: torch.Tensor
     # [num_tokens_after_padding]
     positions: torch.Tensor
+    # [num_tokens_after_padding]
+    is_padding: torch.Tensor
 
     # [total_num_logits]
     logits_indices: torch.Tensor
@@ -99,9 +105,14 @@ class InputBatch:
         num_reqs: int,
         num_tokens: int,
         input_buffers: InputBuffers,
+        num_actual_tokens: int | None = None,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
+        # Rows [num_actual_tokens, num_tokens) are treated as padding.
+        # Default (None) means all real.
+        if num_actual_tokens is None:
+            num_actual_tokens = num_tokens
 
         req_ids = [f"req_{i}_{random_uuid()}" for i in range(num_reqs)]
         idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
@@ -134,6 +145,10 @@ class InputBatch:
         input_ids = input_buffers.input_ids[:num_tokens].zero_()
         positions = input_buffers.positions[:num_tokens].zero_()
 
+        input_buffers.is_padding[:num_actual_tokens].fill_(False)
+        input_buffers.is_padding[num_actual_tokens:num_tokens].fill_(True)
+        is_padding = input_buffers.is_padding[:num_tokens]
+
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
@@ -164,6 +179,7 @@ class InputBatch:
             max_seq_len_np=None,
             input_ids=input_ids,
             positions=positions,
+            is_padding=is_padding,
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
