@@ -662,7 +662,7 @@ def _record_measurement(
     bl: dict[str, Any] = {
         "batch_size": batch_size,
         "kernel": kernel,
-        "tflops": round(tflops, 4),
+        "tflops": float(f"{tflops:.3g}"),
     }
     if annotations:
         bl.update(annotations)
