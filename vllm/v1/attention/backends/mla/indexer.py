@@ -6,6 +6,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -214,6 +215,11 @@ class DeepseekV32IndexerMetadata:
 
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
+    # DCP (Decode Context Parallelism). Populated only when DCP is active;
+    # the indexer op uses these to merge per-rank local top-k into a global
+    # top-k (see sparse_attn_indexer).
+    dcp_world_size: int = 1
+    cp_rank: int = 0
 
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
@@ -494,7 +500,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
         compressed_slot_mapping = slot_mapping
-        compressed_seq_lens = seq_lens
         if self.compress_ratio > 1:
             compressed_slot_mapping = get_compressed_slot_mapping(
                 num_tokens,
@@ -505,30 +510,54 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
-            compressed_seq_lens = seq_lens // self.compress_ratio
 
         prefill_metadata = None
+        # DCP group info (only when DCP is active, guarded by dcp_local_seq_lens
+        # being set; get_dcp_group() asserts the group is initialized). Hoisted
+        # before the prefill branch so the prefill path can use it too.
+        dcp_world_size = 1
+        cp_rank = 0
+        if common_attn_metadata.dcp_local_seq_lens is not None:
+            dcp_group = get_dcp_group()
+            dcp_world_size = dcp_group.world_size
+            cp_rank = dcp_group.rank_in_group
         if num_prefills > 0:
-            # This CPU value is an upper bound for async-spec extend rows.  It
-            # is safe for chunking/allocation because CUDA metadata below is
-            # built from exact device seq_lens and gather ignores the tail.
-            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
-            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-            compressed_seq_lens_cpu = (
-                seq_lens_cpu // self.compress_ratio
-                if self.compress_ratio > 1
-                else seq_lens_cpu
-            )
+            # Under DCP each rank holds only its 1/N shard of the KV. The
+            # prefill kernel needs BOTH: GLOBAL seq lens (so `start_pos` =
+            # global context → the per-token attended count maps correctly to
+            # the rank's shard) and LOCAL seq lens (workspace/cu_seq_lens hold
+            # only this rank's shard). Chunking uses GLOBAL so every rank
+            # produces the same chunk boundaries for the 4b all_gather merge.
+            if common_attn_metadata.dcp_local_seq_lens is not None:
+                local_seq_lens = common_attn_metadata.dcp_local_seq_lens
+                assert common_attn_metadata.dcp_local_seq_lens_cpu is not None
+                local_seq_lens_cpu = common_attn_metadata.dcp_local_seq_lens_cpu
+                global_seq_lens = seq_lens
+                assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+                global_seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            else:
+                local_seq_lens = seq_lens
+                assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+                local_seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+                global_seq_lens = seq_lens
+                global_seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
+            compressed_local_seq_lens = local_seq_lens
+            compressed_local_seq_lens_cpu = local_seq_lens_cpu
+            compressed_global_seq_lens_cpu = global_seq_lens_cpu
+            if self.compress_ratio > 1:
+                compressed_local_seq_lens = local_seq_lens // self.compress_ratio
+                compressed_local_seq_lens_cpu = (
+                    local_seq_lens_cpu // self.compress_ratio
+                )
+                compressed_global_seq_lens_cpu = (
+                    global_seq_lens_cpu // self.compress_ratio
+                )
             prefill_query_lens_cpu = torch.diff(
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
             max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
-            # Upper bound is exact for prefill rows (the `[num_decodes:]`
-            # slice below).
-            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
-            seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             chunk_specs = split_indexer_prefill_chunks(
-                compressed_seq_lens_cpu[num_decodes:],
+                compressed_global_seq_lens_cpu[num_decodes:],
                 prefill_query_lens_cpu,
                 self.max_prefill_buffer_size,
                 max_logits_bytes,
@@ -542,13 +571,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     req_slice.stop,
                     query_start_loc,
                     query_start_loc_cpu,
-                    seq_lens,
-                    compressed_seq_lens,
-                    compressed_seq_lens_cpu,
+                    global_seq_lens,
+                    compressed_local_seq_lens,
+                    compressed_local_seq_lens_cpu,
                     common_attn_metadata.block_table_tensor,
                     self.compress_ratio,
                     query_slice=query_slice,
                     skip_kv_gather=query_slice.start > 0,
+                    dcp_world_size=dcp_world_size,
+                    cp_rank=cp_rank,
                 )
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
@@ -566,7 +597,26 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
             )
 
-            seq_lens = common_attn_metadata.seq_lens[:num_decodes]
+            # Under DCP each rank holds only its 1/N shard of the KV. The paged
+            # logits kernel + topk must operate on this rank's local tokens;
+            # sparse_attn_indexer then merges the per-rank local top-k into a
+            # global top-k.
+            dcp_active = common_attn_metadata.dcp_local_seq_lens is not None
+            if dcp_active:
+                # MTP (next_n>1): _prepare_decode_tensors computes per-candidate
+                # context as L - next_n + j + 1 by linear subtraction from
+                # seq_lens. The correct LOCAL count is ceildiv((L - next_n + j +
+                # 1), N), NOT (L/N - next_n + j + 1). So pass GLOBAL seq_lens
+                # there, then ceil-div the 2D result to local below.
+                # next_n==1: keep the pre-sharded dcp_local_seq_lens (already
+                # correct for the non-MTP case).
+                next_n_pre = 1 + self.num_speculative_tokens
+                if next_n_pre > 1:
+                    seq_lens = common_attn_metadata.seq_lens[:num_decodes]
+                else:
+                    seq_lens = common_attn_metadata.dcp_local_seq_lens[:num_decodes]
+            else:
+                seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
 
             max_decode_len = int(decode_lens_cpu.max().item())
@@ -587,6 +637,28 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     max_decode_len=max_decode_len,
                 )
             )
+
+            # DCP + MTP: seq_lens is now 2D (B, next_n) of GLOBAL per-candidate
+            # context lengths (L - next_n + j + 1). Ceil-div to this rank's
+            # local count: ceildiv(global, N) = (global + N - 1) // N. The paged
+            # logits kernel then reads only this rank's shard with the right
+            # per-candidate length. (CP_INTERLEAVE=1; ceil-div matches the
+            # strided ownership rank r = {r, r+N, ...}.)
+            if dcp_active and next_n > 1:
+                dcp_ws = get_dcp_group().world_size
+                # seq_lens is per-candidate GLOBAL context lengths (L - next_n
+                # + j + 1), either 1D (flatten path on SM90, next_n>2) or 2D
+                # (native path). Ceil-div to this rank's local count IN PLACE,
+                # preserving shape so deepgemm's paged logits assert
+                # (context_lens.shape == q.shape[:2]) holds. (1D will be
+                # unsqueezed to (B,1) below, matching q's (B,1) flatten layout.)
+                orig_shape = seq_lens.shape
+                n = seq_lens.numel()
+                flat = seq_lens.reshape(-1)[:n]
+                self.decode_seq_lens_buffer[:n] = (
+                    flat + dcp_ws - 1
+                ) // dcp_ws
+                seq_lens = self.decode_seq_lens_buffer[:n].view(orig_shape)
 
             # For DeepseekV4 (compress_ratio > 1), the indexer KV cache stores
             # compressed tokens. Convert uncompressed seq_lens to compressed.
@@ -638,6 +710,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            dcp_world_size=dcp_world_size,
+            cp_rank=cp_rank,
         )
 
         return attn_metadata
@@ -655,6 +729,8 @@ def build_prefill_chunk_metadata(
     compress_ratio: int,
     query_slice: slice | None = None,
     skip_kv_gather: bool = False,
+    dcp_world_size: int = 1,
+    cp_rank: int = 0,
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     total_seq_lens = compressed_seq_lens_cpu[start_idx:end_idx].sum().item()
     if total_seq_lens == 0:
@@ -696,8 +772,10 @@ def build_prefill_chunk_metadata(
         cu_seq_len_ke,
         qs_start,
         qs_stop,
+        cp_rank,
         BLOCK_SIZE=1024,
         COMPRESS_RATIO=compress_ratio,
+        DCP_WORLD_SIZE=dcp_world_size,
     )
 
     token_start = query_start_loc_cpu[start_idx].item()
@@ -734,8 +812,10 @@ def _build_prefill_chunk_metadata_kernel(
     cu_compressed_seq_len_ke_ptr,
     query_slice_start,
     query_slice_stop,
+    cp_rank,
     BLOCK_SIZE: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
+    DCP_WORLD_SIZE: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
 
@@ -747,6 +827,8 @@ def _build_prefill_chunk_metadata_kernel(
     seq_end = tl.load(cu_compressed_seq_lens_ptr + batch_idx + 1)
     compressed_seq_len = seq_end - seq_start
 
+    # uncompressed_seq_len is GLOBAL; start_pos = global context before this
+    # prefill, so P = start_pos + offset is the query token's GLOBAL position.
     uncompressed_seq_len = tl.load(uncompressed_seq_lens_ptr + batch_idx)
     start_pos = uncompressed_seq_len - query_len
 
@@ -763,8 +845,19 @@ def _build_prefill_chunk_metadata_kernel(
         # Compute cu_seq_len_ks
         tl.store(cu_compressed_seq_len_ks_ptr + out_pos, seq_start, mask=mask)
 
-        # Compute cu_seq_len_ke
-        seq_len_per_token = (start_pos + 1 + offset) // COMPRESS_RATIO
+        # Compute cu_seq_len_ke. Under DCP (N>1) this rank owns global positions
+        # {r, r+N, ...}; the count it owns in [0, P+1) is ceildiv(P+1-r, N) =
+        # (P + N - r) // N (gives 0 when P < r). cu_seq_lens/workspace already
+        # use the LOCAL compressed length, so this stays within the gathered
+        # shard. N==1 reduces to the original (P+1)//COMPRESS_RATIO.
+        P = start_pos + offset
+        if DCP_WORLD_SIZE == 1:
+            seq_len_per_token = (P + 1) // COMPRESS_RATIO
+        else:
+            local_uncompressed_ke = (P + DCP_WORLD_SIZE - cp_rank) // (
+                DCP_WORLD_SIZE
+            )
+            seq_len_per_token = local_uncompressed_ke // COMPRESS_RATIO
         tl.store(
             cu_compressed_seq_len_ke_ptr + out_pos,
             seq_start + seq_len_per_token,

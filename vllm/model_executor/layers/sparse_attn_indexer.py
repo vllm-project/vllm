@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -255,6 +256,53 @@ def sparse_attn_indexer(
                 topk_tokens,
             )
 
+            # DCP prefill: each rank picked a local top-k over its 1/N KV
+            # shard (the kernel above used DCP-aware cu_seq_len_ke so logits
+            # cover only the local shard). Merge per-rank local top-k into a
+            # global top-k, mirroring the decode merge below. Local top-k
+            # indices are request-relative LOCAL positions [0, local_ke);
+            # remap to GLOBAL: cp_rank + local_idx * dcp_world_size
+            # (CP_INTERLEAVE=1, compress_ratio=1).
+            dcp_ws = attn_metadata_narrowed.dcp_world_size
+            if dcp_ws > 1:
+                cp_rank = attn_metadata_narrowed.cp_rank
+                invalid = topk_indices < 0
+                idx_safe = topk_indices.clamp(min=0)
+                # Each query token's row only has (ke - ks) valid KV slots in
+                # this rank's shard. A row whose shard holds 0 tokens (e.g.
+                # rank r for a token attending [0, r)) must contribute nothing
+                # — top_k_per_row_prefill may not emit -1 for an empty range,
+                # so mask by the explicit valid count.
+                local_valid = (
+                    chunk.cu_seqlen_ke - chunk.cu_seqlen_ks
+                )[:num_rows].to(torch.int32)
+                invalid = invalid | (idx_safe >= local_valid.unsqueeze(1))
+                local_scores = torch.gather(
+                    logits.float(), 1, idx_safe.to(torch.int64)
+                ).masked_fill(invalid, float("-inf"))
+                global_pos = cp_rank + idx_safe.to(torch.int32) * dcp_ws
+                global_pos = torch.where(
+                    invalid, torch.full_like(global_pos, -1), global_pos
+                )
+                T = num_rows
+                K = topk_tokens
+                cand = torch.stack(
+                    [global_pos, local_scores.to(torch.float32)], dim=-1
+                )  # [T, K, 2]
+                cand_all = get_dcp_group().all_gather(cand, dim=0).view(
+                    dcp_ws, T, K, 2
+                )
+                # [dcp_ws, T, K] -> [T, dcp_ws*K]: per row, rank0's K then
+                # rank1's K, ... so a global top-K over the concatenated
+                # candidates is correct. permute before reshape (a bare
+                # reshape would interleave rows across ranks).
+                gp = cand_all[..., 0].permute(1, 0, 2).reshape(T, dcp_ws * K)
+                sc = cand_all[..., 1].permute(1, 0, 2).reshape(T, dcp_ws * K)
+                _, sel = torch.topk(sc, K, dim=1)  # [T, K]
+                topk_indices.copy_(
+                    torch.gather(gp, 1, sel.to(torch.int64)).to(torch.int32)
+                )
+
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
         assert decode_metadata is not None
@@ -357,6 +405,50 @@ def sparse_attn_indexer(
                 logits.stride(0),
                 logits.stride(1),
                 topk_tokens,
+            )
+
+        # DCP decode: each rank picked a local top-k over its 1/N KV shard
+        # (the paged logits kernel read only the local shard). Merge the
+        # per-rank local top-k into a global top-k. Exact: any global top-K
+        # token is in its shard's local top-K; the indexer q is replicated
+        # across DCP ranks so scores are comparable. CP_INTERLEAVE=1 remap:
+        # global_pos = cp_rank + local_idx * dcp_world_size.
+        dcp_ws = attn_metadata_narrowed.dcp_world_size
+        if dcp_ws > 1:
+            cp_rank = attn_metadata_narrowed.cp_rank
+            invalid = topk_indices < 0
+            idx_safe = topk_indices.clamp(min=0)
+            # Each query token's row only has `seq_lens` valid KV slots in this
+            # rank's shard (4a passed dcp_local_seq_lens). A shard holding few
+            # tokens (e.g. 2-3 under DCP=8 on a short prompt) must not
+            # contribute out-of-range local indices — persistent_topk pads to
+            # topk_tokens and may emit indices >= seq_lens. Mask by the
+            # explicit valid count so they map to -1 instead of an out-of-range
+            # global position (cp_rank + idx*dcp_ws).
+            local_valid = seq_lens.reshape(-1)[: topk_indices.shape[0]].to(
+                torch.int32
+            )
+            invalid = invalid | (idx_safe >= local_valid.unsqueeze(1))
+            local_scores = torch.gather(
+                logits.float(), 1, idx_safe.to(torch.int64)
+            ).masked_fill(invalid, float("-inf"))
+            global_pos = cp_rank + idx_safe.to(torch.int32) * dcp_ws
+            global_pos = torch.where(
+                invalid, torch.full_like(global_pos, -1), global_pos
+            )
+            T = topk_indices.shape[0]
+            K = topk_tokens
+            cand = torch.stack(
+                [global_pos, local_scores.to(torch.float32)], dim=-1
+            )  # [T, K, 2]
+            cand_all = get_dcp_group().all_gather(cand, dim=0).view(
+                dcp_ws, T, K, 2
+            )
+            gp = cand_all[..., 0].permute(1, 0, 2).reshape(T, dcp_ws * K)
+            sc = cand_all[..., 1].permute(1, 0, 2).reshape(T, dcp_ws * K)
+            _, sel = torch.topk(sc, K, dim=1)  # [T, K]
+            topk_indices.copy_(
+                torch.gather(gp, 1, sel.to(torch.int64)).to(torch.int32)
             )
 
         if decode_metadata.requires_padding:

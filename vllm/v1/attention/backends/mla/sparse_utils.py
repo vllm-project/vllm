@@ -30,6 +30,10 @@ def _convert_req_index_to_global_index_kernel(
     ti_stride1,
     out_stride0,
     out_stride1,
+    # DCP (Decode Context Parallelism)
+    cp_rank,
+    CP_SIZE: tl.constexpr,
+    CP_INTERLEAVE: tl.constexpr,
 ):
     # program_id(0) -> token_id (row)
     # program_id(1) -> tile index along columns
@@ -52,16 +56,33 @@ def _convert_req_index_to_global_index_kernel(
     if HAS_PREFILL:
         prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
         is_prefill = prefill_req_id >= 0
-    # Compute block id and in-block offset
-    block_id = tok // BLOCK_SIZE
-    inblock_off = tok % BLOCK_SIZE
-
-    # Guard block_table access
-    valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
-    bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-    is_invalid_tok |= ~valid_block
-    base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
-    out_val = base * BLOCK_SIZE + inblock_off
+    # Compute block id and in-block offset. Under DCP (CP_SIZE > 1) the
+    # physical block (BLOCK_SIZE tokens, per-rank) is one shard of an
+    # amplified block (BLOCK_SIZE * CP_SIZE global positions) split across
+    # CP_SIZE ranks by CP_INTERLEAVE. Mirrors gpu/block_table.py:283-299.
+    if CP_SIZE == 1:
+        block_id = tok // BLOCK_SIZE
+        block_off = tok % BLOCK_SIZE
+        valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
+        bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
+        is_invalid_tok |= ~valid_block
+        base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
+        out_val = base * BLOCK_SIZE + block_off
+    else:
+        amp_block = BLOCK_SIZE * CP_SIZE
+        block_id = tok // amp_block
+        block_off = tok % amp_block
+        valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
+        bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
+        is_invalid_tok |= ~valid_block
+        base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
+        is_local = block_off // CP_INTERLEAVE % CP_SIZE == cp_rank
+        rounds = block_off // (CP_INTERLEAVE * CP_SIZE)
+        remainder = block_off % CP_INTERLEAVE
+        local_offset = rounds * CP_INTERLEAVE + remainder
+        out_val = base * BLOCK_SIZE + local_offset
+        # Positions owned by another DCP rank are not in this rank's cache.
+        is_invalid_tok |= ~is_local
 
     # Override with prefill output if prefill is enabled
     if HAS_PREFILL:
@@ -93,6 +114,9 @@ def triton_convert_req_index_to_global_index(
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
     return_valid_counts: bool = False,
+    cp_rank: int = 0,
+    cp_size: int = 1,
+    cp_interleave: int = 1,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     out[token_id, indice_id] =
@@ -183,6 +207,10 @@ def triton_convert_req_index_to_global_index(
         ti_stride1,
         out_stride0,
         out_stride1,
+        # DCP
+        cp_rank,
+        cp_size,
+        cp_interleave,
     )
 
     if return_valid_counts:
