@@ -266,6 +266,17 @@ class OffloadingManager(ABC):
         """
         Called when a request has finished.
 
+        By the time this is called, all per-request offload calls for this
+        request (prepare_store/complete_store, prepare_load/complete_load,
+        touch, lookup) have already been issued, and none will follow. The
+        scheduler defers this call until the request is finished and has no
+        in-flight transfer jobs.
+
+        Note this signals only that no further calls will be made; it does NOT
+        imply the data has been persisted. Asynchronous transfers already
+        submitted for this request (e.g. CPU->secondary cascades) may still be
+        in flight. This is the right place to release per-request bookkeeping.
+
         Args:
             req_context: per-request context.
         """
@@ -287,6 +298,14 @@ class OffloadingManager(ABC):
         during the step (e.g., batched promotions).
         """
         return
+
+    def has_pending_work(self) -> bool:
+        """Whether this manager needs the engine to keep stepping.
+
+        While True, on_schedule_end() and get_finished_jobs() continue
+        to be called even when no requests are scheduled.
+        """
+        return False
 
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
