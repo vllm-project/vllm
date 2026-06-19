@@ -126,10 +126,10 @@ struct RadixRowState {
 // ============================================================================
 
 struct PersistentTopKParams {
-  const float* __restrict__ input;  // [num_rows, stride]
-  int32_t* __restrict__ output;     // [num_rows, top_k]
+  const float* __restrict__ input;      // [num_rows, stride]
+  int32_t* __restrict__ output;         // [num_rows, top_k]
   const int32_t* __restrict__ lengths;  // [num_rows]
-  RadixRowState* row_states;        // large path: per-group state
+  RadixRowState* row_states;            // large path: per-group state
   uint32_t num_rows;
   uint32_t stride;
   uint32_t top_k;           // actual k value for output stride
@@ -1853,8 +1853,8 @@ template <typename DType, typename IdType, uint32_t MAX_K = 2048>
 cudaError_t FilteredTopKRaggedTransform(const DType* input,
                                         IdType* output_indices,
                                         const IdType* lengths,
-                                        uint32_t num_rows,
-                                        uint32_t top_k_val, uint32_t max_len,
+                                        uint32_t num_rows, uint32_t top_k_val,
+                                        uint32_t max_len,
                                         cudaStream_t stream = 0) {
   constexpr size_t smem_size = FILTERED_TOPK_SMEM_DYNAMIC;
   constexpr int MAX_VEC = 16 / sizeof(DType);
@@ -1894,8 +1894,8 @@ template <typename DType, typename IdType, uint32_t MAX_K = 2048>
 cudaError_t FilteredTopKRaggedTransform(const DType* input,
                                         IdType* output_indices,
                                         const IdType* lengths,
-                                        uint32_t num_rows,
-                                        uint32_t top_k_val, uint32_t max_len,
+                                        uint32_t num_rows, uint32_t top_k_val,
+                                        uint32_t max_len,
                                         cudaStream_t stream = 0) {
   return filtered_topk::FilteredTopKRaggedTransform<DType, IdType, MAX_K>(
       input, output_indices, lengths, num_rows, top_k_val, max_len, stream);

@@ -50,8 +50,8 @@ void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK>& params,
   cfg.numAttrs = 1;
   cfg.attrs = attrs;
   cudaError_t err = cudaLaunchKernelEx(&cfg, kernel, params);
-  STD_TORCH_CHECK(err == cudaSuccess, "cooperative_topk launch failed: ",
-                  cudaGetErrorString(err));
+  STD_TORCH_CHECK(err == cudaSuccess,
+                  "cooperative_topk launch failed: ", cudaGetErrorString(err));
 }
 
 template <uint32_t TopK>
@@ -71,11 +71,10 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
       "cooperative_topk supports <=32 rows; use persistent_topk for "
       "larger batches");
 
-  STD_TORCH_CHECK(
-      stride % 4 == 0,
-      "cooperative_topk: stride must be multiple of 4 for TMA "
-      "alignment, got stride (max_model_len)=",
-      stride);
+  STD_TORCH_CHECK(stride % 4 == 0,
+                  "cooperative_topk: stride must be multiple of 4 for TMA "
+                  "alignment, got stride (max_model_len)=",
+                  stride);
 
   STD_TORCH_CHECK(workspace.is_cuda(), "workspace must be CUDA tensor");
   STD_TORCH_CHECK(
@@ -88,14 +87,14 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
   params.lengths = lengths.const_data_ptr<int32_t>();
   params.num_rows = static_cast<uint32_t>(num_rows);
   params.stride = stride;
-  params.tie_ws = reinterpret_cast<ct::Tie*>(
-      workspace.mutable_data_ptr<uint8_t>());
+  params.tie_ws =
+      reinterpret_cast<ct::Tie*>(workspace.mutable_data_ptr<uint8_t>());
 
   constexpr uint32_t kTieWsPerRow =
       TopK <= ct::kBlockSize ? ct::kMaxTies : TopK;
   STD_TORCH_CHECK(
-      workspace.size(0) >= static_cast<int64_t>(num_rows * kTieWsPerRow *
-                                                  sizeof(ct::Tie)),
+      workspace.size(0) >=
+          static_cast<int64_t>(num_rows * kTieWsPerRow * sizeof(ct::Tie)),
       "workspace too small");
 
   #ifndef VLLM_COOPERATIVE_TOPK_PORTABLE_CLUSTER_ONLY
@@ -113,10 +112,10 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
 #endif  // USE_ROCM
 
 void cooperative_topk(const torch::stable::Tensor& logits,
-                        const torch::stable::Tensor& lengths,
-                        torch::stable::Tensor& output,
-                        torch::stable::Tensor& workspace, int64_t k,
-                        int64_t max_seq_len) {
+                      const torch::stable::Tensor& lengths,
+                      torch::stable::Tensor& output,
+                      torch::stable::Tensor& workspace, int64_t k,
+                      int64_t max_seq_len) {
 #ifndef USE_ROCM
   STD_TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
   STD_TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");
@@ -136,9 +135,9 @@ void cooperative_topk(const torch::stable::Tensor& logits,
   STD_TORCH_CHECK(lengths.numel() == num_rows, "lengths size mismatch");
   STD_TORCH_CHECK(output.size(0) == num_rows && output.size(1) == k,
                   "output size mismatch");
-  STD_TORCH_CHECK(k == 512 || k == 1024 || k == 2048,
-                  "cooperative_topk supports k=512, k=1024, or k=2048, got k=",
-                  k);
+  STD_TORCH_CHECK(
+      k == 512 || k == 1024 || k == 2048,
+      "cooperative_topk supports k=512, k=1024, or k=2048, got k=", k);
 
   if (k == 512) {
     launch_cooperative_topk_impl<512>(logits, lengths, output, workspace,
