@@ -31,13 +31,17 @@ from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
+# Sentinel object for globally-accessible blocks (prevents collision with
+# actual tenant_id values like "GLOBAL").
+_GLOBAL_SENTINEL = object()
+
 
 @dataclass
 class TreeNode:
     """A prefix-cache node associated with a cached KV block."""
 
     block: KVCacheBlock
-    allowed_tenants: set[str] = field(default_factory=lambda: {"GLOBAL"})
+    allowed_tenants: set = field(default_factory=lambda: {_GLOBAL_SENTINEL})
 
 
 class BlockHashToBlockMap:
@@ -73,7 +77,7 @@ class BlockHashToBlockMap:
 
     @staticmethod
     def _is_tenant_allowed(node: TreeNode, tenant_id: str) -> bool:
-        return tenant_id in node.allowed_tenants or "GLOBAL" in node.allowed_tenants
+        return tenant_id in node.allowed_tenants or _GLOBAL_SENTINEL in node.allowed_tenants
 
     def get_one_block(
         self,
@@ -102,13 +106,6 @@ class BlockHashToBlockMap:
             self._unexpected_blocks_type(blocks)
         return None
 
-    def match_prefix(
-        self,
-        key: BlockHashWithGroupId,
-        tenant_id: str,
-    ) -> KVCacheBlock | None:
-        return self.get_one_block(key, tenant_id=tenant_id)
-
     def insert(
         self,
         key: BlockHashWithGroupId,
@@ -132,7 +129,7 @@ class BlockHashToBlockMap:
         else:
             self._unexpected_blocks_type(blocks)
 
-        tenant_set = set(allowed_tenants) if allowed_tenants else {"GLOBAL"}
+        tenant_set = set(allowed_tenants) if allowed_tenants else {_GLOBAL_SENTINEL}
         self.hash_to_nodes_map.setdefault(key, {})[block.block_id] = TreeNode(
             block=block, allowed_tenants=tenant_set
         )
@@ -152,30 +149,29 @@ class BlockHashToBlockMap:
         # use del blocks[block_id] instead as followup.
         if isinstance(blocks, KVCacheBlock):
             if blocks.block_id == block_id:
+                self.hash_to_nodes_map.pop(key, None)
                 return blocks
             # If the single block ID doesn't match, we should put the
             # block back (it should happen rarely)
             self._cache[key] = blocks
-            popped_block = None
-            return popped_block
+            return None
         if isinstance(blocks, dict):
             # Try to pop block_id from the block dict, and if dict still
             # contain blocks, put back to the cache.
             block = blocks.pop(block_id, None)
             if len(blocks) > 0:
                 self._cache[key] = blocks
-            popped_block = block
-        else:
-            self._unexpected_blocks_type(blocks)
-            popped_block = None
 
-        nodes = self.hash_to_nodes_map.get(key)
-        if nodes is not None:
-            nodes.pop(block_id, None)
-            if not nodes:
-                del self.hash_to_nodes_map[key]
+            # Clean up the tenant-access node map.
+            nodes = self.hash_to_nodes_map.get(key)
+            if nodes is not None:
+                nodes.pop(block_id, None)
+                if not nodes:
+                    del self.hash_to_nodes_map[key]
 
-        return popped_block
+            return block
+        self._unexpected_blocks_type(blocks)
+        return None
 
     def try_promote_to_global(
         self,
@@ -188,7 +184,7 @@ class BlockHashToBlockMap:
 
         canonical_block_id = min(nodes)
         canonical_node = nodes[canonical_block_id]
-        canonical_node.allowed_tenants = {"GLOBAL"}
+        canonical_node.allowed_tenants = {_GLOBAL_SENTINEL}
 
         redundant_block_ids = sorted(
             block_id for block_id in nodes if block_id != canonical_block_id
@@ -369,7 +365,7 @@ class BlockPool:
             allowed_tenants = (
                 {tenant_id}
                 if isinstance(tenant_id, str) and tenant_id
-                else {"GLOBAL"}
+                else {_GLOBAL_SENTINEL}
             )
             self.cached_block_hash_to_block.insert(
                 block_hash_with_group_id,

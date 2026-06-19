@@ -437,6 +437,7 @@ class SingleTypeKVCacheManager(ABC):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        tenant_id: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         Get the longest cache hit prefix of the blocks that is not longer than
@@ -550,6 +551,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        tenant_id: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
             kv_cache_spec, FullAttentionSpec | ChunkedLocalAttentionSpec
@@ -569,7 +571,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
             if cached_block := block_pool.get_cached_block(
-                block_hash, kv_cache_group_ids
+                block_hash, kv_cache_group_ids, tenant_id=tenant_id
             ):
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed.append(cached)
@@ -628,6 +630,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        tenant_id: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
@@ -656,7 +659,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
-                block_hashes[i], kv_cache_group_ids
+                block_hashes[i], kv_cache_group_ids, tenant_id=tenant_id
             ):
                 # Skip prefix matching check if the block is not aligned with
                 # `alignment_tokens`.
@@ -822,6 +825,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        tenant_id: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         """
         For chunked local attention, we need to find the longest cache hit
@@ -894,7 +898,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         for i in range(local_attention_start_block_idx, max_num_blocks):
             block_hash = block_hashes[i]
             if cached_block := block_pool.get_cached_block(
-                block_hash, kv_cache_group_ids
+                block_hash, kv_cache_group_ids, tenant_id=tenant_id
             ):
                 for computed, cached in zip(computed_blocks, cached_block):
                     computed.append(cached)
@@ -982,6 +986,7 @@ class MambaManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        tenant_id: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, MambaSpec), (
             "MambaManager can only be used for mamba groups"
@@ -997,7 +1002,7 @@ class MambaManager(SingleTypeKVCacheManager):
         # Search from right to left and early stop when a match is found.
         for i in range(max_num_blocks - 1, -1, -1):
             if cached_block := block_pool.get_cached_block(
-                block_hashes[i], kv_cache_group_ids
+                block_hashes[i], kv_cache_group_ids, tenant_id=tenant_id
             ):
                 # When enable Mamba prefix caching, `block_size` will be aligned
                 # across full attention layers and Mamba layers to ensure the
@@ -1283,6 +1288,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        tenant_id: str | None = None,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(kv_cache_spec, CrossAttentionSpec), (
             "CrossAttentionManager can only be used for cross-attention groups"
