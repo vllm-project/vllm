@@ -60,6 +60,11 @@ from vllm.utils.network_utils import (
 )
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import (
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -117,7 +122,9 @@ class MoRIIOConnector(KVConnectorBase_V1):
             self.connector_worker: MoRIIOConnectorWorker | None = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
-            self.connector_worker = MoRIIOConnectorWorker(vllm_config, self.engine_id)
+            self.connector_worker = MoRIIOConnectorWorker(
+                vllm_config, self.engine_id, kv_cache_config
+            )
         logger.info(
             "Initialized MoRIIO Connector,engine_id:%s,role: %s",
             self.engine_id,
@@ -683,7 +690,12 @@ class MoRIIOConnectorScheduler:
 class MoRIIOConnectorWorker:
     """Implementation of Worker side methods"""
 
-    def __init__(self, vllm_config: VllmConfig, engine_id: str):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        engine_id: str,
+        kv_cache_config: "KVCacheConfig",
+    ):
         if not is_moriio_available():
             raise RuntimeError(
                 "MoRIIO is not available. Please ensure the 'mori' package "
@@ -707,6 +719,20 @@ class MoRIIOConnectorWorker:
         )
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.is_producer = self.kv_transfer_config.is_kv_producer
+        self.layer_to_spec = {}
+        for group in kv_cache_config.kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                self.layer_to_spec.update(
+                    {
+                        layer_name: group_spec.kv_cache_specs[layer_name]
+                        for layer_name in group.layer_names
+                    }
+                )
+            else:
+                self.layer_to_spec.update(
+                    {layer_name: group_spec for layer_name in group.layer_names}
+                )
 
         if self.is_producer:
             set_role(ROLE.PRODUCER)
@@ -1220,23 +1246,27 @@ class MoRIIOConnectorWorker:
         all_done_future = self._handshake_initiation_executor.submit(wait_all_dp)
         all_done_future.add_done_callback(request_ready)
 
+    def _is_mla_cache_layer(self, layer_name: str) -> bool:
+        spec = self.layer_to_spec[layer_name]
+        return isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in moriio."""
 
         # Prefer a normal K/V cache as the representative shape. Some models
         # also register 3D key-only side caches.
-        first_kv_cache = next(
+        first_layer_name, first_kv_cache = next(
             (
-                kv_cache
-                for kv_cache in kv_caches.values()
+                (layer_name, kv_cache)
+                for layer_name, kv_cache in kv_caches.items()
                 if len(kv_cache.shape) == 5
                 and (kv_cache.shape[0] == 2 or kv_cache.shape[1] == 2)
             ),
-            next(iter(kv_caches.values())),
+            next(iter(kv_caches.items())),
         )
         kv_elem_size = first_kv_cache.element_size()
 
-        use_mla = len(first_kv_cache.shape) == 3
+        use_mla = self._is_mla_cache_layer(first_layer_name)
         assert use_mla == self.use_mla
 
         if use_mla:
@@ -1278,19 +1308,28 @@ class MoRIIOConnectorWorker:
         caches_data = []
 
         for layer_name, cache_or_caches in kv_caches.items():
-            # Some models register both 5D K/V caches and 3D key-only side
+            # Some models register both 5D K/V caches and MLA-style side
             # caches. Only separated 5D K/V caches should be split into K and V
-            # regions; interleaved K/V and key-only caches must remain one
+            # regions; interleaved K/V and MLA-style caches must remain one
             # region.
-            if len(cache_or_caches.shape) == 5 and cache_or_caches.shape[0] == 2:
+            is_mla_cache = self._is_mla_cache_layer(layer_name)
+            if (
+                not is_mla_cache
+                and len(cache_or_caches.shape) == 5
+                and cache_or_caches.shape[0] == 2
+            ):
                 cache_list = list(cache_or_caches)
                 layer_block_shape = cache_or_caches.shape[-3:]
                 regions_per_block = 1
-            elif len(cache_or_caches.shape) == 5 and cache_or_caches.shape[1] == 2:
+            elif (
+                not is_mla_cache
+                and len(cache_or_caches.shape) == 5
+                and cache_or_caches.shape[1] == 2
+            ):
                 cache_list = [cache_or_caches]
                 layer_block_shape = cache_or_caches.shape[-3:]
                 regions_per_block = 2
-            elif len(cache_or_caches.shape) == 3:
+            elif is_mla_cache and len(cache_or_caches.shape) == 3:
                 cache_list = [cache_or_caches]
                 layer_block_shape = cache_or_caches.shape[-2:]
                 regions_per_block = 1
@@ -1713,14 +1752,14 @@ class MoRIIOConnectorWorker:
         """
         kv_cache = self.kv_caches[layer_name]
         kv_cache_shape = self.kv_cache_shapes[layer_name]
-        is_key_only = len(kv_cache_shape) == 3
+        is_mla_cache = self._is_mla_cache_layer(layer_name)
         stride = kv_cache.stride()
         sz = kv_cache.element_size()
-        if is_key_only:
+        if is_mla_cache and len(kv_cache_shape) == 3:
             blknum, blksize, hs = kv_cache_shape
             hn = 1
             block_stride = stride[0]
-        else:
+        elif not is_mla_cache:
             if kv_cache_shape[0] == 2:
                 _, blknum, blksize, hn, hs = kv_cache_shape
                 local_ktov_stride = stride[0]
@@ -1738,9 +1777,14 @@ class MoRIIOConnectorWorker:
                     "Unsupported MoRIIO KV cache shape for layer "
                     f"{layer_name}: {tuple(kv_cache_shape)}"
                 )
+        else:
+            raise ValueError(
+                "Unsupported MoRIIO MLA KV cache shape for layer "
+                f"{layer_name}: {tuple(kv_cache_shape)}"
+            )
 
         transfer_size_byte = blksize * hn * hs * sz
-        per_block = 1 if is_key_only else 2
+        per_block = 1 if is_mla_cache else 2
         total = len(local_block_ids) * per_block
         offset_local = [0] * total
         offset_remote = [0] * total
@@ -1753,7 +1797,7 @@ class MoRIIOConnectorWorker:
             offset_local[w] = sz * (lb * block_stride)
             offset_remote[w] = sz * (rb * block_stride)
             w += 1
-            if not is_key_only:
+            if not is_mla_cache:
                 # V
                 # Handle num_block variations originating from PD (different kv strides)
                 # TODO: address block_sz differences in heterogeneous TP scenarios
