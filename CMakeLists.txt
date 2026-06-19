@@ -1079,6 +1079,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_C_stable_libtorch PRIVATE
       TORCH_TARGET_VERSION=0x020B000000000000ULL)
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
+    if(COOPERATIVE_TOPK_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_COOPERATIVE_TOPK=1)
+    endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)

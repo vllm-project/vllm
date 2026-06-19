@@ -128,7 +128,7 @@ struct RadixRowState {
 struct PersistentTopKParams {
   const float* __restrict__ input;  // [num_rows, stride]
   int32_t* __restrict__ output;     // [num_rows, top_k]
-  int32_t* __restrict__ lengths;    // [num_rows]
+  const int32_t* __restrict__ lengths;  // [num_rows]
   RadixRowState* row_states;        // large path: per-group state
   uint32_t num_rows;
   uint32_t stride;
@@ -1850,8 +1850,10 @@ constexpr int ComputeFilteredTopKVecSize(uint32_t max_len) {
 }
 
 template <typename DType, typename IdType, uint32_t MAX_K = 2048>
-cudaError_t FilteredTopKRaggedTransform(DType* input, IdType* output_indices,
-                                        IdType* lengths, uint32_t num_rows,
+cudaError_t FilteredTopKRaggedTransform(const DType* input,
+                                        IdType* output_indices,
+                                        const IdType* lengths,
+                                        uint32_t num_rows,
                                         uint32_t top_k_val, uint32_t max_len,
                                         cudaStream_t stream = 0) {
   constexpr size_t smem_size = FILTERED_TOPK_SMEM_DYNAMIC;
@@ -1889,8 +1891,10 @@ cudaError_t FilteredTopKRaggedTransform(DType* input, IdType* output_indices,
 }  // namespace filtered_topk
 
 template <typename DType, typename IdType, uint32_t MAX_K = 2048>
-cudaError_t FilteredTopKRaggedTransform(DType* input, IdType* output_indices,
-                                        IdType* lengths, uint32_t num_rows,
+cudaError_t FilteredTopKRaggedTransform(const DType* input,
+                                        IdType* output_indices,
+                                        const IdType* lengths,
+                                        uint32_t num_rows,
                                         uint32_t top_k_val, uint32_t max_len,
                                         cudaStream_t stream = 0) {
   return filtered_topk::FilteredTopKRaggedTransform<DType, IdType, MAX_K>(
