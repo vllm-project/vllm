@@ -79,10 +79,25 @@ pub(super) fn validate_request_compat(
             "spaces_between_special_tokens is not supported."
         );
     }
-    if request.truncate_prompt_tokens.is_some() {
+    if let Some(value) = request.truncate_prompt_tokens
+        && value < -1
+    {
         bail_invalid_request!(
             param = "truncate_prompt_tokens",
-            "truncate_prompt_tokens is not supported."
+            "truncate_prompt_tokens must be a non-negative integer or -1 to mean \
+             `max_model_len - max_tokens`."
+        );
+    }
+    // Echo prepends the original prompt to the response from the captured raw
+    // text, before truncation runs against the encoded prompt token ids; the
+    // two would disagree if both ran together (and the `-1` sentinel would
+    // additionally see the engine-effective `max_tokens` after the echo-only
+    // remap to 1, not the user-supplied value). Reject the combination until
+    // we route echo through the truncated token ids instead of the raw text.
+    if request.echo && request.truncate_prompt_tokens.is_some() {
+        bail_invalid_request!(
+            param = "truncate_prompt_tokens",
+            "truncate_prompt_tokens is not yet supported together with `echo`."
         );
     }
 

@@ -92,6 +92,10 @@ impl TokenizeChatRequest {
             add_special_tokens: self.add_special_tokens,
             data_parallel_rank: None,
             lora_request: None,
+            // /tokenize never reaches the generate path; truncation is a
+            // submit-time concern handled there.
+            truncate_prompt_tokens: None,
+            truncation_side: None,
         })
     }
 }
