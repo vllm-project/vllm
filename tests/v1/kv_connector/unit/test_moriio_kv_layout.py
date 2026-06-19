@@ -7,6 +7,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    RemoteAllocInfo,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+    MoRIIOWriter,
+)
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 
@@ -153,6 +159,70 @@ def test_mixed_layers_compute_distinct_offsets_per_layer():
     assert separated != interleaved
     assert separated != indexer
     assert interleaved != indexer
+
+
+def test_write_transfer_plan_caches_offsets_per_geometry():
+    kv_caches = {
+        "dense0": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
+        "dense1": torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16),
+        "indexer": torch.empty((8, 4, 3), dtype=torch.bfloat16),
+    }
+    calls: list[str] = []
+
+    class FakeWorker:
+        def _compute_block_transfer_offsets(
+            self, layer_name, local_block_ids, remote_block_ids, remote_moriio_meta
+        ):
+            calls.append(layer_name)
+            call_id = len(calls)
+            return ([call_id], [call_id + 10], [call_id + 20])
+
+    fake_worker = FakeWorker()
+    fake_worker.kv_caches = kv_caches
+    fake_worker.layer_name_to_local_kv_cache_metadata = {
+        name: [] for name in kv_caches
+    }
+    writer = MoRIIOWriter.__new__(MoRIIOWriter)
+    writer._worker_ref = lambda: fake_worker
+    request_info = RemoteAllocInfo(block_ids=[4, 5])
+    remote_meta = _remote_meta()
+
+    dense0_plan = writer._prepare_transfer_plan(
+        SimpleNamespace(
+            layer_name="dense0",
+            local_block_ids=[1, 3],
+            request_id="req",
+            transfer_id="xfer",
+        ),
+        request_info,
+        remote_meta,
+    )
+    dense1_plan = writer._prepare_transfer_plan(
+        SimpleNamespace(
+            layer_name="dense1",
+            local_block_ids=[1, 3],
+            request_id="req",
+            transfer_id="xfer",
+        ),
+        request_info,
+        remote_meta,
+    )
+    indexer_plan = writer._prepare_transfer_plan(
+        SimpleNamespace(
+            layer_name="indexer",
+            local_block_ids=[1, 3],
+            request_id="req",
+            transfer_id="xfer",
+        ),
+        request_info,
+        remote_meta,
+    )
+
+    assert calls == ["dense0", "indexer"]
+    assert dense0_plan.transfer_local_offsets == [1]
+    assert dense1_plan.transfer_local_offsets == [1]
+    assert indexer_plan.transfer_local_offsets == [2]
+    assert len(request_info.transfer_offsets) == 2
 
 
 def test_block_id_length_mismatch_raises_value_error():

@@ -79,7 +79,10 @@ class RemoteAllocInfo:
     block_ids: list[int]
     writes_done: int = 0
     decode_dp_rank: int = 0
-    transfer_offset: tuple[list[int], list[int], list[int]] | None = None
+    transfer_offsets: dict[
+        tuple[tuple[int, ...], tuple[int, ...], torch.dtype],
+        tuple[list[int], list[int], list[int]],
+    ] = field(default_factory=dict)
 
 
 class ROLE(Enum):

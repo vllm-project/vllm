@@ -35,7 +35,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     get_role,
     zmq_ctx,
 )
-
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
         MoRIIOConnectorWorker,
@@ -59,6 +58,13 @@ except ImportError:
 
 
 """Write task execution logic for MoRIIO connector."""
+
+
+WriteGeometryKey = tuple[tuple[int, ...], tuple[int, ...], torch.dtype]
+
+
+def _get_write_geometry_key(kv_cache: torch.Tensor) -> WriteGeometryKey:
+    return (tuple(kv_cache.shape), tuple(kv_cache.stride()), kv_cache.dtype)
 
 
 class MoRIIOWriter:
@@ -279,21 +285,23 @@ class MoRIIOWriter:
         Returns:
             The transfer plan
         """
-        # Compute offsets if not cached
-        if request_info.transfer_offset is None:
+        layer_cache = self.worker.kv_caches[task.layer_name]
+        geometry_key = _get_write_geometry_key(layer_cache)
+        offsets = request_info.transfer_offsets.get(geometry_key)
+        if offsets is None:
             offsets = self.worker._compute_block_transfer_offsets(
                 task.layer_name,
                 task.local_block_ids,
                 request_info.block_ids,
                 remote_moriio_meta,
             )
-            request_info.transfer_offset = offsets
+            request_info.transfer_offsets[geometry_key] = offsets
 
         # Get session index
         layer_names = list(self.worker.layer_name_to_local_kv_cache_metadata.keys())
         sess_idx = layer_names.index(task.layer_name)
 
-        local_off, remote_off, sizes = request_info.transfer_offset
+        local_off, remote_off, sizes = offsets
 
         return LayerTransferPlan(
             request_id=task.request_id,
