@@ -74,7 +74,8 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
 
             p = main_md.prefill
             assert p is not None
-            prefill_topk = topk[:, nd:num_tokens, :]
+            # build_k2q_csr() doesn't support strided topk buffer
+            prefill_topk = topk[:, nd:num_tokens, :].contiguous()
             qp = q[nd:]
             k_cache = kv_cache[:, 0].transpose(1, 2)
             v_cache = kv_cache[:, 1].transpose(1, 2)
