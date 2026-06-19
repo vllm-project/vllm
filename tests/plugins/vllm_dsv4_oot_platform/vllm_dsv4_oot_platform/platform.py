@@ -37,12 +37,3 @@ class DSv4OOTPlatform(NvmlCudaPlatform):
     def is_out_of_tree(self) -> bool:
         return True
 
-    @classmethod
-    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        super().check_and_update_config(vllm_config)
-        # Explicitly disable CUDA graph capture for the hardware
-        # agnostic platform. Imported lazily to avoid a circular import
-        # at platform-resolution time (vllm.config imports vllm.platforms).
-        from vllm.config.compilation import CUDAGraphMode
-
-        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
