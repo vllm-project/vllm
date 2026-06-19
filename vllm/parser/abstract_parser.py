@@ -689,6 +689,12 @@ class DelegatingParser(Parser):
             return False
         return state.reasoning_ended
 
+    @staticmethod
+    def _request_has_tools(
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> bool:
+        return bool(getattr(request, "tools", None))
+
     def _append_unstreamed_tool_args(
         self,
         delta_message: DeltaMessage | None,
@@ -809,8 +815,20 @@ class DelegatingParser(Parser):
                     )
                     delta_text = current_text
 
-        # Tool call extraction
-        if self._in_tool_call_phase(state):
+        # Tool call extraction. A server can have a tool parser configured
+        # globally while an individual request provides no tools. In that
+        # case, post-reasoning text is ordinary content and must not be routed
+        # through the streaming tool parser.
+        if self._in_tool_call_phase(state) and not self._request_has_tools(request):
+            if current_text:
+                if delta_message is None:
+                    delta_message = DeltaMessage(content=current_text)
+                elif delta_message.content:
+                    delta_message.content += current_text
+                else:
+                    delta_message.content = current_text
+
+        elif self._in_tool_call_phase(state):
             if not state.tool_call_text_started:
                 state.tool_call_text_started = True
                 state.previous_text = ""
@@ -884,6 +902,11 @@ class DelegatingParser(Parser):
             # skip_tool_parsing=True.  Flushing that would leak spurious
             # content (e.g. a stray '"'), so skip it.
             if parser is self._reasoning_parser and reasoning_ended:
+                continue
+            if (
+                parser is self._tool_parser
+                and not self._stream_state.tool_call_text_started
+            ):
                 continue
             finish = getattr(parser, "finish_streaming", None)
             if finish is None:

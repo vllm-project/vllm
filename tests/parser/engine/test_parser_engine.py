@@ -889,9 +889,9 @@ class _CombinedDelegating(DelegatingParser):
     tool_parser_cls = _CombinedToolAdapter
 
 
-def _make_delegating_request():
+def _make_delegating_request(*, with_tools: bool = False):
     req = MagicMock(spec=ChatCompletionRequest)
-    req.tools = []
+    req.tools = [_make_tool("f", {})] if with_tools else []
     req.tool_choice = "auto"
     return req
 
@@ -928,7 +928,7 @@ class TestAdapterFinishOnStreamEnd:
         mid-tool-call (closing brace held back in buffer)."""
         tokenizer = make_mock_tokenizer(_VOCAB)
         parser = _CombinedDelegating(tokenizer)
-        request = _make_delegating_request()
+        request = _make_delegating_request(with_tools=True)
 
         parser.parse_delta("</think>", [201], request, finished=False)
         parser.parse_delta("<tool_call>", [202], request, finished=False)
@@ -940,6 +940,24 @@ class TestAdapterFinishOnStreamEnd:
         assert delta is not None, (
             "Engine finish should produce a delta with flushed args/end"
         )
+
+    def test_no_tools_content_bypasses_tool_parser_after_reasoning(self):
+        """A configured tool parser must not process no-tools requests."""
+        tokenizer = make_mock_tokenizer(_VOCAB)
+        parser = _CombinedDelegating(tokenizer)
+        request = _make_delegating_request()
+
+        parser.parse_delta("thinking", [], request, finished=False)
+        parser.parse_delta("</think>", [201], request, finished=False)
+
+        first = parser.parse_delta(" limit <", [], request, finished=False)
+        second = parser.parse_delta(" 2:\n       ", [], request, finished=False)
+
+        assert first is not None
+        assert first.content == " limit <"
+        assert second is not None
+        assert second.content == " 2:\n       "
+        assert not parser._stream_state.tool_call_text_started
 
 
 # ── TestReasoningOnlyDelegatingParser ─────────────────────────────
