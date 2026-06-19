@@ -46,7 +46,7 @@ def test_cuda_flashinfer_bf16_gemm_fake_preserves_leading_dims(x_shape, n):
     k = x_shape[-1]
     x = torch.empty(x_shape, dtype=torch.bfloat16, device="meta")
     weight = torch.empty(n, k, dtype=torch.bfloat16, device="meta")
-    out = cuda_flashinfer_bf16_gemm_fake(x, weight, None, "auto")
+    out = cuda_flashinfer_bf16_gemm_fake(x, weight, None)
     assert out.shape == (*x_shape[:-1], n)
     assert out.dtype == torch.bfloat16
 
@@ -69,6 +69,6 @@ def test_flashinfer_mm_bf16_fake_output_shape():
     A = torch.empty(4, 16, dtype=torch.bfloat16, device="meta")
     # B is the post-transpose tensor the wrapper passes: [K, N]
     B = torch.empty(16, 8, dtype=torch.bfloat16, device="meta")
-    out = torch.ops.vllm.flashinfer_mm_bf16(A, B, None, False, "auto")
+    out = torch.ops.vllm.flashinfer_mm_bf16(A, B, None)
     assert out.shape == (4, 8)
     assert out.dtype == torch.bfloat16
