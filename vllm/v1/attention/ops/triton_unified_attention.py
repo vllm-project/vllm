@@ -470,23 +470,24 @@ def _load_v_tile_nvfp4_bytewise(
 
     if SCALE_DIM == 16:
         swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
-            slot_in_block[:, None], scale_group_idx[None, :]
+            slot_in_block[None, :], scale_group_idx[:, None]
         )
     else:
         swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
-            slot_in_block[:, None], scale_group_idx[None, :], SCALE_DIM
+            slot_in_block[None, :], scale_group_idx[:, None], SCALE_DIM
         )
     scale_offset = (
-        physical_block_idx[:, None] * stride_scale_blk
+        physical_block_idx[None, :] * stride_scale_blk
         + swizzled_slot * stride_scale_slot
         + kv_head_idx * stride_scale_head
         + swizzled_scale * stride_scale_dim
     )
     block_scale_bits = tl.load(
         value_scale_cache_ptr + scale_offset,
-        mask=tile_mask[:, None] & byte_mask[None, :],
+        mask=byte_mask[:, None] & tile_mask[None, :],
         other=0,
     )
+    block_scale_bits = tl.trans(block_scale_bits)
     scale = _nvfp4_scale_bits_to_float(block_scale_bits) * global_scale
     low = (
         _decode_e2m1_nibble_for_head(raw_bytes & 0x0F, HEAD_SIZE).to(tl.float32) * scale
