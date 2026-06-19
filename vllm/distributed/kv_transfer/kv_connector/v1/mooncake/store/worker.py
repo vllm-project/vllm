@@ -19,6 +19,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
@@ -535,7 +536,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             # Within each lcm region only per-spec relevant chunks are loaded
             # (e.g., SWA or linear attn), so mask out irrelevant chunks
-            store_masks = self.coord.store_mask(token_len)
+            store_masks = self.coord.store_mask(
+                token_len, num_prompt_tokens=req_meta.num_prompt_tokens
+            )
             starts: list[int] = []
             ends: list[int] = []
             keys: list[str] = []
@@ -546,7 +549,9 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 for chunk_idx, (start, end, key) in enumerate(
                     db.process_tokens(token_len, req_meta.block_hashes)
                 ):
-                    if chunk_idx >= len(mask) or not mask[chunk_idx]:
+                    if mask is not None and (
+                        chunk_idx >= len(mask) or not mask[chunk_idx]
+                    ):
                         continue
                     starts.append(start)
                     ends.append(end)
@@ -967,7 +972,13 @@ class MooncakeStoreWorker:
         else:
             self.num_kv_head = model_config.get_total_num_kv_heads()
 
-        if self.num_kv_head < self.tp_size:
+        if self.num_kv_head < self.tp_size and self.dcp_size <= 1:
+            # Dedup: TP ranks holding the same KV heads stripe PUTs across
+            # one shared key namespace. DCP splits the TP group, so with
+            # DCP>1 those ranks have different `@dcpN` namespaces and
+            # striping would leave keys unwritten (OBJECT_NOT_FOUND on
+            # GET). PCP is outer to TP (pcp_rank is constant within a TP
+            # group), so it needs no guard.
             self.put_step = self.tp_size // self.num_kv_head
             self.head_or_tp_rank = self.tp_rank // self.put_step
         else:
@@ -980,6 +991,11 @@ class MooncakeStoreWorker:
             pcp_rank=self.pcp_rank,
             dcp_rank=self.dcp_rank,
             pp_rank=self.pp_rank,
+            cache_prefix=str(
+                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                    "cache_prefix", ""
+                )
+            ),
         )
 
         # Initialize MooncakeDistributedStore with its own TransferEngine
@@ -1091,6 +1107,7 @@ class MooncakeStoreWorker:
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
             use_eagle=use_eagle,
+            retention_interval=envs.VLLM_PREFIX_CACHE_RETENTION_INTERVAL,
         )
         # One ChunkedTokenDatabase per group; addresses populated in
         # register_kv_caches once the kv-cache layout is known.
@@ -1367,9 +1384,11 @@ class MooncakeStoreWorker:
         # candidate_meta[i] is the (group_id, hash_bytes) for candidate_keys[i].
         candidate_keys: list[str] = []
         candidate_meta: list[tuple[int, bytes]] = []
+        lookup_masks = self.coord.lookup_mask(token_len)
         tp_count = min(self.tp_size, self.num_kv_head)
         for g_idx, db in enumerate(self.token_dbs):
             spec_block_size = db.block_size
+            lookup_mask = lookup_masks[g_idx]
             group_hashes = self.coord.block_hashes_for_spec(
                 block_hashes, self._kv_cache_groups[g_idx].kv_cache_spec
             )
@@ -1377,6 +1396,10 @@ class MooncakeStoreWorker:
                 start_idx = chunk_id * spec_block_size
                 if start_idx >= token_len:
                     break
+                if lookup_mask is not None and (
+                    chunk_id >= len(lookup_mask) or not lookup_mask[chunk_id]
+                ):
+                    continue
                 for tp in range(tp_count):
                     for pp in range(self.pp_size):
                         md = dataclasses.replace(db.metadata, tp_rank=tp, pp_rank=pp)
@@ -1422,6 +1445,22 @@ class MooncakeStoreWorker:
         if self.enable_kv_events and self.kv_send_thread is not None:
             return self.kv_send_thread.get_kv_events()
         return []
+
+    def close(self) -> None:
+        """Release the MooncakeDistributedStore handle on teardown.
+
+        Closing the store frees its TransferEngine, the registered RDMA
+        buffers, and the connection to the master server. Idempotent so it is
+        safe to call from both the explicit shutdown path and ``__del__``.
+        """
+        store = getattr(self, "store", None)
+        if store is None:
+            return
+        self.store = None
+        try:
+            store.close()
+        except Exception as e:
+            logger.warning("Error closing MooncakeDistributedStore: %s", e)
 
 
 # ============================================================
@@ -1528,7 +1567,13 @@ class LookupKeyClient:
             bind=False,
         )
 
-    def lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
+        # Async lookup support
+        self.executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="MooncakeLookupClient"
+        )
+        self.futures: dict[str, Future[int]] = {}
+
+    def _lookup(self, token_len: int, block_hashes: list[BlockHash]) -> int:
         hash_strs = [h.hex() for h in block_hashes]
         hash_frames = self.encoder.encode(hash_strs)
         token_len_bytes = token_len.to_bytes(4, byteorder="big")
@@ -1538,7 +1583,36 @@ class LookupKeyClient:
         result = int.from_bytes(resp, "big")
         return result
 
-    def reset(self) -> bool:
+    def lookup(
+        self,
+        req_id: str,
+        token_len: int,
+        block_hashes: list[BlockHash],
+        non_block: bool = False,
+    ) -> int | None:
+        """If non_block is True, will return None until the result is ready,
+        so the caller retries on a later step."""
+        future = self.futures.get(req_id)
+        if future is None:
+            future = self.executor.submit(self._lookup, token_len, list(block_hashes))
+            self.futures[req_id] = future
+        if non_block and not future.done():
+            return None
+        try:
+            return future.result()
+        except Exception as e:
+            logger.error("Async Mooncake lookup failed for %s: %s", req_id, e)
+            return 0
+        finally:
+            del self.futures[req_id]
+
+    def discard(self, req_id: str) -> None:
+        """Drop any cached/in-flight lookup for ``req_id`` (e.g. on abort)."""
+        future = self.futures.pop(req_id, None)
+        if future is not None:
+            future.cancel()
+
+    def _reset(self) -> bool:
         """Trigger ``store.remove_all(force=True)`` on worker rank 0.
 
         Ordering assumption: caller MUST ensure no in-flight Mooncake
@@ -1550,7 +1624,11 @@ class LookupKeyClient:
         resp = self.socket.recv()
         return bytes(resp) == RESP_OK
 
+    def reset(self) -> bool:
+        return self.executor.submit(self._reset).result()
+
     def close(self):
+        self.executor.shutdown(wait=False, cancel_futures=True)
         self.socket.close(linger=0)
 
 

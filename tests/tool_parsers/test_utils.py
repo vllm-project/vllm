@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 
 from vllm.tool_parsers.utils import (
@@ -90,6 +92,71 @@ class TestCoerceToSchemaType:
 
         def test_invalid_number_fallback(self):
             assert coerce_to_schema_type("abc", "number") == "abc"
+
+    class TestNonFiniteNumbers:
+        """Non-finite numeric strings must not crash and must coerce to a
+        JSON-serializable value.
+
+        Regression: ``int(float("inf"))`` raised an uncaught ``OverflowError``
+        (only ``ValueError``/``TypeError`` were handled), and ``"1e999"``
+        round-tripped through ``json.loads`` to a float ``inf`` that
+        ``json.dumps`` renders as invalid JSON ``Infinity``.
+        """
+
+        @pytest.mark.parametrize(
+            "value", ["inf", "-inf", "Infinity", "1e999", "nan", "-nan"]
+        )
+        def test_non_finite_number_does_not_crash(self, value):
+            # Must not raise (previously OverflowError for inf/1e999/Infinity).
+            result = coerce_to_schema_type(value, "number")
+            # Result must serialize to valid, finite JSON and round-trip.
+            assert json.loads(json.dumps(result)) == result
+
+        @pytest.mark.parametrize("value", ["inf", "-inf", "1e999"])
+        def test_non_finite_number_preserved_as_string(self, value):
+            assert coerce_to_schema_type(value, "number") == value
+
+        @pytest.mark.parametrize("value", ["inf", "1e999", "Infinity"])
+        def test_non_finite_integer_not_float_inf(self, value):
+            result = coerce_to_schema_type(value, "integer")
+            assert isinstance(result, str)
+            assert result == value
+
+    class TestNonFiniteContainers:
+        """Non-finite floats nested in object/array values must not produce
+        invalid JSON.
+
+        Regression: the ``object``/``array`` branch returned
+        ``json.loads(value)`` directly, so ``"[1e999]"`` became ``[inf]`` and
+        ``'{"x": Infinity}'`` became ``{"x": inf}`` -- values that
+        ``json.dumps`` later renders as invalid JSON (``Infinity``/``NaN``).
+        """
+
+        @pytest.mark.parametrize(
+            "value", ["[1e999]", "[1, 2, 1e999]", "[NaN]", "[-Infinity]"]
+        )
+        def test_array_with_non_finite_preserved_as_string(self, value):
+            result = coerce_to_schema_type(value, "array")
+            assert result == value
+            assert json.loads(json.dumps(result)) == result
+
+        @pytest.mark.parametrize(
+            "value", ['{"x": 1e999}', '{"x": Infinity}', '{"a": [1e999, 2]}']
+        )
+        def test_object_with_non_finite_preserved_as_string(self, value):
+            result = coerce_to_schema_type(value, "object")
+            assert result == value
+            assert json.loads(json.dumps(result)) == result
+
+        def test_finite_array_still_coerced(self):
+            assert coerce_to_schema_type("[1, 2, 3]", "array") == [1, 2, 3]
+
+        def test_finite_object_still_coerced(self):
+            assert coerce_to_schema_type('{"a": 1}', "object") == {"a": 1}
+
+        def test_unknown_type_non_finite_falls_back_to_string(self):
+            # Exercises the final json.loads fallback path.
+            assert coerce_to_schema_type("1e999", "unknown_type") == "1e999"
 
     class TestBooleanType:
         def test_true(self):
