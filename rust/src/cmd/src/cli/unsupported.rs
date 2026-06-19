@@ -202,14 +202,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub tokenizer_revision: Option<Unsupported>,
 
-    /// Maximum number of log probabilities to return when `logprobs` is
-    /// specified in `SamplingParams`. The default value comes the default for
-    /// the OpenAI Chat Completions API. -1 means no cap, i.e. all
-    /// (output_length * vocab_size) logprobs are allowed to be returned and
-    /// it may cause OOM.
-    #[arg(long)]
-    pub max_logprobs: Option<Unsupported>,
-
     /// Skip initialization of tokenizer and detokenizer. Expects valid
     /// `prompt_token_ids` and `None` for prompt from the input. The generated
     /// output will contain token ids.
@@ -325,15 +317,6 @@ pub struct EngineUnsupportedArgs {
     /// Type of cache to use for the multi-modal preprocessor/mapper.
     #[arg(long)]
     pub mm_processor_cache_type: Option<Unsupported>,
-
-    /// If True, enable handling of LoRA adapters.
-    #[arg(
-        long,
-        visible_alias = "no-enable-lora",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_lora: Option<Unsupported>,
 
     /// Dictionary mapping specific modalities to LoRA model paths.
     #[arg(long)]
@@ -453,15 +436,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub max_log_len: Option<Unsupported>,
 
-    /// If set to True, enable prompt_tokens_details in usage.
-    #[arg(
-        long,
-        visible_alias = "no-enable-prompt-tokens-details",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_prompt_tokens_details: Option<Unsupported>,
-
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,
@@ -551,32 +525,6 @@ pub struct ServerUnsupportedArgs {
     /// while keeping logs for other endpoints.
     #[arg(long)]
     pub disable_access_log_for_endpoints: Option<Noop>,
-
-    /// Allow credentials.
-    #[arg(
-        long,
-        visible_alias = "no-allow-credentials",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub allow_credentials: Option<Unsupported>,
-
-    /// Allowed origins.
-    #[arg(long)]
-    pub allowed_origins: Option<Unsupported>,
-
-    /// Allowed methods.
-    #[arg(long)]
-    pub allowed_methods: Option<Unsupported>,
-
-    /// Allowed headers.
-    #[arg(long)]
-    pub allowed_headers: Option<Unsupported>,
-
-    /// If provided, the server will require one of these keys to be presented
-    /// in the header.
-    #[arg(long)]
-    pub api_key: Option<Unsupported>,
 
     /// The file path to the SSL key file.
     #[arg(long)]

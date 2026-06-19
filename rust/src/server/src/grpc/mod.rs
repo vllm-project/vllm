@@ -71,8 +71,7 @@ impl pb::generate_server::Generate for GenerateServiceImpl {
         );
 
         let finish_info = vllm_text::Finished {
-            prompt_token_count: collected.prompt_token_ids.len(),
-            output_token_count: collected.token_ids.len(),
+            usage: collected.usage,
             finish_reason: collected.finish_reason,
             kv_transfer_params: collected.kv_transfer_params,
         };

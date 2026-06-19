@@ -28,7 +28,7 @@ pub struct ReadyMessage {
 /// profiling).
 ///
 /// Original Python definition:
-/// <https://github.com/vllm-project/vllm/blob/c8d98f81f6/vllm/v1/engine/__init__.py#L67-L77>
+/// <https://github.com/vllm-project/vllm/blob/c9340e6f35/vllm/v1/engine/__init__.py#L68-L80>
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EngineCoreReadyResponse {
     /// Engine-reported maximum model context length (auto-fitted after
@@ -36,12 +36,22 @@ pub struct EngineCoreReadyResponse {
     pub max_model_len: u64,
     /// Number of GPU blocks available for KV cache on this engine.
     pub num_gpu_blocks: u64,
+    /// KV cache block size (tokens per block).
+    pub block_size: u64,
     /// DP coordinator stats publish address, if applicable.
     pub dp_stats_address: Option<String>,
     /// Effective model dtype after Python vLLM resolves `--dtype`.
     pub dtype: ModelDtype,
     /// Python vLLM version reported by the engine process.
     pub vllm_version: String,
+    /// World size (TP * PP) from the parallel config.
+    pub world_size: u64,
+    /// Data parallelism size from the parallel config.
+    pub data_parallel_size: u64,
+    /// Total KV cache capacity in tokens, if reported.
+    pub kv_cache_size_tokens: Option<u64>,
+    /// Maximum achievable request concurrency given the KV cache, if reported.
+    pub kv_cache_max_concurrency: Option<f64>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

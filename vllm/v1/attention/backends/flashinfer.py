@@ -62,7 +62,6 @@ from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
     get_dcp_local_seq_lens,
     get_kv_cache_layout,
-    get_num_attention_heads_from_layers,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
@@ -337,9 +336,24 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        # Note: Not sure for all platforms, but on Blackwell,
-        # only support a page size of 16, 32, 64.
-        return [16, 32, 64]
+        # Page sizes >= 128 only run on the trtllm-gen dynamic kernel (GQA/MQA
+        # on Blackwell); advertise them only when usable so selection never
+        # picks a large kernel block we cannot serve.
+        use_large_pages = False
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None and vllm_config.model_config is not None:
+            pc = vllm_config.parallel_config
+            mc = vllm_config.model_config
+            num_qo_heads = mc.get_num_attention_heads(pc)
+            num_kv_heads = mc.get_num_kv_heads(pc)
+            use_large_pages = (
+                num_kv_heads > 0
+                and num_qo_heads // num_kv_heads > 1
+                and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
+            )
+        if not use_large_pages:
+            return [16, 32, 64]
+        return [16, 32, 64, 128, 256, 512, 1024]
 
     @staticmethod
     def get_name() -> str:
@@ -608,10 +622,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.use_dcp and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
 
-        # Compatible with models with non-uniform per-layer head counts.
-        self.num_qo_heads = get_num_attention_heads_from_layers(
-            vllm_config, layer_names
-        ) or self.model_config.get_num_attention_heads(self.vllm_config.parallel_config)
+        self.num_qo_heads = self.model_config.get_num_attention_heads(
+            self.vllm_config.parallel_config
+        )
 
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
@@ -623,6 +636,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
             self.is_kvcache_nvfp4 = self.cache_dtype == "nvfp4"
             if self.is_kvcache_nvfp4:
+                # trtllm-gen FP4 FMHA kernels only exist for sm100f (sm_100/sm_103).
+                # Fail fast at init rather than crashing on the first request.
+                if not current_platform.is_device_capability_family(100):
+                    raise ValueError(
+                        "--kv-cache-dtype nvfp4 requires sm100f, "
+                        "please try a different dtype or remove"
+                    )
                 # For NVFP4, kv_cache_dtype stays as the string "nvfp4"
                 # which is passed to FlashInferImpl
                 self.kv_cache_dtype = self.cache_dtype
@@ -641,6 +661,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # try to use fp8 q if kv cache is fp8, and will fall back to model dtype
         # if TRTLLM attention kernel is not used when building attn metadata
         can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
+
+        # Page sizes >= 128 require the trtllm-gen GQA/MQA path (guaranteed by
+        # get_supported_kernel_block_sizes).
+        assert self.page_size <= 64 or (
+            can_use_trtllm and self.num_qo_heads // self.num_kv_heads > 1
+        ), f"Unexpected FlashInfer page size {self.page_size} without trtllm-gen GQA"
 
         if (
             can_use_trtllm
@@ -912,6 +938,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # - Decode (FI native or TRTLLM)
         use_cascade = common_prefix_len > 0
         uses_spec_reorder = self.reorder_batch_threshold > 1
+        # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
+        prefill_force_trtllm = (
+            True if page_size >= 128 else self.attention_config.use_trtllm_attention
+        )
         prefill_use_trtllm = use_trtllm_attention(
             self.num_qo_heads,
             self.num_kv_heads,
@@ -921,7 +951,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.cache_dtype,
             self.q_data_type,
             is_prefill=True,
-            force_use_trtllm=self.attention_config.use_trtllm_attention,
+            force_use_trtllm=prefill_force_trtllm,
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
