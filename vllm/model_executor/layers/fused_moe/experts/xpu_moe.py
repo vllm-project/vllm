@@ -14,8 +14,12 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
+    kFp8Static128BlockSym,
     kFp8StaticTensorSym,
+    kInt4Static,
+    kInt4Static32,
     kMxfp4Static,
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -28,9 +32,20 @@ if current_platform.is_xpu():
 
 def prepare_fp8_moe_layer_for_xpu(
     w13: torch.Tensor,
+    w13_scale: torch.Tensor,
     w2: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return w13.transpose(-1, -2).contiguous(), w2.transpose(-1, -2).contiguous()
+    w2_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    if w13_scale is not None and w13_scale.ndim == 3:
+        w13_scale = w13_scale.transpose(-1, -2).contiguous()
+    if w2_scale is not None and w2_scale.ndim == 3:
+        w2_scale = w2_scale.transpose(-1, -2).contiguous()
+    return (
+        w13.transpose(-1, -2).contiguous(),
+        w13_scale,
+        w2.transpose(-1, -2).contiguous(),
+        w2_scale,
+    )
 
 
 class XPUExperts(mk.FusedMoEExpertsModular):
@@ -48,7 +63,9 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             num_dispatchers,
         )
         self.is_fp8 = False
+        self.is_int4 = False
         self.is_mxfp4 = False
+        self.is_block_fp8 = False
         self.is_mxfp8 = False
         self.fused_moe_impl: XpuFusedMoe | None = None
 
@@ -73,6 +90,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
             MoEActivation.SWIGLUOAI,
             MoEActivation.RELU2_NO_MUL,
         ]
@@ -92,9 +110,6 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
-
-    def supports_expert_map(self) -> bool:
-        return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -133,6 +148,15 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        # The kernel takes is_fp8/is_int4/is_mxfp4 as independent booleans.
+        # In this hierarchy each subclass flips exactly one to True; assert
+        # the invariant so a future subclass that sets two doesn't silently
+        # miscompute (kernel-side priority is undocumented).
+        assert sum([self.is_fp8, self.is_int4, self.is_mxfp4]) <= 1, (
+            "XPUExperts: at most one of is_fp8, is_int4, is_mxfp4 may be True; "
+            f"got is_fp8={self.is_fp8}, is_int4={self.is_int4}, "
+            f"is_mxfp4={self.is_mxfp4}."
+        )
         if self.fused_moe_impl is None:
             topk = topk_ids.size(-1)
             self.fused_moe_impl = XpuFusedMoe(
@@ -148,8 +172,10 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 ep_rank=self.moe_config.ep_rank,
                 ep_size=self.moe_config.ep_size,
                 is_fp8=self.is_fp8,
+                is_int4=self.is_int4,
                 is_mxfp4=self.is_mxfp4,
                 is_mxfp8=self.is_mxfp8,
+                is_block_fp8=self.is_block_fp8,
             )
         assert self.fused_moe_impl is not None
         self.fused_moe_impl.apply(
@@ -188,7 +214,7 @@ class XPUExpertsFp8(XPUExperts):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-class XPUExpertsMxfp8(XPUExpertsFp8):
+class XPUExpertsMxFp8(XPUExpertsFp8):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -217,7 +243,73 @@ class XPUExpertsMxfp8(XPUExpertsFp8):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
 
-class XPUExpertsMXFp4(XPUExperts):
+class XPUExpertsBlockFp8(XPUExperts):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config,
+            quant_config,
+            max_num_tokens,
+            num_dispatchers,
+        )
+        self.is_block_fp8 = True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        SUPPORTED_W_A = [
+            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+class XPUExpertsWNA16(XPUExperts):
+    """W4A16 INT4-symmetric MoE backed by `xpu_fused_moe(is_int4=True)`.
+
+    Weight layout when `is_int4=True` (per `xpu_fused_moe` docstring):
+        w13: [num_experts, 2*inter_size, hidden_size]   contiguous int4-packed
+        w13_scales: [num_experts, 2*inter_size, hidden_size // group_size]
+        w2:  [num_experts, hidden_size, inter_size]     contiguous int4-packed
+        w2_scales:  [num_experts, hidden_size, inter_size // group_size]
+
+    Pairs with `INCXPULinearMethod` for the linear layers; together they
+    cover full-attn + MoE on Intel XPU end-to-end without IPEX.
+    """
+
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config,
+            quant_config,
+            max_num_tokens,
+            num_dispatchers,
+        )
+        self.is_int4 = True
+
+    @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) in (
+            (kInt4Static, None),
+            (kInt4Static32, None),
+        )
+
+
+class XPUExpertsMxFp4(XPUExperts):
     def __init__(
         self,
         moe_config: FusedMoEConfig,
