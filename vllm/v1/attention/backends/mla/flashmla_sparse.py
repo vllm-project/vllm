@@ -729,9 +729,20 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 topk_indices=topk_indices,
                 kernel_metadata=fp8_metadata.decode.kernel_metadata,
             )
+            num_heads = q.shape[2]
             # Reshape output: (num_decodes, seq_len, num_heads, head_dim_v)
             #              -> (num_decode_tokens, num_heads, head_dim_v)
-            return reshape_attn_output_for_spec_decode(attn_out), lse
+            attn_out = reshape_attn_output_for_spec_decode(attn_out)
+            # Reshape lse: (num_decodes, num_heads, seq_len)
+            #           -> (num_decode_tokens, num_heads)  [decode-major layout,
+            # matching attn_out's reshape_attn_output_for_spec_decode ordering,
+            # which the DCP LSE reducer expects as [tokens, heads].]
+            lse = (
+                lse.permute(0, 2, 1)
+                .reshape(num_decodes * seq_len, num_heads)
+                .contiguous()
+            )
+            return attn_out, lse
 
         num_decode_tokens = fp8_metadata.num_decode_tokens
         num_prefill_tokens = fp8_metadata.num_prefill_tokens
@@ -823,9 +834,13 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             kernel_metadata=fp8_metadata,
         )
 
-        # Output is (1, T, H, D_v), squeeze back to (T, H, D_v). LSE is
-        # (1, T, H) — squeeze the batch dim to (T, H) for the DCP merge.
-        return _attn_out.squeeze(0), lse.squeeze(0) if lse is not None else None
+        # Output is (1, T, H, D_v), squeeze back to (T, H, D_v). The kernel
+        # returns LSE as (1, H, T) [batch, heads, seq]; permute to (1, T, H)
+        # then squeeze to (T, H) — the [tokens, heads] layout the DCP LSE
+        # reducer expects (matching the bf16 path).
+        if lse is not None:
+            lse = lse.permute(0, 2, 1).squeeze(0).contiguous()
+        return _attn_out.squeeze(0), lse
 
     def _fp8_flash_mla_kernel(
         self,
