@@ -5,7 +5,7 @@ import torch
 
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.multimodal.inputs import MultiModalKwargsItem
-from vllm.multimodal.utils import group_and_batch_mm_kwargs
+from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
 
@@ -91,18 +91,16 @@ class EncoderRunner:
                 continue
 
             mm_features = self.encoder_cache.mm_features[req_id]
-            for mm_feature in mm_features:
+            lo, hi = get_mm_features_in_window(
+                mm_features,
+                start=query_start[i],
+                end=query_end[i],
+            )
+            for idx in range(lo, hi):
+                mm_feature = mm_features[idx]
                 pos_info = mm_feature.mm_position
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
-
-                if start_pos >= query_end[i]:
-                    # The encoder output is not needed in this step.
-                    break
-                if start_pos + num_encoder_tokens <= query_start[i]:
-                    # The encoder output is already processed and stored
-                    # in the decoder's KV cache.
-                    continue
 
                 start_idx = max(query_start[i] - start_pos, 0)
                 end_idx = min(query_end[i] - start_pos, num_encoder_tokens)
@@ -126,7 +124,7 @@ class EncoderRunner:
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
                 req_start_pos = query_start_loc[i] + start_pos - query_start[i]
-                is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] = (
+                is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] |= (
                     True if is_embed is None else is_embed
                 )
                 mm_embeds.append(mm_embeds_item)

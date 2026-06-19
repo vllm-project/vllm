@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, overload
 import torch
 from typing_extensions import TypeVar
 
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.multimodal.parse import (
@@ -424,7 +425,7 @@ class BaseProcessingInfo:
             if num_items <= supported_limit:
                 msg += " Set `--limit-mm-per-prompt` to increase this limit."
 
-            raise ValueError(msg)
+            raise VLLMValidationError(msg, parameter=modality)
 
     def parse_mm_data(
         self,
