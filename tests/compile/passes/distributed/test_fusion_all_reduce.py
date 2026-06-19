@@ -508,7 +508,7 @@ def all_reduce_fusion_pass_on_test_model(
             "MASTER_PORT": "12345",
             "VLLM_FLASHINFER_ALLREDUCE_BACKEND": flashinfer_allreduce_backend,
             "VLLM_ROCM_USE_AITER": str(int(use_aiter)),
-            "VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE": str(int(use_aiter)),
+            "VLLM_ROCM_USE_AITER_CUSTOM_AR": str(int(use_aiter)),
         }
     )
     if use_aiter:
@@ -678,7 +678,7 @@ def rocm_aiter_group_quant_fusion_pass_on_test_model(
             "MASTER_ADDR": "localhost",
             "MASTER_PORT": "12345",
             "VLLM_ROCM_USE_AITER": "1",
-            "VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE": "1",
+            "VLLM_ROCM_USE_AITER_CUSTOM_AR": "1",
         }
     )
     rocm_aiter_ops.refresh_env_variables()

@@ -1475,7 +1475,7 @@ class RocmAiterAllReduceFusionPass(VllmFusionPatternMatcherPass):
             logger.warning_once(
                 "AITER allreduce fusions are disabled "
                 "because AITER Custom All Reduce is not enabled. "
-                "Set VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE=1 "
+                "Set VLLM_ROCM_USE_AITER_CUSTOM_AR=1 "
                 "to enable it."
             )
             return

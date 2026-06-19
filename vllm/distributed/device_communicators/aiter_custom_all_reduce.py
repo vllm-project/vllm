@@ -3,7 +3,7 @@
 """vLLM-owned wrapper over AITER's ``CustomAllreduce``.
 
 vLLM's ``CudaCommunicator`` stores one of these as ``aiter_ar_comm`` (when
-``VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE`` is set) so the plain allreduce and
+``VLLM_ROCM_USE_AITER_CUSTOM_AR`` is set) so the plain allreduce and
 the fused allreduce+RMSNorm path share a single AITER instance with its IPC buffers.
 
 """
