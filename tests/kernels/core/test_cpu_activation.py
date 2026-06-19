@@ -113,10 +113,6 @@ def test_cpu_unary_activation(
 
 
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.skipif(
-    current_platform.get_cpu_architecture() != CpuArchEnum.ARM,
-    reason="AOR tanh override is only used on Arm CPU",
-)
 @torch.inference_mode()
 def test_cpu_gelu_tanh_and_mul(
     default_vllm_config,
