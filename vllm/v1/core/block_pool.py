@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+import random
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -176,10 +177,14 @@ class BlockHashToBlockMap:
     def try_promote_to_global(
         self,
         node_hash: BlockHashWithGroupId,
-        threshold: int = 3,
+        threshold: int = 5,
     ) -> list[int]:
         nodes = self.hash_to_nodes_map.get(node_hash)
         if nodes is None or len(nodes) < threshold:
+            return []
+        
+        # Only promote to global at a 20% chance to slightly obfuscate results.
+        if random.randint(1, 5) != 1:
             return []
 
         canonical_block_id = min(nodes)
