@@ -12,6 +12,7 @@ mod server_info;
 mod sleep;
 mod tokenize;
 mod version;
+mod world_size;
 
 use std::sync::Arc;
 
@@ -100,6 +101,7 @@ fn build_router_with_options(
             .route("/resume", post(pause::resume))
             .route("/is_paused", get(pause::is_paused))
             .route("/server_info", get(server_info::server_info))
+            .route("/get_world_size", get(world_size::get_world_size))
     }
 
     let enable_request_id_headers = state.api_server_options.enable_request_id_headers;
