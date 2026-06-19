@@ -227,6 +227,30 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
         wtype = scalar_types.uint4
 
+        from vllm.platforms.rocm import on_gfx1151
+
+        def _pad_rows_off_cliff(w: torch.Tensor) -> torch.Tensor:
+            """gfx11x cache cliff: the skinny weight row stride K//8 (and the
+            per-expert stride N*K//8) land on power-of-2 byte alignments that
+            collide in L2/MALL. Offset the row stride by one cache line (+128 B
+            = +32 int32) via a padded buffer, returning a view of logical shape
+            [E, N, K//8] -- the stride jumps over the pad, the kernels iterate
+            only the real K//8 (zero extra FLOPs). Stride-aware on both paths:
+            the Triton kernel reads B.stride(0/1/2); the HIP skinny kernel takes
+            an explicit B_row_stride_bytes."""
+            E_dim, N_dim, k8 = w.shape
+            if not (on_gfx1151() and w.device.type == "cuda"):
+                return w
+            # The cliff is at a 2048-byte row stride: only those collide in
+            # L2/MALL, off-cliff shapes gain nothing and padding them just
+            # wastes memory + a copy. The row byte stride is k8 * element width.
+            if (k8 * w.element_size()) % 2048 != 0:
+                return w
+            pad = 32
+            buf = torch.empty((E_dim, N_dim, k8 + pad), dtype=w.dtype, device=w.device)
+            buf[:, :, :k8].copy_(w)
+            return buf[:, :, :k8]
+
         def convert_weights(w_packed: torch.Tensor) -> torch.Tensor:
             """Convert [E, K/8, N] GPTQ -> [E, N, K//8] skinny
             (ExLlama shuffle)."""
@@ -239,7 +263,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 unpacked_t = unpacked.t().contiguous()
                 repacked = pack_int4_exllama_shuffle(unpacked_t)
                 experts.append(repacked)
-            return torch.stack(experts)
+            return _pad_rows_off_cliff(torch.stack(experts))
 
         replace_parameter(
             layer,

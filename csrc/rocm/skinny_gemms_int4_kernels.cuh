@@ -1015,6 +1015,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS) moe_wvSplitK_int4_hf_sml_(
   // because each row holds gate(K)+up(K) = 2*K elements.
   constexpr int A_ROW_STRIDE_MUL = FUSED_SILU_MUL ? 2 : 1;
   __shared__ scalar_t s[MOE_LDS_ELEMS];
+  // Per-row byte stride of B = per-expert stride / N_weight (= M here). This
+  // honors a padded weight row stride (E,N,K//8+pad view) without threading a
+  // new param: contiguous weights give expert_stride_w/M == K/2 as before.
+  const int b_row_stride_bytes = static_cast<int>(expert_stride_w / M);
   long last_src_row = -1;
   for (int eb = 0; eb < num_expert_blocks; ++eb) {
     int expert_id = expert_ids[eb];
@@ -1056,7 +1060,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS) moe_wvSplitK_int4_hf_sml_(
 
     wvSplitK_int4_compute_sml_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL,
                                N, GROUP_SIZE, HAS_ZERO_POINTS>(
-        K, M, 1, 1, B, A, S, ZP, nullptr, C, _WvPrGrp, CuCount, s, K / 2);
+        K, M, 1, 1, B, A, S, ZP, nullptr, C, _WvPrGrp, CuCount, s,
+        b_row_stride_bytes);
   }
 }
 
@@ -1080,6 +1085,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // the suffix is read directly from A in the compute loop, so we cannot
   // skip passing the live A pointer even when the LDS preload is reused.
   __shared__ scalar_t s[LDS_SIZE / 2];
+  // Per-row byte stride of B = per-expert stride / N_weight (= M here); honors
+  // a padded weight row stride. Contiguous weights give K/2 as before.
+  const int b_row_stride_bytes = static_cast<int>(expert_stride_w / M);
   long last_src_row = -1;
   for (int eb = 0; eb < num_expert_blocks; ++eb) {
     int expert_id = expert_ids[eb];
@@ -1113,7 +1121,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
     wvSplitK_int4_compute_<scalar_t, THRDS, YTILE, WvPrGrp, A_CHUNK, UNRL, N,
                            GROUP_SIZE, HAS_ZERO_POINTS>(
-        K, M, 1, 1, B, A, S, ZP, nullptr, C, _WvPrGrp, CuCount, s, K / 2);
+        K, M, 1, 1, B, A, S, ZP, nullptr, C, _WvPrGrp, CuCount, s,
+        b_row_stride_bytes);
   }
 }
 #else   // !defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
