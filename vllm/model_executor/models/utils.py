@@ -383,14 +383,14 @@ class AutoWeightsLoader:
         *,
         mapper: WeightsMapper | None = None,
     ) -> set[str]:
+        # Ignore unexpected biases (typically from GPTQ models)
+        self.ignore_unexpected_suffixes.append(".bias")
+
         # Many models store quant_config in the base model instead of the causal model.
         # We look at the causal model's direct children for this reason.
         modules = (self.module, *self.module.children())
         iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
         if quant_config := next(iterator, None):
-            # Skip loading extra bias for GPTQ models
-            if "gptq" in quant_config.get_name():
-                self.ignore_unexpected_suffixes.append(".bias")
             # Get mappings and ignore prefixes for KV cache quantization scales
             mapper = mapper or WeightsMapper()
             mapper |= quant_config.get_cache_scale_mapper()
