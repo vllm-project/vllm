@@ -223,6 +223,9 @@ if TYPE_CHECKING:
     ] = "NONE"
     VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16: bool = True
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
+    VLLM_VISION_NPU_CACHE: str | None = None
+    VLLM_VISION_NPU_DEVICE: str | None = None
+    VLLM_NPU_TIMING: bool = False
     VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB: int | None = None
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB: int | None = None
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
@@ -1962,6 +1965,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
+    # Path to NPU model cache directory (enables FlexMLRT vision backend when set)
+    "VLLM_VISION_NPU_CACHE": lambda: os.getenv("VLLM_VISION_NPU_CACHE"),
+    # NPU device name (e.g., "stx" for Strix, "phx" for Phoenix)
+    "VLLM_VISION_NPU_DEVICE": lambda: os.getenv("VLLM_VISION_NPU_DEVICE"),
+    # Enable NPU timing debug logs
+    "VLLM_NPU_TIMING": lambda: os.getenv("VLLM_NPU_TIMING", "0") == "1",
     # Enable CUDA compatibility mode for datacenter GPUs with older
     # driver versions than the CUDA toolkit major version of vLLM.
     "VLLM_ENABLE_CUDA_COMPATIBILITY": lambda: (
