@@ -373,7 +373,18 @@ def _decode_index_score_kernel(
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
         )  # [N,D]
-        kq = tl.dot(k, q)  # [N,HQ]
+        if BLOCK_SIZE_HQ == 1:
+            # Single index head + single query token (the common M3 decode case):
+            # tl.dot here is a degenerate [N,D] x [D,1] GEMV that produces one
+            # useful output column out of the >=16-wide MFMA tile (>90% wasted)
+            # and bloats accumulator VGPRs. Replace it with a vectorized fp32
+            # multiply + reduce over the head dim (numerically equivalent).
+            q_vec = tl.sum(q, axis=1).to(tl.float32)  # [D] (HQ==1 -> single column)
+            kq = tl.sum(
+                k.to(tl.float32) * q_vec[None, :], axis=1
+            )[:, None]  # [N,1]
+        else:
+            kq = tl.dot(k, q)  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
         score = tl.max(kq, axis=0)  # [HQ]
         is_visible_block = blk < num_blocks_q
