@@ -119,7 +119,7 @@ class CachedRequestData:
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
     # MRV1-only: For requests not scheduled in the last step, propagate the token ids
-    # to the connector. Won't contain requests scheduled in the prior step (MRV1-only).
+    # to the connector. Won't contain requests scheduled in the prior step.
     all_token_ids: dict[str, list[int]]
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
