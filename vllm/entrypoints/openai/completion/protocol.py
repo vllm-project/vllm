@@ -429,9 +429,13 @@ class CompletionRequest(OpenAIBaseModel):
                     parameter="prompt_logprobs",
                     value=prompt_logprobs,
                 )
-        if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
+        if (
+            (logprobs := data.get("logprobs")) is not None
+            and logprobs < 0
+            and logprobs != -1
+        ):
             raise VLLMValidationError(
-                "`logprobs` must be a positive value.",
+                "`logprobs` must be a positive value or -1.",
                 parameter="logprobs",
                 value=logprobs,
             )
