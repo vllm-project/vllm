@@ -10,8 +10,14 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-# Shared global so backends.py can read the start time for Dynamo timing.
+# Shared globals so backends.py can read the start time for Dynamo timing.
+# torch_compile_start_time uses time.perf_counter() (a monotonic clock with an
+# arbitrary, implementation-defined epoch) and must only be used to measure
+# elapsed durations via subtraction. torch_compile_start_time_wall uses
+# time.time() (wall-clock/Unix epoch) and is the value that should be passed
+# to tracing backends (e.g. OpenTelemetry) that expect epoch timestamps.
 torch_compile_start_time: float = 0.0
+torch_compile_start_time_wall: float = 0.0
 
 
 @contextlib.contextmanager
@@ -25,8 +31,9 @@ def monitor_torch_compile(
     On normal exit: logs the compile time and exits depyf.
     On exception: cleans up depyf without logging (compilation failed).
     """
-    global torch_compile_start_time
+    global torch_compile_start_time, torch_compile_start_time_wall
     torch_compile_start_time = time.perf_counter()
+    torch_compile_start_time_wall = time.time()
 
     compilation_config = vllm_config.compilation_config
     depyf_cm = None
