@@ -109,18 +109,18 @@ vLLM supports the `tool_choice='none'` option in the chat completion API. When t
 
 ## Constrained Decoding Behavior
 
-Whether vLLM enforces the tool parameter schema during generation depends on the `tool_choice` mode:
+Whether vLLM enforces the tool parameter schema during generation depends on the `tool_choice` mode and the per-tool `strict` field:
 
 | `tool_choice` value | Schema-constrained decoding | Behavior |
 | --- | --- | --- |
 | Named function | Yes (via structured outputs backend) | Arguments are guaranteed to be valid JSON conforming to the function's parameter schema. |
 | `"required"` | Yes (via structured outputs backend) | Same as named function. The model must produce at least one tool call. |
-| `"auto"` | Depends on the parser | Model-specific structural-tag parsers can constrain tool-call arguments with structured outputs. Other parsers generate freely and extract tool calls from raw text. |
+| `"auto"` | Only when `strict: true` is set on at least one tool | Structural-tag parsers constrain tool-call arguments when a tool opts in with `strict: true`. Without it, the model generates freely and tool calls are extracted from raw text. |
 | `"none"` | N/A | No tool calls are produced. |
 
 ### Strict Mode
 
-Strict tool calling makes function-call arguments adhere to the function schema instead of relying only on best-effort parsing. vLLM implements strict tool calling for structural-tag based tool parsers by using the structured outputs backend under the hood.
+For `tool_choice="required"` or named function calling, structural-tag constraints are always applied regardless of the `strict` field. For `tool_choice="auto"`, setting `strict: true` on at least one tool opts in to structural-tag constraints; without it, the model generates freely and tool calls are extracted from raw text. The `strict` field is supported across all three API surfaces: Chat Completion, Responses, and Anthropic Messages.
 
 For best compatibility with strict schema enforcement, define tool parameter schemas in the OpenAI strict-schema style:
 
@@ -128,15 +128,11 @@ For best compatibility with strict schema enforcement, define tool parameter sch
 * Mark all fields in `properties` as required.
 * Represent optional fields by allowing `null`, for example `{"type": ["string", "null"]}`.
 
-vLLM controls structural-tag strict tool calling with the `VLLM_ENFORCE_STRICT_TOOL_CALLING` environment variable. It defaults to `true`.
+vLLM also provides a global toggle via the `VLLM_ENFORCE_STRICT_TOOL_CALLING` environment variable (defaults to `true`). When set to `false`, vLLM does not attach structural tags for tool calling regardless of the per-tool `strict` field. This environment variable only affects structural-tag based tool calling; it does not change schema-derived structured outputs used by named function calling or `tool_choice="required"`.
 
 ```bash
 VLLM_ENFORCE_STRICT_TOOL_CALLING=false vllm serve ...
 ```
-
-When this variable is `true`, structural-tag based tool parsers attach a structural tag to the request, so the structured outputs backend can constrain the model-specific tool-call format and function-call arguments. When it is `false`, vLLM does not attach structural tags for tool calling. In that case, `tool_choice="auto"` falls back to best-effort parser extraction from the raw model output, and no structural-tag constraint is applied.
-
-This environment variable only affects structural-tag based tool calling. It does not change schema-derived structured outputs used by named function calling or `tool_choice="required"`.
 
 ## Automatic Function Calling
 
@@ -156,7 +152,7 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
 !!! note
-    With `tool_choice="auto"`, schema-level constraint depends on the selected parser and `VLLM_ENFORCE_STRICT_TOOL_CALLING`. Structural-tag parsers can enforce tool-call constraints when it is `true`; when it is `false`, or when the selected parser has no structural-tag support, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
+    With `tool_choice="auto"`, schema-level constraint requires both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`. When these conditions are met and the selected parser supports structural tags, vLLM constrains tool-call arguments. Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
 
 ### Hermes Models (`hermes`)
 
