@@ -38,6 +38,8 @@ macro_rules! tool_parser_factory {
 
 // Export a tool parser to Python by registering it here.
 tool_parser_factory! {
+    MinimaxM3ToolParser,
+
     // Below are the parsers just for testing purposes on Python side.
     DeepSeekV4ToolParser,
     KimiK2ToolParser,

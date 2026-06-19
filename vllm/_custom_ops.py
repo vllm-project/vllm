@@ -315,13 +315,19 @@ def rotary_embedding(
 
 # layer norm ops
 def rms_norm(
-    out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor | None,
+    epsilon: float,
 ) -> None:
     torch.ops._C.rms_norm(out, input, weight, epsilon)
 
 
 def fused_add_rms_norm(
-    input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, epsilon: float
+    input: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor | None,
+    epsilon: float,
 ) -> None:
     # Note: this func is batch invariant
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
@@ -773,6 +779,14 @@ def cutlass_scaled_mm_supports_fp4(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp4(cuda_device_capability)
 
 
+def mxfp4_experts_quant_supported(cuda_device_capability: int) -> bool:
+    try:
+        return torch.ops._C.mxfp4_experts_quant_supported(cuda_device_capability)
+    except AttributeError:
+        # Return False on builds where the CUDA helper is not available.
+        return False
+
+
 def cutlass_scaled_fp4_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -1120,76 +1134,6 @@ def cutlass_mxfp4_moe_mm(
         expert_offsets,
         sf_offsets,
     )
-
-
-def mxfp8_experts_quant(
-    input_tensor: torch.Tensor,
-    problem_sizes: torch.Tensor,
-    expert_offsets: torch.Tensor,
-    blockscale_offsets: torch.Tensor,
-    quant_output: torch.Tensor,
-    scale_factor: torch.Tensor,
-) -> None:
-    torch.ops._C.mxfp8_experts_quant(
-        input_tensor,
-        problem_sizes,
-        expert_offsets,
-        blockscale_offsets,
-        quant_output,
-        scale_factor,
-    )
-
-
-def cutlass_mxfp8_grouped_mm(
-    a_tensors: torch.Tensor,
-    b_tensors: torch.Tensor,
-    a_scales: torch.Tensor,
-    b_scales: torch.Tensor,
-    out_tensors: torch.Tensor,
-    problem_sizes: torch.Tensor,
-    expert_offsets: torch.Tensor,
-    blockscale_offsets: torch.Tensor,
-) -> None:
-    torch.ops._C.cutlass_mxfp8_grouped_mm(
-        a_tensors,
-        b_tensors,
-        a_scales,
-        b_scales,
-        out_tensors,
-        problem_sizes,
-        expert_offsets,
-        blockscale_offsets,
-    )
-
-
-if hasattr(torch.ops._C, "mxfp8_experts_quant"):
-
-    @register_fake("_C::mxfp8_experts_quant")
-    def _mxfp8_experts_quant_fake(
-        input_tensor: torch.Tensor,
-        problem_sizes: torch.Tensor,
-        expert_offsets: torch.Tensor,
-        blockscale_offsets: torch.Tensor,
-        quant_output: torch.Tensor,
-        scale_factor: torch.Tensor,
-    ) -> None:
-        return None
-
-
-if hasattr(torch.ops._C, "cutlass_mxfp8_grouped_mm"):
-
-    @register_fake("_C::cutlass_mxfp8_grouped_mm")
-    def _cutlass_mxfp8_grouped_mm_fake(
-        a_tensors: torch.Tensor,
-        b_tensors: torch.Tensor,
-        a_scales: torch.Tensor,
-        b_scales: torch.Tensor,
-        out_tensors: torch.Tensor,
-        problem_sizes: torch.Tensor,
-        expert_offsets: torch.Tensor,
-        blockscale_offsets: torch.Tensor,
-    ) -> None:
-        return None
 
 
 # gptq_marlin
@@ -2606,6 +2550,73 @@ def reshape_and_cache_flash(
     )
 
 
+def fused_minimax_m3_qknorm_rope_kv_insert(
+    qkv: torch.Tensor,
+    q_norm_weight: torch.Tensor,
+    k_norm_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    rotary_dim: int,
+    eps: float,
+    index_q_norm_weight: torch.Tensor | None = None,
+    index_k_norm_weight: torch.Tensor | None = None,
+    num_index_heads: int = 0,
+    slot_mapping: torch.Tensor | None = None,
+    index_slot_mapping: torch.Tensor | None = None,
+    kv_cache: torch.Tensor | None = None,
+    index_cache: torch.Tensor | None = None,
+    block_size: int = 0,
+    q_out: torch.Tensor | None = None,
+    index_q_out: torch.Tensor | None = None,
+    kv_cache_dtype: str = "auto",
+) -> None:
+    """Fused MiniMax-M3 attention pre-processing (in-place).
+
+    Applies Gemma RMSNorm + partial NeoX RoPE to ``qkv`` in place. ``qkv`` is a
+    single fused tensor:
+
+    - dense layer (``num_index_heads == 0``): ``[q | k | v]``;
+    - sparse layer (``num_index_heads > 0``): ``[q | k | v | index_q |
+      index_k]`` — the index branch is read straight out of ``qkv``.
+
+    When ``kv_cache`` is given (sparse serving), also scatter-inserts the
+    normed/roped k & v into the paged KV cache by ``slot_mapping`` and the
+    index key into ``index_cache`` by ``index_slot_mapping``. ``kv_cache_dtype``
+    selects the cache storage/conversion path. If
+    ``index_slot_mapping`` is omitted, ``slot_mapping`` is used for both caches.
+
+    If ``q_out`` / ``index_q_out`` (contiguous ``[N, nq*128]`` / ``[N,
+    niq*128]``) are given, the normed/roped q / index_q are written there
+    instead of in place — folding the de-interleave into this kernel's store so
+    callers skip a separate ``.contiguous()`` copy before the SM100 sparse
+    attention's flat TMA descriptor.
+    """
+    torch.ops._C.fused_minimax_m3_qknorm_rope_kv_insert(
+        qkv,
+        q_norm_weight,
+        k_norm_weight,
+        cos_sin_cache,
+        positions,
+        num_heads,
+        num_kv_heads,
+        rotary_dim,
+        eps,
+        index_q_norm_weight,
+        index_k_norm_weight,
+        num_index_heads,
+        slot_mapping,
+        index_slot_mapping,
+        kv_cache,
+        index_cache,
+        block_size,
+        q_out,
+        index_q_out,
+        kv_cache_dtype,
+    )
+
+
 def concat_and_cache_mla(
     kv_c: torch.Tensor,
     k_pe: torch.Tensor,
@@ -3547,6 +3558,7 @@ def cpu_attn_get_scheduler_metadata(
     sliding_window_size: int,
     isa: str,
     enable_kv_split: bool,
+    dynamic_causal: torch.Tensor | None = None,
 ) -> torch.Tensor:
     scheduler_metadata = torch.ops._C.get_scheduler_metadata(
         num_reqs,
@@ -3560,6 +3572,7 @@ def cpu_attn_get_scheduler_metadata(
         sliding_window_size,
         isa,
         enable_kv_split,
+        dynamic_causal,
     )
     return scheduler_metadata
 
@@ -3598,11 +3611,12 @@ def cpu_attention_with_kv_cache(
     scale: float,
     causal: bool,
     alibi_slopes: torch.Tensor | None,
-    sliding_window: tuple[int, int],
+    sliding_window: int,
     block_table: torch.Tensor,
     softcap: float,
     scheduler_metadata: torch.Tensor,
     s_aux: torch.Tensor | None,
+    dynamic_causal: torch.Tensor | None = None,
     k_scale: float = 1.0,
     v_scale: float = 1.0,
     kv_cache_dtype: str = "auto",
@@ -3617,12 +3631,12 @@ def cpu_attention_with_kv_cache(
         scale,
         causal,
         alibi_slopes,
-        sliding_window[0],
-        sliding_window[1],
+        sliding_window,
         block_table,
         softcap,
         scheduler_metadata,
         s_aux,
+        dynamic_causal,
         k_scale,
         v_scale,
         kv_cache_dtype,

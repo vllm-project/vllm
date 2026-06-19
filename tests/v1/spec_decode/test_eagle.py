@@ -969,6 +969,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     proposer.draft_attn_groups = [mock_attn_group]
 
     result = proposer.propose(
+        num_speculative_tokens=num_speculative_tokens,
         target_token_ids=target_token_ids,
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
@@ -1001,7 +1002,11 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     assert torch.equal(result, expected_tokens)
 
 
-def test_propose_stores_probabilistic_draft_probs(monkeypatch):
+@pytest.mark.parametrize(
+    "attn_backend",
+    ["ROCM_ATTN", "TRITON_ATTN"] if current_platform.is_rocm() else ["FLASH_ATTN"],
+)
+def test_propose_stores_probabilistic_draft_probs(attn_backend, monkeypatch):
     device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]
@@ -1052,7 +1057,7 @@ def test_propose_stores_probabilistic_draft_probs(monkeypatch):
     )
 
     attn_metadata_builder_cls, _ = try_get_attention_backend(
-        AttentionBackendEnum.FLASH_ATTN
+        AttentionBackendEnum[attn_backend]
     )
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
@@ -1071,6 +1076,7 @@ def test_propose_stores_probabilistic_draft_probs(monkeypatch):
     sampling_metadata.all_greedy = False
 
     result = proposer.propose(
+        num_speculative_tokens=num_speculative_tokens,
         target_token_ids=torch.randint(0, vocab_size, (total_tokens,), device=device),
         target_positions=torch.cat(
             [

@@ -27,6 +27,8 @@ pub(super) struct ResponseOptions {
     pub include_usage: bool,
     /// Whether every streamed chunk should carry cumulative usage.
     pub include_continuous_usage: bool,
+    /// Whether the caller requested prompt-only echo via `max_tokens=0`.
+    pub prompt_only: bool,
     /// Original text prompt that should be echoed back northbound when
     /// `echo=true`.
     pub echo: Option<String>,
@@ -68,11 +70,13 @@ pub(super) fn prepare_completion_request(
         })?),
         None => None,
     };
-    let prompt_logprobs = request.prompt_logprobs.or(if request.echo && !request.stream {
-        logprobs
-    } else {
-        None
-    });
+    let prompt_only = request.echo && request.max_tokens == Some(0);
+    let prompt_logprobs =
+        request.prompt_logprobs.or(if request.echo && (!request.stream || prompt_only) {
+            logprobs
+        } else {
+            None
+        });
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
@@ -83,6 +87,11 @@ pub(super) fn prepare_completion_request(
             .and_then(|options| options.continuous_usage_stats)
             .unwrap_or(false);
     let include_prompt_logprobs = prompt_logprobs.is_some();
+    let max_tokens = if prompt_only {
+        Some(1)
+    } else {
+        request.max_tokens
+    };
     let echo = request.echo.then(|| request.prompt.as_text().cloned()).flatten();
 
     let structured_outputs =
@@ -97,7 +106,7 @@ pub(super) fn prepare_completion_request(
             top_p: request.top_p,
             top_k: request.top_k,
             seed: request.seed,
-            max_tokens: request.max_tokens,
+            max_tokens,
             min_tokens: request.min_tokens,
             logprobs,
             prompt_logprobs,
@@ -138,6 +147,7 @@ pub(super) fn prepare_completion_request(
         options: ResponseOptions {
             include_usage,
             include_continuous_usage,
+            prompt_only,
             echo,
             requested_logprobs: request.logprobs,
             include_prompt_logprobs,
@@ -325,6 +335,57 @@ mod tests {
 
         assert_eq!(prepared.options.echo, Some("hello".to_string()));
         assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
+        assert!(!prepared.options.prompt_only);
+    }
+
+    #[test]
+    fn prepare_completion_request_lowers_prompt_only_echo_as_one_internal_token() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "stream": false,
+            "echo": true,
+            "max_tokens": 0
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
+
+        assert!(prepared.options.prompt_only);
+        assert_eq!(prepared.options.echo, Some("hello".to_string()));
+        assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(1));
+    }
+
+    #[test]
+    fn prepare_completion_request_enables_prompt_logprobs_for_stream_prompt_only_echo() {
+        let request: CompletionRequest = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "prompt": "hello",
+            "echo": true,
+            "stream": true,
+            "max_tokens": 0,
+            "logprobs": 3
+        }))
+        .expect("parse request");
+
+        let prepared = prepare_completion_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
+
+        assert!(prepared.options.prompt_only);
+        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(3));
+        assert_eq!(
+            prepared.text_request.sampling_params.prompt_logprobs,
+            Some(3)
+        );
     }
 
     #[test]
