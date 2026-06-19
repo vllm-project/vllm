@@ -112,6 +112,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
+            topk_indices_buffer=mla_modules.topk_indices_buffer,
         )
 
         self.prefix = prefix

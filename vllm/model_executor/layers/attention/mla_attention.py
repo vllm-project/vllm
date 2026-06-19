@@ -366,6 +366,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         attn_backend: type[AttentionBackend] | None = None,
         use_sparse: bool = False,
         indexer: object | None = None,
+        topk_indices_buffer: torch.Tensor | None = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -451,6 +452,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "with batch invariance, as it is not yet supported.",
             )
             cache_config.enable_prefix_caching = False
+
+        # Sparse MLA reads top-k indices from a shared buffer. Pass it
+        # explicitly so backbone "skip" layers (indexer=None) still find it.
+        if use_sparse:
+            extra_impl_args["topk_indices_buffer"] = topk_indices_buffer
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an MLAAttentionImpl subclass
