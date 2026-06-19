@@ -530,8 +530,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # produces the same chunk boundaries for the 4b all_gather merge.
             if common_attn_metadata.dcp_local_seq_lens is not None:
                 local_seq_lens = common_attn_metadata.dcp_local_seq_lens
-                assert common_attn_metadata.dcp_local_seq_lens_cpu is not None
-                local_seq_lens_cpu = common_attn_metadata.dcp_local_seq_lens_cpu
+                # dcp_local_seq_lens_cpu is populated by the main model runner,
+                # but the MTP draft proposer (build_for_drafting path) currently
+                # only forwards the device tensor. Fall back to a D2H copy in
+                # that case so prefill chunking (which needs CPU seq lens to
+                # avoid a sync in the chunk loop) still works.
+                if common_attn_metadata.dcp_local_seq_lens_cpu is not None:
+                    local_seq_lens_cpu = (
+                        common_attn_metadata.dcp_local_seq_lens_cpu
+                    )
+                else:
+                    local_seq_lens_cpu = local_seq_lens.cpu()
                 global_seq_lens = seq_lens
                 assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
                 global_seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
