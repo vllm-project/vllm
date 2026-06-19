@@ -6,11 +6,11 @@ import os
 import sys
 import types
 
-# In symlink mode (VLLM_FLASH_ATTN_SRC_DIR), cute/ is a symlink to the real
-# source tree and its files use `flash_attn.cute.*` imports (not rewritten).
-# Register a virtual `flash_attn` package so those imports resolve.
+# In local build modes, cute/ may be a symlink or a copied source tree, and its
+# files use `flash_attn.cute.*` imports (not rewritten). Register a virtual
+# `flash_attn` package so those imports resolve.
 _cute_dir = os.path.join(os.path.dirname(__file__), "cute")
-if os.path.islink(_cute_dir) and "flash_attn" not in sys.modules:
+if os.path.isdir(_cute_dir) and "flash_attn" not in sys.modules:
     _fa_mod = types.ModuleType("flash_attn")
     _fa_mod.__path__ = [os.path.dirname(os.path.realpath(_cute_dir))]
     _fa_mod.__package__ = "flash_attn"
@@ -23,6 +23,7 @@ if os.path.islink(_cute_dir) and "flash_attn" not in sys.modules:
 from vllm.vllm_flash_attn.flash_attn_interface import (  # noqa: E402
     FA2_AVAILABLE,
     FA3_AVAILABLE,
+    compile_flash_attn_varlen_func_from_specs,
     fa_version_unsupported_reason,
     flash_attn_varlen_func,
     get_scheduler_metadata,
@@ -36,6 +37,7 @@ if not (FA2_AVAILABLE or FA3_AVAILABLE):
     )
 
 __all__ = [
+    "compile_flash_attn_varlen_func_from_specs",
     "fa_version_unsupported_reason",
     "flash_attn_varlen_func",
     "get_scheduler_metadata",

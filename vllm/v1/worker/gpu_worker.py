@@ -624,6 +624,10 @@ class Worker(WorkerBase):
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
         kernel_warmup(self)
+        if self.vllm_config.kernel_config.enable_cutedsl_warmup:
+            from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
+
+            cutedsl_warmup(self.model_runner)
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:

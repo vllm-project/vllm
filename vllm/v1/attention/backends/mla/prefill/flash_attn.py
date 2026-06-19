@@ -9,7 +9,12 @@ import torch
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
+from vllm.model_executor.warmup.fa4_cutedsl_config import (
+    FA4MLAPrefillCompileContext,
+    iter_fa4_mla_prefill_compile_requests,
+)
 from vllm.v1.attention.backends.fa_utils import (
+    compile_flash_attn_varlen_func_from_specs,
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
@@ -86,6 +91,52 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
         # Track whether we're using vllm's FA or upstream (for ROCm)
         self._is_vllm_fa = current_platform.is_cuda() or current_platform.is_xpu()
+
+    def get_cutedsl_warmup_plan(self, runner: object) -> object | None:
+        if self.vllm_flash_attn_version != 4:
+            return None
+        if compile_flash_attn_varlen_func_from_specs is None:
+            raise RuntimeError(
+                "FA4 compile-only API is unavailable; CuTeDSL warmup does not "
+                "fall back to synthetic forward passes."
+            )
+
+        dtype = getattr(runner, "dtype", torch.bfloat16)
+        if dtype not in self.supported_dtypes:
+            dtype = torch.bfloat16
+
+        qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+        ctx = FA4MLAPrefillCompileContext(
+            dtype=dtype,
+            num_heads=self.num_heads,
+            qk_head_dim=qk_head_dim,
+            v_head_dim=self.v_head_dim,
+            kv_nope_head_dim=self.qk_nope_head_dim + self.v_head_dim,
+            requires_v_padding=self.requires_v_padding,
+            scale=self.scale,
+            num_splits=1 if envs.VLLM_BATCH_INVARIANT else 0,
+            fa_version=self.vllm_flash_attn_version,
+        )
+        compile_requests = tuple(iter_fa4_mla_prefill_compile_requests(ctx))
+        if not compile_requests:
+            return None
+
+        from vllm.model_executor.warmup.cutedsl_warmup import (
+            CuTeDSLCompileUnit,
+            CuTeDSLWarmupPlan,
+        )
+
+        return CuTeDSLWarmupPlan(
+            provider="fa4_mla_prefill",
+            compile_units=tuple(
+                CuTeDSLCompileUnit(
+                    name="fa4_mla_prefill",
+                    key=request.key,
+                    compile=request.compile,
+                )
+                for request in compile_requests
+            ),
+        )
 
     def _flash_attn_varlen_diff_headdims(
         self,
