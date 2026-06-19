@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 )
 from vllm.parser.engine.registered_adapters import (
     DeepSeekV4Parser,
+    DeepSeekV32Parser,
     Gemma4Parser,
     Glm47MoeParser,
     KimiK2Parser,
@@ -681,6 +682,22 @@ def _dsv4_tool_text(tc: ToolCallSpec) -> str:
     return "".join(parts)
 
 
+def _dsml_tool_segs(
+    scenario: Scenario,
+    tag: str,
+) -> list[tuple[str, bool]]:
+    if not scenario.tool_calls:
+        return []
+    parts = ["\n"]
+    for tc in scenario.tool_calls:
+        parts.append(_dsv4_tool_text(tc))
+    return [
+        (f"<{_DSML}{tag}>", True),
+        ("".join(parts), False),
+        (f"</{_DSML}{tag}>", True),
+    ]
+
+
 def _dsv4_segments(scenario: Scenario, thinking: bool) -> list[tuple[str, bool]]:
     segs: list[tuple[str, bool]] = []
 
@@ -698,14 +715,7 @@ def _dsv4_segments(scenario: Scenario, thinking: bool) -> list[tuple[str, bool]]
     if scenario.content is not None:
         segs.append((scenario.content, False))
 
-    if scenario.tool_calls:
-        segs.append((f"<{_DSML}tool_calls>", True))
-        parts = ["\n"]
-        for tc in scenario.tool_calls:
-            parts.append(_dsv4_tool_text(tc))
-        segs.append(("".join(parts), False))
-        segs.append((f"</{_DSML}tool_calls>", True))
-
+    segs.extend(_dsml_tool_segs(scenario, "tool_calls"))
     return segs
 
 
@@ -734,6 +744,43 @@ def _build_deepseek_v4(scenario: Scenario, validate: bool = True) -> Sample:
         if chat_kwargs:
             kwargs["chat_template_kwargs"] = chat_kwargs
         _validate_sample(sample, DeepSeekV4Parser, **kwargs)
+    return sample
+
+
+# ── DeepSeek V3.2 (DSML tool format, no reasoning) ──────────────────
+
+_DSV32_VOCAB: dict[str, int] = {
+    f"<{_DSML}function_calls>": 128830,
+    f"</{_DSML}function_calls>": 128831,
+}
+
+
+def _dsv32_segments(scenario: Scenario) -> list[tuple[str, bool]]:
+    segs: list[tuple[str, bool]] = []
+
+    if scenario.content is not None:
+        segs.append((scenario.content, False))
+
+    segs.extend(_dsml_tool_segs(scenario, "function_calls"))
+    return segs
+
+
+def _build_deepseek_v32(scenario: Scenario, validate: bool = True) -> Sample | None:
+    if scenario.reasoning is not None:
+        return None
+
+    sample = _make_sample(
+        sample_id=f"deepseek_v32-{scenario.id}",
+        description=scenario.description,
+        vocab=_DSV32_VOCAB,
+        segments=_dsv32_segments(scenario),
+        expected_reasoning=None,
+        expected_content=_qwen3_expected_content(scenario),
+        expected_tool_calls=_expected_tc(scenario),
+        tools=_expected_tools(scenario),
+    )
+    if validate:
+        _validate_sample(sample, DeepSeekV32Parser)
     return sample
 
 
@@ -904,6 +951,7 @@ _KIMI_K2_SCENARIOS = [
 # ── Registry and public API ──────────────────────────────────────────
 
 _BUILDERS: dict[str, Any] = {
+    "deepseek_v32": _build_deepseek_v32,
     "deepseek_v4": _build_deepseek_v4,
     "gemma4": _build_gemma4,
     "minimax_m2": _build_minimax_m2,
@@ -920,10 +968,10 @@ def build_samples(model: str) -> tuple[Sample, ...]:
     """Build all scenario samples for a model, self-validated."""
     builder = _BUILDERS[model]
     scenarios = _KIMI_K2_SCENARIOS if model == "kimi_k2" else SCENARIOS
-    return tuple(builder(s) for s in scenarios)
+    return tuple(s for s in (builder(sc) for sc in scenarios) if s is not None)
 
 
-def build_sample(model: str, scenario: Scenario) -> Sample:
+def build_sample(model: str, scenario: Scenario) -> Sample | None:
     """Build a single sample for one model + scenario."""
     return _BUILDERS[model](scenario)
 

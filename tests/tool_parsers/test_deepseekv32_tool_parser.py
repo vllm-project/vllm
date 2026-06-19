@@ -433,7 +433,8 @@ class TestExtractToolCalls:
         result = parser.extract_tool_calls(model_output, None)
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args["ratio"] == pytest.approx(3.14)
-        assert args["whole"] == pytest.approx(5.0)
+        assert args["whole"] == 5
+        assert isinstance(args["whole"], int)
 
     def test_multi_typed_schema(self):
         """Schema with type: ["integer", "null"] must handle both cases."""
