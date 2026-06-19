@@ -345,7 +345,7 @@ class BaiChuanModel(nn.Module):
 
 class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
+        orig_to_new_stacked={
             ".gate_proj": ".gate_up_proj.0",
             ".up_proj": ".gate_up_proj.1",
         }

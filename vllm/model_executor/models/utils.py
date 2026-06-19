@@ -47,6 +47,7 @@ class WeightsMapper:
     orig_to_new_renamings: list[Any] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
+    orig_to_new_stacked: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_prefix: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_suffix: Mapping[str, str | None] = field(default_factory=dict)
 
@@ -59,6 +60,10 @@ class WeightsMapper:
             ],
             orig_to_new_regex={**self.orig_to_new_regex, **other.orig_to_new_regex},
             orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
+            orig_to_new_stacked={
+                **self.orig_to_new_stacked,
+                **other.orig_to_new_stacked,
+            },
             orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
             orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
         )
@@ -85,6 +90,13 @@ class WeightsMapper:
                 key = pattern.sub(new_key, key)
 
         for substr, new_key in self.orig_to_new_substr.items():
+            if substr in key:
+                if new_key is None:
+                    return None
+
+                key = key.replace(substr, new_key, 1)
+
+        for substr, new_key in self.orig_to_new_stacked.items():
             if substr in key:
                 if new_key is None:
                     return None
@@ -130,24 +142,14 @@ class WeightsMapper:
             if (out_name := self._map_name(name)) is not None
         }
 
-    def get_unfused_mapper(self) -> "WeightsMapper":
-        """Mapper variant that drops the QKV/MLP fusion substr maps, keeping
-        all genuine renames/prefixes.
+    def get_unstacked_mapper(self) -> "WeightsMapper":
+        """Mapper variant that drops stacked maps, keeping all genuine renames/prefixes.
 
-        Consumers that reference the checkpoint's *unfused* module names — LoRA
-        name parsing and the quantization config's layer lists
-        (`modules_in_block_to_quantize`, ignored layers) — need the constituent
-        names (e.g. `q_proj`) to survive rather than being rewritten to the
-        fused vLLM name (`qkv_proj.q`)."""
-        qkv_shards = {"q", "k", "v"}
-        substr = {}
-        for old, new in self.orig_to_new_substr.items():
-            if new is not None and "." in new:
-                shard_id = new.rpartition(".")[2]
-                if shard_id.isdigit() or shard_id in qkv_shards:
-                    continue
-            substr[old] = new
-        return replace(self, orig_to_new_substr=substr)
+        Consumers that reference the checkpoint's *unstacked* module names (LoRA name
+        parsing and the quantization config's layer lists) need the constituent names
+        (e.g. `q_proj`) to survive rather than being rewritten to the stacked vLLM name
+        (`qkv_proj.q`)."""
+        return replace(self, orig_to_new_stacked={})
 
 
 class AutoWeightsLoader:

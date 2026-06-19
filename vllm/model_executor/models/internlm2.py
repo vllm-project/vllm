@@ -249,7 +249,7 @@ class InternLMDecoderLayer(nn.Module):
 @support_torch_compile
 class InternLM2Model(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
+        orig_to_new_stacked={
             ".w1": ".gate_up_proj.0",
             ".w3": ".gate_up_proj.1",
         }

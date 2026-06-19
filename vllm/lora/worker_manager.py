@@ -128,7 +128,7 @@ class WorkerLoRAManager:
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
             if hf_to_vllm_mapper is not None:
-                hf_to_vllm_mapper = hf_to_vllm_mapper.get_unfused_mapper()
+                hf_to_vllm_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
 
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)

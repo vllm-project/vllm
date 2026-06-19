@@ -367,7 +367,7 @@ class Exaone4Model(nn.Module):
 
 class Exaone4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(
-        orig_to_new_substr={
+        orig_to_new_stacked={
             ".q_proj": ".qkv_proj.q",
             ".k_proj": ".qkv_proj.k",
             ".v_proj": ".qkv_proj.v",

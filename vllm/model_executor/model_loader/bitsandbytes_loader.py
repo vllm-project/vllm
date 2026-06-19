@@ -576,7 +576,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # `hf_to_vllm_mapper` may belong to model or base model
         for module in (model, *model.children()):
             if hf_to_vllm_mapper := getattr(module, "hf_to_vllm_mapper", None):
-                self.weight_mapper = lambda name: hf_to_vllm_mapper._map_name(name)
+                unstacked_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
+                self.weight_mapper = lambda name, m=unstacked_mapper: m._map_name(name)
                 break
 
         self._get_bnb_target_modules(model)
