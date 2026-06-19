@@ -297,7 +297,18 @@ class Platform:
         ):
             device_ids = os.environ[cls.device_control_env_var].split(",")
             physical_device_id = device_ids[device_id]
-            return cls.device_control_id_to_physical_device_id(physical_device_id)
+            try:
+                return cls.device_control_id_to_physical_device_id(physical_device_id)
+            except ValueError:
+                # The device-control env var (e.g. CUDA_VISIBLE_DEVICES)
+                # accepts device UUIDs as well as integer indices -- a
+                # full-GPU UUID ("GPU-...") or a MIG instance UUID
+                # ("MIG-..."). These are valid, documented CUDA device
+                # specifiers but cannot be parsed as ints. The runtime
+                # remaps the listed visible devices to logical ids in
+                # order, so the caller's logical ``device_id`` is already
+                # the correct index into the visible set.
+                return device_id
         else:
             return device_id
 
