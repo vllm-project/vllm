@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from typing import Literal
@@ -9,6 +10,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
+from vllm.config.speech_to_text import SpeechToTextConfig, VADConfig
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -320,6 +322,176 @@ class AudioResampler:
 # ============================================================
 # Audio Chunking / Splitting
 # ============================================================
+
+
+class VAD:
+    def __init__(self):
+        self.model = None
+        self._get_speech_timestamps = None
+
+    def _ensure_loaded(self) -> None:
+        if self._get_speech_timestamps is not None and self.model is not None:
+            return
+
+        try:
+            from silero_vad import get_speech_timestamps, load_silero_vad
+
+            self.model = load_silero_vad(onnx=True)
+            self._get_speech_timestamps = get_speech_timestamps
+        except ImportError as exc:
+            raise ImportError(
+                "Silero VAD is not installed. Please install it using "
+                "`pip install silero-vad` and `pip install onnxruntime`."
+            ) from exc
+
+    def ensure_loaded(self) -> None:
+        self._ensure_loaded()
+
+    def get_speech_timestamps(
+        self,
+        audio_data: np.ndarray,
+        sample_rate: int,
+        vad_config: VADConfig,
+    ) -> list[dict]:
+        if not vad_config.enabled:
+            raise RuntimeError("VAD is not enabled.")
+
+        self._ensure_loaded()
+        if self._get_speech_timestamps is None or self.model is None:
+            raise RuntimeError("VAD is not enabled.")
+
+        return self._get_speech_timestamps(
+            audio_data,
+            self.model,
+            sampling_rate=sample_rate,
+            threshold=vad_config.threshold,
+            neg_threshold=vad_config.neg_threshold,
+            min_speech_duration_ms=vad_config.min_speech_duration_ms,
+            max_speech_duration_s=vad_config.max_speech_duration_s,
+            min_silence_duration_ms=vad_config.min_silence_duration_ms,
+            speech_pad_ms=vad_config.speech_pad_ms,
+            min_silence_at_max_speech=vad_config.min_silence_at_max_speech_ms,
+            use_max_poss_sil_at_max_speech=(vad_config.use_max_poss_sil_at_max_speech),
+        )
+
+
+class ThreadLocalVADProvider:
+    """
+    Create and cache one loaded ``VAD`` instance per worker thread.
+
+    Silero VAD's ONNX model is stateful (it keeps internal RNN
+    state/context that is reset per call and mutated while streaming).
+    Sharing one instance across the preprocess thread pool corrupts that
+    state under concurrency and degrades segmentation. We therefore use a
+    per-thread VAD instance so concurrent requests stay isolated without
+    serializing VAD behind a lock (which would hurt throughput).
+    """
+
+    def __init__(self) -> None:
+        self._init_lock = threading.Lock()
+        self._thread_local = threading.local()
+
+    def get(self) -> VAD:
+        vad = getattr(self._thread_local, "vad", None)
+        if vad is None:
+            vad = VAD()
+            # Loading the silero model is not thread-safe (downloads/caches),
+            # so serialize only the one-time load, not inference.
+            with self._init_lock:
+                vad.ensure_loaded()
+            self._thread_local.vad = vad
+
+        return vad
+
+
+def split_audio_with_vad(
+    duration: float,
+    asr_config: SpeechToTextConfig,
+    vad: VAD | None,
+    vad_config: VADConfig,
+    audio_data: np.ndarray,
+    sample_rate: int,
+) -> list[np.ndarray]:
+    """
+    Split audio according to the configured VAD and chunking policy.
+    * Silero VAD improves noise robustness and hallucination robustness.
+    * RMS split is used to adhere to the max_clip_duration_s limit.
+    Using Silero VAD for satisfying max_clip_duration_s limit didnt work well
+    hence we have to use 2 stage chunking for best quality.
+
+    Behavior depends on whether chunking is enabled via
+    ``SpeechToTextConfig.allow_audio_chunking`` and whether VAD is enabled:
+
+    * VAD + RMS: run Silero VAD first, then further split only those
+      individual speech segments that exceed ``max_audio_clip_s``.
+    * RMS only: run ``split_audio()`` on the full waveform when the
+      overall clip duration exceeds ``max_audio_clip_s``.
+    * VAD only: remove non-speech by concatenating detected speech spans into
+      a single trimmed chunk. If no speech is detected, return the original
+      audio unchanged.
+    * no chunking: return the original audio as a single chunk.
+    """
+    if asr_config.allow_audio_chunking:
+        assert asr_config.max_audio_clip_s is not None
+        assert asr_config.min_energy_split_window_size is not None
+
+        if vad_config.enabled:
+            # silero VAD + RMS split
+            assert vad is not None
+
+            speech_timestamps = vad.get_speech_timestamps(
+                audio_data, sample_rate, vad_config
+            )
+            chunks = []
+            for timestamp in speech_timestamps:
+                start = timestamp["start"]
+                end = timestamp["end"]
+                vad_duration_s = (end - start) / sample_rate
+                if vad_duration_s > asr_config.max_audio_clip_s:
+                    partial_chunk_output = split_audio(
+                        audio_data[start:end],
+                        sample_rate,
+                        asr_config.max_audio_clip_s,
+                        asr_config.overlap_chunk_second,
+                        asr_config.min_energy_split_window_size,
+                    )
+                    chunks.extend(partial_chunk_output)
+                else:
+                    chunks.append(audio_data[start:end])
+            return chunks
+        else:
+            if duration > asr_config.max_audio_clip_s:
+                # RMS split only
+                return split_audio(
+                    audio_data,
+                    sample_rate,
+                    asr_config.max_audio_clip_s,
+                    asr_config.overlap_chunk_second,
+                    asr_config.min_energy_split_window_size,
+                )
+            else:
+                return [audio_data]
+    else:
+        if vad_config.enabled:
+            # silero VAD only
+            assert vad is not None
+
+            speech_timestamps = vad.get_speech_timestamps(
+                audio_data, sample_rate, vad_config
+            )
+            if len(speech_timestamps) > 0:
+                chunks = []
+                for timestamp in speech_timestamps:
+                    chunks.append(
+                        audio_data[..., timestamp["start"] : timestamp["end"]]
+                    )
+                trimmed_audio_data = np.concatenate(chunks, axis=-1)
+                return [trimmed_audio_data]
+            else:
+                # TODO (ekagra): early return if no speech is detected
+                return [audio_data]
+        else:
+            return [audio_data]
 
 
 def split_audio(
