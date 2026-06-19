@@ -23,6 +23,10 @@ pqdm
 ray[cgraph,default]>=2.48.0 # Ray Compiled Graph, required by pipeline parallelism tests
 sentence-transformers>=5.2.0 # required for embedding tests
 soundfile # required for audio tests
+# COHERE START
+silero-vad==6.2.1 # required for VAD audio tests
+onnxruntime==1.27.0 # required for silero-vad
+# COHERE END
 jiwer # required for audio tests
 tblib # for pickling test exceptions
 timm >=1.0.17 # required for internvl and gemma3n-mm test

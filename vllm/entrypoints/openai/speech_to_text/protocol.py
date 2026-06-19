@@ -13,7 +13,7 @@ from pydantic import (
     model_validator,
 )
 
-from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.config.speech_to_text import SpeechToTextParams, VADConfig  # COHERE
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     OpenAIBaseModel,
@@ -54,6 +54,9 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
 
 ## Protocols for Audio
 AudioResponseFormat: TypeAlias = Literal["json", "text", "srt", "verbose_json", "vtt"]
+
+
+_DEFAULT_VAD_CONFIG = VADConfig()  # COHERE
 
 
 class TranscriptionRequest(OpenAIBaseModel):
@@ -136,6 +139,46 @@ class TranscriptionRequest(OpenAIBaseModel):
     time, but it is a placeholder for future use, matching translation api.
     """
 
+    # COHERE START
+    # Flattened VAD options to simplify multipart form data.
+    vad_enabled: bool = Field(
+        default=_DEFAULT_VAD_CONFIG.enabled,
+        alias="vad_config.enabled",
+    )
+    vad_threshold: float = Field(
+        default=_DEFAULT_VAD_CONFIG.threshold,
+        alias="vad_config.threshold",
+    )
+    vad_neg_threshold: float | None = Field(
+        default=_DEFAULT_VAD_CONFIG.neg_threshold,
+        alias="vad_config.neg_threshold",
+    )
+    vad_min_speech_duration_ms: int = Field(
+        default=_DEFAULT_VAD_CONFIG.min_speech_duration_ms,
+        alias="vad_config.min_speech_duration_ms",
+    )
+    vad_max_speech_duration_s: float = Field(
+        default=_DEFAULT_VAD_CONFIG.max_speech_duration_s,
+        alias="vad_config.max_speech_duration_s",
+    )
+    vad_min_silence_duration_ms: int = Field(
+        default=_DEFAULT_VAD_CONFIG.min_silence_duration_ms,
+        alias="vad_config.min_silence_duration_ms",
+    )
+    vad_speech_pad_ms: int = Field(
+        default=_DEFAULT_VAD_CONFIG.speech_pad_ms,
+        alias="vad_config.speech_pad_ms",
+    )
+    vad_min_silence_at_max_speech_ms: int = Field(
+        default=_DEFAULT_VAD_CONFIG.min_silence_at_max_speech_ms,
+        alias="vad_config.min_silence_at_max_speech_ms",
+    )
+    vad_use_max_poss_sil_at_max_speech: bool = Field(
+        default=_DEFAULT_VAD_CONFIG.use_max_poss_sil_at_max_speech,
+        alias="vad_config.use_max_poss_sil_at_max_speech",
+    )
+    # COHERE END
+
     # --8<-- [start:transcription-sampling-params]
     use_beam_search: bool = False
     """Whether or not beam search should be used."""
@@ -213,6 +256,22 @@ class TranscriptionRequest(OpenAIBaseModel):
             to_language=self.to_language,
             hotwords=self.hotwords,
         )
+
+    # COHERE START
+    def build_vad_config(self) -> VADConfig:
+        return VADConfig(
+            enabled=self.vad_enabled,
+            threshold=self.vad_threshold,
+            neg_threshold=self.vad_neg_threshold,
+            min_speech_duration_ms=self.vad_min_speech_duration_ms,
+            max_speech_duration_s=self.vad_max_speech_duration_s,
+            min_silence_duration_ms=self.vad_min_silence_duration_ms,
+            speech_pad_ms=self.vad_speech_pad_ms,
+            min_silence_at_max_speech_ms=self.vad_min_silence_at_max_speech_ms,
+            use_max_poss_sil_at_max_speech=(self.vad_use_max_poss_sil_at_max_speech),
+        )
+
+    # COHERE END
 
     def to_beam_search_params(
         self,
@@ -513,6 +572,50 @@ class TranslationRequest(OpenAIBaseModel):
 
     max_completion_tokens: int | None = None
     """The maximum number of tokens to generate."""
+
+    # COHERE START
+    # Flattened VAD options to simplify multipart form data.
+    # Keep these defaults aligned with ``VADConfig`` above for the same reason
+    # as in ``TranscriptionRequest``: the nested model is the canonical default
+    # definition, and these flattened fields only exist to make multipart form
+    # parsing work.
+    vad_enabled: bool = Field(
+        default=_DEFAULT_VAD_CONFIG.enabled,
+        alias="vad_config.enabled",
+    )
+    vad_threshold: float = Field(
+        default=_DEFAULT_VAD_CONFIG.threshold,
+        alias="vad_config.threshold",
+    )
+    vad_neg_threshold: float | None = Field(
+        default=_DEFAULT_VAD_CONFIG.neg_threshold,
+        alias="vad_config.neg_threshold",
+    )
+    vad_min_speech_duration_ms: int = Field(
+        default=_DEFAULT_VAD_CONFIG.min_speech_duration_ms,
+        alias="vad_config.min_speech_duration_ms",
+    )
+    vad_max_speech_duration_s: float = Field(
+        default=_DEFAULT_VAD_CONFIG.max_speech_duration_s,
+        alias="vad_config.max_speech_duration_s",
+    )
+    vad_min_silence_duration_ms: int = Field(
+        default=_DEFAULT_VAD_CONFIG.min_silence_duration_ms,
+        alias="vad_config.min_silence_duration_ms",
+    )
+    vad_speech_pad_ms: int = Field(
+        default=_DEFAULT_VAD_CONFIG.speech_pad_ms,
+        alias="vad_config.speech_pad_ms",
+    )
+    vad_min_silence_at_max_speech_ms: int = Field(
+        default=_DEFAULT_VAD_CONFIG.min_silence_at_max_speech_ms,
+        alias="vad_config.min_silence_at_max_speech_ms",
+    )
+    vad_use_max_poss_sil_at_max_speech: bool = Field(
+        default=_DEFAULT_VAD_CONFIG.use_max_poss_sil_at_max_speech,
+        alias="vad_config.use_max_poss_sil_at_max_speech",
+    )
+    # COHERE END
     # --8<-- [end:translation-extra-params]
 
     # Default sampling parameters for translation requests.
@@ -537,6 +640,22 @@ class TranslationRequest(OpenAIBaseModel):
             to_language=self.to_language,
             hotwords=self.hotwords,
         )
+
+    # COHERE START
+    def build_vad_config(self) -> VADConfig:
+        return VADConfig(
+            enabled=self.vad_enabled,
+            threshold=self.vad_threshold,
+            neg_threshold=self.vad_neg_threshold,
+            min_speech_duration_ms=self.vad_min_speech_duration_ms,
+            max_speech_duration_s=self.vad_max_speech_duration_s,
+            min_silence_duration_ms=self.vad_min_silence_duration_ms,
+            speech_pad_ms=self.vad_speech_pad_ms,
+            min_silence_at_max_speech_ms=self.vad_min_silence_at_max_speech_ms,
+            use_max_poss_sil_at_max_speech=(self.vad_use_max_poss_sil_at_max_speech),
+        )
+
+    # COHERE END
 
     def to_beam_search_params(
         self,

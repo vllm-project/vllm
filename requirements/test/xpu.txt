@@ -115,6 +115,8 @@ filelock==3.25.2
     #   huggingface-hub
     #   modelscope
     #   torch
+flatbuffers==25.12.19
+    # via onnxruntime
 frozenlist==1.8.0
     # via
     #   aiohttp
@@ -321,6 +323,7 @@ numpy==2.2.6
     #   mistral-common
     #   mteb
     #   numba
+    #   onnxruntime
     #   opencv-python-headless
     #   pandas
     #   pytrec-eval-terrier
@@ -358,6 +361,8 @@ onemkl-sycl-rng==2025.3.1
     # via torch
 onemkl-sycl-sparse==2025.3.1
     # via torch
+onnxruntime==1.27.0
+    # via -r requirements/test/xpu.in
 openai-harmony==0.0.8
     # via
     #   -c requirements/common.txt
@@ -376,10 +381,12 @@ packaging==26.0
     #   huggingface-hub
     #   lazy-loader
     #   modelscope
+    #   onnxruntime
     #   pooch
     #   pytest
     #   pytest-rerunfailures
     #   scikit-image
+    #   silero-vad
     #   transformers
     #   typepy
 pandas==3.0.1
@@ -416,6 +423,10 @@ propcache==0.4.1
     # via
     #   aiohttp
     #   yarl
+protobuf==7.35.1
+    # via
+    #   -c requirements/common.txt
+    #   onnxruntime
 psutil==7.2.2
     # via accelerate
 py==1.11.0
@@ -574,6 +585,8 @@ setuptools==80.10.2
     #   torch
 shellingham==1.5.4
     # via typer
+silero-vad==6.2.1
+    # via -r requirements/test/xpu.in
 six==1.17.0
     # via
     #   -c requirements/common.txt
@@ -651,8 +664,11 @@ torch==2.11.0+xpu
     #   accelerate
     #   mteb
     #   sentence-transformers
+    #   silero-vad
     #   timm
     #   torchvision
+torchaudio==2.11.0+xpu
+    # via silero-vad
 torchvision==0.26.0+xpu
     # via timm
 tqdm==4.67.3

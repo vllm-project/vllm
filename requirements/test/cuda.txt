@@ -205,6 +205,8 @@ filelock==3.16.1
     #   ray
     #   torch
     #   virtualenv
+flatbuffers==25.12.19
+    # via onnxruntime
 fonttools==4.55.0
     # via matplotlib
 fqdn==1.5.1
@@ -479,6 +481,7 @@ numpy==2.2.6
     #   mistral-common
     #   mteb
     #   numba
+    #   onnxruntime
     #   opencv-python-headless
     #   optuna
     #   pandas
@@ -540,6 +543,8 @@ nvidia-nvshmem-cu13==3.4.5
     # via torch
 nvidia-nvtx==13.0.85
     # via cuda-toolkit
+onnxruntime==1.27.0
+    # via -r requirements/test/cuda.in
 open-clip-torch==2.32.0
     # via -r requirements/test/cuda.in
 openai-harmony==0.0.4
@@ -591,6 +596,7 @@ packaging==24.2
     #   huggingface-hub
     #   lazy-loader
     #   matplotlib
+    #   onnxruntime
     #   optuna
     #   peft
     #   plotly
@@ -599,6 +605,7 @@ packaging==24.2
     #   pytest-rerunfailures
     #   ray
     #   scikit-image
+    #   silero-vad
     #   statsmodels
     #   transformers
     #   typepy
@@ -670,6 +677,7 @@ protobuf==6.33.6
     #   google-api-core
     #   googleapis-common-protos
     #   grpcio-reflection
+    #   onnxruntime
     #   opentelemetry-proto
     #   proto-plus
     #   ray
@@ -907,6 +915,8 @@ shellingham==1.5.4
     # via
     #   perceptron
     #   typer
+silero-vad==6.2.1
+    # via -r requirements/test/cuda.in
 six==1.16.0
     # via
     #   -c requirements/common.txt
@@ -1009,6 +1019,7 @@ torch==2.11.0+cu130
     #   runai-model-streamer
     #   segmentation-models-pytorch
     #   sentence-transformers
+    #   silero-vad
     #   tensorizer
     #   timm
     #   torchvision
@@ -1019,6 +1030,7 @@ torchaudio==2.11.0+cu130
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
     #   encodec
+    #   silero-vad
     #   vocos
 torchvision==0.26.0+cu130
     # via

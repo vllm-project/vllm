@@ -1104,6 +1104,8 @@ setup(
             "scipy",
             "soundfile",
             "mistral_common[audio]",
+            "silero-vad==6.2.1",  # COHERE
+            "onnxruntime==1.27.0",  # COHERE
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         "flashinfer": [],  # Kept for backwards compatibility

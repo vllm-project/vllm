@@ -1,12 +1,12 @@
 <!-- markdownlint-disable MD024 -->
 # Cohere ASR Tests
 
-> **Registry**: [`observability_matrix.md`](../observability_matrix.md) entries 7.1.1-7.1.7 |
+> **Registry**: [`observability_matrix.md`](../observability_matrix.md) entries 7.1.1-7.1.16 |
 > **Compatibility**: [`feature_matrix.md`](../feature_matrix.md) section ASR
 
 Validates Cohere speech-to-text serving for preprocess-worker configuration,
-short- and long-form transcription correctness, and long-audio streaming with
-WER gating.
+request-scoped VAD parsing and chunking, short- and long-form transcription
+correctness, and long-audio streaming with WER gating.
 
 <details>
 <summary>Test case 1: ASR preprocess worker configuration</summary>
@@ -182,7 +182,125 @@ Runtime helpers:
 </details>
 
 <details>
-<summary>Test case 3: Long-audio streaming WER</summary>
+<summary>Test case 3: Per-request VAD and chunking behavior</summary>
+
+## How it runs
+
+1. `run_asr()` executes the dedicated VAD pytest file as part of the `asr`
+   test group.
+   - [`tests/cohere/scripts/run_tests.sh`](../../../../tests/cohere/scripts/run_tests.sh) -- `run_asr`
+   - [`tests/cohere/test_asr_vad.py`](../../../../tests/cohere/test_asr_vad.py)
+2. The suite mixes one long-form Whisper+VAD WER regression, one served
+   per-request VAD smoke test against a short Whisper asset, request-model
+   parsing checks, and pure unit coverage for VAD-aware audio chunking.
+   - [`tests/cohere/test_asr_vad.py`](../../../../tests/cohere/test_asr_vad.py) -- `test_long_audio_vad_wer_correctness`, `test_basic_audio_with_per_request_vad`
+   - [`tests/cohere/test_asr_vad.py`](../../../../tests/cohere/test_asr_vad.py) -- `test_transcription_request_builds_vad_config_from_flat_form_fields`, `test_translation_request_builds_vad_config_from_flat_form_fields`, `test_decode_and_chunk_speech_maps_all_vad_request_fields_to_splitter`
+3. The integration coverage uses Whisper rather than Cohere ASR because the VAD
+   defaults are derived from Faster Whisper / Silero behavior and the Cohere
+   model’s best VAD tuning is application-dependent.
+   - [`tests/cohere/test_asr_vad.py`](../../../../tests/cohere/test_asr_vad.py) -- file comments and `HF_MODEL_NAME`
+4. The lightweight request-to-runtime mapping test constructs
+   `OpenAISpeechToText` via `__new__`, stubs the thread-local VAD provider, and
+   patches audio loading and splitting helpers so it can verify the endpoint
+   mapping without loading weights or starting a server.
+   - [`tests/cohere/test_asr_vad.py`](../../../../tests/cohere/test_asr_vad.py) -- `test_decode_and_chunk_speech_maps_all_vad_request_fields_to_splitter`
+   - [`vllm/entrypoints/openai/speech_to_text/protocol.py`](../../../../vllm/entrypoints/openai/speech_to_text/protocol.py) -- flattened `vad_config.*` fields
+   - [`vllm/entrypoints/openai/speech_to_text/speech_to_text.py`](../../../../vllm/entrypoints/openai/speech_to_text/speech_to_text.py) -- `_decode_and_chunk_speech`
+   - [`vllm/multimodal/audio.py`](../../../../vllm/multimodal/audio.py) -- `ThreadLocalVADProvider`, `split_audio_with_vad`
+5. CI shape: this suite is documented under the dedicated `asr` group and is
+   currently routed only to the 1xH100 runner.
+   - [`tests/cohere/configs/runner_map.json`](../../../../tests/cohere/configs/runner_map.json) -- `h100.asr`
+   - [`.github/workflows/test-pipeline.yaml`](../../../../.github/workflows/test-pipeline.yaml) -- Docker test execution + JUnit reporting
+
+## Checks
+
+1. **Long-form VAD WER regression**: Whisper with per-request VAD enabled on
+   the shared 6-sample long-form dataset matches the expected baseline `8.22`
+   within `atol=1e-1, rtol=1e-2`.
+   - `test_long_audio_vad_wer_correctness`
+2. **Request parsing**: flat multipart / form-style `vad_config.*` fields are
+   converted into `VADConfig` for both transcription and translation request
+   models.
+   - `test_transcription_request_builds_vad_config_from_flat_form_fields`
+   - `test_translation_request_builds_vad_config_from_flat_form_fields`
+3. **Endpoint-to-runtime mapping**: the serving path forwards every VAD request
+   field into `_decode_and_chunk_speech(...)`, selects the thread-local VAD
+   provider when enabled, and passes the resulting `VADConfig` into
+   `split_audio_with_vad(...)`.
+   - `test_decode_and_chunk_speech_maps_all_vad_request_fields_to_splitter`
+4. **Per-request VAD smoke test**: enabling VAD on the short Whisper request
+   still produces the expected transcript for the `mary_had_lamb` asset.
+   - `test_basic_audio_with_per_request_vad`
+5. **Chunking semantics**: the utility coverage checks all major branch shapes:
+   VAD+RMS re-splitting, RMS-only splitting, VAD-only trimming, and the
+   unchanged no-VAD / no-split path.
+   - `test_split_audio_with_vad_and_rms_split`
+   - `test_split_audio_with_rms_split_only`
+   - `test_split_audio_with_vad_only_trims_nonspeech`
+   - `test_split_audio_without_vad_or_rms_split_returns_original_audio`
+
+## Measurements
+
+1. Pytest emits **JUnit XML** for the `asr` group, and
+   `dorny/test-reporter@v2` surfaces it in GitHub Actions as an `asr Test
+   Report`.
+   - `test_asr_vad` suite -- `PRESENT`
+   - [`.github/workflows/test-pipeline.yaml`](../../../../.github/workflows/test-pipeline.yaml) -- `Test Report` step
+
+No benchmark summary JSON is uploaded for this coverage file.
+
+## Compatibility
+
+1. **Input**:
+   - Audio (compatible)
+   - Long Context (compatible)
+2. **Cohere Feature**:
+3. **Model Architecture**:
+4. **Quantization**:
+5. **Hardware**:
+   - H100 (compatible)
+   - A100 (not tested)
+   - B200 (not tested)
+   - GB200 (not tested)
+   - MI300x (not tested)
+6. **vLLM Feature**:
+
+## Implementation
+
+Primary test:
+[`tests/cohere/test_asr_vad.py`](../../../../tests/cohere/test_asr_vad.py)
+Shared helpers:
+[`tests/entrypoints/openai/correctness/test_transcription_api_correctness.py`](../../../../tests/entrypoints/openai/correctness/test_transcription_api_correctness.py)
+Runtime paths:
+[`vllm/entrypoints/openai/speech_to_text/protocol.py`](../../../../vllm/entrypoints/openai/speech_to_text/protocol.py),
+[`vllm/entrypoints/openai/speech_to_text/speech_to_text.py`](../../../../vllm/entrypoints/openai/speech_to_text/speech_to_text.py),
+[`vllm/multimodal/audio.py`](../../../../vllm/multimodal/audio.py)
+CI entry:
+[`tests/cohere/scripts/run_tests.sh`](../../../../tests/cohere/scripts/run_tests.sh) -- `run_asr`
+Runtime helpers:
+[`tests/utils.py`](../../../../tests/utils.py)
+
+### Setup
+
+1. **Model resolution**: use Whisper (`openai/whisper-large-v3`) for the VAD
+   regression coverage, resolving to the HF model id directly in the current
+   test file.
+2. **Long-form dataset**: reuse `load_longform_dataset(...)` so the VAD WER
+   regression runs on the same 6-sample Earnings22 slice as the shared ASR
+   correctness tests.
+3. **Short-form asset**: reuse `AudioAsset("mary_had_lamb")` for the served
+   per-request VAD smoke test.
+4. **Unit isolation**: the request-mapping test avoids model loads by stubbing
+   the thread-local VAD provider and patching `load_audio(...)`,
+   `get_audio_duration(...)`, and `split_audio_with_vad(...)`.
+5. **Chunking branches**: the utility tests pass stub VAD objects directly into
+   `split_audio_with_vad(...)` so the VAD branch behavior is checked without
+   involving a server or model weights.
+
+</details>
+
+<details>
+<summary>Test case 4: Long-audio streaming WER</summary>
 
 ## How it runs
 
@@ -273,7 +391,7 @@ Runtime helpers:
 </details>
 
 <details>
-<summary>Test case 4: Inter-chunk spacing and language-specific joins</summary>
+<summary>Test case 5: Inter-chunk spacing and language-specific joins</summary>
 
 ## How it runs
 
@@ -360,7 +478,7 @@ CI entry:
 </details>
 
 <details>
-<summary>Test case 5: Speech-to-text cancellation propagation</summary>
+<summary>Test case 6: Speech-to-text cancellation propagation</summary>
 
 ## How it runs
 

@@ -817,6 +817,7 @@ run_asr() {
     export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
     time pytest -sv tests/cohere/test_asr_wer.py || errors=1
+    time pytest -sv tests/cohere/test_asr_vad.py || errors=1
     time pytest -sv tests/cohere/test_asr_config.py || errors=1
     time pytest -sv tests/cohere/test_asr_long_audio_with_output_streaming.py::test_asr_long_audio_with_output_streaming || errors=1
     pytest -sv tests/entrypoints/openai/speech_to_text/test_transcription_inter_chunk_spacing.py || errors=1

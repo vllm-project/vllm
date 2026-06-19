@@ -288,6 +288,7 @@ download_vision () {
 download_asr () {
     echo "==> Downloading ASR model checkpoint"
     download_model_if_missing "cohere-transcribe-03-2026"
+    download_model_if_missing "whisper-large-v3"
     echo "==> Downloading ASR long-audio dataset"
     download_data_if_missing "longform-audio-transcription"
 }

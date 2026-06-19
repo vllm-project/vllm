@@ -107,7 +107,7 @@ export TOKENIZERS_PARALLELISM=false # needed for lm-eval, avoid repeated warning
 
 # TODO(czhu): temporary fixes to get amd tests to run. some of these imports
 # are needed for tests to run but not in `rocm-test.txt` requirements file
-$UV pip install --system av resampy scipy soundfile "mistral_common[audio]"  # needed for ASR / transcription tests
+$UV pip install --system av resampy scipy soundfile "mistral_common[audio]" silero-vad==6.2.1 onnxruntime==1.27.0 # needed for ASR / transcription tests
 $UV pip install --system opencv-python-headless==4.11.0.86  # import cv2 error from conftest
 $UV pip install --system lm-eval[api,ruler]  # needed for lm-eval
 $UV pip install --system ray==2.48.0  # needed for lm-eval

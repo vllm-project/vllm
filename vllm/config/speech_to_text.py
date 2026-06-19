@@ -27,7 +27,7 @@ class SpeechToTextParams:
     """Resampled audio waveform for a single chunk."""
 
     stt_config: SpeechToTextConfig
-    """Server-level speech-to-text configuration."""
+    """Model-specific speech-to-text configuration."""  # COHERE
 
     model_config: ModelConfig
     """Model configuration."""
@@ -49,6 +49,60 @@ class SpeechToTextParams:
 
     to_language: str | None = None
     """Target language for translation (model-dependent)."""
+
+
+# COHERE START
+@config
+class VADConfig:
+    """Voice activity detection configuration.
+
+    Default values picked from faster_whisper.
+    """
+
+    # Source:
+    # https://github.com/SYSTRAN/faster-whisper/blob/ed9a06cd89a93e47838f564998a6c09b655d7f43/faster_whisper/vad.py#L41-L48  # noqa: E501
+
+    enabled: bool = False
+    """Whether voice activity detection is enabled for this request."""
+
+    threshold: float = 0.5
+    """Speech probability threshold above which audio is considered speech."""
+
+    neg_threshold: float | None = None
+    """Silence threshold used to determine the end of speech segments.
+
+    Values below this threshold are always treated as silence. Values above it
+    are only treated as speech if the previous sample was already classified as
+    speech, which smooths speech-to-silence transitions.
+    """
+
+    min_speech_duration_ms: int = 0
+    """Speech chunks shorter than this duration, in milliseconds, are dropped."""
+
+    max_speech_duration_s: float = float("inf")
+    """Maximum duration in seconds for a single speech segment.
+
+    Segments longer than this are split at the last qualifying silence when
+    possible; otherwise they are split aggressively just before the limit.
+    """
+
+    min_silence_duration_ms: int = 2000
+    """Silence duration in milliseconds required before separating segments."""
+
+    speech_pad_ms: int = 600
+    """Padding in milliseconds added before and after detected speech spans."""
+
+    min_silence_at_max_speech_ms: int = 98
+    """Minimum silence in milliseconds used to avoid abrupt forced splits."""
+
+    use_max_poss_sil_at_max_speech: bool = True
+    """Whether to prefer the largest possible silence near forced split points.
+
+    If disabled, the last qualifying silence is used instead.
+    """
+
+
+# COHERE END
 
 
 @config

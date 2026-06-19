@@ -22,6 +22,10 @@ audioread
 soxr
 pooch
 soundfile
+# COHERE START
+silero-vad==6.2.1
+onnxruntime==1.27.0
+# COHERE END
 
 # --- Tool Parsing & Evaluation ---
 blobfile

@@ -126,6 +126,15 @@ This matrix is part of a three-layer documentation structure:
 - 7.1.5 `test_audio_preprocess_workers_default`
 - 7.1.6 `test_speech_to_text_preprocess_executor_num_workers`
 - 7.1.7 `test_cohere_transcribe_long_audio_wer_correctness`
+- 7.1.8 `test_long_audio_vad_wer_correctness`
+- 7.1.9 `test_transcription_request_builds_vad_config_from_flat_form_fields`
+- 7.1.10 `test_translation_request_builds_vad_config_from_flat_form_fields`
+- 7.1.11 `test_decode_and_chunk_speech_maps_all_vad_request_fields_to_splitter`
+- 7.1.12 `test_basic_audio_with_per_request_vad`
+- 7.1.13 `test_split_audio_with_vad_and_rms_split`
+- 7.1.14 `test_split_audio_with_rms_split_only`
+- 7.1.15 `test_split_audio_with_vad_only_trims_nonspeech`
+- 7.1.16 `test_split_audio_without_vad_or_rms_split_returns_original_audio`
 
 ## Benchmarks
 
