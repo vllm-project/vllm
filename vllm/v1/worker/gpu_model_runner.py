@@ -12,7 +12,6 @@ from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
-from math import prod
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -7133,19 +7132,19 @@ class GPUModelRunner(
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
                     )
-                    dtype = kv_cache_spec.dtype
                     try:
                         kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-                    raw_tensor = kv_cache_raw_tensors[layer_name].view(dtype)
+                    raw_tensor = kv_cache_raw_tensors[layer_name]
                     kv_caches[layer_name] = _reshape_attention_kv_cache(
                         raw_tensor,
                         kv_cache_spec,
                         kv_cache_shape,
                         kv_cache_stride_order,
                         kernel_num_blocks,
+                        packing,
                     )
 
                 elif isinstance(kv_cache_spec, MambaSpec):

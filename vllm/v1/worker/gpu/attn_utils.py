@@ -192,18 +192,29 @@ def _allocate_kv_cache(
 
 
 def _reshape_attention_kv_cache(
-    kv_tensor: torch.Tensor,
+    kv_raw_tensor: torch.Tensor,
     kv_cache_spec: AttentionSpec,
     kv_cache_shape: tuple[int, ...],
     kv_cache_stride_order: tuple[int, ...],
     num_blocks: int,
+    packing: tuple[int, int] | None,
 ) -> torch.Tensor:
     permuted_kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
     inv_order = [
         kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
     ]
+    dtype = kv_cache_spec.dtype
 
-    if kv_cache_spec.page_size_padded is not None:
+    if packing is not None:
+        offset, block_stride = packing
+        assert inv_order[0] == 0
+        page_bytes = prod(kv_cache_shape[1:]) * get_dtype_size(dtype)
+        kv_cache = (
+            kv_raw_tensor.view(-1, block_stride)[:, offset : offset + page_bytes]
+            .view(dtype)
+            .view(kv_cache_shape)
+        )
+    elif kv_cache_spec.page_size_padded is not None:
         # Use a strided view to skip the padding between physical pages.
         #
         # Only num-blocks-first layouts are supported (the block dimension is
@@ -225,13 +236,13 @@ def _reshape_attention_kv_cache(
         strides[num_blocks_dim] = page_stride
 
         kv_cache = torch.as_strided(
-            kv_tensor,
+            kv_raw_tensor.view(dtype),
             size=permuted_kv_cache_shape,
             stride=tuple(strides),
         )
     else:
         # No padding — safe to use a contiguous view.
-        kv_cache = kv_tensor.view(permuted_kv_cache_shape)
+        kv_cache = kv_raw_tensor.view(dtype).view(permuted_kv_cache_shape)
 
     return kv_cache.permute(*inv_order)
 
@@ -304,14 +315,13 @@ def _reshape_kv_cache(
                 except (AttributeError, NotImplementedError):
                     kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
 
-                dtype = kv_cache_spec.dtype
-                kv_tensor = kv_raw_tensor.view(dtype)
                 kv_caches[layer_name] = _reshape_attention_kv_cache(
-                    kv_tensor,
+                    kv_raw_tensor,
                     kv_cache_spec,
                     kv_cache_shape,
                     kv_cache_stride_order,
                     kernel_num_blocks,
+                    packing,
                 )
 
             elif isinstance(kv_cache_spec, MambaSpec):
