@@ -337,8 +337,10 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # Activation emulation relies solely on `a1q_scale` output of
         # `moe_kernel_quantize_input`, the fallback on `self.a1_scale`
         # should be removed.
-        input_scale = None if self.quantization_emulation else (
-            a1q_scale if a1q_scale is not None else self.a1_scale
+        input_scale = (
+            None
+            if self.quantization_emulation
+            else (a1q_scale if a1q_scale is not None else self.a1_scale)
         )
 
         def _base_w13_fn():
