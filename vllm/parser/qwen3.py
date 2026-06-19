@@ -53,7 +53,7 @@ _PARAM_RE = re.compile(
     r"(?:<\s*/\s*parameter\s*>|(?=<\s*parameter\s*=))",
     re.DOTALL,
 )
-_PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>(.*)$", re.DOTALL)
+_PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>([^<]*)$", re.DOTALL)
 
 
 def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
@@ -138,10 +138,6 @@ def qwen3_config(
             (ParserState.CONTENT, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
-            ),
-            (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(
-                ParserState.CONTENT,
-                (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_PREAMBLE, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,

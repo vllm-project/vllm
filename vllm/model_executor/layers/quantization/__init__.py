@@ -11,7 +11,6 @@ logger = init_logger(__name__)
 
 QuantizationMethods = Literal[
     "awq",
-    "auto_awq",
     "fp8",
     "fbgemm_fp8",
     "fp_quant",
@@ -114,8 +113,9 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
     from vllm.models.deepseek_v4 import DeepseekV4FP8Config
 
-    from .auto_awq import AutoAWQConfig
     from .auto_gptq import AutoGPTQConfig
+    from .awq import AWQConfig
+    from .awq_marlin import AWQMarlinConfig
     from .bitsandbytes import BitsAndBytesConfig
     from .compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
@@ -138,9 +138,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .torchao import TorchAOConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
-        "awq": AutoAWQConfig,
-        "awq_marlin": AutoAWQConfig,
-        "auto_awq": AutoAWQConfig,
+        "awq": AWQConfig,
         "fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
         "fp_quant": FPQuantConfig,
@@ -151,6 +149,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "auto_gptq": AutoGPTQConfig,
         "gptq": AutoGPTQConfig,
         "gptq_marlin": AutoGPTQConfig,
+        "awq_marlin": AWQMarlinConfig,
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "experts_int8": ExpertsInt8Config,

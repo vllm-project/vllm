@@ -5,6 +5,7 @@ from collections.abc import Iterable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING
 
+from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tokenizers.mistral import MistralTokenizer
@@ -12,6 +13,8 @@ from vllm.tokenizers.mistral import MistralTokenizer
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+
+logger = init_logger(__name__)
 
 
 class MistralReasoningParser(BaseThinkingReasoningParser):

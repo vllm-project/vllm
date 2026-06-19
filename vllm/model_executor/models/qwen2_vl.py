@@ -1216,16 +1216,24 @@ class Qwen2VLForConditionalGeneration(
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
             if mm_feature.modality == "image":
-                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                grid_tensor = mm_feature.data["image_grid_thw"].data
+                if not grid_tensor.is_meta:
+                    t, h, w = grid_tensor.tolist()
+                else:
+                    t, h, w = 1, spatial_merge_size, spatial_merge_size
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 yield offset, 1, h // spatial_merge_size, w // spatial_merge_size, 1.0
             elif mm_feature.modality == "video":
-                t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
+                grid_tensor = mm_feature.data["video_grid_thw"].data
+                if not grid_tensor.is_meta:
+                    t, h, w = grid_tensor.tolist()
+                else:
+                    t, h, w = 1, spatial_merge_size, spatial_merge_size
                 second_per_grid_ts = 1.0
-                if mm_feature.data.get("second_per_grid_ts", None):
-                    second_per_grid_ts = mm_feature.data[
-                        "second_per_grid_ts"
-                    ].data.item()
+                if mm_feature.data.get("second_per_grid_ts", None) is not None:
+                    ts_tensor = mm_feature.data["second_per_grid_ts"].data
+                    if not ts_tensor.is_meta:
+                        second_per_grid_ts = ts_tensor.item()
                 t_factor = second_per_grid_ts * tokens_per_second
                 yield (
                     offset,

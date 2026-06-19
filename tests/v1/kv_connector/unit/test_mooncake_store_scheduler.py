@@ -16,7 +16,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler impor
 def _make_bare_scheduler() -> MooncakeStoreScheduler:
     scheduler = object.__new__(MooncakeStoreScheduler)
     scheduler.kv_role = "kv_both"
-    scheduler.lookup_async = False
     scheduler._block_size = 16
     scheduler.load_specs = {}
     scheduler._unfinished_request_ids = {"req-0"}
@@ -474,13 +473,7 @@ class _StubLookupClient:
     def __init__(self, hit_tokens: int) -> None:
         self._hit_tokens = hit_tokens
 
-    def lookup(
-        self,
-        req_id: str,
-        token_len: int,
-        block_hashes: list[bytes],
-        non_block: bool = False,
-    ) -> int:
+    def lookup(self, token_len: int, block_hashes: list[bytes]) -> int:
         return self._hit_tokens
 
 

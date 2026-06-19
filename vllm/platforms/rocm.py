@@ -458,7 +458,6 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq",
-        "auto_awq",
         "awq_marlin",  # will be overwritten with awq
         "gptq",
         "auto_gptq",
