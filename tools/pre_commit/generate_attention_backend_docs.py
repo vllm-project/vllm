@@ -30,6 +30,7 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 RELEVANT_PATTERNS = [
     "vllm/v1/attention/backends/*.py",
     "vllm/v1/attention/backends/**/*.py",
+    "vllm/models/minimax_m3/common/sparse_attention.py",
     "vllm/model_executor/layers/attention/mla_attention.py",
     "vllm/platforms/cuda.py",
     "tools/pre_commit/generate_attention_backend_docs.py",
@@ -383,6 +384,49 @@ def parse_mla_prefill_priorities() -> dict[str, list[str]]:
     return priorities
 
 
+def parse_mla_dimensions_call(node: ast.AST) -> str | None:
+    """Parse an MLADimensions(...) call into a compact display string."""
+    if not isinstance(node, ast.Call):
+        return None
+
+    func = node.func
+    if not isinstance(func, ast.Name) or func.id != "MLADimensions":
+        return None
+
+    dimensions: dict[str, int] = {}
+    for keyword in node.keywords:
+        if (
+            keyword.arg is not None
+            and isinstance(keyword.value, ast.Constant)
+            and isinstance(keyword.value.value, int)
+        ):
+            dimensions[keyword.arg] = keyword.value.value
+
+    qk_nope_head_dim = dimensions.get("qk_nope_head_dim")
+    qk_rope_head_dim = dimensions.get("qk_rope_head_dim")
+    v_head_dim = dimensions.get("v_head_dim")
+    if qk_nope_head_dim is None or qk_rope_head_dim is None or v_head_dim is None:
+        return None
+
+    return (
+        f"(qk_nope_head_dim={qk_nope_head_dim}, "
+        f"qk_rope_head_dim={qk_rope_head_dim}, v_head_dim={v_head_dim})"
+    )
+
+
+def parse_supported_mla_dimensions(node: ast.AST | None) -> list[str]:
+    """Parse a supported_mla_dimensions class variable."""
+    if not isinstance(node, ast.List):
+        return []
+
+    supported_dimensions = []
+    for element in node.elts:
+        dimensions = parse_mla_dimensions_call(element)
+        if dimensions is not None:
+            supported_dimensions.append(dimensions)
+    return supported_dimensions
+
+
 def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
     """Parse a single MLA prefill backend file to extract its properties.
 
@@ -408,20 +452,20 @@ def parse_mla_prefill_backend_file(class_path: str) -> dict[str, Any] | None:
 
     info: dict[str, Any] = {
         "compute_capability": "Any",
-        "requires_r1_dims": False,
+        "supported_mla_dimensions": [],
         "dtypes": "fp16, bf16",  # Default from base class
     }
 
     # Parse class variables
     for item in class_node.body:
-        if isinstance(item, ast.Assign):
-            for target in item.targets:
-                if (
-                    isinstance(target, ast.Name)
-                    and target.id == "requires_r1_mla_dimensions"
-                    and isinstance(item.value, ast.Constant)
-                ):
-                    info["requires_r1_dims"] = item.value.value
+        if (
+            isinstance(item, ast.AnnAssign)
+            and isinstance(item.target, ast.Name)
+            and item.target.id == "supported_mla_dimensions"
+        ):
+            info["supported_mla_dimensions"] = parse_supported_mla_dimensions(
+                item.value
+            )
 
         # Parse supported_dtypes class variable
         if (
@@ -514,8 +558,9 @@ def parse_mla_prefill_backends() -> list[dict[str, Any]]:
             marker = "‡"
 
         notes = ""
-        if backend_info.get("requires_r1_dims"):
-            notes = "DeepSeek R1 dims only"
+        supported_mla_dimensions = backend_info.get("supported_mla_dimensions", [])
+        if supported_mla_dimensions:
+            notes = " or ".join(supported_mla_dimensions) + " only"
         elif backend_name == "FLASH_ATTN":
             notes = "FA4 on SM100+, FA3 on SM90, FA2 otherwise"
 
@@ -1633,6 +1678,24 @@ def generate_mla_section(
     return "\n".join(lines)
 
 
+def generate_minimax_section(backends: list[dict[str, Any]]) -> str:
+    """Generate the MiniMax M3 sparse attention section."""
+    lines = [
+        "## MiniMax M3 Sparse Attention Backends",
+        "",
+        'Block-sparse GQA backend used by MiniMax M3 sparse ("lightning indexer")',
+        "layers. It is wired in directly by the model and is not part of the",
+        "automatic priority lists above. A lightning indexer scores KV blocks, the",
+        "top-k blocks (plus fixed init/local blocks) are selected, and attention",
+        "attends only to those blocks; index keys live in a separate side cache.",
+        "",
+    ]
+    columns = _build_columns(is_mla=False, has_versions=False)
+    lines.extend(_render_table(columns, backends))
+    lines.append("")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Top-level orchestration
 # ---------------------------------------------------------------------------
@@ -1669,15 +1732,24 @@ def generate_docs() -> str:
     if fi_features:
         all_backends = _expand_flashinfer_variants(all_backends, fi_features)
 
-    # DeepSeek V4 (*_DSV4) decode backends get their own subsection rather than
-    # mixing into the main MLA / standard tables (the ROCm V4 backend isn't
-    # flagged is_mla by the AST heuristic, so filter purely on the name).
+    # DeepSeek V4 (*_DSV4) decode backends and MiniMax M3 sparse backends each
+    # get their own subsection rather than mixing into the main MLA / standard
+    # tables (the ROCm V4 backend isn't flagged is_mla by the AST heuristic, so
+    # filter purely on the name).
     def _is_v4(b: dict[str, Any]) -> bool:
         return b["name"].endswith("_DSV4")
 
+    def _is_minimax(b: dict[str, Any]) -> bool:
+        return not b["is_mla"] and not _is_v4(b) and b["name"].startswith("MINIMAX")
+
     v4_decode_backends = [b for b in all_backends if _is_v4(b)]
+    minimax_backends = [b for b in all_backends if _is_minimax(b)]
     mla_backends = [b for b in all_backends if b["is_mla"] and not _is_v4(b)]
-    non_mla_backends = [b for b in all_backends if not b["is_mla"] and not _is_v4(b)]
+    non_mla_backends = [
+        b
+        for b in all_backends
+        if not b["is_mla"] and not _is_v4(b) and not _is_minimax(b)
+    ]
 
     # Generate documentation
     script_path = "tools/pre_commit/generate_attention_backend_docs.py"
@@ -1725,6 +1797,10 @@ def generate_docs() -> str:
         )
     if footnotes:
         doc_lines.append("\n>\n".join(footnotes) + "\n")
+
+    # Add MiniMax M3 sparse section (separate category after standard GQA)
+    if minimax_backends:
+        doc_lines.append(generate_minimax_section(minimax_backends))
 
     # Add MLA section with prefill and decode backends
     doc_lines.append(
