@@ -22,9 +22,6 @@ class InputBuffers:
 
         self.input_ids = torch.zeros(max_num_tokens, dtype=torch.int32, device=device)
         self.positions = torch.zeros(max_num_tokens, dtype=torch.int64, device=device)
-        # Persistent per-token padding mask (True = cudagraph-padding row, not a
-        # real token). Filled in place each step so its stable pointer can be
-        # captured into cuda graphs and read at replay.
         self.is_padding = torch.zeros(max_num_tokens, dtype=torch.bool, device=device)
         self.query_start_loc = torch.zeros(
             max_num_reqs + 1, dtype=torch.int32, device=device
