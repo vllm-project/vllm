@@ -21,6 +21,11 @@ class SpanAttributes:
     """
 
     # Attribute names copied from OTel semantic conventions to avoid version conflicts
+    GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
+    GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+
+    # Deprecated OTel GenAI semantic convention names. Keep emitting these
+    # during the migration window so existing dashboards continue to work.
     GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
     GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
     GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"

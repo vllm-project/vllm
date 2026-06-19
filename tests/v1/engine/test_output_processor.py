@@ -3,9 +3,11 @@
 
 import math
 import time
+from types import SimpleNamespace
 
 import pytest
 
+import vllm.v1.engine.output_processor as output_processor_module
 from tests.v1.engine.utils import (
     NUM_PROMPT_LOGPROBS_UNDER_TEST,
     NUM_SAMPLE_LOGPROBS_UNDER_TEST,
@@ -19,6 +21,7 @@ from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tokenizers import TokenizerLike
+from vllm.tracing import SpanAttributes
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
@@ -28,6 +31,51 @@ from vllm.v1.engine import (
 )
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+
+
+@pytest.mark.skip_global_cleanup
+def test_tracing_emits_current_and_legacy_token_attributes(monkeypatch):
+    captured_attributes = {}
+
+    def capture_span(**kwargs):
+        captured_attributes.update(kwargs["attributes"])
+
+    monkeypatch.setattr(output_processor_module, "instrument_manual", capture_span)
+    monkeypatch.setattr(
+        output_processor_module, "extract_trace_context", lambda _: None
+    )
+
+    stats = SimpleNamespace(
+        arrival_time=1.0,
+        queued_ts=1.1,
+        scheduled_ts=1.2,
+        first_token_ts=1.4,
+        last_token_ts=1.8,
+        first_token_latency=0.4,
+        num_generation_tokens=3,
+    )
+    request_state = SimpleNamespace(
+        stats=stats,
+        prompt_token_ids=[1, 2, 3, 4],
+        prompt_embeds=None,
+        external_req_id="request-id",
+        top_p=None,
+        max_tokens_param=None,
+        temperature=None,
+        n=None,
+    )
+
+    OutputProcessor.do_tracing(
+        object(),
+        SimpleNamespace(trace_headers=None),
+        request_state,
+        SimpleNamespace(iteration_timestamp=2.0),
+    )
+
+    assert captured_attributes[SpanAttributes.GEN_AI_USAGE_INPUT_TOKENS] == 4
+    assert captured_attributes[SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] == 4
+    assert captured_attributes[SpanAttributes.GEN_AI_USAGE_OUTPUT_TOKENS] == 3
+    assert captured_attributes[SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] == 3
 
 
 def _ref_convert_id_to_token(

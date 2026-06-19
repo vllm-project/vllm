@@ -739,6 +739,8 @@ class OutputProcessor:
             ),
             SpanAttributes.GEN_AI_LATENCY_E2E: e2e_time,
             SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE: queued_time,
+            SpanAttributes.GEN_AI_USAGE_INPUT_TOKENS: prompt_length,
+            SpanAttributes.GEN_AI_USAGE_OUTPUT_TOKENS: (metrics.num_generation_tokens),
             SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS: prompt_length,
             SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS: (
                 metrics.num_generation_tokens
