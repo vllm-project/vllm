@@ -705,7 +705,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     )
                     continue
 
-                drop_eagle_block = use_eagle and idx not in eagle_verified
+                drop_eagle_block = (
+                    use_eagle
+                    or (
+                        bool(self.eagle_group_ids)
+                        and (
+                            getattr(spec, "compress_ratio", 1) > 1
+                            or getattr(spec, "sliding_window", None) is not None
+                        )
+                    )
+                ) and idx not in eagle_verified
 
                 _max_length = curr_hit_length
                 if drop_eagle_block:
@@ -784,7 +793,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 kv_cache_group_ids=group_ids,
                 block_pool=self.block_pool,
                 kv_cache_spec=spec,
-                drop_eagle_block=use_eagle,
+                drop_eagle_block=(
+                    use_eagle
+                    or (
+                        bool(self.eagle_group_ids)
+                        and (
+                            getattr(spec, "compress_ratio", 1) > 1
+                            or getattr(spec, "sliding_window", None) is not None
+                        )
+                    )
+                ),
                 alignment_tokens=self.scheduler_block_size,
             )
             group_hit = len(blocks[0]) * spec.block_size
