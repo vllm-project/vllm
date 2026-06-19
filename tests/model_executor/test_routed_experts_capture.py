@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import types
+import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -224,15 +225,20 @@ def _make_manager(
         num_experts_per_tok=_TOP_K,
         num_hidden_layers=_NUM_LAYERS,
     )
+    # Unique instance_id per manager so the shared /dev/shm slot mmap never
+    # collides across tests (the region O_EXCL-creates its file).
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(hf_text_config=hf_config)
+        model_config=SimpleNamespace(hf_text_config=hf_config),
+        instance_id=f"retest_{uuid.uuid4().hex}",
+        parallel_config=SimpleNamespace(data_parallel_rank=0),
     )
-    return RoutedExpertsManager(
+    mgr = RoutedExpertsManager(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         num_offload_blocks=num_offload_blocks,
         block_size_factor=block_size_factor,
     )
+    return mgr
 
 
 def _routing_for_blocks(block_ids: list[int], seed: int) -> np.ndarray:

@@ -26,12 +26,12 @@ class RoutedExpertsCapturer:
     Layer hooks call ``capture`` during the forward pass with the per-layer
     ``topk_ids``; the rows owned by this DP rank are written into a
     preallocated device buffer. ``GPUModelRunner`` then D2Hs the buffer and
-    hands it to the scheduler via ``RoutedExpertsLists``.
+    the worker (output_rank) scatters it into the shared slot buffer.
 
     The transit buffer is ``torch.int32`` (not the narrow ``uint8``/``uint16``
     the scheduler slot buffer uses): it matches the router's native dtype,
     avoids casts on the SP all-gather path, is universally NCCL-supported, and
-    costs only a few MB per worker. ``store_batch`` narrows on the way in.
+    costs only a few MB per worker. ``scatter`` narrows on the way in.
 
     Invariants: one instance per worker; shape fixed at init for the
     worst-case step (``max_num_batched_tokens``); ``clear_buffer`` runs each
@@ -121,10 +121,12 @@ class RoutedExpertsCapturer:
                     f"tp_size={self.tp_size})"
                 )
 
-        # Defensive: model may expose more layers than the capture buffer
-        # was sized for (unusual, but guards against miss-config).
         if layer_id >= self.device_buffer.shape[1]:
-            return
+            raise IndexError(
+                f"routed-experts capture layer_id {layer_id} exceeds buffer "
+                f"layer dim {self.device_buffer.shape[1]} (num_hidden_layers "
+                "mismatch); routing would be silently dropped"
+            )
 
         self.device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[
             start_loc:end_loc, :

@@ -821,11 +821,14 @@ class VllmConfig:
     def _verify_return_routed_experts_kv_compat(self) -> None:
         """Reject KV connectors unsupported by --enable-return-routed-experts.
 
-        Routing capture works only with the CPU offload connector
-        (``CPUOffloadingSpec`` or its multi-tier ``TieringOffloadingSpec``),
-        whose transfer jobs the scheduler follows at block granularity. PD
-        disaggregation (routing on P can't reach D) and other connectors are
-        rejected. Best-effort early check; must run after
+        Supported connectors:
+          * CPU offload connector (``OffloadingConnector`` with
+            ``CPUOffloadingSpec`` or its multi-tier ``TieringOffloadingSpec``),
+            whose transfer jobs the scheduler follows at block granularity.
+          * ``MooncakeStoreConnector`` (direct GPU<->Mooncake): routing rides
+            the same RDMA pool as the KV blocks, PUT/GET by the worker bridge.
+
+        Other connectors are rejected. Best-effort early check; must run after
         _post_init_kv_transfer_config() so the connector synthesized from
         --kv-offloading-size is also seen. Authoritative checks run at
         scheduler init.
@@ -844,13 +847,16 @@ class VllmConfig:
             and ktc.kv_role == "kv_both"
             and spec_name in ("CPUOffloadingSpec", "TieringOffloadingSpec")
         )
-        if not is_cpu_offload:
+        is_mooncake_store = (
+            ktc.kv_connector == "MooncakeStoreConnector" and ktc.kv_role == "kv_both"
+        )
+        if not (is_cpu_offload or is_mooncake_store):
             raise ValueError(
                 "--enable-return-routed-experts only supports the CPU KV "
                 "offload connector (OffloadingConnector + CPUOffloadingSpec "
-                "or its TieringOffloadingSpec subclass, kv_role=kv_both); "
-                "PD disaggregation and other KV connectors are not "
-                "supported."
+                "or its TieringOffloadingSpec subclass) or MooncakeStoreConnector, "
+                "with kv_role=kv_both; PD disaggregation and other KV "
+                "connectors are not supported."
             )
         # Any offloaded block size (block_size_factor >= 1) is fine here;
         # the authoritative checks (full-attention group present, non-empty

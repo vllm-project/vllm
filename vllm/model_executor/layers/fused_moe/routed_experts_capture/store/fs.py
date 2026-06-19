@@ -1,200 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Routed-experts secondary-tier offload sidecar.
+"""Filesystem secondary tier: one ``.re`` sidecar file per offloaded block.
 
-The scheduler-side offloaded-block buffer
-(``RoutedExpertsManager.routed_experts_by_cpu_block``) follows the KV cache
-through the offload tiers. The classes here let it cascade to / promote from a
-secondary tier (disk/object/Mooncake/...) in lockstep with the KV blocks.
-
-Routing is an MoE product, so it lives under ``fused_moe``; it only REUSES the
-KV offload lifecycle (``kv_offload/``) as transport. The generic tier hook
-(``BlockLifecycleObserver``) is defined in ``kv_offload/base.py``; everything
-routing-specific — the backend interface, the pluggable factory, the built-in
-filesystem backend, and the observer that bridges KV-tier events to a backend
-— is here.
+The built-in ``type="fs"`` backend. Writes are asynchronous (a thread pool
+keeps the scheduler off the disk-IO critical path) and reads are prefetched,
+mirroring the KV ``FileSystemTierManager``; routing sidecars sit beside the KV
+block files via the same ``FileMapper`` layout. Registers itself with
+``RoutedExpertsStoreFactory`` under ``"fs"`` at import time.
 """
 
 from __future__ import annotations
 
 import functools
-import importlib
 import logging
 import os
 import threading
 import time
-from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, NamedTuple, Protocol
 
 import numpy as np
 
-from vllm.v1.kv_offload.base import BlockLifecycleObserver
+from vllm.model_executor.layers.fused_moe.routed_experts_capture.store.base import (
+    RoutedExpertsSecondaryStore,
+    RoutedExpertsStoreContext,
+    RoutedExpertsStoreFactory,
+)
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 
-if TYPE_CHECKING:
-    from vllm.v1.kv_offload.base import OffloadingSpec
-
 logger = logging.getLogger(__name__)
-
-
-class RoutedExpertsSecondaryStore(ABC):
-    """Persist / restore offloaded-block rows for a secondary tier.
-
-    The routed-experts offload buffer lives in the CPU primary tier alongside
-    KV. When KV blocks cascade to / promote from a secondary tier, the matching
-    offloaded-block rows must follow so routing survives CPU eviction exactly
-    as the KV bytes do. Implementations key each row by its ``OffloadKey``
-    (block hash + group idx), mirroring the KV ``FileMapper`` layout.
-
-    Rows are ``(factor, block_size, num_layers, top_k)`` arrays of the
-    manager's expert-id dtype. ``persist`` may be asynchronous (the built-in
-    ``fs`` backend enqueues writes onto a thread pool and returns, keeping the
-    scheduler thread off the disk-IO critical path); ``restore`` is
-    synchronous but must observe writes issued by a prior ``persist`` for the
-    same keys (read-after-write), regardless of whether the write has reached
-    its backing store yet.
-    """
-
-    @abstractmethod
-    def persist(self, keys: Sequence[bytes], rows: np.ndarray) -> None:
-        """Write one row per key. ``rows[i]`` corresponds to ``keys[i]``."""
-
-    @abstractmethod
-    def restore(self, keys: Sequence[bytes]) -> np.ndarray | None:
-        """Read rows for keys, stacked in order.
-
-        Returns ``None`` if any key is missing (the caller then leaves the
-        offloaded-block rows untouched — the connector would not have issued a
-        load for an absent block).
-        """
-
-    def prefetch(self, keys: Sequence[bytes]) -> None:
-        """Hint that ``restore(keys)`` is coming soon; warm a read-ahead cache.
-
-        Called when the matching KV blocks begin promoting (secondary ->
-        primary), so a backend can overlap its read with the KV-byte transfer
-        and serve the subsequent ``restore`` from memory instead of blocking
-        the scheduler on disk. Default no-op: ``restore`` stays correct without
-        it (it just reads synchronously). Idempotent and best-effort.
-        """
-
-
-class RoutedExpertsStoreContext(NamedTuple):
-    """Inputs a ``RoutedExpertsSecondaryStore`` builder may need.
-
-    Passed to every builder registered with ``RoutedExpertsStoreFactory`` so
-    a backend (filesystem, object store, Mooncake, ...) can construct its
-    store without the scheduler hard-coding any one implementation. The
-    context is backend-agnostic: each backend reads whatever it needs (a
-    ``root_dir``, an endpoint, credentials, ...) from ``tier_config``.
-
-    Args:
-        tier_config: The secondary-tier config dict from
-            ``kv_connector_extra_config['secondary_tiers'][i]`` (includes
-            ``type`` plus any backend-specific keys, e.g. ``root_dir`` for
-            ``fs`` or endpoint / namespace for a remote store).
-        offloading_spec: The resolved ``CPUOffloadingSpec`` (subclassed by
-            ``TieringOffloadingSpec``); exposes ``block_size_factor``,
-            ``vllm_config``, ``extra_config``, etc.
-        row_shape: Offloaded-block row shape ``(factor, block_size, layers,
-            top_k)``.
-        dtype: Expert-id dtype of the offloaded-block rows.
-    """
-
-    tier_config: dict
-    offloading_spec: "OffloadingSpec"
-    row_shape: tuple[int, ...]
-    dtype: np.dtype
-
-
-class RoutedExpertsStoreFactory:
-    """Registry mapping a secondary-tier ``type`` to a routing-store builder.
-
-    Mirrors ``vllm.v1.kv_offload.tiering.factory.SecondaryTierFactory``: a
-    backend registers a builder under the same ``type`` string its KV tier
-    uses (e.g. ``"fs"``, ``"mooncake"``), and the scheduler looks it up
-    instead of hard-coding any implementation. Registration is lazy (module
-    path + factory name), so a backend's heavy imports load only when its tier
-    is configured, and out-of-tree backends register without importing this
-    module.
-
-    To add a backend, implement the two-method ``RoutedExpertsSecondaryStore``
-    contract (``persist`` / ``restore``, keyed by ``OffloadKey``) and register
-    a builder::
-
-        # my_pkg/mooncake_store.py
-        class MooncakeRoutedExpertsStore(RoutedExpertsSecondaryStore):
-            def __init__(self, ctx):
-                self._store = open_mooncake(ctx.tier_config)  # by-key put/get
-                self._shape, self._dtype = ctx.row_shape, ctx.dtype
-
-            def persist(self, keys, rows):
-                for k, row in zip(keys, rows):
-                    self._store.put(k.hex(), row.tobytes())
-
-            def restore(self, keys):
-                bufs = [self._store.get(k.hex()) for k in keys]
-                if any(not b for b in bufs):
-                    return None
-                return np.stack(
-                    [np.frombuffer(b, self._dtype).reshape(self._shape) for b in bufs]
-                )
-
-
-        def build_store(ctx):
-            return MooncakeRoutedExpertsStore(ctx)
-
-
-        RoutedExpertsStoreFactory.register_store(
-            "mooncake", "my_pkg.mooncake_store", "build_store"
-        )
-
-    A tier ``type`` with no registered builder just gets no routing sidecar (a
-    warning is logged); KV still tiers normally.
-    """
-
-    _registry: dict[str, tuple[str, str]] = {}
-
-    @classmethod
-    def register_store(
-        cls, tier_type: str, module_path: str, factory_name: str
-    ) -> None:
-        """Register a store-builder factory for a secondary-tier ``type``.
-
-        Args:
-            tier_type: Tier type string (must match the KV secondary tier's
-                ``type``, e.g. ``"fs"``, ``"mooncake"``).
-            module_path: Import path of the module holding the builder.
-            factory_name: Name of the builder callable within that module;
-                it takes a ``RoutedExpertsStoreContext`` and returns a
-                ``RoutedExpertsSecondaryStore``.
-
-        Raises:
-            ValueError: If ``tier_type`` is already registered.
-        """
-        if tier_type in cls._registry:
-            raise ValueError(
-                f"Routed-experts store for tier '{tier_type}' is already registered."
-            )
-        cls._registry[tier_type] = (module_path, factory_name)
-
-    @classmethod
-    def is_registered(cls, tier_type: str) -> bool:
-        return tier_type in cls._registry
-
-    @classmethod
-    def create(
-        cls, tier_type: str, ctx: RoutedExpertsStoreContext
-    ) -> RoutedExpertsSecondaryStore | None:
-        """Build the store for ``tier_type``, or None if no builder is known."""
-        entry = cls._registry.get(tier_type)
-        if entry is None:
-            return None
-        module_path, factory_name = entry
-        module = importlib.import_module(module_path)
-        builder = getattr(module, factory_name)
-        return builder(ctx)
 
 
 class FileRoutedExpertsStore(RoutedExpertsSecondaryStore):
@@ -495,96 +328,6 @@ def build_fs_routed_experts_store(
 
 RoutedExpertsStoreFactory.register_store(
     "fs",
-    "vllm.model_executor.layers.fused_moe.routed_experts_capture.store",
+    "vllm.model_executor.layers.fused_moe.routed_experts_capture.store.fs",
     "build_fs_routed_experts_store",
 )
-
-
-class _OffloadBuffer(Protocol):
-    """The subset of RoutedExpertsManager the observer needs.
-
-    Declared structurally so this module does not import the manager at
-    runtime (the observer only reads/writes whole offloaded-block rows).
-    """
-
-    def read_cpu_blocks(self, cpu_block_ids: np.ndarray) -> np.ndarray: ...
-
-    def write_cpu_blocks(self, cpu_block_ids: np.ndarray, rows: np.ndarray) -> None: ...
-
-
-class RoutedExpertsBlockLifecycleObserver(BlockLifecycleObserver):
-    """Mirror cascade / promotion events into a secondary routing store.
-
-    Registered on a ``TieringOffloadingManager``. On cascade (CPU primary ->
-    secondary) it persists the offloaded-block rows of the affected CPU
-    blocks; on promotion (secondary -> CPU primary) it restores them, so the
-    routed-experts offload buffer's lifecycle matches the KV cache's across
-    all tiers (GPU <-> CPU <-> disk/object).
-    """
-
-    def __init__(
-        self,
-        manager: _OffloadBuffer,
-        store: RoutedExpertsSecondaryStore,
-    ) -> None:
-        self._manager = manager
-        self._store = store
-        # Cumulative counters (blocks), for observability. The disk round-trip
-        # is otherwise invisible; these let tests/ops confirm the routing
-        # offload buffer actually followed KV through the secondary tier.
-        self.cascaded_blocks = 0
-        self.promoted_blocks = 0
-
-    def on_blocks_cascaded(
-        self, keys: Sequence[bytes], cpu_block_ids: np.ndarray
-    ) -> None:
-        if len(keys) == 0:
-            return
-        rows = self._manager.read_cpu_blocks(np.asarray(cpu_block_ids))
-        self._store.persist(keys, rows)
-        self.cascaded_blocks += len(keys)
-        logger.debug(
-            "routed-experts offload: cascaded %d block(s) to secondary (total=%d)",
-            len(keys),
-            self.cascaded_blocks,
-        )
-
-    def on_blocks_promotion_started(
-        self, keys: Sequence[bytes], cpu_block_ids: np.ndarray
-    ) -> None:
-        # KV bytes just started loading secondary -> primary; warm the routing
-        # read-ahead cache in parallel so the matching ``on_blocks_promoted``
-        # restore (after the KV load completes) serves from memory.
-        if len(keys) == 0:
-            return
-        self._store.prefetch(keys)
-
-    def on_blocks_promoted(
-        self, keys: Sequence[bytes], cpu_block_ids: np.ndarray
-    ) -> None:
-        if len(keys) == 0:
-            return
-        rows = self._store.restore(keys)
-        if rows is None:
-            # Missing sidecar: leave offloaded-block rows as-is. Should not
-            # happen for a block the connector decided to promote, but never
-            # corrupt the offload buffer with partial data.
-            logger.warning(
-                "routed-experts sidecar missing for %d promoted block(s); "
-                "offloaded-block rows left unchanged",
-                len(keys),
-            )
-            return
-        self._manager.write_cpu_blocks(np.asarray(cpu_block_ids), rows)
-        self.promoted_blocks += len(keys)
-        logger.debug(
-            "routed-experts offload: promoted %d block(s) from secondary (total=%d)",
-            len(keys),
-            self.promoted_blocks,
-        )
-
-    def shutdown(self) -> None:
-        """Flush the secondary store's pending writes, if it has any."""
-        store_shutdown = getattr(self._store, "shutdown", None)
-        if callable(store_shutdown):
-            store_shutdown()

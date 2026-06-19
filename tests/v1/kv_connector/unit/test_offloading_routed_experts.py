@@ -75,6 +75,7 @@ def _kv_transfer_config(
 def _build_llm(
     block_size_factor: int = 1,
     disk_root: str | None = None,
+    async_scheduling: bool = False,
 ) -> LLM:
     return LLM(
         model=MODEL_NAME,
@@ -86,6 +87,7 @@ def _build_llm(
         gpu_memory_utilization=0.3,
         hf_overrides=HF_OVERRIDES,
         enable_return_routed_experts=True,
+        async_scheduling=async_scheduling,
         kv_transfer_config=_kv_transfer_config(block_size_factor, disk_root),
     )
 
@@ -203,6 +205,25 @@ def test_routed_experts_survive_disk_tiering_factor_gt1(tmp_path):
     """Disk tiering with factor>1: combine the sub-block offload mapping
     with the CPU<->disk sidecar lifecycle."""
     llm = _build_llm(block_size_factor=3, disk_root=str(tmp_path / "kv_tier"))
+    try:
+        _run_offload_reload_cycle(llm)
+    finally:
+        del llm
+
+
+def test_routed_experts_survive_offload_reload_async():
+    """Offload/reload routing correctness under async scheduling.
+
+    Async scheduling sets ``max_concurrent_batches=2`` so the engine drives the
+    pipelined ``step_with_batch_queue`` loop -- the path where a GPU block could
+    be reused (and its slot rewritten by a later step's worker scatter) before
+    the scheduler reads the earlier step's routing. The full offload/reload/
+    recycle cycle asserting byte-identical reload therefore covers that the
+    happens-before (the ``ModelRunnerOutput`` IPC barrier plus the KV ref-count
+    block pin) serializes worker write and scheduler read with no slot-version
+    mechanism.
+    """
+    llm = _build_llm(async_scheduling=True)
     try:
         _run_offload_reload_cycle(llm)
     finally:

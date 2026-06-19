@@ -9,6 +9,7 @@ transfer jobs. Torch-free (numpy only): runs in the scheduler process.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import mmap
 from collections.abc import Sequence
@@ -19,9 +20,14 @@ import numpy.typing as npt
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe.routed_experts_capture.common import (
-    find_full_attention_gid,
     get_num_experts,
     get_num_experts_per_tok,
+    require_full_attention_gid,
+    routing_slot_shape_dtype,
+)
+from vllm.model_executor.layers.fused_moe.routed_experts_capture.shared_region import (
+    SharedRoutingRegion,
+    shared_routing_mmap_path,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
 
@@ -41,6 +47,19 @@ class FullAttnBlockMap(NamedTuple):
     gpu_block_ids: np.ndarray  # GPU block id per moved block
     cpu_block_ids: np.ndarray  # offloaded block id holding that block
     sub_offsets: np.ndarray  # sub-block index within the offloaded block
+
+    @classmethod
+    def concatenate(cls, maps: list[FullAttnBlockMap]) -> FullAttnBlockMap:
+        """Merge per-job maps so a step's offload transfers apply in ONE
+        vectorized fancy-index instead of one numpy call per job. The moved
+        data is identical; this only removes per-job call overhead on the
+        scheduler thread. ``maps`` must be non-empty (callers drop empty maps).
+        """
+        return cls(
+            gpu_block_ids=np.concatenate([m.gpu_block_ids for m in maps]),
+            cpu_block_ids=np.concatenate([m.cpu_block_ids for m in maps]),
+            sub_offsets=np.concatenate([m.sub_offsets for m in maps]),
+        )
 
 
 def _cdiv(a: int, b: int) -> int:
@@ -165,15 +184,15 @@ class RoutedExpertsManager:
     prefix-cached blocks (prefix hits re-expose the same slots).
 
     Data flow per step:
-      1. Worker D2Hs its device capture buffer into
-         ``RoutedExpertsLists`` and returns it via
-         ``ModelRunnerOutput``.
-      2. Scheduler calls ``store_batch`` with that step's
-         ``(routing_data, slot_mapping)`` — a single CPU->CPU
-         fancy-index assign, ~few MB per step.
-      3. On request completion / abort / preemption, the scheduler
-         calls ``get`` with the request's block IDs to recover
-         the full per-token routing.
+      1. Worker (output_rank) scatters this step's captured routing
+         directly into the /dev/shm slot buffer (``scatter``), and
+         returns only the per-token ``slot_mapping`` via
+         ``ModelRunnerOutput.routed_experts_slots`` — no routing payload
+         is sent. The returned output is the happens-before barrier.
+      2. On each step the scheduler reads decode tokens' routing back
+         from the shared buffer by those returned slots (``get_by_slots``);
+         on request completion / abort / preemption it calls ``get`` with
+         the request's block IDs to recover the full per-token routing.
 
     Memory: ``routed_experts_by_slot`` is sized for the whole block pool
     (``num_blocks * block_size`` slots), which can reach multiple GB; see the
@@ -207,16 +226,10 @@ class RoutedExpertsManager:
         num_offload_blocks: int | None = None,
         block_size_factor: int = 1,
     ) -> None:
-        # Must match the worker-side gid selection in
-        # GPUModelRunner._get_attention_kv_cache_gid (same helper).
-        attn_gid = find_full_attention_gid(kv_cache_config)
-        if attn_gid is None:
-            raise ValueError(
-                "enable_return_routed_experts requires at least one "
-                "full-attention KV cache group; pure sliding-window / "
-                "Mamba models are unsupported."
-            )
-        self.attn_gid = attn_gid
+        # Same gate the worker model runner uses, so both anchor on (and agree
+        # on) the same group; raises with no full-attention group, warns on a
+        # multi-group hybrid.
+        self.attn_gid = require_full_attention_gid(kv_cache_config)
         attn_group = kv_cache_config.kv_cache_groups[self.attn_gid]
         self.block_size = attn_group.kv_cache_spec.block_size
         if block_size_factor < 1:
@@ -239,16 +252,34 @@ class RoutedExpertsManager:
         # whole block pool and can reach multiple GB.
         expert_id_dtype = np.uint8 if num_experts <= 256 else np.uint16
         self.expert_id_dtype = expert_id_dtype
-        # Demand-paged (see _mmap_zeroed): most slots in this pool-sized buffer
-        # are never written, so eager np.zeros would waste physical RAM.
-        self.routed_experts_by_slot = _mmap_zeroed(
-            (
-                max_num_slots,
-                self.num_layers,
-                num_experts_per_tok,
+        # Slot buffer is shared scheduler<->worker via /dev/shm: the worker
+        # (output_rank) writes this step's routing directly, the scheduler
+        # reads it back per request. Scheduler is the creator. Backing changes
+        # from anonymous MAP_PRIVATE to named MAP_SHARED; the flat
+        # (max_num_slots, layers, top_k) layout and all store_batch/get/
+        # _blocks_view semantics below are unchanged. Demand-paged either way:
+        # untouched slots never fault in physical RAM.
+        # slot_shape/dtype from the shared helper so the worker writer derives
+        # an IDENTICAL layout (they must match or the shared mmap mismatches).
+        slot_shape, slot_dtype = routing_slot_shape_dtype(vllm_config, kv_cache_config)
+        expected_shape = (max_num_slots, self.num_layers, num_experts_per_tok)
+        if slot_shape != expected_shape:
+            raise RuntimeError(
+                "routed-experts slot buffer layout mismatch: "
+                f"routing_slot_shape_dtype gave {slot_shape}, manager sized "
+                f"{expected_shape}. The worker writer derives its mmap from the "
+                "same helper, so a divergence here means the shared /dev/shm "
+                "buffer would be misinterpreted across processes."
+            )
+        self._slot_region = SharedRoutingRegion(
+            path=shared_routing_mmap_path(
+                vllm_config.instance_id,
+                vllm_config.parallel_config.data_parallel_rank,
             ),
-            dtype=expert_id_dtype,
+            shape=slot_shape,
+            dtype=slot_dtype,
         )
+        self.routed_experts_by_slot = self._slot_region.array
         # Block-major view over the slot buffer for whole-block copies
         # (C-contiguous reshape, zero-copy).
         self._blocks_view = self.routed_experts_by_slot.reshape(
@@ -294,10 +325,25 @@ class RoutedExpertsManager:
         """Persist one step's routed experts into the slot buffer.
 
         Equivalent to ``slot_buffer[slot_mapping] = data``; numpy fancy
-        indexing handles repeated / out-of-order indices. Called once
-        per scheduler step in ``update_from_output``.
+        indexing handles repeated / out-of-order indices. The worker writes
+        the live slot buffer directly via ``scatter`` (shared mmap), so this
+        scheduler-side writer is now only exercised by unit tests.
         """
         self.routed_experts_by_slot[slot_mapping] = data
+
+    def shutdown(self) -> None:
+        """Release the shared slot mmap (creator unlinks). Idempotent."""
+        region = getattr(self, "_slot_region", None)
+        if region is not None:
+            # Drop the ndarray view before closing the mmap it is backed by.
+            self.routed_experts_by_slot = None  # type: ignore[assignment]
+            self._blocks_view = None  # type: ignore[assignment]
+            region.close()
+            self._slot_region = None
+
+    def __del__(self) -> None:
+        with contextlib.suppress(Exception):
+            self.shutdown()
 
     def _cpu_blocks(self) -> np.ndarray:
         """Return the offloaded-block buffer, or raise if never allocated.
@@ -314,7 +360,7 @@ class RoutedExpertsManager:
             )
         return self.routed_experts_by_cpu_block
 
-    def store_routed_experts_to_cpu_blocks(self, block_map: FullAttnBlockMap) -> None:
+    def store_to_offload_blocks(self, block_map: FullAttnBlockMap) -> None:
         """Store routed experts GPU slots -> offloaded sub-block rows.
 
         Must run after ``store_batch`` of the step whose
@@ -332,7 +378,7 @@ class RoutedExpertsManager:
             block_map.gpu_block_ids
         ]
 
-    def load_routed_experts_from_cpu_blocks(self, block_map: FullAttnBlockMap) -> None:
+    def load_from_offload_blocks(self, block_map: FullAttnBlockMap) -> None:
         """Load offloaded sub-block rows -> GPU slots for one load job.
 
         Loaded tokens never re-run a forward pass, so this is the only
@@ -370,13 +416,15 @@ class RoutedExpertsManager:
         num_tokens: int,
         token_start: int = 0,
     ) -> np.ndarray:
-        """Read routed experts data for a completed / preempted request.
+        """Read routed experts data for a token range of a request.
 
         Reconstructs a per-token slot_mapping from the request's block
-        IDs and returns the routing slice. Because numpy fancy indexing
-        returns a **copy** (not a view), the returned ndarray is safe
-        to hold across subsequent ``store_batch`` calls — do not
-        replace the fancy index with a slice without re-verifying.
+        IDs and returns the routing slice. Used for the full prompt routing
+        at prefill completion and on request completion / abort / preemption.
+        Because numpy fancy indexing returns a **copy** (not a view), the
+        returned ndarray is safe to hold across subsequent worker ``scatter``
+        writes — do not replace the fancy index with a slice without
+        re-verifying.
 
         Args:
             block_ids: Block IDs from the attention KV-cache group.
@@ -394,14 +442,20 @@ class RoutedExpertsManager:
             num_experts_per_tok).
         """
         bs = self.block_size
-        block_ids_array = np.array(block_ids, dtype=np.int32)
-        block_offsets = np.arange(bs)
-        # slot = block_id * block_size + offset_in_block; flatten the
-        # (num_blocks, block_size) grid and trim to num_tokens, then
-        # skip the first token_start entries so only the requested
-        # range is fetched in a single fancy-index read.
-        slot_mapping = (
-            block_ids_array.reshape(-1, 1) * bs + block_offsets.reshape(1, -1)
-        ).flatten()[:num_tokens]
-        slot_mapping = slot_mapping[token_start:]
+        block_ids_array = np.asarray(block_ids, dtype=np.int64)
+        # slot = block_id * block_size + offset_in_block, computed only for the
+        # requested ``[token_start, num_tokens)`` window (not the whole-sequence
+        # grid) so decode reads stay O(returned tokens) and prefill avoids
+        # materializing the full (num_blocks, block_size) grid.
+        pos = np.arange(token_start, num_tokens)
+        slot_mapping = block_ids_array[pos // bs] * bs + (pos % bs)
         return self.routed_experts_by_slot[slot_mapping]
+
+    def get_by_slots(self, slots: np.ndarray) -> np.ndarray:
+        """Read routing for explicit slot indices (decode path).
+
+        ``slots`` are the physical KV-cache slots the worker scattered this
+        step's routing into, returned per step (step-paired, so correct under
+        async scheduling). Fancy indexing returns a copy, safe to hold.
+        """
+        return self.routed_experts_by_slot[slots]

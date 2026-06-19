@@ -60,7 +60,10 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
     RoutedExpertsCapturer,
-    find_full_attention_gid,
+    RoutedExpertsWorkerWriter,
+    require_full_attention_gid,
+    routed_experts_output_rank,
+    routing_slot_shape_dtype,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -166,7 +169,6 @@ from vllm.v1.outputs import (
     LogprobsTensors,
     ModelRunnerOutput,
     PoolerOutput,
-    RoutedExpertsLists,
     RoutedExpertsTensors,
     SamplerOutput,
     make_empty_encoder_model_runner_output,
@@ -251,9 +253,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         vocab_size: int,
         routed_experts: RoutedExpertsTensors | None = None,
         check_ep_fault: bool = False,
+        routed_experts_writer=None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
+        self._routed_experts_writer = routed_experts_writer
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
         self.async_copy_ready_event = torch.Event()
@@ -318,8 +322,19 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         output.sampled_token_ids = valid_sampled_token_ids
         output.logprobs = logprobs_lists
 
-        if self._routed_experts_cpu is not None:
-            output.routed_experts = self._routed_experts_cpu.tolists()
+        if self._routed_experts_writer is not None:
+            # output_rank scatters this step's routing into the scheduler-shared
+            # slot mmap here — AFTER async_copy_ready_event.synchronize() above
+            # (D2H done). Pure CPU op; the returned ModelRunnerOutput is the
+            # scheduler's happens-before barrier before it reads the buffer back
+            # per request. Only the slot indices are returned (step-paired);
+            # the scheduler reads the routing from shm by these slots.
+            assert self._routed_experts_cpu is not None
+            re_lists = self._routed_experts_cpu.tolists()
+            self._routed_experts_writer.scatter(
+                re_lists.routing_data, re_lists.slot_mapping
+            )
+            output.routed_experts_slots = re_lists.slot_mapping
         del self._routed_experts
 
         if self._has_fault is not None and self._has_fault.item():
@@ -478,6 +493,9 @@ class GPUModelRunner(
         # Set to True after init_routed_experts_capturer() completes.
         # Prevents routed experts code from running during profiling/dummy run.
         self.routed_experts_initialized = False
+        # output_rank-only writer into the scheduler-shared slot mmap; None on
+        # non-output ranks and before init.
+        self.routed_experts_writer = None
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
@@ -4630,19 +4648,24 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
-                routed_experts=None,
             )
 
         if not self.use_async_scheduling:
-            if self.routed_experts_initialized:
+            if self.routed_experts_writer is not None:
                 # Sync path: D2H was issued in ``_bookkeeping_sync`` and
-                # synchronized by ``_to_list``'s event.synchronize(), so
-                # the pinned buffers are ready to be wrapped as numpy.
+                # synchronized by ``_to_list``'s event.synchronize(), so the
+                # pinned buffers are ready to wrap as numpy. output_rank scatters
+                # this step's routing into the scheduler-shared slot mmap (CPU
+                # fancy-index, NOT a CUDA op, AFTER that sync); the per-step
+                # ModelRunnerOutput IPC below is the happens-before barrier
+                # before the scheduler reads it back per request. Only the slot
+                # indices are returned (step-paired); the scheduler reads the
+                # routing from the shm buffer by these slots.
                 total = scheduler_output.total_num_scheduled_tokens
-                output.routed_experts = RoutedExpertsLists(
-                    routing_data=self.routed_experts_cpu[:total].numpy(),
-                    slot_mapping=self.routed_experts_slot_mapping_cpu[:total].numpy(),
-                )
+                routing_data = self.routed_experts_cpu[:total].numpy()
+                slot_mapping = self.routed_experts_slot_mapping_cpu[:total].numpy()
+                self.routed_experts_writer.scatter(routing_data, slot_mapping)
+                output.routed_experts_slots = slot_mapping
             return output
 
         with record_function_or_nullcontext(
@@ -4680,6 +4703,7 @@ class GPUModelRunner(
                 vocab_size=self.input_batch.vocab_size,
                 routed_experts=routed_experts_snapshot,
                 check_ep_fault=self.check_ep_fault,
+                routed_experts_writer=self.routed_experts_writer,
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"
@@ -7368,20 +7392,13 @@ class GPUModelRunner(
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
     def _get_attention_kv_cache_gid(self) -> int:
-        """Find the KV cache group index for routed-experts slot mapping.
+        """KV cache group index for routed-experts slot mapping.
 
         Must match :attr:`RoutedExpertsManager.attn_gid` in the scheduler;
-        both sides share find_full_attention_gid so they index the same
-        slot layout.
+        both sides go through require_full_attention_gid so they anchor on
+        the same group.
         """
-        gid = find_full_attention_gid(self.kv_cache_config)
-        if gid is None:
-            raise ValueError(
-                "enable_return_routed_experts requires at least one "
-                "full-attention KV cache group; pure sliding-window / "
-                "Mamba models are unsupported."
-            )
-        return gid
+        return require_full_attention_gid(self.kv_cache_config)
 
     def init_routed_experts_capturer(self):
         logger.info(
@@ -7424,6 +7441,31 @@ class GPUModelRunner(
             device=self.device,
         )
         self.routed_experts_initialized = True
+
+        # Worker-data-plane write: only the output_rank worker (the single rank
+        # whose ModelRunnerOutput reaches the scheduler) writes routing into the
+        # scheduler-shared /dev/shm slot buffer. Routing is replicated across
+        # ranks (capturer SP all_gather normalizes), so one writer suffices and
+        # avoids redundant writes. PP=1 is enforced for routed experts, so
+        # output_rank = world_size - tp_size*pcp_size is on the scheduler's node.
+        pc = self.parallel_config
+        output_rank = routed_experts_output_rank(pc)
+        self.routed_experts_writer: RoutedExpertsWorkerWriter | None = None
+        if pc.rank == output_rank:
+            slot_shape, slot_dtype = routing_slot_shape_dtype(
+                self.vllm_config, self.kv_cache_config
+            )
+            attn_gid = self._get_attention_kv_cache_gid()
+            block_size = self.kv_cache_config.kv_cache_groups[
+                attn_gid
+            ].kv_cache_spec.block_size
+            self.routed_experts_writer = RoutedExpertsWorkerWriter(
+                instance_id=self.vllm_config.instance_id,
+                dp_rank=pc.data_parallel_rank,
+                slot_shape=slot_shape,
+                dtype=slot_dtype,
+                block_size=block_size,
+            )
 
     def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:
         from vllm.model_executor.layers.fused_moe.layer import MoERunner

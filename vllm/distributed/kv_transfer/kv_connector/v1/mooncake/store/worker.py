@@ -453,6 +453,8 @@ class KVCacheStoreSendingThread(KVTransferThread):
         enable_kv_event: bool = False,
         replicate_config: Any = None,
         record_operation: Callable[..., None] | None = None,
+        routed_experts_bridge=None,
+        routed_experts_attn_gid: int | None = None,
     ):
         super().__init__(
             store,
@@ -471,6 +473,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         # Caller always passes a non-None ReplicateConfig — see
         # MooncakeStoreWorker.__init__ where store_replicate_config is built.
         self.replicate_config = replicate_config
+        # Routed-experts bridge (output_rank only; None otherwise). PUTs routing
+        # rows alongside KV for the attention group ``routed_experts_attn_gid``.
+        self._re_bridge = routed_experts_bridge
+        self._re_attn_gid = routed_experts_attn_gid
 
         # Pause store requests when CPU/disk offloading is under pressure.
         self._store_pressure_active = False
@@ -582,6 +588,28 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     if self.enable_kv_event:
                         kv_event_block_hashes.append(block_hash)
                     group_indices.append(g_idx)
+
+            # Routed-experts: collect the FULL attention-group (key, block_id)
+            # set without put_step striping. Routing is centralized on
+            # output_rank (the sole slot-buffer holder), so it must PUT every
+            # attn-group block's routing row, not just this rank's KV stripe.
+            # Deduped inside the bridge via batch_is_exist on the "re:" keys.
+            re_keys: list[str] = []
+            re_block_ids: list[int] = []
+            if self._re_bridge is not None and self._re_attn_gid is not None:
+                re_db = self.token_databases[self._re_attn_gid]
+                for start, _, block_hash in re_db.process_tokens(
+                    token_len,
+                    req_meta.block_hashes,
+                    mask_num=save_start,
+                    chunk_mask=store_masks[self._re_attn_gid],
+                ):
+                    re_keys.append(re_db.key_for(block_hash))
+                    re_block_ids.append(
+                        block_ids_per_group[self._re_attn_gid][
+                            start // re_db.block_size
+                        ]
+                    )
 
             if not keys:
                 self._record_saved(req_id, token_len)
@@ -730,6 +758,12 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 )
                 logger.error("Failed to put key %s, error: %s", keys, e)
 
+            # Routed-experts: PUT routing rows alongside the KV blocks. The slot
+            # buffer already holds this request's routing (scattered during the
+            # forward step). NO FALLBACK: a failed routing PUT raises.
+            if self._re_bridge is not None and re_keys:
+                self._re_bridge.store_routing(re_keys, re_block_ids)
+
             if self.enable_kv_event and stored_events:
                 self.update_kv_event(stored_events)
         finally:
@@ -751,6 +785,8 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         disk_offload_buffer_budget_bytes: int | None = None,
         record_operation: Callable[..., None] | None = None,
         request_queue: queue.Queue[Any] | None = None,
+        routed_experts_bridge=None,
+        routed_experts_attn_gid: int | None = None,
     ):
         super().__init__(
             store,
@@ -774,6 +810,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             )
         )
         self.coord = coord
+        # Routed-experts bridge (output_rank only; None otherwise). GETs routing
+        # rows into the shared slot buffer alongside the KV load.
+        self._re_bridge = routed_experts_bridge
+        self._re_attn_gid = routed_experts_attn_gid
 
     def _add_load_error_block_ids(self, block_ids: list[int]) -> None:
         with self._invalid_block_ids_lock:
@@ -802,6 +842,10 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         size_list: list[list[int]] = []
         key_list: list[str] = []
         block_id_list: list[int] = []
+        # Routed-experts: collect the attention-group (key, block_id) pairs so we
+        # GET their routing rows into the shared slot buffer after the KV load.
+        re_key_list: list[str] = []
+        re_block_id_list: list[int] = []
         for g_idx, db in enumerate(self.token_databases):
             mask = load_mask_per_group[g_idx]
             for start, end, block_hash in db.process_tokens(
@@ -817,6 +861,9 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 addr_list.append(addr)
                 size_list.append(size)
                 block_id_list.append(block_id)
+                if self._re_bridge is not None and g_idx == self._re_attn_gid:
+                    re_key_list.append(db.key_for(block_hash))
+                    re_block_id_list.append(block_id)
 
         # Rotate aligned lists by tp_rank for load balancing.
         rotation = self.tp_rank % len(key_list)
@@ -933,6 +980,24 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 current_batch_keys[:3],
                 e,
             )
+
+        # Routed-experts: GET routing rows into the shared slot buffer for the
+        # attention-group blocks whose KV load succeeded. Skip any block whose
+        # KV GET failed (its routing would be meaningless and the scheduler will
+        # recompute it). NO FALLBACK: a missing routing row for a successfully
+        # loaded block raises inside the bridge.
+        if self._re_bridge is not None and re_key_list:
+            with self._invalid_block_ids_lock:
+                bad = set(self._invalid_block_ids)
+            ok_keys: list[str] = []
+            ok_block_ids: list[int] = []
+            for k, bid in zip(re_key_list, re_block_id_list, strict=True):
+                if bid in bad:
+                    continue
+                ok_keys.append(k)
+                ok_block_ids.append(bid)
+            if ok_keys:
+                self._re_bridge.load_routing(ok_keys, ok_block_ids)
 
         self.set_finished_request(req_id)
         self.request_queue.task_done()
@@ -1192,6 +1257,53 @@ class MooncakeStoreWorker:
         )
         self._lookup_expected_per_key = len(rank_namespaces)
 
+        # Routed-experts over Mooncake: only the output_rank worker (the sole
+        # holder of the scheduler-shared /dev/shm slot buffer) PUTs/GETs routing
+        # rows alongside KV. Lazily built in register_kv_caches (needs the slot
+        # geometry). ``re_attn_gid`` is the attention group whose blocks anchor
+        # routing; only that group's keys carry routing rows.
+        self._re_bridge = None
+        self._re_attn_gid: int | None = None
+        self._init_routed_experts_bridge_config(vllm_config, kv_cache_config)
+
+    def _init_routed_experts_bridge_config(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
+    ) -> None:
+        """Resolve whether this rank builds a routed-experts Mooncake bridge.
+
+        Sets ``self._re_bridge_enabled`` (this is the output_rank worker AND RE
+        is on) plus the slot geometry the bridge needs. The writer/bridge are
+        built lazily in ``register_kv_caches`` (the shared region is created by
+        the scheduler and may not exist at worker init).
+        """
+        self._re_bridge_enabled = False
+        if not getattr(vllm_config.model_config, "enable_return_routed_experts", False):
+            return
+        from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
+            find_full_attention_gid,
+            routed_experts_output_rank,
+            routing_slot_shape_dtype,
+        )
+
+        pc = vllm_config.parallel_config
+        output_rank = routed_experts_output_rank(pc)
+        if pc.rank != output_rank:
+            return
+        attn_gid = find_full_attention_gid(kv_cache_config)
+        if attn_gid is None:
+            return
+        slot_shape, slot_dtype = routing_slot_shape_dtype(vllm_config, kv_cache_config)
+        block_size = kv_cache_config.kv_cache_groups[attn_gid].kv_cache_spec.block_size
+        self._re_bridge_enabled = True
+        self._re_attn_gid = attn_gid
+        self._re_slot_shape = slot_shape
+        self._re_slot_dtype = slot_dtype
+        self._re_block_size = block_size
+        self._re_instance_id = vllm_config.instance_id
+        self._re_dp_rank = pc.data_parallel_rank
+
     def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
         """Register a cross-layers KV cache tensor.
 
@@ -1274,6 +1386,36 @@ class MooncakeStoreWorker:
             db.set_kv_caches_base_addr(addrs)
             db.set_block_len(block_lens)
 
+        # Build the routed-experts bridge now: the scheduler has created the
+        # shared slot-buffer region by the time the first forward step runs, and
+        # the bridge registers that region with Mooncake for zero-copy routing
+        # IO. output_rank + RE-enabled only (see _init_routed_experts_bridge_config).
+        if self._re_bridge_enabled:
+            from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
+                RoutedExpertsWorkerWriter,
+            )
+            from vllm.model_executor.layers.fused_moe.routed_experts_capture.mooncake_bridge import (  # noqa: E501
+                RoutedExpertsMooncakeBridge,
+            )
+
+            writer = RoutedExpertsWorkerWriter(
+                instance_id=self._re_instance_id,
+                dp_rank=self._re_dp_rank,
+                slot_shape=self._re_slot_shape,
+                dtype=self._re_slot_dtype,
+                block_size=self._re_block_size,
+            )
+            self._re_bridge = RoutedExpertsMooncakeBridge(
+                self.store, writer, replicate_config=self.store_replicate_config
+            )
+            # Do NOT register() eagerly here: the scheduler-side
+            # RoutedExpertsManager creates the shared /dev/shm slot mmap, and
+            # register_kv_caches can run (during EngineCore init) before that
+            # manager exists. The bridge attaches + registers lazily on the
+            # first put/get (always after a forward step, by which time the
+            # manager has created the file). Mirrors RoutedExpertsWorkerWriter's
+            # attach-only/lazy contract.
+
         # Start transfer threads
         if self.kv_role in ["kv_producer", "kv_both"]:
             ready_event_sending = threading.Event()
@@ -1289,6 +1431,8 @@ class MooncakeStoreWorker:
                 self.enable_kv_events,
                 self.store_replicate_config,
                 record_operation=self._record_kv_connector_operation,
+                routed_experts_bridge=self._re_bridge,
+                routed_experts_attn_gid=self._re_attn_gid,
             )
             self.kv_send_thread.start()
 
@@ -1306,6 +1450,8 @@ class MooncakeStoreWorker:
                 disk_offload_buffer_budget_bytes=self.disk_offload_buffer_budget_bytes,
                 record_operation=self._record_kv_connector_operation,
                 request_queue=self.recv_request_queue,
+                routed_experts_bridge=self._re_bridge,
+                routed_experts_attn_gid=self._re_attn_gid,
             )
             recv_thread.name = f"KVCacheStoreRecvingThread-{i}"
             recv_thread.start()

@@ -29,11 +29,17 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capture.common import (
     find_full_attention_gid,
     get_num_experts,
     get_num_experts_per_tok,
+    require_full_attention_gid,
+    routed_experts_output_rank,
+    routing_slot_shape_dtype,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capture.manager import (
     FullAttnBlockMap,
     RoutedExpertsManager,
     compute_full_attn_block_map,
+)
+from vllm.model_executor.layers.fused_moe.routed_experts_capture.shared_region import (
+    RoutedExpertsWorkerWriter,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capture.store import (
     FileRoutedExpertsStore,
@@ -53,9 +59,13 @@ __all__ = [
     "RoutedExpertsSecondaryStore",
     "RoutedExpertsStoreContext",
     "RoutedExpertsStoreFactory",
+    "RoutedExpertsWorkerWriter",
     "build_fs_routed_experts_store",
     "compute_full_attn_block_map",
     "find_full_attention_gid",
     "get_num_experts",
     "get_num_experts_per_tok",
+    "require_full_attention_gid",
+    "routed_experts_output_rank",
+    "routing_slot_shape_dtype",
 ]
