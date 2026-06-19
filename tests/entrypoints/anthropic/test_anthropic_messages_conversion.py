@@ -1205,6 +1205,135 @@ class TestMessageStartIncludesTypeAndRole:
         assert message["role"] == "assistant"
 
 
+class TestStreamingCacheUsageSemantics:
+    """Locks in the documented streaming behavior of cache usage fields.
+
+    vLLM's OpenAI chat completion streaming only attaches
+    ``prompt_tokens_details`` to the terminal usage chunk. The Anthropic layer
+    mirrors that contract: cache fields are omitted on ``message_start`` (key
+    absence signals "unknown") and populated on ``message_delta`` (the final
+    cumulative count). This is intentionally consistent with vLLM's OpenAI
+    behavior, even though Anthropic's upstream API populates cache fields on
+    ``message_start``; closing that gap requires plumbing cache info into the
+    first chunk at the OpenAI layer, which is out of scope here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_streaming_cache_fields_absent_then_populated(self):
+        """First chunk lacks prompt_tokens_details (vLLM contract);
+        message_start omits cache fields. The final chunk carries
+        prompt_tokens_details, so message_delta carries resolved values."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant", content="hi"),
+                usage=UsageInfo(prompt_tokens=100, total_tokens=100),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=100,
+                    completion_tokens=5,
+                    total_tokens=105,
+                    prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=80),
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        # message_start: cache fields unknown → omitted from JSON entirely.
+        start_usage = events[0][1]["message"]["usage"]
+        assert events[0][0] == "message_start"
+        assert start_usage["input_tokens"] == 100
+        assert "cache_read_input_tokens" not in start_usage
+        assert "cache_creation_input_tokens" not in start_usage
+
+        # message_delta: authoritative usage with cache fields populated.
+        delta_usage = next(
+            data["usage"] for ev, data in events if ev == "message_delta"
+        )
+        assert delta_usage["input_tokens"] == 20  # 100 - 80
+        assert delta_usage["cache_read_input_tokens"] == 80
+        assert delta_usage["cache_creation_input_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_streaming_no_cache_hit(self):
+        """When the final chunk reports cached_tokens=0, message_delta carries
+        cache fields = 0 (cache miss); message_start still omits them."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=50, total_tokens=50),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=50,
+                    completion_tokens=5,
+                    total_tokens=55,
+                    prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=0),
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        start_usage = events[0][1]["message"]["usage"]
+        delta_usage = next(
+            data["usage"] for ev, data in events if ev == "message_delta"
+        )
+        assert start_usage["input_tokens"] == 50
+        assert "cache_read_input_tokens" not in start_usage
+        assert "cache_creation_input_tokens" not in start_usage
+        assert delta_usage["input_tokens"] == 50  # 50 - 0
+        assert delta_usage["cache_read_input_tokens"] == 0
+        assert delta_usage["cache_creation_input_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_streaming_no_prompt_tokens_details_at_all(self):
+        """If --enable-prompt-tokens-details is off, no chunk carries cache
+        info; both message_start and message_delta omit cache fields."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=30, total_tokens=30),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=30, completion_tokens=2, total_tokens=32),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        start_usage = events[0][1]["message"]["usage"]
+        delta_usage = next(
+            data["usage"] for ev, data in events if ev == "message_delta"
+        )
+        assert "cache_read_input_tokens" not in start_usage
+        assert "cache_creation_input_tokens" not in start_usage
+        assert "cache_read_input_tokens" not in delta_usage
+        assert "cache_creation_input_tokens" not in delta_usage
+
+
 # ======================================================================
 # Auto-detection of system-first template requirement
 # ======================================================================

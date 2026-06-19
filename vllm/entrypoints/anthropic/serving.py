@@ -68,12 +68,33 @@ def _compute_cache_usage(
 ) -> tuple[int, int | None, int | None]:
     """Compute Anthropic-compatible input_tokens and cache fields.
 
-    Anthropic defines: total_input = input_tokens + cache_read + cache_creation
-    vLLM's prompt_tokens is the total; input_tokens should exclude cached.
-    vLLM's prefix caching only tracks cache hits (cache_read), not writes,
-    so cache_creation is always 0 when cache info is available.
+    The Anthropic Messages API defines the invariant
+    ``total_input == input_tokens + cache_read + cache_creation``. vLLM's
+    ``prompt_tokens`` is the total, so ``input_tokens`` is derived as
+    ``prompt_tokens - cached_tokens``.
 
-    Returns (input_tokens, cache_read_input_tokens, cache_creation_input_tokens).
+    The underlying OpenAI usage protocol carries only ``cached_tokens``
+    (cache hits, mapped to ``cache_read_input_tokens``). There is no
+    ``cached_tokens`` analog for cache creation, so when cache info is
+    present we report ``cache_creation_input_tokens = 0`` to satisfy the
+    invariant above. When cache info is absent (the caller didn't enable
+    ``--enable-prompt-tokens-details``, or vLLM has not attached
+    ``prompt_tokens_details`` yet), both cache fields return ``None`` and
+    the caller omits them from the JSON entirely.
+
+    Origin of ``prompt_tokens_details`` in vLLM:
+      * Non-streaming responses attach it on the final ``UsageInfo`` (see
+        ``OpenAIServingChat.chat_completion_full_generator``).
+      * Streaming attaches it only on the terminal ``include_usage`` chunk
+        (``choices == []``), not on the per-token continuous-usage chunks
+        (see ``OpenAIServingChat.chat_completion_stream_generator``).
+
+    This is why ``message_start.usage`` cannot populate cache fields today.
+    The Anthropic layer mirrors vLLM's OpenAI streaming: cache fields appear
+    on ``message_delta`` (the terminal chunk), not on ``message_start``.
+
+    Returns:
+        (input_tokens, cache_read_input_tokens, cache_creation_input_tokens).
     """
     cached = _get_cached_tokens(usage)
     if cached is not None:
@@ -608,16 +629,21 @@ class AnthropicServingMessages(OpenAIServingChat):
         input_tokens, cache_read, cache_creation = _compute_cache_usage(
             generator.usage.prompt_tokens, generator.usage
         )
+        # Omit cache fields when unknown (--enable-prompt-tokens-details off),
+        # so "unknown" is signaled by key absence rather than null. Consistent
+        # with streaming message_start / message_delta below.
+        usage_kwargs: dict[str, Any] = dict(
+            input_tokens=input_tokens,
+            output_tokens=generator.usage.completion_tokens,
+        )
+        if cache_read is not None:
+            usage_kwargs["cache_read_input_tokens"] = cache_read
+            usage_kwargs["cache_creation_input_tokens"] = cache_creation
         result = AnthropicMessagesResponse(
             id=generator.id,
             content=[],
             model=generator.model,
-            usage=AnthropicUsage(
-                input_tokens=input_tokens,
-                output_tokens=generator.usage.completion_tokens,
-                cache_read_input_tokens=cache_read,
-                cache_creation_input_tokens=cache_creation,
-            ),
+            usage=AnthropicUsage(**usage_kwargs),
             kv_transfer_params=generator.kv_transfer_params,
         )
         choice = generator.choices[0]
@@ -790,6 +816,20 @@ class AnthropicServingMessages(OpenAIServingChat):
                             input_tokens, cache_read, cache_creation = (
                                 _compute_cache_usage(prompt_tokens, origin_chunk.usage)
                             )
+                            # vLLM does not attach prompt_tokens_details to the
+                            # first stream chunk, so cache fields are unknown
+                            # here. Omit them entirely (rather than emit null)
+                            # so clients can distinguish "unknown" from "zero".
+                            # The authoritative values arrive on message_delta.
+                            usage_kwargs: dict[str, Any] = dict(
+                                input_tokens=input_tokens,
+                                output_tokens=0,
+                            )
+                            if cache_read is not None:
+                                usage_kwargs["cache_read_input_tokens"] = cache_read
+                                usage_kwargs["cache_creation_input_tokens"] = (
+                                    cache_creation
+                                )
                             chunk = AnthropicStreamEvent(
                                 type="message_start",
                                 message=AnthropicMessagesResponse(
@@ -805,12 +845,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     model=origin_chunk.model,
                                     stop_reason=None,
                                     stop_sequence=None,
-                                    usage=AnthropicUsage(
-                                        input_tokens=input_tokens,
-                                        output_tokens=0,
-                                        cache_read_input_tokens=cache_read,
-                                        cache_creation_input_tokens=cache_creation,
-                                    ),
+                                    usage=AnthropicUsage(**usage_kwargs),
                                 ),
                             )
                             first_item = False
@@ -833,17 +868,27 @@ class AnthropicServingMessages(OpenAIServingChat):
                             input_tokens, cache_read, cache_creation = (
                                 _compute_cache_usage(prompt_tokens, origin_chunk.usage)
                             )
+                            # Omit cache fields when unknown
+                            # (--enable-prompt-tokens-details off), same as
+                            # message_start, so "unknown" is signaled by key
+                            # absence rather than null.
+                            delta_usage_kwargs: dict[str, Any] = dict(
+                                input_tokens=input_tokens,
+                                output_tokens=origin_chunk.usage.completion_tokens
+                                if origin_chunk.usage
+                                else 0,
+                            )
+                            if cache_read is not None:
+                                delta_usage_kwargs["cache_read_input_tokens"] = (
+                                    cache_read
+                                )
+                                delta_usage_kwargs["cache_creation_input_tokens"] = (
+                                    cache_creation
+                                )
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
                                 delta=AnthropicDelta(stop_reason=stop_reason),
-                                usage=AnthropicUsage(
-                                    input_tokens=input_tokens,
-                                    output_tokens=origin_chunk.usage.completion_tokens
-                                    if origin_chunk.usage
-                                    else 0,
-                                    cache_read_input_tokens=cache_read,
-                                    cache_creation_input_tokens=cache_creation,
-                                ),
+                                usage=AnthropicUsage(**delta_usage_kwargs),
                             )
                             data = chunk.model_dump_json(exclude_unset=True)
                             yield wrap_data_with_event(data, "message_delta")
