@@ -1236,10 +1236,21 @@ def _get_kv_cache_config_deepseek_v4(
     num_blocks = available_memory // total_num_bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
 
+    total_size = total_num_bytes_per_block * num_blocks
+
     kv_cache_tensors: list[KVCacheTensor] = []
+    byte_offset = 0
     for ps, slots in buckets.items():
         for slot in slots:
-            kv_cache_tensors.append(KVCacheTensor(size=ps * num_blocks, shared_by=slot))
+            kv_cache_tensors.append(
+                KVCacheTensor(
+                    size=total_size,
+                    shared_by=slot,
+                    offset=byte_offset,
+                    block_stride=total_num_bytes_per_block,
+                )
+            )
+            byte_offset += ps
 
     return num_blocks, kv_cache_tensors
 

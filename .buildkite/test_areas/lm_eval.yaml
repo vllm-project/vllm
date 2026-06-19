@@ -101,6 +101,15 @@ steps:
   num_devices: 8
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-h200.txt
+  mirror:
+    amd:
+      device: mi300_8
+      timeout_in_minutes: 180
+      depends_on:
+      - image-build-amd
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
 
 - label: MoE Refactor Integration Test (H100 - TEMPORARY)
   key: moe-refactor-integration-test-h100-temporary
