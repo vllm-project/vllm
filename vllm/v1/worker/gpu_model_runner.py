@@ -4946,7 +4946,7 @@ class GPUModelRunner(
                 ):
                     indices.append(offset + len(tokens) - 1)
                     offset += num_draft + 1
-                indices = torch.tensor(indices, device=self.device)
+                indices = async_tensor_h2d(indices, device=self.device)
                 hidden_states = sample_hidden_states[indices]
 
             draft_token_ids = self.drafter.propose(
