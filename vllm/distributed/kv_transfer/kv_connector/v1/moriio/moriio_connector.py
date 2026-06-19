@@ -47,6 +47,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
     MoRIIOWriter,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
+    LayerTransferGeometry,
+    build_layer_to_spec,
+    compute_block_transfer_offsets,
+    get_layer_transfer_geometry,
+    is_mla_cache_layer,
+    iter_layer_registration_regions,
+)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
@@ -60,11 +68,6 @@ from vllm.utils.network_utils import (
 )
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (
-    MLAAttentionSpec,
-    SlidingWindowMLASpec,
-    UniformTypeKVCacheSpecs,
-)
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import RequestStatus
 
@@ -75,6 +78,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
 
 try:
     from mori.io import (
@@ -719,20 +723,7 @@ class MoRIIOConnectorWorker:
         )
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.is_producer = self.kv_transfer_config.is_kv_producer
-        self.layer_to_spec = {}
-        for group in kv_cache_config.kv_cache_groups:
-            group_spec = group.kv_cache_spec
-            if isinstance(group_spec, UniformTypeKVCacheSpecs):
-                self.layer_to_spec.update(
-                    {
-                        layer_name: group_spec.kv_cache_specs[layer_name]
-                        for layer_name in group.layer_names
-                    }
-                )
-            else:
-                self.layer_to_spec.update(
-                    {layer_name: group_spec for layer_name in group.layer_names}
-                )
+        self.layer_to_spec = build_layer_to_spec(kv_cache_config)
 
         if self.is_producer:
             set_role(ROLE.PRODUCER)
@@ -1247,104 +1238,85 @@ class MoRIIOConnectorWorker:
         all_done_future.add_done_callback(request_ready)
 
     def _is_mla_cache_layer(self, layer_name: str) -> bool:
-        spec = self.layer_to_spec[layer_name]
-        return isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+        return is_mla_cache_layer(self.layer_to_spec, layer_name)
+
+    def _get_layer_transfer_geometry(
+        self, layer_name: str, remote_num_blocks: int | None = None
+    ) -> LayerTransferGeometry:
+        return get_layer_transfer_geometry(
+            layer_name,
+            self.kv_caches[layer_name],
+            self.layer_to_spec,
+            remote_num_blocks,
+        )
+
+    def _iter_layer_registration_regions(
+        self, layer_name: str
+    ) -> list[tuple[torch.Tensor, int]]:
+        return iter_layer_registration_regions(
+            layer_name,
+            self.kv_caches[layer_name],
+            self.layer_to_spec,
+        )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in moriio."""
 
-        # Prefer a normal K/V cache as the representative shape. Some models
-        # also register 3D key-only side caches.
+        self.kv_caches = kv_caches  # layer name to kv cache
+        self.kv_cache_shapes = {
+            layer_name: kv_cache.shape for layer_name, kv_cache in kv_caches.items()
+        }
+
         first_layer_name, first_kv_cache = next(
             (
                 (layer_name, kv_cache)
                 for layer_name, kv_cache in kv_caches.items()
-                if len(kv_cache.shape) == 5
-                and (kv_cache.shape[0] == 2 or kv_cache.shape[1] == 2)
+                if (
+                    not self._is_mla_cache_layer(layer_name)
+                    and len(kv_cache.shape) == 5
+                    and (kv_cache.shape[0] == 2 or kv_cache.shape[1] == 2)
+                )
             ),
             next(iter(kv_caches.items())),
         )
         kv_elem_size = first_kv_cache.element_size()
 
         use_mla = self._is_mla_cache_layer(first_layer_name)
-        assert use_mla == self.use_mla
+        first_geometry = self._get_layer_transfer_geometry(first_layer_name)
 
         if use_mla:
             # MLA case.
-            self.num_blocks = first_kv_cache.shape[0]
             block_rank = 2  # [block_size, latent_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
-            block_size, kv_latent_dim = block_shape
-            self.slot_size_bytes = kv_elem_size * kv_latent_dim
         else:
-            # [2 (k and v), num_blocks, ...]
-            self.num_blocks = (
-                first_kv_cache.shape[1]
-                if first_kv_cache.shape[0] == 2
-                else first_kv_cache.shape[0]
-            )
+            # [2, num_blocks, ...] or [num_blocks, 2, ...]
             block_rank = 3  # [block_size, kv_heads, head_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
-            block_size, n_kv_heads, head_dim = block_shape[-3:]
-            # head size in bytes.
-            self.slot_size_bytes = (
-                kv_elem_size * n_kv_heads * head_dim
-            )  # 1 token 1 layer size , slot size
-        assert block_size == self.block_size
+        self.num_blocks = first_geometry.num_blocks
+        self.slot_size_bytes = first_geometry.slot_size_bytes
+        assert first_geometry.block_size == self.block_size
         # TODO(tms): self.block_len needs to be per-layer for sliding window,
         # hybrid attn, etc
         # block size in bytes
-        self.block_len = kv_elem_size * math.prod(block_shape)
+        self.block_len = first_geometry.block_len
         self.kv_cache_shape = first_kv_cache.shape
         self.block_shape = block_shape
         self.kv_element_size = kv_elem_size
 
         self.dst_num_blocks[self.engine_id] = self.num_blocks
-        self.kv_caches = kv_caches  # layer name to kv cache
-        self.kv_cache_shapes = {
-            layer_name: kv_cache.shape for layer_name, kv_cache in kv_caches.items()
-        }
         kv_caches_base_addr = []
         caches_data = []
 
-        for layer_name, cache_or_caches in kv_caches.items():
-            # Some models register both 5D K/V caches and MLA-style side
-            # caches. Only separated 5D K/V caches should be split into K and V
-            # regions; interleaved K/V and MLA-style caches must remain one
-            # region.
-            is_mla_cache = self._is_mla_cache_layer(layer_name)
-            if (
-                not is_mla_cache
-                and len(cache_or_caches.shape) == 5
-                and cache_or_caches.shape[0] == 2
-            ):
-                cache_list = list(cache_or_caches)
-                layer_block_shape = cache_or_caches.shape[-3:]
-                regions_per_block = 1
-            elif (
-                not is_mla_cache
-                and len(cache_or_caches.shape) == 5
-                and cache_or_caches.shape[1] == 2
-            ):
-                cache_list = [cache_or_caches]
-                layer_block_shape = cache_or_caches.shape[-3:]
-                regions_per_block = 2
-            elif is_mla_cache and len(cache_or_caches.shape) == 3:
-                cache_list = [cache_or_caches]
-                layer_block_shape = cache_or_caches.shape[-2:]
-                regions_per_block = 1
-            else:
+        for layer_name in kv_caches:
+            geometry = self._get_layer_transfer_geometry(layer_name)
+            if geometry.block_size != self.block_size:
                 raise ValueError(
-                    "Unsupported MoRIIO KV cache shape for layer "
-                    f"{layer_name}: {tuple(cache_or_caches.shape)}"
+                    "MoRIIO KV cache block size mismatch for layer "
+                    f"{layer_name}: {geometry.block_size} != {self.block_size}"
                 )
-            layer_block_len = cache_or_caches.element_size() * math.prod(
-                layer_block_shape
-            )
-            self.block_lens[layer_name] = layer_block_len
-            for cache in cache_list:
+            self.block_lens[layer_name] = geometry.block_len
+            for cache, region_len in self._iter_layer_registration_regions(layer_name):
                 base_addr = cache.data_ptr()
-                region_len = self.num_blocks * regions_per_block * layer_block_len
                 caches_data.append((base_addr, region_len, cache.device.index, ""))
                 kv_caches_base_addr.append(base_addr)
 
@@ -1750,66 +1722,17 @@ class MoRIIOConnectorWorker:
         Returns:
             Tuple of (local_offsets, remote_offsets, transfer_sizes)
         """
-        kv_cache = self.kv_caches[layer_name]
-        kv_cache_shape = self.kv_cache_shapes[layer_name]
-        is_mla_cache = self._is_mla_cache_layer(layer_name)
-        stride = kv_cache.stride()
-        sz = kv_cache.element_size()
-        if is_mla_cache and len(kv_cache_shape) == 3:
-            blknum, blksize, hs = kv_cache_shape
-            hn = 1
-            block_stride = stride[0]
-        elif not is_mla_cache:
-            if kv_cache_shape[0] == 2:
-                _, blknum, blksize, hn, hs = kv_cache_shape
-                local_ktov_stride = stride[0]
-                block_stride = stride[1]
-                remote_ktov_stride = (
-                    blksize * hn * hs * remote_moriio_meta.num_blocks
-                )
-            elif kv_cache_shape[1] == 2:
-                blknum, _, blksize, hn, hs = kv_cache_shape
-                block_stride = stride[0]
-                local_ktov_stride = stride[1]
-                remote_ktov_stride = blksize * hn * hs
-            else:
-                raise ValueError(
-                    "Unsupported MoRIIO KV cache shape for layer "
-                    f"{layer_name}: {tuple(kv_cache_shape)}"
-                )
-        else:
-            raise ValueError(
-                "Unsupported MoRIIO MLA KV cache shape for layer "
-                f"{layer_name}: {tuple(kv_cache_shape)}"
-            )
-
-        transfer_size_byte = blksize * hn * hs * sz
-        per_block = 1 if is_mla_cache else 2
-        total = len(local_block_ids) * per_block
-        offset_local = [0] * total
-        offset_remote = [0] * total
-        sizes = [transfer_size_byte] * total
-
-        w = 0
-        for i, lb in enumerate(local_block_ids):
-            rb = remote_block_ids[i]
-            # K
-            offset_local[w] = sz * (lb * block_stride)
-            offset_remote[w] = sz * (rb * block_stride)
-            w += 1
-            if not is_mla_cache:
-                # V
-                # Handle num_block variations originating from PD (different kv strides)
-                # TODO: address block_sz differences in heterogeneous TP scenarios
-                # In MLA, we don't need to consider these two cases.
-                offset_local[w] = sz * (1 * local_ktov_stride + lb * block_stride)
-                offset_remote[w] = sz * (1 * remote_ktov_stride + rb * block_stride)
-                w += 1
-
-        merged_l, merged_r, merged_s = self.merge_contiguous_blocks(
-            offset_local, offset_remote, sizes, assume_sorted=False
+        return compute_block_transfer_offsets(
+            layer_name=layer_name,
+            kv_cache=self.kv_caches[layer_name],
+            layer_to_spec=self.layer_to_spec,
+            local_block_ids=local_block_ids,
+            remote_block_ids=remote_block_ids,
+            remote_num_blocks=remote_moriio_meta.num_blocks,
+            merge_fn=lambda local, remote, sizes: self.merge_contiguous_blocks(
+                local, remote, sizes, assume_sorted=False
+            ),
         )
-        return merged_l, merged_r, merged_s
 
     def _read_blocks(
         self,
