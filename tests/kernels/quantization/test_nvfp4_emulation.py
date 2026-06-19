@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
     Nvfp4QuantizationEmulationTritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils import (
     nvfp4_emulation_utils,
 )
@@ -65,6 +64,10 @@ class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
         return "nvfp4"
+
+    @property
+    def a1_scale(self) -> torch.Tensor | None:
+        return self.quant_config.a1_gscale
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -120,14 +123,6 @@ class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
             dtype=hidden_states.dtype,
             block_size=16,
             swizzle=False,
-        )
-
-        hidden_states, _ = moe_kernel_quantize_input(
-            A=hidden_states,
-            A_scale=self.quant_config.a1_gscale,
-            quant_dtype="nvfp4",
-            per_act_token_quant=False,
-            quantization_emulation=True,
         )
 
         super().apply(
@@ -654,7 +649,7 @@ def test_nvfp4_moe_correctness(
         num_experts=num_experts,
         experts_per_token=top_k,
         hidden_dim=hidden_dim,
-        intermediate_size_per_partition=intermediate_size,
+        intermediate_size=intermediate_size,
         num_local_experts=num_experts,
         num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
