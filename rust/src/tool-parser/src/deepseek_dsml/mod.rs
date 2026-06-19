@@ -5,7 +5,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{parse_buffered_event, safe_text_len};
+use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParserOutput};
 use crate::Tool;
 
@@ -39,10 +39,10 @@ impl DsmlTokens {
     };
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum DsmlMode {
     Text,
-    ToolBlock,
+    ToolBlock { invoke_end_scan: MarkerScanState },
     Done,
 }
 
@@ -94,7 +94,11 @@ impl DeepSeekDsmlToolParser {
             DsmlEvent::Text { len: consumed_len } => {
                 output.normal_text.push_str(&self.buffer[..consumed_len]);
             }
-            DsmlEvent::ToolCallsStart => self.mode = DsmlMode::ToolBlock,
+            DsmlEvent::ToolCallsStart => {
+                self.mode = DsmlMode::ToolBlock {
+                    invoke_end_scan: MarkerScanState::default(),
+                };
+            }
             DsmlEvent::Invoke { name, raw_params } => {
                 let mut arguments = serde_json::Map::with_capacity(raw_params.len());
                 for param in raw_params {
@@ -140,7 +144,7 @@ impl DeepSeekDsmlToolParser {
         self.buffer.push_str(chunk);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_dsml_event(input, self.mode, self.tokens)
+            parse_next_dsml_event(input, &mut self.mode, self.tokens)
         })? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
@@ -154,7 +158,7 @@ impl DeepSeekDsmlToolParser {
         match self.mode {
             DsmlMode::Text => output.normal_text.push_str(&self.buffer),
             DsmlMode::Done => {}
-            DsmlMode::ToolBlock => {
+            DsmlMode::ToolBlock { .. } => {
                 return Err(parsing_failed!("incomplete DeepSeek DSML tool call"));
             }
         }
@@ -166,12 +170,14 @@ impl DeepSeekDsmlToolParser {
 /// Parse a DSML event for the current parser mode.
 fn parse_next_dsml_event(
     input: &mut DsmlInput<'_>,
-    mode: DsmlMode,
+    mode: &mut DsmlMode,
     tokens: DsmlTokens,
 ) -> ModalResult<DsmlEvent> {
     match mode {
         DsmlMode::Text => parse_text_event(input, tokens),
-        DsmlMode::ToolBlock => parse_tool_block_event(input, tokens),
+        DsmlMode::ToolBlock { invoke_end_scan } => {
+            parse_tool_block_event(input, tokens, invoke_end_scan)
+        }
         DsmlMode::Done => ignored_rest_event(input),
     }
 }
@@ -186,11 +192,16 @@ fn parse_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResul
 }
 
 /// Parse a tool-block DSML event.
-fn parse_tool_block_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult<DsmlEvent> {
+fn parse_tool_block_event(
+    input: &mut DsmlInput<'_>,
+    tokens: DsmlTokens,
+    invoke_end_scan: &mut MarkerScanState,
+) -> ModalResult<DsmlEvent> {
     ws0.void().parse_next(input)?;
-    alt((invoke_event, |input: &mut DsmlInput<'_>| {
-        tool_calls_end_event(input, tokens)
-    }))
+    alt((
+        |input: &mut DsmlInput<'_>| invoke_event(input, invoke_end_scan),
+        |input: &mut DsmlInput<'_>| tool_calls_end_event(input, tokens),
+    ))
     .parse_next(input)
 }
 
@@ -217,14 +228,17 @@ fn safe_text_event(input: &mut DsmlInput<'_>, tokens: DsmlTokens) -> ModalResult
 }
 
 /// Parse a DSML invoke block.
-fn invoke_event(input: &mut DsmlInput<'_>) -> ModalResult<DsmlEvent> {
+fn invoke_event(
+    input: &mut DsmlInput<'_>,
+    invoke_end_scan: &mut MarkerScanState,
+) -> ModalResult<DsmlEvent> {
     let (name, body) = seq!(
         _: literal(INVOKE_START),
         _: ws1,
         dsml_name_attr,
         _: ws0,
         _: ">",
-        take_until(0.., INVOKE_END),
+        take_until_marker(INVOKE_END, invoke_end_scan),
         _: literal(INVOKE_END),
     )
     .parse_next(input)?;

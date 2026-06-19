@@ -44,6 +44,10 @@ pub struct EngineCoreReadyResponse {
     pub dtype: ModelDtype,
     /// Python vLLM version reported by the engine process.
     pub vllm_version: String,
+    /// World size (TP * PP) from the parallel config.
+    pub world_size: u64,
+    /// Data parallelism size from the parallel config.
+    pub data_parallel_size: u64,
     /// Total KV cache capacity in tokens, if reported.
     pub kv_cache_size_tokens: Option<u64>,
     /// Maximum achievable request concurrency given the KV cache, if reported.

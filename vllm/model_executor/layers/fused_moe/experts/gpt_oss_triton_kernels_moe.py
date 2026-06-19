@@ -755,6 +755,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUSTEP,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -810,6 +811,19 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
                 output,
                 input,
                 quant_config.gemm1_clamp_limit,
+            )
+        elif activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+            assert quant_config.gemm1_clamp_limit is not None
+            alpha = (
+                quant_config.gemm1_alpha
+                if quant_config.gemm1_alpha is not None
+                else 1.0
+            )
+            beta = (
+                quant_config.gemm1_beta if quant_config.gemm1_beta is not None else 0.0
+            )
+            torch.ops._C.silu_and_mul_with_clamp(
+                output, input, quant_config.gemm1_clamp_limit, alpha, beta
             )
         else:
             super().activation(activation, output, input)
