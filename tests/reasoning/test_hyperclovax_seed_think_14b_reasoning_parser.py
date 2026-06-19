@@ -128,6 +128,20 @@ class TestExtractReasoningMatrix:
         assert "<|im_end|>" not in content
         assert ROLE not in content
 
+    def test_literal_im_end_in_argument_not_truncated(self, tokenizer):
+        # A literal <|im_end|> inside a string argument must not be taken as the
+        # tool-call boundary; the reasoner hands the full array downstream and
+        # only the trailing terminator is stripped.
+        parser = build_parser(tokenizer, force_reasoning=True)
+        payload = '[{"name": "get_weather", "arguments": {"city": "a <|im_end|> b"}}]'
+        out = "reason" + ASSISTANT + ROLE + payload + "<|im_end|>"
+        reasoning, content = parser.extract_reasoning(
+            out,
+            make_request(tool_choice="auto", tools=[{"x": 1}], force_reasoning=True),
+        )
+        assert reasoning == "reason"
+        assert content == payload
+
 
 def _stream_extract(parser, raw):
     """Drive the streaming API one character per delta and rebuild the split."""

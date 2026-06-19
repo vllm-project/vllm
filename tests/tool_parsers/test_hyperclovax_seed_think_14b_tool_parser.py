@@ -77,6 +77,24 @@ EXTRACT_TOOL_CASES = [
         ["a", "b"],
         {"x": 1},
     ),
+    # Regression: a literal <|im_end|> inside a string argument must not be
+    # treated as the tool-call boundary (parsed by JSON structure, not text cut).
+    (
+        "header_literal_im_end_in_argument",
+        HEADER
+        + '[{"name": "get_weather", "arguments": {"city": "a <|im_end|> b"}}]'
+        + END,
+        False,
+        ["get_weather"],
+        {"city": "a <|im_end|> b"},
+    ),
+    (
+        "bare_literal_im_end_in_argument",
+        '[{"name": "get_weather", "arguments": {"city": "a <|im_end|> b"}}]' + END,
+        True,
+        ["get_weather"],
+        {"city": "a <|im_end|> b"},
+    ),
 ]
 
 # Outputs that must NOT be parsed as tool calls.

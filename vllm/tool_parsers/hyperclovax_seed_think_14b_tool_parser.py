@@ -127,6 +127,15 @@ class HyperCLOVAXSeedThink14BToolParser(ToolParser):
     def _arguments_json(self, function_call: dict) -> str:
         return json.dumps(function_call.get("arguments", {}), ensure_ascii=False)
 
+    def _decode_tool_call_array(self, text: str) -> list[dict]:
+        # Parse the tool-call array by JSON structure (raw_decode respects JSON
+        # string escaping) instead of cutting at a literal <|im_end|>, which can
+        # legitimately appear inside a JSON string argument.
+        raw_function_calls, _ = json.JSONDecoder().raw_decode(text.lstrip())
+        if not isinstance(raw_function_calls, list):
+            raise ValueError("Tool-call payload must be a JSON array.")
+        return raw_function_calls
+
     def _tool_names(self, request: ChatCompletionRequest) -> set[str]:
         tool_names: set[str] = set()
         for tool in getattr(request, "tools", None) or []:
@@ -211,12 +220,7 @@ class HyperCLOVAXSeedThink14BToolParser(ToolParser):
             stripped = model_output.lstrip("\n")
             if stripped.startswith("[") and getattr(request, "tools", None):
                 try:
-                    bare_json = stripped
-                    end_idx = bare_json.find(self.tool_call_end_token)
-                    if end_idx >= 0:
-                        bare_json = bare_json[:end_idx]
-                    bare_json = bare_json.rstrip()
-                    raw_function_calls = json.loads(bare_json)
+                    raw_function_calls = self._decode_tool_call_array(stripped)
                     if not all(
                         self._is_function_call_like(fc, request)
                         for fc in raw_function_calls
@@ -246,18 +250,13 @@ class HyperCLOVAXSeedThink14BToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
-        # guard against no regex match before using raw_function_calls
-        tool_call_match = self.tool_call_regex.search(model_output)
-        if not tool_call_match:
-            return ExtractedToolCallInformation(
-                tools_called=False, tool_calls=[], content=model_output
-            )
-
         try:
-            if tool_call_match.group(1) is not None:
-                raw_function_calls = json.loads(tool_call_match.group(1))
-            else:
-                raw_function_calls = json.loads(tool_call_match.group(2) + "]")
+            # Locate the array by JSON structure, not by cutting at the literal
+            # <|im_end|> token (which can appear inside a string argument).
+            _, _, function_call_text = model_output.partition(
+                self.tool_call_start_token
+            )
+            raw_function_calls = self._decode_tool_call_array(function_call_text)
 
             tool_calls = [
                 ToolCall(

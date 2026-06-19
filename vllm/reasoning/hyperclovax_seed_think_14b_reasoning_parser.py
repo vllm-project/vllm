@@ -182,6 +182,17 @@ class HyperCLOVAXSeedThink14BReasoningParser(ReasoningParser):
         )
 
     def _strip_tool_end_tokens(self, tool_content: str) -> str:
+        # If the content is a JSON array (the tool-call payload), find its end by
+        # JSON structure (raw_decode respects string escaping) so a literal
+        # <|im_end|> inside a string argument is not mistaken for the terminator.
+        # Fall back to literal search for non-JSON content (e.g. reasoning text).
+        stripped = tool_content.lstrip()
+        if stripped.startswith("["):
+            try:
+                _, end = json.JSONDecoder().raw_decode(stripped)
+                return stripped[:end]
+            except json.JSONDecodeError:
+                pass
         for end_token in ("<|im_end|>", "<|stop|>", "<|endofturn|>"):
             idx = tool_content.find(end_token)
             if idx >= 0:
@@ -320,9 +331,12 @@ class HyperCLOVAXSeedThink14BReasoningParser(ReasoningParser):
                 if last_bracket >= 0 and getattr(request, "tools", None):
                     candidate = model_output[last_bracket:]
                     try:
-                        json.loads(candidate)
+                        # Find the array end by JSON structure so a literal
+                        # <|im_end|> inside a string argument (or a trailing
+                        # terminator) does not break parsing.
+                        _, end = json.JSONDecoder().raw_decode(candidate)
                         reasoning_part = model_output[:last_bracket].strip("\n")
-                        return reasoning_part or None, candidate
+                        return reasoning_part or None, candidate[:end]
                     except json.JSONDecodeError:
                         pass
                 return model_output.strip("\n") or None, None
