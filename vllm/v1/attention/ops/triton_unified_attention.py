@@ -58,7 +58,8 @@ def _cast_kv_tile(
             # per-tensor scale in that dtype (no fp32).
             if Q.dtype == tl.float16:
                 return fp8e4m3_to_fp16(data) * tl.load(tensor_scale).to(tl.float16)
-            return fp8e4m3_to_bf16(data) * tl.load(tensor_scale).to(tl.bfloat16)
+            else:
+                return fp8e4m3_to_bf16(data) * tl.load(tensor_scale).to(tl.bfloat16)
         if Q.dtype.is_fp8():
             return data.to(Q.dtype)
         return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
