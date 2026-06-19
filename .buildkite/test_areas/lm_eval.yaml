@@ -28,12 +28,12 @@ steps:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
 
-- label: LM Eval Kimi K2 Thinking (8xMI300)
-  key: lm-eval-kimi-k2-thinking-mi300
+- label: LM Eval Kimi K2 Thinking (8xMI355)
+  key: lm-eval-kimi-k2-thinking-mi355
   depends_on:
   - image-build-amd
   timeout_in_minutes: 180
-  device: mi300_8
+  device: mi355_8
   optional: true
   soft_fail: true
   working_dir: "/vllm-workspace/tests"
