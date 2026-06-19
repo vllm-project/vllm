@@ -107,6 +107,7 @@ def ref_paged_attn(
     soft_cap: float | None = None,
     alibi_slopes: torch.Tensor | None = None,
     s_aux: torch.Tensor | None = None,
+    dynamic_causal: list[bool] | None = None,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
@@ -142,17 +143,30 @@ def ref_paged_attn(
             v = torch.repeat_interleave(v, q.shape[1] // v.shape[1], dim=1)
         attn = torch.einsum("qhd,khd->hqk", q, k).float()
         empty_mask = torch.ones(query_len, kv_len)
-        mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
 
-        if sliding_window is not None:
-            sliding_window_mask = (
-                torch.triu(
-                    empty_mask, diagonal=kv_len - (query_len + sliding_window) + 1
+        if dynamic_causal is None or dynamic_causal[i]:
+            mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
+            if sliding_window is not None:
+                sliding_window_mask = (
+                    torch.triu(
+                        empty_mask, diagonal=kv_len - (query_len + sliding_window) + 1
+                    )
+                    .bool()
+                    .logical_not()
                 )
-                .bool()
-                .logical_not()
-            )
-            mask |= sliding_window_mask
+                mask |= sliding_window_mask
+        else:
+            if sliding_window is not None:
+                mask = (
+                    torch.triu(
+                        empty_mask, diagonal=1 - sliding_window + kv_len - query_len
+                    ).bool()
+                    ^ torch.triu(
+                        empty_mask, diagonal=sliding_window + kv_len - query_len
+                    ).bool()
+                ).logical_not()
+            else:
+                mask = empty_mask.logical_not()
 
         if soft_cap is not None:
             attn = soft_cap * torch.tanh(attn / soft_cap)
@@ -243,11 +257,6 @@ def varlen_encoder_attention(
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
     assert num_query_heads % num_kv_heads == 0
-    window_size = (
-        (sliding_window - 1, sliding_window - 1)
-        if sliding_window is not None
-        else (-1, -1)
-    )
     scale = head_size**-0.5
     token_num = sum(seq_lens)
 
@@ -343,7 +352,7 @@ def varlen_encoder_attention(
         scale=scale,
         causal=False,
         alibi_slopes=None,
-        sliding_window=window_size,
+        sliding_window=sliding_window if sliding_window is not None else -1,
         block_table=encoder_block_table,
         softcap=0,
         scheduler_metadata=metadata,
@@ -375,7 +384,7 @@ def varlen_encoder_attention(
         scale=scale,
         causal=False,
         alibi_slopes=None,
-        sliding_window=window_size,
+        sliding_window=sliding_window if sliding_window is not None else -1,
         block_table=encoder_block_table,
         softcap=0,
         scheduler_metadata=metadata,
@@ -418,6 +427,7 @@ def varlen_with_paged_kv(
     kv_cache_dtype: str = "auto",
     k_scale: float = 1.0,
     v_scale: float = 1.0,
+    dynamic_causal: list[bool] | None = None,
 ) -> None:
     set_random_seed(0)
     num_seqs = len(seq_lens)
@@ -427,9 +437,13 @@ def varlen_with_paged_kv(
     num_kv_heads = num_heads[1]
     assert num_query_heads % num_kv_heads == 0
     max_kv_len = max(kv_lens)
-    window_size = (sliding_window - 1, 0) if sliding_window is not None else (-1, -1)
     scale = head_size**-0.5
     token_num = sum(query_lens)
+    dynamic_causal_tensor = (
+        torch.tensor(dynamic_causal, dtype=torch.bool)
+        if dynamic_causal is not None
+        else None
+    )
 
     # for n heads the set of slopes is the geometric sequence that starts
     # 2^(-8/n)
@@ -515,10 +529,11 @@ def varlen_with_paged_kv(
         seq_lens=kv_lens_tensor,
         dtype=dtype,
         query_start_loc=cu_query_lens,
-        causal=True,
+        causal=dynamic_causal is None,
         sliding_window_size=sliding_window if sliding_window is not None else -1,
         isa=isa,
         enable_kv_split=False,
+        dynamic_causal=dynamic_causal_tensor,
     )
 
     out_without_split = torch.empty_like(query)
@@ -530,13 +545,14 @@ def varlen_with_paged_kv(
         query_start_loc=cu_query_lens,
         seq_lens=kv_lens_tensor,
         scale=scale,
-        causal=True,
+        causal=dynamic_causal is None,
         alibi_slopes=alibi_slopes,
-        sliding_window=window_size,
+        sliding_window=sliding_window if sliding_window is not None else -1,
         block_table=block_tables,
         softcap=soft_cap if soft_cap is not None else 0,
         scheduler_metadata=metadata,
         s_aux=s_aux,
+        dynamic_causal=dynamic_causal_tensor,
         **fp8_kwargs,
     )
 
@@ -548,10 +564,11 @@ def varlen_with_paged_kv(
         seq_lens=kv_lens_tensor,
         dtype=dtype,
         query_start_loc=cu_query_lens,
-        causal=True,
+        causal=dynamic_causal is None,
         sliding_window_size=sliding_window if sliding_window is not None else -1,
         isa=isa,
         enable_kv_split=True,
+        dynamic_causal=dynamic_causal_tensor,
     )
 
     out_with_split = torch.empty_like(query)
@@ -563,13 +580,14 @@ def varlen_with_paged_kv(
         query_start_loc=cu_query_lens,
         seq_lens=kv_lens_tensor,
         scale=scale,
-        causal=True,
+        causal=dynamic_causal is None,
         alibi_slopes=alibi_slopes,
-        sliding_window=window_size,
+        sliding_window=sliding_window if sliding_window is not None else -1,
         block_table=block_tables,
         softcap=soft_cap if soft_cap is not None else 0,
         scheduler_metadata=metadata,
         s_aux=s_aux,
+        dynamic_causal=dynamic_causal_tensor,
         **fp8_kwargs,
     )
 
@@ -597,13 +615,14 @@ def varlen_with_paged_kv(
             query_start_loc=cu_query_lens,
             seq_lens=kv_lens_tensor,
             scale=scale,
-            causal=True,
+            causal=dynamic_causal is None,
             alibi_slopes=alibi_slopes,
-            sliding_window=window_size,
+            sliding_window=sliding_window if sliding_window is not None else -1,
             block_table=block_tables,
             softcap=soft_cap if soft_cap is not None else 0,
             scheduler_metadata=metadata,
             s_aux=s_aux,
+            dynamic_causal=dynamic_causal_tensor,
         )
         atol = _FP8_ATOL[kv_cache_dtype]
         rtol = _FP8_RTOL
@@ -620,6 +639,7 @@ def varlen_with_paged_kv(
             soft_cap=soft_cap,
             alibi_slopes=alibi_slopes,
             s_aux=s_aux,
+            dynamic_causal=dynamic_causal,
         )
         atol, rtol = 1.5e-2, 1e-2
 
@@ -1034,4 +1054,59 @@ def test_varlen_with_paged_kv_sink(
         use_sink=use_sink,
         isa=isa,
         kv_cache_dtype=kv_cache_dtype,
+    )
+
+
+@pytest.mark.parametrize(
+    "kv_cache_dtype",
+    [
+        "auto",
+    ],
+)
+@pytest.mark.parametrize("seq_lens", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize(
+    "head_size",
+    [
+        128,
+    ],
+)
+@pytest.mark.parametrize("block_size", [96, 128])
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("use_alibi", [False])
+@pytest.mark.parametrize("use_sink", [False])
+@pytest.mark.parametrize("isa", ["amx"])
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support.")
+def test_varlen_with_paged_kv_dynamic_causal(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    use_alibi: bool,
+    use_sink: bool,
+    isa: str,
+    kv_cache_dtype: str,
+) -> None:
+    dynamic_causal = [bool(i % 2) for i in range(len(seq_lens))]
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        soft_cap=soft_cap,
+        num_blocks=num_blocks,
+        use_alibi=use_alibi,
+        use_sink=use_sink,
+        isa=isa,
+        kv_cache_dtype=kv_cache_dtype,
+        dynamic_causal=dynamic_causal,
     )

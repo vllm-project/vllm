@@ -51,8 +51,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Ernie45ToolParser",
     ),
     "glm45": (
-        "glm4_moe_tool_parser",
-        "Glm4MoeModelToolParser",
+        "glm47_moe_tool_parser",
+        "Glm47MoeModelToolParser",
     ),
     "glm47": (
         "glm47_moe_tool_parser",
@@ -191,8 +191,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "FunctionGemmaToolParser",
     ),
     "gemma4": (
-        "gemma4_tool_parser",
-        "Gemma4ToolParser",
+        "gemma4_engine_tool_parser",
+        "Gemma4EngineToolParser",
     ),
     "apertus": (
         "apertus_tool_parser",
