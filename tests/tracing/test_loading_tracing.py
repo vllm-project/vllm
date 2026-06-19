@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import time
 
 import pytest
 from opentelemetry.sdk.environment_variables import OTEL_EXPORTER_OTLP_TRACES_INSECURE
 
 from tests.tracing.conftest import FAKE_TRACE_SERVER_ADDRESS, FakeTraceService
-from vllm.tracing import init_tracer, instrument, is_otel_available
+from vllm.tracing import init_tracer, instrument, instrument_manual, is_otel_available
 
 # Skip everything if OTel is missing
 pytestmark = pytest.mark.skipif(not is_otel_available(), reason="OTel required")
@@ -85,3 +86,54 @@ class TestInterProcessPropagation:
 
         assert span["trace_id"] == fake_trace_id
         assert span["parent_span_id"] == fake_parent_id
+
+
+class TestManualSpanTimestamps:
+    """Regression test for https://github.com/vllm-project/vllm/issues/46193:
+    manual spans (e.g. the "Dynamo bytecode transform" span emitted from
+    vllm/compilation/backends.py) must be anchored to wall-clock time, not a
+    monotonic clock with an arbitrary epoch like time.perf_counter()."""
+
+    @pytest.fixture(autouse=True)
+    def setup_tracing(self, monkeypatch):
+        monkeypatch.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
+        init_tracer("test.manual", FAKE_TRACE_SERVER_ADDRESS)
+
+    def test_manual_span_uses_wall_clock_time(self, trace_service: FakeTraceService):
+        from vllm.compilation import monitor
+        from vllm.config import VllmConfig
+
+        # Exercise the real monitor_torch_compile context manager so this
+        # test fails if vllm/compilation/monitor.py regresses to only
+        # tracking a monotonic (perf_counter) timestamp.
+        with monitor.monitor_torch_compile(VllmConfig()):
+            time.sleep(0.05)
+
+        # Same arithmetic as vllm/compilation/backends.py: an elapsed
+        # duration measured with time.perf_counter(), anchored to the
+        # wall-clock reference point captured by monitor_torch_compile.
+        dynamo_time = time.perf_counter() - monitor.torch_compile_start_time
+        start_time_ns = int(monitor.torch_compile_start_time_wall * 1e9)
+        end_time_ns = int((monitor.torch_compile_start_time_wall + dynamo_time) * 1e9)
+
+        instrument_manual(
+            "Dynamo bytecode transform",
+            start_time_ns,
+            end_time_ns,
+            {"dynamo.time_seconds": dynamo_time},
+        )
+
+        assert trace_service.wait_for_spans(count=1)
+        span = trace_service.get_all_spans()[0]
+
+        now_ns = time.time_ns()
+        one_day_ns = 24 * 60 * 60 * 1_000_000_000
+
+        # The recorded timestamps must be close to "now", not close to the
+        # Unix epoch (which is what happens if a perf_counter() value is
+        # mistakenly used as a nanoseconds-since-epoch timestamp).
+        assert abs(now_ns - span["start_time_unix_nano"]) < one_day_ns
+        assert abs(now_ns - span["end_time_unix_nano"]) < one_day_ns
+
+        duration_s = (span["end_time_unix_nano"] - span["start_time_unix_nano"]) / 1e9
+        assert duration_s == pytest.approx(dynamo_time, abs=0.05)
