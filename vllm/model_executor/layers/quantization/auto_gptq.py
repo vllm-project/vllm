@@ -61,6 +61,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
@@ -223,6 +224,9 @@ class AutoGPTQConfig(QuantizationConfig):
         quant_method = hf_quant_cfg.get("quant_method", "").lower()
 
         if quant_method != "gptq":
+            return None
+
+        if current_platform.is_rocm() and user_quant in ("gptq_marlin", "marlin"):
             return None
 
         is_valid_user_quant = user_quant is None or user_quant in (
