@@ -916,6 +916,13 @@ class SpecDecodeBaseProposer:
         return per_group_attn_metadata, per_layer_attn_metadata
 
     def model_returns_tuple(self) -> bool:
+        if self.method == "mtp":
+            # DeepSeek-family MTP (deepseek_mtp.py) recycles the post-final-
+            # norm hidden, so its forward returns (logit_hidden,
+            # recycle_hidden). Other MTP families return a single tensor.
+            return "DeepSeekMTPModel" in (
+                self.draft_model_config.hf_config.architectures or []
+            )
         return self.method not in ("mtp", "draft_model", "dflash")
 
     def prepare_next_token_ids_cpu(
