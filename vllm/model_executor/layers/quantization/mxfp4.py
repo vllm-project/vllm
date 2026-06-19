@@ -155,6 +155,14 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         # so can skip the padding in the forward before applying the moe method
         return self.mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
 
+    # TODO(bnell): move to MK/expert_class?
+    @property
+    def has_unpadded_output(self) -> bool:
+        return self.mxfp4_backend in [
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        ]
+
     def maybe_roundup_sizes(
         self,
         hidden_size: int,
@@ -482,10 +490,22 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.w2_precision_config = None
 
     @property
+    def supports_eplb(self) -> bool:
+        return True
+
+    @property
     def skip_forward_padding(self) -> bool:
         # SM100_FI_MXFP4_MXFP8_TRTLLM supports padding with mxfp8 quant
         # so can skip the padding in the forward before applying the moe method
         return self.mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
+
+    # TODO(bnell): move to MK/expert_class?
+    @property
+    def has_unpadded_output(self) -> bool:
+        return self.mxfp4_backend in [
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        ]
 
     def maybe_roundup_sizes(
         self,

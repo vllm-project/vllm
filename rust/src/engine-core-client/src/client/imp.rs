@@ -1,5 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
@@ -13,7 +14,7 @@ use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, Uti
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::record_scheduler_stats;
+use crate::metrics::{LoraInfoExporter, record_scheduler_stats};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
 use crate::protocol::{
@@ -58,17 +59,19 @@ impl ClientInner {
     /// per-request output channel bound to its `request_id`.
     ///
     /// When `data_parallel_rank` is provided, the request is routed to that
-    /// specific engine rank, bypassing load balancing.
+    /// specific engine rank, bypassing load balancing. `lora_name` is the
+    /// request's LoRA adapter, tracked for `vllm:lora_requests_info`.
     pub fn register_request(
         &self,
         request_id: String,
+        lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
     ) -> Result<(EngineId, OutputReceiver)> {
         let mut registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
         }
-        registry.register(request_id, data_parallel_rank)
+        registry.register(request_id, lora_name, data_parallel_rank)
     }
 
     /// Allocate the next utility `call_id` and register its waiting receiver.
@@ -124,11 +127,31 @@ impl ClientInner {
         self.request_reg.lock().finish_many(request_ids)
     }
 
+    /// Finalize client-initiated aborts by pushing a terminal `Abort` output
+    /// down each request's stream and removing it from the registry. Returns
+    /// the request ids that were still active. See [`RequestRegistry::abort_many`].
+    pub fn abort_requests_locally<'a>(
+        &self,
+        request_ids: impl IntoIterator<Item = &'a String>,
+    ) -> Vec<String> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        self.request_reg.lock().abort_many(request_ids, timestamp)
+    }
+
     /// Apply one scheduler stats update for the given engine to the local
     /// routing state. Returns `false` if the engine is unknown to the
     /// client.
     pub fn apply_scheduler_stats(&self, engine_index: u32, stats: &SchedulerStats) -> bool {
         self.request_reg.lock().apply_scheduler_stats(engine_index, stats)
+    }
+
+    /// Snapshot the adapter names of tracked LoRA requests as
+    /// (running, waiting) sets.
+    pub fn lora_adapter_states(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        self.request_reg.lock().lora_adapter_states()
     }
 
     /// Close all active request streams and utility calls with the first
@@ -303,6 +326,8 @@ pub(crate) async fn run_output_dispatcher_loop(
     inner: Arc<ClientInner>,
     mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
 ) {
+    let mut lora_info = LoraInfoExporter::default();
+
     let result: Result<()> = async {
         loop {
             let outputs = match output_rx.recv().await {
@@ -357,6 +382,12 @@ pub(crate) async fn run_output_dispatcher_loop(
                             scheduler_stats,
                         );
                     }
+
+                    // The engine's scheduler stats never carry adapter names;
+                    // the gauge is derived from the registry's frontend-side
+                    // request tracking instead.
+                    let (running, waiting) = inner.lora_adapter_states();
+                    lora_info.update(&METRICS.scheduler, running, waiting);
                 }
                 ClassifiedEngineCoreOutputs::Utility(utility) => {
                     let call_id = utility.output.call_id;
