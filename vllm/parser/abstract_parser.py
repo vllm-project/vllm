@@ -463,6 +463,22 @@ class DelegatingParser(Parser):
             request = self._tool_parser.adjust_request(request)
         return request
 
+    def _reasoning_enabled(self) -> bool:
+        """Whether the model will emit a reasoning prefix before its answer
+        / tool call for this request.
+
+        The parser (and thus its reasoning parser) is constructed per request
+        with that request's ``chat_template_kwargs``, so the reasoning parser
+        already reflects whether thinking is enabled. Defaults to ``True`` —
+        xgrammar's own default — when the reasoning parser cannot report it,
+        so the structural-tag grammar models the reasoning phase the engine's
+        structured-output FSM expects.
+        """
+        reasoner = self._reasoning_parser
+        if reasoner is None:
+            return False
+        return bool(getattr(reasoner, "thinking_enabled", True))
+
     def _apply_structural_tag(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
@@ -484,9 +500,16 @@ class DelegatingParser(Parser):
         if not need_tool_calling:
             return request
 
+        # When the model emits a reasoning prefix (e.g. ``...</think>``) before
+        # its tool call, the structural-tag grammar MUST include the reasoning
+        # section. Otherwise the grammar only models the tool-call format and
+        # the structured-output FSM rejects the reasoning tokens at the
+        # reasoning->tool boundary (HTTP 500 non-streaming / mid-stream error
+        # streaming). The engine's structural-tag same-step advance also assumes
+        # the tag models this phased (reasoning -> tool) output.
         structure_tag = self._tool_parser.get_structural_tag(
             request,
-            reasoning=False,
+            reasoning=self._reasoning_enabled(),
         )
         if structure_tag is None:
             return request

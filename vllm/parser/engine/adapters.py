@@ -110,6 +110,18 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     def has_engine_confirmed_reasoning_end(self) -> bool:
         return self._parser_engine.reasoning_ended
 
+    @property
+    def thinking_enabled(self) -> bool:
+        """Whether reasoning/thinking output is enabled for this request.
+
+        Mirrors the wrapped parser engine, which derives this from the
+        request's ``chat_template_kwargs`` (e.g. ``enable_thinking``). Used by
+        structural-tag construction to decide whether the grammar must model a
+        reasoning prefix. Defaults to ``True`` when the engine does not expose
+        it.
+        """
+        return bool(getattr(self._parser_engine, "thinking_enabled", True))
+
     def finish_streaming(self) -> DeltaMessage | None:
         return self._parser_engine.finish_streaming()
 
