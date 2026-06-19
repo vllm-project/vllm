@@ -110,6 +110,7 @@ class StreamingState:
     def reset_for_new_item(self) -> None:
         """Reset state when expecting a new output item."""
         self.current_output_index += 1
+        self.current_content_index = -1
         self.sent_output_item_added = False
         self.is_first_function_call_delta = False
         self.current_call_id = ""
