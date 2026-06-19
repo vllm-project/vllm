@@ -17,6 +17,7 @@ from vllm.cute_utils import (
     cvt,
     fence_before_tma_store,
     mma_bf16,
+    setmaxnreg_inc,
     simple_tma_copy,
 )
 
@@ -115,7 +116,7 @@ class Sm100ChunkUWKernel:
             cu_seqlens,
             chunk_indices,
             total_chunks,
-        ).launch(grid=grid, block=block, stream=stream)
+        ).launch(grid=grid, block=block, min_blocks_per_mp=1, stream=stream)
 
     @cute.kernel
     def kernel(
@@ -311,6 +312,8 @@ class Sm100ChunkUWKernel:
 
         elif warp_id >= 4:
             # inv warps
+            setmaxnreg_inc(120)
+
             tid_ = tid % 128
             warp_id_ = warp_id % 4
 
@@ -654,15 +657,20 @@ class Sm100ChunkUWKernel:
                     s_g_cu_view = cute.make_tensor(s_g_cu_exp, (2, 4, 2, BT // 16))
                     g_cu_col = s_g_cu_view[col_coord].load().reshape((2, 1, 2))
 
-                    Ai_f32 = cvt.bf16x2_to_fp32x2(Ai).load().reshape((2, 2, 2))
+                    Ai_f32 = cvt.bf16x2_to_fp32x2(Ai)
 
-                    Ab_f32 = Ai_f32 * beta_col
-                    Ab = Ab_f32.to(BFloat16)
+                    Ab_f32 = cute.make_rmem_tensor(8, Float32)
+                    Abg_f32 = cute.make_rmem_tensor(8, Float32)
+                    for j in cutlass.range(8, vectorize=True):
+                        scale_idx = (j // 4) * 2 + (j % 2)
+                        Ab_f32[j] = Ai_f32[j] * beta_col[scale_idx]
+                        Abg_f32[j] = Ab_f32[j] * g_cu_col[scale_idx]
+
+                    Ab = Ab_f32.load().to(BFloat16)
                     Ab_tmem = Ab_tmem_base + (BT // 2) * stage_id + i * 8
                     _tcgen05.st(warp_id_ * 32, Ab_tmem, "16x128b", 2, Ab)
 
-                    Abg_f32 = Ab_f32 * g_cu_col
-                    Abg = Abg_f32.to(BFloat16)
+                    Abg = Abg_f32.load().to(BFloat16)
                     _tcgen05.st(warp_id_ * 32 + 16, Ab_tmem, "16x128b", 2, Abg)
 
                 _tcgen05.wait_st()
