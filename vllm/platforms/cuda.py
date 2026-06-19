@@ -19,7 +19,6 @@ from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
-import vllm._C  # noqa
 import vllm._C_stable_libtorch  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -39,6 +38,11 @@ else:
     CacheDType = None
 
 logger = init_logger(__name__)
+
+try:
+    import vllm._qutlass_C  # noqa: F401
+except ImportError as e:
+    logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -186,6 +190,22 @@ class CudaPlatformBase(Platform):
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        """Import CUDA kernel extensions (_C_stable_libtorch, optional _qutlass_C)."""
+        try:
+            import vllm._C_stable_libtorch  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._C_stable_libtorch: %r", e)
+        try:
+            import vllm._moe_C_stable_libtorch  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._moe_C_stable_libtorch: %r", e)
+        try:
+            import vllm._qutlass_C  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
