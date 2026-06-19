@@ -91,9 +91,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
         # Offload tokenization to the thread pool. The sync
         # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
-        # path and char-offset extraction, so the async variant simply
-        # offloads it rather than duplicating that logic.
-        self._async_tokenize_prompt = make_async(
+        # path and char-offset extraction, so the async variant is just it
+        # offloaded (mirrors ``_process_multimodal_async`` below).
+        self._tokenize_prompt_async = make_async(
             self._tokenize_prompt, executor=self._executor
         )
         self._async_tokenizer_decode = make_async(self._decode, executor=self._executor)
@@ -473,13 +473,6 @@ class BaseRenderer(ABC, Generic[_T]):
             prompt,
             offset_mapping=encoding["offset_mapping"] if want_offsets else None,
         )
-
-    async def _tokenize_prompt_async(
-        self,
-        prompt: TextPrompt,
-        params: TokenizeParams,
-    ) -> TokensPrompt:
-        return await self._async_tokenize_prompt(prompt, params)
 
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
         tokenizer = self.get_tokenizer()

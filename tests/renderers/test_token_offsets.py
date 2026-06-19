@@ -36,7 +36,7 @@ def _make_base_renderer_with(tokenizer):
             self._executor = None
             # Mirror BaseRenderer.__init__: the async path offloads the sync
             # ``_tokenize_prompt`` to a thread pool.
-            self._async_tokenize_prompt = make_async(self._tokenize_prompt)
+            self._tokenize_prompt_async = make_async(self._tokenize_prompt)
             self.mm_processor = None
 
         def get_tokenizer(self):
@@ -137,7 +137,7 @@ class TestTokenizePromptOffsets:
         assert "prompt_token_offsets" not in result
 
     @pytest.mark.asyncio
-    async def test_async_tokenize_prompt_returns_offsets(self, fast_tokenizer):
+    async def test_tokenize_prompt_async_returns_offsets(self, fast_tokenizer):
         """The async path offloads the sync tokenizer; it must yield the same
         offsets as the sync path."""
         renderer = _make_base_renderer_with(fast_tokenizer)
