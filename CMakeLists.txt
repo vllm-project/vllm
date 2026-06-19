@@ -324,6 +324,7 @@ endif()
 
 set(VLLM_EXT_SRC
   "csrc/quantization/activation_kernels.cu"
+  "csrc/push_all_reduce.cu"
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")

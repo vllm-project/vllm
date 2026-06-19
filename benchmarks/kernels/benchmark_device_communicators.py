@@ -33,6 +33,7 @@ from vllm.distributed.device_communicators.custom_all_reduce import CustomAllred
 from vllm.distributed.device_communicators.flashinfer_all_reduce import (
     FlashInferAllReduce,
 )
+from vllm.distributed.device_communicators.push_all_reduce import PushAllReduce
 from vllm.distributed.device_communicators.pynccl import (
     PyNcclCommunicator,
     register_nccl_symmetric_ops,
@@ -80,6 +81,7 @@ class CommunicatorBenchmark:
 
         # Initialize communicators
         self.custom_allreduce = None
+        self.push_ar_comm = None
         self.pynccl_comm = None
         self.symm_mem_comm = None
         self.symm_mem_comm_multimem = None
@@ -105,6 +107,23 @@ class CommunicatorBenchmark:
                 "Rank %s: Failed to initialize CustomAllreduce: %s", self.rank, e
             )
             self.custom_allreduce = None
+
+        try:
+            self.push_ar_comm = PushAllReduce(
+                group=self.cpu_group,
+                device=self.device,
+                max_size=self.max_size_override,
+            )
+            if not self.push_ar_comm.disabled:
+                logger.info("Rank %s: PushAllReduce initialized", self.rank)
+            else:
+                logger.info("Rank %s: PushAllReduce disabled", self.rank)
+                self.push_ar_comm = None
+        except Exception as e:
+            logger.warning(
+                "Rank %s: Failed to initialize PushAllReduce: %s", self.rank, e
+            )
+            self.push_ar_comm = None
 
         try:
             self.pynccl_comm = PyNcclCommunicator(
@@ -213,6 +232,19 @@ class CommunicatorBenchmark:
                     comm.capture(),
                     {"VLLM_CUSTOM_ALLREDUCE_ALGO": "2stage"},
                     None,  # no destroy function
+                )
+            )
+
+        if self.push_ar_comm is not None:
+            comm = self.push_ar_comm
+            communicators.append(
+                (
+                    "push_ar",
+                    lambda t, c=comm: c.all_reduce(t),
+                    lambda t, c=comm: c.should_use(t),
+                    comm.capture(),
+                    {},
+                    None,
                 )
             )
 

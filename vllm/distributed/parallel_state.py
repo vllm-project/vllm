@@ -571,6 +571,7 @@ class GroupCoordinator:
         # only cuda uses this function,
         # so we don't abstract it into the base class
         maybe_ca_context = nullcontext()
+        maybe_push_ar_context = nullcontext()
         maybe_aiter_context = nullcontext()
         from vllm.distributed.device_communicators.cuda_communicator import (
             CudaCommunicator,
@@ -588,6 +589,11 @@ class GroupCoordinator:
             if ca_comm is not None:
                 maybe_ca_context = ca_comm.capture()  # type: ignore
 
+            # Enter push allreduce capture context
+            push_ar_comm = getattr(self.device_communicator, "push_ar_comm", None)
+            if push_ar_comm is not None:
+                maybe_push_ar_context = push_ar_comm.capture()  # type: ignore
+
             from vllm._aiter_ops import rocm_aiter_ops
 
             if rocm_aiter_ops.is_enabled():
@@ -601,7 +607,12 @@ class GroupCoordinator:
         if curr_stream != stream:
             stream.wait_stream(curr_stream)
 
-        with torch.cuda.stream(stream), maybe_ca_context, maybe_aiter_context:
+        with (
+            torch.cuda.stream(stream),
+            maybe_ca_context,
+            maybe_push_ar_context,
+            maybe_aiter_context,
+        ):
             yield graph_capture_context
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:

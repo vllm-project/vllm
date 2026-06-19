@@ -65,6 +65,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         from vllm.distributed.device_communicators.flashinfer_all_reduce import (
             FlashInferAllReduce,
         )
+        from vllm.distributed.device_communicators.push_all_reduce import (
+            PushAllReduce,
+        )
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
         from vllm.distributed.device_communicators.quick_all_reduce import (
             QuickAllReduce,
@@ -81,6 +84,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 register_nccl_symmetric_ops(self.pynccl_comm)
 
         self.ca_comm: CustomAllreduce | None = None
+        self.push_ar_comm: PushAllReduce | None = None
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
@@ -106,6 +110,26 @@ class CudaCommunicator(DeviceCommunicatorBase):
                     self.symm_mem_comm is not None and not self.symm_mem_comm.disabled
                 ),
             )
+
+            # Initialize push-based allreduce (faster for small messages)
+            # Only available on NVIDIA CUDA GPUs with NVLink
+            if (
+                current_platform.is_cuda()
+                and self.ca_comm is not None
+                and not self.ca_comm.disabled
+            ):
+                try:
+                    from vllm.distributed.device_communicators.push_all_reduce import (
+                        PushAllReduce,
+                    )
+
+                    self.push_ar_comm = PushAllReduce(
+                        group=self.cpu_group, device=self.device
+                    )
+                    if self.push_ar_comm.disabled:
+                        self.push_ar_comm = None
+                except Exception:
+                    self.push_ar_comm = None
 
             if current_platform.is_rocm():
                 # Initialize a custom quick all-reduce implementation for AMD.
@@ -202,6 +226,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "NCCL_SYMM_MEM",
             "QUICK_REDUCE",
             "FLASHINFER",
+            "PUSH_AR",
             "CUSTOM",
             "SYMM_MEM",
             "PYNCCL",
@@ -235,6 +260,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             enabled_ar_backends.append("QUICK_REDUCE")
         if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
             enabled_ar_backends.append("FLASHINFER")
+        if self.push_ar_comm is not None:
+            enabled_ar_backends.append("PUSH_AR")
         if self.ca_comm is not None and not self.ca_comm.disabled:
             enabled_ar_backends.append("CUSTOM")
         if self.symm_mem_comm is not None and not self.symm_mem_comm.disabled:
@@ -280,6 +307,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = fi_ar_comm.all_reduce(input_)
             assert out is not None
             return out
+        push_ar_comm = self.push_ar_comm
+        if push_ar_comm is not None and push_ar_comm.should_use(input_):
+            out = push_ar_comm.all_reduce(input_)
+            if out is not None:
+                return out
         ca_comm = self.ca_comm
         if (
             ca_comm is not None
@@ -414,6 +446,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.pynccl_comm is not None:
             self.pynccl_comm.destroy()
             self.pynccl_comm = None
+        if self.push_ar_comm is not None:
+            self.push_ar_comm.close()
+            self.push_ar_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
         if self.fi_ar_comm is not None:
