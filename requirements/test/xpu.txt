@@ -667,7 +667,7 @@ tqdm==4.67.3
     #   pqdm
     #   sentence-transformers
     #   transformers
-transformers @ git+https://github.com/huggingface/transformers.git@89eb876fdd9eca53400fe06e6c1e267dedf2d554
+transformers==5.10.4
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/xpu.in
