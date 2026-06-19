@@ -395,8 +395,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     endif()
 
     if(COOPERATIVE_TOPK_ARCHS)
-      list(APPEND VLLM_STABLE_EXT_SRC
-        "csrc/libtorch_stable/cooperative_topk.cu")
       list(APPEND VLLM_GPU_FLAGS "-DVLLM_ENABLE_COOPERATIVE_TOPK=1")
 
       cuda_archs_loose_intersection(COOPERATIVE_TOPK_SM90_ARCHS
@@ -405,10 +403,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
         list(APPEND VLLM_GPU_FLAGS
           "-DVLLM_COOPERATIVE_TOPK_PORTABLE_CLUSTER_ONLY=1")
       endif()
-
-      set_source_files_properties(
-        "csrc/libtorch_stable/cooperative_topk.cu"
-        PROPERTIES CUDA_ARCHITECTURES "${COOPERATIVE_TOPK_ARCHS}")
     endif()
   endif()
 
@@ -527,6 +521,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_STABLE_EXT_SRC}"
       CUDA_ARCHS "${CUDA_ARCHS}")
+
+    if(COOPERATIVE_TOPK_ARCHS)
+      list(APPEND VLLM_STABLE_EXT_SRC
+        "csrc/libtorch_stable/cooperative_topk.cu")
+      set_gencode_flags_for_srcs(
+        SRCS "csrc/libtorch_stable/cooperative_topk.cu"
+        CUDA_ARCHS "${COOPERATIVE_TOPK_ARCHS}")
+    endif()
 
     # Only build Marlin kernels if we are building for at least some compatible archs.
     # Keep building Marlin for 9.0 as there are some group sizes and shapes that
