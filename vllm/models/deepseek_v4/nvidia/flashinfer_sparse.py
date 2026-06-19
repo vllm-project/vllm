@@ -13,18 +13,21 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
     build_flashinfer_mixed_sparse_indices,
 )
-from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLASparseBackend
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
     compute_fp8_einsum_recipe,
     deep_gemm_fp8_o_proj,
 )
+from vllm.models.deepseek_v4.sparse_mla import (
+    DeepseekV4FlashMLABackend,
+    DeepseekV4FlashMLAMetadata,
+)
 from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
-from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseMetadata
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
@@ -47,14 +50,15 @@ def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
     return workspace
 
 
-class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLASparseBackend):
+class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
     """Shares the FlashMLA V4 metadata/cache pipeline; swaps the attention impl.
 
-    Inheriting from the FlashMLA V4 backend reuses its ``FlashMLASparseMetadata``
-    builder (which the V4 sparse-index pipeline needs — the V3.2 FlashInfer
-    builder lacks the ``c128a_*`` fields), 256-token blocks, head_size 512, and
-    the (num_blocks, block_size, 512) cache shape for non-``fp8_ds_mla`` dtypes.
+    Inheriting from the FlashMLA V4 backend reuses its ``DeepseekV4FlashMLAMetadata``
+    builder.
     """
+
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto", "bfloat16", "fp8"]
 
     @staticmethod
     def get_name() -> str:
@@ -162,7 +166,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
 
         assert isinstance(attn_metadata, dict)
         flashmla_metadata = cast(
-            FlashMLASparseMetadata | None, attn_metadata.get(self.prefix)
+            DeepseekV4FlashMLAMetadata | None, attn_metadata.get(self.prefix)
         )
         swa_metadata = cast(
             "DeepseekSparseSWAMetadata | None",
@@ -190,7 +194,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         kv_cache: torch.Tensor | None,
         swa_k_cache: torch.Tensor,
         swa_metadata: "DeepseekSparseSWAMetadata",
-        attn_metadata: FlashMLASparseMetadata | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Build the combined sparse-index tensors for the mixed batch.
@@ -284,24 +288,40 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         query_start_loc = swa_metadata.query_start_loc[: num_reqs + 1]
         seq_lens = swa_metadata.seq_lens[:num_reqs]
         assert seq_lens.dtype == torch.int32
-        sparse_indices, sparse_topk_lens = build_flashinfer_mixed_sparse_indices(
-            decode_swa_indices,
-            decode_compressed_indices,
-            decode_compressed_topk_lens,
-            prefill_topk_indices[:num_prefill_tokens],
-            query_start_loc,
-            seq_lens,
-            swa_metadata.token_to_req_indices[:num_tokens],
-            swa_metadata.block_table[:num_reqs],
-            swa_metadata.block_size,
-            compressed_block_table,
-            compressed_block_size,
-            self.window_size,
-            self.compress_ratio,
-            top_k,
-            decode_compressed_indices_are_local=decode_compressed_indices_are_local,
-            decode_is_valid_token=decode_is_valid_token,
+        # cache for SWA-only and C128A that build the same mixed sparse indices
+        # C4A stays uncached.
+        cache_key = (
+            "swa_only"
+            if swa_only
+            else ("c128a" if self.compress_ratio == 128 else "c4a")
         )
+        cached_sparse = swa_metadata.flashinfer_sparse_index_cache.get(cache_key, None)
+        if cached_sparse is None:
+            sparse_indices, sparse_topk_lens = build_flashinfer_mixed_sparse_indices(
+                decode_swa_indices,
+                decode_compressed_indices,
+                decode_compressed_topk_lens,
+                prefill_topk_indices[:num_prefill_tokens],
+                query_start_loc,
+                seq_lens,
+                swa_metadata.token_to_req_indices[:num_tokens],
+                swa_metadata.block_table[:num_reqs],
+                swa_metadata.block_size,
+                compressed_block_table,
+                compressed_block_size,
+                self.window_size,
+                self.compress_ratio,
+                top_k,
+                decode_compressed_indices_are_local=decode_compressed_indices_are_local,
+                decode_is_valid_token=decode_is_valid_token,
+            )
+            if cache_key != "c4a":
+                swa_metadata.flashinfer_sparse_index_cache[cache_key] = (
+                    sparse_indices,
+                    sparse_topk_lens,
+                )
+        else:
+            sparse_indices, sparse_topk_lens = cached_sparse
         return compressed_kv_cache, seq_lens, sparse_indices, sparse_topk_lens
 
     def _forward(
@@ -310,7 +330,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         kv_cache: torch.Tensor | None,
         swa_k_cache: torch.Tensor,
         swa_metadata: "DeepseekSparseSWAMetadata",
-        attn_metadata: FlashMLASparseMetadata | None,
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
     ) -> None:

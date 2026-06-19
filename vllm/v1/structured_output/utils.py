@@ -6,7 +6,9 @@ import hashlib
 import importlib.metadata
 import os
 import tempfile
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from typing import TYPE_CHECKING, TypeVar
 
 import numpy as np
 import regex as re
@@ -38,7 +40,47 @@ else:
 
 logger = init_logger(__name__)
 
+_T = TypeVar("_T")
+
 CACHE = None
+
+
+def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
+    """Run a regex compilation callable with a timeout.
+
+    Prevents ReDoS attacks where adversarial regex patterns (e.g. nested
+    quantifiers like ``(a+)+b``) cause exponential DFA state-space explosion,
+    hanging the inference worker indefinitely.
+
+    Args:
+        fn: Single-argument callable that takes the pattern and performs
+            the regex compilation.
+        pattern: The regex pattern string, passed to *fn* and included in
+            timeout error messages.
+
+    Raises:
+        ValueError: If compilation exceeds the configured timeout.
+    """
+    timeout = envs.VLLM_REGEX_COMPILATION_TIMEOUT_S
+    if timeout <= 0:
+        return fn(pattern)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn, pattern)
+    try:
+        result = future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise ValueError(
+            f"Regex compilation timed out after {timeout}s. "
+            "The pattern may be too complex or contain constructs that "
+            "cause exponential state-space explosion (e.g. nested "
+            f"quantifiers). Pattern: {pattern[:200]}"
+        ) from None
+    else:
+        executor.shutdown(wait=False)
+        return result
 
 
 def apply_grammar_bitmask(
