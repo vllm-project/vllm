@@ -86,7 +86,7 @@ def test_gsm8k_correctness(config_filename):
         if not on_gfx950():
             pytest.skip(
                 "Skipping Qwen3.5-35B-A3B-MXFP4-AITER-TP2 on non-GFX950 platforms. "
-                "AITER is not supported on non-GFX950 platforms."
+                "The quantization scheme is not supported on non-GFX950 platforms."
             )
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
