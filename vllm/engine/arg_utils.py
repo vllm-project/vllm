@@ -638,6 +638,7 @@ class EngineArgs:
     enable_logging_iteration_details: bool = (
         ObservabilityConfig.enable_logging_iteration_details
     )
+    jit_monitor_mode: Literal["warn", "error"] = ObservabilityConfig.jit_monitor_mode
     jit_monitor_verbose: bool = ObservabilityConfig.jit_monitor_verbose
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
@@ -1360,6 +1361,10 @@ class EngineArgs:
             **observability_kwargs["enable_logging_iteration_details"],
         )
         observability_group.add_argument(
+            "--jit-monitor-mode",
+            **observability_kwargs["jit_monitor_mode"],
+        )
+        observability_group.add_argument(
             "--jit-monitor-verbose",
             **observability_kwargs["jit_monitor_verbose"],
         )
@@ -1720,6 +1725,22 @@ class EngineArgs:
         if isinstance(cfg, str):
             cfg = json.loads(cfg)
         return DiffusionConfig(**cfg)
+
+    def create_observability_config(self) -> ObservabilityConfig:
+        return ObservabilityConfig(
+            show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
+            otlp_traces_endpoint=self.otlp_traces_endpoint,
+            collect_detailed_traces=self.collect_detailed_traces,
+            kv_cache_metrics=self.kv_cache_metrics,
+            kv_cache_metrics_sample=self.kv_cache_metrics_sample,
+            cudagraph_metrics=self.cudagraph_metrics,
+            enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
+            enable_mfu_metrics=self.enable_mfu_metrics,
+            enable_mm_processor_stats=self.enable_mm_processor_stats,
+            enable_logging_iteration_details=self.enable_logging_iteration_details,
+            jit_monitor_mode=self.jit_monitor_mode,
+            jit_monitor_verbose=self.jit_monitor_verbose,
+        )
 
     def create_engine_config(
         self,
@@ -2202,19 +2223,7 @@ class EngineArgs:
                 self.reasoning_parser_plugin
             )
 
-        observability_config = ObservabilityConfig(
-            show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
-            otlp_traces_endpoint=self.otlp_traces_endpoint,
-            collect_detailed_traces=self.collect_detailed_traces,
-            kv_cache_metrics=self.kv_cache_metrics,
-            kv_cache_metrics_sample=self.kv_cache_metrics_sample,
-            cudagraph_metrics=self.cudagraph_metrics,
-            enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
-            enable_mfu_metrics=self.enable_mfu_metrics,
-            enable_mm_processor_stats=self.enable_mm_processor_stats,
-            enable_logging_iteration_details=self.enable_logging_iteration_details,
-            jit_monitor_verbose=self.jit_monitor_verbose,
-        )
+        observability_config = self.create_observability_config()
 
         # Compilation config overrides
         compilation_config = copy.deepcopy(self.compilation_config)
