@@ -440,6 +440,7 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq",
+        "auto_awq",
         "awq_marlin",  # will be overwritten with awq
         "gptq",
         "gptq_marlin",
@@ -459,6 +460,7 @@ class RocmPlatform(Platform):
         "modelopt_mixed",
         "fp8_per_tensor",
         "fp8_per_block",
+        "fp8_per_channel",
         "online",
         "gpt_oss_mxfp4",
     ]

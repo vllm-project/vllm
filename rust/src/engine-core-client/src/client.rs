@@ -56,6 +56,9 @@ pub enum TransportMode {
         /// Output PULL socket address that engines will connect to for
         /// responses.
         output_address: String,
+        /// First data-parallel engine rank expected to register on this
+        /// transport.
+        engine_start_index: u32,
         /// Total number of engines expected to register on this transport.
         engine_count: usize,
         /// Maximum time to wait for all expected engines to register.
@@ -246,6 +249,7 @@ impl EngineCoreClient {
             TransportMode::Bootstrapped {
                 input_address,
                 output_address,
+                engine_start_index,
                 engine_count,
                 ready_timeout,
             } => {
@@ -256,6 +260,7 @@ impl EngineCoreClient {
                 transport::connect_bootstrapped(
                     input_address,
                     output_address,
+                    *engine_start_index,
                     *engine_count,
                     *ready_timeout,
                 )
@@ -409,6 +414,24 @@ impl EngineCoreClient {
             .expect("engine core client requires at least one engine")
     }
 
+    /// Return the world size (TP * PP) from the parallel config, if available.
+    pub fn world_size(&self) -> u64 {
+        self.engines
+            .first()
+            .expect("engine core client requires at least one engine")
+            .ready_response
+            .world_size
+    }
+
+    /// Return the data parallel size from the parallel config, if available.
+    pub fn data_parallel_size(&self) -> u64 {
+        self.engines
+            .first()
+            .expect("engine core client requires at least one engine")
+            .ready_response
+            .data_parallel_size
+    }
+
     /// Get the model name associated with this client used for metrics
     /// labeling.
     pub fn model_name(&self) -> &str {
@@ -489,6 +512,10 @@ impl EngineCoreClient {
         if abortable.is_empty() {
             return Ok(());
         }
+
+        // Finalize the consumer streams first, before the engine round-trip.
+        let all_request_ids: Vec<String> = abortable.values().flatten().cloned().collect();
+        self.inner.abort_requests_locally(&all_request_ids);
 
         for (engine_id, request_ids) in abortable {
             self.inner.do_abort_requests(&engine_id, &request_ids).await?;
