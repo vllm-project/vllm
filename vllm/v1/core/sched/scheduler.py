@@ -443,11 +443,13 @@ class Scheduler(SchedulerInterface):
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
         # Adaptive K: compute now so KV lookahead can be zeroed if K=0.
-        _adaptive_k_step = self._compute_adaptive_k()
+        # If DSD is also active, Adaptive K refines DSD's K downward.
+        _adaptive_k_step = self._compute_adaptive_k(
+            max_k=num_spec_tokens_to_schedule
+        )
         _prev_lookahead = self.num_lookahead_tokens
         if _adaptive_k_step == 0:
             self.num_lookahead_tokens = 0
-
         # For logging.
         scheduled_timestamp = time.monotonic()
 
@@ -1876,16 +1878,17 @@ class Scheduler(SchedulerInterface):
 
         return engine_core_outputs
 
-    def _compute_adaptive_k(self) -> int:
+    def _compute_adaptive_k(self, max_k: int | None = None) -> int:
         """Select K maximising goodput = E_acc(K) / ITL(K, BS).
 
-        ITL (inter-token latency) accounts for both draft generation and
-        target verification costs. K=0 disables speculation when expected
-        goodput falls below 1.0 (no speculation baseline).
+        When DSD is also active, max_k is DSD's batch-size scheduled K and
+        this function refines it downward using runtime acceptance. When
+        DSD is inactive, max_k defaults to num_spec_tokens.
+        K=0 disables speculation when expected goodput falls below 1.0.
         """
         alphas = self._per_position_ema
         if alphas is None or not self._enable_adaptive_k:
-            return self.num_spec_tokens
+            return max_k if max_k is not None else self.num_spec_tokens
 
         prev_k = self._previous_adaptive_k
 
@@ -1906,13 +1909,12 @@ class Scheduler(SchedulerInterface):
 
         # Verification cost: target model processes K+1 tokens per sequence.
         # At batch-size BS, the effective work grows with BS * (K+1), so
-        # verification cost scales with both K and batch size.
+        # verification cost scales with batch size.
         batch_size = len(self.running)
-        # Base verify = 1 target forward; overhead scales with batch and K.
         verify_cost_per_token = self._adaptive_k_bs_penalty * batch_size * scale
 
         min_k = self._adaptive_k_min_tokens
-        max_k = self.num_spec_tokens
+        max_k = max_k if max_k is not None else self.num_spec_tokens
 
         best_k = prev_k
         best_goodput = 1.0  # K=0 baseline (no speculation)
