@@ -1318,6 +1318,13 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        # Knorm: route block scores from model runner to KV cache manager.
+        knorm_scores = getattr(model_runner_output, "knorm_block_scores", None)
+        if knorm_scores:
+            from vllm.knorm.manager import submit_block_scores
+
+            submit_block_scores(knorm_scores)
+
         sampled_token_ids = model_runner_output.sampled_token_ids
         num_sampled_tokens = model_runner_output.num_sampled_tokens
         logprobs = model_runner_output.logprobs
