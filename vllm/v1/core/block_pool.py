@@ -376,24 +376,10 @@ class BlockPool:
                 blk,
                 allowed_tenants=allowed_tenants,
             )
+            self.try_promote_cached_hash_to_global(block_hash, kv_cache_group_id, threshold=3)
+            
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
-
-    def try_promote_cached_hash_to_global(
-        self,
-        block_hash: BlockHash,
-        kv_cache_group_id: int,
-        threshold: int = 3,
-    ) -> list[int]:
-        """Promote duplicate hash entries to a single GLOBAL cache node.
-
-        Returns block ids that became redundant and can be reclaimed by the
-        block allocator.
-        """
-        node_hash = make_block_hash_with_group_id(block_hash, kv_cache_group_id)
-        return self.cached_block_hash_to_block.try_promote_to_global(
-            node_hash, threshold=threshold
-        )
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
@@ -442,6 +428,30 @@ class BlockPool:
                     group_idx=kv_cache_group_id,
                 )
             )
+
+    def try_promote_cached_hash_to_global(
+            self,
+            block_hash: BlockHash,
+            kv_cache_group_id: int,
+            threshold: int = 3,
+        ) -> None: # Changed return type to None
+            """Promote duplicate hash entries and free the redundant GPU memory."""
+            node_hash = make_block_hash_with_group_id(block_hash, kv_cache_group_id)
+            
+            # Get the IDs of the duplicate blocks
+            redundant_block_ids = self.cached_block_hash_to_block.try_promote_to_global(
+                node_hash, threshold=threshold
+            )
+            
+            if not redundant_block_ids:
+                return
+                
+            # Fetch the actual KVCacheBlock objects using the IDs
+            blocks_to_free = [self.blocks[b_id] for b_id in redundant_block_ids]
+            
+            # Free them back into the queue so the GPU reclaims the VRAM!
+            self.free_blocks(blocks_to_free)
+            logger.info(f"[HybridCache] Promoted {node_hash} to GLOBAL. Freed {len(blocks_to_free)} redundant blocks.")
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
