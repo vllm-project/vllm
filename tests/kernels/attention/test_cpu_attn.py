@@ -760,6 +760,25 @@ def test_varlen_with_paged_kv_normal_vec(
     )
 
 
+def test_varlen_with_paged_kv_mixed_gqa_prefill_split_vec() -> None:
+    # A prefill request can be split into single-token workitems
+    # when split-KV is enabled. Mixed-batch GQA decisions must still be based
+    # on the original request q_len, not the scheduler workitem q_len.
+    varlen_with_paged_kv(
+        seq_lens=[(17, 4096), (1, 2048)],
+        num_heads=(12, 2),
+        head_size=96,
+        sliding_window=None,
+        dtype=torch.bfloat16,
+        block_size=96,
+        soft_cap=None,
+        num_blocks=128,
+        use_alibi=False,
+        use_sink=False,
+        isa="vec",
+    )
+
+
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8_e4m3", "fp8_e5m2"])
 @pytest.mark.parametrize("seq_lens", SEQ_LENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
