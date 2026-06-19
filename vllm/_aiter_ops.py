@@ -2679,6 +2679,31 @@ class rocm_aiter_ops:
         return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)
 
     @staticmethod
+    def shuffle_mxfp8_moe_weights(
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Preshuffle MXFP8 MoE weights + E8M0 scales into AITER's FlyDSL layout:
+        gate/up-interleaved weights, interleaved scale for w13 (gate/up), plain
+        scale for w2 (the interleaved variant is gate/up-only and misaligns w2).
+        """
+        from aiter.ops.shuffle import shuffle_scale, shuffle_weight
+
+        num_experts = w13.shape[0]
+        w13 = shuffle_weight(w13, is_guinterleave=True, gate_up=True)
+        w2 = shuffle_weight(w2, is_guinterleave=True, gate_up=False)
+        w13_scale = shuffle_scale(
+            w13_scale.reshape(-1, w13_scale.shape[-1]),
+            num_experts,
+            is_guinterleave=True,
+            gate_up=True,
+        )
+        w2_scale = shuffle_scale(w2_scale.reshape(-1, w2_scale.shape[-1]))
+        return w13, w2, w13_scale, w2_scale
+
+    @staticmethod
     def flash_attn_varlen_func(
         q: torch.Tensor,
         k: torch.Tensor,
