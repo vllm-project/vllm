@@ -87,10 +87,10 @@ CHECK_IMPORTS = {
         pattern=(
             r"^\s*from\s+vllm\."
             r"(?:"
-            r"model_executor\.layers(?!\.utils\b)"
+            r"model_executor\.layers(?!\.utils\b)(?!\.quantization\.base_config\b)(?!\.quantization\.utils\.fp8_utils\b)(?!\.fused_moe\.activation\b)(?!\.fused_moe\.fused_moe_method_base\b)(?!\.fused_moe\.modular_kernel\b)(?!\.fused_moe\.runner\.moe_runner_interface\b)(?!\.sparse_attn_indexer\b)(?!\.attention_layer_base\b)"
             r"|model_executor\.models(?!\.utils\b)"
             r"|models\.[^.]+(?!\.hw_agnostic\b)"
-            r"|v1\.attention\.backends(?!\.utils\b)"
+            r"|v1\.attention\.backends(?!\.utils\b)(?!\.mla\.indexer\b)"
             r")"
             r"(?:\.|\s+import\b)"
         ),
@@ -100,6 +100,18 @@ CHECK_IMPORTS = {
             "utils.py files such as vllm.model_executor.layers.utils.py."
         ),
         applies_to=re.compile(r"^vllm/models/[^/]+/hw_agnostic/.*\.py$"),
+        # Per-file carve-out: the vendored DSv4 quant_config.py is the
+        # explicit boundary between vendored layer types and upstream
+        # quant-method implementations (Fp8LinearMethod, Fp8MoEMethod,
+        # etc.). The user's policy is "concrete quant-method
+        # implementations stay upstream" — this file is where the
+        # vendored RoutedExperts / LinearBase isinstance dispatches into
+        # those upstream method classes. Other paths under
+        # ``hw_agnostic/`` remain forbidden from importing
+        # ``quantization.fp8`` / ``modelopt`` / etc.
+        allowed_files={
+            "vllm/models/deepseek_v4/hw_agnostic/ops/quant_config.py",
+        },
     ),
 }
 
@@ -175,7 +187,9 @@ def test_regex():
         ("from vllm.model_executor.layers.layernorm import RMSNorm", True),
         ("from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm", True),
         ("from vllm.model_executor.layers.rotary_embedding import get_rope", True),
-        ("from vllm.model_executor.layers.sparse_attn_indexer import X", True),
+        # sparse_attn_indexer carve-out: the upstream class has the OOT
+        # torch-fallback wired in; the vendored copy re-exports it.
+        ("from vllm.model_executor.layers.sparse_attn_indexer import X", False),
         ("from vllm.model_executor.layers.mhc import HCHeadOp", True),
         ("from vllm.model_executor.layers.linear import ColumnParallelLinear", True),
         ("from vllm.model_executor.layers.fused_moe import FusedMoE", True),
@@ -183,13 +197,31 @@ def test_regex():
             "from vllm.model_executor.layers.logits_processor import LogitsProcessor",
             True,
         ),
-        ("from vllm.model_executor.layers.attention_layer_base import X", True),
+        # attention_layer_base carve-out: the worker walks static_forward_context
+        # with isinstance(layer, upstream.AttentionLayerBase) to find KV-cache
+        # owners. Vendored DSv4 layers must inherit from the same upstream class
+        # or kv_cache_specs comes back empty.
+        ("from vllm.model_executor.layers.attention_layer_base import X", False),
         (
             "from vllm.model_executor.layers.quantization import QuantizationConfig",
             True,
         ),
+        # Other quantization.utils.* modules (int8_utils, marlin_utils, etc.)
+        # remain forbidden — only fp8_utils is carved out as the FP8 path's
+        # generic quant primitive (DSv4 needs ``per_token_group_quant_fp8``
+        # in the vendored fused_moe.utils).
         (
-            "from vllm.model_executor.layers.quantization.utils.fp8_utils import x",
+            "from vllm.model_executor.layers.quantization.utils.int8_utils import x",
+            True,
+        ),
+        (
+            "from vllm.model_executor.layers.quantization.utils.marlin_utils import x",
+            True,
+        ),
+        # Concrete quantization implementations stay forbidden — only the
+        # abstract bases get a carve-out (further down).
+        (
+            "from vllm.model_executor.layers.quantization.fp8 import X",
             True,
         ),
         ("from vllm.model_executor.layers.vocab_parallel_embedding import X", True),
@@ -202,7 +234,13 @@ def test_regex():
         ("from vllm.models.deepseek_v4.common.ops.fused_indexer_q import bar", True),
         ("from vllm.models.minimax_m3.compressor import X", True),
         ("from vllm.models.llama4.experts import X", True),
-        ("from vllm.v1.attention.backends.mla.indexer import X", True),
+        # mla.indexer carve-out: the indexer's metadata builder is
+        # framework-driven (called per kv-cache group at request time) but
+        # does not contain hardware-specific kernel calls — it only
+        # composes Triton helpers and shape/index math. Re-exporting
+        # rather than vendoring keeps the per-step metadata logic in
+        # sync with upstream.
+        ("from vllm.v1.attention.backends.mla.indexer import X", False),
         ("from vllm.v1.attention.backends.mla.sparse_swa import Y", True),
         ("    from vllm.model_executor.layers.activation import SiluAndMul", True),
         ("from vllm.model_executor.custom_op import PluggableLayer", False),
@@ -210,6 +248,26 @@ def test_regex():
         ("from vllm.model_executor.models.utils import maybe_prefix", False),
         ("from vllm.model_executor.models.utils import make_layers", False),
         ("from vllm.v1.attention.backends.utils import split_decodes", False),
+        # Quantization abstract-bases carve-out: vendored linear/embedding
+        # code must inherit from the registry's QuantizeMethodBase to keep
+        # quant-method dispatch working. The base ABCs aren't HW-specific.
+        (
+            "from vllm.model_executor.layers.quantization.base_config import "
+            "QuantizeMethodBase",
+            False,
+        ),
+        (
+            "from vllm.model_executor.layers.quantization.base_config import "
+            "QuantizationConfig, QuantizeMethodBase",
+            False,
+        ),
+        # FP8 quant primitives carve-out: per_token_group_quant_fp8 is the
+        # generic FP8 quant op the vendored fused_moe.utils needs.
+        (
+            "from vllm.model_executor.layers.quantization.utils.fp8_utils import "
+            "per_token_group_quant_fp8",
+            False,
+        ),
         (
             "from vllm.model_executor.model_loader.weight_utils import "
             "default_weight_loader",

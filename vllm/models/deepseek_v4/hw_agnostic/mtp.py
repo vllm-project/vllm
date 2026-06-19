@@ -25,17 +25,21 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_mapping
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import (
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import maybe_prefix
+from vllm.models.deepseek_v4.hw_agnostic.ops._mtp_helpers import (
+    SharedHead,
+    get_spec_layer_idx_from_weight_name,
+)
+from vllm.models.deepseek_v4.hw_agnostic.ops.fused_moe.layer import (
+    fused_moe_make_expert_params_mapping,
+)
+from vllm.models.deepseek_v4.hw_agnostic.ops.layernorm import RMSNorm
+from vllm.models.deepseek_v4.hw_agnostic.ops.linear import ReplicatedLinear
+from vllm.models.deepseek_v4.hw_agnostic.ops.logits_processor import LogitsProcessor
+from vllm.models.deepseek_v4.hw_agnostic.ops.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.deepseek_mtp import SharedHead
-from vllm.model_executor.models.deepseek_v2 import get_spec_layer_idx_from_weight_name
-from vllm.model_executor.models.utils import maybe_prefix
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -108,8 +112,9 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         )
 
         # CustomOps must be constructed inside set_current_vllm_config — i.e.
-        # here at model-init time, not later in compute_logits.
-        import vllm.model_executor.layers.mhc as mhc  # noqa: F401
+        # here at model-init time, not later in compute_logits. mHC ops are
+        # vendored locally.
+        from vllm.models.deepseek_v4.hw_agnostic.ops import mhc
 
         self.hc_head_op = mhc.HCHeadOp()
         self.mhc_post_op = mhc.MHCPostOp()

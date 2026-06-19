@@ -144,7 +144,7 @@ def triton_qnorm_rope_kv_fp8_insert(
     """
     # Lazy import to avoid an import-time cycle through cache_utils, which
     # itself imports symbols defined later in the deepseek_v4 package.
-    from vllm.models.deepseek_v4.common.ops.cache_utils import (
+    from vllm.models.deepseek_v4.hw_agnostic.ops.common_kernels.cache_utils import (
         quantize_and_insert_k_cache,
     )
 

@@ -39,20 +39,7 @@ from vllm.config import (
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.models.deepseek_v4.common.ops import (
-    combine_topk_swa_indices,
-    compute_global_topk_indices_and_lens,
-    dequantize_and_gather_k_cache,
-    fused_indexer_q_rope_quant,
-    fused_q_kv_rmsnorm,
-)
-from vllm.models.deepseek_v4.compressor import DeepseekCompressor
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.models.deepseek_v4.hw_agnostic.backend import (
     DeepseekV4HWAgnosticBackend,
 )
@@ -62,22 +49,39 @@ from vllm.models.deepseek_v4.hw_agnostic.ops import (
     triton_qnorm_rope_kv_fp8_insert,
     triton_sparse_decode_fp8,
 )
-from vllm.models.deepseek_v4.sparse_mla import (
-    DeepseekV4FlashMLABackend,
-    DeepseekV4FlashMLAMetadata,
+from vllm.models.deepseek_v4.hw_agnostic.ops.attention_layer_base import (
+    AttentionLayerBase,
 )
-from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
-from vllm.v1.attention.backends.mla.indexer import (
+from vllm.models.deepseek_v4.hw_agnostic.ops.common_kernels import (
+    combine_topk_swa_indices,
+    compute_global_topk_indices_and_lens,
+    dequantize_and_gather_k_cache,
+    fused_indexer_q_rope_quant,
+    fused_q_kv_rmsnorm,
+)
+from vllm.models.deepseek_v4.hw_agnostic.ops.compressor import DeepseekCompressor
+from vllm.models.deepseek_v4.hw_agnostic.ops.custom_op import PluggableLayer
+from vllm.models.deepseek_v4.hw_agnostic.ops.indexer import (
     DeepseekV4IndexerBackend,
     get_max_prefill_buffer_size,
 )
-from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
+from vllm.models.deepseek_v4.hw_agnostic.ops.layernorm import LayerNorm, RMSNorm
+from vllm.models.deepseek_v4.hw_agnostic.ops.linear import ReplicatedLinear
+from vllm.models.deepseek_v4.hw_agnostic.ops.sparse_attn_indexer import (
+    SparseAttnIndexer,
+)
+from vllm.models.deepseek_v4.hw_agnostic.ops.sparse_mla import (
+    DeepseekV4FlashMLABackend,
+    DeepseekV4FlashMLAMetadata,
+)
+from vllm.models.deepseek_v4.hw_agnostic.ops.sparse_swa import DeepseekV4SWACache
+from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
-    from vllm.v1.attention.backends.mla.sparse_swa import (
+    from vllm.models.deepseek_v4.hw_agnostic.ops.sparse_swa import (
         DeepseekSparseSWAMetadata,
     )
 

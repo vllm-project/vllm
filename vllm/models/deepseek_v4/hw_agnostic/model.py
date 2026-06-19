@@ -15,27 +15,8 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    GateLinear,
-    fused_moe_make_expert_params_mapping,
-)
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
-    MergedColumnParallelLinear,
-    RowParallelLinear,
-)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -45,10 +26,32 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.models.deepseek_v4.hw_agnostic.ops._mtp_helpers import SupportsPP
+from vllm.models.deepseek_v4.hw_agnostic.ops.activation import (
+    SiluAndMul,
+    SiluAndMulWithClamp,
+)
 from vllm.models.deepseek_v4.hw_agnostic.ops.attention import (
     DeepseekV4Indexer,
     DeepseekV4MLAModules,
     DeepseekV4MultiHeadLatentAttentionWrapper,
+)
+from vllm.models.deepseek_v4.hw_agnostic.ops.fused_moe.layer import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
+from vllm.models.deepseek_v4.hw_agnostic.ops.gate_linear import GateLinear
+from vllm.models.deepseek_v4.hw_agnostic.ops.layernorm import RMSNorm
+from vllm.models.deepseek_v4.hw_agnostic.ops.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    RowParallelLinear,
+)
+from vllm.models.deepseek_v4.hw_agnostic.ops.logits_processor import LogitsProcessor
+from vllm.models.deepseek_v4.hw_agnostic.ops.rotary_embedding import get_rope
+from vllm.models.deepseek_v4.hw_agnostic.ops.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -410,9 +413,8 @@ class DeepseekV4DecoderLayer(nn.Module):
     ):
         super().__init__()
 
-        # Lazy import to avoid top-level tilelang dependency.
-        # Registers torch.ops.vllm.mhc_pre / mhc_fused_post_pre.
-        import vllm.model_executor.layers.mhc as mhc  # noqa: F401
+        # mHC ops are vendored locally; no upstream tilelang dependency.
+        from vllm.models.deepseek_v4.hw_agnostic.ops import mhc
 
         self.mhc_pre = mhc.MHCPreOp()
         self.mhc_fused_post_pre = mhc.MHCFusedPostPreOp()
@@ -625,10 +627,8 @@ class DeepseekV4Model(nn.Module):
             requires_grad=False,
         )
 
-        # CustomOp instances must be constructed inside set_current_vllm_config
-        # (their __init__ reads the cached compilation config). Build once at
-        # model-init time; calling them later in forward() is safe.
-        import vllm.model_executor.layers.mhc as mhc  # noqa: F401
+        # mHC ops are vendored locally; build them once at model-init time.
+        from vllm.models.deepseek_v4.hw_agnostic.ops import mhc
 
         self.hc_head_op = mhc.HCHeadOp()
         self.mhc_post_op = mhc.MHCPostOp()
