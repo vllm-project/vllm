@@ -149,6 +149,44 @@ class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
         )
 
 
+@pytest.mark.parametrize(
+    ("config_kwargs", "expected_reason"),
+    [
+        ({"has_bias": True}, "kernel does not support bias"),
+        ({"is_lora_enabled": True}, "kernel does not support LoRA"),
+    ],
+)
+def test_nvfp4_emulation_support_check_rejects_bias_and_lora(
+    config_kwargs: dict[str, bool],
+    expected_reason: str,
+) -> None:
+    moe_config = FusedMoEConfig(
+        num_experts=2,
+        experts_per_token=1,
+        hidden_dim=16,
+        intermediate_size_per_partition=16,
+        num_local_experts=2,
+        num_logical_experts=2,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device="cuda",
+        routing_method=RoutingMethodType.TopK,
+        **config_kwargs,
+    )
+
+    supported, reason = Nvfp4QuantizationEmulationTritonExperts.is_supported_config(
+        Nvfp4QuantizationEmulationTritonExperts,
+        moe_config,
+        kNvfp4Static,
+        kNvfp4Dynamic,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+
+    assert not supported
+    assert reason == expected_reason
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
     reason="Triton NVFP4 kernel requires CUDA.",
@@ -704,49 +742,3 @@ def test_nvfp4_moe_correctness(
     )
 
     torch.testing.assert_close(output_fused, output_ref, atol=0, rtol=0)
-
-    # Benchmark.
-    quantiles = [0.5, 0.001, 0.999]
-    model_short = model_id.split("/")[-1]
-
-    def _ref_bench():
-        workspace13_ref.zero_()
-        workspace2_ref.zero_()
-        output_ref.zero_()
-        ref_experts.apply(
-            output=output_ref,
-            workspace13=workspace13_ref,
-            workspace2=workspace2_ref,
-            **apply_kwargs,
-        )
-
-    def _fused_bench():
-        workspace13_fused.zero_()
-        workspace2_fused.zero_()
-        output_fused.zero_()
-        fused_experts.apply(
-            output=output_fused,
-            workspace13=workspace13_fused,
-            workspace2=workspace2_fused,
-            **apply_kwargs,
-        )
-
-    ref_ms, ref_min, ref_max = triton.testing.do_bench(_ref_bench, quantiles=quantiles)
-    fused_ms, fused_min, fused_max = triton.testing.do_bench(
-        _fused_bench, quantiles=quantiles
-    )
-
-    speedup = ref_ms / fused_ms if fused_ms > 0 else float("inf")
-    print(
-        f"  MoE [{model_short}, tp={tensor_parallel_size},"
-        f" tokens={num_tokens}, top_k={top_k}]:"
-    )
-    print(
-        f"    unfused:   median={ref_ms:.3f}ms, "
-        f"min={ref_min:.3f}ms, max={ref_max:.3f}ms"
-    )
-    print(
-        f"    fused:     median={fused_ms:.3f}ms, "
-        f"min={fused_min:.3f}ms, max={fused_max:.3f}ms"
-    )
-    print(f"    speedup:   {speedup:.2f}x")
