@@ -52,6 +52,7 @@ def _get_cherry_blossom_image() -> Image.Image:
         get_vllm_public_assets(filename="cherry_blossom.jpg", s3_prefix=VLM_IMAGES_DIR)
     )
 
+
 @torch.inference_mode()
 def _run_test(
     hf_runner: type[HfRunner],
