@@ -785,7 +785,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
-                assert not fp8_attention, "DCP not support fp8 kvcache now."
+                # DCP head-dim all-gather of Q is incompatible with per-rank
+                # Q fp8 quantization (supports_quant_query_input: each rank
+                # quantizes Q with its own _q_scale, so all-gathered Q shards
+                # have inconsistent scales). Sparse MLA is exempt: its
+                # supports_quant_query_input is False, so Q stays bf16 here
+                # and the fp8 KV scale is handled inside the sparse kernel
+                # (flash_mla_with_kvcache is_fp8_kvcache=True) — no
+                # cross-rank scale issue.
+                assert not fp8_attention or is_sparse_impl, (
+                    "DCP not support fp8 kvcache now (except sparse MLA)."
+                )
                 # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
                 mqa_q = torch.cat(mqa_q, dim=-1)
                 # mqa_q do allgather in head dim.
