@@ -1877,8 +1877,12 @@ class Scheduler(SchedulerInterface):
         return engine_core_outputs
 
     def _compute_adaptive_k(self) -> int:
-        """Select K maximising speedup using per-position EMA acceptance.
-        K=0 disables speculation when expected utility falls below 1."""
+        """Select K maximising goodput = E_acc(K) / ITL(K, BS).
+
+        ITL (inter-token latency) accounts for both draft generation and
+        target verification costs. K=0 disables speculation when expected
+        goodput falls below 1.0 (no speculation baseline).
+        """
         alphas = self._per_position_ema
         if alphas is None or not self._enable_adaptive_k:
             return self.num_spec_tokens
@@ -1890,21 +1894,28 @@ class Scheduler(SchedulerInterface):
             self._adaptive_k_cooldown -= 1
             return max(0, prev_k)
 
-        # Online c_draft: measured ratio scales the user-configured value.
+        # Online cost ratio: measured draft:target step ratio corrects the
+        # profiled base c_draft (which is draft_time / target_time).
         total_draft = max(self._draft_steps, 1)
         total_target = max(self._target_steps, 1)
         scale = total_draft / total_target
-        c_eff_per_token = self._adaptive_k_c_draft * scale
 
-        # Batch-size penalty (Cascade/TurboSpec: cost grows with batch).
+        # --- Cost breakdown (goodput = AL / ITL) ---
+        # Draft cost: K forwards at c_draft per token, scaled by online ratio.
+        draft_cost_per_token = self._adaptive_k_c_draft * scale
+
+        # Verification cost: target model processes K+1 tokens per sequence.
+        # At batch-size BS, the effective work grows with BS * (K+1), so
+        # verification cost scales with both K and batch size.
         batch_size = len(self.running)
-        c_eff_per_token *= 1.0 + self._adaptive_k_bs_penalty * batch_size
+        # Base verify = 1 target forward; overhead scales with batch and K.
+        verify_cost_per_token = self._adaptive_k_bs_penalty * batch_size * scale
 
         min_k = self._adaptive_k_min_tokens
         max_k = self.num_spec_tokens
 
         best_k = prev_k
-        best_utility = 1.0  # K=0 baseline
+        best_goodput = 1.0  # K=0 baseline (no speculation)
         for k in range(max(min_k, 1), max_k + 1):
             prod = 1.0
             e_total = 1.0
@@ -1912,14 +1923,17 @@ class Scheduler(SchedulerInterface):
                 a = max(0.001, min(0.999, alphas[i]))
                 prod *= a
                 e_total += prod
-            utility = e_total / (k * c_eff_per_token + 1.0)
-            if utility > best_utility:
-                best_utility = utility
+
+            # ITL(K, BS) = K * draft_cost + 1 + K * verify_cost_per_token
+            itl = k * draft_cost_per_token + 1.0 + k * verify_cost_per_token
+            goodput = e_total / itl
+            if goodput > best_goodput:
+                best_goodput = goodput
                 best_k = k
 
-        # K=0: disable speculation when utility < 1
+        # K=0: disable speculation when goodput < 1
         # (Saxena et al., MLSys 2026, Theorem 4.2).
-        if best_utility < 1.0 and min_k == 0:
+        if best_goodput < 1.0 and min_k == 0:
             best_k = 0
 
         if best_k != prev_k:
