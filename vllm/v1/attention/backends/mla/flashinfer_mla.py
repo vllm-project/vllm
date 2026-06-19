@@ -105,6 +105,8 @@ g_fi_workspace = torch.zeros(
 
 
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
+    is_lse_base_on_e: bool = False
+
     def __init__(
         self,
         num_heads: int,

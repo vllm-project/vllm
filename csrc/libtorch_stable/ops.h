@@ -321,6 +321,18 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
                           torch::stable::Tensor& indices, int64_t numRows,
                           int64_t stride0, int64_t stride1, int64_t topK);
 
+void stable_top_k_per_row(const torch::stable::Tensor& scores,
+                          const torch::stable::Tensor& seq_lens,
+                          torch::stable::Tensor& indices, int64_t numRows,
+                          int64_t stride0, int64_t stride1, int64_t topK);
+
+void stable_top_k_from_candidates(const torch::stable::Tensor& scores,
+                                  const torch::stable::Tensor& token_ids,
+                                  torch::stable::Tensor& indices,
+                                  int64_t numRows, int64_t score_stride0,
+                                  int64_t score_stride1, int64_t id_stride0,
+                                  int64_t id_stride1, int64_t topK);
+
 void persistent_topk(const torch::stable::Tensor& logits,
                      const torch::stable::Tensor& lengths,
                      torch::stable::Tensor& output,

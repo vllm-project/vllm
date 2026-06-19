@@ -179,6 +179,12 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     token_end: int
     num_reqs: int
     skip_kv_gather: bool = False
+    dcp_rank: int = 0
+    dcp_world_size: int = 1
+    cp_kv_cache_interleave_size: int = 1
+    local_cu_seq_lens: torch.Tensor | None = None
+    local_total_seq_lens: int = 0
+    max_local_total_seq_lens: int = 0
 
 
 @dataclass
@@ -197,6 +203,10 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_lens: torch.Tensor
     requires_padding: bool
     schedule_metadata: torch.Tensor
+    dcp_rank: int = 0
+    dcp_world_size: int = 1
+    cp_kv_cache_interleave_size: int = 1
+    global_seq_lens: torch.Tensor | None = None
 
 
 @dataclass
@@ -306,6 +316,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # (B, max_decode_len) at runtime, keeping context_lens contiguous even
         # when max_decode_len is smaller than next_n.
         self.decode_seq_lens_buffer = torch.zeros(
+            (scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self.global_decode_seq_lens_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
             device=self.device,
@@ -503,6 +518,34 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 seq_lens = seq_lens_buffer
             return seq_lens, block_table, decode_lens, num_decodes, requires_padding
 
+    def _prepare_global_decode_seq_lens(
+        self,
+        global_seq_lens: torch.Tensor | None,
+        decode_lens: torch.Tensor,
+        decode_lens_cpu: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_decode_tokens: int,
+        use_native: bool,
+        max_decode_len: int,
+    ) -> torch.Tensor | None:
+        if global_seq_lens is None:
+            return None
+        if use_native or max_decode_len <= 1:
+            return global_seq_lens
+
+        actual_expanded = int(decode_lens_cpu.sum().item())
+        if actual_expanded > 0:
+            expanded_offsets = torch.repeat_interleave(
+                global_seq_lens - decode_lens - query_start_loc,
+                decode_lens,
+                output_size=actual_expanded,
+            )
+            self.global_decode_seq_lens_buffer[:actual_expanded] = (
+                expanded_offsets + self.arange_buffer[:actual_expanded] + 1
+            )
+        self.global_decode_seq_lens_buffer[actual_expanded:num_decode_tokens] = 0
+        return self.global_decode_seq_lens_buffer[:num_decode_tokens]
+
     def build(
         self,
         common_prefix_len: int,
@@ -543,9 +586,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
             compressed_seq_lens = seq_lens // self.compress_ratio
 
-        if dcp_local_seq_lens is not None:
-            compressed_seq_lens = dcp_local_seq_lens
-
         prefill_metadata = None
         if num_prefills > 0:
             # This CPU value is an upper bound for async-spec extend rows.  It
@@ -558,13 +598,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 if self.compress_ratio > 1
                 else seq_lens_cpu
             )
-            if dcp_local_seq_lens is not None:
-                compressed_seq_lens_cpu = get_dcp_local_seq_lens(
-                    seq_lens_cpu,
-                    self.dcp_world_size,
-                    self.dcp_rank,
-                    self.cp_kv_cache_interleave_size,
-                )
             prefill_query_lens_cpu = torch.diff(
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
@@ -615,12 +648,27 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
             )
 
-            seq_lens = common_attn_metadata.seq_lens[:num_decodes]
+            global_seq_lens_for_decode: torch.Tensor | None = None
+            if dcp_local_seq_lens is not None:
+                global_seq_lens_for_decode = common_attn_metadata.seq_lens[:num_decodes]
+                seq_lens = dcp_local_seq_lens[:num_decodes]
+            else:
+                seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
 
             max_decode_len = int(decode_lens_cpu.max().item())
             next_n = 1 + self.num_speculative_tokens
             use_native = not self.use_flattening and max_decode_len <= next_n
+
+            global_seq_lens_for_decode = self._prepare_global_decode_seq_lens(
+                global_seq_lens=global_seq_lens_for_decode,
+                decode_lens=decode_lens,
+                decode_lens_cpu=decode_lens_cpu,
+                query_start_loc=common_attn_metadata.query_start_loc[:num_decodes],
+                num_decode_tokens=num_decode_tokens,
+                use_native=use_native,
+                max_decode_len=max_decode_len,
+            )
 
             seq_lens, block_table, decode_lens, batch_size, requires_padding = (
                 self._prepare_decode_tensors(
@@ -640,13 +688,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             seq_lens_is_buffer_view = (use_native and next_n > 1) or (
                 not use_native and max_decode_len > 1
             )
-
-            if dcp_local_seq_lens is not None:
-                seq_lens = self._dcp_localize_decode_seq_lens(
-                    seq_lens,
-                    num_decodes,
-                    seq_lens_is_buffer_view=seq_lens_is_buffer_view,
-                )
 
             # For DeepseekV4 (compress_ratio > 1), the indexer KV cache stores
             # compressed tokens. Convert uncompressed seq_lens to compressed.
@@ -681,6 +722,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
+                dcp_rank=self.dcp_rank,
+                dcp_world_size=self.dcp_world_size,
+                cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
+                global_seq_lens=global_seq_lens_for_decode,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(
@@ -726,6 +771,26 @@ def build_prefill_chunk_metadata(
     # Assigning to slice avoids cpu sync.
     cu_seq_lens[:1] = 0
     torch.cumsum(compressed_seq_lens[start_idx:end_idx], dim=0, out=cu_seq_lens[1:])
+
+    local_cu_seq_lens: torch.Tensor | None = None
+    local_total_seq_lens = 0
+    max_local_total_seq_lens = 0
+    if dcp_world_size > 1:
+        assert cp_kv_cache_interleave_size == 1, (
+            "DCP sparse indexer prefill currently supports only "
+            "cp_kv_cache_interleave_size=1."
+        )
+        ranks = torch.arange(dcp_world_size, device=device, dtype=torch.int32)
+        seqs = compressed_seq_lens[start_idx:end_idx].to(torch.int32)
+        local_counts = (
+            seqs.unsqueeze(0) + (dcp_world_size - 1 - ranks.unsqueeze(1))
+        ) // dcp_world_size
+        local_counts = torch.clamp(local_counts, min=0)
+        this_rank_counts = local_counts[dcp_rank]
+        local_cu_seq_lens = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
+        torch.cumsum(this_rank_counts, dim=0, out=local_cu_seq_lens[1:])
+        local_total_seq_lens = int(local_cu_seq_lens[-1].item())
+        max_local_total_seq_lens = int(local_counts.sum(dim=1).max().item())
 
     query_start_loc = (
         query_start_loc[start_idx : end_idx + 1] - query_start_loc[start_idx]
@@ -780,6 +845,12 @@ def build_prefill_chunk_metadata(
         token_end=token_end,
         num_reqs=num_reqs,
         skip_kv_gather=skip_kv_gather,
+        dcp_rank=dcp_rank,
+        dcp_world_size=dcp_world_size,
+        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+        local_cu_seq_lens=local_cu_seq_lens,
+        local_total_seq_lens=local_total_seq_lens,
+        max_local_total_seq_lens=max_local_total_seq_lens,
     )
 
 
@@ -827,18 +898,11 @@ def _build_prefill_chunk_metadata_kernel(
         # Compute cu_seq_len_ks
         tl.store(cu_compressed_seq_len_ks_ptr + out_pos, seq_start, mask=mask)
 
-        # Compute cu_seq_len_ke. Under DCP, global KV position p is owned by
-        # rank (p // DCP_INTERLEAVE) % DCP_WORLD, so each token's global
-        # causal bound must be reduced to this rank's local count.
+        # Compute cu_seq_len_ke. The sparse indexer prefill path gathers K
+        # from all DCP ranks back into global order before computing logits,
+        # so this must remain the global causal bound.
         global_ctx = start_pos + 1 + offset
-        dcp_group = DCP_WORLD * DCP_INTERLEAVE
-        full = global_ctx // dcp_group
-        rem = global_ctx % dcp_group
-        extra = tl.minimum(
-            tl.maximum(rem - DCP_RANK * DCP_INTERLEAVE, 0), DCP_INTERLEAVE
-        )
-        local_ctx = full * DCP_INTERLEAVE + extra
-        seq_len_per_token = local_ctx // COMPRESS_RATIO
+        seq_len_per_token = global_ctx // COMPRESS_RATIO
         tl.store(
             cu_compressed_seq_len_ke_ptr + out_pos,
             seq_start + seq_len_per_token,

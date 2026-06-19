@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.distributed import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -35,6 +36,182 @@ RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
+
+_STABLE_TOPK_SCALE = 1.0e9
+
+
+def _can_use_stable_topk_radix(scores: torch.Tensor, k: int) -> bool:
+    """The fused CUDA radix top-K is exact-stable (fp32 score, then lowest token
+    id) and far faster than the fp64-composite torch.topk, so it is always used
+    when applicable; the fp64 path is only the fallback (CPU / k > 2048)."""
+    return (
+        scores.device.type == "cuda" and scores.dtype == torch.float32 and 0 < k <= 2048
+    )
+
+
+def _stable_topk_from_candidates_radix(
+    candidate_scores: torch.Tensor,
+    candidate_token_ids: torch.Tensor,
+    k: int,
+) -> torch.Tensor:
+    """Radix CUDA path: returns the selected global token ids (``-1`` padded)."""
+    num_rows = candidate_scores.shape[0]
+    out = torch.empty((num_rows, k), dtype=torch.int32, device=candidate_scores.device)
+    candidate_token_ids = candidate_token_ids.to(dtype=torch.int32, copy=False)
+    ops.stable_top_k_from_candidates(
+        candidate_scores,
+        candidate_token_ids,
+        out,
+        num_rows,
+        candidate_scores.stride(0),
+        candidate_scores.stride(1),
+        candidate_token_ids.stride(0),
+        candidate_token_ids.stride(1),
+        k,
+    )
+    return out
+
+
+def _stable_topk_from_candidates_fp64(
+    candidate_scores: torch.Tensor,
+    candidate_token_ids: torch.Tensor,
+    k: int,
+) -> torch.Tensor:
+    """fp64-composite stable top-K -- the fallback used when the radix kernel is
+    unavailable (CPU / k > 2048 / not built). Selects the same set as radix."""
+    num_rows, num_candidates = candidate_scores.shape
+    device = candidate_scores.device
+    select_k = min(k, num_candidates)
+    valid = candidate_token_ids >= 0
+    composite = candidate_scores.to(
+        torch.float64
+    ) * _STABLE_TOPK_SCALE - candidate_token_ids.to(torch.float64)
+    composite = composite.masked_fill(~valid, float("-inf"))
+    _, topk_pos = composite.topk(select_k, dim=-1)
+
+    selected = candidate_token_ids.gather(1, topk_pos).to(torch.int32)
+    selected_valid = valid.gather(1, topk_pos)
+    selected = torch.where(selected_valid, selected, selected.new_full((), -1))
+    if select_k == k:
+        return selected
+    pad = torch.full((num_rows, k - select_k), -1, dtype=torch.int32, device=device)
+    return torch.cat((selected, pad), dim=1)
+
+
+def _stable_topk_from_candidates(
+    candidate_scores: torch.Tensor,
+    candidate_token_ids: torch.Tensor,
+    k: int,
+) -> torch.Tensor:
+    """Deterministic top-K over an already-pruned candidate set.
+
+    Ranks by score descending, then lowest global token id -- a total order, so
+    the result is identical on every DCP rank (plain ``torch.topk`` breaks ties
+    nondeterministically). Uses the fused CUDA radix kernel when applicable
+    (fast, exact); otherwise the fp64 composite fallback. Only the selected SET
+    is meaningful -- array order is implementation-defined. ``candidate_token_ids``
+    holds global token ids (``-1`` marks padding).
+    """
+    num_rows, num_candidates = candidate_scores.shape
+    device = candidate_scores.device
+    if num_candidates == 0:
+        return torch.full((num_rows, k), -1, dtype=torch.int32, device=device)
+    if _can_use_stable_topk_radix(candidate_scores, k):
+        return _stable_topk_from_candidates_radix(
+            candidate_scores.float(), candidate_token_ids, k
+        )
+    return _stable_topk_from_candidates_fp64(candidate_scores, candidate_token_ids, k)
+
+
+def _dcp_interleave_source_index(
+    global_cu_seq_lens: torch.Tensor,
+    local_cu_seq_lens_per_rank: torch.Tensor,
+    max_local_total: int,
+    dcp_size: int,
+    global_total: int,
+    cp_kv_cache_interleave_size: int = 1,
+) -> torch.Tensor:
+    assert cp_kv_cache_interleave_size == 1, (
+        "DCP prefill K-gather currently supports only cp_kv_cache_interleave_size=1."
+    )
+    device = global_cu_seq_lens.device
+    if global_total == 0:
+        return torch.empty(0, dtype=torch.long, device=device)
+
+    counts = (global_cu_seq_lens[1:] - global_cu_seq_lens[:-1]).to(torch.int64)
+    num_reqs = counts.numel()
+    req_ids = torch.repeat_interleave(
+        torch.arange(num_reqs, device=device, dtype=torch.int64), counts
+    )
+    pos_in_chunk = torch.arange(global_total, device=device, dtype=torch.int64)
+    req_starts = global_cu_seq_lens[:-1].to(torch.int64)
+    t_in_req = pos_in_chunk - req_starts[req_ids]
+
+    rank_per_pos = t_in_req % dcp_size
+    lpos_per_pos = t_in_req // dcp_size
+    local_starts = local_cu_seq_lens_per_rank.to(torch.int64)[rank_per_pos, req_ids]
+    return rank_per_pos * max_local_total + local_starts + lpos_per_pos
+
+
+def _local_dcp_indices_to_global(
+    local_indices: torch.Tensor,
+    dcp_rank: int,
+    dcp_world_size: int,
+    cp_interleave: int,
+) -> torch.Tensor:
+    valid = local_indices >= 0
+    local = local_indices.to(torch.int64).clamp_min(0)
+    global_indices = (
+        (local // cp_interleave) * (dcp_world_size * cp_interleave)
+        + dcp_rank * cp_interleave
+        + local % cp_interleave
+    )
+    return torch.where(valid, global_indices, -1).to(torch.int32)
+
+
+def _merge_dcp_topk_global(
+    logits: torch.Tensor,
+    topk_indices: torch.Tensor,
+    topk_tokens: int,
+    dcp_rank: int,
+    dcp_world_size: int,
+    cp_interleave: int,
+    row_starts: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Merge each DCP rank's local top-K into the global top-K.
+
+    ``topk_indices`` are this rank's local top-K positions into its 1/N KV
+    shard. A token in the global top-K must also be in its owning rank's local
+    top-K (at most ``topk_tokens - 1`` tokens rank globally above it, hence at
+    most that many on its own rank), so exchanging only the per-rank local
+    candidates is exact -- equivalent to all-gathering the full logit matrix,
+    but it ships ``dcp_world_size * topk_tokens`` candidates instead of the
+    whole score row. Returns global token ids (``-1`` for padding); the
+    attention backend localizes them back to physical slots per rank.
+    """
+    if dcp_world_size <= 1:
+        return topk_indices
+
+    valid = topk_indices >= 0
+    score_indices = topk_indices.clamp_min(0).to(torch.long)
+    if row_starts is not None:
+        score_indices = score_indices + row_starts.to(torch.long).view(-1, 1)
+    local_scores = logits.gather(1, score_indices)
+    local_scores = local_scores.masked_fill(~valid, float("-inf"))
+    global_indices = _local_dcp_indices_to_global(
+        topk_indices, dcp_rank, dcp_world_size, cp_interleave
+    )
+
+    # Pack (score, global_id) so the candidate exchange is a single all-gather.
+    # Token ids are < max_model_len (<< 2**24), exactly representable in fp32.
+    packed = torch.stack(
+        (local_scores.float(), global_indices.to(torch.float32)), dim=-1
+    ).contiguous()
+    gathered = get_dcp_group().all_gather(packed, dim=1)
+    candidate_scores = gathered[..., 0]
+    candidate_ids = gathered[..., 1].to(torch.int32)
+
+    return _stable_topk_from_candidates(candidate_scores, candidate_ids, topk_tokens)
 
 
 def _gather_workspace_shapes(
@@ -189,18 +366,88 @@ def sparse_attn_indexer(
             values_spec,
             scales_spec,
         )
+        chunks_under_dcp = (
+            prefill_metadata.chunks
+            and prefill_metadata.chunks[0].local_cu_seq_lens is not None
+        )
+        prefill_dcp_group = get_dcp_group() if chunks_under_dcp else None
+        prefill_dcp_world = prefill_dcp_group.world_size if prefill_dcp_group else 1
+
         for chunk in prefill_metadata.chunks:
             k_quant = k_quant_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
 
             if not chunk.skip_kv_gather:
-                ops.cp_gather_indexer_k_quant_cache(
-                    kv_cache,
-                    k_quant,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.cu_seq_lens,
-                )
+                if prefill_dcp_world > 1:
+                    assert prefill_dcp_group is not None
+                    assert chunk.local_cu_seq_lens is not None
+                    max_local = chunk.max_local_total_seq_lens
+                    local_k_quant = torch.empty(
+                        (max_local, k_quant.shape[1]),
+                        dtype=k_quant.dtype,
+                        device=k_quant.device,
+                    )
+                    local_k_scale = torch.empty(
+                        (max_local, k_scale.shape[1]),
+                        dtype=k_scale.dtype,
+                        device=k_scale.device,
+                    )
+                    ops.cp_gather_indexer_k_quant_cache(
+                        kv_cache,
+                        local_k_quant,
+                        local_k_scale,
+                        chunk.block_table,
+                        chunk.local_cu_seq_lens,
+                    )
+                    gathered_k_quant = prefill_dcp_group.all_gather(
+                        local_k_quant, dim=0
+                    )
+                    gathered_k_scale = prefill_dcp_group.all_gather(
+                        local_k_scale, dim=0
+                    )
+                    counts = chunk.cu_seq_lens[1:] - chunk.cu_seq_lens[:-1]
+                    ranks = torch.arange(
+                        prefill_dcp_world,
+                        device=k_quant.device,
+                        dtype=torch.int32,
+                    ).unsqueeze(1)
+                    local_counts_all = torch.clamp(
+                        (
+                            counts.to(torch.int32).unsqueeze(0)
+                            + (prefill_dcp_world - 1 - ranks)
+                        )
+                        // prefill_dcp_world,
+                        min=0,
+                    )
+                    local_cu_seq_lens_all = torch.zeros(
+                        prefill_dcp_world,
+                        chunk.num_reqs + 1,
+                        dtype=torch.int32,
+                        device=k_quant.device,
+                    )
+                    torch.cumsum(
+                        local_counts_all,
+                        dim=1,
+                        out=local_cu_seq_lens_all[:, 1:],
+                    )
+                    src_idx = _dcp_interleave_source_index(
+                        chunk.cu_seq_lens,
+                        local_cu_seq_lens_all,
+                        max_local,
+                        prefill_dcp_world,
+                        chunk.total_seq_lens,
+                        chunk.cp_kv_cache_interleave_size,
+                    )
+                    k_quant.copy_(gathered_k_quant.view(-1, k_quant.shape[1])[src_idx])
+                    k_scale.copy_(gathered_k_scale.view(-1, k_scale.shape[1])[src_idx])
+                else:
+                    ops.cp_gather_indexer_k_quant_cache(
+                        kv_cache,
+                        k_quant,
+                        k_scale,
+                        chunk.block_table,
+                        chunk.cu_seq_lens,
+                    )
 
             q_slice = q_quant[chunk.token_start : chunk.token_end]
             q_scale_slice = (
@@ -345,7 +592,7 @@ def sparse_attn_indexer(
                 topk_indices,
                 topk_workspace,
                 topk_tokens,
-                attn_metadata_narrowed.max_seq_len,
+                logits.shape[1],
             )
         else:
             ops.top_k_per_row_decode(
@@ -357,6 +604,18 @@ def sparse_attn_indexer(
                 logits.stride(0),
                 logits.stride(1),
                 topk_tokens,
+            )
+
+        if decode_metadata.global_seq_lens is not None:
+            topk_indices.copy_(
+                _merge_dcp_topk_global(
+                    logits,
+                    topk_indices,
+                    topk_tokens,
+                    decode_metadata.dcp_rank,
+                    decode_metadata.dcp_world_size,
+                    decode_metadata.cp_kv_cache_interleave_size,
+                )
             )
 
         if decode_metadata.requires_padding:

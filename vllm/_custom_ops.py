@@ -2852,6 +2852,50 @@ def top_k_per_row_decode(
     )
 
 
+def stable_top_k_per_row(
+    scores: torch.Tensor,
+    seq_lens: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    stride0: int,
+    stride1: int,
+    topk_tokens: int,
+) -> None:
+    torch.ops._C.stable_top_k_per_row(
+        scores,
+        seq_lens,
+        indices,
+        num_rows,
+        stride0,
+        stride1,
+        topk_tokens,
+    )
+
+
+def stable_top_k_from_candidates(
+    scores: torch.Tensor,
+    token_ids: torch.Tensor,
+    indices: torch.Tensor,
+    num_rows: int,
+    score_stride0: int,
+    score_stride1: int,
+    id_stride0: int,
+    id_stride1: int,
+    topk_tokens: int,
+) -> None:
+    torch.ops._C.stable_top_k_from_candidates(
+        scores,
+        token_ids,
+        indices,
+        num_rows,
+        score_stride0,
+        score_stride1,
+        id_stride0,
+        id_stride1,
+        topk_tokens,
+    )
+
+
 def cp_gather_indexer_k_quant_cache(
     kv_cache: torch.Tensor,
     dst_k: torch.Tensor,

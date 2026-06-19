@@ -41,8 +41,12 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
+    triton_filter_and_convert_dcp_index,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
+from vllm.v1.attention.backends.utils import (
+    KVCacheLayoutType,
+    split_decodes_and_prefills,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
@@ -162,10 +166,13 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
 
     # Sequence lengths for all requests (context + query)
     seq_lens: torch.Tensor
+    num_decodes: int
+    num_decode_tokens: int
 
     # Sparse-specific
     block_size: int = 64
     topk_tokens: int = 2048
+    cp_kv_cache_interleave_size: int = 1
 
 
 class FlashInferMLASparseMetadataBuilder(
@@ -191,6 +198,15 @@ class FlashInferMLASparseMetadataBuilder(
         self.mla_dims = get_mla_dims(self.model_config)
         self.topk_tokens = vllm_config.model_config.hf_config.index_topk
 
+        # Treat MTP/spec-decode query chunks as decode work. This backend
+        # flattens tokens before calling the FlashInfer sparse decode kernel,
+        # and the sparse indexer localizes each expanded token's DCP bound.
+        self._init_reorder_batch_threshold(
+            1,
+            supports_spec_as_decode=True,
+            supports_dcp_with_varlen=True,
+        )
+
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -205,6 +221,12 @@ class FlashInferMLASparseMetadataBuilder(
     ) -> FlashInferMLASparseMetadata:
         cm = common_attn_metadata
         num_tokens = cm.num_actual_tokens
+        assert self.reorder_batch_threshold is not None
+        num_decodes, _, num_decode_tokens, _ = split_decodes_and_prefills(
+            cm,
+            decode_threshold=self.reorder_batch_threshold,
+            treat_short_extends_as_decodes=True,
+        )
 
         # Build req_id_per_token mapping
         starts = np.asarray(cm.query_start_loc_cpu, dtype=np.int32)
@@ -230,8 +252,13 @@ class FlashInferMLASparseMetadataBuilder(
             block_table=cm.block_table_tensor,
             req_id_per_token=req_id_per_token_tensor,
             seq_lens=cm.seq_lens,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            cp_kv_cache_interleave_size=(
+                self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+            ),
         )
 
 
@@ -259,6 +286,7 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
     """
 
     can_return_lse_for_decode: bool = True
+    is_lse_base_on_e: bool = False
 
     def __init__(
         self,
@@ -330,14 +358,27 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        topk_indices_physical, seq_lens = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[:num_actual_toks],
-            attn_metadata.block_table,
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
-            return_valid_counts=True,
-        )
+        if self.dcp_world_size > 1:
+            topk_indices_physical, seq_lens = triton_filter_and_convert_dcp_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                topk_indices,
+                dcp_size=self.dcp_world_size,
+                dcp_rank=self.dcp_rank,
+                cp_kv_cache_interleave_size=(attn_metadata.cp_kv_cache_interleave_size),
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=True,
+            )
+        else:
+            topk_indices_physical, seq_lens = triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=True,
+            )
 
         if self._workspace_buffer is None:
             self._workspace_buffer = _get_workspace_buffer(q.device)
@@ -351,15 +392,38 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             if is_quantized_kv_cache(self.kv_cache_dtype):
                 self.bmm2_scale *= layer._k_scale_float
 
+        if (
+            attn_metadata.num_decode_tokens == num_actual_toks
+            and attn_metadata.num_decodes > 0
+            and attn_metadata.num_decode_tokens % attn_metadata.num_decodes == 0
+        ):
+            q_len_per_req = attn_metadata.num_decode_tokens // attn_metadata.num_decodes
+            query = q.view(
+                attn_metadata.num_decodes,
+                q_len_per_req,
+                q.shape[-2],
+                q.shape[-1],
+            )
+            block_tables = topk_indices_physical.view(
+                attn_metadata.num_decodes,
+                q_len_per_req,
+                topk_indices_physical.shape[-1],
+            )
+            seq_lens_arg = seq_lens.view(attn_metadata.num_decodes, q_len_per_req)
+        else:
+            query = q.unsqueeze(1)
+            block_tables = topk_indices_physical.unsqueeze(1)
+            seq_lens_arg = seq_lens
+
         kernel_out = trtllm_batch_decode_with_kv_cache_mla(
-            query=q.unsqueeze(1),
+            query=query,
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
             workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=topk_indices_physical.unsqueeze(1),
-            seq_lens=seq_lens,
+            block_tables=block_tables,
+            seq_lens=seq_lens_arg,
             max_seq_len=attn_metadata.topk_tokens,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
@@ -396,6 +460,8 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
                 lse = lse.squeeze(-1)
             elif lse.shape[1] == 1:
                 lse = lse.squeeze(1)
+            elif lse.shape[0] * lse.shape[1] == num_tokens:
+                lse = lse.reshape(num_tokens, lse.shape[-1])
         if lse.shape != (num_tokens, num_heads):
             raise RuntimeError(
                 "Unexpected FlashInfer sparse MLA LSE shape: "

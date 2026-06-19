@@ -726,6 +726,10 @@ class AttentionImplBase(ABC, Generic[T]):
     # even if they can return lse (for efficiency reasons)
     need_to_return_lse_for_decode: bool = False
 
+    # Whether decode LSE returned by this implementation is natural-log based.
+    # Some FlashInfer TRT-LLM kernels return log2 LSE.
+    is_lse_base_on_e: bool = True
+
     # Whether this attention implementation supports pre-quantized query input.
     # When True, the attention layer will quantize queries before passing them
     # to this backend, allowing torch.compile to fuse the quantization with

@@ -613,6 +613,249 @@ static __global__ __launch_bounds__(kNumThreadsPerBlock) void topKPerRowDecode(
       indices, logits, rowStart, rowEnd, outIndices, outLogits, stride1, topK);
 }
 
+static constexpr int kStableTopKThreads = 512;
+static constexpr int kStableTopKMaxK = 2048;
+static constexpr int kStableTopKBins = 2048;
+static constexpr int kStableTopKItemsPerThread =
+    kStableTopKMaxK / kStableTopKThreads;
+
+__device__ __forceinline__ uint32_t stable_ordered_float_bits(float score) {
+  uint32_t bits = __float_as_uint(score);
+  uint32_t mask = (bits & 0x80000000u) ? 0xffffffffu : 0x80000000u;
+  return bits ^ mask;
+}
+
+__device__ __forceinline__ uint64_t stable_topk_key(float score,
+                                                    int32_t token_id) {
+  if (token_id < 0) {
+    return 0;
+  }
+  const uint64_t score_key =
+      static_cast<uint64_t>(stable_ordered_float_bits(score)) << 32;
+  const uint64_t id_key =
+      static_cast<uint64_t>(~static_cast<uint32_t>(token_id));
+  return score_key | id_key;
+}
+
+__device__ __forceinline__ bool stable_prefix_matches(uint64_t key,
+                                                      uint64_t prefix,
+                                                      int prefix_bits) {
+  if (prefix_bits == 0) {
+    return true;
+  }
+  return (key >> (64 - prefix_bits)) == (prefix >> (64 - prefix_bits));
+}
+
+template <bool HAS_TOKEN_IDS>
+__device__ __forceinline__ uint64_t load_stable_topk_key(
+    const float* __restrict__ scores, const int32_t* __restrict__ token_ids,
+    const int32_t* __restrict__ seq_lens, int row, int col,
+    int64_t score_stride0, int64_t score_stride1, int64_t id_stride0,
+    int64_t id_stride1) {
+  int32_t token_id;
+  if constexpr (HAS_TOKEN_IDS) {
+    token_id = token_ids[static_cast<int64_t>(row) * id_stride0 +
+                         static_cast<int64_t>(col) * id_stride1];
+  } else {
+    const int32_t seq_len = seq_lens[row];
+    token_id = col < seq_len ? col : -1;
+  }
+  const float score = scores[static_cast<int64_t>(row) * score_stride0 +
+                             static_cast<int64_t>(col) * score_stride1];
+  return stable_topk_key(score, token_id);
+}
+
+template <bool HAS_TOKEN_IDS>
+__device__ __forceinline__ int32_t load_stable_topk_token_id(
+    const int32_t* __restrict__ token_ids, const int32_t* __restrict__ seq_lens,
+    int col, int row, int64_t id_stride0, int64_t id_stride1) {
+  if constexpr (HAS_TOKEN_IDS) {
+    return token_ids[static_cast<int64_t>(row) * id_stride0 +
+                     static_cast<int64_t>(col) * id_stride1];
+  } else {
+    return col < seq_lens[row] ? col : -1;
+  }
+}
+
+template <bool HAS_TOKEN_IDS>
+static __global__
+__launch_bounds__(kStableTopKThreads) void stableTopKByKeyKernel(
+    const float* __restrict__ scores, const int32_t* __restrict__ token_ids,
+    const int32_t* __restrict__ seq_lens, int32_t* __restrict__ out_indices,
+    int num_cols, int64_t score_stride0, int64_t score_stride1,
+    int64_t id_stride0, int64_t id_stride1, int topK) {
+  using Sort = cub::BlockRadixSort<uint64_t, kStableTopKThreads,
+                                   kStableTopKItemsPerThread, int32_t>;
+  using Scan = cub::BlockScan<int, kStableTopKThreads>;
+
+  struct HistogramScratch {
+    typename Scan::TempStorage scan;
+    int data[kStableTopKBins];
+  };
+  __shared__ union {
+    HistogramScratch hist;
+    typename Sort::TempStorage sort;
+  } scratch;
+  __shared__ uint64_t final_keys[kStableTopKMaxK];
+  __shared__ int32_t final_ids[kStableTopKMaxK];
+  __shared__ int selected_count;
+  __shared__ int final_count;
+  __shared__ int threshold_bin;
+  __shared__ int threshold_count;
+  __shared__ uint64_t prefix;
+  __shared__ int prefix_bits;
+
+  const int row = blockIdx.x;
+  const int tid = threadIdx.x;
+
+  if constexpr (!HAS_TOKEN_IDS) {
+    const int row_len = min(max(seq_lens[row], 0), num_cols);
+    if (row_len <= topK) {
+      for (int i = tid; i < topK; i += kStableTopKThreads) {
+        out_indices[static_cast<int64_t>(row) * topK + i] =
+            i < row_len ? i : -1;
+      }
+      return;
+    }
+  }
+
+  if (tid == 0) {
+    selected_count = 0;
+    prefix = 0;
+    prefix_bits = 0;
+  }
+  __syncthreads();
+
+  for (int step = 0; step < 6; ++step) {
+    const int bits = step == 5 ? 9 : 11;
+    const int num_bins = 1 << bits;
+    const int shift = 64 - prefix_bits - bits;
+    const uint64_t bin_mask = static_cast<uint64_t>(num_bins - 1);
+
+    for (int i = tid; i < kStableTopKBins; i += kStableTopKThreads) {
+      scratch.hist.data[i] = 0;
+    }
+    if (tid == 0) {
+      final_count = 0;
+      threshold_bin = 0;
+      threshold_count = 0;
+    }
+    __syncthreads();
+
+    for (int col = tid; col < num_cols; col += kStableTopKThreads) {
+      const uint64_t key = load_stable_topk_key<HAS_TOKEN_IDS>(
+          scores, token_ids, seq_lens, row, col, score_stride0, score_stride1,
+          id_stride0, id_stride1);
+      if (stable_prefix_matches(key, prefix, prefix_bits)) {
+        const int bin = static_cast<int>((key >> shift) & bin_mask);
+        atomicAdd(&scratch.hist.data[bin], 1);
+      }
+    }
+    __syncthreads();
+
+    int running = selected_count;
+    for (int round = 0;
+         round < (num_bins + kStableTopKThreads - 1) / kStableTopKThreads;
+         ++round) {
+      const int descending_idx = round * kStableTopKThreads + tid;
+      const int bin = num_bins - 1 - descending_idx;
+      const int count = bin >= 0 ? scratch.hist.data[bin] : 0;
+      int prefix_sum = 0;
+      int round_total = 0;
+      Scan(scratch.hist.scan).ExclusiveSum(count, prefix_sum, round_total);
+      prefix_sum += running;
+      round_total += running;
+
+      const bool found =
+          bin >= 0 && prefix_sum < topK && prefix_sum + count >= topK;
+      if (found) {
+        threshold_bin = bin;
+        threshold_count = count;
+      }
+      if (__syncthreads_or(found)) {
+        break;
+      }
+      running = round_total;
+      __syncthreads();
+    }
+    __syncthreads();
+
+    const bool finish = threshold_count <= kStableTopKMaxK || step == 5;
+    for (int col = tid; col < num_cols; col += kStableTopKThreads) {
+      const uint64_t key = load_stable_topk_key<HAS_TOKEN_IDS>(
+          scores, token_ids, seq_lens, row, col, score_stride0, score_stride1,
+          id_stride0, id_stride1);
+      if (!stable_prefix_matches(key, prefix, prefix_bits)) {
+        continue;
+      }
+      const int bin = static_cast<int>((key >> shift) & bin_mask);
+      if (bin > threshold_bin) {
+        const int dst = atomicAdd(&selected_count, 1);
+        if (dst < topK) {
+          out_indices[static_cast<int64_t>(row) * topK + dst] =
+              load_stable_topk_token_id<HAS_TOKEN_IDS>(
+                  token_ids, seq_lens, col, row, id_stride0, id_stride1);
+        }
+      } else if (bin == threshold_bin && finish) {
+        const int dst = atomicAdd(&final_count, 1);
+        if (dst < kStableTopKMaxK) {
+          final_keys[dst] = key;
+          final_ids[dst] = load_stable_topk_token_id<HAS_TOKEN_IDS>(
+              token_ids, seq_lens, col, row, id_stride0, id_stride1);
+        }
+      }
+    }
+    __syncthreads();
+
+    if (finish) {
+      uint64_t thread_keys[kStableTopKItemsPerThread];
+      int32_t thread_ids[kStableTopKItemsPerThread];
+#pragma unroll
+      for (int ii = 0; ii < kStableTopKItemsPerThread; ++ii) {
+        const int src = ii * kStableTopKThreads + tid;
+        if (src < final_count && src < kStableTopKMaxK) {
+          thread_keys[ii] = final_keys[src];
+          thread_ids[ii] = final_ids[src];
+        } else {
+          thread_keys[ii] = 0;
+          thread_ids[ii] = -1;
+        }
+      }
+      Sort(scratch.sort)
+          .SortDescendingBlockedToStriped(thread_keys, thread_ids);
+      __syncthreads();
+
+      const int base = selected_count;
+      const int need = max(0, topK - base);
+#pragma unroll
+      for (int ii = 0; ii < kStableTopKItemsPerThread; ++ii) {
+        const int rank = ii * kStableTopKThreads + tid;
+        if (rank < need && rank < final_count) {
+          out_indices[static_cast<int64_t>(row) * topK + base + rank] =
+              thread_ids[ii];
+        }
+      }
+      __syncthreads();
+
+      if (tid == 0) {
+        selected_count = min(topK, base + min(need, final_count));
+      }
+      __syncthreads();
+
+      for (int i = selected_count + tid; i < topK; i += kStableTopKThreads) {
+        out_indices[static_cast<int64_t>(row) * topK + i] = -1;
+      }
+      return;
+    }
+
+    if (tid == 0) {
+      prefix |= static_cast<uint64_t>(threshold_bin) << shift;
+      prefix_bits += bits;
+    }
+    __syncthreads();
+  }
+}
+
 }  // namespace vllm
 
 void apply_repetition_penalties_(
@@ -718,6 +961,69 @@ void top_k_per_row_decode(const torch::stable::Tensor& logits, int64_t next_n,
             nullptr, multipleBlocksPerRowConfig,
             outIndicesAux.const_data_ptr<int>());
   }
+}
+
+void stable_top_k_per_row(const torch::stable::Tensor& scores,
+                          const torch::stable::Tensor& seq_lens,
+                          torch::stable::Tensor& indices, int64_t numRows,
+                          int64_t stride0, int64_t stride1, int64_t topK) {
+#ifndef USE_ROCM
+  STD_TORCH_CHECK(scores.scalar_type() == torch::headeronly::ScalarType::Float,
+                  "stable_top_k_per_row expects fp32 scores");
+  STD_TORCH_CHECK(seq_lens.scalar_type() == torch::headeronly::ScalarType::Int,
+                  "stable_top_k_per_row expects int32 seq_lens");
+  STD_TORCH_CHECK(indices.scalar_type() == torch::headeronly::ScalarType::Int,
+                  "stable_top_k_per_row expects int32 output indices");
+  STD_TORCH_CHECK(topK > 0 && topK <= vllm::kStableTopKMaxK,
+                  "stable_top_k_per_row supports 1 <= k <= ",
+                  vllm::kStableTopKMaxK, ", got k=", topK);
+  if (numRows == 0) {
+    return;
+  }
+  const auto num_cols = scores.size(1);
+  const cudaStream_t stream = get_current_cuda_stream();
+  vllm::stableTopKByKeyKernel<false>
+      <<<static_cast<int>(numRows), vllm::kStableTopKThreads, 0, stream>>>(
+          scores.const_data_ptr<float>(), nullptr,
+          seq_lens.const_data_ptr<int32_t>(),
+          indices.mutable_data_ptr<int32_t>(), static_cast<int>(num_cols),
+          stride0, stride1, 0, 0, static_cast<int>(topK));
+#else
+  STD_TORCH_CHECK(false, "stable_top_k_per_row is not supported on ROCm");
+#endif
+}
+
+void stable_top_k_from_candidates(const torch::stable::Tensor& scores,
+                                  const torch::stable::Tensor& token_ids,
+                                  torch::stable::Tensor& indices,
+                                  int64_t numRows, int64_t score_stride0,
+                                  int64_t score_stride1, int64_t id_stride0,
+                                  int64_t id_stride1, int64_t topK) {
+#ifndef USE_ROCM
+  STD_TORCH_CHECK(scores.scalar_type() == torch::headeronly::ScalarType::Float,
+                  "stable_top_k_from_candidates expects fp32 scores");
+  STD_TORCH_CHECK(token_ids.scalar_type() == torch::headeronly::ScalarType::Int,
+                  "stable_top_k_from_candidates expects int32 token_ids");
+  STD_TORCH_CHECK(indices.scalar_type() == torch::headeronly::ScalarType::Int,
+                  "stable_top_k_from_candidates expects int32 output indices");
+  STD_TORCH_CHECK(topK > 0 && topK <= vllm::kStableTopKMaxK,
+                  "stable_top_k_from_candidates supports 1 <= k <= ",
+                  vllm::kStableTopKMaxK, ", got k=", topK);
+  if (numRows == 0) {
+    return;
+  }
+  const auto num_cols = scores.size(1);
+  const cudaStream_t stream = get_current_cuda_stream();
+  vllm::stableTopKByKeyKernel<true>
+      <<<static_cast<int>(numRows), vllm::kStableTopKThreads, 0, stream>>>(
+          scores.const_data_ptr<float>(), token_ids.const_data_ptr<int32_t>(),
+          nullptr, indices.mutable_data_ptr<int32_t>(),
+          static_cast<int>(num_cols), score_stride0, score_stride1, id_stride0,
+          id_stride1, static_cast<int>(topK));
+#else
+  STD_TORCH_CHECK(false,
+                  "stable_top_k_from_candidates is not supported on ROCm");
+#endif
 }
 
 void top_k_per_row_prefill(const torch::stable::Tensor& logits,

@@ -476,6 +476,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int numRows, int stride0, int stride1, int topK) -> ()");
 
   ops.def(
+      "stable_top_k_per_row(Tensor scores, Tensor seq_lens, Tensor! indices, "
+      "int numRows, int stride0, int stride1, int topK) -> ()");
+
+  ops.def(
+      "stable_top_k_from_candidates(Tensor scores, Tensor token_ids, "
+      "Tensor! indices, int numRows, int score_stride0, int score_stride1, "
+      "int id_stride0, int id_stride1, int topK) -> ()");
+
+  ops.def(
       "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
       "Tensor workspace, int k, int max_seq_len) -> ()");
 
@@ -687,6 +696,9 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&apply_repetition_penalties_));
   ops.impl("top_k_per_row_prefill", TORCH_BOX(&top_k_per_row_prefill));
   ops.impl("top_k_per_row_decode", TORCH_BOX(&top_k_per_row_decode));
+  ops.impl("stable_top_k_per_row", TORCH_BOX(&stable_top_k_per_row));
+  ops.impl("stable_top_k_from_candidates",
+           TORCH_BOX(&stable_top_k_from_candidates));
   ops.impl("persistent_topk", TORCH_BOX(&persistent_topk));
 
   // Activation kernels (shared CUDA/ROCm)
