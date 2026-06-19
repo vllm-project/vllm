@@ -101,6 +101,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             WNA16MoEBackend.MARLIN,
             WNA16MoEBackend.BATCHED_MARLIN,
         ]
+        self.is_transposed = self.wna16_backend != WNA16MoEBackend.FLASHINFER_TRTLLM
 
         if self.is_marlin:
             assert check_moe_marlin_supports_config(self.moe, self.group_size)
@@ -198,7 +199,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
                 ),
             },
         }
-        backend_key = "Marlin" if self.is_marlin else "Flashinfer"
+        backend_key = "Marlin" if self.is_transposed else "Flashinfer"
         return shape_map[weight_name][backend_key]
 
     def create_weights(
@@ -217,7 +218,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         # shard for TP along the transposed dims
         extra_weight_attrs.update(
             {
-                "is_transposed": self.is_marlin,
+                "is_transposed": self.is_transposed,
                 "quant_method": self.strategy,
             }
         )
