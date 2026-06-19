@@ -419,8 +419,7 @@ class AttentionScheduler {
     int32_t q_head_per_kv = input.num_heads_q / input.num_heads_kv;
     const bool supports_gqa = q_head_per_kv <= max_num_q_per_iter;
     const bool use_gqa_fast_path = supports_gqa && decode_only_batch;
-    const bool use_gqa_scratchpad = supports_gqa && has_decode_request;
-    if (!use_gqa_scratchpad) {
+    if (!use_gqa_fast_path) {
       q_head_per_kv = 1;  // fallback to MHA
     }
     const int32_t min_split_kv_len =
@@ -1482,6 +1481,10 @@ class AttentionMainLoop {
               sizeof(q_buffer_t), sizeof(logits_buffer_t),
               sizeof(partial_output_buffer_t), max_q_head_num_per_iter,
               max_q_head_num_per_iter);
+      const int32_t max_q_token_num_per_iter =
+          max_q_head_num_per_iter / actual_q_heads_per_kv;
+      const int32_t default_q_tile_token_num =
+          default_tile_size / actual_q_heads_per_kv;
 
       const int32_t effective_thread_num = metadata.effective_thread_num;
       const int32_t reduction_item_num = metadata.reduction_item_num;
@@ -1539,21 +1542,8 @@ class AttentionMainLoop {
             const int32_t q_token_id_start =
                 current_workitem_group->q_token_id_start;
             const int32_t q_token_num = current_workitem_group->q_token_num;
-            const bool curr_use_gqa =
-                use_gqa_fast_path || (supports_gqa && q_token_num == 1);
-            if (!use_gqa_fast_path && curr_use_gqa &&
-                kv_head_idx % q_heads_per_kv != 0) {
-              continue;
-            }
-            const int32_t curr_q_heads_per_kv =
-                curr_use_gqa ? q_heads_per_kv : 1;
-            const int32_t curr_max_q_token_num_per_iter =
-                max_q_head_num_per_iter / curr_q_heads_per_kv;
-            const int32_t curr_default_q_tile_token_num =
-                default_tile_size / curr_q_heads_per_kv;
             const int32_t q_head_start_idx =
-                use_gqa_fast_path ? (kv_head_idx * q_heads_per_kv)
-                                  : kv_head_idx;
+                kv_head_idx * actual_q_heads_per_kv;
 
             // taskgroup general information
             const int32_t q_end = input->query_start_loc[current_group_idx + 1];
@@ -1567,7 +1557,7 @@ class AttentionMainLoop {
                              current_workitem_group->local_split_id == 0);
 
             for (int32_t q_token_offset = 0; q_token_offset < q_token_num;
-                 q_token_offset += curr_default_q_tile_token_num) {
+                 q_token_offset += default_q_tile_token_num) {
               bool first_iter_flag[AttentionScheduler::MaxQTileIterNum];
               for (int32_t i = 0; i < AttentionScheduler::MaxQTileIterNum;
                    ++i) {
@@ -1577,9 +1567,9 @@ class AttentionMainLoop {
               const int32_t q_token_start_idx =
                   q_start + q_token_offset + q_token_id_start;
               const int32_t actual_q_token_num = std::min(
-                  curr_default_q_tile_token_num, q_token_num - q_token_offset);
+                  default_q_tile_token_num, q_token_num - q_token_offset);
               const int32_t q_head_tile_size =
-                  actual_q_token_num * curr_q_heads_per_kv;
+                  actual_q_token_num * actual_q_heads_per_kv;
               const int32_t rounded_q_head_tile_size =
                   ((q_head_tile_size + max_q_head_num_per_iter - 1) /
                    max_q_head_num_per_iter) *
@@ -1653,11 +1643,11 @@ class AttentionMainLoop {
                   (s_aux != nullptr ? s_aux + q_head_start_idx : nullptr);
 
               // copy the Q tile to q_buffer, the logical layout of q_buffer is
-              // [actual_q_token_num, curr_q_heads_per_kv, head_dim]
+              // [actual_q_token_num, actual_q_heads_per_kv, head_dim]
               {
                 attn_impl.copy_q_heads_tile(
                     q_tile_ptr, q_buffer, actual_q_token_num,
-                    curr_q_heads_per_kv, q_token_num_stride, q_head_num_stride,
+                    actual_q_heads_per_kv, q_token_num_stride, q_head_num_stride,
                     scale);
               }
 
@@ -1672,29 +1662,29 @@ class AttentionMainLoop {
                 float* __restrict__ curr_max_buffer = max_buffer;
                 for (int32_t token_idx = 0; token_idx < actual_q_token_num;
                      ++token_idx) {
-                  for (int32_t head_idx = 0; head_idx < curr_q_heads_per_kv;
+                  for (int32_t head_idx = 0; head_idx < actual_q_heads_per_kv;
                        ++head_idx) {
                     curr_sum_buffer[head_idx] = 1.0f;
                     curr_max_buffer[head_idx] = s_aux_fp32[head_idx];
                   }
 
-                  curr_sum_buffer += curr_q_heads_per_kv;
-                  curr_max_buffer += curr_q_heads_per_kv;
+                  curr_sum_buffer += actual_q_heads_per_kv;
+                  curr_max_buffer += actual_q_heads_per_kv;
                 }
               } else {
                 float* __restrict__ curr_sum_buffer = sum_buffer;
                 float* __restrict__ curr_max_buffer = max_buffer;
                 for (int32_t token_idx = 0; token_idx < actual_q_token_num;
                      ++token_idx) {
-                  for (int32_t head_idx = 0; head_idx < curr_q_heads_per_kv;
+                  for (int32_t head_idx = 0; head_idx < actual_q_heads_per_kv;
                        ++head_idx) {
                     curr_sum_buffer[head_idx] = 0.0f;
                     curr_max_buffer[head_idx] =
                         std::numeric_limits<float>::lowest();
                   }
 
-                  curr_sum_buffer += curr_q_heads_per_kv;
-                  curr_max_buffer += curr_q_heads_per_kv;
+                  curr_sum_buffer += actual_q_heads_per_kv;
+                  curr_max_buffer += actual_q_heads_per_kv;
                 }
               }
 
@@ -1708,16 +1698,16 @@ class AttentionMainLoop {
                 for (int32_t q_head_tile_token_offset = 0;
                      q_head_tile_token_offset < actual_q_token_num;
                      q_head_tile_token_offset +=
-                     curr_max_q_token_num_per_iter) {
+                     max_q_token_num_per_iter) {
                   const int32_t q_tile_pos_left =
                       q_tile_start_pos + q_head_tile_token_offset;
                   const int32_t q_tile_token_num =
-                      std::min(curr_max_q_token_num_per_iter,
+                      std::min(max_q_token_num_per_iter,
                                actual_q_token_num - q_head_tile_token_offset);
                   const int32_t q_tile_head_offset =
-                      q_head_tile_token_offset * curr_q_heads_per_kv;
+                      q_head_tile_token_offset * actual_q_heads_per_kv;
                   const int32_t q_tile_head_num =
-                      q_tile_token_num * curr_q_heads_per_kv;
+                      q_tile_token_num * actual_q_heads_per_kv;
                   const int32_t q_tile_pos_right =
                       q_tile_pos_left + q_tile_token_num;
                   const auto [actual_kv_tile_pos_left,
@@ -1727,7 +1717,7 @@ class AttentionMainLoop {
                           q_tile_pos_right, sliding_window_left,
                           sliding_window_right);
                   const int32_t q_iter_idx =
-                      q_head_tile_token_offset / curr_max_q_token_num_per_iter;
+                      q_head_tile_token_offset / max_q_token_num_per_iter;
 
                   if (actual_kv_tile_pos_right <= actual_kv_tile_pos_left) {
                     continue;
@@ -1793,7 +1783,7 @@ class AttentionMainLoop {
                       aligned_actual_kv_tile_pos_left,
                       aligned_actual_kv_tile_pos_right, actual_kv_token_num,
                       kv_cache_block_num_stride, q_tile_head_num,
-                      q_tile_token_num, q_tile_pos_left, curr_q_heads_per_kv,
+                      q_tile_token_num, q_tile_pos_left, actual_q_heads_per_kv,
                       block_size, sliding_window_left, sliding_window_right,
                       scale, softcap_scale, curr_alibi_slopes,
                       first_iter_flag[q_iter_idx], use_sink, debug_info);
@@ -1807,11 +1797,11 @@ class AttentionMainLoop {
                   final_output(partial_q_buffer,
                                reinterpret_cast<query_t*>(input->output) +
                                    output_buffer_offset,
-                               sum_buffer, curr_q_heads_per_kv,
+                               sum_buffer, actual_q_heads_per_kv,
                                actual_q_token_num, q_head_num, output_v_scale);
                 } else {
                   const int32_t stride =
-                      curr_q_heads_per_kv * split_kv_q_token_num_threshold;
+                      actual_q_heads_per_kv * split_kv_q_token_num_threshold;
                   buffer_manager.update(kv_head_idx, total_reduction_split_num,
                                         head_dim, stride, sizeof(float));
                   volatile bool* split_flag_buffer =
@@ -1847,26 +1837,19 @@ class AttentionMainLoop {
           const int32_t curr_split_id = curr_workitem_groups->split_start_id;
           const int32_t curr_split_num = curr_workitem_groups->split_num;
           const int32_t current_group_idx = curr_workitem_groups->req_id;
-          const bool curr_use_gqa =
-              use_gqa_fast_path || (supports_gqa && curr_output_token_num == 1);
-          if (!use_gqa_fast_path && curr_use_gqa &&
-              kv_head_idx % q_heads_per_kv != 0) {
-            continue;
-          }
-          const int32_t curr_q_heads_per_kv = curr_use_gqa ? q_heads_per_kv : 1;
           const int32_t curr_output_head_num =
-              curr_output_token_num * curr_q_heads_per_kv;
+              curr_output_token_num * actual_q_heads_per_kv;
 
           const int32_t q_start = input->query_start_loc[current_group_idx];
           const int32_t q_token_start_idx = q_start + curr_output_token_idx;
           const int32_t q_head_start_idx =
-              use_gqa_fast_path ? (kv_head_idx * q_heads_per_kv) : kv_head_idx;
+              kv_head_idx * actual_q_heads_per_kv;
           size_t output_buffer_offset =
               q_token_start_idx * q_head_num * head_dim +
               q_head_start_idx * head_dim;
 
           const int32_t stride =
-              curr_q_heads_per_kv * split_kv_q_token_num_threshold;
+              actual_q_heads_per_kv * split_kv_q_token_num_threshold;
           buffer_manager.update(kv_head_idx, total_reduction_split_num,
                                 head_dim, stride, sizeof(float));
           volatile bool* split_flag_buffer =
@@ -1885,7 +1868,7 @@ class AttentionMainLoop {
           final_output(
               split_output_buffer,
               reinterpret_cast<query_t*>(input->output) + output_buffer_offset,
-              split_sum_buffer, curr_q_heads_per_kv, curr_output_token_num,
+              split_sum_buffer, actual_q_heads_per_kv, curr_output_token_num,
               q_head_num, output_v_scale);
         }
       }
