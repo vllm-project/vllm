@@ -163,10 +163,6 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
-    # Cached result of AttentionBackend.indexes_kv_by_block_stride. If True,
-    # the backend reads KV pages by the runtime block stride (num_blocks is
-    # the outermost dim), so it tolerates a non-contiguous block dim. This
-    # property gates page size padding and cross-layer uniform KV layout.
     indexes_kv_by_block_stride: bool = False
 
     @property

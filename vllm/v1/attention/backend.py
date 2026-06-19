@@ -203,6 +203,17 @@ class AttentionBackend(ABC):
 
     @classmethod
     def indexes_kv_by_block_stride(cls) -> bool:
+        """Whether the backend reads KV pages by the runtime block stride.
+
+        True when ``num_blocks`` is the outermost physical dimension of the KV
+        cache, so the backend tolerates a non-contiguous block dim. This gates
+        page size padding and cross-layer uniform KV layout.
+
+        Returns:
+            True if the backend's physical KV layout is num-blocks-first. False
+            otherwise, including when the backend does not define a layered
+            stride order.
+        """
         try:
             kv_cache_stride_order = cls.get_kv_cache_stride_order(
                 include_num_layers_dimension=False
