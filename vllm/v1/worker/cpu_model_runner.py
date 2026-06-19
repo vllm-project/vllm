@@ -153,9 +153,23 @@ class CPUModelRunner(GPUModelRunner):
         pass
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
-        # CPU attention assigns -INF to logits at invalid positions,
-        # so stale KV cache data never affects computation.
-        pass
+        # Zero newly allocated full-attention KV cache blocks to prevent stale
+        # data from corrupting attention when a block is partially written and
+        # the uninitialized tail is read before masking can apply.
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+        for group in self.kv_cache_config.kv_cache_groups:
+            if not isinstance(group.kv_cache_spec, FullAttentionSpec):
+                continue
+            for layer_name in group.layer_names:
+                ctx = self.compilation_config.static_forward_context.get(layer_name)
+                if ctx is None:
+                    continue
+                kv = ctx.kv_cache
+                if not isinstance(kv, torch.Tensor):
+                    continue
+                for block_id in block_ids:
+                    kv[block_id].zero_()
 
     # =========================================================================
     # CPU-safe overrides for speculative decoding methods
