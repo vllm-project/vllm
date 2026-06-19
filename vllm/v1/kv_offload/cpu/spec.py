@@ -37,8 +37,13 @@ class CPUOffloadingSpec(OffloadingSpec):
     ) -> dict[str, OffloadingMetricMetadata]:
         definitions: dict[str, OffloadingMetricMetadata] = {
             CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC: OffloadingGaugeMetadata(
-                documentation="CPU KV-cache offload usage. 1 means 100 percent usage.",
-            ),
+                documentation=(
+                    "Fraction of CPU KV-cache space currently pinned by active "
+                    "transfers (0.0 = idle, 1.0 = saturated). Sustained high "
+                    "values indicate transfers (stores or promotions) may be "
+                    "dropped due to insufficient capacity."
+                ),
+            )
         }
         store_threshold = int(extra_config.get("store_threshold", 0))
         if store_threshold >= 2:

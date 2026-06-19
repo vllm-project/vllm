@@ -286,9 +286,16 @@ class CPUOffloadingManager(OffloadingManager):
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = OffloadingConnectorStats()
-        num_used = self._num_blocks - self._get_num_free_blocks()
+
+        # Compute cache usage.
+        num_used = (
+            self._num_blocks
+            - self._get_num_free_blocks()
+            - self._num_evictable_cache_blocks
+        )
         usage = num_used / self._num_blocks if self._num_blocks > 0 else 0.0
         stats.set_gauge(CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC, usage)
+
         if self.store_threshold >= 2:
             stats.increase_counter(
                 CPUOffloadingMetrics.STORES_SKIPPED,
