@@ -414,15 +414,27 @@ class XPUPlatform(Platform):
         device_name = cls.get_device_name().lower()
         return device_name.count("data center gpu") > 0
 
+
     @classmethod
     def get_device_communicator_cls(cls) -> str:
+        if os.environ.get("TORCHCOMMS_USE_VLLM", "0").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+            "on",
+        ):
+            return (
+                "vllm.distributed.device_communicators."
+                "torchcomms_communicator.TorchCommsCommunicator"
+            )
+
         if not torch.distributed.is_xccl_available():
-            # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
             logger.warning(
                 "xccl is not enabled in this torch build, communication"
                 " is not available."
             )
-        return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
+
+        return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"
 
     @classmethod
     def supports_fp8(cls) -> bool:
