@@ -217,10 +217,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
         extra_weight_attrs.update(
-            {
-                "is_transposed": self.is_transposed,
-                "quant_method": self.strategy,
-            }
+            {"is_transposed": self.is_transposed, "quant_method": self.strategy}
         )
 
         w13_weight = torch.nn.Parameter(
@@ -437,7 +434,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w13_weight_scale", w13_scales)
         replace_parameter(layer, "w2_weight_scale", w2_scales)
 
-        if not self.symmetric:
+        # CPU fused_experts_cpu requires zero points even for symmetric quant
+        if not self.symmetric or self.wna16_backend == WNA16MoEBackend.CPU:
             assert w13_qzeros is not None and w2_qzeros is not None
             replace_parameter(layer, "w13_weight_zero_point", w13_qzeros)
             replace_parameter(layer, "w2_weight_zero_point", w2_qzeros)
