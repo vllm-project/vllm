@@ -110,7 +110,7 @@ CHECK_IMPORTS = {
         # ``hw_agnostic/`` remain forbidden from importing
         # ``quantization.fp8`` / ``modelopt`` / etc.
         allowed_files={
-            "vllm/models/deepseek_v4/hw_agnostic/ops/quant_config.py",
+            "vllm/models/deepseek_v4/hw_agnostic/quantization/quant_config.py",
         },
     ),
 }

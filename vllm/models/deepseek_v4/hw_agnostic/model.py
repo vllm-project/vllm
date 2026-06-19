@@ -26,30 +26,30 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.deepseek_v4.hw_agnostic.ops._mtp_helpers import SupportsPP
-from vllm.models.deepseek_v4.hw_agnostic.ops.activation import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.interfaces import SupportsPP
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.activation import (
     SiluAndMul,
     SiluAndMulWithClamp,
 )
-from vllm.models.deepseek_v4.hw_agnostic.ops.attention import (
+from vllm.models.deepseek_v4.hw_agnostic.attention.attention import (
     DeepseekV4Indexer,
     DeepseekV4MLAModules,
     DeepseekV4MultiHeadLatentAttentionWrapper,
 )
-from vllm.models.deepseek_v4.hw_agnostic.ops.fused_moe.layer import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.layer import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.models.deepseek_v4.hw_agnostic.ops.gate_linear import GateLinear
-from vllm.models.deepseek_v4.hw_agnostic.ops.layernorm import RMSNorm
-from vllm.models.deepseek_v4.hw_agnostic.ops.linear import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.gate_linear import GateLinear
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import RMSNorm
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.models.deepseek_v4.hw_agnostic.ops.logits_processor import LogitsProcessor
-from vllm.models.deepseek_v4.hw_agnostic.ops.rotary_embedding import get_rope
-from vllm.models.deepseek_v4.hw_agnostic.ops.vocab_parallel_embedding import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.logits_processor import LogitsProcessor
+from vllm.models.deepseek_v4.hw_agnostic.layers.rotary_embedding import get_rope
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -414,7 +414,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         super().__init__()
 
         # mHC ops are vendored locally; no upstream tilelang dependency.
-        from vllm.models.deepseek_v4.hw_agnostic.ops import mhc
+        from vllm.models.deepseek_v4.hw_agnostic.layers import mhc
 
         self.mhc_pre = mhc.MHCPreOp()
         self.mhc_fused_post_pre = mhc.MHCFusedPostPreOp()
@@ -628,7 +628,7 @@ class DeepseekV4Model(nn.Module):
         )
 
         # mHC ops are vendored locally; build them once at model-init time.
-        from vllm.models.deepseek_v4.hw_agnostic.ops import mhc
+        from vllm.models.deepseek_v4.hw_agnostic.layers import mhc
 
         self.hc_head_op = mhc.HCHeadOp()
         self.mhc_post_op = mhc.MHCPostOp()

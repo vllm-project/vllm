@@ -27,17 +27,17 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.models.deepseek_v4.hw_agnostic.ops._mtp_helpers import (
+from vllm.models.deepseek_v4.hw_agnostic.models_utils._mtp_helpers import (
     SharedHead,
     get_spec_layer_idx_from_weight_name,
 )
-from vllm.models.deepseek_v4.hw_agnostic.ops.fused_moe.layer import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.layer import (
     fused_moe_make_expert_params_mapping,
 )
-from vllm.models.deepseek_v4.hw_agnostic.ops.layernorm import RMSNorm
-from vllm.models.deepseek_v4.hw_agnostic.ops.linear import ReplicatedLinear
-from vllm.models.deepseek_v4.hw_agnostic.ops.logits_processor import LogitsProcessor
-from vllm.models.deepseek_v4.hw_agnostic.ops.vocab_parallel_embedding import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import RMSNorm
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import ReplicatedLinear
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.logits_processor import LogitsProcessor
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform
@@ -114,7 +114,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         # CustomOps must be constructed inside set_current_vllm_config — i.e.
         # here at model-init time, not later in compute_logits. mHC ops are
         # vendored locally.
-        from vllm.models.deepseek_v4.hw_agnostic.ops import mhc
+        from vllm.models.deepseek_v4.hw_agnostic.layers import mhc
 
         self.hc_head_op = mhc.HCHeadOp()
         self.mhc_post_op = mhc.MHCPostOp()

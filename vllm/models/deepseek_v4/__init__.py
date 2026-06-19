@@ -16,11 +16,11 @@ from vllm.platforms import current_platform
 
 # The hw-agnostic platform uses a vendored DeepseekV4FP8Config whose
 # ``get_quant_method`` does isinstance against vendored ``LinearBase`` /
-# ``RoutedExperts`` (in ``hw_agnostic/ops/``). Without the override the
-# upstream config would return None for our vendored layers and crash
-# with "All linear layers should support quant method.".
+# ``RoutedExperts`` (under ``hw_agnostic/shared/layers/``). Without the
+# override the upstream config would return None for our vendored layers
+# and crash with "All linear layers should support quant method.".
 if current_platform.is_out_of_tree():
-    from .hw_agnostic.ops.quant_config import (  # type: ignore[assignment]
+    from .hw_agnostic.quantization.quant_config import (  # type: ignore[assignment]
         DeepseekV4FP8Config,
     )
 else:

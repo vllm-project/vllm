@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek V4 sparse-MLA backend stub for the hw_agnostic path."""
 
-from vllm.models.deepseek_v4.hw_agnostic.ops.sparse_mla import (
+from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla import (
     DeepseekV4FlashMLABackend,
 )
 from vllm.platforms.interface import DeviceCapability
