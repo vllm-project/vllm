@@ -15,7 +15,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     TransferJob,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
+    OffloadingEventGroupSpec,
     OffloadingEventsTracker,
+    get_offloading_event_group_spec,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
@@ -30,8 +32,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     SlidingWindowSpec,
-    get_kv_cache_spec_kind,
-    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
@@ -83,8 +83,10 @@ class GroupOffloadConfig(NamedTuple):
     alignment_block_count: int | None = None
     # KV cache spec metadata propagated onto emitted BlockStored events so
     # KV-aware consumers can classify and filter the group.
-    kv_cache_spec_kind: str | None = None
-    kv_cache_spec_sliding_window: int | None = None
+    kv_event_group_spec: OffloadingEventGroupSpec = OffloadingEventGroupSpec(
+        kv_cache_spec_kind=None,
+        kv_cache_spec_sliding_window=None,
+    )
     # True for EAGLE/MTP draft-model attention groups. The trailing block
     # of these groups is volatile and lacks a stable hash, so it must
     # be excluded from store and load scheduling.
@@ -208,11 +210,8 @@ class SchedulerOffloadConfig(NamedTuple):
                     alignment_block_count=_alignment_block_count(
                         gpu_block_size * spec.block_size_factor, sw
                     ),
-                    kv_cache_spec_kind=get_kv_cache_spec_kind(
-                        spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec
-                    ).value,
-                    kv_cache_spec_sliding_window=get_kv_cache_spec_sliding_window(
-                        spec.kv_cache_config.kv_cache_groups[idx].kv_cache_spec
+                    kv_event_group_spec=get_offloading_event_group_spec(
+                        spec.kv_cache_config.kv_cache_groups[idx]
                     ),
                     is_eagle_group=idx in eagle_groups,
                 )
@@ -375,16 +374,7 @@ class OffloadingConnectorScheduler:
         # be freed before a request finishes).
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
-        # Opt-in, and inert unless KV cache events are enabled (otherwise
-        # take_events is never drained and tracker state would grow).
-        kv_events_config = spec.vllm_config.kv_events_config
-        self._events_tracker = OffloadingEventsTracker(
-            enabled=bool(
-                kv_events_config is not None
-                and kv_events_config.enable_kv_cache_events
-                and spec.extra_config.get("self_describing_kv_events", False)
-            )
-        )
+        self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter

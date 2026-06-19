@@ -17,13 +17,19 @@ KV cache events are enabled. See the PR description for the full design.
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.kv_cache_interface import (
+    KVCacheGroupSpec,
+    get_kv_cache_spec_kind,
+    get_kv_cache_spec_sliding_window,
+)
 from vllm.v1.kv_offload.base import (
     OffloadingEvent,
+    OffloadingKVEventsConfig,
     OffloadKey,
     get_offload_block_hash,
     get_offload_group_idx,
@@ -38,6 +44,21 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class OffloadingEventGroupSpec(NamedTuple):
+    kv_cache_spec_kind: str | None
+    kv_cache_spec_sliding_window: int | None
+
+
+def get_offloading_event_group_spec(
+    kv_cache_group: KVCacheGroupSpec,
+) -> OffloadingEventGroupSpec:
+    kv_cache_spec = kv_cache_group.kv_cache_spec
+    return OffloadingEventGroupSpec(
+        kv_cache_spec_kind=get_kv_cache_spec_kind(kv_cache_spec).value,
+        kv_cache_spec_sliding_window=get_kv_cache_spec_sliding_window(kv_cache_spec),
+    )
+
+
 @dataclass(slots=True)
 class _OffloadEventMetadata:
     """BlockStored payload snapshot for one OffloadKey, captured at store
@@ -45,17 +66,16 @@ class _OffloadEventMetadata:
     from the OffloadingEvent."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
-    block_hashes: list[BlockHash]
+    block_hashes: tuple[BlockHash, ...]
     parent_block_hash: BlockHash | None
-    token_ids: list[int]
+    token_ids: tuple[int, ...]
     block_size: int
     lora_id: int | None
     lora_name: str | None
     # Deferred: needs the same incremental curr_mm_idx handling as GPU events.
-    extra_keys: list[tuple[Any, ...] | None] | None
+    extra_keys: tuple[tuple[Any, ...] | None, ...] | None
     group_idx: int
-    kv_cache_spec_kind: str | None
-    kv_cache_spec_sliding_window: int | None
+    kv_cache_spec: OffloadingEventGroupSpec
 
 
 class OffloadingEventsTracker:
@@ -67,8 +87,11 @@ class OffloadingEventsTracker:
     is bounded by the CPU pool capacity and cleared by :meth:`reset`.
     """
 
-    def __init__(self, enabled: bool):
-        self.enabled = enabled
+    def __init__(self, config: OffloadingKVEventsConfig):
+        self.config = config
+        self.self_describing_enabled = (
+            config.enable_kv_cache_events and config.self_describing_kv_events
+        )
 
         # OffloadKey -> payload snapshot, kept until the eviction event so
         # BlockRemoved can fan out. Bounded: one entry per offloaded chunk.
@@ -83,10 +106,10 @@ class OffloadingEventsTracker:
     ) -> None:
         """Snapshot the KV cache event payload for one offloaded chunk.
 
-        No-op when the tracker is disabled or for sliding-window / SSM
-        groups, which keep the legacy placeholder payload.
+        No-op when self-describing event capture is disabled or for
+        sliding-window / SSM groups, which keep the legacy placeholder payload.
         """
-        if not self.enabled:
+        if not self.self_describing_enabled:
             return
         if group_config.sliding_window_size_in_blocks is not None:
             return
@@ -127,31 +150,42 @@ class OffloadingEventsTracker:
         per-block ``block_size``. Returns None when metadata is incomplete
         so take_events falls back to the placeholder payload."""
         hbf = group_config.hash_block_size_factor
+        assert hbf > 0
+        assert offload_block_idx >= 0
         # per-block token count (= the GPU/hash block size)
         sub_block_size = group_config.offloaded_block_size // hbf
         # chunk c covers hash-blocks [c*hbf, (c+1)*hbf); its tail block's hash
         # is the chunk's OffloadKey.
         first_hash_idx = offload_block_idx * hbf
         last_hash_idx = first_hash_idx + hbf
-        if first_hash_idx < 0 or last_hash_idx > len(req.block_hashes):
-            return None
-        chunk_hashes = list(req.block_hashes[first_hash_idx:last_hash_idx])
-        if any(h is None for h in chunk_hashes):
-            return None
+        assert first_hash_idx >= 0
+        assert last_hash_idx <= len(req.block_hashes)
+        chunk_hashes: list[BlockHash] = []
+        for block_hash in req.block_hashes[first_hash_idx:last_hash_idx]:
+            # This can happen for requests whose blocks do not have stable
+            # hashes. Keep the legacy placeholder event in that case.
+            if block_hash is None:
+                return None
+            chunk_hashes.append(block_hash)
+        assert len(chunk_hashes) == hbf
+
+        if group_config.sliding_window_size_in_blocks is not None:
+            # record_store filters these out before calling this helper.
+            raise AssertionError("self-describing events only support full attention")
 
         parent_block_hash: BlockHash | None
         if first_hash_idx == 0:
             parent_block_hash = None
         else:
             parent_block_hash = req.block_hashes[first_hash_idx - 1]
+            # A chunk cannot be self-describing if its parent is not hashable.
             if parent_block_hash is None:
                 return None
 
         tok_start = offload_block_idx * group_config.offloaded_block_size
         tok_end = tok_start + group_config.offloaded_block_size
-        if tok_end > len(req.all_token_ids):
-            return None
-        token_ids = list(req.all_token_ids[tok_start:tok_end])
+        assert tok_end <= len(req.all_token_ids)
+        token_ids = tuple(req.all_token_ids[tok_start:tok_end])
 
         lora_id: int | None = None
         lora_name: str | None = None
@@ -160,7 +194,7 @@ class OffloadingEventsTracker:
             lora_name = req.lora_request.name
 
         return _OffloadEventMetadata(
-            block_hashes=chunk_hashes,
+            block_hashes=tuple(chunk_hashes),
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
             block_size=sub_block_size,
@@ -168,8 +202,7 @@ class OffloadingEventsTracker:
             lora_name=lora_name,
             extra_keys=None,
             group_idx=group_config.group_idx,
-            kv_cache_spec_kind=group_config.kv_cache_spec_kind,
-            kv_cache_spec_sliding_window=(group_config.kv_cache_spec_sliding_window),
+            kv_cache_spec=group_config.kv_event_group_spec,
         )
 
     def _placeholder_stored(self, key: OffloadKey, medium: str) -> BlockStored:
@@ -193,35 +226,41 @@ class OffloadingEventsTracker:
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
             if meta is None:
-                if self.enabled:
+                if self.self_describing_enabled:
                     # Expected for unsupported shapes; warn once only.
                     logger.warning_once(
                         "OffloadingEventsTracker: no event metadata for "
                         "offload key during BlockStored emission; emitting a "
                         "placeholder payload. Expected for non-full-attention "
-                        "groups or when block hashes/tokens were unavailable "
-                        "at store time; otherwise indicates a missing "
-                        "populate path."
+                        "groups or when block hashes were unavailable at "
+                        "store time; otherwise indicates a missing populate "
+                        "path."
                     )
                 yield self._placeholder_stored(key, event.medium)
                 continue
 
             yield BlockStored(
-                block_hashes=[maybe_convert_block_hash(h) for h in meta.block_hashes],
+                block_hashes=list(
+                    maybe_convert_block_hash(h) for h in meta.block_hashes
+                ),
                 parent_block_hash=(
                     maybe_convert_block_hash(meta.parent_block_hash)
                     if meta.parent_block_hash is not None
                     else None
                 ),
-                token_ids=meta.token_ids,
+                token_ids=list(meta.token_ids),
                 block_size=meta.block_size,
                 lora_id=meta.lora_id,
                 medium=event.medium,
                 lora_name=meta.lora_name,
-                extra_keys=meta.extra_keys,
+                extra_keys=(
+                    list(meta.extra_keys) if meta.extra_keys is not None else None
+                ),
                 group_idx=meta.group_idx,
-                kv_cache_spec_kind=meta.kv_cache_spec_kind,
-                kv_cache_spec_sliding_window=meta.kv_cache_spec_sliding_window,
+                kv_cache_spec_kind=meta.kv_cache_spec.kv_cache_spec_kind,
+                kv_cache_spec_sliding_window=(
+                    meta.kv_cache_spec.kv_cache_spec_sliding_window
+                ),
             )
 
     def _take_removed_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
@@ -231,13 +270,22 @@ class OffloadingEventsTracker:
             meta = self._pending_event_metadata.pop(key, None)
             if meta is not None:
                 group_idx = meta.group_idx
-                hashes = [maybe_convert_block_hash(h) for h in meta.block_hashes]
+                by_group.setdefault(group_idx, []).extend(
+                    maybe_convert_block_hash(h) for h in meta.block_hashes
+                )
             else:
+                if self.self_describing_enabled:
+                    logger.warning_once(
+                        "OffloadingEventsTracker: no event metadata for "
+                        "offload key during BlockRemoved emission; emitting a "
+                        "placeholder removal. Expected if the matching store "
+                        "used the legacy placeholder payload; otherwise "
+                        "indicates missing store metadata."
+                    )
                 group_idx = get_offload_group_idx(key)
-                hashes = [
+                by_group.setdefault(group_idx, []).append(
                     maybe_convert_block_hash(BlockHash(get_offload_block_hash(key)))
-                ]
-            by_group.setdefault(group_idx, []).extend(hashes)
+                )
 
         for group_idx, hashes in by_group.items():
             yield BlockRemoved(
