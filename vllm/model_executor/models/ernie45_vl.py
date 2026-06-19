@@ -1603,11 +1603,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             out_hidden_size=self.config.hidden_size,
         )
 
-    def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
-        if "image_grid_thw" in mm_kwargs:
-            return "image"
-        raise AssertionError("This line should be unreachable.")
-
     def get_encoder_cudagraph_budget_range(self, vllm_config) -> tuple[int, int]:
         # Min: a 224x224 image -> 16x16 patches (patch_size=14),
         # spatial_merge_size=2 -> 8x8 = 64 output tokens.
@@ -1618,20 +1613,11 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         )
         return (min_budget, max_budget)
 
-    def _get_pixel_values_by_modality(self, mm_kwargs: dict[str, Any]) -> torch.Tensor:
-        return mm_kwargs["pixel_values"]
-
-    def _get_grid_thw_by_modality(self, mm_kwargs: dict[str, Any]) -> list[list[int]]:
-        grid_thw = mm_kwargs["image_grid_thw"]
-        if not isinstance(grid_thw, list):
-            grid_thw = grid_thw.tolist()
-        return grid_thw
-
     def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
         from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
 
         m = self.vision_model.spatial_merge_size
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
+        grid_thw = mm_kwargs["image_grid_thw"].tolist()
         return [
             EncoderItemSpec(
                 input_size=t * h * w,
@@ -1643,21 +1629,21 @@ class Ernie4_5_VLMoeForConditionalGeneration(
     def select_encoder_cudagraph_items(
         self, mm_kwargs: dict[str, Any], indices: list[int]
     ) -> dict[str, Any]:
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
+        grid_thw = mm_kwargs["image_grid_thw"]
+        pixel_values = mm_kwargs["pixel_values"]
 
         if len(indices) == 0:
-            return {"pixel_values": pixel_values[:0], "image_grid_thw": []}
+            return {"pixel_values": pixel_values[:0], "image_grid_thw": grid_thw[:0]}
 
         # Cumulative patch offsets for slicing the concatenated pixel_values.
+        patches_per_item = (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).tolist()
         cum_patches = [0]
-        for t, h, w in grid_thw:
-            cum_patches.append(cum_patches[-1] + t * h * w)
+        for p in patches_per_item:
+            cum_patches.append(cum_patches[-1] + p)
         selected_pv = torch.cat(
             [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
         )
-        selected_grid = [grid_thw[i] for i in indices]
-        return {"pixel_values": selected_pv, "image_grid_thw": selected_grid}
+        return {"pixel_values": selected_pv, "image_grid_thw": grid_thw[indices]}
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -1707,12 +1693,11 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             EncoderCudaGraphReplayBuffers,
         )
 
-        grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
         metadata = self.vision_model.prepare_encoder_metadata(
-            grid_thw_list, max_batch_size=max_batch_size
+            mm_kwargs["image_grid_thw"].tolist(), max_batch_size=max_batch_size
         )
         values = metadata | {
-            "pixel_values": self._get_pixel_values_by_modality(mm_kwargs),
+            "pixel_values": mm_kwargs["pixel_values"],
         }
         return EncoderCudaGraphReplayBuffers(values=values)
 
@@ -1729,13 +1714,8 @@ class Ernie4_5_VLMoeForConditionalGeneration(
     ) -> torch.Tensor:
         # Eager fallback: run the full pipeline (ViT + resampler). The result
         # is scattered directly, so it must be the post-merge embeddings.
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs).type(
-            self.vision_model.dtype
-        )
-        grid_thw = torch.tensor(
-            self._get_grid_thw_by_modality(mm_kwargs),
-            device=self.vision_model.device,
-        )
+        pixel_values = mm_kwargs["pixel_values"].type(self.vision_model.dtype)
+        grid_thw = mm_kwargs["image_grid_thw"].to(self.vision_model.device)
         image_features = self.vision_model(pixel_values, grid_thw)
         return self.resampler_model(image_features, grid_thw)
 
@@ -1751,9 +1731,8 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         # The graph output is the raw ViT features (pre-merge), padded to the
         # token budget. Run the resampler eagerly on the valid portion using
         # the actual batch grid_thw, then scatter the post-merge embeddings.
-        grid_thw_list = self._get_grid_thw_by_modality(batch_mm_kwargs)
-        num_valid = sum(t * h * w for t, h, w in grid_thw_list)
-        grid_thw = torch.tensor(grid_thw_list, device=output.device)
+        grid_thw = batch_mm_kwargs["image_grid_thw"].to(output.device)
+        num_valid = int((grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum())
         image_embeds = self.resampler_model(output[:num_valid], grid_thw)
         scatter_output_slices(image_embeds, indices, per_item_out_tokens, dest, clone)
 
