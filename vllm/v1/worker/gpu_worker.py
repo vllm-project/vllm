@@ -737,7 +737,7 @@ class Worker(WorkerBase):
 
         activate_jit_monitor(
             mode=self.observability_config.jit_monitor_mode,
-            verbose=self.observability_config.jit_monitor_verbose
+            verbose=self.observability_config.jit_monitor_verbose,
         )
 
         # Freeze the worker heap so the GC won't scan static objects
