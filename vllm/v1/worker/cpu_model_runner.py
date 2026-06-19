@@ -158,6 +158,7 @@ class CPUModelRunner(GPUModelRunner):
         # the uninitialized tail is read before masking can apply.
         from vllm.v1.kv_cache_interface import FullAttentionSpec
 
+        seen_ptrs: set[int] = set()
         for group in self.kv_cache_config.kv_cache_groups:
             if not isinstance(group.kv_cache_spec, FullAttentionSpec):
                 continue
@@ -168,6 +169,9 @@ class CPUModelRunner(GPUModelRunner):
                 kv = ctx.kv_cache
                 if not isinstance(kv, torch.Tensor):
                     continue
+                if kv.data_ptr() in seen_ptrs:
+                    continue
+                seen_ptrs.add(kv.data_ptr())
                 for block_id in block_ids:
                     kv[block_id].zero_()
 
