@@ -18,6 +18,7 @@ class AllocationData:
     handle: HandleType
     tag: str
     cpu_backup_tensor: torch.Tensor | None = None
+    is_asleep: bool = False
 
 
 class MemAllocator(Protocol):
