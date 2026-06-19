@@ -256,6 +256,188 @@ def _reshape_cache_nvfp4_kernel(
     )
 
 
+@triton.jit
+def _reshape_cache_nvfp4_grouped_kernel(
+    key_ptr,  # [num_tokens, num_heads, head_size]
+    value_ptr,  # [num_tokens, num_heads, head_size]
+    key_data_cache_ptr,  # [num_blocks, block_size, num_heads, head_size // 2]
+    value_data_cache_ptr,  # [num_blocks, block_size, num_heads, head_size // 2]
+    key_scale_cache_ptr,  # [num_blocks, block_size, num_heads, head_size // 16]
+    value_scale_cache_ptr,  # [num_blocks, block_size, num_heads, head_size // 16]
+    slot_mapping_ptr,  # [num_tokens]
+    k_scale,  # float32 global dequant scale
+    v_scale,  # float32 global dequant scale
+    stride_key_tok: tl.int64,
+    stride_key_head: tl.int64,
+    stride_value_tok: tl.int64,
+    stride_value_head: tl.int64,
+    stride_k_data_blk: tl.int64,
+    stride_k_data_slot: tl.int64,
+    stride_k_data_head: tl.int64,
+    stride_v_data_blk: tl.int64,
+    stride_v_data_slot: tl.int64,
+    stride_v_data_head: tl.int64,
+    stride_k_scale_blk: tl.int64,
+    stride_k_scale_slot: tl.int64,
+    stride_k_scale_head: tl.int64,
+    stride_k_scale_dim: tl.int64,
+    stride_v_scale_blk: tl.int64,
+    stride_v_scale_slot: tl.int64,
+    stride_v_scale_head: tl.int64,
+    stride_v_scale_dim: tl.int64,
+    block_size: tl.constexpr,
+    head_size: tl.constexpr,
+    GROUPS_PER_PROGRAM: tl.constexpr,
+):
+    tl.static_assert(head_size % 16 == 0)
+    SCALE_DIM: tl.constexpr = head_size // 16
+    tl.static_assert(SCALE_DIM % 4 == 0)
+    tl.static_assert(block_size % 4 == 0)
+
+    token_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    scale_group_block = tl.program_id(2)
+
+    slot_idx = tl.load(slot_mapping_ptr + token_idx).to(tl.int64)
+    if slot_idx < 0:
+        return
+
+    block_idx = slot_idx // block_size
+    slot_in_block = slot_idx % block_size
+
+    scale_group_offsets = tl.arange(0, GROUPS_PER_PROGRAM)[:, None]
+    byte_offsets = tl.arange(0, 8)[None, :]
+    scale_group_idx = scale_group_block * GROUPS_PER_PROGRAM + scale_group_offsets
+    group_mask = scale_group_idx < SCALE_DIM
+
+    dim_base = scale_group_idx * 16
+    even_offsets = dim_base + byte_offsets * 2
+    odd_offsets = even_offsets + 1
+
+    key_vals_even = tl.load(
+        key_ptr
+        + token_idx * stride_key_tok
+        + head_idx * stride_key_head
+        + even_offsets,
+        mask=group_mask,
+        other=0.0,
+    ).to(tl.float32)
+    key_vals_odd = tl.load(
+        key_ptr + token_idx * stride_key_tok + head_idx * stride_key_head + odd_offsets,
+        mask=group_mask,
+        other=0.0,
+    ).to(tl.float32)
+    value_vals_even = tl.load(
+        value_ptr
+        + token_idx * stride_value_tok
+        + head_idx * stride_value_head
+        + even_offsets,
+        mask=group_mask,
+        other=0.0,
+    ).to(tl.float32)
+    value_vals_odd = tl.load(
+        value_ptr
+        + token_idx * stride_value_tok
+        + head_idx * stride_value_head
+        + odd_offsets,
+        mask=group_mask,
+        other=0.0,
+    ).to(tl.float32)
+
+    k_global_scale = tl.load(k_scale).to(tl.float32)
+    v_global_scale = tl.load(v_scale).to(tl.float32)
+    k_quant_scale = tl.where(k_global_scale == 0.0, 1.0, 1.0 / k_global_scale)
+    v_quant_scale = tl.where(v_global_scale == 0.0, 1.0, 1.0 / v_global_scale)
+
+    k_vec_max = tl.maximum(
+        tl.max(tl.abs(key_vals_even), axis=1),
+        tl.max(tl.abs(key_vals_odd), axis=1),
+    )[:, None]
+    v_vec_max = tl.maximum(
+        tl.max(tl.abs(value_vals_even), axis=1),
+        tl.max(tl.abs(value_vals_odd), axis=1),
+    )[:, None]
+
+    k_block_scale_bits = _float_to_e4m3fn_bits((k_quant_scale * k_vec_max) / 6.0)
+    v_block_scale_bits = _float_to_e4m3fn_bits((v_quant_scale * v_vec_max) / 6.0)
+
+    k_block_scale_f32 = _nvfp4_scale_bits_to_float(k_block_scale_bits)
+    v_block_scale_f32 = _nvfp4_scale_bits_to_float(v_block_scale_bits)
+    k_output_scale = tl.where(
+        k_block_scale_f32 == 0.0, 0.0, k_quant_scale / k_block_scale_f32
+    )
+    v_output_scale = tl.where(
+        v_block_scale_f32 == 0.0, 0.0, v_quant_scale / v_block_scale_f32
+    )
+
+    key_low = _round_to_e2m1_bits(tl.clamp(key_vals_even * k_output_scale, -6.0, 6.0))
+    key_high = _round_to_e2m1_bits(tl.clamp(key_vals_odd * k_output_scale, -6.0, 6.0))
+    value_low = _round_to_e2m1_bits(
+        tl.clamp(value_vals_even * v_output_scale, -6.0, 6.0)
+    )
+    value_high = _round_to_e2m1_bits(
+        tl.clamp(value_vals_odd * v_output_scale, -6.0, 6.0)
+    )
+    key_packed = key_low | (key_high << 4)
+    value_packed = value_low | (value_high << 4)
+
+    key_data_base = (
+        block_idx * stride_k_data_blk
+        + slot_in_block * stride_k_data_slot
+        + head_idx * stride_k_data_head
+        + scale_group_idx * 8
+    )
+    value_data_base = (
+        block_idx * stride_v_data_blk
+        + slot_in_block * stride_v_data_slot
+        + head_idx * stride_v_data_head
+        + scale_group_idx * 8
+    )
+    tl.store(
+        key_data_cache_ptr + key_data_base + byte_offsets,
+        key_packed,
+        mask=group_mask,
+    )
+    tl.store(
+        value_data_cache_ptr + value_data_base + byte_offsets,
+        value_packed,
+        mask=group_mask,
+    )
+
+    scale_groups = scale_group_block * GROUPS_PER_PROGRAM + tl.arange(
+        0, GROUPS_PER_PROGRAM
+    )
+    scale_group_mask = scale_groups < SCALE_DIM
+    k_scale_bits = tl.reshape(k_block_scale_bits, (GROUPS_PER_PROGRAM,))
+    v_scale_bits = tl.reshape(v_block_scale_bits, (GROUPS_PER_PROGRAM,))
+    if SCALE_DIM == 16:
+        swizzled_slot, swizzled_scale = _nvfp4_linear_scale_coord(
+            slot_in_block, scale_groups
+        )
+    else:
+        swizzled_slot, swizzled_scale = _nvfp4_swizzled_scale_coord(
+            slot_in_block, scale_groups, SCALE_DIM
+        )
+    tl.store(
+        key_scale_cache_ptr
+        + block_idx * stride_k_scale_blk
+        + swizzled_slot * stride_k_scale_slot
+        + head_idx * stride_k_scale_head
+        + swizzled_scale * stride_k_scale_dim,
+        k_scale_bits,
+        mask=scale_group_mask,
+    )
+    tl.store(
+        value_scale_cache_ptr
+        + block_idx * stride_v_scale_blk
+        + swizzled_slot * stride_v_scale_slot
+        + head_idx * stride_v_scale_head
+        + swizzled_scale * stride_v_scale_dim,
+        v_scale_bits,
+        mask=scale_group_mask,
+    )
+
+
 def triton_reshape_and_cache_flash_nvfp4(
     key: torch.Tensor,
     value: torch.Tensor,
@@ -291,9 +473,14 @@ def triton_reshape_and_cache_flash_nvfp4(
 
     block_size = key_data_cache.shape[1]
     num_scale_groups = head_size // _NVFP4_GROUP_SIZE
-    grid = (num_tokens, num_heads, num_scale_groups)
+    groups_per_program = 4 if head_size == 256 else 1
+    grid = (
+        num_tokens,
+        num_heads,
+        triton.cdiv(num_scale_groups, groups_per_program),
+    )
 
-    _reshape_cache_nvfp4_kernel[grid](
+    kernel_args = dict(
         key_ptr=key,
         value_ptr=value,
         key_data_cache_ptr=key_data_cache,
@@ -323,9 +510,20 @@ def triton_reshape_and_cache_flash_nvfp4(
         stride_v_scale_dim=value_scale_cache.stride(3),
         block_size=block_size,
         head_size=head_size,
-        num_warps=1,
-        num_stages=4,
     )
+    if groups_per_program > 1:
+        _reshape_cache_nvfp4_grouped_kernel[grid](
+            **kernel_args,
+            GROUPS_PER_PROGRAM=groups_per_program,
+            num_warps=1,
+            num_stages=4,
+        )
+    else:
+        _reshape_cache_nvfp4_kernel[grid](
+            **kernel_args,
+            num_warps=1,
+            num_stages=4,
+        )
 
 
 @triton.jit
