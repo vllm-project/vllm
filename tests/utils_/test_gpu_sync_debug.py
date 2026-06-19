@@ -10,6 +10,8 @@ from vllm.utils.gpu_sync_debug import (
     with_gpu_sync_check,
 )
 
+from ..utils import create_new_process_for_each_test
+
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
@@ -31,6 +33,7 @@ def _causes_sync():
 
 
 @pytest.mark.parametrize("mode", ["warn", "error"])
+@create_new_process_for_each_test()
 def test_with_env_set(monkeypatch, mode):
     # Env set + gate flipped on: the unguarded sync is detected.
     monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", mode)
@@ -48,6 +51,7 @@ def test_with_env_set(monkeypatch, mode):
         with_gpu_sync_check(_causes_sync)()
 
 
+@create_new_process_for_each_test()
 def test_without_env_set(monkeypatch):
     # Env unset: the decorator is a pass-through, no sync is detected.
     monkeypatch.delenv("VLLM_GPU_SYNC_CHECK", raising=False)
