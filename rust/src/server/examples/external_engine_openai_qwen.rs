@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{
-    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode,
-    ParserSelection, RendererSelection, serve,
+    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
+    HttpListenerMode, ParserSelection, RendererSelection, serve,
 };
 
 #[derive(Debug, Parser)]
@@ -68,7 +68,9 @@ async fn main() -> Result<()> {
         chat_template: None,
         default_chat_template_kwargs: None,
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
+        max_logprobs: None,
         api_server_options: ApiServerOptions::default(),
+        cors: CorsConfig::default(),
         api_keys: Vec::new(),
         disable_log_stats: false,
         grpc_port: None,
