@@ -89,10 +89,10 @@ class BaseRenderer(ABC, Generic[_T]):
         # to keep the asyncio event loop responsive under concurrent load.
         self._mm_executor: Executor = self._executor
 
-        # Offload tokenization & detokenization to the thread pool. The
-        # sync ``_tokenize_prompt`` already encapsulates the unified
-        # ``__call__`` path and char-offset extraction, so the async variant
-        # simply offloads it rather than duplicating that logic.
+        # Offload tokenization to the thread pool. The sync
+        # ``_tokenize_prompt`` already encapsulates the unified ``__call__``
+        # path and char-offset extraction, so the async variant simply
+        # offloads it rather than duplicating that logic.
         self._async_tokenize_prompt = make_async(
             self._tokenize_prompt, executor=self._executor
         )

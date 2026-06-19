@@ -168,11 +168,9 @@ class TokenizeParams:
     """Whether to add special tokens."""
 
     return_token_offsets: bool = False
-    """If true, request the tokenizer to return char-level (start, end)
-    offsets per token. Honored only when the tokenizer is Fast
-    (Rust-backed) AND the prompt has source text AND no multimodal data
-    is present. Otherwise silently ignored (TokensPrompt's
-    prompt_token_offsets remains unset)."""
+    """If true, request char-level (start, end) offsets per token. Honored
+    only for Fast (Rust-backed) tokenizers with text input and no multimodal
+    data; otherwise silently ignored."""
 
     needs_detokenization: bool = False
     """

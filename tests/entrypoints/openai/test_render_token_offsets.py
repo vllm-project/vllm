@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the token-offsets request/response protocol fields.
-
-End-to-end coverage of the render endpoints (real model, no mocks) lives in
-``tests/entrypoints/serve/render/test_render.py``.
+"""Unit tests for the token-offsets request/response protocol wiring:
+the request flag flowing into ``TokenizeParams`` and the ``GenerateRequest``
+serialization boundary. End-to-end behavior is covered by
+``tests/entrypoints/serve/render/test_render.py``; plain Pydantic field
+storage is not retested here.
 """
 
 from unittest.mock import Mock
@@ -15,121 +16,65 @@ from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
 from vllm.sampling_params import SamplingParams
 
 
-class TestCompletionRequestField:
-    def test_default_is_false(self):
-        """return_token_offsets must default to False so existing
-        callers see zero behavioral change."""
-        req = CompletionRequest(model="m", prompt="hi")
-        assert req.return_token_offsets is False
-
-    def test_accepts_true(self):
-        req = CompletionRequest(model="m", prompt="hi", return_token_offsets=True)
-        assert req.return_token_offsets is True
-
-    def test_none_coerces_to_false_in_tok_params(self):
-        """JSON null must coerce to False when forwarded into TokenizeParams."""
-        req = CompletionRequest(model="m", prompt="hi", return_token_offsets=None)
-        model_config = Mock(spec=ModelConfig)
-        model_config.max_model_len = 128
-        params = req.build_tok_params(model_config)
-        assert params.return_token_offsets is False
-
-    def test_build_tok_params_forwards_true(self):
-        req = CompletionRequest(model="m", prompt="hi", return_token_offsets=True)
-        model_config = Mock(spec=ModelConfig)
-        model_config.max_model_len = 128
-        params = req.build_tok_params(model_config)
-        assert params.return_token_offsets is True
-
-    def test_build_tok_params_default_is_false(self):
-        req = CompletionRequest(model="m", prompt="hi")
-        model_config = Mock(spec=ModelConfig)
-        model_config.max_model_len = 128
-        params = req.build_tok_params(model_config)
-        assert params.return_token_offsets is False
+def _model_config() -> Mock:
+    model_config = Mock(spec=ModelConfig)
+    model_config.max_model_len = 128
+    return model_config
 
 
-class TestChatCompletionRequestField:
-    def test_default_is_false(self):
-        req = ChatCompletionRequest(
-            model="m", messages=[{"role": "user", "content": "hi"}]
-        )
-        assert req.return_token_offsets is False
+def test_completion_flag_forwarded_to_tok_params():
+    """build_tok_params must forward return_token_offsets, defaulting to
+    False (zero behavioral change for existing callers) and coercing JSON
+    null to False via the bool() guard."""
+    cfg = _model_config()
 
-    def test_accepts_true(self):
-        req = ChatCompletionRequest(
-            model="m",
-            messages=[{"role": "user", "content": "hi"}],
-            return_token_offsets=True,
-        )
-        assert req.return_token_offsets is True
+    default = CompletionRequest(model="m", prompt="hi")
+    assert default.build_tok_params(cfg).return_token_offsets is False
 
-    def test_none_coerces_to_false_in_tok_params(self):
-        req = ChatCompletionRequest(
-            model="m",
-            messages=[{"role": "user", "content": "hi"}],
-            return_token_offsets=None,
-        )
-        model_config = Mock(spec=ModelConfig)
-        model_config.max_model_len = 128
-        params = req.build_tok_params(model_config)
-        assert params.return_token_offsets is False
+    on = CompletionRequest(model="m", prompt="hi", return_token_offsets=True)
+    assert on.build_tok_params(cfg).return_token_offsets is True
 
-    def test_build_tok_params_forwards_true(self):
-        req = ChatCompletionRequest(
-            model="m",
-            messages=[{"role": "user", "content": "hi"}],
-            return_token_offsets=True,
-        )
-        model_config = Mock(spec=ModelConfig)
-        model_config.max_model_len = 128
-        params = req.build_tok_params(model_config)
-        assert params.return_token_offsets is True
-
-    def test_build_tok_params_default_is_false(self):
-        req = ChatCompletionRequest(
-            model="m", messages=[{"role": "user", "content": "hi"}]
-        )
-        model_config = Mock(spec=ModelConfig)
-        model_config.max_model_len = 128
-        params = req.build_tok_params(model_config)
-        assert params.return_token_offsets is False
+    null = CompletionRequest(model="m", prompt="hi", return_token_offsets=None)
+    assert null.build_tok_params(cfg).return_token_offsets is False
 
 
-class TestGenerateRequestField:
-    def test_default_is_none(self):
-        """token_offsets must default to None so existing /v1/.../render
-        responses are byte-identical (modulo new key emission)."""
-        req = GenerateRequest(
-            token_ids=[1, 2, 3],
-            sampling_params=SamplingParams(),
-        )
-        assert req.token_offsets is None
+def test_chat_flag_forwarded_to_tok_params():
+    """Chat build_tok_params has its own (max_completion_tokens) branch, so
+    its return_token_offsets forwarding is verified independently."""
+    cfg = _model_config()
+    messages = [{"role": "user", "content": "hi"}]
 
-    def test_accepts_offsets_list(self):
-        req = GenerateRequest(
-            token_ids=[10, 20],
-            sampling_params=SamplingParams(),
-            token_offsets=[(0, 1), (1, 3)],
-        )
-        assert req.token_offsets == [(0, 1), (1, 3)]
+    default = ChatCompletionRequest(model="m", messages=messages)
+    assert default.build_tok_params(cfg).return_token_offsets is False
 
-    def test_offsets_serialize_to_json(self):
-        """Pydantic v2 round-trip: tuple[int, int] elements survive
-        model_dump and re-validate."""
-        req = GenerateRequest(
-            token_ids=[10, 20],
-            sampling_params=SamplingParams(),
-            token_offsets=[(0, 1), (1, 3)],
-        )
-        dumped = req.model_dump()
-        assert dumped["token_offsets"] == [(0, 1), (1, 3)]
-        # Re-validate from the dumped dict (excluding sampling_params
-        # which doesn't round-trip cleanly via dump).
-        again = GenerateRequest.model_validate(
-            {
-                **dumped,
-                "sampling_params": SamplingParams(),
-            }
-        )
-        assert again.token_offsets == [(0, 1), (1, 3)]
+    on = ChatCompletionRequest(model="m", messages=messages, return_token_offsets=True)
+    assert on.build_tok_params(cfg).return_token_offsets is True
+
+    null = ChatCompletionRequest(
+        model="m", messages=messages, return_token_offsets=None
+    )
+    assert null.build_tok_params(cfg).return_token_offsets is False
+
+
+def test_generate_request_token_offsets_default_none():
+    """Defaults to None so existing /v1/.../render responses are unchanged."""
+    req = GenerateRequest(token_ids=[1, 2, 3], sampling_params=SamplingParams())
+    assert req.token_offsets is None
+
+
+def test_generate_request_token_offsets_survive_json_round_trip():
+    """GenerateRequest crosses the disagg serialization boundary; the
+    tuple[int, int] offsets must survive model_dump and re-validate."""
+    req = GenerateRequest(
+        token_ids=[10, 20],
+        sampling_params=SamplingParams(),
+        token_offsets=[(0, 1), (1, 3)],
+    )
+    dumped = req.model_dump()
+    assert dumped["token_offsets"] == [(0, 1), (1, 3)]
+    # Re-validate from the dumped dict (sampling_params doesn't round-trip
+    # cleanly via dump, so re-inject a fresh instance).
+    again = GenerateRequest.model_validate(
+        {**dumped, "sampling_params": SamplingParams()}
+    )
+    assert again.token_offsets == [(0, 1), (1, 3)]

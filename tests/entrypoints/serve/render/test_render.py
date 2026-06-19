@@ -292,7 +292,8 @@ async def test_completion_render_emits_token_offsets(client):
 
 @pytest.mark.asyncio
 async def test_completion_render_default_no_token_offsets(client):
-    """Without the flag, token_offsets must be null (zero-regression)."""
+    """Without the flag, token_offsets must be null (existing responses
+    unchanged)."""
     response = await client.post(
         "/v1/completions/render",
         json={
