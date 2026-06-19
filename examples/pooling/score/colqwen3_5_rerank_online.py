@@ -8,7 +8,7 @@ It produces per-token embeddings and uses MaxSim scoring for retrieval
 and reranking. Supports both text and image inputs.
 
 Works for any ColQwen3.5 checkpoint, e.g. `athrael-soju/colqwen3.5-4.5B-v3`
-or `athrael-soju/VultronRetrieverPrime-Qwen3.5-8B`.
+or `vultr/VultronRetrieverPrime-Qwen3.5-8B`.
 
 Start the server with:
     vllm serve athrael-soju/colqwen3.5-4.5B-v3 --max-model-len 4096 \

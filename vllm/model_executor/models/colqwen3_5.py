@@ -15,7 +15,7 @@ Based on: Qwen3.5 backbone with custom text projection
 
 Target models:
 - athrael-soju/colqwen3.5-4.5B-v3
-- athrael-soju/VultronRetrieverPrime-Qwen3.5-8B
+- vultr/VultronRetrieverPrime-Qwen3.5-8B
 """
 
 from collections.abc import Iterable, Mapping
