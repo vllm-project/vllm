@@ -11,32 +11,31 @@ def _model_config(*architectures: str):
     return SimpleNamespace(architectures=list(architectures))
 
 
-def test_deepseek_v4_auto_enables_breakable_cudagraph_off_sm121(monkeypatch):
+def test_deepseek_v4_does_not_auto_enable_breakable_cudagraph(monkeypatch):
+    # Breakable cudagraph disables torch.compile and is 1.5-3.8x slower for MTP
+    # decode on SM12x (measured); DeepSeek-V4 defaults to FULL_AND_PIECEWISE.
     monkeypatch.setattr(
         current_platform,
         "is_device_capability",
         lambda capability, device_id=0: False,
     )
 
-    assert _should_auto_enable_deepseek_v4_breakable_cudagraph(
+    assert not _should_auto_enable_deepseek_v4_breakable_cudagraph(
         _model_config("DeepseekV4ForCausalLM")
     )
-    assert _should_auto_enable_deepseek_v4_breakable_cudagraph(
+    assert not _should_auto_enable_deepseek_v4_breakable_cudagraph(
         _model_config("DeepSeekV4MTPModel")
     )
 
 
-def test_deepseek_v4_auto_enables_breakable_cudagraph_on_sm121(monkeypatch):
-    # Re-enabled on SM121 after upstream reverted #45309 (#45972): with the full
-    # @eager_break_during_capture split restored, breakable cudagraph generates
-    # correctly on SM121 again (verified 2x GB10, EP off, "2+2等于几" clean).
+def test_deepseek_v4_does_not_auto_enable_breakable_cudagraph_on_sm121(monkeypatch):
     monkeypatch.setattr(
         current_platform,
         "is_device_capability",
         lambda capability, device_id=0: capability == 121,
     )
 
-    assert _should_auto_enable_deepseek_v4_breakable_cudagraph(
+    assert not _should_auto_enable_deepseek_v4_breakable_cudagraph(
         _model_config("DeepseekV4ForCausalLM")
     )
 

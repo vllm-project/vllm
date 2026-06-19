@@ -114,17 +114,17 @@ IS_DENSE = False
 def _should_auto_enable_deepseek_v4_breakable_cudagraph(
     model_config: ModelConfig,
 ) -> bool:
-    # Auto-enable breakable cudagraph for DeepSeek-V4 on all SM12x platforms.
-    # The earlier SM121 carve-out (breakable cudagraph produced garbage on
-    # trivial prompts there) was removed after upstream reverted #45309 in
-    # #45972: with the full @eager_break_during_capture split restored,
-    # breakable cudagraph generates correctly on SM121 again (verified on 2x
-    # GB10, EP off: "2+2等于几" and arithmetic clean) and is on-par-or-faster
-    # than FULL_AND_PIECEWISE.
-    return any(
-        arch in DEEPSEEK_V4_CUDAGRAPH_ARCHITECTURES
-        for arch in model_config.architectures
-    )
+    # DeepSeek-V4 does NOT auto-enable breakable cudagraph. Breakable mode
+    # disables the torch.compile pipeline (equivalent to -O.mode=none) and runs
+    # attention eagerly every decode step; on SM12x that is 1.5-3.8x SLOWER for
+    # MTP decode and degrades with output length, measured on both RTX PRO 6000
+    # (SM120) and 2x GB10 (SM121). FULL_AND_PIECEWISE + torch.compile is correct
+    # (GSM8K parity, bare-prompt clean) and faster, so it is the default.
+    # Opt in with VLLM_USE_BREAKABLE_CUDAGRAPH=1 for the MTP + long-context +
+    # high-concurrency garbled-output workaround (which also engages the
+    # spec-decode attention eager-break).
+    del model_config  # architecture-independent: never auto-enable
+    return False
 
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
