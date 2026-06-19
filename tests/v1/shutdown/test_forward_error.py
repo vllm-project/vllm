@@ -36,6 +36,7 @@ def evil_forward(self, *args, **kwargs):
         raise Exception("Simulated illegal memory access on Rank 0!")
     self.num_calls += 1
 
+    kwargs.setdefault("intermediate_tensors", None)  # required for MRV2
     return self.model(*args, **kwargs)
 
 
