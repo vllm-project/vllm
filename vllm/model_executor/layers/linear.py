@@ -934,14 +934,14 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     name,
                     loaded_weight.shape,
                 )
-            # Load into self if name is not an attr of self
-            param: Parameter = getattr(self, name, self)
-            if (
-                param is None
-                and name == "bias"
-                and self.quant_config is not None
-                and "gptq" in self.quant_config.get_name()
-            ):
+            # Load into self if name is not an attr of self or its submodules
+            param: Parameter
+            if "." in name:
+                submodule, _, attr = name.rpartition(".")
+                param = getattr(self.get_submodule(submodule), attr, self)
+            else:
+                param = getattr(self, name, self)
+            if param is None and name == "bias":
                 continue
             param.weight_loader(param, loaded_weight, shard_id)
             yield name
@@ -1362,14 +1362,14 @@ class QKVParallelLinear(ColumnParallelLinear):
                     name,
                     loaded_weight.shape,
                 )
-            # Load into self if name is not an attr of self
-            param: Parameter = getattr(self, name, self)
-            if (
-                param is None
-                and name == "bias"
-                and self.quant_config is not None
-                and "gptq" in self.quant_config.get_name()
-            ):
+            # Load into self if name is not an attr of self or its submodules
+            param: Parameter
+            if "." in name:
+                submodule, _, attr = name.rpartition(".")
+                param = getattr(self.get_submodule(submodule), attr, self)
+            else:
+                param = getattr(self, name, self)
+            if param is None and name == "bias":
                 continue
             param.weight_loader(param, loaded_weight, shard_id)
             yield name
