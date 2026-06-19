@@ -1096,3 +1096,50 @@ class TestMessageStartIncludesTypeAndRole:
         message = events[0][1]["message"]
         assert message["type"] == "message"
         assert message["role"] == "assistant"
+
+
+# ======================================================================
+# Auto-detection of system-first template requirement
+# ======================================================================
+
+
+Q35_TEMPLATE = (
+    "{%- for message in messages %}"
+    "{%- if message.role == 'system' %}"
+    "{%- if not loop.first %}"
+    "{{- raise_exception('System message must be at the beginning.') }}"
+    "{%- endif %}"
+    "{%- endif %}"
+    "{%- endfor %}"
+)
+
+
+class TestDetectMergeInlineSystem:
+    """Verify _detect_merge_inline_system auto-detection.
+
+    Tests three scenarios:
+    1. Template with system-first guard (e.g. Qwen) → merge needed
+    2. Template without restrictions → no merge, cache-friendly
+    3. No template provided → safe default: merge
+    """
+
+    def test_qwen_template_requires_merge(self):
+        """Template with loop.first guard rejects mid-conversation system."""
+        assert (
+            AnthropicServingMessages._detect_merge_inline_system(Q35_TEMPLATE) is True
+        )
+
+    def test_no_restriction_no_merge(self):
+        """Template without restriction accepts mid-conversation system."""
+        assert (
+            AnthropicServingMessages._detect_merge_inline_system(
+                "{%- for message in messages %}"
+                "{{- message.role }}: {{ message.content }}\n"
+                "{%- endfor %}"
+            )
+            is False
+        )
+
+    def test_no_template_defaults_merge(self):
+        """No chat_template → conservative default: merge."""
+        assert AnthropicServingMessages._detect_merge_inline_system(None) is True

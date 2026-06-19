@@ -20,7 +20,6 @@ except ImportError as e:
     ) from e
 
 
-from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -496,15 +495,6 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
                 has_end_token = True
 
         return has_end_token
-
-    def prepare_structured_tag(
-        self, original_tag: str | None, tool_server: ToolServer | None
-    ) -> str | None:
-        # Responses API replaces ``structural_tag`` via the reasoning parser.
-        # Default ``ReasoningParser.prepare_structured_tag`` returns None, which
-        # would clear a Cohere tag produced in ``adjust_request`` and break
-        # ``StructuredOutputsParams`` validation. Preserve the existing tag.
-        return original_tag
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
