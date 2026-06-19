@@ -563,6 +563,14 @@ class Platform:
 
         kv_quant_mode = get_kv_quant_mode(cache_config.cache_dtype)
 
+        if cache_config.attn_pack_size > 1:
+            logger.info(
+                "Packing %d attention layers into one page, which will "
+                "reduce the block size to roughly 1/%d of the original.",
+                cache_config.attn_pack_size,
+                cache_config.attn_pack_size,
+            )
+
         # Compute attention page size for 1 token
         if model_config.use_mla:
             attn_page_size_1_token = MLAAttentionSpec(
@@ -571,6 +579,7 @@ class Platform:
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+                pack_size=cache_config.attn_pack_size,
             ).page_size_bytes
         elif cache_config.cache_dtype.startswith("turboquant_"):
             # TQ has a packed K|V layout; the standard FullAttentionSpec
@@ -615,6 +624,7 @@ class Platform:
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+                pack_size=cache_config.attn_pack_size,
             ).page_size_bytes
 
         # Compute mamba page size

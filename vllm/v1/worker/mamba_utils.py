@@ -16,8 +16,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 )
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState
 from vllm.v1.worker.lora_model_runner_mixin import GPUInputBatch
@@ -935,3 +936,77 @@ def stage_postprocess_inputs_to_gpu(
         ctx.num_computed_tokens_buf,
         ctx.num_draft_tokens_buf,
     )
+
+
+def get_hybrid_attn_stride_order(
+    logical_kv_cache_shape: tuple[int, ...],
+    kv_cache_stride_order: tuple[int, ...],
+    block_dim: int,
+) -> tuple[int, ...]:
+    """
+    Move the logical block dimension to the front of the physical layout.
+
+    Hybrid attention+mamba caches need a block-major physical layout so one
+    block maps to one cache page.
+    """
+    assert len(logical_kv_cache_shape) == len(kv_cache_stride_order)
+    assert block_dim < len(logical_kv_cache_shape)
+
+    # Keep the backend order when the block dimension is already physical dim 0.
+    if kv_cache_stride_order[0] == block_dim:
+        return kv_cache_stride_order
+
+    stride_order = [dim for dim in kv_cache_stride_order if dim != block_dim]
+    stride_order.insert(0, block_dim)
+    return tuple(stride_order)
+
+
+def get_hybrid_attn_pack_layout(
+    kv_cache_shape: tuple[int, ...],
+    kv_cache_stride: tuple[int, ...],
+    kv_cache_spec: AttentionSpec,
+    block_dim: int,
+    inv_order: list[int],
+    layer_idx: int,
+    kernel_block_size: int,
+) -> tuple[tuple[int, ...], int]:
+    """
+    Compute the attn-pack block stride and storage offset.
+
+    Args:
+        kv_cache_shape: The shape of the KV cache tensor.
+        kv_cache_stride: The stride of the KV cache tensor.
+        kv_cache_spec: The specification of the KV cache.
+        block_dim: The block dimension in the logical KV cache shape.
+        inv_order: Maps each logical KV cache dimension to the current physical
+            KV cache dimension.
+        layer_idx: The index of the layer.
+        kernel_block_size: The size of the kernel block.
+    Returns:
+        A tuple containing the target stride and storage offset.
+    """
+    assert len(inv_order) == len(kv_cache_shape) == len(kv_cache_stride)
+    target_stride_list = list(kv_cache_stride)
+
+    attn_pack_size = kv_cache_spec.pack_size
+    if attn_pack_size == 1:
+        return tuple(target_stride_list), 0
+
+    physical_block_dim = inv_order[block_dim]
+
+    if kv_cache_spec.page_size_padded is not None:
+        # _reshape_kv_cache_tensors already set this stride from page_size_bytes.
+        block_stride = target_stride_list[physical_block_dim]
+    else:
+        block_stride = target_stride_list[physical_block_dim] * attn_pack_size
+    target_stride_list[physical_block_dim] = block_stride
+
+    dtype_size = get_dtype_size(kv_cache_spec.dtype)
+    num_element_per_page = kv_cache_spec.page_size_bytes // dtype_size
+    num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+    num_element_per_attn_pack = (
+        num_element_per_page // num_blocks_per_kv_block // attn_pack_size
+    )
+    attn_pack_idx = layer_idx % attn_pack_size
+    storage_offset = attn_pack_idx * num_element_per_attn_pack
+    return tuple(target_stride_list), storage_offset
