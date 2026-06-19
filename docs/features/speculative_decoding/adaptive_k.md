@@ -8,7 +8,7 @@ cost model.
 
 When enabled, Adaptive K picks the K that maximises:
 
-```
+```text
 U(K) = E_acc(K) / (K · c_draft + 1)
 
 E_acc(K) = 1 + Σ_{i=1}^{K} Π_{j=1}^{i} α_j
@@ -47,7 +47,7 @@ Or via `--speculative-config`:
 ## Configuration Options
 
 | Option | Default | Description |
-|--------|---------|-------------|
+| ------ | ------- | ----------- |
 | `enable_adaptive_k` | `False` | Enable online adaptive K selection |
 | `adaptive_k_ema_alpha` | `0.3` | EMA smoothing factor (0 = slow, 1 = raw) |
 | `adaptive_k_c_draft` | `0.05` | Draft-forward to target-forward cost ratio |
