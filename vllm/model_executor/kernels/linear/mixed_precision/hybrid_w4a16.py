@@ -23,7 +23,7 @@ from vllm.model_executor.parameter import (
     permute_param_layout_,
 )
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx1x, on_gfx1151
+from vllm.platforms.rocm import on_gfx1x, on_gfx1103, on_gfx1151
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -326,7 +326,10 @@ def _select_skinny_gfx11_config(
             block_n = min(block_n, 32)
     else:
         # Scalar-dequant path (bf16): pre-packed-kernel scalar-tuned table.
-        if M <= 32:
+        if on_gfx1103() and M > 256:
+            # Tested on Qwen3-VL-4B-AWQ
+            block_m, block_n, block_k, num_warps = 64, 256, 64, 8
+        elif M <= 32:
             block_m, block_n, block_k, num_warps = 32, 32, 128, 4
         elif M <= 64:
             block_m, block_n, block_k, num_warps = 64, 64, 32, 4
