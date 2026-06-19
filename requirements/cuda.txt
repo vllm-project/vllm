@@ -26,4 +26,4 @@ quack-kernels>=0.3.3
 tokenspeed-mla==0.1.2
 
 # Humming kernels for quantization gemm
-humming-kernels[cu13] @ https://github.com/inclusionAI/humming/archive/151ba0eb3b7859c1052db80d207c520dfcc8244b.tar.gz
+humming-kernels[cu13] @ https://github.com/inclusionAI/humming/archive/f4491a340aa7efd97abbd6385cdcf3812fbf3928.tar.gz
