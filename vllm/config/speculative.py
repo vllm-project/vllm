@@ -138,7 +138,9 @@ class SpeculativeConfig:
     non-tree speculation."""
     eagle_aux_layer_semantics: EagleAuxLayerSemantics | None = None
     """Convention used to interpret EAGLE-3 auxiliary hidden-state layer
-    indices (`eagle_aux_hidden_state_layer_ids`).
+    indices (`eagle_aux_hidden_state_layer_ids`). Only valid for the
+    `eagle3` method; other methods (e.g. dflash) normalize their indices at
+    config-load time and reject this setting.
 
     vLLM captures auxiliary hidden states *after* each decoder layer, so a
     stored index `k` corresponds to the output of layer `k - 1`. Different
@@ -835,6 +837,14 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+
+        if self.eagle_aux_layer_semantics is not None and self.method != "eagle3":
+            raise ValueError(
+                "eagle_aux_layer_semantics is only supported for the 'eagle3' "
+                f"method, but method is '{self.method}'. Other methods (e.g. "
+                "dflash) normalize their auxiliary-layer indices at config-load "
+                "time, so this setting must not be used with them."
+            )
         return self
 
     def _validate_suffix_decoding(self):

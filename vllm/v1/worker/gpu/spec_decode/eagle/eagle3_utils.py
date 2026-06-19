@@ -59,7 +59,15 @@ def apply_eagle3_aux_layer_semantics(
     index `k` yields the output of layer `k - 1`. SGLang-trained draft heads
     declare indices referring to the output of layer `k`, so a `+1` shift is
     applied to keep both frameworks in sync.
+
+    The SGLang/vLLM index-convention ambiguity only affects EAGLE-3
+    checkpoints. Other methods (e.g. DFlash) normalize their aux-layer
+    indices to vLLM's convention at config-load time, so the shift must not
+    be re-applied for them; `eagle_aux_layer_semantics` is rejected for those
+    methods in `SpeculativeConfig`.
     """
+    if spec_config.method != "eagle3":
+        return layer_ids
     if resolve_eagle3_aux_layer_semantics(spec_config) == "sglang":
         return tuple(v + 1 for v in layer_ids)
     return layer_ids
