@@ -13,7 +13,7 @@ pytest-shard
 absl-py
 accelerate
 arctic-inference
-lm_eval[api]
+lm_eval[api]>=0.4.12
 modelscope
 
 # --- Audio Processing ---
@@ -31,7 +31,7 @@ schemathesis
 jiwer
 bm25s
 pystemmer
-mteb[bm25s]
+mteb[bm25s]>=2, <3 # required for mteb test
 num2words
 pqdm
 

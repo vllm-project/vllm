@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import json
 import time
 from collections.abc import Awaitable, Mapping
@@ -9,8 +8,7 @@ from http import HTTPStatus
 from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
 
 from fastapi import Request
-from openai.types.responses import ToolChoiceFunction
-from pydantic import ConfigDict, TypeAdapter, ValidationError
+from pydantic import ConfigDict
 from starlette.datastructures import Headers
 
 import vllm.envs as envs
@@ -18,10 +16,8 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     BatchChatCompletionRequest,
-    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
@@ -31,8 +27,6 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
-    FunctionCall,
-    FunctionDefinition,
     GenerationError,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -44,12 +38,13 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeCompletionRequest,
     TokenizeResponse,
 )
+from vllm.entrypoints.serve.utils.error_response import create_error_response
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.speech_to_text.transcription.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
 )
 from vllm.entrypoints.speech_to_text.translation.protocol import TranslationRequest
-from vllm.entrypoints.utils import create_error_response
 from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
@@ -61,14 +56,12 @@ from vllm.renderers.inputs.preprocess import (
 )
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers import ToolParser
 from vllm.tracing import (
     contains_trace_headers,
     extract_trace_headers,
     log_tracing_disabled_warning,
 )
 from vllm.utils import random_uuid
-from vllm.utils.mistral import is_mistral_tool_parser
 
 logger = init_logger(__name__)
 
@@ -160,7 +153,7 @@ class OpenAIServing(BeamSearchOnlineMixin):
         # Computed once at startup (cached by ``vllm_config`` identity) and
         # stamped on non-streaming responses. Streaming chunks deliberately
         # omit it to avoid per-chunk overhead.
-        from vllm.entrypoints.openai.fingerprint import get_system_fingerprint
+        from vllm.entrypoints.serve.utils.fingerprint import get_system_fingerprint
 
         try:
             self.system_fingerprint: str | None = get_system_fingerprint(
@@ -452,124 +445,6 @@ class OpenAIServing(BeamSearchOnlineMixin):
                     )
 
     @staticmethod
-    def _parse_tool_calls_from_content(
-        request: ResponsesRequest | ChatCompletionRequest,
-        tokenizer: TokenizerLike | None,
-        enable_auto_tools: bool,
-        tool_parser_cls: type[ToolParser] | None,
-        content: str | None = None,
-    ) -> tuple[list[FunctionCall] | None, str | None]:
-        # When the Mistral grammar factory injected structured outputs,
-        # let the parser handle the output.
-        use_mistral_tool_parser = (
-            isinstance(request, ChatCompletionRequest)
-            and is_mistral_tool_parser(tool_parser_cls)
-            and request._grammar_from_tool_parser
-        )
-
-        function_calls = list[FunctionCall]()
-        if (
-            not use_mistral_tool_parser
-            and request.tool_choice
-            and isinstance(request.tool_choice, ToolChoiceFunction)
-        ):
-            # Forced Function Call (Responses API)
-            if content is None:
-                return [], None
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.name, arguments=content)
-            )
-            content = None  # Clear content since tool is called.
-        elif (
-            not use_mistral_tool_parser
-            and request.tool_choice
-            and isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
-            and (tool_parser_cls is None or tool_parser_cls.supports_required_and_named)
-        ):
-            # Named function with standard JSON-based parsing
-            if content is None:
-                return [], None
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.function.name, arguments=content)
-            )
-            content = None  # Clear content since tool is called.
-        elif (
-            not use_mistral_tool_parser
-            and request.tool_choice == "required"
-            and (tool_parser_cls is None or tool_parser_cls.supports_required_and_named)
-        ):
-            # "required" with standard JSON-based parsing
-            tool_calls = []
-            with contextlib.suppress(ValidationError):
-                content = content or ""
-                tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(
-                    content
-                )
-            for tool_call in tool_calls:
-                function_calls.append(
-                    FunctionCall(
-                        name=tool_call.name,
-                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
-                    )
-                )
-            content = None  # Clear content since tool is called.
-        elif tool_parser_cls and (
-            use_mistral_tool_parser
-            or (
-                enable_auto_tools
-                and (
-                    request.tool_choice == "auto"
-                    or request.tool_choice is None
-                    or (
-                        not tool_parser_cls.supports_required_and_named
-                        and request.tools
-                        and (
-                            request.tool_choice == "required"
-                            or isinstance(
-                                request.tool_choice,
-                                ChatCompletionNamedToolChoiceParam,
-                            )
-                        )
-                    )
-                )
-            )
-        ):
-            # Automatic Tool Call Parsing (also used as fallback for
-            # required/named when supports_required_and_named=False)
-            if tokenizer is None:
-                raise ValueError(
-                    "Tokenizer not available when `skip_tokenizer_init=True`"
-                )
-
-            try:
-                tool_parser = tool_parser_cls(tokenizer, request.tools)
-            except RuntimeError as e:
-                logger.exception("Error in tool parser creation.")
-                raise e
-            tool_call_info = tool_parser.extract_tool_calls(
-                content if content is not None else "",
-                request=request,  # type: ignore
-            )
-            if tool_call_info is not None and tool_call_info.tools_called:
-                # extract_tool_calls() returns a list of tool calls.
-                function_calls.extend(
-                    FunctionCall(
-                        id=tool_call.id,
-                        name=tool_call.function.name,
-                        arguments=tool_call.function.arguments,
-                    )
-                    for tool_call in tool_call_info.tool_calls
-                )
-                content = tool_call_info.content
-                if content and content.strip() == "":
-                    content = None
-            else:
-                # No tool calls.
-                return None, content
-
-        return function_calls, content
-
-    @staticmethod
     def _get_decoded_token(
         logprob: Logprob,
         token_id: int,
@@ -577,7 +452,7 @@ class OpenAIServing(BeamSearchOnlineMixin):
         return_as_token_id: bool = False,
     ) -> str:
         if return_as_token_id:
-            return f"token_id:{token_id}"
+            return format_token_id_placeholder(token_id)
 
         if logprob.decoded_token is not None:
             return logprob.decoded_token
@@ -595,6 +470,38 @@ class OpenAIServing(BeamSearchOnlineMixin):
         if envs.VLLM_SKIP_MODEL_NAME_VALIDATION:
             return True
         return self.models.is_base_model(model_name)
+
+
+def format_token_id_placeholder(token_id: int) -> str:
+    return f"token_id:{token_id}"
+
+
+def resolve_token_id_placeholder(
+    token: str, tokenizer: TokenizerLike
+) -> tuple[str, list[int] | None]:
+    """Decode a 'token_id:N' placeholder back to a token string and UTF-8 bytes.
+
+    Returns (token, None) unchanged if token is not a placeholder.
+    This is the inverse of format_token_id_placeholder / _get_decoded_token
+    when return_as_token_id=True.
+    """
+    suffix = token.removeprefix("token_id:")
+    if suffix == token:
+        return token, None
+    try:
+        token_id = int(suffix)
+    except ValueError:
+        return token, None
+    token_repr = tokenizer.convert_ids_to_tokens([token_id])[0]
+    if token_repr is None:
+        logger.warning_once(
+            "resolve_token_id_placeholder: token_id %d has no vocab entry; "
+            "substituting empty string",
+            token_id,
+        )
+        return "", None
+    token_str = tokenizer.convert_tokens_to_string([token_repr])
+    return token_str, list(token_str.encode("utf-8", errors="replace"))
 
 
 def clamp_prompt_logprobs(
