@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 
-import functools
 from collections.abc import Callable
 
 import torch
@@ -14,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.flashinfer import (
     flashinfer_bf16_mm,
-    get_flashinfer_bf16_supported_backends,
+    is_flashinfer_bf16_gemm_supported,
 )
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -103,20 +102,16 @@ def default_unquantized_gemm(
     return torch.nn.functional.linear(x, weight, bias)
 
 
-_BF16_BIAS_CAPABLE_BACKENDS = frozenset({"auto", "tgv", "tinygemm"})
-
-
 def cuda_flashinfer_bf16_gemm_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
-    backend: str,
 ) -> torch.Tensor:
     """Route an unquantized BF16 matmul through FlashInfer's ``mm_bf16``.
 
     Falls back to ``torch.nn.functional.linear`` when the inputs do not
     satisfy FlashInfer's contract (dtype, device, last-dim contiguity,
-    non-empty M, and a bias-capable backend when bias is supplied).
+    non-empty M, and valid bias metadata when bias is supplied).
     """
     if x.dim() == 0 or weight.dim() != 2:
         return torch.nn.functional.linear(x, weight, bias)
@@ -130,7 +125,6 @@ def cuda_flashinfer_bf16_gemm_impl(
         and bias.is_contiguous()
         and bias.dim() == 1
         and bias.shape[0] == N
-        and backend in _BF16_BIAS_CAPABLE_BACKENDS
     )
     if (
         x.dtype != torch.bfloat16
@@ -148,12 +142,8 @@ def cuda_flashinfer_bf16_gemm_impl(
         logger.warning_once("Using default unquantized gemm (torch).")
         return torch.nn.functional.linear(x, weight, bias)
 
-    # cuBLASLt/CUTLASS do not support fused bias in FlashInfer BF16 GEMM.
-    # When using auto with bias, we select between ("tgv", "tinygemm").
-    pdl = backend in ("tgv", "tinygemm") or (backend == "auto" and bias is not None)
-
     x_2d = x.reshape(M, K)
-    out_2d = flashinfer_bf16_mm(x_2d, weight.t(), bias, backend=backend, pdl=pdl)
+    out_2d = flashinfer_bf16_mm(x_2d, weight.t(), bias)
     return out_2d.reshape(*x.shape[:-1], N)
 
 
@@ -161,7 +151,6 @@ def cuda_flashinfer_bf16_gemm_fake(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
-    backend: str,
 ) -> torch.Tensor:
     return x.new_empty((*x.shape[:-1], weight.shape[0]), dtype=torch.bfloat16)
 
@@ -171,10 +160,8 @@ def cuda_flashinfer_bf16_gemm(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
-    *,
-    backend: str,
 ) -> torch.Tensor:
-    return torch.ops.vllm.cuda_flashinfer_bf16_gemm(x, weight, bias, backend)
+    return torch.ops.vllm.cuda_flashinfer_bf16_gemm(x, weight, bias)
 
 
 direct_register_custom_op(
@@ -425,7 +412,6 @@ def _get_bf16_linear_backend() -> str:
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
-        supported_backends = get_flashinfer_bf16_supported_backends()
 
     except (AssertionError, AttributeError, ImportError):
         return "torch"
@@ -437,15 +423,9 @@ def _get_bf16_linear_backend() -> str:
     if backend == "torch":
         return "torch"
 
-    if not supported_backends:
-        return "torch"
-
-    if backend != "auto" and backend not in supported_backends:
+    if not is_flashinfer_bf16_gemm_supported():
         logger.warning_once(
-            "bf16_linear_backend=%r is not in the installed FlashInfer's "
-            "mm_bf16 supported backends %s; falling back to torch.",
-            backend,
-            supported_backends,
+            "FlashInfer mm_bf16 is unavailable or unsupported; falling back to torch."
         )
         return "torch"
 
@@ -462,7 +442,4 @@ def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
     if bf16_linear_backend == "torch":
         return default_unquantized_gemm
     else:
-        return functools.partial(
-            cuda_flashinfer_bf16_gemm,
-            backend=bf16_linear_backend,
-        )
+        return cuda_flashinfer_bf16_gemm
