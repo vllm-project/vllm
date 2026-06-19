@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
+from math import prod
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -7029,10 +7030,21 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+        packed_backing: torch.Tensor | None = None
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-            tensor = torch.zeros(
-                kv_cache_tensor.size, dtype=torch.int8, device=self.device
-            )
+            if kv_cache_tensor.block_stride > 0:
+                # Allocate once; all packed tensors alias the same backing.
+                if packed_backing is None:
+                    packed_backing = torch.zeros(
+                        kv_cache_tensor.size,
+                        dtype=torch.int8,
+                        device=self.device,
+                    )
+                tensor = packed_backing
+            else:
+                tensor = torch.zeros(
+                    kv_cache_tensor.size, dtype=torch.int8, device=self.device
+                )
             for layer_name in kv_cache_tensor.shared_by:
                 kv_cache_raw_tensors[layer_name] = tensor
 
@@ -7074,6 +7086,14 @@ class GPUModelRunner(
         """
         kv_caches: dict[str, torch.Tensor] = {}
         has_attn, has_mamba = False, False
+
+        # Map layer names to (offset, block_stride) within the packed
+        # backing tensor so we can create strided views per layer.
+        layer_packing: dict[str, tuple[int, int]] = {}
+        for kv_tensor in self.kv_cache_config.kv_cache_tensors:
+            if kv_tensor.block_stride > 0:
+                for ln in kv_tensor.shared_by:
+                    layer_packing[ln] = (kv_tensor.offset, kv_tensor.block_stride)
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
@@ -7085,8 +7105,13 @@ class GPUModelRunner(
                 if layer_name in self.runner_only_attn_layers:
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
-                assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-                num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+                packing = layer_packing.get(layer_name)
+                if packing is not None:
+                    _, blk_stride = packing
+                    num_blocks = raw_tensor.numel() // blk_stride
+                else:
+                    assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+                    num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
                 if isinstance(kv_cache_spec, AttentionSpec):
                     has_attn = True
                     num_blocks_per_kv_block = (
@@ -7127,8 +7152,17 @@ class GPUModelRunner(
                         for i in range(len(kv_cache_stride_order))
                     ]
 
-                    raw_tensor = kv_cache_raw_tensors[layer_name].view(dtype)
-                    if kv_cache_spec.page_size_padded is not None:
+                    if packing is not None:
+                        offset, block_stride = packing
+                        assert inv_order[0] == 0
+                        page_bytes = prod(kv_cache_shape[1:]) * get_dtype_size(dtype)
+                        kv_cache = (
+                            kv_cache_raw_tensors[layer_name]
+                            .view(-1, block_stride)[:, offset : offset + page_bytes]
+                            .view(dtype)
+                            .view(kv_cache_shape)
+                        )
+                    elif kv_cache_spec.page_size_padded is not None:
                         # Use strided view to handle page_size_bytes that
                         # include padding. This follows
                         # the same pattern as MambaSpec handling below.
@@ -7142,13 +7176,17 @@ class GPUModelRunner(
                         strides = list(torch.empty(kv_cache_shape).stride())
                         strides[inv_order[0]] = page_stride
                         kv_cache = torch.as_strided(
-                            raw_tensor,
+                            kv_cache_raw_tensors[layer_name].view(dtype),
                             size=kv_cache_shape,
                             stride=tuple(strides),
                         )
                     else:
                         # No padding — safe to use a contiguous view.
-                        kv_cache = raw_tensor.view(kv_cache_shape)
+                        kv_cache = (
+                            kv_cache_raw_tensors[layer_name]
+                            .view(dtype)
+                            .view(kv_cache_shape)
+                        )
                     kv_caches[layer_name] = kv_cache.permute(*inv_order)
 
                 elif isinstance(kv_cache_spec, MambaSpec):
