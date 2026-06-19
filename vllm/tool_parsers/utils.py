@@ -3,6 +3,7 @@
 
 import ast
 import json
+import math
 import warnings
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
@@ -145,10 +146,28 @@ def is_complete_json(input_str: str) -> bool:
         return False
 
 
+def _is_json_finite(obj: Any) -> bool:
+    """Whether *obj* can be serialized to valid JSON.
+
+    ``json.dumps(..., allow_nan=False)`` raises ``ValueError`` on any
+    non-finite float (``inf``/``-inf``/``nan``) anywhere in the value, so this
+    detects non-finite floats nested inside parsed lists/dicts too.
+    """
+    try:
+        json.dumps(obj, allow_nan=False)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def consume_space(i: int, s: str) -> int:
     while i < len(s) and s[i].isspace():
         i += 1
     return i
+
+
+def _is_function_tool(tool: Tool) -> bool:
+    return isinstance(tool, (FunctionTool, ChatCompletionToolsParam))
 
 
 def _extract_tool_info(
@@ -170,10 +189,28 @@ def find_tool_properties(
     if not tools:
         return {}
     for tool in tools:
+        if not _is_function_tool(tool):
+            continue
         name, params = _extract_tool_info(tool)
         if name == tool_name:
             return (params or {}).get("properties", {})
     return {}
+
+
+def find_tool_name(
+    tools: list[Tool] | None,
+    tool_name: str,
+) -> bool:
+    """Return whether a function tool with *tool_name* exists."""
+    if not tools:
+        return False
+    for tool in tools:
+        if not _is_function_tool(tool):
+            continue
+        name, _ = _extract_tool_info(tool)
+        if name == tool_name:
+            return True
+    return False
 
 
 def _get_tool_schema_from_tool(tool: Tool) -> dict:
@@ -210,15 +247,16 @@ def _get_tool_schema_defs(
 def _get_json_schema_from_tools(
     tools: list[Tool],
 ) -> dict:
+    fn_tools = [t for t in tools if _is_function_tool(t)]
     json_schema = {
         "type": "array",
         "minItems": 1,
         "items": {
             "type": "object",
-            "anyOf": [_get_tool_schema_from_tool(tool) for tool in tools],
+            "anyOf": [_get_tool_schema_from_tool(tool) for tool in fn_tools],
         },
     }
-    json_schema_defs = _get_tool_schema_defs(tools)
+    json_schema_defs = _get_tool_schema_defs(fn_tools)
     if json_schema_defs:
         json_schema["$defs"] = json_schema_defs
     return json_schema
@@ -578,9 +616,15 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         if candidate_type == "number":
             try:
                 val = float(value)
-                return val if val != int(val) else int(val)
             except (ValueError, TypeError):
                 continue
+            if not math.isfinite(val):
+                # inf/-inf/nan are not valid JSON numbers. Fall through so
+                # the value is preserved as a string instead of crashing
+                # (int(float("inf")) raises OverflowError) or emitting
+                # invalid JSON (json.dumps(inf) -> "Infinity").
+                continue
+            return val if val != int(val) else int(val)
         if candidate_type == "boolean":
             lower_val = value.lower().strip()
             if lower_val in ("true", "1"):
@@ -590,14 +634,25 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
             continue
         if candidate_type in ("object", "array"):
             try:
-                return json.loads(value)
+                parsed = json.loads(value)
             except (json.JSONDecodeError, ValueError, TypeError):
                 continue
+            if _is_json_finite(parsed):
+                return parsed
+            # Non-finite floats (e.g. "[1e999]" -> [inf]) cannot be
+            # serialized back to valid JSON; preserve the raw string.
+            continue
 
     try:
-        return json.loads(value)
+        parsed = json.loads(value)
     except (json.JSONDecodeError, ValueError):
         return value
+    # Reject non-finite results (e.g. json.loads("1e999") -> inf, or nested
+    # inf/nan inside a parsed list/dict) which json.dumps would render as
+    # invalid JSON (Infinity/NaN). Preserve the raw string instead.
+    if not _is_json_finite(parsed):
+        return value
+    return parsed
 
 
 def compute_tool_delta(

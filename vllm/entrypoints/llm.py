@@ -556,7 +556,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         and returns their outputs. Use after enqueue() to get results.
 
         Args:
-            output_type: The expected output type, defaults to RequestOutput.
+            output_type: The expected output type(s). If not provided, accepts
+                both RequestOutput and PoolingRequestOutput.
             use_tqdm: If True, shows a tqdm progress bar.
 
         Returns:
@@ -897,6 +898,12 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     def finish_weight_update(self) -> None:
         """Finish the current weight update."""
         self.llm_engine.collective_rpc("finish_weight_update")
+        # Invalidate cached state computed with the old weights so it isn't
+        # reused for subsequent requests:
+        # - prefix cache: KV blocks computed with the old weights
+        # - encoder cache: multimodal embeddings keyed only by mm_hash
+        self.llm_engine.reset_prefix_cache()
+        self.llm_engine.reset_encoder_cache()
 
     def __repr__(self) -> str:
         """Return a transformers-style hierarchical view of the model."""

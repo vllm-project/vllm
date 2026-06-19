@@ -13,7 +13,7 @@ import warnings
 from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, cast
 
 import uvloop
 from fastapi import FastAPI, HTTPException
@@ -52,6 +52,7 @@ from vllm.entrypoints.serve.utils.server_utils import (
     log_response,
     validation_exception_handler,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS, SupportedTask
@@ -250,6 +251,7 @@ def build_app(
     app.exception_handler(EngineGenerateError)(engine_error_handler)
     app.exception_handler(EngineDeadError)(engine_error_handler)
     app.exception_handler(GenerationError)(generation_error_handler)
+    app.exception_handler(VLLMValidationError)(exception_handler)
     app.exception_handler(Exception)(exception_handler)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
@@ -306,19 +308,12 @@ async def init_app_state(
 ) -> None:
     vllm_config = engine_client.vllm_config
 
-    # Propagate enable_in_reasoning to the API-server process. The engine core
-    # runs in a separate process, so the contextvar that backs
-    # `get_current_vllm_config_or_none()` is None on this stack. Tool parsers
-    # call `get_enable_structured_outputs_in_reasoning()` during request
-    # handling and need to see the real flag, otherwise they silently fall
-    # back to False and mismatch the engine-side bitmask gating.
-    from vllm.tool_parsers.structural_tag_registry import (
-        set_enable_structured_outputs_in_reasoning,
-    )
+    if args.tool_call_parser is not None:
+        from vllm.parser.metrics import init_parser_metrics
 
-    set_enable_structured_outputs_in_reasoning(
-        vllm_config.structured_outputs_config.enable_in_reasoning
-    )
+        init_parser_metrics(
+            model_name=cast(str, vllm_config.model_config.served_model_name)
+        )
 
     if supported_tasks is None:
         warnings.warn(
