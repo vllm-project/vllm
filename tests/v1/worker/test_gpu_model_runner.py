@@ -32,7 +32,7 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup.kernel_warmup import (
-    _warmup_triton_nvfp4_attention,
+    _warmup_triton_nvfp4_prefill_kernels,
 )
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
@@ -351,54 +351,6 @@ def _make_warmup_runner(
     return runner, calls
 
 
-def test_triton_nvfp4_attention_warmup_runs_for_nvfp4_triton():
-    runner, calls = _make_warmup_runner()
-
-    _warmup_triton_nvfp4_attention(runner)
-
-    assert len(calls) == 2
-    assert calls[0] == {
-        "num_tokens": 1,
-        "skip_eplb": True,
-        "is_profile": True,
-        "force_attention": True,
-        "uniform_decode": True,
-        "profile_seq_lens": 8192,
-    }
-    assert calls[1] == {
-        "num_tokens": 4096,
-        "skip_eplb": True,
-        "is_profile": True,
-        "force_attention": True,
-        "uniform_decode": False,
-    }
-
-
-def test_triton_nvfp4_attention_warmup_uses_v2_decode_query_len():
-    runner, calls = _make_warmup_runner()
-    delattr(runner, "uniform_decode_query_len")
-    runner.decode_query_len = 3
-
-    _warmup_triton_nvfp4_attention(runner)
-
-    assert len(calls) == 2
-    assert calls[0]["num_tokens"] == 3
-    assert calls[0]["uniform_decode"] is True
-    assert calls[1]["num_tokens"] == 4096
-    assert calls[1]["uniform_decode"] is False
-
-
-def test_triton_nvfp4_attention_warmup_falls_back_to_single_decode_token():
-    runner, calls = _make_warmup_runner()
-    delattr(runner, "uniform_decode_query_len")
-
-    _warmup_triton_nvfp4_attention(runner)
-
-    assert len(calls) == 2
-    assert calls[0]["num_tokens"] == 1
-    assert calls[0]["uniform_decode"] is True
-
-
 @pytest.mark.parametrize(
     ("cache_dtype", "backend_name", "is_pooling_model"),
     [
@@ -418,7 +370,7 @@ def test_triton_nvfp4_attention_warmup_skips_other_paths(
         is_pooling_model=is_pooling_model,
     )
 
-    _warmup_triton_nvfp4_attention(runner)
+    _warmup_triton_nvfp4_prefill_kernels(runner)
 
     assert calls == []
 
@@ -494,9 +446,9 @@ def test_triton_nvfp4_attention_warmup_compiles_prefill_variants(monkeypatch):
         fake_context_attention_fwd,
     )
 
-    _warmup_triton_nvfp4_attention(runner)
+    _warmup_triton_nvfp4_prefill_kernels(runner)
 
-    assert len(calls) == 2
+    assert calls == []
     assert len(prefill_calls) == 2
     assert {call["q"].shape for call in prefill_calls} == {
         torch.Size([64, 8, 256]),
