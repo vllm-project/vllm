@@ -155,50 +155,57 @@ def _gqa_sparse_fwd_kernel(
         lse_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
         acc_o = tl.zeros((BLOCK_SIZE_QH, BLOCK_SIZE_D), dtype=tl.float32)
         q = tl.reshape(q, BLOCK_SIZE_QH, BLOCK_SIZE_D)
-        for _ in range(real_topk):
+        SUB_K: tl.constexpr = BLOCK_SIZE_K // 4
+        NUM_SUB: tl.constexpr = BLOCK_SIZE_K // SUB_K
+        for _ in tl.range(real_topk):
             blk = tl.load(t_ptr_j).to(tl.int32)
             t_ptr_j = t_ptr_j + stride_tk
             c = blk * BLOCK_SIZE_K
             page = tl.load(bt_row + blk).to(tl.int64)
-            pos = c + off_n
-            pos_mask = pos < seq_len
-            k = tl.load(
-                kv_cache_ptr
-                + page * stride_kv_blk
-                + 0 * stride_kv_kv
-                + off_n[None, :] * stride_kv_pos
-                + pid_kh * stride_kv_h
-                + off_d[:, None] * stride_kv_d,
-                mask=d_mask[:, None] & pos_mask[None, :],
-                other=0.0,
-            )
-            if USE_FP8:
-                k = k.to(q.dtype)
-            qk = tl.zeros((BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_K), dtype=tl.float32)
-            # causal: q_abs_pos - k_off >= block_start (c)
-            qk += tl.where(off_q[:, None, :] >= c, 0, float("-inf"))
-            qk = tl.reshape(qk, BLOCK_SIZE_QH, BLOCK_SIZE_K)
-            qk += tl.dot(q, k) * sm_scale_log2e
-            qk += tl.where(pos_mask[None, :], 0, float("-inf"))
-            m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
-            p = tl.exp2(qk - m_ij[:, None])
-            l_ij = tl.sum(p, axis=1)
-            acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
-            v = tl.load(
-                kv_cache_ptr
-                + page * stride_kv_blk
-                + 1 * stride_kv_kv
-                + off_n[:, None] * stride_kv_pos
-                + pid_kh * stride_kv_h
-                + off_d[None, :] * stride_kv_d,
-                mask=pos_mask[:, None] & d_mask[None, :],
-                other=0.0,
-            )
-            if USE_FP8:
-                v = v.to(q.dtype)
-            acc_o += tl.dot(p.to(v.dtype), v)
-            m_i = m_ij
-            lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
+            kv_base = kv_cache_ptr + page * stride_kv_blk + pid_kh * stride_kv_h
+
+            for sub_i in range(NUM_SUB):
+                off_sub = tl.arange(0, SUB_K) + sub_i * SUB_K
+                pos_sub = c + off_sub
+                pos_mask_sub = pos_sub < seq_len
+                k_sub = tl.load(
+                    kv_base
+                    + 0 * stride_kv_kv
+                    + off_sub[None, :] * stride_kv_pos
+                    + off_d[:, None] * stride_kv_d,
+                    mask=d_mask[:, None] & pos_mask_sub[None, :],
+                    other=0.0,
+                )
+                if USE_FP8:
+                    k_sub = k_sub.to(q.dtype)
+                off_q_sub = (
+                    tl.arange(0, BLOCK_SIZE_Q)[:, None]
+                    + pid_q_j * BLOCK_SIZE_Q
+                    + prefix_len
+                    - off_sub[None, :]
+                )
+                qk_sub_3d = tl.zeros((BLOCK_SIZE_Q, BLOCK_SIZE_H, SUB_K), dtype=tl.float32)
+                qk_sub_3d += tl.where(off_q_sub[:, None, :] >= c, 0, float("-inf"))
+                qk_sub = tl.reshape(qk_sub_3d, BLOCK_SIZE_QH, SUB_K)
+                qk_sub += tl.dot(q, k_sub) * sm_scale_log2e
+                qk_sub += tl.where(pos_mask_sub[None, :], 0, float("-inf"))
+                m_ij = tl.maximum(m_i, tl.max(qk_sub, axis=1))
+                p_sub = tl.exp2(qk_sub - m_ij[:, None])
+                l_ij = tl.sum(p_sub, axis=1)
+                acc_o = acc_o * tl.exp2(m_i - m_ij)[:, None]
+                v_sub = tl.load(
+                    kv_base
+                    + 1 * stride_kv_kv
+                    + off_sub[:, None] * stride_kv_pos
+                    + off_d[None, :] * stride_kv_d,
+                    mask=pos_mask_sub[:, None] & d_mask[None, :],
+                    other=0.0,
+                )
+                if USE_FP8:
+                    v_sub = v_sub.to(q.dtype)
+                acc_o += tl.dot(p_sub.to(v_sub.dtype), v_sub)
+                m_i = m_ij
+                lse_i = m_ij + tl.log2(tl.exp2(lse_i - m_ij) + l_ij)
         acc_o = acc_o * tl.exp2(m_i - lse_i)[:, None]
         acc_o = tl.reshape(acc_o, BLOCK_SIZE_Q, BLOCK_SIZE_H, BLOCK_SIZE_D)
         o_ptrs = tl.make_block_ptr(
@@ -498,6 +505,9 @@ def minimax_m3_sparse_attn(
         BLOCK_SIZE_Q=1,
         BLOCK_SIZE_K=SPARSE_BLOCK_SIZE,
         USE_FP8=use_fp8,
+        num_warps=1,
+        matrix_instr_nonkdim=16,
+        kpack=2,
         **_sparse_attn_num_stages_kwarg(),
     )
 
