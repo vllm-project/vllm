@@ -234,6 +234,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     # NOTE this will be ignored by vLLM
     user: str | None = None
+    tenant_id: str | None = None
 
     # --8<-- [start:chat-completion-sampling-params]
     use_beam_search: bool = False

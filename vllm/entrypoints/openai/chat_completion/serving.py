@@ -341,6 +341,7 @@ class OpenAIServingChat(OpenAIServing):
                     params=sampling_params,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
+                    tenant_id=request.tenant_id,
                 )
             else:
                 if not request.include_reasoning:
@@ -364,6 +365,7 @@ class OpenAIServingChat(OpenAIServing):
                     priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
                     reasoning_ended=reasoning_ended,
+                    tenant_id=request.tenant_id,
                     reasoning_parser_kwargs={
                         "chat_template_kwargs": chat_template_kwargs,
                     }
