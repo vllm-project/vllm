@@ -24,7 +24,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 )
 from vllm.v1.attention.ops.triton_unified_attention import (
     _decode_e2m1_nibble,
-    _decode_e2m1_nibble_lut,
+    _decode_e2m1_nibble_fast_signed,
     _get_nvfp4_launch_config,
     unified_attention,
 )
@@ -52,22 +52,27 @@ SEQ_THRESHOLD_3D_VALUES = [0, 8]
 
 
 @triton.jit
-def _e2m1_lut_compare_kernel(old_out, lut_out):
+def _e2m1_fast_signed_compare_kernel(old_out, fast_out):
     offs = tl.arange(0, 16)
     nibble = offs.to(tl.uint8)
     tl.store(old_out + offs, _decode_e2m1_nibble(nibble).to(tl.float32))
-    tl.store(lut_out + offs, _decode_e2m1_nibble_lut(nibble).to(tl.float32))
+    tl.store(fast_out + offs, _decode_e2m1_nibble_fast_signed(nibble).to(tl.float32))
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_nvfp4_e2m1_lut_matches_existing_decoder() -> None:
+def test_nvfp4_e2m1_fast_signed_matches_existing_decoder() -> None:
     old = torch.empty((16,), dtype=torch.float32, device="cuda")
-    lut = torch.empty_like(old)
+    fast = torch.empty_like(old)
 
-    _e2m1_lut_compare_kernel[(1,)](old, lut, num_warps=1)
+    _e2m1_fast_signed_compare_kernel[(1,)](old, fast, num_warps=1)
 
-    torch.testing.assert_close(lut, old, rtol=0, atol=0, equal_nan=True)
-    assert torch.equal(lut.cpu().view(torch.int32), old.cpu().view(torch.int32))
+    torch.testing.assert_close(fast, old, rtol=0, atol=0, equal_nan=True)
+    nibble = torch.arange(16)
+    nonzero = (nibble & 0x07) != 0
+    assert torch.equal(
+        fast.cpu().view(torch.int32)[nonzero],
+        old.cpu().view(torch.int32)[nonzero],
+    )
 
 
 def test_nvfp4_launch_config_large_full_decode_heads() -> None:
