@@ -32,9 +32,8 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/
 
 # ROCm environment variables. ROCm SDK is installed by the CI workflow at
 # runtime; these paths point to where the pip wheel will land so downstream
-# steps see hipcc/llvm-bitcode/amd_smi without an extra export.
+# steps see hipcc/amd_smi without an extra export.
 ENV ROCM_PATH=/usr/local/lib/python3.12/site-packages/_rocm_sdk_devel
-ENV HIP_DEVICE_LIB_PATH=/usr/local/lib/python3.12/site-packages/_rocm_sdk_core/lib/llvm/amdgcn/bitcode
 ENV PATH=/usr/local/lib/python3.12/site-packages/_rocm_sdk_devel/bin:$PATH
 ENV PYTHONPATH=/usr/local/lib/python3.12/site-packages/_rocm_sdk_core/share/amd_smi
 
