@@ -5,6 +5,7 @@
 Run `pytest tests/quantization/test_compressed_tensors.py`.
 """
 
+from contextlib import contextmanager
 from unittest.mock import Mock
 
 import pytest
@@ -369,6 +370,25 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
         assert output
 
 
+@contextmanager
+def _nvfp4_marlin_error_context(model, capfd):
+    if (
+        model != "nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16"
+        or not current_platform.is_rocm()
+    ):
+        yield
+    else:
+        expected_error = (
+            "ValueError: Forced NVFP4 kernel MarlinNvFp4LinearKernel is not "
+            "supported: Marlin FP4 not available"
+        )
+        with pytest.raises(RuntimeError, match="Engine core initialization failed"):
+            yield
+
+        captured = capfd.readouterr()
+        assert expected_error in captured.out + captured.err
+
+
 @pytest.mark.parametrize(
     "args",
     [
@@ -376,9 +396,12 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
         ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", False),
     ],
 )
-def test_compressed_tensors_nvfp4(vllm_runner, args):
+def test_compressed_tensors_nvfp4(vllm_runner, args, capfd):
     model, use_a16 = args
-    with vllm_runner(model, enforce_eager=True) as llm:
+    with (
+        _nvfp4_marlin_error_context(model, capfd),
+        vllm_runner(model, enforce_eager=True) as llm,
+    ):
 
         def check_model(model):
             layer = model.model.layers[0]
