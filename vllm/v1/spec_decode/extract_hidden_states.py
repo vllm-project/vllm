@@ -7,12 +7,12 @@ from typing import TYPE_CHECKING
 
 import torch
 import torch.nn as nn
-from utils.torch_utils import PIN_MEMORY
 
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.attention.backend import AttentionMetadataBuilder, CommonAttentionMetadata
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.utils import CpuGpuBuffer

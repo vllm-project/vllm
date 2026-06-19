@@ -5,10 +5,9 @@
 from typing import TYPE_CHECKING, Any
 
 import torch
-from utils.torch_utils import PIN_MEMORY
 
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
     MoveDirectionality,
