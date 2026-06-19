@@ -41,7 +41,9 @@ class HummingLinearKernel(MPLinearKernel):
             "group_size": 0 if group_size == -1 else group_size,
         }
 
-        convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
+        convert_linear_layer_to_humming_standard(
+            layer=layer, name_map=name_map, weight_type=self.config.weight_type
+        )
         prepare_humming_layer(layer, quant_config)
 
     def apply_weights(

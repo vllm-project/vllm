@@ -32,7 +32,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    pack_quantized_values_into_int32,
 )
+from vllm.scalar_type import ScalarType
 from vllm.utils.import_utils import has_humming
 
 if TYPE_CHECKING:
@@ -400,7 +402,7 @@ def humming_is_layer_skipped(config: dict[str, Any], prefix: str):
 
 
 def convert_linear_layer_to_humming_standard(
-    layer: LinearBase, name_map: dict[str, str]
+    layer: LinearBase, name_map: dict[str, str], weight_type: ScalarType
 ):
     """Rename/reshape a linear layer's quantized params (the canonical MPLinear
     layout: ``weight_packed`` int32 + ``weight_scale``) into the parameter names
@@ -418,7 +420,21 @@ def convert_linear_layer_to_humming_standard(
             else:
                 assert output_dim == 0 and input_dim == 1
 
-            tensor = tensor.view(tensor.size(0), -1).view(torch.int32)
+            if tensor.dtype == torch.int32:
+                # Already bit-packed (e.g. PackedvLLMParameter) upstream.
+                tensor = tensor.view(tensor.size(0), -1).view(torch.int32)
+            else:
+                # `tensor` holds one signed quantized value per element (e.g.
+                # an int4 value in [-8, 7] occupying a full int8 byte), not
+                # bit-packed. humming's weight format stores unsigned values
+                # biased by 2**(size_bits-1) (mirroring compressed-tensors'
+                # own `weight + 128` conversion for its 8-bit case), so apply
+                # that bias before packing `weight_type.size_bits`-wide
+                # values into int32 lanes.
+                bias = 1 << (weight_type.size_bits - 1)
+                tensor = pack_quantized_values_into_int32(
+                    tensor.to(torch.int32) + bias, weight_type, packed_dim=1
+                )
         elif name in ["weight_scale", "zero_point"]:
             if getattr(tensor, "output_dim", 0) == 1:
                 tensor = tensor.transpose(0, 1).contiguous()
