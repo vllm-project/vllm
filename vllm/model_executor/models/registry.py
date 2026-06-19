@@ -84,7 +84,6 @@ _TEXT_GENERATION_MODELS = {
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
     "BailingMoeV2ForCausalLM": ("bailing_moe", "BailingMoeV2ForCausalLM"),
     "BailingMoeV2_5ForCausalLM": ("bailing_moe_linear", "BailingMoeV25ForCausalLM"),
-    "BambaForCausalLM": ("bamba", "BambaForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
@@ -735,6 +734,7 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "MllamaForConditionalGeneration": "0.10.2",
     "XverseForCausalLM": "0.23.0",
     "Dots1ForCausalLM": "0.23.0",
+    "BambaForCausalLM": "0.23.0",
 }
 
 _OOT_SUPPORTED_MODELS = {

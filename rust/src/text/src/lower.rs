@@ -288,6 +288,32 @@ mod tests {
         StubTokenizer
     }
 
+    struct FixedTokenizer {
+        token_ids: Vec<u32>,
+    }
+
+    impl Tokenizer for FixedTokenizer {
+        fn encode(
+            &self,
+            _text: &str,
+            _add_special_tokens: bool,
+        ) -> vllm_tokenizer::Result<Vec<u32>> {
+            Ok(self.token_ids.clone())
+        }
+
+        fn decode(
+            &self,
+            _token_ids: &[u32],
+            _skip_special_tokens: bool,
+        ) -> vllm_tokenizer::Result<String> {
+            Ok(String::new())
+        }
+
+        fn token_to_id(&self, _token: &str) -> Option<u32> {
+            None
+        }
+    }
+
     fn sample_request() -> TextRequest {
         TextRequest {
             prompt: Prompt::TokenIds(vec![1, 2, 3]),
@@ -821,6 +847,33 @@ mod tests {
             error,
             Error::OutOfVocab(OutOfVocabError {
                 parameter: "allowed_token_ids",
+                token_ids,
+                vocab_size: 2000,
+            }) if token_ids == vec![2000]
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_out_of_vocab_bad_words() {
+        let tokenizer = FixedTokenizer {
+            token_ids: vec![1999, 2000],
+        };
+        let error = lower_sampling_params(
+            SamplingParams {
+                bad_words: Some(vec!["blocked".to_string()]),
+                ..Default::default()
+            },
+            SamplingHints::default(),
+            sample_sampling_limits(),
+            3,
+            &tokenizer,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::OutOfVocab(OutOfVocabError {
+                parameter: "bad_words",
                 token_ids,
                 vocab_size: 2000,
             }) if token_ids == vec![2000]

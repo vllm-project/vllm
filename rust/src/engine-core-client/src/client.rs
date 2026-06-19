@@ -56,6 +56,9 @@ pub enum TransportMode {
         /// Output PULL socket address that engines will connect to for
         /// responses.
         output_address: String,
+        /// First data-parallel engine rank expected to register on this
+        /// transport.
+        engine_start_index: u32,
         /// Total number of engines expected to register on this transport.
         engine_count: usize,
         /// Maximum time to wait for all expected engines to register.
@@ -246,6 +249,7 @@ impl EngineCoreClient {
             TransportMode::Bootstrapped {
                 input_address,
                 output_address,
+                engine_start_index,
                 engine_count,
                 ready_timeout,
             } => {
@@ -256,6 +260,7 @@ impl EngineCoreClient {
                 transport::connect_bootstrapped(
                     input_address,
                     output_address,
+                    *engine_start_index,
                     *engine_count,
                     *ready_timeout,
                 )
@@ -407,6 +412,24 @@ impl EngineCoreClient {
             .map(|engine| engine.ready_response.max_model_len as u32)
             .min()
             .expect("engine core client requires at least one engine")
+    }
+
+    /// Return the world size (TP * PP) from the parallel config, if available.
+    pub fn world_size(&self) -> u64 {
+        self.engines
+            .first()
+            .expect("engine core client requires at least one engine")
+            .ready_response
+            .world_size
+    }
+
+    /// Return the data parallel size from the parallel config, if available.
+    pub fn data_parallel_size(&self) -> u64 {
+        self.engines
+            .first()
+            .expect("engine core client requires at least one engine")
+            .ready_response
+            .data_parallel_size
     }
 
     /// Get the model name associated with this client used for metrics
