@@ -27,6 +27,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.platforms import current_platform
 
+
 @pytest.fixture(scope="function", autouse=True)
 def enable_pickle(monkeypatch):
     """`LLM.apply_model` requires pickling a function."""
@@ -467,7 +468,10 @@ def test_modelopt_mixed_precision_dispatches_w4a16_layer(
     from vllm.model_executor.layers.linear import LinearBase
     from vllm.model_executor.layers.quantization import modelopt as m
 
-    if expected_linear_cls_name == "ModelOptNvFp4W4A16LinearMethod" and current_platform.is_rocm():
+    if (
+        expected_linear_cls_name == "ModelOptNvFp4W4A16LinearMethod"
+        and current_platform.is_rocm()
+    ):
         pytest.skip("ModelOptNvFp4W4A16LinearMethod is not supported with rocm")
 
     hf_quant_config: dict[str, Any] = {
