@@ -26,6 +26,14 @@ class EncoderItemSpec:
     """Number of output tokens after encoder processing (e.g. after
     spatial merge)."""
 
+    global_output_tokens: int = 0
+    """Number of output tokens from the global image path.
+    Only used when ``EncoderCudaGraphConfig.enable_dual_path_graph`` is True."""
+
+    local_output_tokens: int = 0
+    """Number of output tokens from the local patch path.
+    Only used when ``EncoderCudaGraphConfig.enable_dual_path_graph`` is True."""
+
 
 @dataclass
 class EncoderCudaGraphConfig:
@@ -59,6 +67,18 @@ class EncoderCudaGraphConfig:
     """Maximum number of frames per video.
     Only relevant when "video" is in ``modalities``.
     Image-only models can use the default of 1."""
+
+    enable_dual_path_graph: bool = False
+    """If True, the manager captures two independent graph sets
+    (global + local) and runs dual-path graph selection during inference."""
+
+    global_token_per_image: int = 0
+    """Tokens per global image (e.g. 272 for DeepSeek-OCR).
+    Only used when ``enable_dual_path_graph`` is True."""
+
+    local_token_per_patch: int = 0
+    """Tokens per local patch (e.g. 100 for DeepSeek-OCR).
+    Only used when ``enable_dual_path_graph`` is True."""
 
 
 @dataclass

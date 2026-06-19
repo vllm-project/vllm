@@ -127,6 +127,29 @@ PYTHONHASHSEED=0 vllm serve ...
 - FS thread counts: tune `n_read_threads` and `n_write_threads` to the parallelism your storage can sustain. Reads are latency-sensitive on the prefill path, so prefer more read threads when prefill hit rates are high.
 - Sharing `root_dir` across runs: runs with the same model, `block_size`, parallelism layout, and dtype share files under the same `<digest>` subdirectory. Changing any of these produces a new subdirectory; old ones are orphaned but harmless. Delete them to reclaim disk.
 
+## Per-Request Selective Offload
+
+Individual requests can cap how many of their tokens are eligible for offload by setting `max_offload_tokens` in the request's `kv_transfer_params`. Only the first `max_offload_tokens` tokens of the request are offloaded; blocks beyond that point are skipped on the store path. This is useful when a known prefix (e.g., a system prompt or shared context) is worth caching but later request-specific tokens are not.
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `max_offload_tokens` | non-negative `int` | Upper bound on tokens to offload for this request. `0` disables offload for the request entirely; omit the key (or set to `None`) for no cap. Non-`int`, negative, or `bool` values are rejected with a warning and treated as no cap. |
+
+!!! note
+    `max_offload_tokens` is experimental and subject to change.
+
+Example (OpenAI-compatible completions request):
+
+```json
+{
+  "model": "<model>",
+  "prompt": "...",
+  "kv_transfer_params": {
+    "max_offload_tokens": 1024
+  }
+}
+```
+
 ## Further Reading
 
 - [vLLM blog: KV Offloading Connector](https://vllm.ai/blog/2026-01-08-kv-offloading-connector) — motivation, architecture (DMA-based async transfer), and benchmarks (TTFT and throughput).
