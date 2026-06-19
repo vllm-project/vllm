@@ -672,7 +672,7 @@ class ParserEngine(Parser):
         if len(tool_call_deltas) > 1:
             tool_call_deltas = self._coalesce_tool_call_deltas(tool_call_deltas)
 
-        if self._deferred_content and not seen_tool_event:
+        if self._deferred_content and (not seen_tool_event or not tool_call_deltas):
             content_parts.insert(0, self._deferred_content)
             self._deferred_content = ""
 
