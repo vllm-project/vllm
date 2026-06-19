@@ -144,6 +144,30 @@ impl RoundtripCase {
             json_fmt: spaced_json_fmt(),
         }
     }
+
+    /// SeedOSS with `<seed:think>` / `</seed:think>` reasoning tags.
+    fn seed_oss() -> Self {
+        Self {
+            model_id: "ByteDance-Seed/Seed-OSS-36B-Instruct",
+            assistant_stop_suffix: "<seed:eos>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+        }
+    }
+
+    /// Step-3.5 with `<think>` / `</think>` reasoning tags and newline trimming.
+    fn step3p5() -> Self {
+        Self {
+            model_id: "stepfun-ai/Step-3.5-Flash",
+            assistant_stop_suffix: "<|im_end|>\n",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Always { value: true },
+            json_fmt: compact_json_fmt(),
+        }
+    }
 }
 
 macro_rules! roundtrip_tests {
@@ -168,10 +192,11 @@ roundtrip_tests! {
     minimax_m25 => [reasoning_and_content, tool_call_mix],
     deepseek_v4 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
+    seed_oss => [reasoning_and_content],
+    step3p5 => [reasoning_and_content],
 
     // Note: Kimi K2.5 strips the reasoning content in history.
-    // TODO: we don't respect model-generated tool call id now so `tool_call_mix` cannot pass.
-    // kimi_k25 => [tool_call_mix],
+    kimi_k25 => [tool_call_mix],
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
@@ -233,7 +258,7 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
         "roundtrip-reasoning-tools",
         vec![ChatMessage::text(
             ChatRole::User,
-            "Check Shanghai weather and add 1.00 plus 2.",
+            "Check Shanghai weather and add 1.0 plus 2.",
         )],
         test_tools(),
         Some(true), // always enable thinking in this fixture
@@ -261,9 +286,10 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
                 AssistantContentBlock::ToolCall(AssistantToolCall {
                     id: "functions.add:1".to_string(),
                     name: "add".to_string(),
-                    // Intentionally use a non-lexical order of keys and a different number
-                    // formatting style to verify text-level fidelity of the roundtrip.
-                    arguments: r#"{"y":1.00,"x":2}"#.to_string(),
+                    // Intentionally use a non-lexical order of keys to verify text-level
+                    // fidelity of the roundtrip where JSON formatting remains stable. The
+                    // `items` key also exercises templates that call `arguments.items()`.
+                    arguments: r#"{"y":1.0,"x":2,"items":["left","right"]}"#.to_string(),
                 }),
             ],
         },
@@ -291,7 +317,7 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
     assert_eq!(tool_calls[1].name, "add");
     assert_eq!(
         tool_calls[1].arguments,
-        expected_arguments(&case, r#"{"y": 1.00, "x": 2}"#)?,
+        expected_arguments(&case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
     );
 
     assert_eq!(
@@ -482,8 +508,11 @@ fn decoded_completion_stream(
                 token_ids: Vec::new(),
                 logprobs: None,
                 finished: Some(Finished {
-                    prompt_token_count: 0,
-                    output_token_count: 0,
+                    usage: vllm_llm::TokenUsage {
+                        prompt_token_count: 0,
+                        output_token_count: 0,
+                        cached_token_count: 0,
+                    },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 }),
@@ -493,8 +522,11 @@ fn decoded_completion_stream(
         let last_index = chunks.len() - 1;
         for (index, chunk) in chunks.into_iter().enumerate() {
             let finished = (index == last_index).then(|| Finished {
-                prompt_token_count,
-                output_token_count: completion_body.chars().count(),
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count,
+                    output_token_count: completion_body.chars().count(),
+                    cached_token_count: 0,
+                },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             });
@@ -585,9 +617,13 @@ fn test_tools() -> Vec<ChatTool> {
                 "type": "object",
                 "properties": {
                     "y": { "type": "number" },
-                    "x": { "type": "number" }
+                    "x": { "type": "number" },
+                    "items": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    }
                 },
-                "required": ["y", "x"]
+                "required": ["y", "x", "items"]
             }),
             strict: None,
         },

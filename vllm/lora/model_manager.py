@@ -31,7 +31,7 @@ from vllm.lora.utils import (
     process_packed_modules_mapping,
     replace_submodule,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.models import (
     SupportsLoRA,
     is_pooling_model,
@@ -431,7 +431,7 @@ class LoRAModelManager:
 
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
-            if isinstance(module, FusedMoE):
+            if isinstance(module, MoERunner):
                 # packed_moduled_lst is used here to just determine whether to
                 # instantiate FusedMoE3DWithLoRA or FusedMoEWithLoRA, and the
                 # difference between these two LoRA layers is whether the
@@ -451,6 +451,7 @@ class LoRAModelManager:
             )
             if isinstance(new_module, BaseLayerWithLoRA):
                 wrapped_by_id[id(module)] = new_module
+                wrapped_by_id[id(new_module)] = new_module
 
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
@@ -839,8 +840,8 @@ class LoRAModelManager:
                 # owned expert range before it gets copied into the local
                 # stacked buffer. For non-EP (local == global) this is a
                 # no-op slice.
-                global_num_experts = module.base_layer.global_num_experts
-                ep_rank = module.base_layer.ep_rank
+                global_num_experts = module.global_num_experts
+                ep_rank = module.ep_rank
                 expert_start = ep_rank * local_num_experts
                 expert_end = expert_start + local_num_experts
 
@@ -943,9 +944,9 @@ class LoRAModelManager:
             # untouched so set_lora can raise a clear error if needed.
             return
 
-        local_num_experts = module.base_layer.local_num_experts
-        global_num_experts = module.base_layer.global_num_experts
-        ep_rank = module.base_layer.ep_rank
+        local_num_experts = module.local_num_experts
+        global_num_experts = module.global_num_experts
+        ep_rank = module.ep_rank
         expert_start = ep_rank * local_num_experts
         expert_end = expert_start + local_num_experts
 
@@ -1022,15 +1023,15 @@ class LoRAModelManager:
         ``.bin``/``.pt`` adapters with weights mappers we don't recognize)
         still get sliced here.
         """
-        if not module.base_layer.use_ep:
+        if not module.use_ep:
             return
         module_lora = self._get_lora_layer_weights(lora_model, module_name)
         if module_lora is None or not isinstance(module_lora.lora_a, list):
             return
 
-        local_num_experts = module.base_layer.local_num_experts
-        global_num_experts = module.base_layer.global_num_experts
-        ep_rank = module.base_layer.ep_rank
+        local_num_experts = module.local_num_experts
+        global_num_experts = module.global_num_experts
+        ep_rank = module.ep_rank
         expert_start = ep_rank * local_num_experts
         expert_end = expert_start + local_num_experts
 
@@ -1051,7 +1052,7 @@ class LoRAModelManager:
         """Narrow a flat expert-major sub-module list to this rank's experts.
 
         ``new_module_names`` is produced by
-        ``FusedMoE.make_expert_params_mapping`` and is ordered
+        ``fused_moe_make_expert_params_mapping`` and is ordered
         ``[e=0,w1, e=0,w2, e=0,w3, e=1,w1, ...]`` (non-gated MoE has 2
         entries per expert instead of 3). When the module is a 2D
         ``FusedMoEWithLoRA`` with EP enabled, we slice the list to the
@@ -1068,11 +1069,11 @@ class LoRAModelManager:
             return new_module_names
         if isinstance(module, FusedMoE3DWithLoRA):
             return new_module_names
-        if not getattr(module.base_layer, "use_ep", False):
+        if not getattr(module, "use_ep", False):
             return new_module_names
-        global_num_experts = module.base_layer.global_num_experts
-        local_num_experts = module.base_layer.local_num_experts
-        ep_rank = module.base_layer.ep_rank
+        global_num_experts = module.global_num_experts
+        local_num_experts = module.local_num_experts
+        ep_rank = module.ep_rank
         if global_num_experts <= 0 or len(new_module_names) % global_num_experts != 0:
             return new_module_names
         per_expert = len(new_module_names) // global_num_experts
@@ -1097,11 +1098,10 @@ class LoRAModelManager:
         )
         if module is None:
             return None
-        base = module.base_layer
         return MoEEPLoadSpec(
-            ep_rank=base.ep_rank,
-            local_num_experts=base.local_num_experts,
-            global_num_experts=base.global_num_experts,
+            ep_rank=module.ep_rank,
+            local_num_experts=module.local_num_experts,
+            global_num_experts=module.global_num_experts,
         )
 
     def _get_lora_layer_weights(
