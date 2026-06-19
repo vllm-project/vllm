@@ -23,7 +23,10 @@ from vllm.model_executor.kernels.mhc.tilelang import (
     mhc_pre_tilelang,
 )
 from vllm.model_executor.layers.activation import SiluAndMul, SiluAndMulWithClamp
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.fused_moe.router.base_router import (
     eplb_map_to_physical_and_record,
 )
@@ -33,7 +36,6 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
-    ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
@@ -55,13 +57,15 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.models.deepseek_v4.attention import (
-    DeepseekV4Indexer,
-    DeepseekV4MLA,
+from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
+    DeepseekV4FlashInferMLAAttention,
 )
-from vllm.models.deepseek_v4.common.rope import build_deepseek_v4_rope
+from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 class DeepseekV4MLP(nn.Module):
@@ -82,6 +86,15 @@ class DeepseekV4MLP(nn.Module):
         # across the ranks within the tp_group. In this case the weights are
         # replicated and no collective ops are needed.
         # Otherwise we use standard TP with an allreduce at the end.
+        #
+        # Block-FP8 shards in whole 128-blocks; cdiv rounds the per-rank block
+        # count up so the linear's even TP split stays block-aligned, with the
+        # trailing ranks zero-filled by load_weights.
+        block_size = getattr(quant_config, "weight_block_size", None)
+        if block_size is not None and not is_sequence_parallel:
+            tp_size = get_tensor_model_parallel_world_size()
+            n_local = cdiv(intermediate_size // block_size[0], tp_size)
+            intermediate_size = n_local * block_size[0] * tp_size
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
@@ -563,7 +576,7 @@ class DeepseekV4MoE(nn.Module):
         if self.use_mega_moe:
             self._init_mega_moe_experts(vllm_config, config, prefix)
         else:
-            self._init_fused_moe_experts(config, quant_config, prefix)
+            self._init_fused_moe_experts(vllm_config, config, quant_config, prefix)
 
     def _init_mega_moe_experts(
         self,
@@ -609,22 +622,27 @@ class DeepseekV4MoE(nn.Module):
 
     def _init_fused_moe_experts(
         self,
+        vllm_config: VllmConfig,
         config,
         quant_config,
         prefix: str,
     ) -> None:
+        parallel_config = vllm_config.parallel_config
         self.tp_rank = get_tensor_model_parallel_rank()
-        assert config.n_routed_experts % self.tp_size == 0
 
-        self.n_local_experts = config.n_routed_experts // self.tp_size
-        self.experts_start_idx = self.tp_rank * self.n_local_experts
-        self.experts_end_idx = self.experts_start_idx + self.n_local_experts
-
-        self.n_redundant_experts = 0
+        eplb_config = parallel_config.eplb_config
+        self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_shared_experts = config.n_shared_experts or 0
         self.n_logical_experts = self.n_routed_experts
-        self.n_physical_experts = self.n_logical_experts
-        self.n_local_physical_experts = self.n_local_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
+        assert self.n_physical_experts % self.tp_size == 0, (
+            f"n_physical_experts={self.n_physical_experts} must be divisible by "
+            f"tp_size={self.tp_size}. Adjust num_redundant_experts."
+        )
+        self.n_local_physical_experts = self.n_physical_experts // self.tp_size
+        self.n_local_experts = self.n_local_physical_experts
+        self.experts_start_idx = self.tp_rank * self.n_local_experts
+        self.experts_end_idx = self.experts_start_idx + self.n_local_experts
         self.physical_expert_start = self.experts_start_idx
         self.physical_expert_end = self.experts_end_idx
 
@@ -644,6 +662,8 @@ class DeepseekV4MoE(nn.Module):
             hash_indices_table=self.gate.tid2eid,
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
+            enable_eplb=parallel_config.enable_eplb,
+            num_redundant_experts=eplb_config.num_redundant_experts,
         )
 
     def forward(
@@ -713,163 +733,18 @@ class DeepseekV4MoE(nn.Module):
             self.experts.finalize_weights()
 
 
-class DeepseekV4Attention(nn.Module):
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str,
-        topk_indices_buffer: torch.Tensor | None = None,
-        aux_stream_list: list[torch.cuda.Stream] | None = None,
+def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
+    """Pick the CUDA sparse-MLA attention class for the configured backend.
+
+    An explicit ``--attention-backend FLASHINFER_MLA_SPARSE_DSV4`` selects the
+    FlashInfer TRTLLM-gen path; otherwise the FlashMLA path is used.
+    """
+    if (
+        vllm_config.attention_config.backend
+        == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4
     ):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        layer_id = extract_layer_index(prefix)
-
-        self.layer_id = layer_id
-        self.hidden_size = config.hidden_size
-        self.n_heads = config.num_attention_heads
-        tp_size = get_tensor_model_parallel_world_size()
-        assert self.n_heads % tp_size == 0
-
-        self.n_local_heads = self.n_heads // tp_size
-        self.q_lora_rank = config.q_lora_rank
-        self.o_lora_rank = config.o_lora_rank
-        self.head_dim = config.head_dim
-        self.rope_head_dim = config.qk_rope_head_dim
-        self.nope_head_dim = self.head_dim - self.rope_head_dim
-        self.n_groups = config.o_groups
-        self.n_local_groups = self.n_groups // tp_size
-        self.window_size = config.sliding_window
-        # NOTE(zyongye) Compress ratio can't be 0
-        # we do this for because MTP layer is not included
-        # in the compress ratio list
-        if layer_id < config.num_hidden_layers:
-            self.compress_ratio = max(1, config.compress_ratios[layer_id])
-        else:
-            self.compress_ratio = 1
-        self.eps = config.rms_norm_eps
-        self.max_position_embeddings = config.max_position_embeddings
-
-        # Padded to min 64 heads for FlashMLA, initialized to -inf
-        # (no sink effect). Weight loading fills the first n_local_heads slots.
-        padded_heads = max(self.n_local_heads, 64)
-        self.attn_sink = nn.Parameter(
-            torch.full((padded_heads,), -float("inf"), dtype=torch.float32),
-            requires_grad=False,
-        )
-
-        self.fused_wqa_wkv = MergedColumnParallelLinear(
-            self.hidden_size,
-            [self.q_lora_rank, self.head_dim],
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.fused_wqa_wkv",
-            disable_tp=True,  # fused ReplicatedLinear
-        )
-        self.q_norm = RMSNorm(self.q_lora_rank, self.eps)
-        self.wq_b = ColumnParallelLinear(
-            self.q_lora_rank,
-            self.n_heads * self.head_dim,
-            bias=False,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix=f"{prefix}.wq_b",
-        )
-
-        self.kv_norm = RMSNorm(self.head_dim, self.eps)
-        self.wo_a = ColumnParallelLinear(
-            self.n_heads * self.head_dim // self.n_groups,
-            self.n_groups * self.o_lora_rank,
-            bias=False,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix=f"{prefix}.wo_a",
-        )
-        self.wo_a.is_bmm = True
-        self.wo_a.bmm_batch_size = self.n_local_groups
-        self.wo_b = RowParallelLinear(
-            self.n_groups * self.o_lora_rank,
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            return_bias=False,
-            prefix=f"{prefix}.wo_b",
-        )
-        self.softmax_scale = self.head_dim**-0.5
-        self.scale_fmt = config.quantization_config["scale_fmt"]
-
-        self.rope_parameters = config.rope_scaling
-
-        # Initialize rotary embedding BEFORE DeepseekV4MLA (which needs it)
-        self.rotary_emb = build_deepseek_v4_rope(
-            config,
-            head_dim=self.head_dim,
-            rope_head_dim=self.rope_head_dim,
-            max_position_embeddings=self.max_position_embeddings,
-            compress_ratio=self.compress_ratio,
-        )
-
-        self.indexer = None
-        if self.compress_ratio == 4:
-            # Only C4A uses sparse attention and hence has indexer.
-            # aux_stream_list[0] runs indexer.forward() in the wrapper; [2] is
-            # free here (outer GEMMs joined) for the inner overlap of
-            # wq_b+fused_indexer_q_rope_quant vs compressor.
-            indexer_aux_stream = (
-                aux_stream_list[2] if aux_stream_list is not None else None
-            )
-            self.indexer = DeepseekV4Indexer(
-                vllm_config,
-                config=config,
-                hidden_size=self.hidden_size,
-                q_lora_rank=self.q_lora_rank,
-                quant_config=quant_config,
-                cache_config=vllm_config.cache_config,
-                topk_indices_buffer=topk_indices_buffer,
-                compress_ratio=self.compress_ratio,
-                prefix=f"{prefix}.indexer",
-                aux_stream=indexer_aux_stream,
-            )
-
-        self.mla_attn = DeepseekV4MLA(
-            hidden_size=self.hidden_size,
-            num_heads=self.n_local_heads,
-            head_dim=self.head_dim,
-            scale=self.softmax_scale,
-            qk_nope_head_dim=self.nope_head_dim,
-            qk_rope_head_dim=self.rope_head_dim,
-            v_head_dim=self.head_dim,
-            q_lora_rank=self.q_lora_rank,
-            kv_lora_rank=self.head_dim,
-            o_lora_rank=self.o_lora_rank,
-            vllm_config=vllm_config,
-            fused_wqa_wkv=self.fused_wqa_wkv,
-            q_norm=self.q_norm,
-            wq_b=self.wq_b,
-            kv_norm=self.kv_norm,
-            wo_a=self.wo_a,
-            wo_b=self.wo_b,
-            attn_sink=self.attn_sink,
-            rotary_emb=self.rotary_emb,
-            indexer=self.indexer,
-            indexer_rotary_emb=self.rotary_emb,
-            topk_indices_buffer=topk_indices_buffer,
-            aux_stream_list=aux_stream_list,
-            window_size=self.window_size,
-            compress_ratio=self.compress_ratio,
-            cache_config=vllm_config.cache_config,
-            quant_config=quant_config,
-            prefix=prefix,
-        )
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        llama_4_scaling: torch.Tensor | None,
-    ):
-        return self.mla_attn(positions, hidden_states, llama_4_scaling)
+        return DeepseekV4FlashInferMLAAttention
+    return DeepseekV4FlashMLAAttention
 
 
 class DeepseekV4DecoderLayer(nn.Module):
@@ -886,7 +761,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         self.rms_norm_eps = config.rms_norm_eps
-        self.attn = DeepseekV4Attention(
+        self.attn = _select_dsv4_attn_cls(vllm_config)(
             vllm_config,
             prefix=f"{prefix}.attn",
             topk_indices_buffer=topk_indices_buffer,
@@ -1027,6 +902,8 @@ class DeepseekV4Model(nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self.quant_config = quant_config
+        self.parallel_config = vllm_config.parallel_config
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         )
@@ -1043,7 +920,7 @@ class DeepseekV4Model(nn.Module):
         self.rms_norm_eps = config.rms_norm_eps
 
         # Three aux streams: one per non-default input GEMM in
-        # DeepseekV4MLA.attn_gemm_parallel_execute
+        # DeepseekV4Attention.attn_gemm_parallel_execute
         # (compressor kv_score, indexer.weights_proj, indexer.compressor
         # kv_score). fused_wqa_wkv stays on the default stream.
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
@@ -1215,7 +1092,17 @@ class DeepseekV4Model(nn.Module):
         # Pre-compute expert mapping ONCE.
         expert_mapping = self.get_expert_mapping()
 
+        # Block-FP8 shared experts: pad the intermediate up to the TP-uniform
+        # block count so the standard loaders below slice it evenly (trailing
+        # ranks land on the zero pad). SP / unquantized ones need no padding.
+        pad_shared_expert = (
+            getattr(self.quant_config, "weight_block_size", None) is not None
+            and not self.parallel_config.use_sequence_parallel_moe
+        )
+
         for name, loaded_weight in weights:
+            if pad_shared_expert and ".shared_experts." in name:
+                loaded_weight = self._pad_shared_expert_weight(name, loaded_weight)
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if ".experts." in name:
@@ -1290,13 +1177,35 @@ class DeepseekV4Model(nn.Module):
 
         return loaded_params
 
+    def _pad_shared_expert_weight(
+        self, name: str, loaded_weight: torch.Tensor
+    ) -> torch.Tensor:
+        """Zero-pad a block-FP8 shared-expert weight/scale on its intermediate
+        axis so the standard TP loaders split it into even, block-aligned shards
+        (trailing ranks get the zero pad). gate (w1)/up (w3) [I, H] pad dim 0;
+        down (w2 -> down_proj) [H, I] pads dim 1.
+        """
+        block_size = getattr(self.quant_config, "weight_block_size", None)
+        assert block_size is not None
+        # Round the intermediate axis up to a whole number of TP shards. The axis
+        # is in elements for weights (step = block) and in blocks for scales.
+        step = 1 if name.endswith("weight_scale_inv") else block_size[0]
+        dim = 1 if ".down_proj." in name else 0
+        mult = get_tensor_model_parallel_world_size() * step
+        pad = cdiv(loaded_weight.shape[dim], mult) * mult - loaded_weight.shape[dim]
+        if pad == 0:
+            return loaded_weight
+        pad_shape = list(loaded_weight.shape)
+        pad_shape[dim] = pad
+        return torch.cat([loaded_weight, loaded_weight.new_zeros(pad_shape)], dim=dim)
+
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         first_layer = next(iter(islice(self.layers, self.start_layer, self.end_layer)))
         if first_layer.ffn.use_mega_moe:
             return make_deepseek_v4_expert_params_mapping(self.config.n_routed_experts)
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="w1",
             ckpt_down_proj_name="w2",
@@ -1341,7 +1250,6 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
             ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
         },
         orig_to_new_substr={
-            ".attn.compressor.": ".attn.mla_attn.compressor.",
             ".shared_experts.w2": ".shared_experts.down_proj",
         },
     )
