@@ -446,17 +446,11 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             _,
             _,
             lora_ids,
-            no_lora_flag,
+            _,
             num_active_loras,
         ) = self.token_mapping_meta.meta_args(
             x.size(0), self.lora_config.specialize_active_lora
         )
-
-        assert no_lora_flag.numel() == 1
-        if no_lora_flag.item():
-            # None of the inputs require LoRA.
-            return
-
         if token_lora_mapping is None:
             token_lora_mapping = token_lora_mapping_meta
         fused_moe_lora(

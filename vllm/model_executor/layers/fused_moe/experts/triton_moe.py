@@ -77,16 +77,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    @property
-    def expects_unquantized_inputs(self) -> bool:
-        # Defer activation quantization to apply() only when LoRA is active AND
-        # tokens are dispatched across ranks (DP+EP all2all).
-        return (
-            self._lora_context is not None
-            and self.quant_dtype is not None
-            and self.moe_config.moe_parallel_config.use_all2all_kernels
-        )
-
     @staticmethod
     def _supports_current_device() -> bool:
         return current_platform.is_cuda_alike() or current_platform.is_xpu()
@@ -233,25 +223,6 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             torch.float8_e4m3fnuz,
         ]
 
-        # We declared expects_unquantized_inputs (LoRA + DP/EP all2all), so the
-        # prepare step deferred activation quantization to this kernel:
-        # `hidden_states` arrives unquantized. Keep the unquantized tensor for
-        # the LoRA shrink input and quantize a copy here for the base GEMM
-        # (mirrors what the prepare step would have done, but after the
-        # all-gather so the layout matches the gathered topk_ids / token map).
-        lora_unquantized_hidden_states: torch.Tensor | None = None
-        if self.expects_unquantized_inputs:
-            assert a1q_scale is None
-            lora_unquantized_hidden_states = hidden_states
-            hidden_states, a1q_scale = moe_kernel_quantize_input(
-                hidden_states,
-                self.a1_scale,
-                self.quant_dtype,
-                self.per_act_token_quant,
-                self.block_shape,
-                quantization_emulation=self.quantization_emulation,
-            )
-
         E, num_tokens, N, K, top_k_num = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids
         )
@@ -309,28 +280,12 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # GEMM on the default stream and the LoRA fast-path on aux_stream;
         # the LoRA writes its delta into a fresh zero buffer (add_inputs=
         # False) and we sum it into intermediate_cache1 after both finish.
-        #
-        # The LoRA shrink kernel needs unquantized, gathered-layout
-        # activations. When activation quant was deferred to this kernel
-        # (expects_unquantized_inputs), the input we quantized above is exactly
-        # that, so use it directly. Otherwise fall back to the context stash
-        # (e.g. weight-only quant), guarding on a row-count match so a
-        # DP-gathered layout never indexes a local stash out of bounds.
+
         sorted_token_ids_lora = None
         expert_ids_lora = None
         num_tokens_post_padded_lora = None
         token_lora_mapping = None
         lora_context = self._lora_context
-        if lora_unquantized_hidden_states is not None:
-            lora_x = lora_unquantized_hidden_states
-        elif (
-            lora_context is not None
-            and lora_context.original_hidden_states is not None
-            and lora_context.original_hidden_states.shape[0] == hidden_states.shape[0]
-        ):
-            lora_x = lora_context.original_hidden_states
-        else:
-            lora_x = hidden_states
 
         def _base_w13_fn():
             invoke_fused_moe_triton_kernel(
@@ -367,7 +322,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 return self.apply_w13_lora(
                     lora_context,
                     y=lora_delta_w13,
-                    x=lora_x,
+                    x=hidden_states,
                     topk_ids=topk_ids,
                     topk_weights=topk_weights,
                     expert_map=expert_map,
@@ -404,7 +359,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 ) = self.apply_w13_lora(
                     lora_context,
                     y=intermediate_cache1,
-                    x=lora_x,
+                    x=hidden_states,
                     topk_ids=topk_ids,
                     topk_weights=topk_weights,
                     expert_map=expert_map,

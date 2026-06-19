@@ -1407,13 +1407,6 @@ class FusedMoEKernelModularImpl:
             apply_router_weight_on_input,
         )
 
-        # Stash the original unquantized hidden states on the LoRA context
-        # so apply_w13_lora sees correct-magnitude activations instead of
-        # the potentially quantized values produced by _prepare().
-        lora_ctx = getattr(self.fused_experts, "_lora_context", None)
-        if lora_ctx is not None:
-            lora_ctx.original_hidden_states = hidden_states
-
         fused_out = self._fused_experts(
             in_dtype=hidden_states.dtype,
             a1q=a1q,
@@ -1430,9 +1423,6 @@ class FusedMoEKernelModularImpl:
             expert_tokens_meta=expert_tokens_meta,
             output_alias=output,
         )
-
-        if lora_ctx is not None:
-            lora_ctx.original_hidden_states = None
 
         return self._finalize(
             output,
