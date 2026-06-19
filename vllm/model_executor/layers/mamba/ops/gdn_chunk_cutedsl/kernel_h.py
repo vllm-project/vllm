@@ -131,7 +131,7 @@ class Sm100ChunkHKernel:
             g_cu,
             cu_seqlens,
             chunk_offsets,
-        ).launch(grid=grid, block=block, stream=stream)
+        ).launch(grid=grid, block=block, min_blocks_per_mp=1, stream=stream)
 
     @cute.kernel
     def kernel(

@@ -17,7 +17,6 @@ from vllm.cute_utils import (
     cvt,
     fence_before_tma_store,
     mma_bf16,
-    setmaxnreg_inc,
     simple_tma_copy,
 )
 
@@ -145,6 +144,13 @@ class Sm100ChunkUWKernel:
         V_dim = self.V_dim
         num_stages = self.num_stages
 
+        INV_BAR = 1
+        EPI_BAR = 2
+        SCAN_BAR = 3
+        TMEM_ALLOC_BAR = 4
+        OFF1_BAR = 5
+        OFF2_BAR = 6
+
         K_tma_atom, tmaK, sK_layout = K_args
         V_tma_atom, tmaV, sV_layout = V_args
         U_tma_atom, tmaU, sU_layout = U_args
@@ -164,9 +170,9 @@ class Sm100ChunkUWKernel:
         sA_ptr = smem.allocate_array(BFloat16, BT * BT, byte_alignment=16)
         sAi_ptr = smem.allocate_array(BFloat16, BT * BT, byte_alignment=16)
 
-        s_beta = smem.allocate_array(Float32, BT)
-        s_g_cu_exp = smem.allocate_array(Float32, BT)
-        s_g_cu = smem.allocate_array(Float32, BT)
+        s_beta = smem.allocate_tensor(Float32, cute.make_layout((BT, num_stages)))
+        s_g_cu = smem.allocate_tensor(Float32, BT)
+        s_beta_g = smem.allocate_tensor(Float32, cute.make_layout((BT, num_stages)))
 
         tma_mbar = smem.allocate_array(Int64, num_stages)
         mma_kkt_mbar = smem.allocate_array(Int64, num_stages)
@@ -179,7 +185,7 @@ class Sm100ChunkUWKernel:
         kkt_tmem = 0
         U_tmem_base = kkt_tmem + BT
         Ab_tmem_base = U_tmem_base + V_dim * num_stages
-        assert Ab_tmem_base + (BT // 2) * num_stages <= 512
+        assert Ab_tmem_base + (BT // 2) <= 512
 
         # prepare ldmatrix/stmatrix ops
         ldsm_op = warp.LdMatrix8x8x16bOp(num_matrices=4)
@@ -249,6 +255,7 @@ class Sm100ChunkUWKernel:
         elif warp_id == 8:
             # MMA warp
             _tcgen05.alloc(taddr)
+            cute.arch.barrier(barrier_id=TMEM_ALLOC_BAR, number_of_threads=160)
 
             stage_id = 0
             parity = 0
@@ -263,8 +270,8 @@ class Sm100ChunkUWKernel:
             for global_chunk_id in range(bid, num_global_chunks, grid_x):
                 U_tmem = U_tmem_base + V_dim * stage_id
                 W_tmem = U_tmem | (16 << 16)
-                Ab_tmem = Ab_tmem_base + (BT // 2) * stage_id
-                Abg_tmem = Ab_tmem | (16 << 16)
+                Ab_tmem = Ab_tmem_base
+                Abg_tmem = Ab_tmem_base | (16 << 16)
 
                 ##### KKT MMA: KKT = K @ K.T #####
                 kaddr = sK[None, None, stage_id].iterator.toint()
@@ -312,10 +319,45 @@ class Sm100ChunkUWKernel:
 
         elif warp_id >= 4:
             # inv warps
-            setmaxnreg_inc(120)
-
             tid_ = tid % 128
             warp_id_ = warp_id % 4
+
+            def store_ab_abg(
+                Ai_f32, s_beta, s_beta_g, warp_id_, lane_id, tile_col, Ab_tmem_base
+            ):
+                # compute Ab and Abg from Ai, then store to tmem
+                beta_col = cute.make_rmem_tensor((2, 2), Float32)
+                beta_g_col = cute.make_rmem_tensor((2, 2), Float32)
+
+                for i in cutlass.range_constexpr(2):
+                    base = tile_col * 16 + i * 8 + (lane_id % 4) * 2
+                    for j in cutlass.range_constexpr(2):
+                        beta_col[j, i] = s_beta[base + j]
+                        beta_g_col[j, i] = s_beta_g[base + j]
+
+                # without conversion to TensorSSA, cutlass.range(vectorize=True) fails
+                beta_col = beta_col.load()
+                beta_g_col = beta_g_col.load()
+
+                Ab_f32 = cute.make_rmem_tensor(8, Float32)
+                Abg_f32 = cute.make_rmem_tensor(8, Float32)
+                for i in cutlass.range(8, vectorize=True):
+                    scale_idx = (i // 4) * 2 + (i % 2)
+                    Ab_f32[i] = Ai_f32[i] * beta_col[scale_idx]
+                    Abg_f32[i] = Ai_f32[i] * beta_g_col[scale_idx]
+
+                Ab = Ab_f32.load().to(BFloat16)
+                Abg = Abg_f32.load().to(BFloat16)
+                Ab_tmem = Ab_tmem_base + tile_col * 8
+                _tcgen05.st(warp_id_ * 32, Ab_tmem, "16x128b", 2, Ab)
+                _tcgen05.st(warp_id_ * 32 + 16, Ab_tmem, "16x128b", 2, Abg)
+
+            # clear the Ab/Abg tmem buffer once before mainloop
+            # this is to keep the upper triangular tiles zeros
+            cute.arch.barrier(barrier_id=TMEM_ALLOC_BAR, number_of_threads=160)
+            zeros_ = cute.make_rmem_tensor(BT // 2, Float32)
+            zeros_.fill(0.0)
+            _tcgen05.st(warp_id_ * 32, Ab_tmem_base, "32x32b", BT // 2, zeros_)
 
             stage_id = 0
             parity = 0
@@ -363,12 +405,14 @@ class Sm100ChunkUWKernel:
                 t = off_t + tid_
 
                 ##### Phase 1: load g and beta #####
+                # we need to multi-buffer s_beta and s_beta_g_cu
+                # because other warps may still be using it for producing
+                # Ab/Abg in the previous iteration.
                 if tid_ < BT:
                     in_bounds = t < eos
                     beta_val = beta[t, head_id] if in_bounds else Float32(0.0)
                     g_val = g[t, head_id] if in_bounds else Float32(0.0)
-
-                    s_beta[tid_] = beta_val
+                    s_beta[tid_, stage_id] = beta_val
 
                     # compute cumsum(g)
                     # parallel scan within a warp
@@ -383,38 +427,45 @@ class Sm100ChunkUWKernel:
                     # store warp sum
                     if lane_id == 31:
                         s_g_cu[warp_id_] = g_val
-                    cute.arch.barrier(barrier_id=3, number_of_threads=BT)
+                    cute.arch.barrier(barrier_id=SCAN_BAR, number_of_threads=BT)
 
                     # add warp sum from lower warps
                     for i in cutlass.range_constexpr(1, BT // 32):
                         if warp_id_ >= i:
                             g_val += s_g_cu[i - 1]
-                    cute.arch.barrier(barrier_id=3, number_of_threads=BT)
+                    cute.arch.barrier(barrier_id=SCAN_BAR, number_of_threads=BT)
 
                     # store g_cu to gmem for H and O kernels
                     if in_bounds:
                         g_cu[t, head_id] = g_val
 
-                    # store g and g_cu to smem for later
+                    # store g and beta*g_cu to smem for later
                     s_g_cu[tid_] = g_val
-                    s_g_cu_exp[tid_] = cute.math.exp(g_val) if in_bounds else 0.0
+                    s_beta_g[tid_, stage_id] = beta_val * cute.math.exp(g_val)
 
                 ##### Phase 2: A = strictLower(beta * kkt * Gamma) #####
+                # Ab/Abg share one tmem slot across stages. The MMA warp commits
+                # tcgen05 groups in program order: KKT_i, W_i, U_i, KKT_{i+1}.
+                # Waiting for KKT_i means the previous W/U commits have completed,
+                # so the INV warps can safely overwrite Ab/Abg for this iteration.
                 if warp_id_ == 0:
                     cute.arch.mbarrier_wait(mma_kkt_mbar + stage_id, parity)
-                cute.arch.barrier(barrier_id=1, number_of_threads=128)
+                cute.arch.barrier(barrier_id=INV_BAR, number_of_threads=128)
                 _tcgen05.fence_after_thread_sync()
 
                 # tmem 16x256b layout / ldmatrix layout
+                beta_row = cute.make_rmem_tensor(2, Float32)
+                g_cu_row = cute.make_rmem_tensor(2, Float32)
+                for i in cutlass.range_constexpr(2):
+                    idx = warp_id_ * 16 + i * 8 + (lane_id // 4)
+                    beta_row[i] = s_beta[idx, stage_id]
+                    g_cu_row[i] = s_g_cu[idx]
+
                 # mode0 is 8 rows together
                 # mode1 is top and bottom 8 rows
                 # mode2 is groups of 16 rows
-                row_coord = (lane_id // 4, None, warp_id_)
-                s_beta_view = cute.make_tensor(s_beta, (8, 2, 4))
-                beta_row = s_beta_view[row_coord].load().reshape((1, 2, 1))
-
-                s_g_cu_view = cute.make_tensor(s_g_cu, (8, 2, 4))
-                g_cu_row = s_g_cu_view[row_coord].load().reshape((1, 2, 1))
+                beta_row = beta_row.load().reshape((1, 2, 1))
+                g_cu_row = g_cu_row.load().reshape((1, 2, 1))
 
                 # mode0 is 2 consecutive elems
                 # mode1 is top and bottom 8 rows
@@ -429,7 +480,7 @@ class Sm100ChunkUWKernel:
                     # mode2 is top and bottom 8 rows
                     # mode3 is next 16 columns
                     col_coord = (None, lane_id % 4, None, i)
-                    s_g_cu_view = cute.make_tensor(s_g_cu, (2, 4, 2, BT // 16))
+                    s_g_cu_view = cute.make_tensor(s_g_cu.iterator, (2, 4, 2, BT // 16))
                     g_cu_col = s_g_cu_view[col_coord].load().reshape((2, 1, 2))
 
                     Gamma = cute.math.exp(g_cu_row - g_cu_col, fastmath=True)
@@ -455,7 +506,9 @@ class Sm100ChunkUWKernel:
                         sA_ldsm[None, (warp_id_, i)],
                     )
 
-                cute.arch.barrier(barrier_id=1, number_of_threads=128)
+                # use sync warp instead of bar.sync because for block-diagonal inverse,
+                # each warp reads its own private smem memory.
+                cute.arch.sync_warp()
 
                 ##### Phase 3: matrix inverse #####
                 # we use Newton-Schulz iterations to compute the inverse
@@ -523,7 +576,16 @@ class Sm100ChunkUWKernel:
                     Ai_bf16.store(Ai_f32.load().to(BFloat16))
 
                 cute.copy(stsm_atom, Ai_bf16, sAi_ldsm[None, (warp_id_, warp_id_)])
-                cute.arch.barrier(barrier_id=1, number_of_threads=128)
+                store_ab_abg(
+                    Ai_f32,
+                    s_beta[None, stage_id],
+                    s_beta_g[None, stage_id],
+                    warp_id_,
+                    lane_id,
+                    warp_id_,
+                    Ab_tmem_base,
+                )
+                cute.arch.barrier(barrier_id=INV_BAR, number_of_threads=128)
 
                 # off-diagonal by 1
                 # given
@@ -534,7 +596,7 @@ class Sm100ChunkUWKernel:
                 # warp1: Ai10 = -Ai11 @ A10 @ Ai00
                 # warp2: Ai21 = -Ai22 @ A21 @ Ai11
                 # warp3: Ai32 = -Ai33 @ A32 @ Ai22
-                if warp_id_ > 0:
+                if warp_id_ >= 1:
                     neg_Ai = cute.make_rmem_tensor(4, Uint32)
                     for i in cutlass.range_constexpr(4):
                         neg_Ai[i] = _bf16x2_neg(Ai[i])
@@ -556,38 +618,46 @@ class Sm100ChunkUWKernel:
                     acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
                     acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], zeros_f32)
                     Ai_bf16.store(acc.load().to(BFloat16))
+                    store_ab_abg(
+                        acc,
+                        s_beta[None, stage_id],
+                        s_beta_g[None, stage_id],
+                        warp_id_,
+                        lane_id,
+                        warp_id_ - 1,
+                        Ab_tmem_base,
+                    )
                     cute.copy(
                         stsm_atom,
                         Ai_bf16,
                         sAi_ldsm[None, (warp_id_, warp_id_ - 1)],
                     )
-                cute.arch.barrier(barrier_id=1, number_of_threads=128)
+                    cute.arch.barrier(barrier_id=OFF1_BAR, number_of_threads=3 * 32)
 
                 # off-diagonal by 2
-                # warp0: Ai20 = -Ai22 @ (A20 @ Ai00 + A21 @ Ai10)
-                # warp1: Ai31 = -Ai33 @ (A31 @ Ai11 + A32 @ Ai21)
-                if warp_id_ < 2:
+                # warp2: Ai20 = -Ai22 @ (A20 @ Ai00 + A21 @ Ai10)
+                # warp3: Ai31 = -Ai33 @ (A31 @ Ai11 + A32 @ Ai21)
+                if warp_id_ >= 2:
+                    tile_col = warp_id_ - 2
                     cute.copy(
                         ldsm_atom,
-                        sA_ldsm[None, (warp_id_ + 2, warp_id_)],
+                        sA_ldsm[None, (warp_id_, tile_col)],
                         Ai_bf16,
                     )
                     cute.copy(
                         ldsm_trans_atom,
-                        sAi_ldsm[None, (warp_id_, warp_id_)],
+                        sAi_ldsm[None, (tile_col, tile_col)],
                         mma_B_bf16,
                     )
                     acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
                     acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], zeros_f32)
 
                     cute.copy(
-                        ldsm_atom,
-                        sA_ldsm[None, (warp_id_ + 2, warp_id_ + 1)],
-                        Ai_bf16,
+                        ldsm_atom, sA_ldsm[None, (warp_id_, tile_col + 1)], Ai_bf16
                     )
                     cute.copy(
                         ldsm_trans_atom,
-                        sAi_ldsm[None, (warp_id_ + 1, warp_id_)],
+                        sAi_ldsm[None, (tile_col + 1, tile_col)],
                         mma_B_bf16,
                     )
                     acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], acc[None, 0])
@@ -595,28 +665,35 @@ class Sm100ChunkUWKernel:
 
                     tmp = cute.make_rmem_tensor(8, BFloat16)
                     tmp.store(acc.load().to(BFloat16))
-                    cute.copy(stsm_atom, tmp, sAi_ldsm[None, (warp_id_ + 2, warp_id_)])
+                    cute.copy(stsm_atom, tmp, sAi_ldsm[None, (warp_id_, tile_col)])
                     cute.arch.sync_warp()
 
-                    cute.copy(
-                        ldsm_atom, sAi_ldsm[None, (warp_id_ + 2, warp_id_ + 2)], Ai_bf16
-                    )
+                    cute.copy(ldsm_atom, sAi_ldsm[None, (warp_id_, warp_id_)], Ai_bf16)
                     for i in cutlass.range_constexpr(4):
                         Ai[i] = _bf16x2_neg(Ai[i])
                     cute.copy(
                         ldsm_trans_atom,
-                        sAi_ldsm[None, (warp_id_ + 2, warp_id_)],
+                        sAi_ldsm[None, (warp_id_, tile_col)],
                         mma_B_bf16,
                     )
                     acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
                     acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], zeros_f32)
                     tmp.store(acc.load().to(BFloat16))
-                    cute.copy(stsm_atom, tmp, sAi_ldsm[None, (warp_id_ + 2, warp_id_)])
-                cute.arch.barrier(barrier_id=1, number_of_threads=128)
+                    cute.copy(stsm_atom, tmp, sAi_ldsm[None, (warp_id_, tile_col)])
+                    store_ab_abg(
+                        acc,
+                        s_beta[None, stage_id],
+                        s_beta_g[None, stage_id],
+                        warp_id_,
+                        lane_id,
+                        tile_col,
+                        Ab_tmem_base,
+                    )
+                    cute.arch.barrier(barrier_id=OFF2_BAR, number_of_threads=2 * 32)
 
                 # off-diagonal by 3
-                # warp0: Ai30 = -Ai33 @ (A30 @ Ai00 + A31 @ Ai10 + A32 @ Ai20)
-                if warp_id_ == 0:
+                # warp3: Ai30 = -Ai33 @ (A30 @ Ai00 + A31 @ Ai10 + A32 @ Ai20)
+                if warp_id_ == 3:
                     cute.copy(ldsm_atom, sA_ldsm[None, (3, 0)], Ai_bf16)
                     cute.copy(ldsm_trans_atom, sAi_ldsm[None, (0, 0)], mma_B_bf16)
                     acc[None, 0] = mma_bf16(Ai, mma_B[None, 0], zeros_f32)
@@ -641,38 +718,15 @@ class Sm100ChunkUWKernel:
                     acc[None, 1] = mma_bf16(Ai, mma_B[None, 1], zeros_f32)
                     tmp.store(acc.load().to(BFloat16))
                     cute.copy(stsm_atom, tmp, sAi_ldsm[None, (3, 0)])
-
-                ##### Phase 4: compute Ab, Abg #####
-                if warp_id_ == 3:
-                    cute.arch.mbarrier_wait(mma_u_mbar + stage_id, parity ^ 1)
-                cute.arch.barrier(barrier_id=1, number_of_threads=128)
-
-                for i in cutlass.range_constexpr(BT // 16):
-                    cute.copy(ldsm_atom, sAi_ldsm[None, (warp_id_, i)], Ai_bf16)
-
-                    col_coord = (None, lane_id % 4, None, i)
-                    s_beta_view = cute.make_tensor(s_beta, (2, 4, 2, BT // 16))
-                    beta_col = s_beta_view[col_coord].load().reshape((2, 1, 2))
-
-                    s_g_cu_view = cute.make_tensor(s_g_cu_exp, (2, 4, 2, BT // 16))
-                    g_cu_col = s_g_cu_view[col_coord].load().reshape((2, 1, 2))
-
-                    Ai_f32 = cvt.bf16x2_to_fp32x2(Ai)
-
-                    Ab_f32 = cute.make_rmem_tensor(8, Float32)
-                    Abg_f32 = cute.make_rmem_tensor(8, Float32)
-                    for j in cutlass.range(8, vectorize=True):
-                        scale_idx = (j // 4) * 2 + (j % 2)
-                        Ab_f32[j] = Ai_f32[j] * beta_col[scale_idx]
-                        Abg_f32[j] = Ab_f32[j] * g_cu_col[scale_idx]
-
-                    Ab = Ab_f32.load().to(BFloat16)
-                    Ab_tmem = Ab_tmem_base + (BT // 2) * stage_id + i * 8
-                    _tcgen05.st(warp_id_ * 32, Ab_tmem, "16x128b", 2, Ab)
-
-                    Abg = Abg_f32.load().to(BFloat16)
-                    _tcgen05.st(warp_id_ * 32 + 16, Ab_tmem, "16x128b", 2, Abg)
-
+                    store_ab_abg(
+                        acc,
+                        s_beta[None, stage_id],
+                        s_beta_g[None, stage_id],
+                        warp_id_,
+                        lane_id,
+                        0,
+                        Ab_tmem_base,
+                    )
                 _tcgen05.wait_st()
                 _tcgen05.fence_before_thread_sync()
                 cute.arch.mbarrier_arrive(inv_mbar + stage_id)
@@ -714,7 +768,7 @@ class Sm100ChunkUWKernel:
                 elif warp_id == 1:
                     with cute.arch.elect_one():
                         cute.arch.cp_async_bulk_wait_group(0, read=True)
-                cute.arch.barrier(barrier_id=2, number_of_threads=128)
+                cute.arch.barrier(barrier_id=EPI_BAR, number_of_threads=128)
                 _tcgen05.fence_after_thread_sync()
 
                 w_f32 = _tcgen05.ld(warp_id * 32 + 16, U_tmem, "16x256b", K_dim // 8)
@@ -724,7 +778,7 @@ class Sm100ChunkUWKernel:
                 cute.copy(stsm_atom, w_bf16, sW_view)
 
                 # wait for U MMA + issue W TMA store
-                cute.arch.barrier(barrier_id=2, number_of_threads=128)
+                cute.arch.barrier(barrier_id=EPI_BAR, number_of_threads=128)
                 fence_before_tma_store()
                 if warp_id == 0:
                     cute.arch.mbarrier_wait(mma_u_mbar + stage_id, parity)
@@ -733,7 +787,7 @@ class Sm100ChunkUWKernel:
                     simple_tma_copy(
                         W_tma_atom, sW, gW_tiles[(None, global_chunk_id), None]
                     )
-                cute.arch.barrier(barrier_id=2, number_of_threads=128)
+                cute.arch.barrier(barrier_id=EPI_BAR, number_of_threads=128)
                 _tcgen05.fence_after_thread_sync()
 
                 u_f32 = _tcgen05.ld(warp_id * 32, U_tmem, "16x256b", V_dim // 8)
@@ -744,7 +798,7 @@ class Sm100ChunkUWKernel:
                 u_bf16.store(u_f32.to(BFloat16))
                 cute.copy(stsm_atom, u_bf16, sU_view)
 
-                cute.arch.barrier(barrier_id=2, number_of_threads=128)
+                cute.arch.barrier(barrier_id=EPI_BAR, number_of_threads=128)
                 fence_before_tma_store()
                 if warp_id == 1:
                     simple_tma_copy(

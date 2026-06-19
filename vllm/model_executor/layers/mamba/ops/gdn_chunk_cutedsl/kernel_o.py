@@ -130,7 +130,7 @@ class Sm100ChunkOKernel:
             chunk_indices,
             total_chunks,
             scale,
-        ).launch(grid=grid, block=block, stream=stream)
+        ).launch(grid=grid, block=block, min_blocks_per_mp=1, stream=stream)
 
     @cute.kernel
     def kernel(
