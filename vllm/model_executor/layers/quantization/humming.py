@@ -852,7 +852,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
         # use moe modular
         experts: HummingIndexedExperts | HummingGroupedExperts
-        layer.ensure_moe_quant_config_init()
+        layer._ensure_moe_quant_config_init()
         assert self.moe_quant_config is not None
         if get_humming_moe_gemm_type() == "indexed":
             experts = HummingIndexedExperts(layer, self.moe, self.moe_quant_config)
