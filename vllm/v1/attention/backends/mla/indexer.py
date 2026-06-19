@@ -648,25 +648,35 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
 
             # DCP + MTP: seq_lens is now 2D (B, next_n) of GLOBAL per-candidate
-            # context lengths (L - next_n + j + 1). Ceil-div to this rank's
-            # local count: ceildiv(global, N) = (global + N - 1) // N. The paged
-            # logits kernel then reads only this rank's shard with the right
-            # per-candidate length. (CP_INTERLEAVE=1; ceil-div matches the
-            # strided ownership rank r = {r, r+N, ...}.)
+            # context lengths (L - next_n + j + 1). Convert to this rank's
+            # LOCAL shard count. The paged logits kernel then reads only this
+            # rank's shard with the right per-candidate length.
+            # (CP_INTERLEAVE=1; rank r owns global positions {r, r+N, ...}.)
             if dcp_active and next_n > 1:
-                dcp_ws = get_dcp_group().world_size
+                dcp_group = get_dcp_group()
+                dcp_ws = dcp_group.world_size
+                cp_rank = dcp_group.rank_in_group
                 # seq_lens is per-candidate GLOBAL context lengths (L - next_n
                 # + j + 1), either 1D (flatten path on SM90, next_n>2) or 2D
-                # (native path). Ceil-div to this rank's local count IN PLACE,
+                # (native path). Convert to this rank's LOCAL count IN PLACE,
                 # preserving shape so deepgemm's paged logits assert
                 # (context_lens.shape == q.shape[:2]) holds. (1D will be
                 # unsqueezed to (B,1) below, matching q's (B,1) flatten layout.)
+                #
+                # Correct per-rank shard count (CP_INTERLEAVE=1, rank r owns
+                # global positions {r, r+N, ...}): local = L//N + (r < L%N).
+                # This matches get_dcp_local_seq_lens (utils.py). A bare
+                # ceildiv (L+N-1)//N would over-count by 1 for every rank
+                # r >= L%N, making the paged logits kernel read one stale/OOB
+                # KV slot per candidate per step — harmless at short context
+                # but accumulates under MTP (next_n>1) verify until output
+                # degrades (repetition) a few hundred tokens in.
                 orig_shape = seq_lens.shape
                 n = seq_lens.numel()
-                flat = seq_lens.reshape(-1)[:n]
-                self.decode_seq_lens_buffer[:n] = (
-                    flat + dcp_ws - 1
-                ) // dcp_ws
+                flat = seq_lens.reshape(-1)[:n].to(torch.int32)
+                base = flat // dcp_ws
+                local = base + (cp_rank < (flat - base * dcp_ws)).to(torch.int32)
+                self.decode_seq_lens_buffer[:n] = local
                 seq_lens = self.decode_seq_lens_buffer[:n].view(orig_shape)
 
             # For DeepseekV4 (compress_ratio > 1), the indexer KV cache stores
