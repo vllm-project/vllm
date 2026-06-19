@@ -289,8 +289,8 @@ class CPUOffloadingManager(OffloadingManager):
 
         # Compute cache usage.
         num_used = (
-            self._num_blocks
-            - self._get_num_free_blocks()
+            self._num_allocated_blocks
+            - len(self._free_list)
             - self._num_evictable_cache_blocks
         )
         usage = num_used / self._num_blocks if self._num_blocks > 0 else 0.0
