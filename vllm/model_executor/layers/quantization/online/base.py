@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
+
+if TYPE_CHECKING:
+    from vllm.model_executor.models.utils import WeightsMapper
 
 from vllm.config.quantization import QuantizationConfigArgs, QuantSpec
 from vllm.logger import init_logger
@@ -88,6 +91,27 @@ class OnlineQuantizationConfig(QuantizationConfig):
             )
         self.args = args
         self.ignored_layers: list[str] = args.ignore
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper") -> None:
+        """Translate ``ignored_layers`` from the checkpoint's (HF) module naming
+        into vLLM's module naming so ``should_ignore_layer`` matches the runtime
+        layer prefixes (e.g. ``model.language_model.layers.*`` ->
+        ``language_model.model.layers.*``). Without this the online path would
+        quantize layers the offline (compressed-tensors) checkpoint leaves in
+        bf16. Mirrors ``CompressedTensorsConfig.apply_vllm_mapper``: only true
+        layer paths are remapped; module-class names and ``re:`` patterns are
+        passed through unchanged.
+        """
+
+        def _map_target(target: str) -> str | None:
+            is_layer_path = "." in target and not target.startswith("re:")
+            if is_layer_path:
+                return hf_to_vllm_mapper._map_name(target)
+            return target
+
+        self.ignored_layers = [
+            t for x in self.ignored_layers if (t := _map_target(x)) is not None
+        ]
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
