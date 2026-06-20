@@ -10,6 +10,9 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fla.ops.fused_gdn_prefill_post_conv import (
+    fused_post_conv_prep,
+)
 from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
     QwenGatedDeltaNetAttention,
 )
@@ -56,6 +59,32 @@ def _warmup_qwen_gdn_layer(
 ) -> None:
     qkv_dim = (layer.key_dim * 2 + layer.value_dim) // layer.tp_size
     device = layer.A_log.device
+    num_k_heads = layer.num_k_heads // layer.tp_size
+    num_v_heads = layer.num_v_heads // layer.tp_size
+    # Warm the exact fused post-conv specialization directly. The broader
+    # layer warmup below may be skipped by the layer's own warmed-up flag after
+    # profiling, while this Triton specialization can still be absent at the
+    # first real request.
+    # Use a non-multiple of BLOCK_T so Triton compiles the same dynamic L
+    # alignment class used by arbitrary prompt lengths at runtime.
+    warmup_tokens = 17
+    conv_output = torch.empty(
+        (warmup_tokens, qkv_dim), device=device, dtype=model_dtype
+    )
+    a = torch.empty((warmup_tokens, num_v_heads), device=device, dtype=model_dtype)
+    b = torch.empty((warmup_tokens, num_v_heads), device=device, dtype=model_dtype)
+    fused_post_conv_prep(
+        conv_output=conv_output,
+        a=a,
+        b=b,
+        A_log=layer.A_log,
+        dt_bias=layer.dt_bias,
+        num_k_heads=num_k_heads,
+        head_k_dim=layer.head_k_dim,
+        head_v_dim=layer.head_v_dim,
+        apply_l2norm=True,
+        output_g_exp=False,
+    )
     qkv = torch.empty((1, qkv_dim), device=device, dtype=model_dtype)
     layer._warmup_prefill_kernels(qkv, 0)
 
