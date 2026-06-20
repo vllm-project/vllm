@@ -172,7 +172,7 @@ def test_cached_request_data_resumed_all_token_ids_mrv1_only():
     assert not scheduler.use_v2_model_runner
     cached = make_cached()
     assert req.request_id in cached.resumed_req_ids
-    assert cached.all_token_ids[req.request_id] == req.all_token_ids
+    assert cached.all_token_ids[req.request_id] == list(req.all_token_ids)
 
     # V2 model runner: all_token_ids is skipped entirely.
     scheduler.use_v2_model_runner = True
