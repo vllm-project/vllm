@@ -14,7 +14,11 @@ from vllm.config import get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import get_dtype_size
+from vllm.utils.torch_utils import (
+    get_dtype_size,
+    nvfp4_kv_cache_full_dim,
+    nvfp4_kv_cache_split_views,
+)
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode, get_kv_quant_mode
 
@@ -50,6 +54,7 @@ class _WarmupShape:
     query_lens: tuple[int, ...]
     seq_lens: tuple[int, ...]
     use_3d: bool
+    use_raw_current: bool = False
 
 
 def _is_triton_attention_backend(backend: object) -> bool:
@@ -91,11 +96,6 @@ def _iter_triton_unified_attention_warmup_keys(
                 continue
 
             kv_quant_mode = get_kv_quant_mode(impl.kv_cache_dtype)
-            if kv_quant_mode.is_nvfp4:
-                # Main does not route NVFP4 through TritonAttentionBackend yet.
-                # The hook is intentionally generic so the NVFP4 branch can add
-                # its own synthetic tensors without changing kernel_warmup.py.
-                continue
 
             kv_cache_spec = cast(AttentionSpec, group.kv_cache_spec)
             key = TritonUnifiedAttentionWarmupKey(
@@ -157,6 +157,27 @@ def _decode_warmup_batch_sizes(
     return tuple(sorted(selected))
 
 
+def _raw_current_warmup_batch_sizes(
+    cudagraph_batch_sizes: tuple[int, ...],
+) -> tuple[int, ...]:
+    # Triton specializes the raw-current 2D kernel on num_seqs attributes:
+    # equal-to-1, generic non-divisible, and divisible-by-16. Warm exactly one
+    # representative for each class instead of sweeping all capture sizes.
+    selected = {1}
+
+    non_divisible = next(
+        (size for size in cudagraph_batch_sizes if size > 1 and size % 16 != 0),
+        2,
+    )
+    divisible = next(
+        (size for size in cudagraph_batch_sizes if size > 1 and size % 16 == 0),
+        16,
+    )
+    selected.add(non_divisible)
+    selected.add(divisible)
+    return tuple(sorted(selected))
+
+
 def _warmup_shapes(
     key: TritonUnifiedAttentionWarmupKey,
     cudagraph_batch_sizes: tuple[int, ...] = (),
@@ -166,7 +187,7 @@ def _warmup_shapes(
     decode_kv_len = key.block_size * 2
     prefill_len = min(16, key.block_size)
 
-    return (
+    shapes = [
         _WarmupShape("prefill_2d", (prefill_len,), (prefill_len,), False),
         *(
             _WarmupShape(
@@ -177,7 +198,23 @@ def _warmup_shapes(
             )
             for size in decode_batch_sizes
         ),
-    )
+    ]
+
+    if key.kv_quant_mode.is_nvfp4:
+        raw_current_len = min(16, key.block_size)
+        raw_current_seq_len = raw_current_len + key.block_size
+        shapes.extend(
+            _WarmupShape(
+                "raw_current_2d",
+                (raw_current_len,) * size,
+                (raw_current_seq_len,) * size,
+                False,
+                True,
+            )
+            for size in _raw_current_warmup_batch_sizes(cudagraph_batch_sizes)
+        )
+
+    return tuple(shapes)
 
 
 def _kv_cache_dtype(key: TritonUnifiedAttentionWarmupKey) -> torch.dtype:
@@ -200,6 +237,18 @@ def _allocate_kv_cache_tensors(
     cache_dtype = _kv_cache_dtype(key)
 
     head_size = key.head_size
+    if key.kv_quant_mode.is_nvfp4:
+        full_dim = nvfp4_kv_cache_full_dim(head_size)
+        k_side = torch.empty(
+            (num_blocks, key.block_size, key.num_kv_heads, full_dim),
+            dtype=torch.uint8,
+            device=device,
+        )
+        v_side = torch.empty_like(k_side)
+        (k,), (k_scale_cache,) = nvfp4_kv_cache_split_views(k_side)
+        (v,), (v_scale_cache,) = nvfp4_kv_cache_split_views(v_side)
+        return k, v, k_scale_cache.view(torch.uint8), v_scale_cache.view(torch.uint8)
+
     if key.kv_quant_mode.is_per_token_head:
         scale_pad = get_dtype_size(torch.float32) // get_dtype_size(cache_dtype)
         head_size += scale_pad
@@ -249,16 +298,31 @@ def _warmup_unified_attention_key(
             device=device,
         )
         out = torch.empty_like(q)
+        raw_k = raw_v = None
+        if shape.use_raw_current:
+            raw_k = torch.empty(
+                (num_tokens, key.num_kv_heads, key.head_size),
+                dtype=key.q_dtype,
+                device=device,
+            )
+            raw_v = torch.empty_like(raw_k)
         k, v, k_scale_cache, v_scale_cache = _allocate_kv_cache_tensors(
             key, shape, device
         )
         cu_seqlens_q = _make_cu_seqlens(shape.query_lens, device)
         seq_lens = torch.tensor(shape.seq_lens, dtype=torch.int32, device=device)
         max_blocks = (max_seq_len + key.block_size - 1) // key.block_size
+        block_table_cols = max_blocks
+        if shape.use_raw_current and key.kv_quant_mode.is_nvfp4:
+            # Match the runtime raw-current specialization class without
+            # broadening the warmup shapes. Short synthetic sequences only
+            # need two logical blocks, but server block tables usually have a
+            # divisible stride that participates in the Triton compile key.
+            block_table_cols = max(block_table_cols, 16)
         block_table = (
-            torch.arange(max_blocks, dtype=torch.int32, device=device)
+            torch.arange(block_table_cols, dtype=torch.int32, device=device)
             .unsqueeze(0)
-            .expand(num_seqs, max_blocks)
+            .expand(num_seqs, block_table_cols)
             .contiguous()
         )
 
@@ -268,6 +332,9 @@ def _warmup_unified_attention_key(
         if key.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR:
             k_descale = torch.ones(descale_shape, dtype=torch.float32, device=device)
             v_descale = torch.ones(descale_shape, dtype=torch.float32, device=device)
+        elif key.kv_quant_mode.is_nvfp4:
+            k_descale = torch.ones(1, dtype=torch.float32, device=device)
+            v_descale = torch.ones_like(k_descale)
 
         alibi_slopes = None
         if key.use_alibi:
@@ -285,7 +352,7 @@ def _warmup_unified_attention_key(
         softmax_segm_max = None
         softmax_segm_expsum = None
         if shape.use_3d:
-            seq_threshold_3d = num_seqs
+            seq_threshold_3d = _seq_threshold_3d(key, cudagraph_batch_sizes)
             num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
             head_size_padded = 1 << (key.head_size - 1).bit_length()
             softmax_segm_output = torch.empty(
@@ -333,6 +400,8 @@ def _warmup_unified_attention_key(
             kv_quant_mode=key.kv_quant_mode,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
+            raw_k=raw_k,
+            raw_v=raw_v,
             chunk_lookback=key.chunk_lookback,
             use_td=key.use_td,
         )
