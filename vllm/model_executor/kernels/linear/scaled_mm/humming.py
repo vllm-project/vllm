@@ -5,7 +5,6 @@ import humming.dtypes
 import torch
 from humming.layer import HummingMethod
 
-from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
     convert_linear_layer_to_humming_standard,

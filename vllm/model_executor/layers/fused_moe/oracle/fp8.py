@@ -162,12 +162,16 @@ def backend_to_kernel_cls(
         return [BatchedDeepGemmExperts]
 
     elif backend == Fp8MoeBackend.HUMMING:
-        import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming_moe
+        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+        )
 
         return [
-            humming_moe.BatchedHummingGroupedExperts,
-            humming_moe.HummingGroupedExperts,
-            humming_moe.HummingIndexedExperts,
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
         ]
 
     elif backend == Fp8MoeBackend.MARLIN:
@@ -563,12 +567,12 @@ def make_fp8_moe_quant_config(
             gemm1_clamp_limit=swiglu_limit,
         )
     elif fp8_backend == Fp8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             get_humming_moe_quant_config,
         )
 
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
         return get_humming_moe_quant_config(layer)
 
     # Flashinfer CUTLASS per-tensor uses single dq scale

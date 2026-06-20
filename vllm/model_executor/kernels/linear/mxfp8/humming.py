@@ -4,7 +4,6 @@
 import torch
 from humming.layer import HummingMethod
 
-from vllm import envs
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
     convert_linear_layer_to_humming_standard,
     prepare_humming_layer,

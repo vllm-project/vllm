@@ -748,6 +748,7 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None),
             w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None),
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:

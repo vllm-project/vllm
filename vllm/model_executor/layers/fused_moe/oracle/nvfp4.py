@@ -115,12 +115,16 @@ def backend_to_kernel_cls(
         return [CutlassExpertsFp4]
 
     elif backend == NvFp4MoeBackend.HUMMING:
-        import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming_moe
+        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+        )
 
         return [
-            humming_moe.BatchedHummingGroupedExperts,
-            humming_moe.HummingGroupedExperts,
-            humming_moe.HummingIndexedExperts,
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
         ]
 
     elif backend == NvFp4MoeBackend.MARLIN:
@@ -467,12 +471,12 @@ def make_nvfp4_moe_quant_config(
     layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
     if backend == NvFp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             get_humming_moe_quant_config,
         )
 
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
         return get_humming_moe_quant_config(layer)
     elif backend == NvFp4MoeBackend.MARLIN:
         return nvfp4_w4a16_moe_quant_config(

@@ -52,12 +52,16 @@ def backend_to_kernel_cls(
         return [TritonExperts]
 
     elif backend == Int8MoeBackend.HUMMING:
-        import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming_moe
+        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+        )
 
         return [
-            humming_moe.BatchedHummingGroupedExperts,
-            humming_moe.HummingGroupedExperts,
-            humming_moe.HummingIndexedExperts,
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
         ]
 
     else:
@@ -170,12 +174,12 @@ def make_int8_moe_quant_config(
     ), "a1_scale and a2_scale must both be provided or both be None"
 
     if int8_backend == Int8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
             get_humming_moe_quant_config,
         )
 
-        assert isinstance(layer, FusedMoE)
+        assert isinstance(layer, RoutedExperts)
         return get_humming_moe_quant_config(layer)
 
     assert int8_backend == Int8MoeBackend.TRITON
