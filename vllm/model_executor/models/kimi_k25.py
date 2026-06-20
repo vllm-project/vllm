@@ -110,6 +110,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         tokenizer = self.get_tokenizer()
         image_processor = cached_get_image_processor(
             self.ctx.model_config.model,
+            revision=self.ctx.model_config.revision,
             trust_remote_code=self.ctx.model_config.trust_remote_code,
         )
 
@@ -234,7 +235,7 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
                 "vision_chunk", grid_sizes
             ),
-            grid_thws=MultiModalFieldConfig.batched("vision_chunk"),
+            grid_thws=MultiModalFieldConfig.batched("vision_chunk", keep_on_cpu=True),
         )
 
     def _call_hf_processor(
@@ -338,9 +339,12 @@ class KimiK25ForConditionalGeneration(
                 quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
-            self.vision_tower = self.vision_tower.to(
-                device=self.device, dtype=model_config.dtype
-            )
+            if self._maybe_ignore_quant_config(quant_config) is not None:
+                self.vision_tower = self.vision_tower.to(device=self.device)
+            else:
+                self.vision_tower = self.vision_tower.to(
+                    device=self.device, dtype=model_config.dtype
+                )
 
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,

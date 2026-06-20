@@ -11,8 +11,9 @@ from compressed_tensors.quantization import (
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
     FusedMoeWeightScaleSupported,
+    RoutedExperts,
+    SharedExperts,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -130,7 +131,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             requires_grad=False,
         )
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
-        # Add PER-CHANNEL quantization for FusedMoE.weight_loader.
+        # Add PER-CHANNEL quantization for RoutedExperts.weight_loader.
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
         )
@@ -142,7 +143,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-    def process_weights_after_loading(self, layer: FusedMoE) -> None:
+    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         w13, w2, w13_scale, w2_scale = convert_to_int8_moe_kernel_format(
             int8_backend=self.int8_backend,
             layer=layer,
@@ -168,8 +169,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
-            routing_tables=layer._maybe_init_expert_routing_tables(),
-            shared_experts=layer.shared_experts,
+            routing_tables=layer._expert_routing_tables(),
             layer=layer,
         )
 
@@ -195,10 +195,11 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
     def apply(
         self,
-        layer: FusedMoE,
+        layer: RoutedExperts,
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         assert not self.is_monolithic
@@ -213,5 +214,6 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )

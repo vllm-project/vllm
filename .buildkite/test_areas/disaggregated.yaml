@@ -8,10 +8,10 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 - label: Distributed FlashInfer NixlConnector PD accuracy (4 GPUs)
   key: distributed-flashinfer-nixlconnector-pd-accuracy-4-gpus
@@ -19,10 +19,10 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - FLASHINFER=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: DP EP Distributed NixlConnector PD accuracy tests (4 GPUs)
@@ -31,10 +31,10 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs)
@@ -43,23 +43,37 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: Hybrid SSM NixlConnector PD accuracy tests (4 GPUs)
   key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
-  timeout_in_minutes: 20
+  timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - tests/v1/kv_connector/nixl_integration/
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
+- label: Hybrid SSM NixlConnector PD prefix cache test (2 GPUs)
+  key: hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
+  timeout_in_minutes: 25
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/v1/core/sched/
+    - vllm/v1/core/kv_cache_coordinator.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
 
 - label: MultiConnector (Nixl+Offloading) PD accuracy (2 GPUs)
   key: multiconnector-nixl-offloading-pd-accuracy-2-gpus
@@ -67,13 +81,13 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
     - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
     - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
     - tests/v1/kv_connector/nixl_integration/
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
 
 - label: NixlConnector PD + Spec Decode acceptance (2 GPUs)
@@ -83,12 +97,12 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - vllm/v1/worker/kv_connector_model_runner_mixin.py
     - tests/v1/kv_connector/nixl_integration/
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
-    - bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
 
 - label: MultiConnector (Nixl+Offloading) PD edge cases (2 GPUs)
   key: multiconnector-nixl-offloading-pd-edge-cases-2-gpus
@@ -96,11 +110,11 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
   source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
     - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
     - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
     - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
     - tests/v1/kv_connector/nixl_integration/
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh

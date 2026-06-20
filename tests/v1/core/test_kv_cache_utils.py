@@ -28,6 +28,7 @@ from vllm.v1.core.kv_cache_utils import (
     estimate_max_model_len,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
+    get_kv_cache_capacity,
     get_kv_cache_configs,
     get_max_concurrency_for_kv_cache_config,
     get_request_block_hasher,
@@ -43,11 +44,16 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    KVCacheSpecKind,
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
+    SinkFullAttentionSpec,
+    SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_kv_cache_spec_kind,
+    get_kv_cache_spec_sliding_window,
 )
 from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
@@ -351,6 +357,43 @@ def test_free_kv_cache_block_queue_append_n():
         invalid_queue.fake_free_list_head.next_free_block
         == invalid_queue.fake_free_list_tail
     )
+
+
+def test_free_kv_cache_block_queue_prepend_n():
+    # Seed the queue with one block so prepend has an existing head to splice
+    # in front of (fake_head->b0->fake_tail).
+    blocks = [KVCacheBlock(block_id=i) for i in range(6)]
+    queue = FreeKVCacheBlockQueue(blocks[0:1])
+
+    # Prepend 0 blocks is a no-op.
+    queue.prepend_n([])
+    assert queue.num_free_blocks == 1
+    assert queue.fake_free_list_head.next_free_block is blocks[0]
+
+    # Prepend 2 blocks; they land in front of the existing head, in order.
+    # fake_head->b4->b5->b0->fake_tail
+    queue.prepend_n(blocks[4:6])
+    assert queue.num_free_blocks == 3
+    assert queue.fake_free_list_head.next_free_block is blocks[4]
+    assert blocks[4].prev_free_block is queue.fake_free_list_head
+    assert blocks[4].next_free_block is blocks[5]
+    assert blocks[5].prev_free_block is blocks[4]
+    assert blocks[5].next_free_block is blocks[0]
+    assert blocks[0].prev_free_block is blocks[5]
+    assert blocks[0].next_free_block is queue.fake_free_list_tail
+    assert queue.fake_free_list_tail.prev_free_block is blocks[0]
+
+    # A second prepend goes ahead of everything previously prepended.
+    # fake_head->b1->b2->b4->b5->b0->fake_tail
+    queue.prepend_n(blocks[1:3])
+    assert queue.num_free_blocks == 5
+    assert queue.fake_free_list_head.next_free_block is blocks[1]
+    assert blocks[1].next_free_block is blocks[2]
+    assert blocks[2].next_free_block is blocks[4]
+
+    # The popleft order reflects the front-to-back queue order.
+    assert [queue.popleft().block_id for _ in range(5)] == [1, 2, 4, 5, 0]
+    assert queue.num_free_blocks == 0
 
 
 def test_free_kv_cache_block_queue_popleft_n():
@@ -1417,6 +1460,11 @@ def test_get_max_concurrency_for_kv_cache_config():
         vllm_config, kv_cache_config_hybrid_model
     )
     assert max_concurrency_hybrid_model == 3
+    num_tokens, max_concurrency = get_kv_cache_capacity(
+        vllm_config, kv_cache_config_hybrid_model
+    )
+    assert num_tokens == max_concurrency_hybrid_model * max_model_len
+    assert max_concurrency == max_concurrency_hybrid_model
 
 
 def test_allocate_with_lookahead():
@@ -1442,7 +1490,10 @@ def test_allocate_with_lookahead():
 
     # Test case 1: Requires additional lookahead tokens
     kv_cache_manager = KVCacheManager(
-        kv_cache_config=config, max_model_len=100, hash_block_size=block_size
+        kv_cache_config=config,
+        max_model_len=100,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
     )
     blocks = kv_cache_manager.allocate_slots(
         request,
@@ -1453,7 +1504,10 @@ def test_allocate_with_lookahead():
 
     # Test case 2: With precomputed blocks
     kv_cache_manager = KVCacheManager(
-        kv_cache_config=config, max_model_len=100, hash_block_size=block_size
+        kv_cache_config=config,
+        max_model_len=100,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
     )
     # required_blocks = ceil((3 + 2) /4) = 2
     blocks = kv_cache_manager.allocate_slots(
@@ -1466,7 +1520,10 @@ def test_allocate_with_lookahead():
     # Test case 3: With precomputed blocks
     # required_blocks = ceil((3 + 4) / 4) = 2
     kv_cache_manager = KVCacheManager(
-        kv_cache_config=config, max_model_len=100, hash_block_size=block_size
+        kv_cache_config=config,
+        max_model_len=100,
+        scheduler_block_size=block_size,
+        hash_block_size=block_size,
     )
     blocks = kv_cache_manager.allocate_slots(
         request,
@@ -1863,6 +1920,149 @@ def new_mla_spec(cache_dtype_str=None):
         dtype=torch.float32,
         cache_dtype_str=cache_dtype_str,
     )
+
+
+def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
+    assert get_kv_cache_spec_kind(new_mla_spec()) == KVCacheSpecKind.MLA_ATTENTION
+
+    sliding_window_mla_spec = SlidingWindowMLASpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=576,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+    assert (
+        get_kv_cache_spec_kind(sliding_window_mla_spec)
+        == KVCacheSpecKind.SLIDING_WINDOW_MLA
+    )
+
+    sink_full_attention_spec = SinkFullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+        sink_len=4,
+    )
+    assert (
+        get_kv_cache_spec_kind(sink_full_attention_spec)
+        == KVCacheSpecKind.SINK_FULL_ATTENTION
+    )
+
+
+def test_get_kv_cache_spec_kind_unwraps_uniform_type_specs():
+    uniform_mla_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": new_mla_spec(),
+            "layer_2": new_mla_spec(cache_dtype_str="fp8"),
+        },
+    )
+    assert get_kv_cache_spec_kind(uniform_mla_spec) == KVCacheSpecKind.MLA_ATTENTION
+
+    uniform_swa_mla_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+            "layer_2": SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=1024,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+        },
+    )
+    assert (
+        get_kv_cache_spec_kind(uniform_swa_mla_spec)
+        == KVCacheSpecKind.SLIDING_WINDOW_MLA
+    )
+
+
+def test_get_kv_cache_spec_kind_unknown_for_mixed_uniform_type_specs():
+    uniform_mixed_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": new_mla_spec(),
+            "layer_2": SlidingWindowMLASpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+        },
+    )
+    assert get_kv_cache_spec_kind(uniform_mixed_spec) == KVCacheSpecKind.UNKNOWN
+
+
+def test_get_kv_cache_spec_sliding_window_reads_windowed_specs():
+    full_attention_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+    )
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=64,
+        dtype=torch.float32,
+        sliding_window=128,
+    )
+
+    assert get_kv_cache_spec_sliding_window(full_attention_spec) is None
+    assert get_kv_cache_spec_sliding_window(sliding_window_spec) == 128
+
+
+def test_get_kv_cache_spec_sliding_window_unwraps_uniform_type_specs():
+    uniform_window_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+            "layer_2": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=2,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+        },
+    )
+    mixed_window_spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={
+            "layer_1": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=128,
+            ),
+            "layer_2": SlidingWindowSpec(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=64,
+                dtype=torch.float32,
+                sliding_window=256,
+            ),
+        },
+    )
+
+    assert get_kv_cache_spec_sliding_window(uniform_window_spec) == 128
+    assert get_kv_cache_spec_sliding_window(mixed_window_spec) is None
 
 
 def test_merge_mla_spec():

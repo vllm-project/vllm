@@ -18,7 +18,6 @@ pytestmark = pytest.mark.cpu_test
 # Token IDs matching FakeTokenizer.vocab
 TC_START_ID = 1
 TC_END_ID = 2
-EOS_ID = 99
 
 
 class FakeTokenizer:
@@ -33,6 +32,10 @@ class FakeTokenizer:
 
     def get_vocab(self):
         return self.vocab
+
+    def decode(self, token_ids):
+        id_to_token = {v: k for k, v in self.vocab.items()}
+        return "".join(id_to_token.get(token_id, "") for token_id in token_ids)
 
 
 @pytest.fixture
@@ -121,7 +124,6 @@ class TestContentStreaming:
         """No tool call tokens — all text is streamed as content."""
         results = _feed(parser, ["Hello ", "world"])
         assert _collect_content(results) == "Hello world"
-        assert not parser.prev_tool_call_arr
 
     def test_content_before_tool_call(self, parser):
         """Text before <minimax:tool_call> is streamed as content."""
@@ -135,7 +137,6 @@ class TestContentStreaming:
             ],
         )
         assert _collect_content(results) == "Let me check. "
-        assert len(parser.prev_tool_call_arr) == 1
 
     def test_empty_delta_no_crash(self, parser):
         """Empty delta_text with no token IDs returns None."""
@@ -263,45 +264,6 @@ class TestMultipleInvokes:
 
 
 # ---------------------------------------------------------------------------
-# Internal state: prev_tool_call_arr
-# ---------------------------------------------------------------------------
-
-
-class TestInternalState:
-    """Verify prev_tool_call_arr is correct."""
-
-    def test_prev_tool_call_arr_single(self, parser):
-        _feed(
-            parser,
-            [
-                '<minimax:tool_call><invoke name="fn">'
-                '<parameter name="a">1</parameter>'
-                "</invoke></minimax:tool_call>",
-            ],
-        )
-        assert len(parser.prev_tool_call_arr) == 1
-        assert parser.prev_tool_call_arr[0]["name"] == "fn"
-        assert parser.prev_tool_call_arr[0]["arguments"] == {"a": "1"}
-
-    def test_prev_tool_call_arr_multiple(self, parser):
-        """prev_tool_call_arr records each invoke with correct arguments."""
-        _feed(
-            parser,
-            [
-                "<minimax:tool_call>",
-                '<invoke name="search"><parameter name="q">hello</parameter></invoke>',
-                '<invoke name="search"><parameter name="q">world</parameter></invoke>',
-                "</minimax:tool_call>",
-            ],
-        )
-        assert len(parser.prev_tool_call_arr) == 2
-        assert parser.prev_tool_call_arr[0]["name"] == "search"
-        assert parser.prev_tool_call_arr[0]["arguments"] == {"q": "hello"}
-        assert parser.prev_tool_call_arr[1]["name"] == "search"
-        assert parser.prev_tool_call_arr[1]["arguments"] == {"q": "world"}
-
-
-# ---------------------------------------------------------------------------
 # DeltaMessage structure
 # ---------------------------------------------------------------------------
 
@@ -324,7 +286,7 @@ class TestDeltaMessageFormat:
         tc = tc_deltas[0]
         assert tc.index == 0
         assert tc.type == "function"
-        assert tc.id is not None and tc.id.startswith("call_")
+        assert tc.id is not None
         assert tc.function.name == "fn"
         assert json.loads(tc.function.arguments) == {"k": "v"}
 
@@ -345,72 +307,6 @@ class TestDeltaMessageFormat:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3: EOS handling
-# ---------------------------------------------------------------------------
-
-
-class TestEOSHandling:
-    """Tests for the end-of-stream phase."""
-
-    def test_eos_after_tool_calls(self, parser):
-        """EOS token (empty delta, non-special token id) returns content=''."""
-        results = _feed(
-            parser,
-            [
-                "<minimax:tool_call>",
-                '<invoke name="fn"><parameter name="k">v</parameter></invoke>',
-                "</minimax:tool_call>",
-                # EOS: empty delta_text, non-special token id
-                ("", [EOS_ID]),
-            ],
-        )
-        # Last result should be the EOS empty-content signal
-        assert results[-1].content == ""
-
-    def test_end_token_ignored(self, parser):
-        """</minimax:tool_call> special token should NOT trigger EOS."""
-        results = _feed(
-            parser,
-            [
-                "<minimax:tool_call>",
-                '<invoke name="fn"><parameter name="k">v</parameter></invoke>',
-                # </minimax:tool_call> arrives as special token
-                ("", [TC_END_ID]),
-            ],
-        )
-        # The tool call delta should be emitted, but no EOS signal
-        assert not any(r.content == "" and r.tool_calls is None for r in results)
-
-
-# ---------------------------------------------------------------------------
-# Start token detection via token IDs
-# ---------------------------------------------------------------------------
-
-
-class TestSpecialTokenDetection:
-    """Start token arrives as a special token (not in delta_text)."""
-
-    def test_start_token_via_id(self, parser):
-        """<minimax:tool_call> detected via delta_token_ids, not text."""
-        results = _feed(parser, ["Hello "])
-        assert _collect_content(results) == "Hello "
-
-        # Start token as special token (empty delta_text)
-        previous = "Hello "
-        result = parser.extract_tool_calls_streaming(
-            previous_text=previous,
-            current_text=previous,
-            delta_text="",
-            previous_token_ids=[],
-            current_token_ids=[],
-            delta_token_ids=[TC_START_ID],
-            request=None,
-        )
-        assert result is None  # no content to emit
-        assert parser.is_tool_call_started is True
-
-
-# ---------------------------------------------------------------------------
 # Large chunks (stream_interval > 1)
 # ---------------------------------------------------------------------------
 
@@ -419,7 +315,7 @@ class TestLargeChunks:
     """Simulate stream_interval > 1 where many tokens arrive at once."""
 
     def test_header_and_params_in_separate_chunks(self, parser):
-        """Header in chunk 1, all params + close in chunk 2, then EOS."""
+        """Header in chunk 1, all params + close in chunk 2."""
         chunk1 = '<minimax:tool_call><invoke name="get_weather">'
         chunk2 = (
             '<parameter name="city">Seattle</parameter>'
@@ -432,7 +328,6 @@ class TestLargeChunks:
             [
                 chunk1,
                 chunk2,
-                ("", [EOS_ID]),
             ],
         )
 
@@ -440,12 +335,6 @@ class TestLargeChunks:
         assert len(tc) == 1
         parsed = json.loads(tc[0]["arguments"])
         assert parsed == {"city": "Seattle", "days": "5"}
-
-        assert len(parser.prev_tool_call_arr) == 1
-        assert parser.prev_tool_call_arr[0]["arguments"] == {
-            "city": "Seattle",
-            "days": "5",
-        }
 
 
 class TestAnyOfNullableParam:
@@ -548,3 +437,133 @@ class TestAnyOfNullableParam:
         parsed = json.loads(tc[0]["arguments"])
         assert parsed["config"] == {"theme": "dark", "fontSize": 14}
         assert isinstance(parsed["config"], dict)
+
+
+class TestNoneStringPreservation:
+    """Regression tests for #39567: 'none' as a string must not become None."""
+
+    def test_none_string_preserved_in_enum(self):
+        """'none' in an enum must stay as the string 'none', not Python None."""
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="set_theme",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "theme": {
+                                "type": "string",
+                                "enum": ["dark", "light", "none"],
+                            },
+                        },
+                    },
+                ),
+            )
+        ]
+        parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
+
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="set_theme">'
+                '<parameter name="theme">none</parameter>'
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+        tc = _collect_tool_calls(results)
+        assert len(tc) == 1
+        parsed = json.loads(tc[0]["arguments"])
+        assert parsed["theme"] == "none"
+        assert parsed["theme"] is not None
+
+    def test_none_string_preserved_plain_string(self):
+        """'none' as a plain string param must stay as 'none'."""
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="echo",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "message": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+        parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
+
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="echo">'
+                '<parameter name="message">none</parameter>'
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+        tc = _collect_tool_calls(results)
+        assert len(tc) == 1
+        parsed = json.loads(tc[0]["arguments"])
+        assert parsed["message"] == "none"
+
+    def test_null_still_converts_to_none(self):
+        """'null' in a nullable param must still become Python None."""
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="update_profile",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "nickname": {
+                                "anyOf": [{"type": "string"}, {"type": "null"}],
+                            },
+                        },
+                    },
+                ),
+            )
+        ]
+        parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
+
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="update_profile">'
+                '<parameter name="nickname">null</parameter>'
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+        tc = _collect_tool_calls(results)
+        assert len(tc) == 1
+        parsed = json.loads(tc[0]["arguments"])
+        assert parsed["nickname"] is None
+
+    def test_nil_string_preserved(self):
+        """'nil' must stay as the string 'nil', not become None."""
+        tools = [
+            ChatCompletionToolsParam(
+                function=FunctionDefinition(
+                    name="echo",
+                    parameters={
+                        "type": "object",
+                        "properties": {
+                            "value": {"type": "string"},
+                        },
+                    },
+                ),
+            )
+        ]
+        parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
+
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="echo">'
+                '<parameter name="value">nil</parameter>'
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+        tc = _collect_tool_calls(results)
+        assert len(tc) == 1
+        parsed = json.loads(tc[0]["arguments"])
+        assert parsed["value"] == "nil"
