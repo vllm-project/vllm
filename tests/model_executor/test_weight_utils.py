@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 import tempfile
 
 import huggingface_hub.constants
 import pytest
 from huggingface_hub.utils import LocalEntryNotFoundError
 
+from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
+    _prefetch_all_checkpoints,
     download_weights_from_hf,
     maybe_remap_kv_scale_name,
 )
@@ -279,6 +282,58 @@ class TestKvCacheScaleMapper:
             combined._map_name("model.layers.0.self_attn.k_scale")
             == "model.layers.0.self_attn.attn.k_scale"
         )
+
+
+def test_prefetch_quiet_on_executor_shutdown(monkeypatch, caplog):
+    class ShutdownExecutor:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def submit(self, *_args, **_kwargs):
+            raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(
+        weight_utils.concurrent.futures, "ThreadPoolExecutor", ShutdownExecutor
+    )
+
+    paths = [f"/tmp/shard-{i}.safetensors" for i in range(16)]
+    with caplog.at_level(logging.DEBUG, logger=weight_utils.logger.name):
+        thread = _prefetch_all_checkpoints(paths)
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "prefetch thread did not finish"
+
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and r.name == weight_utils.logger.name
+    ]
+    assert warnings == []
+
+
+def test_prefetch_warns_on_checkpoint_failure(monkeypatch, caplog):
+    def raise_prefetch_error(*_args, **_kwargs) -> None:
+        raise RuntimeError("disk read failed")
+
+    monkeypatch.setattr(weight_utils, "_prefetch_checkpoint", raise_prefetch_error)
+
+    paths = [f"/tmp/shard-{i}.safetensors" for i in range(2)]
+    with caplog.at_level(logging.WARNING, logger=weight_utils.logger.name):
+        thread = _prefetch_all_checkpoints(paths)
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "prefetch thread did not finish"
+
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and r.name == weight_utils.logger.name
+    ]
+    assert len(warnings) == len(paths)
 
 
 if __name__ == "__main__":
