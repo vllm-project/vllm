@@ -76,7 +76,10 @@ def kernel_warmup(worker: "Worker"):
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
     if enable_flashinfer_autotune is False:
         logger.info("Skipping FlashInfer autotune because it is disabled.")
-    elif has_flashinfer() and current_platform.has_device_capability(90):
+    elif has_flashinfer() and (
+        current_platform.is_device_capability_family(90)
+        or current_platform.is_device_capability_family(100)
+    ):
         flashinfer_autotune(worker.model_runner)
 
     # FlashInfer attention warmup
@@ -135,7 +138,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     from vllm.distributed.parallel_state import get_world_group
 
     if not _FLASHINFER_USE_PERSISTENT_CACHE:
-        with torch.inference_mode(), fi_utils.autotune():
+        with torch.inference_mode(), fi_utils.autotune_warmup():
             runner._dummy_run(
                 num_tokens=runner.scheduler_config.max_num_batched_tokens,
                 skip_eplb=True,
@@ -163,7 +166,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
 
     with torch.inference_mode():
         if is_leader:
-            with fi_utils.autotune(tune_mode=True, cache=str(cache_path)):
+            with fi_utils.autotune_warmup(tune_mode=True, cache=str(cache_path)):
                 runner._dummy_run(**dummy_run_kwargs)
         else:
             runner._dummy_run(**dummy_run_kwargs)
