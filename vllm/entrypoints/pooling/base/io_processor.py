@@ -4,7 +4,6 @@
 from collections.abc import Sequence
 from typing import Any, Final
 
-from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -14,6 +13,9 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
 from vllm.inputs import EngineInput, SingletonPrompt
+from vllm.inputs.llm import PromptType
+from vllm.outputs import PoolingRequestOutput
+from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, TokenizeParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.tool_parsers import ToolParser

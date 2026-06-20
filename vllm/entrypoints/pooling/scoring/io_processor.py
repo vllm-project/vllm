@@ -6,8 +6,10 @@ from typing import Any, TypeAlias
 
 import torch.nn.functional as F
 
-from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
 from vllm.inputs import EngineInput
+from vllm.inputs.llm import TokensPrompt
+from vllm.outputs import PoolingRequestOutput
+from vllm.pooling_params import PoolingParams
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
 from vllm.tasks import PoolingTask

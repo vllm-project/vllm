@@ -12,7 +12,7 @@ from fastapi import Request
 from fastapi.responses import Response
 from starlette.datastructures import Headers
 
-from vllm import PoolingParams, PoolingRequestOutput, envs
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
@@ -22,6 +22,8 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMNotFoundError
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
+from vllm.outputs import PoolingRequestOutput
+from vllm.pooling_params import PoolingParams
 from vllm.renderers.base import BaseRenderer
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.tracing import (

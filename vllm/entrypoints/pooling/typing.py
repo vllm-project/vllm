@@ -8,9 +8,11 @@ from typing import Any, Generic, TypeAlias, TypeVar
 from fastapi import Request
 from pydantic import ConfigDict
 
-from vllm import PoolingParams, PoolingRequestOutput, PromptType
 from vllm.inputs import DataPrompt, EngineInput
+from vllm.inputs.llm import PromptType
 from vllm.lora.request import LoRARequest
+from vllm.outputs import PoolingRequestOutput
+from vllm.pooling_params import PoolingParams
 
 from .classify.protocol import (
     ClassificationChatRequest,
