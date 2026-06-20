@@ -90,6 +90,7 @@ def test_kernel_warmup_runs_runtime_dummy_for_hybrid_models(monkeypatch) -> None
 
     def fake_scheduler_warmup(model_runner, execute_model, sample_tokens) -> None:
         assert model_runner.num_speculative_steps == 0
+        assert model_runner.decode_query_len == 1
         assert hasattr(model_runner, "kv_connector")
         assert model_runner.is_last_pp_rank is True
         calls.append("scheduler")
@@ -139,6 +140,7 @@ def test_kernel_warmup_runs_runtime_dummy_for_hybrid_models(monkeypatch) -> None
 
     assert calls == ["hybrid", "dummy", "scheduler", "single"]
     assert not hasattr(model_runner, "num_speculative_steps")
+    assert not hasattr(model_runner, "decode_query_len")
     assert not hasattr(model_runner, "kv_connector")
     assert not hasattr(model_runner, "is_last_pp_rank")
 

@@ -84,10 +84,15 @@ def _warmup_scheduler_output_kernels(worker: "Worker") -> None:
     runner = worker.model_runner
     runner_attrs: Any = runner
     added_num_speculative_steps = not hasattr(runner_attrs, "num_speculative_steps")
+    added_decode_query_len = not hasattr(runner_attrs, "decode_query_len")
     added_kv_connector = not hasattr(runner_attrs, "kv_connector")
     added_is_last_pp_rank = not hasattr(runner_attrs, "is_last_pp_rank")
     if added_num_speculative_steps:
         runner_attrs.num_speculative_steps = getattr(runner_attrs, "num_spec_tokens", 0)
+    if added_decode_query_len:
+        runner_attrs.decode_query_len = getattr(
+            runner_attrs, "uniform_decode_query_len", 1
+        )
     if added_kv_connector:
         runner_attrs.kv_connector = _NoOpKVConnector()
     if added_is_last_pp_rank:
@@ -104,6 +109,8 @@ def _warmup_scheduler_output_kernels(worker: "Worker") -> None:
             del runner_attrs.is_last_pp_rank
         if added_kv_connector:
             del runner_attrs.kv_connector
+        if added_decode_query_len:
+            del runner_attrs.decode_query_len
         if added_num_speculative_steps:
             del runner_attrs.num_speculative_steps
 
