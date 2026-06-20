@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     should_moe_wna16_use_cuda,
 )
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Method
 
 logger = init_logger(__name__)
@@ -120,7 +120,10 @@ def _generate_wna16_triton_m_values(
     return sorted(m_values)
 
 
-def _get_warmup_expert_ids(layer: FusedMoE, device: torch.device) -> torch.Tensor:
+def _get_warmup_expert_ids(
+    layer: RoutedExperts,
+    device: torch.device,
+) -> torch.Tensor:
     expert_map = layer.expert_map
     if expert_map is None:
         return torch.arange(
@@ -145,19 +148,23 @@ def _make_warmup_topk_ids(
     return expert_ids[expert_indices % expert_ids.numel()].view(m, top_k)
 
 
-def _get_wna16_moe_warmup_key(layer: FusedMoE) -> tuple[Any, ...]:
+def _get_wna16_moe_warmup_key(layer: RoutedExperts) -> tuple[Any, ...]:
     quant_method = layer.quant_method
     assert isinstance(quant_method, MoeWNA16Method)
 
     w13_zp = getattr(layer, "w13_qzeros", None)
     w2_zp = getattr(layer, "w2_qzeros", None)
+    w13_qweight = layer.w13_qweight
+    w2_qweight = layer.w2_qweight
+    w13_scales = layer.w13_scales
+    w2_scales = layer.w2_scales
     return (
-        str(layer.w13_qweight.device),
+        str(w13_qweight.device),
         layer.moe_config.in_dtype,
-        tuple(layer.w13_qweight.shape),
-        tuple(layer.w2_qweight.shape),
-        tuple(layer.w13_scales.shape),
-        tuple(layer.w2_scales.shape),
+        tuple(w13_qweight.shape),
+        tuple(w2_qweight.shape),
+        tuple(w13_scales.shape),
+        tuple(w2_scales.shape),
         None if w13_zp is None else tuple(w13_zp.shape),
         None if w2_zp is None else tuple(w2_zp.shape),
         getattr(layer, "group_size", quant_method.quant_config.group_size),
@@ -167,24 +174,25 @@ def _get_wna16_moe_warmup_key(layer: FusedMoE) -> tuple[Any, ...]:
     )
 
 
-def _iter_wna16_moe_layers(model: torch.nn.Module) -> Iterable[FusedMoE]:
+def _iter_wna16_moe_layers(model: torch.nn.Module) -> Iterable[RoutedExperts]:
     for module in model.modules():
-        if isinstance(module, FusedMoE) and isinstance(
+        if isinstance(module, RoutedExperts) and isinstance(
             module.quant_method, MoeWNA16Method
         ):
             yield module
 
 
 def _warmup_wna16_moe_layer(
-    layer: FusedMoE,
+    layer: RoutedExperts,
     m_values: list[int],
 ) -> None:
     if not m_values:
         return
 
-    layer.ensure_moe_quant_config_init()
+    layer._ensure_moe_quant_config_init()
 
-    device = layer.w13_qweight.device
+    w13_qweight = layer.w13_qweight
+    device = w13_qweight.device
     dtype = layer.moe_config.in_dtype
     expert_ids = _get_warmup_expert_ids(layer, device)
     if expert_ids.numel() == 0:
@@ -210,6 +218,7 @@ def _warmup_wna16_moe_layer(
                     x,
                     topk_weights,
                     topk_ids,
+                    shared_experts=None,
                     shared_experts_input=None,
                 )
                 if device.type != "cpu":
@@ -237,7 +246,8 @@ def fused_moe_wna16_warmup(
         quant_method = layer.quant_method
         assert isinstance(quant_method, MoeWNA16Method)
         group_size = getattr(layer, "group_size", quant_method.quant_config.group_size)
-        num_experts = layer.w13_qweight.size(0)
+        w13_qweight = layer.w13_qweight
+        num_experts = w13_qweight.size(0)
         m_values = _generate_wna16_triton_m_values(
             max_num_batched_tokens=max_num_batched_tokens,
             num_experts=num_experts,

@@ -91,6 +91,7 @@ class _FakeWNA16Method:
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         self.calls.append(
@@ -104,7 +105,7 @@ class _FakeWNA16Method:
         return x
 
 
-class _FakeFusedMoE(torch.nn.Module):
+class _FakeRoutedExperts(torch.nn.Module):
     def __init__(self):
         super().__init__()
         self.quant_method = _FakeWNA16Method()
@@ -125,12 +126,12 @@ class _FakeFusedMoE(torch.nn.Module):
         )
         self.ensure_moe_quant_config_init_called = False
 
-    def ensure_moe_quant_config_init(self):
+    def _ensure_moe_quant_config_init(self):
         self.ensure_moe_quant_config_init_called = True
 
 
 def test_wna16_warmup_uses_local_experts_and_quant_config(monkeypatch):
-    monkeypatch.setattr(fused_moe_warmup, "FusedMoE", _FakeFusedMoE)
+    monkeypatch.setattr(fused_moe_warmup, "RoutedExperts", _FakeRoutedExperts)
     monkeypatch.setattr(fused_moe_warmup, "MoeWNA16Method", _FakeWNA16Method)
     monkeypatch.setattr(
         fused_moe_warmup,
@@ -138,7 +139,7 @@ def test_wna16_warmup_uses_local_experts_and_quant_config(monkeypatch):
         lambda *args, **kwargs: False,
     )
 
-    layer = _FakeFusedMoE()
+    layer = _FakeRoutedExperts()
     model = torch.nn.Sequential(layer)
 
     fused_moe_warmup.fused_moe_wna16_warmup(
@@ -157,7 +158,7 @@ def test_wna16_warmup_uses_local_experts_and_quant_config(monkeypatch):
 
 def test_wna16_warmup_rocm_aiter_expert_mask(monkeypatch):
     # ROCm AITER returns a binary expert mask from the expert_map property.
-    monkeypatch.setattr(fused_moe_warmup, "FusedMoE", _FakeFusedMoE)
+    monkeypatch.setattr(fused_moe_warmup, "RoutedExperts", _FakeRoutedExperts)
     monkeypatch.setattr(fused_moe_warmup, "MoeWNA16Method", _FakeWNA16Method)
     monkeypatch.setattr(
         fused_moe_warmup,
@@ -165,7 +166,7 @@ def test_wna16_warmup_rocm_aiter_expert_mask(monkeypatch):
         lambda *args, **kwargs: False,
     )
 
-    layer = _FakeFusedMoE()
+    layer = _FakeRoutedExperts()
     layer.rocm_aiter_fmoe_enabled = True
     layer.expert_map = torch.tensor([0, 1, 0, 1], dtype=torch.int32)
     model = torch.nn.Sequential(layer)
