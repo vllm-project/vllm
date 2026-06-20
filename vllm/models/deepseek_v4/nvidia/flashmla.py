@@ -910,6 +910,29 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 assert self.topk_indices_buffer is not None
                 topk_indices = self.topk_indices_buffer[num_decode_tokens:]
                 topk_indices = topk_indices[:num_prefill_tokens]
+                # Rebase the indexer's BATCH-GLOBAL compressed top-k positions to
+                # per-request-local. combine_topk_swa_indices maps a position p of
+                # the k-th in-chunk request to gathered slot p + M*k, which is only
+                # correct when p is request-local; the indexer writes cu_seqlen_ks-
+                # cumulative (batch-global) positions, so without this rebase non-
+                # first prefill requests index past their gathered slot and read
+                # stale workspace (latent C4A multi-request prefill bug). torch.where
+                # preserves -1 sentinels; no-op at num_prefills==1 (cu_base[0]==0).
+                assert swa_metadata.token_to_req_indices is not None
+                _comp_lens = seq_lens // self.compress_ratio
+                _cu_base = (torch.cumsum(_comp_lens, dim=0) - _comp_lens).to(
+                    torch.int32
+                )
+                _req_local = (
+                    swa_metadata.token_to_req_indices[
+                        num_decode_tokens : num_decode_tokens + num_prefill_tokens
+                    ]
+                    - num_decodes
+                ).long()
+                _base = _cu_base[_req_local].unsqueeze(1)
+                topk_indices = torch.where(
+                    topk_indices >= 0, topk_indices - _base, topk_indices
+                )
             else:
                 # C128A: pre-computed during metadata build.
                 assert attn_metadata is not None
