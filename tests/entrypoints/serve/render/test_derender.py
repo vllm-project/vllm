@@ -789,8 +789,30 @@ async def test_e2e_no_chat_request_fallback(parser_client, parser_tokenizer):
 HARMONY_MODEL = "openai/gpt-oss-20b"
 
 
+def _ensure_harmony_vocab():
+    """Pre-cache the o200k_base BPE file needed by openai-harmony.
+
+    The Rust tiktoken-rs backend downloads from Azure Blob Storage, which
+    may be unreachable in some environments.  When the cache is cold we
+    fetch the file ourselves and place it in ``/tmp/tiktoken-rs-cache/``
+    using the SHA-1(URL) filename that tiktoken-rs expects.
+    """
+    import hashlib
+    import urllib.request
+    from pathlib import Path
+
+    url = "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
+    cache_dir = Path("/tmp/tiktoken-rs-cache")
+    cache_key = hashlib.sha1(url.encode()).hexdigest()
+    cache_file = cache_dir / cache_key
+    if not cache_file.exists():
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(url, cache_file)
+
+
 @pytest.fixture(scope="module")
 def harmony_server():
+    _ensure_harmony_vocab()
     args = [
         "--trust-remote-code",
         "--enable-auto-tool-choice",
