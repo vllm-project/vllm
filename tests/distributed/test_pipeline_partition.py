@@ -41,21 +41,22 @@ def test_custom_layer_partition(monkeypatch: pytest.MonkeyPatch):
 @pytest.mark.parametrize(
     "num_hidden_layers,pp_size,pp_rank,indices",
     [
+        # Remainder layers are placed on the last stage(s).
         # pp_size 2
         (2, 2, 0, (0, 1)),
         (2, 2, 1, (1, 2)),
-        (3, 2, 0, (0, 2)),
-        (3, 2, 1, (2, 3)),
+        (3, 2, 0, (0, 1)),
+        (3, 2, 1, (1, 3)),
         # pp_size 3
         (3, 3, 0, (0, 1)),
         (3, 3, 1, (1, 2)),
         (3, 3, 2, (2, 3)),
         (4, 3, 0, (0, 1)),
-        (4, 3, 1, (1, 3)),
-        (4, 3, 2, (3, 4)),
-        (5, 3, 0, (0, 2)),
-        (5, 3, 1, (2, 4)),
-        (5, 3, 2, (4, 5)),
+        (4, 3, 1, (1, 2)),
+        (4, 3, 2, (2, 4)),
+        (5, 3, 0, (0, 1)),
+        (5, 3, 1, (1, 3)),
+        (5, 3, 2, (3, 5)),
     ],
 )
 def test_uneven_auto_partition(
