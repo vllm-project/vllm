@@ -160,6 +160,36 @@ def _build_chat_choice(
     )
 
 
+def _append_text_content(content: Any, text: str) -> Any:
+    if isinstance(content, str):
+        return f"{content}\n\n{text}" if content else text
+    if content is None:
+        return text
+    if isinstance(content, list):
+        return [*content, {"type": "text", "text": f"\n\n{text}"}]
+    return f"{content}\n\n{text}"
+
+
+def _with_thinking_budget_system_prompt(
+    messages: Sequence[Any], thinking_token_budget: int | None
+) -> list[Any]:
+    """Add prompt guidance for requests with a thinking token budget."""
+    if thinking_token_budget is None or thinking_token_budget <= 0:
+        return list(messages)
+
+    instruction = (
+        "Think step by step and use fewer than "
+        f"{thinking_token_budget} reasoning tokens before the final answer."
+    )
+    updated = [dict(message) for message in messages]
+    if updated and updated[0].get("role") in ("system", "developer"):
+        updated[0]["content"] = _append_text_content(
+            updated[0].get("content"), instruction
+        )
+        return updated
+    return [{"role": "system", "content": instruction}, *updated]
+
+
 class OpenAIServingRender:
     def __init__(
         self,
@@ -332,6 +362,10 @@ class OpenAIServingRender:
         else:
             tool_dicts = [tool.model_dump() for tool in request.tools]
 
+        messages = _with_thinking_budget_system_prompt(
+            request.messages, request.thinking_token_budget
+        )
+
         if not self.use_harmony:
             # Common case.
             error_check_ret = self.validate_chat_template(
@@ -344,7 +378,7 @@ class OpenAIServingRender:
 
             conversation, engine_inputs = await self.preprocess_chat(
                 request,
-                request.messages,
+                messages,
                 default_template=self.chat_template,
                 default_template_content_format=self.chat_template_content_format,
                 default_template_kwargs=self.default_chat_template_kwargs,
@@ -356,7 +390,7 @@ class OpenAIServingRender:
             # For GPT-OSS.
             should_include_tools = tool_dicts is not None
             conversation, engine_inputs = self._make_request_with_harmony(
-                request, should_include_tools
+                request, should_include_tools, chat_messages_override=messages
             )
 
         return conversation, engine_inputs
@@ -492,6 +526,7 @@ class OpenAIServingRender:
         self,
         request: ChatCompletionRequest,
         should_include_tools: bool = True,
+        chat_messages_override: Sequence[Any] | None = None,
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
         messages: list[OpenAIMessage] = []
@@ -501,7 +536,13 @@ class OpenAIServingRender:
         # for more info: see comment in `maybe_serialize_tool_calls`
         _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
 
-        chat_messages = list(request.messages)
+        chat_messages = list(
+            chat_messages_override
+            if chat_messages_override is not None
+            else _with_thinking_budget_system_prompt(
+                request.messages, request.thinking_token_budget
+            )
+        )
         instructions, chat_messages = extract_instructions_from_messages(chat_messages)
 
         # Add system message.

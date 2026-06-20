@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+import math
 from collections.abc import Callable
 from typing import NamedTuple, TypeAlias
 
@@ -104,6 +105,14 @@ class MockReasoningConfig:
 
     reasoning_start_token_ids = [THINK_START_TOKEN_ID]
     reasoning_end_token_ids = [THINK_END_TOKEN_ID]
+    enabled = True
+
+
+class MockReasoningMultiTokenEndConfig:
+    """Reasoning config with a multi-token end marker."""
+
+    reasoning_start_token_ids = [THINK_START_TOKEN_ID]
+    reasoning_end_token_ids = [997, THINK_END_TOKEN_ID]
     enabled = True
 
 
@@ -1194,6 +1203,113 @@ def test_thinking_budget_enforced_without_penalties():
         "Budget exceeded: in_end should be True so that apply_to_logits "
         "forces the end token"
     )
+
+
+def _make_holder_in_soft_zone(reasoning_config):
+    h = ThinkingBudgetStateHolder(
+        reasoning_config,
+        1,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    output_token_ids = [THINK_START_TOKEN_ID]
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=10),
+                    None,
+                    output_token_ids,
+                )
+            ],
+            moved=(),
+        )
+    )
+
+    for token_id in range(8):
+        output_token_ids.append(token_id)
+        h.update_state([output_token_ids], None, None)
+
+    return h, output_token_ids
+
+
+def _expected_soft_sigmoid_ramp(progress: float) -> float:
+    center = 0.8
+    sharpness = 10.0
+
+    def sigmoid(x: float) -> float:
+        return 1.0 / (1.0 + math.exp(-sharpness * x))
+
+    start = sigmoid(0.0 - center)
+    finish = sigmoid(1.0 - center)
+    value = sigmoid(progress - center)
+    return min(max((value - start) / (finish - start), 0.0), 1.0)
+
+
+def test_thinking_budget_soft_zone_biases_before_hard_force():
+    h, _ = _make_holder_in_soft_zone(MockReasoningConfig())
+    state = h._state[0]
+    assert state["in_think"]
+    assert not state["in_end"]
+    assert state["soft_progress"] == pytest.approx(
+        _expected_soft_sigmoid_ramp(0.5)
+    )
+
+    logits = torch.zeros((1, VOCAB_SIZE), dtype=torch.float32)
+    logits[0, 7] = 10.0
+    logits[0, THINK_END_TOKEN_ID] = 2.0
+    h.apply_to_logits(logits, predict_bonus_token=False, spec_token_ids=None)
+
+    expected = 2.0 + state["soft_progress"] * (10.0 - 0.25 - 2.0)
+    assert logits[0, THINK_END_TOKEN_ID] == pytest.approx(expected)
+    assert logits[0, 7] == 10.0
+
+
+def test_thinking_budget_soft_zone_reaches_full_ramp_before_hard_force():
+    h, output_token_ids = _make_holder_in_soft_zone(MockReasoningConfig())
+    output_token_ids.append(99)
+    h.update_state([output_token_ids], None, None)
+
+    state = h._state[0]
+    assert state["in_think"]
+    assert not state["in_end"]
+    assert state["soft_progress"] == pytest.approx(1.0)
+
+
+def test_thinking_budget_soft_zone_does_not_overtake_top_logit():
+    h, _ = _make_holder_in_soft_zone(MockReasoningConfig())
+    h._state[0]["soft_progress"] = 1.0
+
+    logits = torch.zeros((1, VOCAB_SIZE), dtype=torch.float32)
+    logits[0, 7] = 10.0
+    logits[0, THINK_END_TOKEN_ID] = -20.0
+    h.apply_to_logits(logits, predict_bonus_token=False, spec_token_ids=None)
+
+    assert logits[0, THINK_END_TOKEN_ID] == pytest.approx(9.75)
+    assert logits[0, THINK_END_TOKEN_ID] < logits[0, 7]
+
+
+def test_thinking_budget_soft_zone_biases_only_next_close_token():
+    h, output_token_ids = _make_holder_in_soft_zone(
+        MockReasoningMultiTokenEndConfig()
+    )
+    logits = torch.zeros((1, VOCAB_SIZE), dtype=torch.float32)
+    logits[0, 7] = 10.0
+    h.apply_to_logits(logits, predict_bonus_token=False, spec_token_ids=None)
+    assert logits[0, 997] > 0.0
+    assert logits[0, THINK_END_TOKEN_ID] == 0.0
+
+    output_token_ids.append(997)
+    h.update_state([output_token_ids], None, None)
+    logits = torch.zeros((1, VOCAB_SIZE), dtype=torch.float32)
+    logits[0, 7] = 10.0
+    h.apply_to_logits(logits, predict_bonus_token=False, spec_token_ids=None)
+    assert logits[0, 997] == 0.0
+    assert logits[0, THINK_END_TOKEN_ID] > 0.0
 
 
 @pytest.mark.parametrize(

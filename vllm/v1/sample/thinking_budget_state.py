@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-batch thinking token budget state; applied after penalties at sample time."""
 
+import math
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -32,7 +33,23 @@ def maybe_create_thinking_budget_state_holder(
 
 
 class ThinkingBudgetStateHolder:
-    """Tracks thinking sections and forces end tokens when budget is exceeded."""
+    """Tracks thinking sections and forces end tokens when budget is exceeded.
+
+    Includes a soft budget zone over the last 30% of the token budget.
+    Instead of a single hard cut, the logit for the end-of-thinking token is
+    progressively boosted relative to the model's own logit distribution,
+    encouraging a natural stopping point before the hard force at 100%.
+    The soft bias applies on the standard decoding path only; speculative
+    decoding keeps the existing hard-force behavior.
+    """
+
+    # Fraction of budget where the soft zone begins (0.7 = last 30%).
+    _SOFT_ZONE_START_FRAC = 0.7
+    _SOFT_SIGMOID_CENTER = 0.8
+    _SOFT_SIGMOID_SHARPNESS = 10.0
+    # Keep the soft target just below the current best logit so it nudges the
+    # model toward a natural close without becoming the argmax at temperature 0.
+    _SOFT_TARGET_MARGIN = 0.25
 
     think_start_token_ids: list[int]
     think_end_token_ids: list[int]
@@ -165,6 +182,23 @@ class ThinkingBudgetStateHolder:
         spec_lists = spec_token_ids or []
         return self._apply_forcing_to_logits(logits, predict_bonus_token, spec_lists)
 
+    def _next_close_token_id(self, state: dict[str, Any]) -> int:
+        """The only close-marker token that is valid to sample next.
+
+        For a multi-token close marker the ids must be emitted in order; if
+        the tail of already-generated output tokens matches a proper prefix
+        of the marker, the next id of the sequence is the one to encourage.
+        Otherwise (and always for a single-token marker) it is the first id.
+        """
+        ids = self.think_end_token_ids
+        if len(ids) == 1:
+            return ids[0]
+        output = state.get("output_tok_ids") or []
+        for k in range(min(len(output), len(ids) - 1), 0, -1):
+            if output[-k:] == ids[:k]:
+                return ids[k]
+        return ids[0]
+
     @staticmethod
     def _find_last_sequence_index(target_list: list[int], token_ids: list[int]) -> int:
         if not token_ids:
@@ -216,6 +250,7 @@ class ThinkingBudgetStateHolder:
         return {
             "in_think": in_think,
             "in_end": in_end,
+            "soft_progress": 0.0,  # 0..1 sigmoid ramp through the soft zone
             "check_count_down": countdown,
             "think_count": think_count,
             "end_count": 0,
@@ -273,10 +308,14 @@ class ThinkingBudgetStateHolder:
         )
         predicted_countdown = current_step_countdown - len(state["spec_token_ids"]) - 1
         # We only proceed further if we have counted down the thinking budget
-        # to 0 or less and when we are in the "in think" mode.
+        # into the soft zone (last 30% of the budget) or to 0 or less, and
+        # when we are in the "in think" mode. Taking the early return inside
+        # the soft zone would freeze ``think_count`` and skip the ramp.
+        budget = state["thinking_token_budget"]
+        soft_span = budget - int(budget * self._SOFT_ZONE_START_FRAC)
         if (
             not state.get("in_end", False)
-            and predicted_countdown >= 0
+            and predicted_countdown >= soft_span
             and state["start_thinking"] > -1
         ):
             state["check_count_down"] = current_step_countdown
@@ -378,6 +417,19 @@ class ThinkingBudgetStateHolder:
             else:
                 state["check_count_down"] = state["thinking_token_budget"]
 
+            # Soft zone: map progress through a late sigmoid over the last
+            # 30% of the budget; 0.0 outside the zone or when not thinking.
+            soft_start = int(budget * self._SOFT_ZONE_START_FRAC)
+            if state["in_think"] and state["think_count"] > soft_start:
+                progress = (state["think_count"] - soft_start) / max(
+                    1, budget - soft_start - 1
+                )
+                state["soft_progress"] = min(
+                    1.0, self._normalized_soft_ramp(progress)
+                )
+            else:
+                state["soft_progress"] = 0.0
+
             total_thinking_tokens = (
                 state["think_count"] + len(state["spec_token_ids"]) + 1
             )
@@ -394,6 +446,7 @@ class ThinkingBudgetStateHolder:
                 # where budget is exceeded.
                 state["in_think"] = False
                 state["in_end"] = True
+                state["soft_progress"] = 0.0
                 state["end_count"] = 0
                 state["check_count_down"] = state["thinking_token_budget"]
                 remaining_budget = state["thinking_token_budget"] - state["think_count"]
@@ -433,6 +486,7 @@ class ThinkingBudgetStateHolder:
                     {
                         "in_end": False,
                         "end_count": 0,
+                        "soft_progress": 0.0,
                         "check_count_down": state["thinking_token_budget"],
                     }
                 )
@@ -509,6 +563,32 @@ class ThinkingBudgetStateHolder:
                                     state["force_index"] = []
                                 else:
                                     state["bonus_token_forced"] = True
+            elif (
+                not self.in_spec_mode
+                and self.think_end_token_ids
+                and state.get("soft_progress", 0.0) > 0.0
+            ):
+                # Adaptive soft bias: pull the end-of-thinking logit toward
+                # just below the current top logit.
+                #   ramp=0%   -> target = end_logit (no change)
+                #   ramp=50%  -> halfway to top_logit - margin
+                #   ramp=100% -> target = top_logit - margin
+                #
+                # Kept entirely in torch ops — no ``.item()`` — so the
+                # sampler never syncs device->host on this path. Only the
+                # *next valid* close token is biased: for a multi-token
+                # marker, boosting later ids could let the model sample them
+                # out of order and leak a marker fragment into the thinking
+                # text.
+                row = self.cu_num_tokens[seq_idx]
+                if row < logits.shape[0]:
+                    next_id = self._next_close_token_id(state)
+                    top = logits[row].max()
+                    end = logits[row, next_id]
+                    target = end + state["soft_progress"] * (
+                        (top - self._SOFT_TARGET_MARGIN) - end
+                    )
+                    logits[row, next_id] = torch.maximum(end, target)
 
         if active_indices_cpu:
             device = logits.device
@@ -540,3 +620,16 @@ class ThinkingBudgetStateHolder:
                 logits.index_put_((active_indices, force_tokens), fill)
 
         return logits
+
+    @classmethod
+    def _normalized_soft_ramp(cls, progress: float) -> float:
+        """Map soft-zone progress [0, 1] to a late-rising sigmoid [0, 1]."""
+        progress = min(max(progress, 0.0), 1.0)
+
+        def sigmoid(x: float) -> float:
+            return 1.0 / (1.0 + math.exp(-cls._SOFT_SIGMOID_SHARPNESS * x))
+
+        start = sigmoid(0.0 - cls._SOFT_SIGMOID_CENTER)
+        finish = sigmoid(1.0 - cls._SOFT_SIGMOID_CENTER)
+        value = sigmoid(progress - cls._SOFT_SIGMOID_CENTER)
+        return min(max((value - start) / (finish - start), 0.0), 1.0)
