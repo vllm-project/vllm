@@ -72,18 +72,22 @@ class OffloadingConnectorWorker:
                 if isinstance(layer_kv_cache_spec, AttentionSpec):
                     layer_kv_cache = kv_caches[layer_name]
                     assert isinstance(layer_kv_cache, torch.Tensor)
-                    assert layer_kv_cache.storage_offset() == 0
 
-                    storage = layer_kv_cache.untyped_storage()
                     page = layer_kv_cache_spec.page_size_bytes
+                    elem_size = layer_kv_cache.element_size()
+                    byte_offset = layer_kv_cache.storage_offset() * elem_size
+                    block_stride_bytes = layer_kv_cache.stride(0) * elem_size
                     tensors_per_block[layer_name] = (
                         torch.tensor(
                             [],
                             dtype=torch.int8,
                             device=layer_kv_cache.device,
-                        )
-                        .set_(storage)
-                        .view(num_blocks, page),
+                        ).set_(
+                            layer_kv_cache.untyped_storage(),
+                            byte_offset,
+                            (num_blocks, page),
+                            (block_stride_bytes, 1),
+                        ),
                     )
                     page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
                     unpadded_page_size_bytes[layer_name] = (
