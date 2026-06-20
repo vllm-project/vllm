@@ -162,6 +162,28 @@ class KVCacheBlock:
         )
 
 
+@dataclass(slots=True)
+class LargeBlockMeta:
+    """Hierarchical block-pool metadata.
+
+    Each large block owns N consecutive small blocks with IDs
+    [L*N .. L*N+N-1]. ``num_small_in_use`` counts ref-held smalls; when it
+    drops to 0 *and* the cursor has been fully consumed, the parent large
+    block is recycled to the free-large queue (``next_small_idx`` reset to 0).
+    Smalls freed within a still-partial meta stay temporarily inaccessible
+    until that recycle — this is the anti-fragmentation guarantee
+    ("a fresh large block per request").
+    """
+
+    # KVCacheBlock with block_id=L (large id); lives in the free-large
+    # queue when ``num_small_in_use == 0 and next_small_idx == 0``.
+    large_block: "KVCacheBlock"
+    # Length-N list of KVCacheBlock with consecutive small ids L*N..L*N+N-1.
+    small_blocks: list["KVCacheBlock"]
+    num_small_in_use: int = 0
+    next_small_idx: int = 0
+
+
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
     list of free blocks. We implement this class instead of using Python
@@ -1796,7 +1818,7 @@ def _max_memory_usage_bytes_from_groups(
     page_size = get_uniform_page_size(
         [group.kv_cache_spec for group in kv_cache_groups]
     )
-    blocks_needed = sum(
+    blocks_needed = sum(  #TODO: Here small blocks count is returned. Is it OK?
         cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), page_size)
         for group in kv_cache_groups
     )
