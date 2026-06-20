@@ -544,7 +544,7 @@ class BlockPool:
                     assert self.free_large_block_queue is not None
                     meta_for_large = (
                         self.large_block_metas[block.block_id]
-                        if block.block_id < len(self.large_block_metas)
+                        if block.block_id < len(self.large_block_metas)  #TODO: Is this a valid condition?
                         else None
                     )
                     if (
@@ -713,9 +713,9 @@ class BlockPool:
         assert self.free_large_block_queue is not None
         N = self.large_block_factor
         free = self.free_large_block_queue.num_free_blocks * N
-        for meta in self.large_block_metas:
-            if 0 < meta.next_small_idx < N:
-                free += N - meta.next_small_idx
+        # for meta in self.large_block_metas:  #TODO: Can ignore partial ; Note can be freed from head too
+        #     if 0 < meta.next_small_idx < N:
+        #         free += N - meta.next_small_idx
         return free
 
     def get_num_free_large_blocks(self) -> int:
