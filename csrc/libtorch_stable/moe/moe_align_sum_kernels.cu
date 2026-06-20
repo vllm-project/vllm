@@ -637,16 +637,16 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
   const cudaStream_t stream =
       get_current_cuda_stream(output.get_device_index());
 
-#define MOE_SUM_CASE(TOPK)                                                 \
+#define MOE_SUM_CASE(TOPK)                                                   \
   case TOPK:                                                                 \
     VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                     \
         input.scalar_type(), "moe_sum_kernel", [&] {                         \
           vllm::moe::moe_sum_kernel<scalar_t, TOPK>                          \
-              <<<grid, block, 0, stream>>>(                                   \
-                  reinterpret_cast<scalar_t*>(output.mutable_data_ptr()),     \
+              <<<grid, block, 0, stream>>>(                                  \
+                  reinterpret_cast<scalar_t*>(output.mutable_data_ptr()),    \
                   reinterpret_cast<const scalar_t*>(input.const_data_ptr()), \
-                  hidden_size);                                               \
-        });                                                                   \
+                  hidden_size);                                              \
+        });                                                                  \
     break
 
   switch (topk) {
