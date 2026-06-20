@@ -1107,6 +1107,32 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         T = FLA_CHUNK_SIZE
 
         def _run_warmup() -> None:
+            def _warmup_post_conv_prep(length: int) -> None:
+                dummy_mixed_qkv = torch.randn(
+                    length, qkv_dim, device=device, dtype=dtype
+                )
+                dummy_a = torch.randn(length, num_v_heads, device=device, dtype=dtype)
+                dummy_b = torch.randn(length, num_v_heads, device=device, dtype=dtype)
+                fused_post_conv_prep(
+                    conv_output=dummy_mixed_qkv,
+                    a=dummy_a,
+                    b=dummy_b,
+                    A_log=self.A_log,
+                    dt_bias=self.dt_bias,
+                    num_k_heads=num_k_heads,
+                    head_k_dim=self.head_k_dim,
+                    head_v_dim=self.head_v_dim,
+                    apply_l2norm=True,
+                    output_g_exp=False,
+                )
+
+            short_prefill_len = min(8, T)
+            if 0 < short_prefill_len < T:
+                # Mixed prefill/decode requests can pass only the prefill
+                # slice through post-conv prep, producing a shorter Triton
+                # specialization than the chunk-size prefill warmup below.
+                _warmup_post_conv_prep(short_prefill_len)
+
             dummy_mixed_qkv = torch.randn(T, qkv_dim, device=device, dtype=dtype)
             dummy_a = torch.randn(T, num_v_heads, device=device, dtype=dtype)
             dummy_b = torch.randn(T, num_v_heads, device=device, dtype=dtype)
