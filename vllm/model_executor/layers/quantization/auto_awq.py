@@ -795,9 +795,7 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
             "initialization logic. This function should not be called."
         )
 
-    def _moe_weights(
-        self, layer: RoutedExperts
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _moe_weights(self, layer: RoutedExperts) -> tuple[torch.Tensor, torch.Tensor]:
         # Humming converts weights in-place to the standard ``w13_weight`` /
         # ``w2_weight`` names; other backends keep the AWQ ``*_qweight`` params.
         if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
