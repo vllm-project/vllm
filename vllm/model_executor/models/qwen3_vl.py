@@ -34,7 +34,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature
-from transformers.models.qwen2_vl import Qwen2VLImageProcessorFast
+from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     smart_resize as image_smart_resize,
 )
@@ -872,7 +872,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             **kwargs,
         )
 
-    def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessorFast:
+    def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_video_processor(self, **kwargs: object) -> Qwen3VLVideoProcessor:
@@ -892,7 +892,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         image_height: int,
         num_frames: int = 2,
         do_resize: bool = True,
-        image_processor: Qwen2VLImageProcessorFast | Qwen3VLVideoProcessor,
+        image_processor: Qwen2VLImageProcessor | Qwen3VLVideoProcessor,
         mm_kwargs: Mapping[str, object],
     ) -> tuple[ImageSize, int]:
         is_video = isinstance(image_processor, Qwen3VLVideoProcessor)
@@ -1202,6 +1202,49 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         return video_items
 
 
+def _replace_video_token_placeholders(
+    prompt_ids: list[int],
+    target: list[int],
+    replacements: list[list[int]],
+) -> list[int]:
+    """Replace each 3-token video placeholder with its expanded sequence.
+
+    Args:
+        prompt_ids: Token IDs of the original (unexpanded) prompt.
+        target: 3-element list ``[vision_start_id, video_pad_id,
+            vision_end_id]`` to search for.
+        replacements: Per-video expanded token sequences, in prompt order.
+
+    Returns:
+        Token IDs with every placeholder triplet replaced.
+    """
+    result: list[int] = []
+    repl_idx = 0
+    i = 0
+    n = len(prompt_ids)
+    t0, t1, t2 = target
+    num_repl = len(replacements)
+
+    while i < n:
+        if (
+            i + 2 < n
+            and prompt_ids[i] == t0
+            and prompt_ids[i + 1] == t1
+            and prompt_ids[i + 2] == t2
+        ):
+            result.extend(replacements[repl_idx])
+            repl_idx += 1
+            i += 3
+        else:
+            result.append(prompt_ids[i])
+            i += 1
+
+    assert repl_idx == num_repl, (
+        f"Found {repl_idx} video placeholders but expected {num_repl}"
+    )
+    return result
+
+
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
     def _call_hf_processor(
         self,
@@ -1211,14 +1254,22 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
-        processor = self.info.get_hf_processor(**mm_kwargs)
 
         # Separate video processing from image processing. Because the videos
         # are processed into several image patches
+        video_input_ids_lst: list[list[int]] = []
         if videos := mm_data.pop("videos", []):
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
             timestamps_per_video = []
+
+            hf_config = self.info.get_hf_config()
+            tokenizer = self.info.get_tokenizer()
+            merge_size = hf_config.vision_config.spatial_merge_size
+            video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
+            vision_start_token_id = hf_config.vision_start_token_id
+            vision_end_token_id = hf_config.vision_end_token_id
+            video_token_id = hf_config.video_token_id
 
             for item in videos:
                 video_array, metadata = item
@@ -1269,55 +1320,38 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     tok_kwargs=tok_kwargs,
                 )
 
-                merge_size = processor.video_processor.merge_size
-                # Get video grid info for EVS calculation.
+                # Discard HF output input_ids — we use get_video_repl below
+                # to generate the correct (EVS-adjusted) token sequence.
+                video_outputs.pop("input_ids", None)
+
                 video_grid_thw = video_outputs["video_grid_thw"]
                 num_frames = int(video_grid_thw[0, 0])
                 tokens_per_frame_base = int(video_grid_thw[0, 1:].prod()) // (
                     merge_size**2
                 )
 
-                # Apply EVS if enabled.
-                video_pruning_rate = self.info.ctx.get_mm_config().video_pruning_rate
                 if video_pruning_rate is not None and video_pruning_rate > 0.0:
                     num_tokens = compute_retained_tokens_count(
                         tokens_per_frame=tokens_per_frame_base,
                         num_frames=num_frames,
                         q=video_pruning_rate,
                     )
-                    # Here we just need placeholders that won't actually be replaced -
-                    # we just need to make sure the total number of tokens is correct
-                    # assign all tokens to the first frame.
                     tokens_per_frame = [num_tokens] + [0] * (num_frames - 1)
                     select_token_id = False
                 else:
                     tokens_per_frame = [tokens_per_frame_base] * num_frames
                     select_token_id = True
 
-                # Generate the video replacement with EVS-adjusted token counts
-                tokenizer = self.info.get_tokenizer()
-                hf_config = self.info.get_hf_config()
                 video_repl = Qwen3VLMultiModalProcessor.get_video_repl(
                     tokens_per_frame=tokens_per_frame,
                     timestamps=timestamps,
                     tokenizer=tokenizer,
-                    vision_start_token_id=hf_config.vision_start_token_id,
-                    vision_end_token_id=hf_config.vision_end_token_id,
-                    video_token_id=hf_config.video_token_id,
+                    vision_start_token_id=vision_start_token_id,
+                    vision_end_token_id=vision_end_token_id,
+                    video_token_id=video_token_id,
                     select_token_id=select_token_id,
                 )
-
-                # Convert token IDs to text for the HF processor flow
-                video_placeholder = tokenizer.decode(
-                    video_repl.full, skip_special_tokens=False
-                )
-                input_ids = video_outputs.pop("input_ids")
-                video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
-                prompt = prompt.replace(
-                    "<|vision_start|><|video_pad|><|vision_end|>",
-                    video_placeholder,
-                    1,
-                )
+                video_input_ids_lst.append(list(video_repl.full))
 
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
                 pixel_values_videos_lst.append(video_outputs["pixel_values_videos"])
@@ -1335,6 +1369,24 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             mm_kwargs=mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
+
+        # Replace each placeholder triplet with pre-computed video tokens.
+        if video_input_ids_lst:
+            hf_config = self.info.get_hf_config()
+            video_target = [
+                hf_config.vision_start_token_id,
+                hf_config.video_token_id,
+                hf_config.vision_end_token_id,
+            ]
+            input_ids = processed_outputs.pop("input_ids")
+            if not isinstance(input_ids, list):
+                input_ids = input_ids.tolist()
+            (prompt_ids,) = input_ids
+            expanded_ids = _replace_video_token_placeholders(
+                prompt_ids, video_target, video_input_ids_lst
+            )
+            processed_outputs["input_ids"] = [expanded_ids]
+
         combined_outputs = dict(
             processed_outputs,
             **video_outputs,
@@ -1715,8 +1767,8 @@ class Qwen3VLForConditionalGeneration(
     ) -> IntermediateTensors | None:
         if not getattr(self, "deepstack_input_embeds", None):
             return None  # If vision tower is skipped
-        if getattr(self, "deepstack_input_embeds_num_tokens", 0) == 0:
-            return None
+        if num_tokens > self.deepstack_input_embeds[0].size(0):
+            self._resize_deepstack_input_embeds(num_tokens)
 
         # get deepstack_input_embeds from buffer, and clear the buffer
         return IntermediateTensors(
@@ -1728,6 +1780,17 @@ class Qwen3VLForConditionalGeneration(
             }
         )
 
+    def _resize_deepstack_input_embeds(self, num_tokens: int) -> None:
+        self.deepstack_input_embeds = [
+            torch.zeros(
+                num_tokens,
+                self.config.text_config.hidden_size,
+                device=self.deepstack_input_embeds[0].device,
+                dtype=self.deepstack_input_embeds[0].dtype,
+            )
+            for _ in range(self.deepstack_num_level)
+        ]
+
     def _set_deepstack_input_embeds(self, deepstack_input_embeds: torch.Tensor) -> None:
         if not getattr(self, "deepstack_input_embeds", None):
             return
@@ -1735,15 +1798,7 @@ class Qwen3VLForConditionalGeneration(
         # set deepstack_input_embeds to buffer
         num_tokens = deepstack_input_embeds.size(1)
         if num_tokens > self.deepstack_input_embeds[0].size(0):
-            self.deepstack_input_embeds = [
-                torch.zeros(
-                    num_tokens,
-                    self.config.text_config.hidden_size,
-                    device=self.deepstack_input_embeds[0].device,
-                    dtype=self.deepstack_input_embeds[0].dtype,
-                )
-                for _ in range(self.deepstack_num_level)
-            ]
+            self._resize_deepstack_input_embeds(num_tokens)
         for idx in range(self.deepstack_num_level):
             self.deepstack_input_embeds[idx][:num_tokens].copy_(
                 deepstack_input_embeds[idx]
@@ -1781,11 +1836,8 @@ class Qwen3VLForConditionalGeneration(
 
         return EncoderCudaGraphConfig(
             modalities=modalities,
-            input_key_by_modality={
-                "image": "pixel_values",
-                "video": "pixel_values_videos",
-            },
             buffer_keys=[
+                "pixel_values",
                 "pos_embeds",
                 "rotary_pos_emb_cos",
                 "rotary_pos_emb_sin",
@@ -1918,6 +1970,7 @@ class Qwen3VLForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1975,7 +2028,7 @@ class Qwen3VLForConditionalGeneration(
         # so the capture value must cover any replay scenario.
         # Worst case: 1 item consuming the full budget ->
         # seq_len = token_budget * spatial_merge_size^2.
-        buffers = self.visual.prepare_encoder_metadata(
+        metadata = self.visual.prepare_encoder_metadata(
             grid_config,
             max_batch_size=max_batch_size,
             max_frames_per_batch=max_frames_per_batch,
@@ -1985,14 +2038,12 @@ class Qwen3VLForConditionalGeneration(
 
         # Just use image-modality dummy input_buffer for capturing, since it's also
         # compatible for video inputs (has the same shape: [num_patches, C*T*P*P]).
-        mm_kwargs = {
+        values = metadata | {
             "pixel_values": dummy_pixel_values,
-            "image_grid_thw": grid_config,
         }
 
         return EncoderCudaGraphCaptureInputs(
-            mm_kwargs=mm_kwargs,
-            buffers=buffers,
+            values=values,
         )
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -2000,37 +2051,42 @@ class Qwen3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         modality = self.get_input_modality(mm_kwargs)
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
 
         if modality == "image":
-            buffers = self.visual.prepare_encoder_metadata(
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
             )
         elif modality == "video":
-            buffers = self.visual.prepare_encoder_metadata(
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
             )
         else:
             raise AssertionError("This line should be unreachable.")
 
-        return EncoderCudaGraphReplayBuffers(buffers=buffers)
+        values = metadata | {
+            "pixel_values": self._get_pixel_values_by_modality(mm_kwargs),
+        }
+        return EncoderCudaGraphReplayBuffers(values=values)
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return self.visual(pixel_values, grid_thw, encoder_metadata=buffers)
+        pixel_values = values.pop("pixel_values")
+        metadata = values
+        return self.visual(pixel_values, None, encoder_metadata=metadata)
 
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
@@ -2269,6 +2325,8 @@ class Qwen3VLForConditionalGeneration(
         input_embeds for the LLM.
         """
 
+        device = video_embeddings.device
+
         # Generate video replacement token IDs using get_video_repl
         # This tokenizes each frame separator independently, then uses pre-tokenized
         # special tokens to ensure consistent tokenization regardless of
@@ -2283,10 +2341,8 @@ class Qwen3VLForConditionalGeneration(
             select_token_id=self.is_multimodal_pruning_enabled,
         )
 
-        repl_token_ids = torch.tensor(video_repl.full)
-        embed_token_id = _cached_tensor(
-            self.config.video_token_id, repl_token_ids.device
-        )
+        repl_token_ids = torch.tensor(video_repl.full, device=device)
+        embed_token_id = _cached_tensor(self.config.video_token_id, device=device)
         is_video_embed = torch.isin(repl_token_ids, embed_token_id)
 
         # Get text embeddings for indicator tokens (has only `visual_dim``).

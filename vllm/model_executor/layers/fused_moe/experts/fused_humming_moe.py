@@ -7,9 +7,6 @@ import math
 from typing import TYPE_CHECKING, Any
 
 import torch
-from humming import dtypes
-from humming.config import GemmType as HummingGemmType
-from humming.layer import HummingLayerMeta, HummingMethod
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
@@ -26,7 +23,9 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 )
 from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import moe_fused_mul_sum
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
+    MoEPermuteScratch,
     moe_permute,
+    moe_permute_unpermute_supported,
     moe_unpermute,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -39,6 +38,8 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
+from vllm.utils.humming import GemmType as HummingGemmType
+from vllm.utils.humming import HummingLayerMeta, HummingMethod, dtypes
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -85,6 +86,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
+        self._permute_scratch: MoEPermuteScratch | None = None
 
     def init_humming_moe(self):
         self.compute_config = {
@@ -109,6 +111,19 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self.compute_config_str = json.dumps(self.compute_config)
         self.w13_tuning_config_str = json.dumps(self.w13_tuning_config)
         self.w2_tuning_config_str = json.dumps(self.w2_tuning_config)
+
+    def _get_permute_scratch(self) -> MoEPermuteScratch | None:
+        if self._permute_scratch is None and moe_permute_unpermute_supported():
+            self._permute_scratch = MoEPermuteScratch(
+                max_num_tokens=self.moe_config.max_num_tokens,
+                topk=self.moe_config.experts_per_token,
+                num_experts=self.moe_config.num_experts,
+                num_local_experts=self.moe_config.num_local_experts,
+                device=torch.device(self.moe_config.device),
+                hidden_size=self.moe_config.hidden_dim,
+                hidden_dtype=self.moe_config.in_dtype,
+            )
+        return self._permute_scratch
 
     def get_global_valid_shape_m(self, topk_ids: torch.Tensor):
         num_tokens = topk_ids.size(0)
@@ -138,9 +153,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        return True
-
-    def supports_expert_map(self) -> bool:
         return True
 
     @staticmethod
@@ -598,6 +610,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             n_expert=self.global_num_experts,
             n_local_expert=self.num_experts,
             expert_map=self.layer.expert_map,
+            scratch=self._get_permute_scratch(),
         )
 
         inputs, input_scale = HummingMethod.may_quant_input(

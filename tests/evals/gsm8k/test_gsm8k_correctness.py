@@ -39,11 +39,18 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
         host = f"http://{host}"
 
     # Run GSM8K evaluation
+    request_timeout_seconds = eval_config.get("request_timeout_seconds", 600)
+    if current_platform.is_rocm():
+        request_timeout_seconds = eval_config.get(
+            "rocm_request_timeout_seconds", request_timeout_seconds
+        )
+
     results = evaluate_gsm8k(
         num_questions=eval_config["num_questions"],
         num_shots=eval_config["num_fewshot"],
         host=host,
         port=port,
+        request_timeout_seconds=request_timeout_seconds,
     )
 
     return results
@@ -71,7 +78,16 @@ def test_gsm8k_correctness(config_filename):
             "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms "
             "due to agent pool disk space issues and pod evictions."
         )
+    if current_platform.is_rocm() and (
+        "Qwen3.5-35B-A3B-MXFP4-AITER-TP2" in config_filename.name
+    ):
+        from vllm.platforms.rocm import on_gfx950
 
+        if not on_gfx950():
+            pytest.skip(
+                "Skipping Qwen3.5-35B-A3B-MXFP4-AITER-TP2 on non-GFX950 platforms. "
+                "The quantization scheme is not supported on non-GFX950 platforms."
+            )
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
     server_args = shlex.split(server_args_str) if server_args_str else []
@@ -90,6 +106,12 @@ def test_gsm8k_correctness(config_filename):
     print(f"Expected metric threshold: {eval_config['accuracy_threshold']}")
     print(f"Number of questions: {eval_config['num_questions']}")
     print(f"Number of few-shot examples: {eval_config['num_fewshot']}")
+    request_timeout_seconds = eval_config.get("request_timeout_seconds", 600)
+    if current_platform.is_rocm():
+        request_timeout_seconds = eval_config.get(
+            "rocm_request_timeout_seconds", request_timeout_seconds
+        )
+    print(f"Request timeout: {request_timeout_seconds}s")
     print(f"Server args: {' '.join(server_args)}")
     print(f"Environment variables: {env_dict}")
 

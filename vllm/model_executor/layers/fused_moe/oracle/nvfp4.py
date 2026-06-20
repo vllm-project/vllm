@@ -17,13 +17,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
     prepare_nvfp4_moe_layer_for_flashinfer_cutedsl,
-)
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
-    get_flashinfer_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_nvfp4_moe_layer_for_marlin,
@@ -56,12 +53,6 @@ FLASHINFER_NVFP4_MOE_BACKENDS = [
     NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
     NvFp4MoeBackend.FLASHINFER_B12X,
 ]
-
-fi_2_vllm_backend_map: dict[FlashinferMoeBackend, NvFp4MoeBackend] = {
-    FlashinferMoeBackend.CUTLASS: NvFp4MoeBackend.FLASHINFER_CUTLASS,
-    FlashinferMoeBackend.TENSORRT_LLM: NvFp4MoeBackend.FLASHINFER_TRTLLM,
-    FlashinferMoeBackend.CUTEDSL: NvFp4MoeBackend.FLASHINFER_CUTEDSL,
-}
 
 
 def is_global_sf_supported_for_nvfp4_backend(backend: NvFp4MoeBackend) -> bool:
@@ -257,55 +248,6 @@ def select_nvfp4_moe_backend(
             requested_backend, config, weight_key, activation_key, activation_format
         )
 
-    if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP4"):
-        if not envs.VLLM_USE_FLASHINFER_MOE_FP4:
-            # If the user rejects FlashInfer remove those backends.
-            for b in FLASHINFER_NVFP4_MOE_BACKENDS:
-                if b in AVAILABLE_BACKENDS:
-                    AVAILABLE_BACKENDS.remove(b)
-
-        elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
-            # If user is explicit about backend, validate it.
-            backend = fi_2_vllm_backend_map[get_flashinfer_moe_backend()]
-            if (
-                config.swiglu_limit is not None
-                and backend not in NVFP4_BACKENDS_WITH_CLAMP
-            ):
-                raise ValueError(
-                    f"Model sets swiglu_limit={config.swiglu_limit}, but the "
-                    f"FlashInfer backend selected via VLLM_FLASHINFER_MOE_BACKEND "
-                    f"({backend.value}) does not apply the SwiGLU clamp."
-                )
-            return _return_or_raise(
-                backend, config, weight_key, activation_key, activation_format
-            )
-        else:
-            # If the user is not explicit about the backend, try each.
-            fi_backends = [
-                b
-                for b in FLASHINFER_NVFP4_MOE_BACKENDS
-                if config.swiglu_limit is None or b in NVFP4_BACKENDS_WITH_CLAMP
-            ]
-            for backend in fi_backends:
-                for k_cls in backend_to_kernel_cls(backend):
-                    supported, reason = k_cls.is_supported_config(
-                        k_cls,
-                        config,
-                        weight_key,
-                        activation_key,
-                        activation_format,
-                    )
-                    if supported:
-                        logger.info_once(_make_log_backend(backend))
-                        return backend, k_cls
-                    else:
-                        logger.debug_once(_make_log_unsupported(backend, reason))
-
-            raise NotImplementedError(
-                "Found VLLM_USE_FLASHINFER_MOE_FP4=1, but no "
-                "FlashInfer NVFP4 MoE backend supports the configuration."
-            )
-
     if envs.VLLM_TEST_FORCE_FP8_MARLIN:
         backend = NvFp4MoeBackend.MARLIN
         return _return_or_raise(
@@ -335,7 +277,7 @@ def select_nvfp4_moe_backend(
 
 def convert_to_nvfp4_moe_kernel_format(
     nvfp4_backend: NvFp4MoeBackend,
-    layer: torch.nn.Module,
+    layer: RoutedExperts,
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,
@@ -555,8 +497,6 @@ def make_nvfp4_moe_kernel(
     kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        inplace=False,
     )
 
-    # TODO(rob): update inplace logic to be part of the kernel.
     return kernel

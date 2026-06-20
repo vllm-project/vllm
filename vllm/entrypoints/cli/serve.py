@@ -15,7 +15,7 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from vllm.entrypoints.openai.dp_supervisor import (
     run_dp_supervisor,
 )
-from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -308,7 +308,17 @@ def run_multi_api_server(args: argparse.Namespace):
 
     from vllm.v1.engine.utils import get_engine_zmq_addresses
 
-    addresses = get_engine_zmq_addresses(vllm_config, num_api_servers)
+    # Defer port allocation to the child's bind() to avoid TOCTOU, except
+    # for Rust front-end and Ray DP, which can't see the post-bind rebind
+    # (CLI-arg subprocess / pickled-into-actor snapshot respectively) and
+    # so pre-allocate driver-side -- reintroducing the original race only
+    # there.
+    is_ray_dp = parallel_config.data_parallel_backend == "ray"
+    addresses = get_engine_zmq_addresses(
+        vllm_config,
+        num_api_servers,
+        defer_api_server_ports=not (rust_frontend_path or is_ray_dp),
+    )
 
     with launch_core_engines(
         vllm_config, executor_class, log_stats, addresses, num_api_servers
@@ -318,6 +328,12 @@ def run_multi_api_server(args: argparse.Namespace):
         )
 
         if rust_frontend_path:
+            if parallel_config.local_engines_only:
+                expected_engine_start_index = parallel_config.data_parallel_rank
+                expected_engine_count = parallel_config.data_parallel_size_local
+            else:
+                expected_engine_start_index = 0
+                expected_engine_count = parallel_config.data_parallel_size
             # Start rust front-end process.
             api_server_manager = RustFrontendProcessManager(
                 binary_path=rust_frontend_path,
@@ -325,7 +341,8 @@ def run_multi_api_server(args: argparse.Namespace):
                 args=args,
                 input_address=addresses.inputs[0],
                 output_address=addresses.outputs[0],
-                engine_count=parallel_config.data_parallel_size,
+                engine_start_index=expected_engine_start_index,
+                engine_count=expected_engine_count,
                 stats_update_address=stats_update_address,
             )
         else:
@@ -340,6 +357,16 @@ def run_multi_api_server(args: argparse.Namespace):
                 stats_update_address=stats_update_address,
                 tensor_queue=tensor_queue,
             )
+
+            if not is_ray_dp:
+                # Forward each child's bound endpoints to the engine handshake
+                # (runs on ``with`` exit). Skipped for Ray DP, where addresses
+                # are pre-allocated above and Ray actors already hold them.
+                actual_inputs, actual_outputs = (
+                    api_server_manager.gather_actual_addresses()
+                )
+                addresses.inputs = actual_inputs
+                addresses.outputs = actual_outputs
 
     # Wait for API servers.
     try:
