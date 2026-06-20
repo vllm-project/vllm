@@ -2,15 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib.util
+import threading
+from collections import defaultdict
+from queue import Queue
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
+    MoRIIOError,
     RemoteAllocInfo,
+    WriteTask,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
+    MoRIIOWrapper,
     MoRIIOWriter,
 )
 from vllm.platforms import current_platform
@@ -63,6 +69,32 @@ def _worker(
 
 def _remote_meta(num_blocks: int = 16) -> SimpleNamespace:
     return SimpleNamespace(num_blocks=num_blocks)
+
+
+def _writer_with_fake_worker(fake_worker) -> MoRIIOWriter:
+    writer = MoRIIOWriter.__new__(MoRIIOWriter)
+    writer._worker_ref = lambda: fake_worker
+    writer._write_task_q = Queue()
+    writer._write_state_lock = threading.Lock()
+    writer._scheduled_writes = defaultdict(int)
+    writer._scheduled_layers = defaultdict(set)
+    writer._sealed_writes = {}
+    writer.ensure_worker_started = lambda: None
+    return writer
+
+
+def _write_task(layer_name: str, transfer_id: str = "xfer") -> WriteTask:
+    return WriteTask(
+        request_id="req",
+        transfer_id=transfer_id,
+        dst_engine_id="remote-engine",
+        local_block_ids=[1, 3],
+        remote_block_ids_hint=None,
+        layer_name=layer_name,
+        event=None,
+        remote_notify_port=7000,
+        remote_ip="127.0.0.1",
+    )
 
 
 def test_separated_kv_layout_uses_kv_axis_zero_and_block_axis_one():
@@ -223,6 +255,81 @@ def test_write_transfer_plan_caches_offsets_per_geometry():
     assert dense1_plan.transfer_local_offsets == [1]
     assert indexer_plan.transfer_local_offsets == [2]
     assert len(request_info.transfer_offsets) == 2
+
+
+def test_write_scheduler_deduplicates_layers_and_seals_expected_count():
+    request_info = RemoteAllocInfo(block_ids=[4, 5])
+    fake_wrapper = SimpleNamespace(
+        done_remote_allocate_req_dict={"xfer": request_info}
+    )
+    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=fake_wrapper))
+
+    assert writer.schedule_write(_write_task("dense0"))
+    assert not writer.schedule_write(_write_task("dense0"))
+    assert writer.schedule_write(_write_task("indexer"))
+
+    assert writer._write_task_q.qsize() == 2
+    writer.seal_pending_transfers()
+
+    assert request_info.writes_expected == 2
+    assert writer._sealed_writes["xfer"] == 2
+
+
+def test_write_completion_notifies_once_after_all_sealed_writes_finish():
+    class FakeWrapper:
+        def __init__(self):
+            self.done_remote_allocate_req_dict = {}
+            self.done_req_ids = []
+            self.lock = threading.Lock()
+            self.notifications = []
+            self.wait_count = 0
+
+        def waiting_for_transfer_complete(self):
+            self.wait_count += 1
+
+        def send_notify(self, transfer_id, remote_ip, remote_port):
+            self.notifications.append((transfer_id, remote_ip, remote_port))
+
+    wrapper = FakeWrapper()
+    request_info = RemoteAllocInfo(block_ids=[4, 5], writes_expected=2)
+    request_info.completion_request_id = "req"
+    request_info.completion_remote_notify_port = 7000
+    request_info.completion_remote_ip = "127.0.0.1"
+    wrapper.done_remote_allocate_req_dict["xfer"] = request_info
+    writer = _writer_with_fake_worker(
+        SimpleNamespace(moriio_wrapper=wrapper, tp_rank=2)
+    )
+    writer._scheduled_writes["xfer"] = 2
+    writer._scheduled_layers["xfer"] = {"dense0", "indexer"}
+    writer._sealed_writes["xfer"] = 2
+
+    writer._mark_write_done("xfer", request_info)
+    assert wrapper.notifications == []
+    writer._mark_write_done("xfer", request_info)
+    writer._finalize_if_complete("xfer", request_info)
+
+    assert wrapper.notifications == [("xfer", "127.0.0.1", 7002)]
+    assert wrapper.done_req_ids == ["xfer"]
+    assert wrapper.done_remote_allocate_req_dict == {}
+    assert wrapper.wait_count == 1
+
+
+def test_moriio_wrapper_accepts_plain_string_completion_message():
+    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
+    completions = []
+    wrapper._handle_completion_message = completions.append
+
+    wrapper._handle_message(b"xfer")
+
+    assert completions == ["xfer"]
+
+
+def test_moriio_wrapper_rejects_empty_completion_message():
+    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
+    wrapper._handle_completion_message = lambda msg: None
+
+    with pytest.raises(MoRIIOError, match="Unhandled message format"):
+        wrapper._handle_message(b"")
 
 
 def test_block_id_length_mismatch_raises_value_error():
