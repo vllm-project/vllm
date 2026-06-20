@@ -5,7 +5,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, take_until};
 
 use super::parameters::ToolSchemas;
-use super::utils::{parse_buffered_event, safe_text_len};
+use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
 use crate::Tool;
 
@@ -18,10 +18,10 @@ const PARAMETER_END: &str = "</parameter>";
 
 type QwenCoderInput<'i> = Partial<&'i str>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum QwenCoderMode {
     Text,
-    ToolCall,
+    ToolCall { end_marker_scan: MarkerScanState },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,7 +76,11 @@ impl Qwen3CoderToolParser {
             QwenCoderEvent::Text { len: consumed_len } => {
                 output.normal_text.push_str(&self.buffer[..consumed_len]);
             }
-            QwenCoderEvent::ToolCallStart => self.mode = QwenCoderMode::ToolCall,
+            QwenCoderEvent::ToolCallStart => {
+                self.mode = QwenCoderMode::ToolCall {
+                    end_marker_scan: MarkerScanState::default(),
+                };
+            }
             QwenCoderEvent::ToolCall { name, raw_params } => {
                 self.mode = QwenCoderMode::Text;
                 let arguments = self.tool_parameters.convert_params_with_schema(&name, raw_params);
@@ -113,7 +117,7 @@ impl ToolParser for Qwen3CoderToolParser {
         self.buffer.push_str(chunk);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_qwen_coder_event(input, self.mode)
+            parse_next_qwen_coder_event(input, &mut self.mode)
         })? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
@@ -125,7 +129,9 @@ impl ToolParser for Qwen3CoderToolParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
         if !self.buffer.is_empty() {
-            if self.mode == QwenCoderMode::ToolCall || self.buffer.starts_with(TOOL_CALL_START) {
+            if matches!(self.mode, QwenCoderMode::ToolCall { .. })
+                || self.buffer.starts_with(TOOL_CALL_START)
+            {
                 return Err(parsing_failed!("incomplete Qwen Coder tool call"));
             }
             output.normal_text.push_str(&self.buffer);
@@ -142,11 +148,11 @@ impl ToolParser for Qwen3CoderToolParser {
 /// Parse a Qwen Coder event for the current parser mode.
 fn parse_next_qwen_coder_event(
     input: &mut QwenCoderInput<'_>,
-    mode: QwenCoderMode,
+    mode: &mut QwenCoderMode,
 ) -> ModalResult<QwenCoderEvent> {
     match mode {
         QwenCoderMode::Text => parse_text_event(input),
-        QwenCoderMode::ToolCall => tool_call_event(input),
+        QwenCoderMode::ToolCall { end_marker_scan } => tool_call_event(input, end_marker_scan),
     }
 }
 
@@ -166,10 +172,13 @@ fn safe_text_event(input: &mut QwenCoderInput<'_>) -> ModalResult<QwenCoderEvent
 }
 
 /// Parse a complete Qwen Coder tool call.
-fn tool_call_event(input: &mut QwenCoderInput<'_>) -> ModalResult<QwenCoderEvent> {
+fn tool_call_event(
+    input: &mut QwenCoderInput<'_>,
+    end_marker_scan: &mut MarkerScanState,
+) -> ModalResult<QwenCoderEvent> {
     let (body,) = seq!(
         _: ws0,
-        take_until(0.., TOOL_CALL_END),
+        take_until_marker(TOOL_CALL_END, end_marker_scan),
         _: literal(TOOL_CALL_END),
     )
     .parse_next(input)?;
@@ -228,8 +237,8 @@ mod tests {
     use thiserror_ext::AsReport;
 
     use super::{Qwen3CoderToolParser, ToolParser};
-    use crate::ToolParserTestExt as _;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::{ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
         let params = params
@@ -571,6 +580,68 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({ "location": "SF" })
+        );
+    }
+
+    #[test]
+    fn qwen_coder_streaming_handles_end_token_split_across_chunks() {
+        let mut parser = Qwen3CoderToolParser::new(&test_tools());
+        let output = parser
+            .parse_chunk(
+                "<tool_call>\n\
+                 <function=get_weather>\n\
+                 <parameter=location>SF</parameter>\n\
+                 </function>\n\
+                 </tool",
+            )
+            .unwrap();
+
+        assert!(output.normal_text.is_empty());
+        assert!(output.calls.is_empty());
+
+        let mut output = output;
+        output.append(parser.parse_chunk("_call>").unwrap());
+        output.append(parser.finish().unwrap());
+        let output = output.coalesce_calls();
+
+        assert!(output.normal_text.is_empty());
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            json!({ "location": "SF" })
+        );
+    }
+
+    #[test]
+    fn qwen_coder_streaming_buffers_long_body_until_end_marker() {
+        let long_location = format!("SF-{}", "x".repeat(8192));
+        let text = build_tool_call("get_weather", &[("location", &long_location)]);
+        let split_at = text.len() - "_call>".len();
+        let (body_with_partial_end, end_suffix) = text.split_at(split_at);
+        let chunks = split_by_chars(body_with_partial_end, 31);
+        let mut parser = Qwen3CoderToolParser::new(&test_tools());
+        let mut output = ToolParserOutput::default();
+
+        assert_eq!(end_suffix, "_call>");
+
+        for chunk in chunks {
+            let chunk_output = parser.parse_chunk(chunk).unwrap();
+            assert!(chunk_output.normal_text.is_empty());
+            assert!(chunk_output.calls.is_empty());
+            output.append(chunk_output);
+        }
+
+        output.append(parser.parse_chunk(end_suffix).unwrap());
+        output.append(parser.finish().unwrap());
+        let output = output.coalesce_calls();
+
+        assert!(output.normal_text.is_empty());
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            json!({ "location": long_location })
         );
     }
 
