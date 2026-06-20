@@ -385,104 +385,6 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = num_new_tokens // block_size * block_size
         return num_new_tokens
 
-    def _has_scheduled_decode(self, requests: list[Request]) -> bool:
-        return any(
-            request.num_computed_tokens >= request.num_prompt_tokens
-            for request in requests
-        )
-
-    def _very_long_prefill_threshold(self) -> int:
-        return self.max_num_scheduled_tokens * 4
-
-    def _is_very_long_prefill(
-        self,
-        request: Request,
-        num_computed_tokens: int | None = None,
-    ) -> bool:
-        if not self.scheduler_config.enable_chunked_prefill:
-            return False
-        if num_computed_tokens is None:
-            num_computed_tokens = request.num_computed_tokens
-        remaining_prefill = max(0, request.num_prompt_tokens - num_computed_tokens)
-        return remaining_prefill > self._very_long_prefill_threshold()
-
-    def _waiting_request_remaining_prefill(self, request: Request) -> int:
-        if request.num_computed_tokens > 0:
-            num_computed_tokens = request.num_computed_tokens
-        else:
-            _, num_computed_tokens = self.kv_cache_manager.get_computed_blocks(
-                request,
-                record_stats=False,
-            )
-        return max(0, request.num_prompt_tokens - num_computed_tokens)
-
-    def _has_active_very_long_prefill(self) -> bool:
-        return any(self._is_very_long_prefill(request) for request in self.running)
-
-    def _is_waiting_request_very_long_prefill(self, request: Request) -> bool:
-        return (
-            self._waiting_request_remaining_prefill(request)
-            > self._very_long_prefill_threshold()
-        )
-
-    def _waiting_prefill_competitor_count(self) -> int:
-        non_long_prefill_count = 0
-        for waiting_request in itertools.chain(self.waiting, self.skipped_waiting):
-            if not self._is_waiting_request_very_long_prefill(waiting_request):
-                non_long_prefill_count += 1
-        return non_long_prefill_count
-
-    def _has_waiting_requests_for_running_prefill(self, request: Request) -> bool:
-        if not (self.waiting or self.skipped_waiting):
-            return False
-        if not self._is_very_long_prefill(request):
-            return True
-        return self._waiting_prefill_competitor_count() > 0
-
-    def _limit_mixed_decode_prefill_chunk(
-        self,
-        request: Request,
-        num_new_tokens: int,
-        scheduled_running_reqs: list[Request],
-        has_waiting_requests: bool = False,
-        has_pending_decode: bool = False,
-        prefill_budget_partitions: int = 1,
-    ) -> int:
-        if (
-            not self.scheduler_config.enable_chunked_prefill
-            or request.num_computed_tokens >= request.num_prompt_tokens
-        ):
-            return num_new_tokens
-
-        has_decode_pressure = (
-            self._has_scheduled_decode(scheduled_running_reqs) or has_pending_decode
-        )
-        has_prefill_competition = has_waiting_requests or prefill_budget_partitions > 1
-        if not has_decode_pressure and not has_prefill_competition:
-            return num_new_tokens
-
-        remaining_prefill = request.num_prompt_tokens - request.num_computed_tokens
-        if remaining_prefill <= self.max_num_scheduled_tokens:
-            return num_new_tokens
-
-        # Very long prefills span many scheduling steps; a smaller chunk keeps
-        # already-active decoders from seeing long inter-token gaps and leaves
-        # room for short requests that arrive behind an active long prefill.
-        very_long_prefill_threshold = self._very_long_prefill_threshold()
-        if has_decode_pressure:
-            if remaining_prefill > very_long_prefill_threshold:
-                return 0
-            else:
-                mixed_prefill_budget = max(1, self.max_num_scheduled_tokens // 4)
-        elif remaining_prefill > very_long_prefill_threshold:
-            mixed_prefill_budget = max(
-                1,
-                self.max_num_scheduled_tokens // max(2, prefill_budget_partitions),
-            )
-        else:
-            mixed_prefill_budget = max(1, (self.max_num_scheduled_tokens * 3) // 4)
-        return min(num_new_tokens, mixed_prefill_budget)
-
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
@@ -507,6 +409,7 @@ class Scheduler(SchedulerInterface):
         if self._pause_state == PauseState.PAUSED_ALL:
             # Do not schedule any requests when paused.
             token_budget = 0
+
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
@@ -567,28 +470,6 @@ class Scheduler(SchedulerInterface):
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
-            has_unscheduled_running_prefill = any(
-                later_request.num_computed_tokens < later_request.num_prompt_tokens
-                for later_request in self.running[req_index + 1 :]
-            )
-            has_pending_running_decode = any(
-                later_request.num_computed_tokens >= later_request.num_prompt_tokens
-                for later_request in self.running[req_index + 1 :]
-            )
-            prefill_budget_partitions = (
-                1
-                + int(has_unscheduled_running_prefill)
-                + self._waiting_prefill_competitor_count()
-            )
-            num_new_tokens = self._limit_mixed_decode_prefill_chunk(
-                request,
-                num_new_tokens,
-                scheduled_running_reqs,
-                self._has_waiting_requests_for_running_prefill(request)
-                or has_unscheduled_running_prefill,
-                has_pending_running_decode,
-                prefill_budget_partitions,
-            )
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -896,14 +777,6 @@ class Scheduler(SchedulerInterface):
                     num_new_local_computed_tokens = 0
                     num_computed_tokens = request.num_computed_tokens
 
-                if (
-                    self._is_very_long_prefill(request, num_computed_tokens)
-                    and self._has_active_very_long_prefill()
-                ):
-                    request_queue.pop_request()
-                    step_skipped_waiting.prepend_request(request)
-                    continue
-
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
                 new_encoder_compute_budget = encoder_compute_budget
@@ -938,28 +811,7 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
-                    scheduled_prefill_count = sum(
-                        scheduled_request.num_computed_tokens
-                        < scheduled_request.num_prompt_tokens
-                        for scheduled_request in itertools.chain(
-                            scheduled_running_reqs,
-                            scheduled_new_reqs,
-                            scheduled_resumed_reqs,
-                        )
-                    )
-                    prefill_budget_partitions = max(
-                        1,
-                        scheduled_prefill_count
-                        + self._waiting_prefill_competitor_count(),
-                    )
-                    num_new_tokens = self._limit_mixed_decode_prefill_chunk(
-                        request,
-                        num_new_tokens,
-                        scheduled_running_reqs,
-                        prefill_budget_partitions=prefill_budget_partitions,
-                    )
-                    if num_new_tokens == 0:
-                        break
+                    assert num_new_tokens > 0
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
