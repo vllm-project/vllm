@@ -7194,12 +7194,15 @@ class GPUModelRunner(
                     raw_tensor = kv_cache_raw_tensors[layer_name]
                     state_tensors = []
                     storage_offset_bytes = 0
+                    # In hierarchical mode (large_block_factor > 1), the mamba
+                    # view has one slot per ``N`` consecutive small attention
+                    # blocks.
+                    num_state_slots = num_blocks // kv_cache_spec.large_block_factor
+                    state_page_bytes = kv_cache_spec.state_page_size_bytes
                     for shape, dtype in zip(kv_cache_spec.shapes, kv_cache_spec.dtypes):
                         dtype_size = get_dtype_size(dtype)
-                        num_element_per_page = (
-                            kv_cache_spec.page_size_bytes // dtype_size
-                        )
-                        target_shape = (num_blocks, *shape)
+                        num_element_per_page = state_page_bytes // dtype_size
+                        target_shape = (num_state_slots, *shape)
                         stride = torch.empty(target_shape).stride()
                         target_stride = (num_element_per_page, *stride[1:])
                         assert storage_offset_bytes % dtype_size == 0

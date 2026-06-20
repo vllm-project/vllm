@@ -681,16 +681,27 @@ class Platform:
         # latter equals kernel_block_alignment_size, so divisibility holds.
         assert mamba_block_size_tokens % cache_config.block_size == 0
         large_block_factor = mamba_block_size_tokens // cache_config.block_size
-        cache_config.mamba_block_size = mamba_block_size_tokens
         cache_config.mamba_large_block_factor = large_block_factor
+
+        # In "all" mode the kernel uses ``mamba_block_size`` as the cadence at
+        # which intermediate states are checkpointed (chunk_stride math), so it
+        # must stay at the large value. In "align"/"none" modes the kernel only
+        # writes/reads state at the request boundary, so ``mamba_block_size``
+        # is just the prefix-cache step granularity; keep it at the small
+        # attention block size so cache hits land on attention boundaries.
+        if cache_config.mamba_cache_mode == "all":
+            cache_config.mamba_block_size = mamba_block_size_tokens
+        else:
+            cache_config.mamba_block_size = cache_config.block_size
 
         if large_block_factor > 1:
             logger.info(
                 "Mamba block spans %d attention blocks of %d tokens "
-                "(mamba_block_size=%d).",
+                "(mamba_block_size=%d, prefix-cache step=%d).",
                 large_block_factor,
                 cache_config.block_size,
                 mamba_block_size_tokens,
+                cache_config.mamba_block_size,
             )
 
         # Pad mamba page size to exactly match a mamba-sized run of attention

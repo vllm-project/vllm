@@ -608,8 +608,8 @@ class BlockPool:
             # the free-large queue. The large_block KVCacheBlock itself can
             # carry a hash too (mamba prefix caching), so we honour the same
             # eviction-order convention as the small-block path.
-            larges_with_hash: list[KVCacheBlock] = []
-            larges_without_hash: list[KVCacheBlock] = []
+            large_with_hash: list[KVCacheBlock] = []
+            large_without_hash: list[KVCacheBlock] = []
             for blk in ordered_blocks:
                 blk.ref_cnt -= 1
                 if blk.ref_cnt == 0 and not blk.is_null:
@@ -617,11 +617,11 @@ class BlockPool:
                     meta.num_small_in_use = 0
                     meta.next_small_idx = 0
                     if blk.block_hash is None:
-                        larges_without_hash.append(blk)
+                        large_without_hash.append(blk)
                     else:
-                        larges_with_hash.append(blk)
-            self.free_large_block_queue.prepend_n(larges_without_hash)
-            self.free_large_block_queue.append_n(larges_with_hash)
+                        large_with_hash.append(blk)
+            self.free_large_block_queue.prepend_n(large_without_hash)
+            self.free_large_block_queue.append_n(large_with_hash)
             return
 
         # Hierarchical small-block free. Mirrors the flat path's "linger"
