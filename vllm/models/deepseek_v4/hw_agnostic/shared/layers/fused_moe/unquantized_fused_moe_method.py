@@ -222,9 +222,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         elif self.unquantized_backend == UnquantizedMoeBackend.CPU:
             raise NotImplementedError(
-                "CPU FusedMoE is not vendored on the DSv4 hw-agnostic path. "
-                "Use the upstream vllm.model_executor.layers.fused_moe path "
-                "for CPU deployments."
+                "CPU FusedMoE is not supported on the DSv4 hw-agnostic path."
             )
         elif self.unquantized_backend == UnquantizedMoeBackend.XPU:
             w13 = layer.w13_weight

@@ -1,21 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4 sparse-MLA backend, metadata, and metadata builder.
-
-Vendored and pruned from
-``vllm/models/deepseek_v4/sparse_mla.py``. The hw-agnostic copy:
-
-  * Renames the backend ("FLASHMLA_SPARSE_DSV4" → kept here as the
-    parent class; the visible name comes from the ``backend.py``
-    subclass which prefixes ``DEEPSEEK_V4_HW_AGNOSTIC``).
-  * Drops the ``supports_compute_capability`` SM gate (the
-    hw-agnostic Triton kernels are portable; OOT plugins re-add gates
-    in their own subclass if needed).
-  * Inlines ``get_compressed_slot_mapping`` (was a 30-line helper
-    under ``v1/attention/backends/mla/compressor_utils.py``) so the
-    file has no upstream MLA-backend imports.
-"""
-
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -37,11 +21,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-# Pad C128A topk width to this alignment. 128 covers both h_q=64 (B_TOPK=64)
-# and h_q=128 (B_TOPK=128). FlashMLA decode asserts extra_topk % B_TOPK == 0;
-# unaligned widths (e.g. 17 = ceil(2136/128)) crash the sm100 head64 kernel.
-# Padded slots stay -1 and decode_lens caps them via topk_length, so the pad
-# is a no-op at kernel level.
+# FlashMLA asserts extra_topk % B_TOPK == 0; 128 covers h_q in {64, 128}.
 _C128A_TOPK_ALIGNMENT = 128
 
 
@@ -92,10 +72,8 @@ def _get_compressed_slot_mapping(
     compress_ratio: int,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Inlined from ``v1/attention/backends/mla/compressor_utils.py``."""
     if out is not None:
-        # Guard padded / invalid sequences whose negative positions would
-        # otherwise produce bogus block indices and illegal memory accesses.
+        # Pre-fill with -1 so padded/invalid positions don't yield bogus block ids.
         out.fill_(-1)
         slot_mapping = out[:num_tokens]
     else:
@@ -118,16 +96,7 @@ def _get_compressed_slot_mapping(
     return slot_mapping
 
 
-class DeepseekV4FlashMLABackend(AttentionBackend):
-    """DeepSeek-V4 sparse-MLA backend (hw-agnostic vendored copy).
-
-    Subclasses ``AttentionBackend`` directly: DeepSeek-V4 runs its own
-    attention layer (``DeepseekV4MLAAttention``), so this backend only
-    declares its metadata builder, KV-cache layout, and capability flags.
-    The visible backend name ("DEEPSEEK_V4_HW_AGNOSTIC") is set on the
-    ``DeepseekV4HWAgnosticBackend`` subclass in ``backend.py``.
-    """
-
+class DeepseekV4HWAgnosticBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -142,25 +111,21 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "DEEPSEEK_V4_SPARSE_MLA"
+        return "DEEPSEEK_V4_HW_AGNOSTIC"
 
     @staticmethod
-    def get_builder_cls() -> type["DeepseekV4FlashMLAMetadataBuilder"]:
-        return DeepseekV4FlashMLAMetadataBuilder
+    def get_builder_cls() -> type["DeepseekV4HWAgnosticMetadataBuilder"]:
+        return DeepseekV4HWAgnosticMetadataBuilder
 
     @staticmethod
     def get_impl_cls() -> type[Any]:
-        # DeepSeek-V4 attention runs through DeepseekV4MLAAttention.forward,
-        # not the generic Attention/MLAAttention layer, so the backend's
-        # impl class is never instantiated.
         raise NotImplementedError(
-            "DeepseekV4FlashMLABackend has no separate impl class; DeepSeek-V4 "
-            "attention runs through DeepseekV4MLAAttention."
+            "Attention runs through DeepseekV4MLAAttention; backend has no impl."
         )
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        # DeepSeek V4 layout: 448 NoPE + 64 RoPE = 512.
+        # 448 NoPE + 64 RoPE.
         return [512]
 
     @classmethod
@@ -186,7 +151,7 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
 
 
 @dataclass
-class DeepseekV4FlashMLAMetadata(AttentionMetadata):
+class DeepseekV4HWAgnosticMetadata(AttentionMetadata):
     num_reqs: int
     max_query_len: int
     max_seq_len: int
@@ -201,13 +166,15 @@ class DeepseekV4FlashMLAMetadata(AttentionMetadata):
     topk_tokens: int
 
     # Pre-computed C128A metadata (compress_ratio == 128 only).
+    # Decode: global slot ids + valid-entry counts (fused from positions).
     c128a_global_decode_topk_indices: torch.Tensor | None = None
     c128a_decode_topk_lens: torch.Tensor | None = None
+    # Prefill: local topk indices (used by combine_topk_swa_indices).
     c128a_prefill_topk_indices: torch.Tensor | None = None
 
 
-class DeepseekV4FlashMLAMetadataBuilder(
-    AttentionMetadataBuilder[DeepseekV4FlashMLAMetadata]
+class DeepseekV4HWAgnosticMetadataBuilder(
+    AttentionMetadataBuilder[DeepseekV4HWAgnosticMetadata]
 ):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
@@ -237,6 +204,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
                 max_num_batched_tokens, dtype=torch.int64, device=device
             )
 
+        # Pre-allocate C128A topk buffers for CUDA graph address stability.
         if self.compress_ratio == 128:
             c128a_max_compressed = cdiv(
                 self.model_config.max_model_len, self.compress_ratio
@@ -245,6 +213,11 @@ class DeepseekV4FlashMLAMetadataBuilder(
                 cdiv(c128a_max_compressed, _C128A_TOPK_ALIGNMENT)
                 * _C128A_TOPK_ALIGNMENT
             )
+            # Stored so _build_c128a_metadata passes it as the kernel's
+            # max_compressed_tokens, matching the buffer stride. Otherwise the
+            # kernel's default 8192 iterates past row width and spills writes
+            # into adjacent rows (present in both decode and prefill branches of
+            # _build_c128a_topk_metadata_kernel).
             self.c128a_max_compressed = c128a_max_compressed
             self.c128a_global_decode_buffer = torch.empty(
                 (max_num_batched_tokens, c128a_max_compressed),
@@ -265,7 +238,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> DeepseekV4FlashMLAMetadata:
+    ) -> DeepseekV4HWAgnosticMetadata:
         cm = common_attn_metadata
         num_tokens = cm.num_actual_tokens
         starts = np.asarray(cm.query_start_loc_cpu, dtype=np.int32)
@@ -295,7 +268,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
         if self.compress_ratio == 128:
             c128a_fields = self._build_c128a_metadata(cm, req_id_per_token)
 
-        return DeepseekV4FlashMLAMetadata(
+        return DeepseekV4HWAgnosticMetadata(
             num_reqs=cm.num_reqs,
             max_query_len=cm.max_query_len,
             max_seq_len=cm.max_seq_len,
@@ -318,7 +291,6 @@ class DeepseekV4FlashMLAMetadataBuilder(
         cm: CommonAttentionMetadata,
         req_id_per_token: torch.Tensor,
     ) -> dict[str, torch.Tensor | None]:
-        """Pre-compute C128A topk indices for DeepseekV4 (compress_ratio == 128)."""
         (num_decodes, _, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
                 cm,

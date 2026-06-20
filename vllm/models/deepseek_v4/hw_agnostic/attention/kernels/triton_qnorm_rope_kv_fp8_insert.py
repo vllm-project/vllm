@@ -1,27 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Per-head Q RMSNorm + GPT-J RoPE + UE8M0 FP8 quant + paged cache insert.
-
-This is the first DSv4 attention kernel: it operates on the un-padded Q
-tensor (``[num_tokens, num_heads, HEAD_DIM]``) and the matching KV row
-(``[num_tokens, HEAD_DIM]``) before the sparse-MLA kernel runs.
-
-What the Triton kernel does in a single launch:
-  * Q side — per-head RMSNorm (no learnable weight) on the full HEAD_DIM,
-    then GPT-J interleaved RoPE on the trailing ``ROPE_DIM`` elements.
-  * KV side — GPT-J interleaved RoPE on the trailing ``ROPE_DIM`` elements
-    of a copy of ``kv``; the original ``kv`` is left intact so callers
-    that need it post-quant (e.g. the BF16 prefill workspace) still
-    have it.
-
-The RoPE-applied KV is then handed to ``quantize_and_insert_k_cache``
-(Triton kernel in ``common/ops/cache_utils.py``) which writes it into
-the paged FP8 (UE8M0) cache.
-
-Padding contract: the kernel does **not** pad Q. The DSv4 sparse MLA
-buffers downstream are allocated at ``padded_heads`` (64 or 128). The
-caller pads ``q`` after this kernel returns.
-"""
+"""Per-head Q RMSNorm + RoPE on Q/KV, FP8 quant, paged cache insert."""
 
 import torch
 
@@ -48,15 +27,6 @@ def _triton_qnorm_rope_kernel(
     NOPE_DIM: tl.constexpr,
     HALF_ROPE: tl.constexpr,
 ):
-    """Apply per-head RMSNorm + GPT-J RoPE on Q, GPT-J RoPE on KV.
-
-    GPT-J interleaved format: pairs are (data[2i], data[2i+1]).
-    cos_sin_cache layout: [max_pos, ROPE_DIM] with first HALF_ROPE=cos,
-    second HALF_ROPE=sin.
-
-    Grid: ``(num_tokens, num_heads + 1)``. ``head_idx < num_heads`` runs
-    the Q branch; ``head_idx == num_heads`` runs the KV branch.
-    """
     token_idx = tl.program_id(0)
     head_idx = tl.program_id(1)
 
@@ -137,13 +107,7 @@ def triton_qnorm_rope_kv_fp8_insert(
     eps: float,
     block_size: int,
 ) -> None:
-    """Triton: qnorm+rope on Q, rope on KV, then FP8 UE8M0 quant+insert.
-
-    Mutates ``q`` in place. Returns ``None`` — the caller is responsible
-    for any padding the downstream MLA buffers require.
-    """
-    # Lazy import to avoid an import-time cycle through cache_utils, which
-    # itself imports symbols defined later in the deepseek_v4 package.
+    # Lazy import: cache_utils breaks an import cycle.
     from vllm.models.deepseek_v4.hw_agnostic.attention.kernels.cache_utils import (
         quantize_and_insert_k_cache,
     )
@@ -151,12 +115,9 @@ def triton_qnorm_rope_kv_fp8_insert(
     num_tokens = q.shape[0]
     num_heads = q.shape[1]
 
-    # Allocate temp buffer for RoPE-applied KV
     kv_roped = torch.empty_like(kv)
 
-    # Grid: one program per (token, head_or_kv).
-    #   head_idx < num_heads -> Q branch
-    #   head_idx == num_heads -> KV branch
+    # Grid (token, head_or_kv): head_idx == num_heads is the KV branch.
     grid = (num_tokens, num_heads + 1)
     _triton_qnorm_rope_kernel[grid](
         q,
@@ -173,10 +134,7 @@ def triton_qnorm_rope_kv_fp8_insert(
         HALF_ROPE=HALF_ROPE,
     )
 
-    # FP8 UE8M0 quant + paged insert (shared Triton kernel in common/ops).
-    # swa_kv_cache may arrive as [num_blocks, block_size, 584] or
-    # [num_blocks, flat]; quantize_and_insert_k_cache expects the 2D
-    # [num_blocks, block_bytes] uint8 layout.
+    # quantize_and_insert_k_cache expects a 2D uint8 [num_blocks, block_bytes].
     cache_2d = swa_kv_cache.view(swa_kv_cache.shape[0], -1)
     quantize_and_insert_k_cache(
         kv_roped,

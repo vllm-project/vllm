@@ -1,16 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4 mHC (multi-head compression) ops — hw-agnostic native-only.
-
-Vendored from ``vllm/model_executor/layers/mhc.py``. All four CustomOps
-keep only the pure-PyTorch reference implementation; the
-TileLang/aiter/Triton fast paths used by upstream
-``forward_cuda``/``forward_hip``/``forward_xpu`` are dropped, and the
-math (previously imported from ``vllm.model_executor.kernels.mhc``)
-is inlined here so the module has no dependency on the upstream
-kernel package.
-"""
-
 import torch
 import torch.nn as nn
 

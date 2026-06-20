@@ -1,25 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V4 quantization config — hw-agnostic vendored copy.
-
-Vendored from ``vllm/models/deepseek_v4/quant_config.py``. The override
-of ``get_quant_method`` is rewritten so the ``isinstance(layer, ...)``
-checks resolve against the **vendored** ``LinearBase`` / ``RoutedExperts``
-(which live under ``hw_agnostic/ops/``) rather than the upstream
-classes. Without this rewrite, the upstream
-``Fp8Config.get_quant_method`` returns ``None`` for vendored linear /
-expert layers — its isinstance checks point at the upstream classes
-that the vendored ones don't subclass — which would surface as the
-``"All linear layers should support quant method."`` error during
-model construction.
-
-The actual quant-method implementations (``Fp8LinearMethod``,
-``Fp8MoEMethod``, ``UnquantizedLinearMethod``, ``UnquantizedFusedMoEMethod``,
-``Fp8KVCacheMethod``, etc.) are NOT vendored: they're hardware-specific
-kernel dispatchers that the upstream registry continues to own. This
-file imports them from upstream and returns them directly.
-"""
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -61,20 +41,11 @@ if TYPE_CHECKING:
 
 
 class DeepseekV4FP8Config(Fp8Config):
-    """FP8 config for DeepSeek V4 with expert-dtype-aware MoE dispatch.
+    """DSv4 FP8 config with expert-dtype-aware MoE dispatch.
 
-    Vendored hw-agnostic copy of
-    ``vllm.models.deepseek_v4.quant_config.DeepseekV4FP8Config``. The
-    ``get_quant_method`` override does isinstance against the vendored
-    ``LinearBase`` / ``RoutedExperts`` so upstream's quant pipeline
-    routes properly into our vendored classes.
-
-    DeepSeek V4 checkpoints always use FP8 block quantization for
-    linear/attention layers. The MoE expert weights vary by checkpoint:
-    - ``expert_dtype="fp4"`` (e.g. DeepSeek-V4-Flash): MXFP4 experts
-      with ue8m0 (e8m0fnu) FP8 linear scales.
-    - ``expert_dtype="fp8"`` (e.g. DeepSeek-V4-Flash-Base): FP8 block
-      experts with float32 FP8 linear scales.
+    Linear / attention layers are always FP8 block quant. ``expert_dtype``
+    is ``"fp4"`` (MXFP4 experts, ue8m0 FP8 linear scales) or ``"fp8"``
+    (FP8 block experts, float32 FP8 linear scales).
     """
 
     def __init__(self, *args, **kwargs):
@@ -89,8 +60,7 @@ class DeepseekV4FP8Config(Fp8Config):
             try:
                 hf_config = get_current_vllm_config().model_config.hf_config
             except Exception:
-                # vllm_config not yet set; defer the decision until a
-                # later call lands inside set_current_vllm_config.
+                # vllm_config not yet set — retry on a later call.
                 return "fp4"
             expert_dtype = getattr(hf_config, "expert_dtype", "fp4")
             if expert_dtype not in _DEEPSEEK_V4_EXPERT_DTYPES:
@@ -161,19 +131,6 @@ class DeepseekV4FP8Config(Fp8Config):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> QuantizeMethodBase | None:
-        """Vendored ``get_quant_method``.
-
-        Differences vs.
-        ``vllm.models.deepseek_v4.quant_config.DeepseekV4FP8Config.get_quant_method``:
-
-        * ``isinstance(layer, RoutedExperts)`` resolves against the
-          **vendored** ``RoutedExperts`` (this file's import).
-        * The fallthrough to ``Fp8Config.get_quant_method`` is replaced
-          by an inline copy of the upstream linear / RoutedExperts /
-          Attention dispatch using vendored ``LinearBase`` for the
-          isinstance check; that way upstream's ``isinstance(layer,
-          upstream.LinearBase)`` no longer rejects our vendored linears.
-        """
         if isinstance(layer, RoutedExperts):
             if is_layer_skipped(
                 prefix=prefix,
@@ -214,8 +171,6 @@ class DeepseekV4FP8Config(Fp8Config):
             )
 
             if not self.is_checkpoint_fp8_serialized:
-                # Upstream split per-tensor online quant out into a
-                # dedicated module after the merge that landed Fp8OnlineMoEMethod.
                 from vllm.model_executor.layers.quantization.online.fp8 import (
                     Fp8PerTensorOnlineLinearMethod,
                 )
@@ -227,9 +182,6 @@ class DeepseekV4FP8Config(Fp8Config):
             offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return offline_method
 
-        # Attention layer routing — DSv4 uses Fp8KVCacheMethod for the
-        # main attention; isinstance check against upstream's
-        # ``Attention`` class is fine because that class isn't vendored.
         from vllm.model_executor.layers.attention import Attention
 
         if isinstance(layer, Attention):

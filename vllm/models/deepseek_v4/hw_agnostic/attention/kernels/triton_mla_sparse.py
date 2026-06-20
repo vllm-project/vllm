@@ -1,22 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""BF16 sparse MLA attention kernel.
-
-Single Triton kernel that implements multi-latent attention with
-head-grouped Q against a sparsely-indexed BF16 KV. Used by both decode
-and prefill on the hw-agnostic path:
-
-  * Decode — ``triton_sparse_decode_fp8`` first dequantizes the FP8
-    paged cache slots into a flat BF16 workspace, then calls into this
-    kernel with ``block_dpe=0`` (no separated RoPE block).
-  * Prefill — the kernel is called directly on the BF16 workspace
-    produced by ``dequantize_and_gather_k_cache`` (also ``block_dpe=0``;
-    DSv4 prefill keeps NoPE and RoPE concatenated in the latent).
-
-The kernel is structurally generic — it also serves DeepSeek V3.2 with
-``block_dpe=64``, ``index_topk=2048`` — but the ``hw_agnostic/`` callers
-only exercise the V4 BF16-only path.
-"""
+"""BF16 sparse MLA attention kernel (head-grouped Q, sparse-indexed KV)."""
 
 import torch
 

@@ -1,25 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Sparse MLA decode for DeepSeek V4 over an FP8 paged KV cache.
-
-Strategy: dequantize the gathered FP8 UE8M0 KV slots into a BF16 workspace
-on the fly, then reuse the BF16 sparse MLA attention kernel
-(``triton_bf16_mla_sparse_interface``). This keeps the external KV cache
-layout identical to the FlashMLA path used by the vendor branches, at the
-cost of a per-call BF16 dequant pass.
-
-Page layout (matches FlashMLA's ``fp8_ds_mla``):
-  * 448 bytes FP8 (NoPE half of the head)
-  * 64 bytes BF16 (RoPE half)
-  * 8 bytes UE8M0 scale (one per 64-element NoPE block, 7 blocks total)
-  * 1 byte pad
-"""
+"""Sparse MLA decode: dequantize FP8 cache to BF16, then BF16 sparse MLA."""
 
 import torch
 
+from vllm.models.deepseek_v4.hw_agnostic.attention.kernels.triton_mla_sparse import (
+    triton_bf16_mla_sparse_interface,
+)
 from vllm.triton_utils import tl, triton
-
-from .triton_mla_sparse import triton_bf16_mla_sparse_interface
 
 # FP8 DS MLA cache layout constants
 TOKEN_FP8_DIM = 448  # NoPE portion in FP8
@@ -164,16 +152,6 @@ def triton_sparse_decode_fp8(
     rope_head_dim: int,
     out: torch.Tensor,  # [num_tokens, num_heads, head_dim]
 ) -> None:
-    """Decode: dequant FP8 pages to BF16, then BF16 sparse MLA attention.
-
-    Keeps the external FP8 KV cache layout identical to the FlashMLA path.
-    Per-call dequant adds latency; correctness is guaranteed by reusing
-    the validated BF16 attention kernel.
-
-    The ``attn_sink`` argument is accepted for interface parity with the
-    FlashMLA call site but **not consumed** by the BF16 sparse kernel
-    (see study doc §50.7 / §51.5).
-    """
     num_tokens = q.shape[0]
     device = q.device
 
@@ -218,13 +196,7 @@ def triton_sparse_decode_fp8(
 
     ws_3d[:, max_topk:, :] = swa_buf.view(num_tokens, max_swa, OUTPUT_DIM)
 
-    # Build combined indices into the flat workspace and combined lengths.
-    # Workspace layout per token t: [topk_0..topk_{max_topk-1}, swa_0..swa_{max_swa-1}]
-    # Flat index for token t, position p = t * K_total + p
-    #
-    # IMPORTANT: The attention kernel uses combined_lens as a position
-    # cutoff — it only reads indices[0..combined_lens-1]. So indices
-    # must be PACKED contiguously: [valid_topk..., valid_swa..., -1 padding...]
+    # Pack combined indices contiguously: [valid_topk..., valid_swa..., -1 padding].
     if not swa_only and topk_lens is not None:
         combined_lens = (topk_lens + swa_lens).to(torch.int32)
     else:

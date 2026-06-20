@@ -1,22 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4 KV/score compressor — hw-agnostic vendored copy.
-
-Vendored from ``vllm/models/deepseek_v4/compressor.py``. Differences vs.
-the upstream copy:
-
-  * Imports the local hw-agnostic copies of ``RMSNorm``,
-    ``MergedColumnParallelLinear``, ``AttentionLayerBase`` instead of
-    ``vllm.model_executor.layers.*``.
-  * Imports the local ``common_kernels`` copies of
-    ``compress_norm_rope_store_triton``, ``MXFP4_BLOCK_SIZE``, and
-    ``save_partial_states`` instead of the upstream ``common.ops``
-    package.
-  * The CUTeDSL fast path for head_dim=512 on CUDA is dropped; the
-    Triton kernel is the only impl. OOT plugins that want a CUDA fast
-    path subclass and override ``forward``.
-"""
-
 from dataclasses import dataclass
 from typing import Any, ClassVar, cast
 
@@ -25,6 +8,18 @@ from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
+from vllm.models.deepseek_v4.hw_agnostic.attention.kernels import (
+    MXFP4_BLOCK_SIZE,
+    compress_norm_rope_store_triton,
+    save_partial_states,
+)
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.attention_layer_base import (
+    AttentionLayerBase,
+)
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import RMSNorm
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import (
+    MergedColumnParallelLinear,
+)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -37,15 +32,6 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
-)
-
-from ..shared.layers.attention_layer_base import AttentionLayerBase
-from ..shared.layers.layernorm import RMSNorm
-from ..shared.layers.linear import MergedColumnParallelLinear
-from .kernels import (
-    MXFP4_BLOCK_SIZE,
-    compress_norm_rope_store_triton,
-    save_partial_states,
 )
 
 
@@ -155,12 +141,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
         assert compress_ratio in [4, 128]
         coff = 1 + (compress_ratio == 4)
         self.sliding_window = coff * compress_ratio
-        # Block size is constrained by tensor sharing between compressor states
-        # and KV blocks. Since compressor states share the same physical tensor
-        # as KV blocks, they must use the same page size.
-        # The KV block shape [256//4, head_dim] = [64, 584] determines:
-        # - C4 compressor block shape [4, 2*512*2*4] -> block_size = 4
-        # - C128 compressor block shape [8, 512*2*4] -> block_size = 8
+        # Block size matched to KV block layout (shared physical tensor).
         if compress_ratio == 4:
             self.block_size = 4
         elif compress_ratio == 128:
@@ -189,16 +170,6 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
 
 
 class DeepseekCompressor(nn.Module):
-    """DeepSeek V4 KV/score compressor (hw-agnostic).
-
-    Owns the linear / norm / state-cache / ape state and the shared forward
-    prologue (kv/score split, save_partial_states launch). The
-    compress → norm → RoPE → store step runs the portable Triton kernel
-    (``compress_norm_rope_store_triton``) on every backend; OOT vendor
-    plugins that want a CUDA / ROCm fast path subclass this module and
-    override ``forward``.
-    """
-
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -258,8 +229,7 @@ class DeepseekCompressor(nn.Module):
             prefix=f"{prefix}.state_cache",
         )
 
-        # Save reference to static_forward_context for forward-time KV cache lookup.
-        # get_current_vllm_config() is only available during __init__, not forward.
+        # Cached for forward-time KV-cache lookup; vllm_config is __init__-only.
         self._static_forward_context = (
             vllm_config.compilation_config.static_forward_context
         )
@@ -287,19 +257,16 @@ class DeepseekCompressor(nn.Module):
 
     def forward(
         self,
-        # [num_tokens, 2 * self.coff * self.head_dim]
-        kv_score: torch.Tensor,
-        # [num_tokens]
-        positions: torch.Tensor,
+        kv_score: torch.Tensor,  # [num_tokens, 2 * coff * head_dim], bf16
+        positions: torch.Tensor,  # [num_tokens]
         rotary_emb,
     ) -> None:
-        # Each of shape [num_tokens, coff * self.head_dim]
-        # input bf16, output are fp32
+        # Each half is fp32 [num_tokens, coff * head_dim].
         kv, score = kv_score.split(
             [self.coff * self.head_dim, self.coff * self.head_dim], dim=-1
         )
 
-        # Get the metadata and handle dummy profiling run.
+        # Profile/dummy run.
         attn_metadata = get_forward_context().attn_metadata
         if not isinstance(attn_metadata, dict):
             return
@@ -313,20 +280,16 @@ class DeepseekCompressor(nn.Module):
         block_table = state_metadata.block_table
         block_size = state_metadata.block_size
 
-        # [num_blocks, block_size, kv_dim+score_dim], where kv_dim == score_dim
+        # state_cache: [num_blocks, block_size, kv_dim+score_dim] (kv first half).
         state_cache = self.state_cache.kv_cache
-        # kv_state stored in first half, score_state stored in second half
         state_width = state_cache.shape[-1] // 2
-        # Triton kernels here are launched without PDL grid dependencies, and
-        # both depend on outputs from a preceding kernel; launch_pdl=True
-        # caused a non-deterministic read-after-write race upstream. ROCm /
-        # XPU don't accept the kwarg.
         pdl_kwargs = (
             {}
             if current_platform.is_rocm() or current_platform.is_xpu()
             else {"launch_pdl": False}
         )
 
+        # PDL disabled to avoid read-after-write race with preceding kernels.
         save_partial_states(
             kv=kv,
             score=score,
@@ -340,13 +303,6 @@ class DeepseekCompressor(nn.Module):
             pdl_kwargs=pdl_kwargs,
         )
 
-        # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
-        # RoPE requirements (kernel applies forward GPT-J style rotation):
-        # - is_neox_style=False (interleaved pairs, NOT split-half)
-        # - cos_sin_cache layout: [max_pos, rope_head_dim] with first half cos,
-        #   second half sin (per-pair, length rope_head_dim // 2 each)
-        # - applied to LAST rope_head_dim elements of head_dim
-        # - position used: (positions // compress_ratio) * compress_ratio
         cos_sin_cache = rotary_emb.cos_sin_cache
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]

@@ -100,15 +100,6 @@ CHECK_IMPORTS = {
             "utils.py files such as vllm.model_executor.layers.utils.py."
         ),
         applies_to=re.compile(r"^vllm/models/[^/]+/hw_agnostic/.*\.py$"),
-        # Per-file carve-out: the vendored DSv4 quant_config.py is the
-        # explicit boundary between vendored layer types and upstream
-        # quant-method implementations (Fp8LinearMethod, Fp8MoEMethod,
-        # etc.). The user's policy is "concrete quant-method
-        # implementations stay upstream" — this file is where the
-        # vendored RoutedExperts / LinearBase isinstance dispatches into
-        # those upstream method classes. Other paths under
-        # ``hw_agnostic/`` remain forbidden from importing
-        # ``quantization.fp8`` / ``modelopt`` / etc.
         allowed_files={
             "vllm/models/deepseek_v4/hw_agnostic/quantization/quant_config.py",
         },
@@ -282,8 +273,14 @@ def test_regex():
         ("from vllm.platforms import current_platform", False),
         ("from vllm.forward_context import get_forward_context", False),
         ("# from vllm.model_executor.layers.layernorm import RMSNorm", False),
-        ("from vllm.models.deepseek_v4.hw_agnostic.ops.layernorm import X", False),
-        ("from vllm.models.minimax_m3.hw_agnostic.ops.layernorm import X", False),
+        (
+            "from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import X",
+            False,
+        ),
+        (
+            "from vllm.models.minimax_m3.hw_agnostic.shared.layers.layernorm import X",
+            False,
+        ),
         ("from vllm.model_executor.layers_extra import x", False),
         ("from vllm.model_executor.models_extra import x", False),
     ]
@@ -299,10 +296,11 @@ def test_regex():
     assert rule.applies_to is not None
     accept_paths = [
         "vllm/models/deepseek_v4/hw_agnostic/model.py",
-        "vllm/models/deepseek_v4/hw_agnostic/ops/attention.py",
+        "vllm/models/deepseek_v4/hw_agnostic/attention/attention.py",
+        "vllm/models/deepseek_v4/hw_agnostic/shared/layers/linear.py",
         "vllm/models/deepseek_v4/hw_agnostic/tests/test_hw_agnostic_e2e.py",
         "vllm/models/minimax_m3/hw_agnostic/model.py",
-        "vllm/models/llama4/hw_agnostic/ops/attention.py",
+        "vllm/models/llama4/hw_agnostic/attention/attention.py",
     ]
     reject_paths = [
         "vllm/models/deepseek_v4/attention.py",

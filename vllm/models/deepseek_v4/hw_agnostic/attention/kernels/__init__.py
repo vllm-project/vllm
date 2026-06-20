@@ -1,12 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton kernels backing the DSv4 hw-agnostic attention path.
-
-Each kernel lives in its own file. This package never imports from
-``nvidia/``, ``amd/``, or ``xpu/`` — the hw-agnostic stream is
-self-contained at the kernel level (see study doc §52).
-"""
-
 from .cache_utils import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,

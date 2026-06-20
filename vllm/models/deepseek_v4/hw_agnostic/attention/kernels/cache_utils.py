@@ -1,18 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Triton kernels for DeepseekV4 paged K-cache management and sparse-attention index
-preparation.
-
-- quantize_and_insert_k_cache: quantize bf16 K to UE8M0 FP8 and insert into
-  the paged cache.
-- dequantize_and_gather_k_cache: gather and dequantize FP8 K from the paged
-  cache for sparse/SWA prefill.
-- compute_global_topk_indices_and_lens: map local topk indices to global KV
-  cache slots and count valid entries.
-- combine_topk_swa_indices: concatenate topk compressed indices with SWA
-  window indices for sparse prefill.
-"""
+"""Triton kernels for paged K-cache management and sparse-attention indexing."""
 
 import torch
 
@@ -39,16 +27,6 @@ def quantize_and_insert_k_kernel(
     fp8_max: tl.constexpr,
     n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding)
 ):
-    """
-    Quantize K tensor and insert into paged K cache.
-
-    K Cache block layout (block_size=64 tokens):
-    - [0, 64*576): Token data, each token has 448 fp8 + 128 bf16
-    - [64*576, 64*576 + 64*8): Scales, each token has 8 uint8 scales
-    - [64*576 + 64*8, block_stride): Padding
-
-    One program per token.
-    """
     pid = tl.program_id(0)
 
     if pid >= num_tokens:
@@ -145,16 +123,6 @@ def quantize_and_insert_k_cache(
     block_size: int = 64,
     is_ue8m0: bool = True,
 ):
-    """
-    Quantize K tensor and insert into paged K cache.
-
-    K Cache block layout (block_size=64 tokens):
-    - First 64 * 576 = 36864 bytes: Token data
-      - Each token: 448 bytes (fp8) + 128 bytes (bf16)
-    - Next 64 * 8 = 512 bytes: Scales
-      - Each token: 8 bytes (uint8 scales, 7 real + 1 padding)
-    - Padded to multiple of 576
-    """
     assert k.dim() == 2 and k.shape[1] == 512, (
         f"K must be [num_tokens, 512], got {k.shape}"
     )
@@ -375,13 +343,7 @@ def compute_global_topk_indices_and_lens(
     block_size: int,
     is_valid_token: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Map local topk indices to global KV cache slots and count valid entries.
-
-    Fuses three operations into a single kernel:
-    1. Block-table lookup (local index → global slot id)
-    2. Valid-entry counting (topk_lens per token)
-    3. Masking padding tokens to length 0
-    """
+    """Map local topk indices to global KV cache slots and count valid entries."""
     num_tokens = topk_indices.shape[0]
     global_topk_indices = torch.empty_like(topk_indices)
     topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=topk_indices.device)

@@ -1,24 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Parallel linear layers — hw-agnostic vendored copy.
-
-Vendored from ``vllm/model_executor/layers/linear.py``. Differences vs.
-the upstream copy:
-
-  * The ``vllm.model_executor.layers.batch_invariant`` import (and the
-    ``VLLM_BATCH_INVARIANT`` fast-path branch in
-    ``UnquantizedLinearMethod.apply``) is dropped — that path is a
-    CUDA-only fast-path and would route OOT into a CUDA kernel.
-  * ``QuantizationConfig`` / ``QuantizeMethodBase`` continue to be
-    imported from upstream's ``quantization.base_config``: they are
-    abstract bases the registered quant-method subclasses inherit
-    from, not hardware-specific. A dedicated lint carve-out keeps this
-    import allowed (study doc §54).
-
-The TP / merged-shard / sharded weight-loading orchestration is
-unchanged from upstream.
-"""
-
 import itertools
 from abc import abstractmethod
 

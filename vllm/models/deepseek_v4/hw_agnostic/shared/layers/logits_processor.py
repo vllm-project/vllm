@@ -1,13 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""LogitsProcessor — hw-agnostic vendored copy.
-
-Vendored from ``vllm/model_executor/layers/logits_processor.py`` with
-its only sideways-import (``VocabParallelEmbedding``) rewired to the
-local hw-agnostic copy. No vendor dispatch is involved here, so the
-file is otherwise verbatim.
-"""
-
 import torch
 
 from vllm.distributed import (
@@ -16,9 +8,10 @@ from vllm.distributed import (
     tensor_model_parallel_gather,
 )
 from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import PluggableLayer
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding,
+)
 from vllm.platforms import current_platform
-
-from .vocab_parallel_embedding import VocabParallelEmbedding
 
 
 class LogitsProcessor(PluggableLayer):

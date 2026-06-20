@@ -20,14 +20,8 @@ from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
 )
 from vllm.platforms import current_platform
 
-# DSv4 hw-agnostic doesn't exercise the FlashInfer Cutlass / TRTLLM
-# unquantized MoE kernels — those are NV-specific fast paths. The
-# upstream copy imported ``swap_w13_to_w31`` and
-# ``convert_moe_weights_to_flashinfer_trtllm_block_layout`` from the
-# forbidden quantization-utils subtree; the corresponding branches in
-# ``convert_to_unquantized_kernel_format`` raise NotImplementedError on
-# this path. OOT vendor plugins re-add the FlashInfer paths via their
-# own subclass.
+# FlashInfer Cutlass/TRTLLM paths raise NotImplementedError on the agnostic
+# stream; OOT plugins re-add them via subclass.
 
 logger = init_logger(__name__)
 
@@ -45,11 +39,7 @@ class UnquantizedMoeBackend(Enum):
 
 
 def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBackend]:
-    """
-    Get available backends in priority order based on platform and config.
-
-    This function can be extended to become more complex as needed.
-    """
+    """Available backends in priority order for the current platform."""
 
     def _move_to_back(
         backends: list[UnquantizedMoeBackend],
@@ -93,20 +83,9 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
 def backend_to_kernel_cls(
     backend: UnquantizedMoeBackend,
 ) -> type[mk.FusedMoEExperts]:
-    """The DSv4 hw-agnostic path takes ``UnquantizedMoeBackend.OOT`` from
-    ``select_unquantized_moe_backend`` (because ``is_out_of_tree()`` is
-    True), which causes its caller to skip ``backend_to_kernel_cls``
-    entirely. Calling this function on the hw-agnostic path is a bug —
-    the concrete experts modules
-    (``vllm.model_executor.layers.fused_moe.experts.*``) live upstream
-    and are HW-specific kernels that we deliberately did NOT vendor.
-    OOT vendor plugins re-add their own kernel via subclassing.
-    """
     raise NotImplementedError(
-        f"backend_to_kernel_cls({backend.value!r}) is not vendored on the "
-        "DSv4 hw-agnostic FusedMoE path. The OOT plugin's "
-        "select_unquantized_moe_backend returns OOT, which short-circuits "
-        "before this function is reached."
+        f"backend_to_kernel_cls({backend.value!r}) is not supported on "
+        "the DSv4 hw-agnostic FusedMoE path."
     )
 
 
@@ -246,8 +225,7 @@ def convert_to_unquantized_kernel_format(
     ):
         raise NotImplementedError(
             f"FlashInfer unquantized MoE kernels ({unquantized_backend}) "
-            "are not vendored on the DSv4 hw-agnostic path. Use the upstream "
-            "FusedMoE for these backends or register an OOT vendor subclass."
+            "are not supported on the DSv4 hw-agnostic path."
         )
 
     return w13_weight.contiguous(), w2_weight.contiguous()

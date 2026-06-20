@@ -26,29 +26,33 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.interfaces import SupportsPP
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.activation import (
-    SiluAndMul,
-    SiluAndMulWithClamp,
-)
 from vllm.models.deepseek_v4.hw_agnostic.attention.attention import (
     DeepseekV4Indexer,
     DeepseekV4MLAModules,
     DeepseekV4MultiHeadLatentAttentionWrapper,
 )
+from vllm.models.deepseek_v4.hw_agnostic.layers.rotary_embedding import get_rope
+from vllm.models.deepseek_v4.hw_agnostic.shared.interfaces import SupportsPP
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.activation import (
+    SiluAndMul,
+    SiluAndMulWithClamp,
+)
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.gate_linear import (
+    GateLinear,
+)
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.layer import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.gate_linear import GateLinear
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import RMSNorm
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.logits_processor import LogitsProcessor
-from vllm.models.deepseek_v4.hw_agnostic.layers.rotary_embedding import get_rope
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.logits_processor import (
+    LogitsProcessor,
+)
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -141,13 +145,10 @@ class DeepseekV4MoE(nn.Module):
         self.gate.e_score_correction_bias = None
         self.gate.tid2eid = None
         is_hash_moe = extract_layer_index(prefix) < config.num_hash_layers
-        # FusedMoE consumes int32 hash indices.
         self.hash_indices_dtype = torch.int32
 
         if is_hash_moe:
-            # hash MoE doesn't use e_score_correction_bias
-            # Use randint instead of empty to avoid garbage values causing
-            # invalid memory access in dummy mode (--load-format="dummy")
+            # randint (not empty) for valid indices in dummy-weight mode.
             self.gate.tid2eid = nn.Parameter(
                 torch.randint(
                     0,
@@ -221,7 +222,7 @@ class DeepseekV4MoE(nn.Module):
 
         org_shape = hidden_states.shape
         if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class.
+            # Router runs inside FusedMoE.
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
                 router_logits=hidden_states,
@@ -265,9 +266,6 @@ class DeepseekV4Attention(nn.Module):
         self.n_groups = config.o_groups
         self.n_local_groups = self.n_groups // tp_size
         self.window_size = config.sliding_window
-        # NOTE(zyongye) Compress ratio can't be 0
-        # we do this for because MTP layer is not included
-        # in the compress ratio list
         if layer_id < config.num_hidden_layers:
             self.compress_ratio = max(1, config.compress_ratios[layer_id])
         else:
@@ -275,8 +273,6 @@ class DeepseekV4Attention(nn.Module):
         self.eps = config.rms_norm_eps
         self.max_position_embeddings = config.max_position_embeddings
 
-        # Padded to min 64 heads for FlashMLA, initialized to -inf
-        # (no sink effect). Weight loading fills the first n_local_heads slots.
         padded_heads = max(self.n_local_heads, 64)
         self.attn_sink = nn.Parameter(
             torch.full((padded_heads,), -float("inf"), dtype=torch.float32),
@@ -321,11 +317,7 @@ class DeepseekV4Attention(nn.Module):
             prefix=f"{prefix}.wo_b",
         )
         self.softmax_scale = self.head_dim**-0.5
-        self.scale_fmt = config.quantization_config["scale_fmt"]
 
-        self.rope_parameters = config.rope_scaling
-
-        # Initialize rotary embedding BEFORE DeepseekV4MLAModules (which needs it)
         rope_parameters = config.rope_parameters
         rope_parameters["rope_theta"] = (
             config.compress_rope_theta if self.compress_ratio > 1 else config.rope_theta
@@ -349,7 +341,6 @@ class DeepseekV4Attention(nn.Module):
 
         self.indexer = None
         if self.compress_ratio == 4:
-            # Only C4A uses sparse attention and hence has indexer.
             self.indexer = DeepseekV4Indexer(
                 vllm_config,
                 config=config,
@@ -413,8 +404,8 @@ class DeepseekV4DecoderLayer(nn.Module):
     ):
         super().__init__()
 
-        # mHC ops are vendored locally; no upstream tilelang dependency.
-        from vllm.models.deepseek_v4.hw_agnostic.layers import mhc
+        # Lazy import to avoid top-level tilelang dependency.
+        from vllm.models.deepseek_v4.hw_agnostic.layers import mhc  # noqa: F401
 
         self.mhc_pre = mhc.MHCPreOp()
         self.mhc_fused_post_pre = mhc.MHCFusedPostPreOp()
@@ -488,7 +479,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         hc_scale: torch.Tensor,
         hc_base: torch.Tensor,
     ):
-        # post_mix, res_mix, layer_input = torch.ops.vllm.mhc_pre(
         post_mix, res_mix, layer_input = self.mhc_pre(
             residual=x,
             fn=hc_fn,
@@ -512,13 +502,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if residual is None:
-            # Run standalone hc_pre on first layer
+            # First layer: standalone hc_pre.
             residual = x
             x, post_mix, res_mix = self.hc_pre(
                 x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base
             )
         else:
-            # residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre(
             residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
                 x,
                 residual,
@@ -537,7 +526,6 @@ class DeepseekV4DecoderLayer(nn.Module):
         x = self.attn_norm(x)
         x = self.attn(positions, x, None)
 
-        # residual, post_mix, res_mix, x = torch.ops.vllm.mhc_fused_post_pre(
         residual, post_mix, res_mix, x = self.mhc_fused_post_pre(
             x,
             residual,
@@ -627,18 +615,13 @@ class DeepseekV4Model(nn.Module):
             requires_grad=False,
         )
 
-        # mHC ops are vendored locally; build them once at model-init time.
-        from vllm.models.deepseek_v4.hw_agnostic.layers import mhc
+        # CustomOps must be built inside set_current_vllm_config context.
+        from vllm.models.deepseek_v4.hw_agnostic.layers import mhc  # noqa: F401
 
         self.hc_head_op = mhc.HCHeadOp()
         self.mhc_post_op = mhc.MHCPostOp()
 
-        # Pre-hc_head residual stream buffer for the MTP draft. Stable
-        # address (outside the cudagraph pool) so the copy_ in forward()
-        # refreshes it correctly across captured shapes.
-        # refreshes it correctly across captured shapes. Only allocated on
-        # the last PP rank — that's where MTP target hidden states are
-        # produced.
+        # Stable buffer for MTP pre-hc_head residual (last PP rank only).
         if get_pp_group().is_last_rank:
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
@@ -658,10 +641,6 @@ class DeepseekV4Model(nn.Module):
         dtype: torch.dtype,
         device: torch.device,
     ) -> IntermediateTensors:
-        # PP intermediate tensors carry the multi-stream hidden_states
-        # of shape (num_tokens, hc_mult, hidden_size) — V4 expands the
-        # token embedding to hc_mult streams before the first decoder
-        # layer and keeps that shape until hc_head() collapses it.
         return IntermediateTensors(
             {
                 "hidden_states": torch.zeros(
@@ -704,7 +683,7 @@ class DeepseekV4Model(nn.Module):
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
 
-        # Stash pre-hc_head residual for the MTP draft (captured copy_).
+        # Stash pre-hc_head residual for MTP draft.
         num_tokens = hidden_states.shape[0]
         self._mtp_hidden_buffer[:num_tokens].copy_(hidden_states.flatten(1))
 
@@ -839,31 +818,17 @@ def hc_head(
     rms_norm_eps: float,
     hc_eps: float,
 ) -> torch.Tensor:
-    """Thin functional wrapper around a pre-built ``HCHeadOp`` instance.
-
-    ``HCHeadOp`` (a ``CustomOp``) must be instantiated inside a
-    ``set_current_vllm_config`` context — i.e. at model construction time,
-    not in ``forward`` — because its ``__init__`` reads the cached
-    compilation config. Callers (``DeepseekV4Model``, the MTP layer) build
-    the op once and pass it in here.
-    """
     return hc_head_op(hidden_states, hc_fn, hc_scale, hc_base, rms_norm_eps, hc_eps)
 
 
 def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
     if expert_dtype == "fp4":
-        # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
-        # ``w{1,2,3}_weight_scale`` (no _inv suffix). FP8 linear and
-        # shared experts use Fp8LinearMethod's block scales, which
-        # register as ``weight_scale_inv``.
+        # MXFP4 experts: w{1,2,3}_weight_scale; FP8 elsewhere: weight_scale_inv.
         scale_regex = {
             re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
             re.compile(r"\.scale$"): ".weight_scale_inv",
         }
     else:
-        # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
-        # scales as ``w{13,2}_weight_scale_inv``. Map all ``.scale`` keys
-        # there.
         scale_regex = {
             re.compile(r"\.scale$"): ".weight_scale_inv",
         }
@@ -891,8 +856,6 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
 class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
     model_cls = DeepseekV4Model
 
-    # Default mapper assumes the original FP4-expert checkpoint layout.
-    # Overridden per-instance in __init__ when expert_dtype != "fp4".
     hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp4")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

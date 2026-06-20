@@ -100,27 +100,26 @@ def create_fused_moe_router(
     routing_strategy = envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY
     if routing_strategy != "":
         raise NotImplementedError(
-            "VLLM_MOE_ROUTING_SIMULATION_STRATEGY (RoutingSimulatorRouter) "
-            "is not vendored on the DSv4 hw-agnostic FusedMoE path."
+            "RoutingSimulatorRouter is not supported on the DSv4 "
+            "hw-agnostic FusedMoE path."
         )
 
     if zero_expert_type is not None:
         raise NotImplementedError(
-            "ZeroExpertRouter is not vendored on the DSv4 hw-agnostic "
-            "FusedMoE path. DSv4 doesn't use zero-expert layouts."
+            "ZeroExpertRouter is not supported on the DSv4 hw-agnostic "
+            "FusedMoE path."
         )
 
     if use_grouped_topk:
         raise NotImplementedError(
-            "GroupedTopKRouter is not vendored on the DSv4 hw-agnostic "
-            "FusedMoE path. DSv4 uses sqrtsoftplus / hash MoE / noaux_tc "
-            "routing (FusedTopKRouter / FusedTopKBiasRouter); use the "
-            "upstream FusedMoE for grouped top-k models."
+            "GroupedTopKRouter is not supported on the DSv4 hw-agnostic "
+            "FusedMoE path."
         )
 
     if custom_routing_function is not None:
         raise NotImplementedError(
-            "CustomRoutingRouter is not vendored on the DSv4 hw-agnostic FusedMoE path."
+            "CustomRoutingRouter is not supported on the DSv4 hw-agnostic "
+            "FusedMoE path."
         )
 
     assert scoring_func in ["sigmoid", "softmax", "sqrtsoftplus"]
@@ -139,9 +138,8 @@ def create_fused_moe_router(
 
     if num_fused_shared_experts > 0:
         raise NotImplementedError(
-            "AiterSharedRoutedFusedMoERouter (ROCm AITER fused-shared) is "
-            "not vendored on the DSv4 hw-agnostic FusedMoE path. Disable "
-            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS for this layer."
+            "ROCm AITER fused-shared experts not supported on DSv4 "
+            "hw-agnostic. Disable VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS."
         )
 
     return FusedTopKRouter(

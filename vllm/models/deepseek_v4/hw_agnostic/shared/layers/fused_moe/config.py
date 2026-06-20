@@ -16,21 +16,11 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import cdiv
 
-# ----- Inlined vendored stubs for forbidden quantization-utils symbols ----
-# Upstream config.py imports ``GroupShape`` (a pure NamedTuple),
-# ``OCP_MX_DTYPES`` and ``OCP_MX_Scheme`` from
-# ``vllm.model_executor.layers.quantization.utils.{quant_utils,
-# ocp_mx_utils}``. Both modules are forbidden on the hw-agnostic path,
-# so the small surface they expose is reproduced inline.
-
-
 class _GroupShape(namedtuple("_GroupShape", ["row", "col"])):
     pass
 
 
 class GroupShape(_GroupShape):
-    """Group shape for quantization (vendored; pure data class)."""
-
     PER_TENSOR: ClassVar["GroupShape"]
     PER_TOKEN: ClassVar["GroupShape"]
 
@@ -38,20 +28,14 @@ class GroupShape(_GroupShape):
 GroupShape.PER_TENSOR = GroupShape(-1, -1)
 GroupShape.PER_TOKEN = GroupShape(1, -1)
 
-# DSv4 hw-agnostic doesn't exercise any OCP MX quant scheme; placeholder
-# constants keep upstream conditional checks falsy.
 OCP_MX_DTYPES: tuple = ()
 
 
 class OCP_MX_Scheme:  # noqa: N801 — preserve upstream public name
-    """Stub: DSv4 hw-agnostic does not use OCP MX schemes."""
-
     @classmethod
     def from_quant_dtype(cls, *args, **kwargs):
         return None
 
-
-# --------------------------------------------------------------------------
 
 logger = init_logger(__name__)
 

@@ -1,15 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Vocab-parallel embedding and LM head — hw-agnostic vendored copy.
-
-Vendored from ``vllm/model_executor/layers/vocab_parallel_embedding.py``.
-Differences vs. the upstream copy mirror those of the vendored
-``linear.py``: drop the ``batch_invariant`` import (and its CUDA-only
-fast-path branch), keep the abstract-base imports from
-``quantization.base_config``, and skip the ``PluggableLayer.register``
-decorators so the upstream layer keeps owning the registry names.
-"""
-
 from collections.abc import Sequence
 from dataclasses import dataclass
 

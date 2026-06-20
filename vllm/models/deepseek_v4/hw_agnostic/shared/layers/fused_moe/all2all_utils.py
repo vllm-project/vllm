@@ -24,29 +24,16 @@ from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.prepare_finaliz
 )
 from vllm.platforms import current_platform
 
-# Optional-dep prepare/finalize backends that DSv4 hw-agnostic doesn't
-# vendor: FlashInfer NVLink one/two-sided, DeepEP HT/LL/V2, Mori (ROCm),
-# NIXL EP. The corresponding selection branches in
-# ``select_prepare_finalize`` raise NotImplementedError below. OOT
-# vendor plugins re-add these via their own subclass.
-
 logger = init_logger(__name__)
 
 
 class _NotVendoredPrepareAndFinalize:
-    """Placeholder for prepare/finalize backends not vendored on the
-    DSv4 hw-agnostic path. The corresponding ``moe.use_*_kernels``
-    flags are normally False on DSv4; raising on instantiation makes
-    accidental routing into one of these backends fail loudly.
-    """
-
     _kernel_name = "<unknown>"
 
     def __init__(self, *args, **kwargs):
         raise NotImplementedError(
-            f"{self._kernel_name} prepare/finalize is not vendored on the "
-            "DSv4 hw-agnostic FusedMoE path. Use the upstream FusedMoE for "
-            "this backend or register an OOT vendor subclass."
+            f"{self._kernel_name} prepare/finalize is not supported on "
+            "the DSv4 hw-agnostic FusedMoE path."
         )
 
     @classmethod

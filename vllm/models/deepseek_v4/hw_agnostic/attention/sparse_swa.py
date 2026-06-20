@@ -1,31 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4 sparse-SWA cache and metadata — hw-agnostic copy.
-
-Vendored from ``vllm/v1/attention/backends/mla/sparse_swa.py``.
-
-Differences vs. the upstream copy:
-
-  * The ``DeepseekSparseSWABackend.get_builder_cls`` ROCm/AITER branch
-    is dropped — OOT vendor plugins subclass to register their own
-    builder.
-  * ``build_tile_scheduler`` is reduced to a no-op (returns all-None)
-    because the FlashMLA tile scheduler is a NV-specific fast-path
-    consumed only by FlashMLA decode; the hw-agnostic Triton decode
-    path doesn't use it.
-  * The ``get_mla_metadata`` import (FlashMLA C++ entry point) is
-    removed; the metadata fields ``tile_sched_*`` remain in the
-    ``DeepseekSparseSWAMetadata`` dataclass for API compatibility but
-    are always ``None`` here.
-  * Imports rewired to the local ``attention_layer_base`` copy.
-"""
-
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.attention_layer_base import (
+    AttentionLayerBase,
+)
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -41,19 +24,13 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowMLASpec,
 )
 
-from ..shared.layers.attention_layer_base import AttentionLayerBase
-
 if TYPE_CHECKING:
-    # Forward-declared in the dataclass below; not imported at runtime to
-    # keep the hw-agnostic copy free of FlashMLA dependencies.
+    # Forward-declared in the dataclass; never imported at runtime.
     from typing import Any
 
     FlashMLASchedMeta = Any
 
-# DeepseekV4 decode layer types, keyed by compress_ratio. Each type has a distinct
-# (topk, extra_topk, extra_page_block_size) config, so they cannot share a
-# FlashMLA tile-scheduler plan. Within a type, all ~60 DeepseekV4 layers share one
-# plan per step because b / s_q / h_q / page_block_sizes / topks are identical.
+# Decode-layer kinds keyed by compress_ratio.
 _LAYER_TYPE_SWAONLY = "swaonly"
 _LAYER_TYPE_C4A = "c4a"
 _LAYER_TYPE_C128A = "c128a"
@@ -93,12 +70,8 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        # Block size constraint: SWA and C4A KV blocks share the physical
-        # tensor and must use the same page size. C4A page shape
-        # [256//4, head_dim] = [64, head_dim] determines block_size = 64.
+        # Block size matched to C4A page size (shared physical tensor).
         self.block_size = 64
-        # uint8: legacy FlashMLA UE8M0 paged layout. bfloat16 / float8_e4m3fn:
-        # FlashInfer contiguous full-cache layout.
         assert self.dtype in (torch.uint8, torch.bfloat16, torch.float8_e4m3fn)
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
@@ -186,17 +159,26 @@ class DeepseekSparseSWAMetadata:
     prefill_seq_lens: torch.Tensor | None = None
     prefill_gather_lens: torch.Tensor | None = None
 
-    # Tile-scheduler plan slots. Always None on the hw-agnostic path; OOT
-    # plugins that bind a FlashMLA-style decode kernel populate them in
-    # their own metadata builder subclass.
+    # Always None here; OOT FlashMLA-decode plugins populate them.
     tile_sched_swaonly: object | None = None
     tile_sched_c4a: object | None = None
     tile_sched_c128a: object | None = None
 
 
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
-    """Build metadata for DeepseekV4 SWA cache."""
+    """Builds metadata for DeepseekV4 SWA cache.
 
+    Similar to the indexer, this handles mixed batches by:
+    1. Using split_decodes_and_prefills() to determine the boundary
+    2. Building separate metadata for decode and prefill portions
+
+    Supports:
+    - Mixed decode/prefill batches
+    - MTP (Multi-Token Prediction) where decode has query_len > 1
+    - Chunked prefill (aligns with the indexer's chunking)
+    """
+
+    # Base threshold: query_len <= 1 is decode
     reorder_batch_threshold: int = 1
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
@@ -204,15 +186,19 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         super().__init__(*args, **kwargs)
         assert isinstance(self.kv_cache_spec, SlidingWindowMLASpec | MLAAttentionSpec)
         mla_spec = cast(SlidingWindowMLASpec | MLAAttentionSpec, self.kv_cache_spec)
-        self.head_size = mla_spec.head_size
+        self.head_size = mla_spec.head_size  # Already considered quantization.
         self.compress_ratio = mla_spec.compress_ratio
         self.block_size = mla_spec.block_size
 
+        # Handle MTP: adjust decode_threshold like the indexer does
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config
             else 0
         )
+        # With MTP, decode can have query_len up to 1 + num_speculative_tokens.
+        # Must match the threshold used by the indexer and flashmla_sparse so
+        # that all backends agree on the decode/prefill split.
         self.decode_threshold = (
             self.reorder_batch_threshold + self.num_speculative_tokens
         )
@@ -221,6 +207,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         assert hasattr(hf_config, "sliding_window")
         self.window_size = hf_config.sliding_window
 
+        # Detect which DeepseekV4 layer types this model uses so we only build a
+        # FlashMLA tile-scheduler plan for types that will actually be called.
+        # Models without compress_ratios (pure SWA) fall back to swaonly.
         compress_ratios = getattr(hf_config, "compress_ratios", None) or [1]
         self._layer_types: set[str] = set()
         for ratio in compress_ratios:
@@ -348,7 +337,6 @@ def _compute_prefill_metadata_kernel(
     window_size,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Compute prefill gather_lens in a single pass."""
     offset = tl.arange(0, BLOCK_SIZE)
     mask = offset < num_prefills
     seq_len = tl.load(seq_lens_ptr + num_decodes + offset, mask=mask)

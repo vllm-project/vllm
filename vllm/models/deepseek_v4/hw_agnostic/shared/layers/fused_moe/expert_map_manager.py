@@ -15,11 +15,6 @@ from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
     FusedMoEParallelConfig,
 )
 
-# ``init_aiter_topK_meta_data`` lives in the upstream ROCm-AITER experts
-# module which is not vendored on the DSv4 hw-agnostic path. Lazy-imported
-# below so the missing module surfaces only if the AITER shared-experts
-# fusion path is actually invoked (which DSv4 hw-agnostic does not).
-
 logger = init_logger(__name__)
 
 
@@ -262,24 +257,9 @@ class ExpertMapManager:
     def _init_aiter_shared_experts_topK_buffer(self):
         if self.num_fused_shared_experts > 0:
             raise NotImplementedError(
-                "ROCm-AITER fused shared-experts MoE is not vendored on the "
-                "DSv4 hw-agnostic path; the upstream "
-                "``vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe``"
-                " module is forbidden by the isolation lint. Disable "
+                "ROCm-AITER fused shared-experts MoE is not supported on the "
+                "DSv4 hw-agnostic path. Disable "
                 "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS for this layer."
-            )
-            # Original upstream call kept here as a comment for future
-            # reference if a hw-agnostic AITER-shared path is added later.
-            dp_size = self.moe_parallel_config.dp_size  # noqa: F841
-            init_aiter_topK_meta_data(  # type: ignore[name-defined]  # noqa: F821
-                n_routed_experts=self.global_num_experts,
-                n_shared_experts=self.num_fused_shared_experts,
-                top_k=self.top_k,
-                tp_rank=self.ep_rank if self.use_ep else self.tp_rank,
-                tp_size=self.ep_size if self.use_ep else self.tp_size,
-                shared_experts_score=1.0,
-                max_num_tokens=self.max_num_batched_tokens * dp_size,
-                is_EP=self.use_ep,
             )
 
     @property

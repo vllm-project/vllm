@@ -1,23 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4 rotary embedding — hw-agnostic native-only copy.
-
-Vendored and pruned from
-``vllm/model_executor/layers/rotary_embedding/{__init__,base,common,deepseek_scaling_rope}.py``.
-
-DSv4 only ever instantiates ``DeepseekV4ScalingRotaryEmbedding`` (via
-the upstream ``get_rope`` factory with ``rope_type ∈ {"deepseek_yarn",
-"deepseek_llama_scaling"}`` and ``is_deepseek_v4=True``) and only ever
-reads ``self.cos_sin_cache`` from it — the Triton kernels in
-``hw_agnostic/ops/triton_*.py`` consume the cache directly and never
-call the embedding's ``forward``. The vendored copy keeps just that
-shape: a ``DeepseekV4ScalingRotaryEmbedding`` class that builds the
-fp32 ``cos_sin_cache`` at construction time, plus a thin local
-``get_rope`` factory that returns it. All FlashInfer / aiter / CUDA
-fast paths are dropped; ``forward_native`` is preserved as a
-reference implementation in case OOT plugins need to call it directly.
-"""
-
 import math
 
 import torch
@@ -37,7 +19,7 @@ def _rotate_gptj(x: torch.Tensor) -> torch.Tensor:
     return x.flatten(-2)
 
 
-# ---- YaRN math (extracted from rotary_embedding/common.py) ----
+# YaRN math.
 
 
 def _yarn_find_correction_dim(
@@ -83,16 +65,11 @@ def _yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
 
 
 class DeepseekV4ScalingRotaryEmbedding(nn.Module):
-    """Rotary embedding extended with YaRN — DeepSeek-V4 variant.
+    """YaRN rotary embedding — V4 variant.
 
-    Key V4 differences vs. the V3 ``DeepseekScalingRotaryEmbedding``:
-      * Applies RoPE to the LAST ``rotary_dim`` of each head (not the
-        first), via ``forward_native``.
-      * Stores ``cos_sin_cache`` as fp32 (V3 used ``dtype``).
-      * Supports query-only RoPE (``key=None``) and an ``inverse`` flag
-        that flips the sign of ``sin`` (used by ``triton_inv_rope_einsum``
-        in spirit, though that kernel reads the cache directly rather
-        than calling ``forward``).
+    Differs from V3: RoPE on the LAST ``rotary_dim`` (not first), fp32
+    ``cos_sin_cache``, query-only RoPE (``key=None``) supported, and an
+    ``inverse`` flag that flips ``sin``.
     """
 
     def __init__(
@@ -211,8 +188,7 @@ class DeepseekV4ScalingRotaryEmbedding(nn.Module):
         return query, key
 
 
-# Cache constructed embeddings — DSv4 builds two embeddings per layer
-# (attention + indexer), and the embeddings get reused across layers.
+# Reused across layers (DSv4 builds two embeddings per layer).
 _ROPE_CACHE: dict[tuple, DeepseekV4ScalingRotaryEmbedding] = {}
 
 
@@ -223,13 +199,8 @@ def get_rope(
     is_neox_style: bool = False,
     dtype: torch.dtype | None = None,
 ) -> DeepseekV4ScalingRotaryEmbedding:
-    """DSv4-only rope factory (hw-agnostic).
-
-    Restricted to ``rope_type in {"deepseek_yarn", "deepseek_llama_scaling"}``
-    with ``is_deepseek_v4=True`` — the only paths the DSv4 hw-agnostic
-    model exercises. Other rope types are not supported here; if a
-    future model needs them, copy the relevant subclass into this file.
-    """
+    """DSv4 rope factory. Only ``deepseek_yarn`` / ``deepseek_llama_scaling``
+    with ``is_deepseek_v4=True`` are supported."""
     if dtype is None:
         dtype = torch.get_default_dtype()
     rope_parameters = rope_parameters or {}

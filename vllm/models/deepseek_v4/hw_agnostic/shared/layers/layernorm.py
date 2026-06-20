@@ -1,31 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Layer normalization — hw-agnostic native-only copies.
-
-Vendored and pruned from ``vllm/model_executor/layers/layernorm.py``.
-Only ``RMSNorm`` (with the optional fused-residual addition) and
-``LayerNorm`` are kept — the variants used elsewhere in vLLM
-(``GemmaRMSNorm``, ``RMSNormGated``, ``poly_norm``) are unused here.
-The ``CustomOp`` dispatch layer is gone: each class subclasses
-``nn.Module`` directly and computes the result in float32 PyTorch.
-OOT plugins that want a CUDA / XPU / ROCm fast path subclass these and
-override ``forward``.
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 class RMSNorm(nn.Module):
-    """Root mean square normalization.
-
-    Computes ``x -> w * x / sqrt(E[x^2] + eps)`` where ``w`` is the
-    learned weight (omitted when ``has_weight=False``). When called
-    with a non-None ``residual``, performs the standard
-    add-then-normalize pattern in place: ``residual += x``, then
-    ``x = rms_norm(residual)``.
-    """
+    """``x -> w * x / sqrt(E[x^2] + eps)``. With ``residual``, fuses
+    ``residual += x`` then RMSNorm and returns ``(normalized, residual)``."""
 
     def __init__(
         self,
@@ -70,8 +52,6 @@ class RMSNorm(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             return self._rms_norm(x)
-        # Fused add + RMSNorm: writes residual in place, returns
-        # (normalized, residual) so callers can keep chaining.
         residual = residual + x.to(residual.dtype)
         return self._rms_norm(residual), residual
 
@@ -80,8 +60,6 @@ class RMSNorm(nn.Module):
 
 
 class LayerNorm(nn.Module):
-    """Standard layer normalization with a learned weight + bias."""
-
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.dim = dim

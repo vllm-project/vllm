@@ -21,7 +21,9 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import init_logger
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.activation import MoEActivation
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.activation import (
+    MoEActivation,
+)
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
     FusedMoEConfig,
 )
@@ -51,12 +53,7 @@ from vllm.utils.torch_utils import (
 )
 
 
-# ZeroExpertRouter isn't vendored on the DSv4 hw-agnostic path
-# (see router_factory.py). The ``isinstance(self.router, ZeroExpertRouter)``
-# check below would normally branch into zero-expert handling; an empty
-# placeholder class makes the isinstance always False so the regular
-# routing path runs.
-class ZeroExpertRouter:  # noqa: N801 — preserve upstream public name
+class ZeroExpertRouter:  # noqa: N801 — upstream public name
     pass
 
 
@@ -196,26 +193,7 @@ def _moe_forward_shared_fake(
     return shared_out, fused_out
 
 
-# NOTE: ``moe_forward`` and ``moe_forward_shared`` are registered as
-# opaque custom ops by the upstream
-# ``vllm.model_executor.layers.fused_moe.runner.moe_runner``. Re-
-# registering from this vendored copy would collide on the global
-# ``torch.library`` namespace, so the registrations are skipped here
-# and the vendored ``MoERunner`` reuses the upstream-registered
-# ``torch.ops.vllm.moe_forward`` / ``moe_forward_shared`` ops.
-# direct_register_custom_op(
-#     op_name="moe_forward",
-#     op_func=_moe_forward,
-#     mutates_args=["hidden_states"],
-#     fake_impl=_moe_forward_fake,
-#     tags=(torch.Tag.needs_fixed_stride_order,),
-# )
-# direct_register_custom_op(
-#     op_name="moe_forward_shared",
-#     op_func=_moe_forward_shared,
-#     fake_impl=_moe_forward_shared_fake,
-#     tags=(torch.Tag.needs_fixed_stride_order,),
-# )
+# Custom ops are registered by upstream; reuse those registrations.
 
 
 def _unpack(

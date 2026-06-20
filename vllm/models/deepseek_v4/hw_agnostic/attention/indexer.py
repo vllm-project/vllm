@@ -1,28 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4 indexer attention backend — hw-agnostic copy.
-
-Vendored and pruned from
-``vllm/v1/attention/backends/mla/indexer.py``.
-
-The upstream module pairs the ``DeepseekV4IndexerBackend`` class with a
-DeepGEMM-backed metadata builder
-(``DeepseekV32IndexerMetadataBuilder``) that handles chunked prefill,
-uniform-decode, and tile-scheduling for the FlashInfer sparse-MLA
-kernels. None of that is needed on the hw-agnostic path because the
-local ``SparseAttnIndexer`` stub (see ``ops/sparse_attn_indexer.py``)
-is the only consumer of the indexer cache and it has no portable
-forward implementation. The vendored copy therefore keeps only:
-
-  * the backend class itself (referenced by
-    ``DeepseekV4IndexerCache.get_attn_backend``);
-  * the ``get_max_prefill_buffer_size`` helper used by the indexer
-    layer to size its workspace.
-
-OOT plugins that want a real metadata builder subclass
-``DeepseekV4IndexerBackend`` and override ``get_builder_cls``.
-"""
-
 from vllm.config import VllmConfig
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -72,12 +49,6 @@ class DeepseekV4IndexerBackend(AttentionBackend):
 
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig) -> int:
-    """Indexer workspace sizing heuristic (DSv4 / V3.2 ports).
-
-    Verbatim from the upstream comment: ``40`` is a magic constant chosen
-    so the indexer prefill buffer (132 B per entry) fits inside the
-    FlashMLA-sparse workspace (576 * 2 B per entry, 5 * max_model_len
-    entries). ``40 = (576 * 2 // 132) * 5``.
-    """
-    max_model_len = vllm_config.model_config.max_model_len
-    return 40 * max_model_len
+    # 40 = (576 * 2 // 132) * 5: indexer prefill (132 B) fits inside the
+    # FlashMLA-sparse workspace (576 * 2 B, 5 * max_model_len entries).
+    return 40 * vllm_config.model_config.max_model_len

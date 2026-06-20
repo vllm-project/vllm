@@ -13,17 +13,6 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 
-# Note: only the FP8 quant kernel is imported here; the upstream
-# vllm.model_executor.layers.fused_moe.utils also imported int8 /
-# mxfp4 / mxfp6 / mxfp8 / nvfp4 / w8a8 quant kernels, but DSv4 with FP8
-# experts exercises only the FP8 branch. The other ``_*_quantize``
-# helpers and their corresponding ``moe_kernel_quantize_input``
-# branches were dropped from this vendored copy. The
-# ``quantization.utils.fp8_utils`` import is allowed via a dedicated
-# lint carve-out (study doc §54) since the DSv4 path requires it and
-# the FP8 quant primitives are needed by every backend that supports
-# block-scaled FP8 MoE.
-
 
 @triton.jit
 def _count_expert_num_tokens(
@@ -134,13 +123,6 @@ def _fp8_quantize(
     return A, A_scale
 
 
-# Removed from this vendored copy: _int8_quantize / _mxfp4_quantize /
-# _mxfp8_e4m3_quantize / _mxfp6_e3m2_quantize / _mxfp6_e2m3_quantize /
-# _nvfp4_quantize. DSv4 hw-agnostic only exercises the FP8 path; the
-# other dtypes are handled by registered quant-method subclasses
-# upstream and aren't reached from this file.
-
-
 def moe_kernel_quantize_input(
     A: torch.Tensor,
     A_scale: torch.Tensor | None,
@@ -152,10 +134,6 @@ def moe_kernel_quantize_input(
     quantization_emulation: bool = False,
     mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    # DSv4 hw-agnostic only exercises the FP8 quantization path. The
-    # upstream copy supported nvfp4 / mxfp4 / mxfp8 / mxfp6_e3m2 /
-    # mxfp6_e2m3 / int8 / OCP-MX QDQ schemes — these branches were
-    # dropped here. Other dtypes raise NotImplementedError.
     if ocp_mx_scheme is not None:
         raise NotImplementedError(
             f"OCP MX schemes ({ocp_mx_scheme!r}) are not supported on the "

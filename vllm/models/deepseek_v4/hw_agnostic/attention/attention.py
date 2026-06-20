@@ -1,28 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek V4 multi-head latent attention — hardware-agnostic Triton path.
-
-This module implements the wrapper layer
-(``DeepseekV4MultiHeadLatentAttentionWrapper``) plus its inner
-``DeepseekV4MLAAttention`` for the hw-agnostic stream. All four
-performance-critical kernels are pure Triton and live in
-``hw_agnostic/ops/triton_*.py``:
-
-  * ``triton_qnorm_rope_kv_fp8_insert`` — per-head Q RMSNorm + GPT-J
-    RoPE + UE8M0 FP8 quant + paged cache insert.
-  * ``triton_sparse_decode_fp8`` — sparse MLA decode (FP8→BF16 dequant
-    + BF16 sparse attention).
-  * ``triton_bf16_mla_sparse_interface`` — BF16 sparse attention
-    kernel (consumed by both decode and prefill).
-  * ``triton_inv_rope_einsum`` — BF16 inverse-RoPE + WO_A einsum for
-    the o-projection.
-
-Outside of those four files plus ``common/ops/`` (shared Triton kernels)
-and ``compressor.py`` (shared compressor module), nothing in
-``hw_agnostic/`` reaches into vendor branches (``nvidia/``, ``amd/``,
-``xpu/``). See study doc §52.
-"""
-
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -40,8 +17,10 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.models.deepseek_v4.hw_agnostic.backend import (
-    DeepseekV4HWAgnosticBackend,
+from vllm.models.deepseek_v4.hw_agnostic.attention.compressor import DeepseekCompressor
+from vllm.models.deepseek_v4.hw_agnostic.attention.indexer import (
+    DeepseekV4IndexerBackend,
+    get_max_prefill_buffer_size,
 )
 from vllm.models.deepseek_v4.hw_agnostic.attention.kernels import (
     combine_topk_swa_indices,
@@ -54,25 +33,23 @@ from vllm.models.deepseek_v4.hw_agnostic.attention.kernels import (
     triton_qnorm_rope_kv_fp8_insert,
     triton_sparse_decode_fp8,
 )
+from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla import (
+    DeepseekV4HWAgnosticBackend,
+    DeepseekV4HWAgnosticMetadata,
+)
+from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_swa import DeepseekV4SWACache
+from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import PluggableLayer
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.attention_layer_base import (
     AttentionLayerBase,
 )
-from vllm.models.deepseek_v4.hw_agnostic.attention.compressor import DeepseekCompressor
-from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import PluggableLayer
-from vllm.models.deepseek_v4.hw_agnostic.attention.indexer import (
-    DeepseekV4IndexerBackend,
-    get_max_prefill_buffer_size,
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import (
+    LayerNorm,
+    RMSNorm,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import LayerNorm, RMSNorm
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import ReplicatedLinear
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
 )
-from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla import (
-    DeepseekV4FlashMLABackend,
-    DeepseekV4FlashMLAMetadata,
-)
-from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_swa import DeepseekV4SWACache
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
@@ -85,16 +62,12 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
-# workspace allocated at _forward_prefill (and the matching profile-time
-# reservation in attention_impl's dummy-run branch).
+# Bounds the bf16 kv-gather workspace in _forward_prefill.
 PREFILL_CHUNK_SIZE = 4
 
 
 @dataclass
 class DeepseekV4MLAModules:
-    """Modules used in DeepseekV4 MLA."""
-
     vllm_config: VllmConfig
     fused_wqa_wkv: torch.nn.Module
     q_norm: torch.nn.Module
@@ -109,32 +82,11 @@ class DeepseekV4MLAModules:
     topk_indices_buffer: torch.Tensor | None
 
 
-# --8<-- [start:multi_head_latent_attention]
-# Public name for this PluggableLayer. Out-of-tree subclasses that override
-# this layer should reuse the same suffix so the static-forward-context
-# lookup keeps resolving to the layer instance.
 LAYER_NAME = "deepseek_v4_multi_head_latent_attention"
 
 
 @PluggableLayer.register(LAYER_NAME)
 class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
-    """Pluggable MLA layer which allows OOT backends to add
-    custom implementations of the outer MLA layer (including rope & o_proj).
-    Note that currently oot platforms can still use CustomOp.register_oot to
-    replace MLA layer entirely, although we use PluggableLayer to register
-    this layer now.
-
-    This class takes positions and hidden_states as input.
-    The input tensors can either contain prefill tokens or decode tokens.
-    The class does the following:
-
-    1. MLA Preprocess.
-    2. Perform multi-head attention to prefill tokens and
-       multi-query attention to decode tokens separately.
-    3. Return the output tensor.
-    """
-
-    # --8<-- [end:multi_head_latent_attention]
 
     def __init__(
         self,
@@ -161,8 +113,6 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.head_dim = head_dim
         self.scale = scale
 
-        # FlashMLA sparse kernel only supports 64 or 128 heads; pad up to the
-        # next supported size. Must match DeepseekV4MLAAttention.padded_heads.
         if num_heads <= 64:
             self.padded_heads = 64
         elif num_heads <= 128:
@@ -179,45 +129,38 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.compress_ratio = compress_ratio if compress_ratio is not None else 1
         self.prefix = prefix
 
-        # Extract config from vllm_config
         config = mla_modules.vllm_config.model_config.hf_config
         tp_size = get_tensor_model_parallel_world_size()
 
-        # DeepseekV4-specific attributes (num_heads is already TP-adjusted)
+        # num_heads is already TP-adjusted.
         self.eps = config.rms_norm_eps
         self.rope_head_dim = config.qk_rope_head_dim
         self.nope_head_dim = head_dim - self.rope_head_dim
         self.n_local_groups = config.o_groups // tp_size
         self.o_lora_rank = config.o_lora_rank
 
-        # Store projection modules
         self.fused_wqa_wkv = mla_modules.fused_wqa_wkv
         self.q_norm = mla_modules.q_norm
         self.wq_b = mla_modules.wq_b
-
         self.kv_norm = mla_modules.kv_norm
         self.wo_a = mla_modules.wo_a
-
         self.wo_b = mla_modules.wo_b
-
         self.rotary_emb = mla_modules.rotary_emb
         self.indexer_rotary_emb = mla_modules.indexer_rotary_emb
         self.topk_indices_buffer = mla_modules.topk_indices_buffer
-
         self.indexer = mla_modules.indexer
 
-        # Per-head RMS normalization for Q (no learnable weights)
         self.q_head_norm = RMSNorm(head_dim, eps=self.eps, has_weight=False)
 
-        # TODO(yifan): currently hardcoded for FP8 sparse, make it more generic
+        # TODO(yifan): generalize beyond FP8 sparse.
         head_bytes = (
             self.nope_head_dim  # 448 fp8 NoPE
             + self.rope_head_dim * 2  # 64 bf16 RoPE
-            + self.nope_head_dim // 64  # 7B scale factors
+            + self.nope_head_dim // 64  # 7B scale
             + 1  # 1B pad
         )
 
-        assert cache_config is not None, "DeepseekV4 attention requires cache_config"
+        assert cache_config is not None
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -238,24 +181,21 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             window_size=self.window_size,
             head_bytes=head_bytes,
             swa_cache_layer=self.swa_cache_layer,
-            attn_sink=mla_modules.attn_sink,  # already padded with -inf
+            attn_sink=mla_modules.attn_sink,  # pre-padded with -inf
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=prefix,
             indexer=self.indexer,
             topk_indices_buffer=self.topk_indices_buffer,
         )
-        # Register this layer in the compilation config's static forward context
-        # so the ``deepseek_v4_attention`` custom op (registered below) can
-        # retrieve the per-layer instance by name during execution.
+        # Register so the ``deepseek_v4_attention`` custom op can resolve us.
         compilation_config = mla_modules.vllm_config.compilation_config
         self.layer_name = f"{prefix}.{LAYER_NAME}"
         if self.layer_name in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {self.layer_name}")
         compilation_config.static_forward_context[self.layer_name] = self
 
-        # Create the compressor for layers with compress_ratio > 1; after
-        # creating the DeepseekV4MLAAttention layer to get its cache.
+        # Built after DeepseekV4MLAAttention so we can pass its k_cache prefix.
         self.compressor = None
         if self.compress_ratio > 1:
             self.compressor = DeepseekCompressor(
@@ -274,8 +214,6 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # Pre-allocate attention output with FlashMLA-padded head count.
-        # The op writes into `o_padded`; we slice to n_local_heads after.
         num_tokens = hidden_states.shape[0]
         o_padded = torch.empty(
             (num_tokens, self.padded_heads, self.head_dim),
@@ -283,7 +221,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             device=hidden_states.device,
         )
 
-        # Attention (inside custom op for torch.compile boundary)
+        # Wrapped in a custom op for the torch.compile boundary.
         torch.ops.vllm.deepseek_v4_attention(
             hidden_states,
             positions,
@@ -292,7 +230,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         )
         o = o_padded[:, : self.n_local_heads, :]
 
-        # O projection: BF16 inverse RoPE + reference einsum + wo_b.
+        # O projection: BF16 inverse-RoPE + einsum + wo_b.
         z = triton_inv_rope_einsum(
             self.rotary_emb,
             o,
@@ -305,7 +243,6 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         return self.wo_b(z.flatten(1))
 
     def attn_gemm_parallel_execute(self, hidden_states) -> tuple[Any, ...]:
-        # Hardware-agnostic path: run the four input GEMMs sequentially.
         qr_kv, _ = self.fused_wqa_wkv(hidden_states)
 
         kv_score = None
@@ -332,7 +269,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         self,
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
-        out: torch.Tensor,  # [num_tokens, padded_heads, head_dim], written in place
+        out: torch.Tensor,  # [num_tokens, padded_heads, head_dim], in-place
     ) -> None:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
@@ -350,8 +287,6 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.eps,
         )
 
-        # Hardware-agnostic path: run wq_b + kv_insert and the
-        # indexer/compressor work sequentially on the current stream.
         q = self.wq_b(qr).view(-1, self.n_local_heads, self.head_dim)
         q = self._fused_qnorm_rope_kv_insert(q, kv, positions, attn_metadata)
 
@@ -368,11 +303,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
                 self.indexer_rotary_emb,
             )
 
-        # Handle dummy run (no metadata).
+        # Profile run: pre-allocate bf16-gather workspace.
         if not isinstance(attn_metadata, dict):
-            # Reserve _forward_prefill's bf16-gather workspace; the dummy
-            # run returns before mla_attn runs, so without this the shared
-            # workspace locks below the real prefill size.
             sub = self.mla_attn
             swa_only = sub.compress_ratio <= 1
             N = (
@@ -387,10 +319,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             out.zero_()
             return
 
-        # `q` arrives padded to self.padded_heads — _fused_qnorm_rope_kv_insert
-        # zero-fills the padding head slots inside the kernel and returns the
-        # padded tensor. MLA attention writes into the pre-allocated `out`
-        # buffer ([num_tokens, padded_heads, head_dim]).
+        # `q` is padded to padded_heads by _fused_qnorm_rope_kv_insert.
         self.mla_attn(q, kv, positions, output=out)
 
     def _fused_qnorm_rope_kv_insert(
@@ -402,10 +331,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
         ),
     ) -> torch.Tensor:
-        # The kernel does the (unpadded → padded) Q allocation/zero-fill itself
-        # and returns the padded tensor; on a profile/dummy run where the
-        # kernel doesn't fire, we have to pad `q` ourselves so downstream
-        # FlashMLA still sees the right shape.
+        # Profile run: pad q manually since kernel doesn't fire.
         if not isinstance(attn_metadata, dict):
             if self.n_local_heads < self.padded_heads:
                 return F.pad(
@@ -422,11 +348,8 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         assert swa_metadata is not None
 
         swa_kv_cache = self.swa_cache_layer.kv_cache
-        # The runner's positions buffer is already int64 — no cast needed.
         assert positions.dtype == torch.int64
 
-        # Per-head Q RMSNorm + GPT-J RoPE on Q; GPT-J RoPE on KV; UE8M0
-        # FP8 quant + paged cache insert. Mutates ``q`` in place.
         triton_qnorm_rope_kv_fp8_insert(
             q,
             kv,
@@ -437,8 +360,7 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.eps,
             swa_metadata.block_size,
         )
-        # The kernel does not pad q; the downstream MLA buffers are
-        # allocated at padded_heads, so pad here.
+        # Kernel does not pad q; downstream MLA buffers are at padded_heads.
         if self.n_local_heads < self.padded_heads:
             return F.pad(
                 q,
@@ -500,7 +422,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         # Sparse MLA Args
         indexer: object | None = None,
         topk_indices_buffer: torch.Tensor | None = None,
-        **extra_impl_args,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -517,9 +438,8 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         self.indexer = indexer
         self.topk_indices_buffer = topk_indices_buffer
 
-        self.prefix = prefix  # Alias for compatibility with compressor
+        self.prefix = prefix  # consumed by compressor
 
-        # Determine padded head count for FlashMLA
         if num_heads not in self.SUPPORTED_HEAD_COUNTS:
             if num_heads < 64:
                 self.padded_heads = 64
@@ -533,31 +453,23 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         else:
             self.padded_heads = num_heads
 
-        # Store attention sink
         assert attn_sink is not None
         self.attn_sink: torch.Tensor = attn_sink
-        # Store SWA cache
         assert swa_cache_layer is not None
         self.swa_cache_layer: DeepseekV4SWACache = swa_cache_layer
 
-        # Get vllm config for cache setup
         vllm_config = get_current_vllm_config()
         self.max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.max_model_len = vllm_config.model_config.max_model_len
-        # DeepseekV4 only supports fp8 kv-cache format for now.
         kv_cache_dtype = cache_config.cache_dtype if cache_config is not None else "fp8"
 
         assert kv_cache_dtype.startswith("fp8"), (
-            f"DeepseekV4 only supports fp8 kv-cache format for now, "
-            f"got {kv_cache_dtype}"
+            f"DeepseekV4 requires fp8 kv-cache, got {kv_cache_dtype}"
         )
-        assert issubclass(self.get_attn_backend(), DeepseekV4FlashMLABackend), (
-            "hw_agnostic DeepseekV4 attention requires the V4 sparse-MLA backend"
-        )
-        # The V4 sparse-MLA backend uses the fp8_ds_mla cache layout (584B per
-        # token, UE8M0-block-scaled FP8). Auto-convert any "fp8" alias.
+        assert issubclass(self.get_attn_backend(), DeepseekV4HWAgnosticBackend)
+        # Coerce ``fp8`` alias to the V4 layout (584B/token, UE8M0-block FP8).
         if kv_cache_dtype != "fp8_ds_mla":
             assert cache_config is not None
             cache_config.cache_dtype = "fp8_ds_mla"
@@ -566,7 +478,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
 
         self.kv_cache_dtype = kv_cache_dtype
 
-        # Register with compilation context for metadata lookup
         compilation_config = vllm_config.compilation_config
         if prefix and prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -579,9 +490,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         return DeepseekV4HWAgnosticBackend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
-        if (
-            self.compress_ratio <= 1
-        ):  # SWA part. Allocated separately as DeepseekV4SWACache.
+        if self.compress_ratio <= 1:
             return None
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
@@ -590,7 +499,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             dtype=torch.uint8,
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
-            alignment=576,  # NOTE: FlashMLA requires 576B alignment
+            alignment=576,  # FlashMLA requires 576B alignment
             model_version="deepseek_v4",
         )
 
@@ -608,12 +517,11 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             f"output buffer dtype {output.dtype} must match q dtype {q.dtype}"
         )
 
-        # Get SWA and indexer metadata from forward context
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
         assert isinstance(attn_metadata, dict)
         flashmla_metadata = cast(
-            DeepseekV4FlashMLAMetadata | None, attn_metadata.get(self.prefix)
+            DeepseekV4HWAgnosticMetadata | None, attn_metadata.get(self.prefix)
         )
         swa_metadata = cast(
             "DeepseekSparseSWAMetadata | None",
@@ -622,12 +530,9 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         assert swa_metadata is not None
 
         swa_only = self.compress_ratio <= 1
-        # SWA-only layers (compress_ratio <= 1) don't have their own KV cache
-        # allocation, so self.kv_cache may be empty after profiling cleanup.
         self_kv_cache = self.kv_cache if not swa_only else None
         swa_kv_cache = self.swa_cache_layer.kv_cache
 
-        # Split prefill and decode
         num_decodes = swa_metadata.num_decodes
         num_prefills = swa_metadata.num_prefills
         num_decode_tokens = swa_metadata.num_decode_tokens
@@ -655,9 +560,9 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
     def _forward_decode(
         self,
         q: torch.Tensor,
-        kv_cache: torch.Tensor | None,  # Only used when compress_ratio > 1
+        kv_cache: torch.Tensor | None,  # only used when compress_ratio > 1
         swa_metadata: "DeepseekSparseSWAMetadata",
-        attn_metadata: DeepseekV4FlashMLAMetadata | None,
+        attn_metadata: DeepseekV4HWAgnosticMetadata | None,
         swa_only: bool,
         output: torch.Tensor,
     ) -> None:
@@ -672,7 +577,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             block_size = attn_metadata.block_size // self.compress_ratio
             is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
             if self.compress_ratio == 4:
-                # C4A: local indices differ per layer (filled by Indexer).
+                # C4A: per-layer local indices, filled by the Indexer.
                 assert self.topk_indices_buffer is not None
                 global_indices, topk_lens = compute_global_topk_indices_and_lens(
                     self.topk_indices_buffer[:num_decode_tokens],
@@ -683,7 +588,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 topk_indices = global_indices.view(num_decode_tokens, 1, -1)
             else:
-                # C128A: pre-computed during metadata build by the V4 backend.
+                # C128A: pre-computed by the metadata builder.
                 topk_indices = attn_metadata.c128a_global_decode_topk_indices
                 topk_lens = attn_metadata.c128a_decode_topk_lens
 
@@ -691,9 +596,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         swa_lens = swa_metadata.decode_swa_lens
         assert swa_indices is not None and swa_lens is not None
 
-        # Sparse MLA decode: on-the-fly UE8M0 FP8 → BF16 dequant of the
-        # paged cache, then the BF16 sparse attention kernel. Same
-        # fp8_ds_mla page layout as FlashMLA.
+        # FP8→BF16 dequant of the paged cache, then BF16 sparse attention.
         triton_sparse_decode_fp8(
             q=q,
             kv_cache=kv_cache,
@@ -718,7 +621,7 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         compressed_k_cache: torch.Tensor | None,  # Only used when compress_ratio > 1
         swa_k_cache: torch.Tensor,
         output: torch.Tensor,
-        attn_metadata: DeepseekV4FlashMLAMetadata | None,
+        attn_metadata: DeepseekV4HWAgnosticMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
     ) -> None:
         swa_only = attn_metadata is None
@@ -728,13 +631,11 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
         num_decodes = swa_metadata.num_decodes
         num_decode_tokens = swa_metadata.num_decode_tokens
 
-        # Use pre-computed prefill metadata.
         seq_lens = swa_metadata.prefill_seq_lens
         gather_lens = swa_metadata.prefill_gather_lens
         assert seq_lens is not None
         assert gather_lens is not None
 
-        # Derive prefill-local token offsets from the full query_start_loc_cpu.
         query_start_loc_cpu = swa_metadata.query_start_loc_cpu
         query_start_loc = swa_metadata.query_start_loc
         assert query_start_loc_cpu is not None
@@ -747,17 +648,13 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 topk_indices = self.topk_indices_buffer[num_decode_tokens:]
                 topk_indices = topk_indices[:num_prefill_tokens]
             else:
-                # C128A: pre-computed during metadata build by the V4 backend.
+                # C128A: pre-computed by the metadata builder.
                 assert attn_metadata is not None
                 topk_indices = attn_metadata.c128a_prefill_topk_indices
                 assert topk_indices is not None
             top_k = topk_indices.shape[-1]
-            # Compressed region must fit the full compressed pool (seq_len //
-            # compress_ratio), not just top_k. top_k bounds how many indices
-            # the indexer selects, not the pool size it indexes into.
             N = (self.max_model_len + self.compress_ratio - 1) // self.compress_ratio
         else:
-            # NOTE(woosuk): topk_indices will not be used for SWA-only layers.
             assert self.topk_indices_buffer is not None
             topk_indices = self.topk_indices_buffer[num_decode_tokens:]
             top_k = 0
@@ -775,7 +672,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
             chunk_end = min(chunk_start + PREFILL_CHUNK_SIZE, num_prefills)
             chunk_size = chunk_end - chunk_start
             if not swa_only:
-                # Gather compressed KV
                 assert attn_metadata is not None
                 block_table = attn_metadata.block_table[num_decodes:]
                 dequantize_and_gather_k_cache(
@@ -788,7 +684,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                     offset=0,
                 )
 
-            # Gather SWA KV
             swa_block_table = swa_metadata.block_table[num_decodes:]
             dequantize_and_gather_k_cache(
                 kv[:chunk_size],
@@ -800,7 +695,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 offset=N,
             )
 
-            # Combine the topk indices and SWA indices for gathered KV cache
             query_start = (
                 query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
             )
@@ -808,10 +702,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
             )
 
-            # combined_lens (returned alongside combined_indices) is no
-            # longer consumed: the BF16 sparse kernel reads the index
-            # table only up to its first ``-1``, and ``combine_topk_swa_indices``
-            # already pads the tail with ``-1``.
             combined_indices, _ = combine_topk_swa_indices(
                 topk_indices[query_start:query_end],
                 query_start_loc[
@@ -826,8 +716,6 @@ class DeepseekV4MLAAttention(nn.Module, AttentionLayerBase):
                 N,
             )
 
-            # Sparse MLA prefill: the gathered kv workspace is already
-            # BF16, so we go straight to the BF16 sparse kernel.
             kv_ws = kv[:chunk_size].reshape(-1, 1, q.shape[-1])
             out_chunk, _, _ = triton_bf16_mla_sparse_interface(
                 q=q[query_start:query_end],
@@ -862,17 +750,13 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # head_dim already carries the fp8 scale padding
-        # compress_ratio=1 for V3.2, >1 for DeepseekV4; both use the same cache layout.
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
             compress_ratio=self.compress_ratio,
-            # DeepseekV4 aligns indexer pages to FlashMLA's 576B so they can pack with
-            # the indexer's compressor state cache. V3.2 keeps the legacy layout.
-            alignment=576,
+            alignment=576,  # FlashMLA alignment; lets indexer + compressor pages pack.
         )
 
     def forward(self): ...
@@ -898,12 +782,11 @@ class DeepseekV4Indexer(nn.Module):
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = quant_config
-        # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
         self.topk_tokens = config.index_topk
-        self.n_head = config.index_n_heads  # 64
-        self.head_dim = config.index_head_dim  # 128
-        self.rope_dim = config.qk_rope_head_dim  # 64
-        self.q_lora_rank = q_lora_rank  # 1536
+        self.n_head = config.index_n_heads
+        self.head_dim = config.index_head_dim
+        self.rope_dim = config.qk_rope_head_dim
+        self.q_lora_rank = q_lora_rank
         self.compress_ratio = compress_ratio
         self.use_fp4_kv = self.vllm_config.attention_config.use_fp4_indexer_cache
         logger.info_once(
@@ -911,7 +794,6 @@ class DeepseekV4Indexer(nn.Module):
             "MXFP4" if self.use_fp4_kv else "FP8",
         )
 
-        # no tensor parallel, just replicated
         self.wq_b = ReplicatedLinear(
             self.q_lora_rank,
             self.head_dim * self.n_head,
@@ -942,11 +824,9 @@ class DeepseekV4Indexer(nn.Module):
             get_max_prefill_buffer_size(vllm_config) // self.compress_ratio
         )
 
-        assert cache_config is not None, "Deepseek V4 indexer requires cache_config"
-        # NOTE(yifan): FP8 indxer cache use the same layout as V3.2:
-        # head_dim bytes = 128 fp8 + 4 fp32 scale = 132.
-        # For FP4 indexer cache, we still allocate the same amount of memory as FP8,
-        # but only use the first half of the memory.
+        assert cache_config is not None
+        # FP8 layout: 128 fp8 + 4 fp32 scale = 132 bytes/head_dim. FP4 reuses the
+        # same allocation but only fills the first half.
         k_cache_head_dim = self.head_dim + self.head_dim // self.quant_block_size * 4
         self.k_cache = DeepseekV4IndexerCache(
             head_dim=k_cache_head_dim,
@@ -988,7 +868,6 @@ class DeepseekV4Indexer(nn.Module):
         positions: torch.Tensor,
         rotary_emb: nn.Module,
     ) -> torch.Tensor:
-        # ReplicatedLinear returns (output, bias); bias is None.
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
         k = self.compressor(compressed_kv_score, positions, rotary_emb)

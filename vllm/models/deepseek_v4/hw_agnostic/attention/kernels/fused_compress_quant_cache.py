@@ -1,31 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Fused compressor + FP8/MXFP4 UE8M0 quantization + KV cache insert kernels.
-
-Three specialized kernels:
-  - _fused_kv_compress_norm_rope_insert_sparse_attn:
-        head=512, nope=448 FP8 + rope=64 bf16
-  - _fused_kv_compress_norm_rope_insert_indexer_attn:
-        head=128, all FP8, 1 block/token
-  - _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn:
-        head=128, MXFP4 (block=32), 4 ue8m0 bytes
-
-RoPE is register-based via tl.reshape -> tl.split -> tl.interleave (or the
-even/odd halves are consumed directly for MXFP4, no interleave needed).
-FP8 UE8M0 quant uses tl.reshape to tile [N_QUANT_BLOCKS, QUANT_BLOCK] for
-per-block absmax entirely in registers. MXFP4 does the same tiling on the
-even/odd halves, producing (N_QUANT_BLOCKS, MXFP4_BLOCK/2) packed nibbles
-and N_QUANT_BLOCKS ue8m0 bytes.
-"""
+"""Fused compress + RoPE + FP8/MXFP4 quant + cache insert kernels."""
 
 from typing import Any
 
 import torch
 
+from vllm.models.deepseek_v4.hw_agnostic.attention.kernels.fused_indexer_q import (
+    _fp32x2_to_fp4x2,
+)
 from vllm.triton_utils import tl, triton
-
-from .fused_indexer_q import _fp32x2_to_fp4x2
 
 
 def compress_norm_rope_store_triton(

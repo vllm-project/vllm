@@ -17,6 +17,7 @@ from collections.abc import Callable, Iterable
 import regex as re
 import torch
 import torch.nn as nn
+from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -25,39 +26,68 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.models.deepseek_v4.hw_agnostic.models_utils._mtp_helpers import (
-    SharedHead,
-    get_spec_layer_idx_from_weight_name,
+from vllm.models.deepseek_v4.hw_agnostic.model import (
+    DeepseekV4DecoderLayer,
+    hc_head,
 )
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.layer import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import RMSNorm
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import ReplicatedLinear
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.logits_processor import LogitsProcessor
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.logits_processor import (
+    LogitsProcessor,
+)
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .model import (
-    DeepseekV4DecoderLayer,
-    hc_head,
-)
-
 logger = init_logger(__name__)
 
-# MoE expert scales are fused into per-layer w13/w2 tensors. The exact
-# parameter suffix depends on which FusedMoE method handles the experts:
-# - fp4 experts (Mxfp4MoEMethod) register ``w{1,2,3}_weight_scale``;
-# - fp8 experts (Fp8MoEMethod with block_quant=True) register
-#   ``w{1,2,3}_weight_scale_inv``.
-# Other FP8 linear scales (including shared experts) always use
-# ``.weight_scale_inv``. Mirrors the per-instance mapper built by
-# ``_make_deepseek_v4_weights_mapper`` in deepseek_v4.py.
+
+class SharedHead(nn.Module):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        prefix: str,
+        quant_config: QuantizationConfig | None = None,
+    ) -> None:
+        super().__init__()
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "head"),
+        )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.norm(hidden_states)
+
+
+def get_spec_layer_idx_from_weight_name(
+    config: PretrainedConfig, weight_name: str
+) -> int | None:
+    if (
+        hasattr(config, "num_nextn_predict_layers")
+        and config.num_nextn_predict_layers > 0
+    ):
+        layer_idx = config.num_hidden_layers
+        for i in range(config.num_nextn_predict_layers):
+            if weight_name.startswith(
+                f"model.layers.{layer_idx + i}."
+            ) or weight_name.startswith(f"layers.{layer_idx + i}."):
+                return layer_idx + i
+    return None
+
+
+# Expert scale naming: fp4 uses _weight_scale, fp8 uses _weight_scale_inv.
 _EXPERT_SCALE_RE = re.compile(r"\.experts\.\d+\.w[123]\.scale$")
 
 
@@ -111,10 +141,8 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             requires_grad=False,
         )
 
-        # CustomOps must be constructed inside set_current_vllm_config — i.e.
-        # here at model-init time, not later in compute_logits. mHC ops are
-        # vendored locally.
-        from vllm.models.deepseek_v4.hw_agnostic.layers import mhc
+        # CustomOps must be built inside set_current_vllm_config context.
+        from vllm.models.deepseek_v4.hw_agnostic.layers import mhc  # noqa: F401
 
         self.hc_head_op = mhc.HCHeadOp()
         self.mhc_post_op = mhc.MHCPostOp()
@@ -141,8 +169,6 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
         inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
 
-        # Target stashes pre-hc_head residual as flat (T, hc_mult * D);
-        # reshape to (T, hc_mult, D) — the training-time layout.
         previous_hidden_states = previous_hidden_states.view(
             -1, self.hc_mult, self.config.hidden_size
         )
@@ -154,9 +180,6 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
             positions=positions, x=hidden_states, input_ids=None
         )
         hidden_states = self.mhc_post_op(hidden_states, residual, post_mix, res_mix)
-        # Return the flat pre-hc_head residual so it can be re-fed as the
-        # next spec step's `previous_hidden_states` when
-        # num_speculative_tokens > 1. hc_head is deferred to compute_logits.
         return hidden_states.flatten(1)
 
 
@@ -297,8 +320,7 @@ class DeepSeekV4MTP(nn.Module):
             return name
 
         def _find_mtp_layer_idx(name: str) -> int:
-            subnames = name.split(".")
-            for subname in subnames:
+            for subname in name.split("."):
                 try:
                     # we return the first encountered integer
                     return int(subname)
@@ -333,9 +355,6 @@ class DeepSeekV4MTP(nn.Module):
             num_experts=self.config.n_routed_experts,
         )
 
-        # FP8 experts register ``..._weight_scale_inv`` (block_quant) while
-        # FP4/MXFP4 experts register ``..._weight_scale``. Choose the suffix
-        # for the rename below based on the model's expert dtype.
         expert_scale_suffix = (
             ".weight_scale"
             if getattr(self.config, "expert_dtype", "fp4") == "fp4"
@@ -344,9 +363,7 @@ class DeepSeekV4MTP(nn.Module):
 
         for name, loaded_weight in weights:
             mtp_layer_idx = _find_mtp_layer_idx(name)
-            # V4 checkpoints store MTP weights as `mtp.{i}.*`; remap to
-            # `model.layers.{num_hidden_layers + i}.*` so that
-            # get_spec_layer_idx_from_weight_name can identify them.
+            # Remap checkpoint mtp.{i} to model.layers.{num_hidden_layers + i}.
             name = name.replace(
                 f"mtp.{mtp_layer_idx}.",
                 f"model.layers.{self.config.num_hidden_layers + mtp_layer_idx}.",
@@ -383,9 +400,7 @@ class DeepSeekV4MTP(nn.Module):
                 break
             else:
                 if ".experts." in name:
-                    # Reinterpret E8M0 scales as uint8 to preserve raw
-                    # exponent bytes; numeric copy_() would zero them.
-                    # Mirrors the main DeepseekV4 loader.
+                    # Preserve E8M0 exponent bytes: reinterpret as uint8.
                     if (
                         "weight_scale" in name
                         and loaded_weight.dtype == torch.float8_e8m0fnu
@@ -458,11 +473,8 @@ class DeepSeekV4MTP(nn.Module):
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
-        """
-        Rewrite the weight name to match the format of the original model.
-        Add .mtp_block for modules in transformer layer block for spec layer
-        and rename shared layer weights to be top level.
-        """
+        """Insert ``.mtp_block`` for transformer-block weights, lift shared
+        weights (e.g. ``embed_tokens``) to the top level."""
         spec_layer_weight_names = [
             "embed_tokens",
             "enorm",

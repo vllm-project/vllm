@@ -18,7 +18,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.activation import MoEActivation
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.activation import (
+    MoEActivation,
+)
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -82,7 +84,6 @@ def determine_expert_counts(
     # ROCm aiter shared experts fusion
     # AITER only supports gated activations (silu/gelu), so disable it
     # for non-gated MoE (is_act_and_mul=False)
-    # rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul
     aiter_fmoe_shared_expert_enabled = (
         rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() and is_act_and_mul
     )

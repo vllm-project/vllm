@@ -1,26 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""BF16 reference inverse-RoPE + WO_A einsum for the o-projection.
-
-This file lives next to its Triton siblings under ``hw_agnostic/ops/``
-and uses the ``triton_`` naming for consistency, but the implementation
-itself is pure PyTorch — there is no Triton kernel here. Kept in the
-same package so the agnostic attention layer imports all four
-o-projection / sparse-MLA helpers from one place.
-
-Inputs:
-  * ``o``: attention output, ``[num_tokens, n_local_heads, head_dim]``,
-    BF16. The trailing ``rope_head_dim`` elements still carry the
-    forward-RoPE rotation applied earlier in the layer.
-  * ``positions``: ``[num_tokens]`` int64.
-  * ``wo_a``: linear module exposing ``weight`` (and optionally
-    ``weight_scale_inv`` for FP8 quantization). The weights are
-    dequantized to BF16 inline; this is intentionally a *reference*
-    path, not a fused FP8 kernel.
-
-Output: ``[num_tokens, n_local_groups, o_lora_rank]`` in BF16, ready
-for ``wo_b`` (a RowParallelLinear) to consume.
-"""
+"""Inverse-RoPE + WO_A einsum for the o-projection."""
 
 import math
 
