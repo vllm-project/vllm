@@ -10,10 +10,11 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import Request
 
+from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicContentBlock,
@@ -48,6 +49,9 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.renderers.online_renderer import OnlineRenderer
+
+if TYPE_CHECKING:
+    from vllm.tokenizers import TokenizerLike
 
 logger = logging.getLogger(__name__)
 
@@ -146,30 +150,48 @@ class AnthropicServingMessages(OpenAIServingChat):
         # arg is ``None`` by default, in which case ``_detect_merge_inline_system``
         # would blindly return ``True`` (the conservative merge path) even for
         # templates—like GLM—that already accept mid-conversation system
-        # messages. Looking the template up the same way the renderer does
-        # lets us return ``False`` for those, so a trailing system message
-        # appended by the client no longer invalidates the entire prefix and
-        # triggers a full recompute. Falls back to the conservative behavior
-        # only when no template can be resolved.
-        resolved_template = chat_template
-        if resolved_template is None:
-            tokenizer = self.renderer.tokenizer
-            if tokenizer is not None:
-                try:
-                    from vllm.renderers.hf import resolve_chat_template
-
-                    resolved_template = resolve_chat_template(
-                        tokenizer, None, None, model_config=self.model_config
-                    )
-                except Exception:
-                    logger.debug(
-                        "Could not resolve model chat template for "
-                        "inline-system detection; falling back to merge mode.",
-                        exc_info=True,
-                    )
+        # messages. Resolving the model's own template (as the renderer
+        # does) lets us return ``False`` for those, so a trailing system
+        # message appended by the client no longer invalidates the entire
+        # prefix and triggers a full recompute.
+        resolved_template = self._resolve_chat_template_for_detection(
+            chat_template, self.renderer.tokenizer, self.model_config
+        )
         self._merge_inline_system = self._detect_merge_inline_system(
             resolved_template
         )
+
+    @staticmethod
+    def _resolve_chat_template_for_detection(
+        chat_template: str | None,
+        tokenizer: "TokenizerLike | None",
+        model_config: "ModelConfig",
+    ) -> str | None:
+        """Resolve the model's chat template for inline-system detection.
+
+        Mirrors the renderer's resolution path so the merge decision is
+        based on the template the model actually uses, rather than the
+        raw (often ``None``) ``--chat-template`` arg. Returns ``None``
+        only when no template can be resolved, in which case the caller
+        falls back to the conservative merge behavior.
+        """
+        if chat_template is not None:
+            return chat_template
+        if tokenizer is None:
+            return None
+        try:
+            from vllm.renderers.hf import resolve_chat_template
+
+            return resolve_chat_template(
+                tokenizer, None, None, model_config=model_config
+            )
+        except Exception:
+            logger.debug(
+                "Could not resolve model chat template for "
+                "inline-system detection; falling back to merge mode.",
+                exc_info=True,
+            )
+            return None
 
     @staticmethod
     def _detect_merge_inline_system(chat_template: str | None) -> bool:
@@ -185,6 +207,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         # not pull in ``jinja2.sandbox`` / ``jinja2.ext``, so referencing
         # ``jinja2.sandbox.ImmutableSandboxedEnvironment`` only works when
         # some other import has loaded them as a side effect.
+        from jinja2.exceptions import TemplateError
         from jinja2.ext import loopcontrols
         from jinja2.sandbox import ImmutableSandboxedEnvironment
 
@@ -204,9 +227,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                 add_generation_prompt=False,
             )
             return False
-        except Exception:
-            # Non-templates, malformed templates, or templates that raise
-            # on mid-conversation system messages fall back to merging.
+        except TemplateError:
+            # Templates that raise on mid-conversation system messages
+            # (e.g. Qwen's loop.first guard) fall back to merging.
             return True
 
     @staticmethod
