@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for MiniMax M3 sparse prefill attention kernels."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.forward_context import ForwardContext, override_forward_context
 from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerBackend,
 )
@@ -21,7 +24,12 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
 )
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
+    MiniMaxM3SparseMetadata,
+    MiniMaxM3SparsePrefillMetadata,
     MiniMaxM3SparseTritonImpl,
+)
+from vllm.models.minimax_m3.nvidia.sparse_attention_msa import (
+    MiniMaxM3SparseMSAImpl,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
@@ -79,6 +87,95 @@ BLOCK_SIZE = 128
 DTYPE = torch.bfloat16
 SM_SCALE = HEAD_DIM**-0.5
 TOPK = 16
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="fmha_sm100 sparse attention requires SM100.",
+)
+def test_msa_prefill_materializes_noncontiguous_topk(monkeypatch):
+    import vllm.third_party.fmha_sm100.sparse as msa_sparse
+
+    num_tokens = 4
+    num_index_heads = 2
+    topk_blocks = 4
+    topk_buffer = torch.arange(
+        num_index_heads * 8 * topk_blocks,
+        device="cuda",
+        dtype=torch.int32,
+    ).view(num_index_heads, 8, topk_blocks)
+    prefill_topk = topk_buffer[:, :num_tokens, :]
+    assert not prefill_topk.is_contiguous()
+
+    observed_topk: torch.Tensor | None = None
+
+    def build_k2q_csr(topk, *args, **kwargs):
+        nonlocal observed_topk
+        observed_topk = topk
+        empty = torch.empty(0, device=topk.device, dtype=torch.int32)
+        return empty, empty, None
+
+    monkeypatch.setattr(msa_sparse, "build_k2q_csr", build_k2q_csr)
+    monkeypatch.setattr(msa_sparse, "sparse_atten_func", lambda *args, **kwargs: None)
+
+    prefill_metadata = MiniMaxM3SparsePrefillMetadata(
+        cu_seqlens_q=torch.tensor([0, num_tokens], device="cuda", dtype=torch.int32),
+        cu_seqlens_k=torch.tensor([0, BLOCK_SIZE], device="cuda", dtype=torch.int32),
+        seq_lens=torch.tensor([BLOCK_SIZE], device="cuda", dtype=torch.int32),
+        context_lens=torch.tensor([0], device="cuda", dtype=torch.int32),
+        block_table=torch.zeros(1, 1, device="cuda", dtype=torch.int32),
+        max_query_len=num_tokens,
+        max_seq_len=BLOCK_SIZE,
+        total_kv_blocks=1,
+    )
+    metadata = MiniMaxM3SparseMetadata(
+        seq_lens=prefill_metadata.seq_lens,
+        max_seq_len=BLOCK_SIZE,
+        slot_mapping=torch.arange(num_tokens, device="cuda"),
+        num_actual_tokens=num_tokens,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=1,
+        num_prefill_tokens=num_tokens,
+        prefill=prefill_metadata,
+    )
+    forward_context = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={"layer": metadata},
+        slot_mapping={},
+    )
+    impl = MiniMaxM3SparseMSAImpl(
+        num_heads=4,
+        head_size=HEAD_DIM,
+        scale=SM_SCALE,
+        num_kv_heads=2,
+        topk_blocks=topk_blocks,
+        sparse_block_size=BLOCK_SIZE,
+    )
+    query = torch.empty(num_tokens, 4 * HEAD_DIM, device="cuda", dtype=DTYPE)
+    output = torch.empty_like(query)
+    kv_cache = torch.empty(
+        1,
+        2,
+        BLOCK_SIZE,
+        2,
+        HEAD_DIM,
+        device="cuda",
+        dtype=DTYPE,
+    )
+
+    with override_forward_context(forward_context):
+        impl.forward(
+            SimpleNamespace(layer_name="layer"),
+            query,
+            kv_cache,
+            (None, prefill_topk),
+            output,
+        )
+
+    assert observed_topk is not None
+    assert observed_topk.is_contiguous()
+    torch.testing.assert_close(observed_topk, prefill_topk)
 
 
 @pytest.mark.parametrize(

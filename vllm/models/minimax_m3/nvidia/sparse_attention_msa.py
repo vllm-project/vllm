@@ -73,6 +73,8 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
 
             p = main_md.prefill
             assert p is not None and prefill_topk is not None
+            # Persistent top-k buffer slices can retain a padded head stride.
+            prefill_topk = prefill_topk.contiguous()
             qp = q[nd:]
             k_cache = kv_cache[:, 0].transpose(1, 2)
             v_cache = kv_cache[:, 1].transpose(1, 2)
