@@ -39,12 +39,7 @@ def main(argv):
         if "torch" in "".join(lines).lower():
             with open(file, "w") as f:
                 for line in lines:
-                    if (
-                        args.prefix
-                        and not line.lower().strip().startswith(TORCH_LIB_PREFIXES)
-                        or not args.prefix
-                        and "torch" not in line.lower()
-                    ):
+                    if (args.prefix and not line.lower().strip().startswith(TORCH_LIB_PREFIXES)) or (not args.prefix and "torch" not in line.lower()):
                         f.write(line)
                     else:
                         print(f">>> removed from {file}:", line.strip())
