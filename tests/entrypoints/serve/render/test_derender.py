@@ -775,3 +775,123 @@ async def test_e2e_no_chat_request_fallback(parser_client, parser_tokenizer):
     assert resp.status_code == 200
     content = resp.json()["choices"][0]["message"]["content"]
     assert "Hi" in content
+
+
+# ---------------------------------------------------------------------------
+# E2E: HarmonyParser + GPT-OSS
+# ---------------------------------------------------------------------------
+
+HARMONY_MODEL = "openai/gpt-oss-20b"
+
+
+@pytest.fixture(scope="module")
+def harmony_server():
+    args = [
+        "--trust-remote-code",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser",
+        "openai",
+        "--reasoning-parser",
+        "openai_gptoss",
+    ]
+    with RemoteLaunchRenderServer(HARMONY_MODEL, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def harmony_client(harmony_server):
+    async with httpx.AsyncClient(
+        base_url=harmony_server.url_for(""), timeout=60.0
+    ) as http_client:
+        yield http_client
+
+
+@pytest.fixture(scope="module")
+def harmony_tokenizer():
+    return get_tokenizer(HARMONY_MODEL, trust_remote_code=True)
+
+
+def _harmony_extract_assistant_ids(
+    tokenizer, assistant_msg: dict, user_content: str = "test"
+) -> list[int]:
+    """Extract assistant token IDs via apply_chat_template diff."""
+    prompt = [{"role": "user", "content": user_content}]
+    full = prompt + [assistant_msg]
+    text_prompt = tokenizer.apply_chat_template(
+        prompt, add_generation_prompt=True, tokenize=False
+    )
+    text_full = tokenizer.apply_chat_template(
+        full, add_generation_prompt=False, tokenize=False
+    )
+    prompt_ids = tokenizer.encode(text_prompt)
+    full_ids = tokenizer.encode(text_full)
+    assistant_ids = list(full_ids[len(prompt_ids) :])
+    if not assistant_ids:
+        pytest.skip("Could not extract assistant tokens for Harmony")
+    return assistant_ids
+
+
+@pytest.mark.asyncio
+async def test_e2e_harmony_plain_roundtrip(harmony_client, harmony_tokenizer):
+    """GPT-OSS content-only roundtrip."""
+    messages = [{"role": "user", "content": "What is 2+2?"}]
+    gen_req = await _e2e_render_chat(harmony_client, HARMONY_MODEL, messages)
+
+    assistant_msg = {"role": "assistant", "content": "Four."}
+    output_ids = _harmony_extract_assistant_ids(harmony_tokenizer, assistant_msg)
+
+    resp = await harmony_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": HARMONY_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {
+                "model": HARMONY_MODEL,
+                "messages": messages,
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    content = resp.json()["choices"][0]["message"]["content"]
+    assert content is not None and len(content) > 0
+    assert "Four" in content
+
+
+@pytest.mark.asyncio
+async def test_e2e_harmony_reasoning(harmony_client, harmony_tokenizer):
+    """GPT-OSS reasoning: analysis channel extracted."""
+    messages = [{"role": "user", "content": "Add 2 and 3."}]
+    gen_req = await _e2e_render_chat(harmony_client, HARMONY_MODEL, messages)
+
+    reasoning_text = "The user wants 2 plus 3."
+    answer_text = "The answer is 5."
+    assistant_msg = {
+        "role": "assistant",
+        "thinking": reasoning_text,
+        "content": answer_text,
+    }
+    output_ids = _harmony_extract_assistant_ids(harmony_tokenizer, assistant_msg)
+
+    decoded = harmony_tokenizer.decode(output_ids)
+    if reasoning_text not in decoded:
+        pytest.skip("Harmony template did not render thinking")
+
+    resp = await harmony_client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": HARMONY_MODEL,
+            "generate_response": _e2e_generate_response(output_ids),
+            "prompt_tokens": len(gen_req["token_ids"]),
+            "chat_request": {
+                "model": HARMONY_MODEL,
+                "messages": messages,
+                "include_reasoning": True,
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    msg = resp.json()["choices"][0]["message"]
+    assert msg["reasoning"] is not None
+    assert reasoning_text in msg["reasoning"]
+    assert answer_text in (msg["content"] or "")

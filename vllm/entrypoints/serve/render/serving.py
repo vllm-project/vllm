@@ -127,7 +127,7 @@ def _correct_decoded_token(
 def _resolve_logprobs(
     logprobs: ChatCompletionLogProbs, tokenizer: TokenizerLike
 ) -> ChatCompletionLogProbs:
-    """Resolve token_id:N placeholders and fix byte-fallback U+FFFD."""
+    """Resolve token_id:N placeholders in a ChatCompletionLogProbs object."""
     if logprobs.content is None:
         return logprobs
 
@@ -616,9 +616,21 @@ class OpenAIServingRender:
                         choice.token_ids, skip_special_tokens=False
                     )
 
+                    chat_template_kwargs: dict[str, Any] = {}
+                    if not self.use_harmony:
+                        chat_template_kwargs = (
+                            chat_request.build_chat_params(
+                                self.chat_template,
+                                self.chat_template_content_format,
+                            )
+                            .with_defaults(self.default_chat_template_kwargs)
+                            .chat_template_kwargs
+                        )
+
                     parser = self.parser(
                         tokenizer,
                         chat_request.tools,
+                        chat_template_kwargs=chat_template_kwargs,
                     )
                     reasoning, content, tool_calls = parser.parse(
                         decoded_text,
