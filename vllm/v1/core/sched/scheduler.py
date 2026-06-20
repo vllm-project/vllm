@@ -1623,7 +1623,8 @@ class Scheduler(SchedulerInterface):
                             self._pos_reached[j] += 1
                             if j < num_accepted:
                                 self._pos_accepted[j] += 1
-                    self._draft_steps += 1  # Track forward passes, not tokens
+                    if actual_k > 0:
+                        self._draft_steps += 1  # Only count steps where draft actually ran
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
@@ -1918,15 +1919,25 @@ class Scheduler(SchedulerInterface):
         min_k = self._adaptive_k_min_tokens
         max_k = max_k if max_k is not None else self.num_spec_tokens
 
+        # O(K) computation: maintain running prefix product
+        prod = 1.0
+        e_total = 1.0
         best_k = 0  # K=0 baseline (no speculation)
         best_goodput = 1.0
-        for k in range(max(min_k, 1), max_k + 1):
-            prod = 1.0
-            e_total = 1.0
-            for i in range(min(k, len(alphas))):
-                a = max(0.001, min(0.999, alphas[i]))
-                prod *= a
-                e_total += prod
+
+        for k in range(1, max_k + 1):
+            # alphas[i] = conditional acceptance rate at draft position i+1
+            # (0-indexed array, 1-indexed in the cost model formula)
+            if k - 1 < len(alphas):
+                a = max(0.001, min(0.999, alphas[k - 1]))
+            else:
+                a = self._alpha_prior
+            prod *= a
+            e_total += prod
+
+            if k < min_k:
+                continue
+
             # ITL(K) = K * draft + 1 + K * verify_cost.
             itl = k * draft_cost_per_token + 1.0 + k * verify_cost_per_token
 
