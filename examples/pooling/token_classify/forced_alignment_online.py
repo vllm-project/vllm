@@ -25,6 +25,7 @@ Then run:
 """
 
 import argparse
+import json
 import mimetypes
 import wave
 from io import BytesIO
@@ -35,6 +36,7 @@ import numpy as np
 import pybase64 as base64
 import requests
 import torch
+from huggingface_hub import hf_hub_download
 
 RAW_CONTENT_CHAT_TEMPLATE = "{{ messages[0]['content'] }}"
 
@@ -106,6 +108,20 @@ def parse_response(response: requests.Response) -> dict[str, Any]:
     return result
 
 
+def load_timestamp_config(model: str) -> tuple[int, float]:
+    model_path = Path(model)
+    config_path = (
+        model_path / "config.json"
+        if model_path.exists()
+        else Path(hf_hub_download(repo_id=model, filename="config.json"))
+    )
+
+    with config_path.open() as f:
+        config = json.load(f)
+
+    return config["timestamp_token_id"], config["timestamp_segment_time"]
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
@@ -131,7 +147,7 @@ def parse_args():
 
 
 def main(args):
-    from transformers import AutoConfig, AutoTokenizer
+    from transformers import AutoTokenizer
 
     api_url = f"http://{args.host}:{args.port}/pooling"
     prompt = build_prompt(args.words)
@@ -145,10 +161,8 @@ def main(args):
     pooling_response = post_http_request(payload=payload, api_url=api_url)
     result = parse_response(pooling_response)
 
-    config = AutoConfig.from_pretrained(args.model)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    timestamp_token_id = config.timestamp_token_id
-    timestamp_segment_time = config.timestamp_segment_time
+    timestamp_token_id, timestamp_segment_time = load_timestamp_config(args.model)
 
     output = result["data"][0]
     logits = torch.tensor(output["data"])
