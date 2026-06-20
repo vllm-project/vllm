@@ -175,11 +175,23 @@ def warmup_v1_slot_mapping_kernel(model_runner: Any) -> None:
     device = model_runner.device
     block_table.add_row(tuple([1] for _ in block_table.block_tables), 0)
     block_table.commit_block_table(1)
-    query_start_loc = torch.tensor([0, 1], dtype=torch.int32, device=device)
-    positions = torch.zeros(1, dtype=torch.int64, device=device)
+    max_warmup_tokens = min(
+        model_runner.max_num_tokens,
+        model_runner.max_model_len,
+        1024,
+    )
+    warmup_sizes: list[int] = []
+    for num_tokens in (max_warmup_tokens, min(max_warmup_tokens, 2), 1):
+        if num_tokens > 0 and num_tokens not in warmup_sizes:
+            warmup_sizes.append(num_tokens)
 
     try:
-        block_table.compute_slot_mapping(1, query_start_loc, positions)
+        for num_tokens in warmup_sizes:
+            query_start_loc = torch.tensor(
+                [0, num_tokens], dtype=torch.int32, device=device
+            )
+            positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+            block_table.compute_slot_mapping(1, query_start_loc, positions)
         torch.accelerator.synchronize()
     finally:
         block_table.clear_row(0)

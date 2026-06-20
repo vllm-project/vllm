@@ -93,6 +93,8 @@ def _make_v1_slot_mapping_warmup_runner_stub(block_table=None, num_blocks=12):
     return SimpleNamespace(
         device=torch.device("cpu"),
         kv_cache_config=SimpleNamespace(num_blocks=num_blocks),
+        max_model_len=128,
+        max_num_tokens=128,
         input_batch=SimpleNamespace(block_table=block_table),
     )
 
@@ -108,6 +110,22 @@ def test_v1_warmup_runs_slot_mapping_and_clears_temporary_row(monkeypatch):
     assert block_table.calls == [
         ("add_row", ([1], [1]), 0),
         ("commit_block_table", 1),
+        (
+            "compute_slot_mapping",
+            1,
+            [0, 128],
+            list(range(128)),
+            torch.int32,
+            torch.int64,
+        ),
+        (
+            "compute_slot_mapping",
+            1,
+            [0, 2],
+            [0, 1],
+            torch.int32,
+            torch.int64,
+        ),
         (
             "compute_slot_mapping",
             1,
