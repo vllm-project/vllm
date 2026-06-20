@@ -145,11 +145,14 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
                 "Fallback to default kv cache layout."
             )
             return None
-        use_mla = vllm_config.model_config.use_mla
-        if use_mla:
-            # return None when we have mla
-            # as the layout should not matter in that case,
-            # which fallback to the default behavior.
+        if vllm_config.model_config.use_mla:
+            return None
+        backend = get_current_attn_backend(vllm_config)
+        if backend.get_name() not in (
+            "FLASH_ATTN",
+            "FLASHINFER",
+            "TRITON_ATTN",
+        ):
             return None
         logger.info_once(
             "NixlConnector setting KV cache layout to HND for better xfer performance."

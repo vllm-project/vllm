@@ -7,6 +7,9 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    get_current_attn_backend,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -180,7 +183,18 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
-        return "HND"
+        if vllm_config.model_config is None:
+            return None
+        if vllm_config.model_config.use_mla:
+            return None
+        backend = get_current_attn_backend(vllm_config)
+        if backend.get_name() in (
+            "FLASH_ATTN",
+            "FLASHINFER",
+            "TRITON_ATTN",
+        ):
+            return "HND"
+        return None
 
     def reset_cache(self) -> bool | None:
         assert self.connector_scheduler is not None
