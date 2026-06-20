@@ -790,6 +790,7 @@ async def benchmark(
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
     self_timed: bool = False,
+    system_prompt: str | None = None,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -1022,6 +1023,7 @@ async def benchmark(
             extra_body=per_request_extra_body,
             request_id=request_id,
             chat_messages=request.chat_messages,
+            system_prompt=system_prompt,
         )
         tasks.append(
             asyncio.create_task(
@@ -1489,6 +1491,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
     # Use 127.0.0.1 here instead of localhost to force the use of ipv4
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument(
+        "--system-prompt",
+        type=str,
+        default=None,
+        help="System prompt/instruction to be passed with each request.",
+    )
     parser.add_argument(
         "--endpoint",
         type=str,
@@ -2110,6 +2118,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
         self_timed=args.self_timed,
+        system_prompt=args.system_prompt,
     )
 
     # Save config and results to json

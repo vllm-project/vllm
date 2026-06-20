@@ -83,6 +83,7 @@ class RequestFuncInput:
     # uses this list directly and skips building messages from `prompt` and
     # `multi_modal_content`.
     chat_messages: list[dict[str, Any]] | None = None
+    system_prompt: str | None = None
 
 
 @dataclass
@@ -325,18 +326,23 @@ def _get_chat_messages(
     mm_position: Literal["first", "last"] = "last",
 ) -> list[dict[str, Any]]:
     prompt = request_func_input.prompt
-    if _is_chat_messages(prompt):
-        return prompt
+    messages = []
+    if request_func_input.system_prompt:
+        messages.append({"role": "system", "content": request_func_input.system_prompt})
 
-    return [
-        {
-            "role": "user",
-            "content": _get_chat_content(
-                request_func_input,
-                mm_position=mm_position,
-            ),
-        }
-    ]
+    if _is_chat_messages(prompt):
+        messages.extend(prompt)
+    else:
+        messages.append(
+            {
+                "role": "user",
+                "content": _get_chat_content(
+                    request_func_input,
+                    mm_position=mm_position,
+                ),
+            }
+        )
+    return messages
 
 
 async def async_request_openai_chat_completions(
