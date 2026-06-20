@@ -686,6 +686,15 @@ class CudaPlatformBase(Platform):
 # the major benefit of using NVML is that it will not initialize CUDA
 class NvmlCudaPlatform(CudaPlatformBase):
     @classmethod
+    @with_nvml_context
+    def device_control_id_to_physical_device_id(cls, device_id: str) -> int:
+        try:
+            return int(device_id)
+        except ValueError:
+            handle = pynvml.nvmlDeviceGetHandleByUUID(device_id)
+            return pynvml.nvmlDeviceGetIndex(handle)
+
+    @classmethod
     @cache
     @with_nvml_context
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
