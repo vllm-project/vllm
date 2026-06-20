@@ -64,7 +64,7 @@ def _get_cached_tokens(usage: UsageInfo | None) -> int | None:
 
 def _build_anthropic_usage(
     prompt_tokens: int,
-    completion_tokens: int,
+    completion_tokens: int | None,
     usage: UsageInfo | None,
 ) -> AnthropicUsage:
     """Build an AnthropicUsage from OpenAI-style token counts.
@@ -79,18 +79,22 @@ def _build_anthropic_usage(
     ``--enable-prompt-tokens-details`` off, or a streaming chunk that
     hasn't carried it yet), cache fields are left **unset** so
     ``exclude_unset=True`` serialization omits them entirely.
+
+    ``completion_tokens`` follows ``UsageInfo`` and may be ``None`` on
+    intermediate stream chunks; we coerce to ``0`` for the wire format.
     """
+    output_tokens = completion_tokens or 0
     cached = _get_cached_tokens(usage)
     if cached is not None:
         return AnthropicUsage(
             input_tokens=prompt_tokens - cached,
-            output_tokens=completion_tokens,
+            output_tokens=output_tokens,
             cache_read_input_tokens=cached,
             cache_creation_input_tokens=0,
         )
     return AnthropicUsage(
         input_tokens=prompt_tokens,
-        output_tokens=completion_tokens,
+        output_tokens=output_tokens,
     )
 
 
