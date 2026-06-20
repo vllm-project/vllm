@@ -8,6 +8,7 @@ and distributed execution with various TP/PP configurations.
 """
 
 import gc
+import os
 import threading
 from unittest.mock import patch
 
@@ -105,6 +106,53 @@ def test_ray_v2_executor(tp_size, pp_size):
     executor = RayExecutorV2(vllm_config=vllm_config)
     try:
         assert_executor(executor, tp_size, pp_size)
+    finally:
+        executor.shutdown()
+
+
+def test_ray_v2_config_deserialized_after_cuda_visible_devices():
+    """vllm_config must be deserialized only *after* CUDA_VISIBLE_DEVICES is set.
+
+    A probe attached to the real config records CUDA_VISIBLE_DEVICES at the exact
+    moment a worker deserializes it. The test asserts that recorded value matches
+    the worker's assigned GPUs, which holds only if deserialization happened after
+    the env var was set.
+    """
+    tp_size = 2
+    vllm_config = create_vllm_config(tensor_parallel_size=tp_size)
+
+    record_var = "RECORDED_CUDA_VISIBLE_DEVICES"
+
+    def record_env():
+        os.environ[record_var] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        return None
+
+    class Probe:
+        def __reduce__(self):
+            return (record_env, ())
+
+    # Attach to the real config so the probe fires when the config is deserialized.
+    vllm_config._probe = Probe()
+    executor = RayExecutorV2(vllm_config=vllm_config)
+    try:
+
+        def get_env(worker, name):
+            return os.environ.get(name, "")
+
+        recorded = executor.collective_rpc(get_env, args=(record_var,))
+        assigned = executor.collective_rpc(get_env, args=("CUDA_VISIBLE_DEVICES",))
+
+        assert len(recorded) == tp_size
+        assert len(assigned) == tp_size
+
+        for at_deserialize, final in zip(recorded, assigned):
+            assert at_deserialize == final
+
+            device_ids = at_deserialize.split(",")
+            assert all(tok.isdigit() for tok in device_ids)
+            assert len(device_ids) == tp_size
+
+        assert_executor(executor, tp_size=tp_size, pp_size=1)
     finally:
         executor.shutdown()
 
