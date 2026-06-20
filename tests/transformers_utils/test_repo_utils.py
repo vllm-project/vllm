@@ -7,11 +7,15 @@ from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+import requests
+from huggingface_hub.utils import RepositoryNotFoundError
 
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
     is_mistral_model_repo,
+    is_transient_hf_error,
     list_filtered_repo_files,
+    maybe_resolve_latest_hf_revision,
     retry_with_kwargs,
 )
 
@@ -212,3 +216,81 @@ def test_retry_with_kwargs_retries_with_missing_none_kwarg():
         {"model": "cached-model"},
         {"model": "cached-model", "revision": None},
     ]
+
+
+def test_is_transient_hf_error_rejects_wrapped_hub_access_errors():
+    response = requests.Response()
+    response.status_code = 403
+
+    try:
+        raise requests.HTTPError(response=response)
+    except requests.HTTPError as e:
+        try:
+            raise RepositoryNotFoundError("private repo", response=response) from e
+        except RepositoryNotFoundError as exc:
+            assert not is_transient_hf_error(exc)
+
+
+def test_is_transient_hf_error_accepts_server_errors():
+    response = requests.Response()
+    response.status_code = 503
+
+    assert is_transient_hf_error(requests.HTTPError(response=response))
+
+
+def test_maybe_resolve_latest_hf_revision_preserves_explicit_revision(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    hf_api_mock = MagicMock()
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.hf_api",
+        hf_api_mock,
+    )
+
+    assert (
+        maybe_resolve_latest_hf_revision("org/model", "pinned-revision")
+        == "pinned-revision"
+    )
+    hf_api_mock.assert_not_called()
+
+
+def test_maybe_resolve_latest_hf_revision_can_force_dataset_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class Info:
+        sha = "latest-dataset-sha"
+
+    class FakeHfApi:
+        def dataset_info(self, repo_id, token=None):
+            assert repo_id == "org/dataset"
+            assert token is None
+            return Info()
+
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.envs.VLLM_CI_ENSURE_LATEST_HF_REVISION",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.envs.VLLM_USE_MODELSCOPE",
+        False,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.huggingface_hub.constants.HF_HUB_OFFLINE",
+        False,
+    )
+    monkeypatch.setattr(
+        "vllm.transformers_utils.repo_utils.hf_api",
+        lambda: FakeHfApi(),
+    )
+
+    assert (
+        maybe_resolve_latest_hf_revision(
+            "org/dataset",
+            None,
+            repo_type="dataset",
+            ensure_latest=True,
+        )
+        == "latest-dataset-sha"
+    )

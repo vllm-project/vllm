@@ -46,6 +46,7 @@ from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
     ModelArchConfigConvertorBase,
 )
+from vllm.transformers_utils.repo_utils import maybe_resolve_latest_hf_revision
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
@@ -482,13 +483,27 @@ class ModelConfig:
         self.served_model_name = get_served_model_name(
             self.model, self.served_model_name
         )
+        user_revision = self.revision
+        tokenizer_uses_model = self.tokenizer is None or self.tokenizer == self.model
         self.model = maybe_model_redirect(self.model)
+        self.revision = maybe_resolve_latest_hf_revision(
+            self.model,
+            self.revision,
+            token=self.hf_token,
+        )
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
             self.tokenizer = self.model
-        if self.tokenizer_revision is None:
-            self.tokenizer_revision = self.revision
         self.tokenizer = maybe_model_redirect(self.tokenizer)
+        if self.tokenizer_revision is None:
+            if tokenizer_uses_model or user_revision is not None:
+                self.tokenizer_revision = self.revision
+            else:
+                self.tokenizer_revision = maybe_resolve_latest_hf_revision(
+                    self.tokenizer,
+                    None,
+                    token=self.hf_token,
+                )
 
         if isinstance(self.hf_config_path, str):
             self.hf_config_path = maybe_model_redirect(self.hf_config_path)

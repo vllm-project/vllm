@@ -16,9 +16,11 @@ from huggingface_hub import HfApi, try_to_load_from_cache
 from huggingface_hub.utils import (
     EntryNotFoundError,
     HfHubHTTPError,
+    HFValidationError,
     LocalEntryNotFoundError,
     RepositoryNotFoundError,
     RevisionNotFoundError,
+    validate_repo_id,
 )
 
 from vllm import envs
@@ -52,12 +54,26 @@ def hf_fs() -> "huggingface_hub.HfFileSystem":
 _R = TypeVar("_R")
 
 
+def _http_status_code(exc: BaseException) -> int | None:
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    return getattr(response, "status_code", None)
+
+
 def is_transient_hf_error(exc: Exception) -> bool:
     """Return whether an exception looks like a transient HF transport failure."""
     current: BaseException | None = exc
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
         seen.add(id(current))
+        if isinstance(current, (RepositoryNotFoundError, RevisionNotFoundError)):
+            return False
+        status_code = _http_status_code(current)
+        if status_code is not None:
+            return 500 <= status_code < 600
+        if isinstance(current, HfHubHTTPError):
+            return False
         module = type(current).__module__
         if module.startswith(("httpx", "requests", "urllib3")):
             return True
@@ -95,6 +111,45 @@ def retry_with_kwargs(
             return func(*args, **{**kwargs, **retry_kwargs})
 
     return wrapper
+
+
+def maybe_resolve_latest_hf_revision(
+    repo_id: str | Path,
+    revision: str | None,
+    *,
+    repo_type: str | None = None,
+    token: str | bool | None = None,
+    ensure_latest: bool = False,
+) -> str | None:
+    """Return an immutable latest Hub revision for floating CI refs."""
+    if revision is not None:
+        return revision
+    if not (ensure_latest or envs.VLLM_CI_ENSURE_LATEST_HF_REVISION):
+        return revision
+    if Path(repo_id).exists():
+        return revision
+
+    repo_id = str(repo_id)
+    try:
+        validate_repo_id(repo_id)
+    except HFValidationError:
+        return revision
+
+    if envs.VLLM_USE_MODELSCOPE or huggingface_hub.constants.HF_HUB_OFFLINE:
+        return revision
+
+    try:
+        if repo_type == "dataset":
+            return hf_api().dataset_info(repo_id, token=token).sha
+        return hf_api().model_info(repo_id, token=token).sha
+    except Exception as e:
+        logger.warning(
+            "Failed to resolve latest Hugging Face revision for %s; "
+            "falling back to the default revision.",
+            repo_id,
+            exc_info=e,
+        )
+        return revision
 
 
 def with_retry(

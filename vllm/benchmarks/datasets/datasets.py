@@ -46,7 +46,10 @@ from vllm.multimodal.audio import get_audio_duration
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.tokenizers import TokenizerLike
-from vllm.transformers_utils.repo_utils import hf_api
+from vllm.transformers_utils.repo_utils import (
+    hf_api,
+    maybe_resolve_latest_hf_revision,
+)
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -3225,8 +3228,11 @@ class HuggingFaceDataset(BenchmarkDataset):
             "trust_remote_code": self.trust_remote_code,
         }
 
-        latest_revision = (
-            self._get_latest_revision() if self.ENSURE_LATEST_REVISION else None
+        latest_revision = maybe_resolve_latest_hf_revision(
+            self.dataset_path,
+            None,
+            repo_type="dataset",
+            ensure_latest=self.ENSURE_LATEST_REVISION,
         )
         if latest_revision is not None:
             load_kwargs["revision"] = latest_revision
@@ -3234,12 +3240,6 @@ class HuggingFaceDataset(BenchmarkDataset):
         self.data = load_dataset(**load_kwargs)
         if not getattr(self, "disable_shuffle", False):
             self.data = self.data.shuffle(seed=self.random_seed)
-
-    def _get_latest_revision(self) -> str | None:
-        """Return the latest Hub revision when metadata lookup is available."""
-        with suppress(Exception):
-            return hf_api().dataset_info(self.dataset_path).sha
-        return None
 
 
 # -----------------------------------------------------------------------------
