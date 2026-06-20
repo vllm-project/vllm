@@ -645,11 +645,11 @@ def test_resolve_awq_moe_uses_marlin_when_supported(monkeypatch) -> None:
         lambda *args, **kwargs: True,
     )
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.awq_marlin.verify_marlin_supported",
+        "vllm.model_executor.layers.quantization.auto_awq.verify_marlin_supported",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.awq_marlin.AWQMarlinMoEMethod",
+        "vllm.model_executor.layers.quantization.auto_awq.AutoAWQMoEMethod",
         DummyMethod,
     )
 

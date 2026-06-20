@@ -6,7 +6,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_until};
 
 use super::parameters::{ParamElement, ParamInput, ToolSchemas};
-use super::utils::{parse_buffered_event, safe_text_len};
+use super::utils::{MarkerScanState, parse_buffered_event, safe_text_len, take_until_marker};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
 use crate::Tool;
 
@@ -21,10 +21,10 @@ const MIXED_TEXT_FIELD: &str = "$text";
 
 type MinimaxM3Input<'i> = Partial<&'i str>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum MinimaxM3Mode {
     Text,
-    ToolBlock,
+    ToolBlock { invoke_end_scan: MarkerScanState },
     Done,
 }
 
@@ -109,7 +109,11 @@ impl MinimaxM3ToolParser {
             MinimaxM3Event::Text { len: consumed_len } => {
                 output.normal_text.push_str(&self.buffer[..consumed_len]);
             }
-            MinimaxM3Event::ToolBlockStart => self.mode = MinimaxM3Mode::ToolBlock,
+            MinimaxM3Event::ToolBlockStart => {
+                self.mode = MinimaxM3Mode::ToolBlock {
+                    invoke_end_scan: MarkerScanState::default(),
+                };
+            }
             MinimaxM3Event::Invoke { name, params } => {
                 let arguments = self.tool_parameters.convert_params_with_schema(&name, params);
                 let arguments = serde_json::to_string(&arguments)
@@ -141,7 +145,7 @@ impl ToolParser for MinimaxM3ToolParser {
         self.buffer.push_str(chunk);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_minimax_m3_event(input, self.mode)
+            parse_next_minimax_m3_event(input, &mut self.mode)
         })? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
@@ -156,7 +160,7 @@ impl ToolParser for MinimaxM3ToolParser {
             MinimaxM3Mode::Text => {
                 output.normal_text.push_str(&self.buffer);
             }
-            MinimaxM3Mode::ToolBlock => {
+            MinimaxM3Mode::ToolBlock { .. } => {
                 if !self.buffer.trim_start().is_empty() {
                     return Err(parsing_failed!("incomplete MiniMax M3 tool call"));
                 }
@@ -177,11 +181,13 @@ impl ToolParser for MinimaxM3ToolParser {
 /// Parse a MiniMax M3 event for the current parser mode.
 fn parse_next_minimax_m3_event(
     input: &mut MinimaxM3Input<'_>,
-    mode: MinimaxM3Mode,
+    mode: &mut MinimaxM3Mode,
 ) -> ModalResult<MinimaxM3Event> {
     match mode {
         MinimaxM3Mode::Text => parse_text_event(input),
-        MinimaxM3Mode::ToolBlock => parse_tool_block_event(input),
+        MinimaxM3Mode::ToolBlock { invoke_end_scan } => {
+            parse_tool_block_event(input, invoke_end_scan)
+        }
         MinimaxM3Mode::Done => ignored_rest_event(input),
     }
 }
@@ -202,8 +208,14 @@ fn safe_text_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event
 }
 
 /// Parse one event inside a MiniMax M3 tool block.
-fn parse_tool_block_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
-    alt((tool_block_end_event, invoke_event)).parse_next(input)
+fn parse_tool_block_event(
+    input: &mut MinimaxM3Input<'_>,
+    invoke_end_scan: &mut MarkerScanState,
+) -> ModalResult<MinimaxM3Event> {
+    alt((tool_block_end_event, |input: &mut MinimaxM3Input<'_>| {
+        invoke_event(input, invoke_end_scan)
+    }))
+    .parse_next(input)
 }
 
 /// Parse a MiniMax M3 tool-block end marker.
@@ -214,14 +226,17 @@ fn tool_block_end_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3
 }
 
 /// Parse a complete MiniMax M3 invoke block.
-fn invoke_event(input: &mut MinimaxM3Input<'_>) -> ModalResult<MinimaxM3Event> {
+fn invoke_event(
+    input: &mut MinimaxM3Input<'_>,
+    invoke_end_scan: &mut MarkerScanState,
+) -> ModalResult<MinimaxM3Event> {
     let (name, body) = seq!(
         _: ws0,
         _: literal(INVOKE_START),
         _: (ws1, literal("name=")),
         partial_attr_value,
         _: literal(">"),
-        take_until(0.., INVOKE_END),
+        take_until_marker(INVOKE_END, invoke_end_scan),
         _: literal(INVOKE_END),
     )
     .parse_next(input)?;
