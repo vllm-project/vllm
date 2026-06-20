@@ -3,6 +3,8 @@
 import itertools
 import random
 import time
+import json
+import os
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
@@ -258,12 +260,12 @@ class Scheduler(SchedulerInterface):
             self._alpha_prior = speculative_config.adaptive_k_alpha_prior
         else:
             self._enable_adaptive_k = False
-            self._adaptive_k_ema_alpha = 0.5
-            self._adaptive_k_c_draft = 0.05
+            self._adaptive_k_ema_alpha = 0.3
+            self._adaptive_k_c_draft = 0.1144
             self._adaptive_k_min_tokens = 0
             self._adaptive_k_bs_penalty = 0.002
             self._cooldown_steps = 2
-            self._alpha_prior = 0.5
+            self._alpha_prior = 0.85
         # Per-position EMA and per-step accumulators.
         self._per_position_ema: list[float] | None = None
         self._pos_accepted: list[int] | None = None
@@ -271,6 +273,13 @@ class Scheduler(SchedulerInterface):
         # Anti-thrashing cooldown.
         self._adaptive_k_cooldown: int = 0
         self._previous_adaptive_k: int = self.num_spec_tokens
+        # EMA accumulation: update every N steps to avoid binary oscillation.
+        # Per-step stats counter for oracle analysis.
+        self._per_step_idx: int = 0
+        self._steps_since_ema_update: int = 0
+        self._ema_update_interval: int = 10
+        # Confidence from draft model logits for the current step.
+        self._draft_confidence: float | None = None
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -1520,6 +1529,7 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        self._draft_confidence = model_runner_output.draft_confidence
         kv_connector_output = model_runner_output.kv_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
@@ -1642,6 +1652,13 @@ class Scheduler(SchedulerInterface):
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
                 )
+                self._per_step_idx += 1
+                _dump_per_step_stats(
+                    self, req_id, num_draft_tokens, num_accepted,
+                    scheduler_output.adaptive_k_for_step, self._per_step_idx,
+                    model_runner_output.draft_confidence,
+                )
+
 
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:
@@ -1868,21 +1885,24 @@ class Scheduler(SchedulerInterface):
                 # outputs this step.
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
             eco.scheduler_stats = stats
-
         if self._enable_adaptive_k and self._pos_accepted is not None:
             if self._per_position_ema is None:
                 self._per_position_ema = [self._alpha_prior] * self.num_spec_tokens
             if self._pos_reached is None:
                 return engine_core_outputs
-            for j in range(self.num_spec_tokens):
-                if self._pos_reached[j] > 0:
-                    raw = self._pos_accepted[j] / self._pos_reached[j]
-                    self._per_position_ema[j] += self._adaptive_k_ema_alpha * (
-                        raw - self._per_position_ema[j]
-                    )
-            for j in range(self.num_spec_tokens):
-                self._pos_accepted[j] = 0
-                self._pos_reached[j] = 0
+            # Accumulate over N steps, update EMA every interval.
+            self._steps_since_ema_update += 1
+            if self._steps_since_ema_update >= self._ema_update_interval:
+                for j in range(self.num_spec_tokens):
+                    if self._pos_reached[j] > 0:
+                        raw = self._pos_accepted[j] / self._pos_reached[j]
+                        self._per_position_ema[j] += self._adaptive_k_ema_alpha * (
+                            raw - self._per_position_ema[j]
+                        )
+                for j in range(self.num_spec_tokens):
+                    self._pos_accepted[j] = 0
+                    self._pos_reached[j] = 0
+                self._steps_since_ema_update = 0
 
         return engine_core_outputs
 
@@ -1933,6 +1953,10 @@ class Scheduler(SchedulerInterface):
             # (0-indexed array, 1-indexed in the cost model formula)
             if k - 1 < len(alphas):
                 a = max(0.001, min(0.999, alphas[k - 1]))
+                # Blend position-0 EMA with draft model confidence.
+                if k == 1 and self._draft_confidence is not None:
+                    dc = max(0.001, min(0.999, self._draft_confidence))
+                    a = 0.3 * a + 0.7 * dc
             else:
                 a = self._alpha_prior
             prod *= a
@@ -2776,3 +2800,41 @@ class Scheduler(SchedulerInterface):
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
+
+
+# ── env-var-gated per-step acceptance dump (for oracle analysis) ───────
+_PER_STEP_FP: str | None = None
+
+
+def _get_per_step_fp() -> str | None:
+    global _PER_STEP_FP
+    if _PER_STEP_FP is None:
+        _PER_STEP_FP = os.environ.get("VLLM_PER_STEP_STATS")
+    return _PER_STEP_FP
+
+
+def _dump_per_step_stats(
+    scheduler: "Scheduler",
+    req_id: str,
+    num_draft_tokens: int,
+    num_accepted: int,
+    adaptive_k_for_step: int | None,
+    step_idx: int,
+    draft_confidence: float | None = None,
+) -> None:
+    fp = _get_per_step_fp()
+    if not fp:
+        return
+    k_chosen = adaptive_k_for_step if adaptive_k_for_step is not None else scheduler.num_spec_tokens
+    try:
+        with open(fp, "a") as f:
+            f.write(json.dumps({
+                "req_id": req_id,
+                "step_idx": step_idx,
+                "num_draft_tokens": num_draft_tokens,
+                "num_accepted": num_accepted,
+                "k_chosen": k_chosen,
+                "draft_confidence": round(draft_confidence, 4) if draft_confidence is not None else None,
+            }) + "\n")
+    except Exception:
+        pass

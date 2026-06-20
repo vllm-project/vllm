@@ -269,6 +269,9 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # Draft confidence: average max prob across draft tokens [0,1].
+    # None when no spec decoding step was taken.
+    draft_confidence: float | None = None
     # Per-step routed experts data captured by the worker.
     # ``routing_data`` shape: (num_scheduled_tokens, num_layers,
     #                         num_experts_per_tok); expert IDs as uint8/uint16.

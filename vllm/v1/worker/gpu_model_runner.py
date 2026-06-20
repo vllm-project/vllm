@@ -4486,6 +4486,12 @@ class GPUModelRunner(
             if adaptive_k is not None and isinstance(
                 self.drafter, SpecDecodeBaseProposer
             ):
+                old_k = self.drafter.current_spec_tokens
+                if adaptive_k != old_k:
+                    logger.info(
+                        "AdaptiveK: K=%d->%d",
+                        old_k, adaptive_k,
+                    )
                 self.drafter.current_spec_tokens = adaptive_k
             with record_function_or_nullcontext("gpu_model_runner: draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
@@ -4613,6 +4619,14 @@ class GPUModelRunner(
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
 
+        # Compute draft confidence: avg max prob across all draft tokens.
+        draft_confidence: float | None = None
+        if self._draft_probs is not None and self._draft_probs.numel() > 0:
+            with torch.no_grad():
+                draft_confidence = float(
+                    self._draft_probs.max(dim=-1).values.mean().item()
+                )
+                draft_confidence = max(0.0, min(1.0, draft_confidence))
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -4627,6 +4641,7 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
+                draft_confidence=draft_confidence,
             )
 
         if not self.use_async_scheduling:
