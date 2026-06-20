@@ -180,6 +180,16 @@ def test_beam_search_passes_multimodal_data(
     with hf_runner(model, dtype=dtype, auto_cls=AutoModelForSeq2SeqLM) as hf_model:
         audio_token_id = hf_model.config.audio_token_index
         eos_token_id = hf_model.tokenizer.eos_token_id  # <|im_end|>
+        # Also filter <|audio_bos|>/<|audio_eos|>: HF's transformers helper
+        # expands <|AUDIO|> per audio_features (padded max length), while the
+        # vLLM helper expands per real feature_attention_mask length, so the
+        # number of <|AUDIO|> on the two sides differs and total lengths
+        # differ. <|audio_bos|>/<|audio_eos|> are emitted once on each side
+        # and are not what this test is trying to assert; treating all three
+        # audio-related special tokens as filler keeps the assertion focused
+        # on the non-audio token stream that should match exactly.
+        audio_bos_id = hf_model.tokenizer.convert_tokens_to_ids("<|audio_bos|>")
+        audio_eos_id = hf_model.tokenizer.convert_tokens_to_ids("<|audio_eos|>")
         hf_outputs = hf_model.generate_beam_search(
             prompts,
             beam_width=beam_width,
@@ -195,7 +205,8 @@ def test_beam_search_passes_multimodal_data(
             audios=audios,
         )
 
-    seq_with_no_audio_toks = lambda seq: [tok for tok in seq if tok != audio_token_id]
+    audio_special_ids = {audio_token_id, audio_bos_id, audio_eos_id}
+    seq_with_no_audio_toks = lambda seq: [tok for tok in seq if tok not in audio_special_ids]
 
     for i in range(len(prompts)):
         hf_output_ids, hf_output_texts = hf_outputs[i]
