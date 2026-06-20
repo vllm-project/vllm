@@ -30,6 +30,9 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
+from vllm.v1.core.single_type_kv_cache_manager import (
+    register_all_kvcache_specs,
+)
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -68,6 +71,9 @@ def _make_kv_cache_config(
     """Build a KVCacheConfig with non-empty kv_cache_tensors."""
     groups = []
     tensors = []
+    register_all_kvcache_specs(
+        vllm_config=None
+    )  # Ensure specs are registered for tests
     for g in range(num_groups):
         layer_names = [f"layer_{g}"]
         groups.append(
@@ -153,6 +159,8 @@ def make_scheduler(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         cpu_capacity_bytes=cpu_capacity_bytes,
+        scheduler_block_size=BLOCK_SIZE,
+        hash_block_size=BLOCK_SIZE,
         lazy_offload=lazy,
     )
 
@@ -1346,3 +1354,177 @@ def test_toctou_cpu_hit_evicted_between_phases_no_crash() -> None:
     )
     assert len(meta_b.load_gpu_blocks) == 2
     assert len(meta_b.load_cpu_blocks) == 2
+
+
+# ---------------------------------------------------------------------------
+# Test 12: Reset with pending eager stores waits for completion
+# ---------------------------------------------------------------------------
+def test_reset_pending_eager_stores() -> None:
+    """Eager mode: reset() abandons in-flight stores until they complete."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks)
+
+    kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    block_ids = kv_blocks.get_block_ids()
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: block_ids},
+    )
+
+    meta = sched.build_connector_meta(sched_out)
+    assert meta.store_event >= 0
+    assert len(sched._store_event_to_blocks) > 0
+
+    # GPU blocks should have elevated ref_cnt from touch()
+    for bid in meta.store_gpu_blocks:
+        assert gpu_pool.blocks[bid].ref_cnt > 0
+
+    # Free the request's own block refs (simulates preemption)
+    gpu_pool.free_blocks(gpu_pool.blocks[bid] for bid in block_ids[0])
+
+    # Reset should keep DMA refs pinned until the worker reports completion.
+    assert sched.reset() is False
+    assert len(sched._store_event_to_blocks) == 0
+    assert len(sched._abandoned_store_event_to_blocks) == 1
+    assert len(sched._reqs_to_store) == 0
+    assert len(sched._store_event_to_reqs) == 0
+
+    num_used = gpu_pool.num_gpu_blocks - gpu_pool.get_num_free_blocks()
+    assert num_used > 1
+
+    simulate_store_completion(sched, meta.store_event)
+    assert len(sched._abandoned_store_event_to_blocks) == 0
+
+    # All GPU blocks should now be free (ref_cnt == 0) except null block
+    num_used = gpu_pool.num_gpu_blocks - gpu_pool.get_num_free_blocks()
+    assert num_used == 1, f"Expected only null block in use, got {num_used}"
+
+    # GPU prefix cache reset should now succeed
+    assert gpu_pool.reset_prefix_cache() is True
+    assert sched.reset() is True
+
+
+# ---------------------------------------------------------------------------
+# Test 13: Reset with pending lazy stores waits for completion
+# ---------------------------------------------------------------------------
+def test_reset_pending_lazy_stores() -> None:
+    """Lazy mode: reset() abandons in-flight stores until they complete."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=8, lazy=True)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    num_blocks = 2
+    req = make_request(num_blocks=num_blocks)
+
+    # Allocate, hash, and free — blocks move to free queue with hashes
+    gpu_blocks = _allocate_gpu_blocks(gpu_pool, req, num_blocks, group_id=0)
+    gpu_pool.free_blocks(gpu_blocks)
+
+    # Push hashed blocks to LRU head
+    fillers = _flush_old_blocks_to_lru_head(gpu_pool, num_filler_blocks=5)
+
+    # Lazy scanner offloads old hashed blocks
+    sched_out = make_scheduler_output({})
+    meta = sched.build_connector_meta(sched_out)
+    assert meta.store_event >= 0
+    assert len(sched._store_event_to_blocks) > 0
+
+    gpu_pool.free_blocks(fillers)
+
+    # Reset should keep DMA refs pinned until the worker reports completion.
+    assert sched.reset() is False
+    assert len(sched._store_event_to_blocks) == 0
+    assert len(sched._abandoned_store_event_to_blocks) == 1
+    assert sched._cursor is None
+
+    simulate_store_completion(sched, meta.store_event)
+    assert len(sched._abandoned_store_event_to_blocks) == 0
+    assert sched.reset() is True
+
+    # No CPU cache hits after reset
+    req2 = Request(
+        request_id="req-after-lazy-reset",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, _ = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens == 0, "CPU cache should be empty after reset"
+
+
+# ---------------------------------------------------------------------------
+# Test 14: Reset with pending loads waits for completion
+# ---------------------------------------------------------------------------
+def test_reset_pending_loads() -> None:
+    """reset() abandons in-flight loads until they complete."""
+    fix = make_scheduler(num_cpu_blocks=8, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+    gpu_pool = fix.gpu_block_pool
+
+    num_blocks = 2
+
+    # First store blocks to CPU
+    req = make_request(num_blocks=num_blocks)
+    kv_blocks = _alloc_and_register(fix, req, num_blocks)
+    sched.update_state_after_alloc(req, kv_blocks, num_external_tokens=0)
+    block_ids = kv_blocks.get_block_ids()
+    sched_out = make_scheduler_output(
+        {req.request_id: num_blocks * BLOCK_SIZE},
+        new_reqs={req.request_id: block_ids},
+    )
+    meta = sched.build_connector_meta(sched_out)
+    simulate_store_completion(sched, meta.store_event)
+
+    # Start a load — CPU cache hit
+    req2 = Request(
+        request_id="req-load-reset",
+        prompt_token_ids=req.prompt_token_ids,
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=None,
+        block_hasher=req._block_hasher,
+    )
+    hit_tokens, is_async = sched.get_num_new_matched_tokens(req2, num_computed_tokens=0)
+    assert hit_tokens > 0
+
+    gpu_blocks2 = gpu_pool.get_new_blocks(num_blocks)
+    kv_blocks2 = KVCacheBlocks(blocks=(gpu_blocks2,))
+    sched.update_state_after_alloc(req2, kv_blocks2, num_external_tokens=hit_tokens)
+
+    block_ids2 = kv_blocks2.get_block_ids()
+    sched_out2 = make_scheduler_output(
+        {req2.request_id: 1},
+        new_reqs={req2.request_id: block_ids2},
+    )
+    meta2 = sched.build_connector_meta(sched_out2)
+    assert meta2.load_event >= 0
+    assert req2.request_id in sched._reqs_to_load
+
+    # Free request block refs (simulates preemption)
+    gpu_pool.free_blocks(gpu_pool.blocks[bid] for bid in block_ids[0])
+    gpu_pool.free_blocks(gpu_pool.blocks[bid] for bid in block_ids2[0])
+
+    # Reset should keep load touch refs until the worker reports completion.
+    assert sched.reset() is False
+    assert len(sched._reqs_to_load) == 0
+    assert len(sched._abandoned_reqs_to_load) == 1
+    assert len(sched._load_event_to_reqs) == 1
+
+    num_used = gpu_pool.num_gpu_blocks - gpu_pool.get_num_free_blocks()
+    assert num_used > 1
+
+    simulate_load_completion(sched, {req2.request_id})
+    assert len(sched._abandoned_reqs_to_load) == 0
+    assert len(sched._load_event_to_reqs) == 0
+    assert sched.reset() is True
+
+    # All GPU blocks free
+    num_used = gpu_pool.num_gpu_blocks - gpu_pool.get_num_free_blocks()
+    assert num_used == 1, f"Expected only null block in use, got {num_used}"

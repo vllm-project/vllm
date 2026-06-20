@@ -7,7 +7,11 @@
 
 #include <cmath>
 
-#include <cuda_fp8.h>
+#ifdef USE_ROCM
+  #include <hip/hip_fp8.h>
+#else
+  #include <cuda_fp8.h>
+#endif
 
 #include "libtorch_stable/quantization/vectorization.cuh"
 #include "libtorch_stable/quantization/vectorization_utils.cuh"
@@ -15,12 +19,23 @@
 #include "libtorch_stable/torch_utils.h"
 
 __device__ __forceinline__ float GroupReduceMax(float val) {
+#ifdef USE_ROCM
+  // 16-thread logical groups may pack up to four per 64-lane wavefront; use a
+  // 64-bit mask and explicit width so shuffles stay within each group.
+  const int lane_in_wave = threadIdx.x % warpSize;
+  const unsigned long long mask = 0xFFFFull << ((lane_in_wave / 16) * 16);
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 8, 16));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 4, 16));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 2, 16));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 1, 16));
+#else
   unsigned mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
 
   val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
   val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
   val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
   val = fmaxf(val, __shfl_xor_sync(mask, val, 1));
+#endif
   return val;
 }
 
@@ -237,10 +252,12 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "per_token_group_quant_8bit", ([&] {
-        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
-          LAUNCH_KERNEL(scalar_t, __nv_fp8_e4m3);
-        } else if (dst_type == torch::headeronly::ScalarType::Char) {
+        if (dst_type == torch::headeronly::ScalarType::Char) {
           LAUNCH_KERNEL(scalar_t, int8_t);
+        } else {
+          VLLM_STABLE_DISPATCH_FP8_TYPES(
+              dst_type, "per_token_group_quant_8bit_fp8",
+              ([&] { LAUNCH_KERNEL(scalar_t, fp8_t); }));
         }
       }));
 
@@ -284,12 +301,21 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
 
   const int sf_k_local = local_group_id % kGroupsPerBlockX;
   const int row_local = local_group_id / kGroupsPerBlockX;
-  const int sf_k_idx = blockIdx.x * kGroupsPerBlockX + sf_k_local;
-  const int mn_idx = blockIdx.y * kRowsPerBlock + row_local;
+  // Rows on grid.x: mn scales with tokens and can exceed the 65535 grid.y cap.
+  const int sf_k_idx = blockIdx.y * kGroupsPerBlockX + sf_k_local;
+  const int mn_idx = blockIdx.x * kRowsPerBlock + row_local;
+
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.wait;");
+#endif
 
   if (mn_idx >= tma_aligned_mn) {
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+    asm volatile("griddepcontrol.launch_dependents;");
+#endif
     return;
   }
+
   const bool is_valid_group = (mn_idx < mn) && (sf_k_idx < groups_per_row);
 
   // Load 16 input elements (32 B) into registers as two adjacent uint4
@@ -317,10 +343,18 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
 
   // 8-lane subgroup shuffle reduce (octet of the warp). The mask selects the
   // 8 lanes within the warp that share a group.
+#ifdef USE_ROCM
+  const int lane_in_wave = threadIdx.x % warpSize;
+  const unsigned long long mask = 0xFFull << (lane_in_wave & ~7);
+  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 4, 8));
+  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 2, 8));
+  local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 1, 8));
+#else
   unsigned mask = 0xffu << (threadIdx.x & 24u);
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 4));
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 2));
   local_absmax = fmaxf(local_absmax, __shfl_xor_sync(mask, local_absmax, 1));
+#endif
 
   float y_s = local_absmax / max_8bit;
   y_s = fmaxf(y_s, 1e-10f);
@@ -392,6 +426,10 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
       static_cast<int64_t>(mn_idx) * groups_per_row * GROUP_SIZE +
       sf_k_idx * GROUP_SIZE + lane_id * VEC_SIZE;
   *reinterpret_cast<uint4*>(group_output) = packed_out;
+
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  asm volatile("griddepcontrol.launch_dependents;");
+#endif
 }
 
 // Public entry point: register-resident packed quant kernel.
@@ -459,34 +497,66 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
                   " is not a multiple of 4.");
   const int kx = GetGroupsPerBlockX(padded_groups_per_row);
   const int ry = 16 / kx;
-  const int64_t blocks_x = padded_groups_per_row / kx;
-  const int64_t blocks_y = (tma_aligned_mn + ry - 1) / ry;
+  const int64_t row_blocks = (tma_aligned_mn + ry - 1) / ry;
+  const int64_t sf_k_blocks = padded_groups_per_row / kx;
   const int num_threads = (kx * ry) * THREADS_PER_GROUP;
-  // CUDA caps grid.x and grid.y at 2^31 - 1; guard against pathological inputs.
-  STD_TORCH_CHECK(blocks_x <= static_cast<int64_t>(INT32_MAX) &&
-                      blocks_y <= static_cast<int64_t>(INT32_MAX),
+  // CUDA caps grid.x at 2^31 - 1 and grid.y at 2^16 - 1 (65535).
+  constexpr int64_t kMaxGridDimYZ = 65535;
+  STD_TORCH_CHECK(row_blocks <= static_cast<int64_t>(INT32_MAX) &&
+                      sf_k_blocks <= kMaxGridDimYZ,
                   "per_token_group_quant_8bit_packed grid too large: (",
-                  blocks_x, ", ", blocks_y, ").");
+                  row_blocks, ", ", sf_k_blocks, ").");
 
   auto dst_type = output_q.scalar_type();
 
-#define LAUNCH_REG_KERNEL_INST(T, DST_DTYPE, KX, RY)                         \
-  do {                                                                       \
-    dim3 grid(static_cast<unsigned int>(blocks_x),                           \
-              static_cast<unsigned int>(blocks_y));                          \
-    dim3 block(num_threads);                                                 \
-    per_token_group_quant_8bit_packed_register_kernel<T, DST_DTYPE, 128, KX, \
-                                                      RY>                    \
-        <<<grid, block, 0, stream>>>(                                        \
-            static_cast<const T*>(input.data_ptr()), output_q.data_ptr(),    \
-            reinterpret_cast<unsigned int*>(output_s_packed.data_ptr()),     \
-            static_cast<int>(padded_groups_per_row),                         \
-            static_cast<int>(groups_per_row), static_cast<int>(mn),          \
-            static_cast<int>(output_q_mn_extent),                            \
-            static_cast<int>(tma_aligned_mn), num_scale_elems,               \
-            static_cast<float>(eps), static_cast<float>(min_8bit),           \
-            static_cast<float>(max_8bit));                                   \
-  } while (0)
+// PDL (Programmatic Dependent Launch) is NVIDIA-only; ROCm/HIP has no
+// equivalent launch attribute, so fall back to a classic launch there.
+#ifndef USE_ROCM
+  #define LAUNCH_REG_KERNEL_INST(T, DST_DTYPE, KX, RY)                         \
+    do {                                                                       \
+      cudaLaunchConfig_t config = {};                                          \
+      config.gridDim = dim3(static_cast<unsigned int>(row_blocks),             \
+                            static_cast<unsigned int>(sf_k_blocks));           \
+      config.blockDim = dim3(num_threads);                                     \
+      config.dynamicSmemBytes = 0;                                             \
+      config.stream = stream;                                                  \
+      cudaLaunchAttribute attrs[1];                                            \
+      attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;        \
+      attrs[0].val.programmaticStreamSerializationAllowed = 1;                 \
+      config.numAttrs = 1;                                                     \
+      config.attrs = attrs;                                                    \
+      cudaLaunchKernelEx(                                                      \
+          &config,                                                             \
+          per_token_group_quant_8bit_packed_register_kernel<T, DST_DTYPE, 128, \
+                                                            KX, RY>,           \
+          static_cast<const T*>(input.data_ptr()), output_q.data_ptr(),        \
+          reinterpret_cast<unsigned int*>(output_s_packed.data_ptr()),         \
+          static_cast<int>(padded_groups_per_row),                             \
+          static_cast<int>(groups_per_row), static_cast<int>(mn),              \
+          static_cast<int>(output_q_mn_extent),                                \
+          static_cast<int>(tma_aligned_mn), num_scale_elems,                   \
+          static_cast<float>(eps), static_cast<float>(min_8bit),               \
+          static_cast<float>(max_8bit));                                       \
+    } while (0)
+#else
+  #define LAUNCH_REG_KERNEL_INST(T, DST_DTYPE, KX, RY)                         \
+    do {                                                                       \
+      dim3 grid(static_cast<unsigned int>(row_blocks),                         \
+                static_cast<unsigned int>(sf_k_blocks));                       \
+      dim3 block(num_threads);                                                 \
+      per_token_group_quant_8bit_packed_register_kernel<T, DST_DTYPE, 128, KX, \
+                                                        RY>                    \
+          <<<grid, block, 0, stream>>>(                                        \
+              static_cast<const T*>(input.data_ptr()), output_q.data_ptr(),    \
+              reinterpret_cast<unsigned int*>(output_s_packed.data_ptr()),     \
+              static_cast<int>(padded_groups_per_row),                         \
+              static_cast<int>(groups_per_row), static_cast<int>(mn),          \
+              static_cast<int>(output_q_mn_extent),                            \
+              static_cast<int>(tma_aligned_mn), num_scale_elems,               \
+              static_cast<float>(eps), static_cast<float>(min_8bit),           \
+              static_cast<float>(max_8bit));                                   \
+    } while (0)
+#endif
 
 #define LAUNCH_REG_KERNEL(T, DST_DTYPE)                    \
   do {                                                     \
@@ -503,15 +573,12 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       input.scalar_type(), "per_token_group_quant_8bit_packed_register", ([&] {
-        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
-          LAUNCH_REG_KERNEL(scalar_t, __nv_fp8_e4m3);
-        } else if (dst_type == torch::headeronly::ScalarType::Char) {
+        if (dst_type == torch::headeronly::ScalarType::Char) {
           LAUNCH_REG_KERNEL(scalar_t, int8_t);
         } else {
-          STD_TORCH_CHECK(
-              false,
-              "per_token_group_quant_8bit_packed only supports FP8/INT8 "
-              "outputs.");
+          VLLM_STABLE_DISPATCH_FP8_TYPES(
+              dst_type, "per_token_group_quant_8bit_packed_fp8",
+              ([&] { LAUNCH_REG_KERNEL(scalar_t, fp8_t); }));
         }
       }));
 

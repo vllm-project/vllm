@@ -1,5 +1,5 @@
 use super::{GlmXmlToolParser, Separator};
-use crate::{Result, Tool, ToolParseResult, ToolParser};
+use crate::{Result, Tool, ToolParser, ToolParserOutput};
 
 /// Tool parser for GLM-4.7 MoE XML-style tool calls.
 ///
@@ -22,12 +22,16 @@ impl ToolParser for Glm47MoeToolParser {
         Ok(Box::new(Self::new(tools)))
     }
 
-    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
-        self.0.push(chunk)
+    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+        self.0.parse_into(chunk, output)
     }
 
-    fn finish(&mut self) -> Result<ToolParseResult> {
+    fn finish(&mut self) -> Result<ToolParserOutput> {
         self.0.finish()
+    }
+
+    fn reset(&mut self) -> String {
+        self.0.reset()
     }
 }
 
@@ -35,7 +39,8 @@ impl ToolParser for Glm47MoeToolParser {
 mod tests {
     use serde_json::{Value, json};
 
-    use super::{Glm47MoeToolParser, ToolParser};
+    use super::Glm47MoeToolParser;
+    use crate::ToolParserTestExt as _;
     use crate::test_utils::{collect_stream, split_by_chars, test_tools};
 
     fn glm47_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -58,13 +63,13 @@ mod tests {
             )
         );
 
-        let result = parser.parse_complete(&output).unwrap();
+        let output = parser.parse_complete(&output).unwrap();
 
-        assert_eq!(result.normal_text, "Let me search for that.\n");
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.normal_text, "Let me search for that.\n");
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({"city": "Beijing", "date": "2024-12-25"})
         );
     }
@@ -79,14 +84,14 @@ mod tests {
         );
 
         let chunks = split_by_chars(&output, 7);
-        let result = collect_stream(&mut parser, &chunks);
+        let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(result.normal_text, "");
-        assert_eq!(result.calls.len(), 2);
-        assert_eq!(result.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(result.calls[1].name.as_deref(), Some("add"));
+        assert_eq!(output.normal_text, "");
+        assert_eq!(output.calls.len(), 2);
+        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls[1].name.as_deref(), Some("add"));
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[1].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[1].arguments).unwrap(),
             json!({"x": 1, "y": 2})
         );
     }
@@ -94,7 +99,7 @@ mod tests {
     #[test]
     fn glm47_parse_complete_converts_schema_types() {
         let mut parser = Glm47MoeToolParser::new(&test_tools());
-        let result = parser
+        let output = parser
             .parse_complete(&glm47_tool_call(
                 "convert",
                 &[
@@ -108,7 +113,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({
                 "whole": 42,
                 "flag": true,
@@ -123,12 +128,12 @@ mod tests {
     fn glm47_parse_complete_extracts_zero_argument_call() {
         let mut parser = Glm47MoeToolParser::new(&test_tools());
 
-        let result = parser.parse_complete("<tool_call>add</tool_call>").unwrap();
+        let output = parser.parse_complete("<tool_call>add</tool_call>").unwrap();
 
-        assert_eq!(result.calls.len(), 1);
-        assert_eq!(result.calls[0].name.as_deref(), Some("add"));
+        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls[0].name.as_deref(), Some("add"));
         assert_eq!(
-            serde_json::from_str::<Value>(&result.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
             json!({})
         );
     }

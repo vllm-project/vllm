@@ -20,7 +20,7 @@ class PoolingCursor:
     seq_lens_cpu: torch.Tensor
     num_scheduled_tokens_cpu: torch.Tensor
 
-    def __getitem__(self, indices: slice):
+    def __getitem__(self, indices: slice) -> "PoolingCursor":
         return PoolingCursor(
             first_token_indices_gpu=self.first_token_indices_gpu[indices],
             last_token_indices_gpu=self.last_token_indices_gpu[indices],
@@ -29,19 +29,19 @@ class PoolingCursor:
             num_scheduled_tokens_cpu=self.num_scheduled_tokens_cpu[indices],
         )
 
-    def is_partial_prefill(self):
+    def is_partial_prefill(self) -> bool:
         return not torch.all(self.prompt_lens_cpu == self.num_scheduled_tokens_cpu)
 
-    def is_finished(self):
+    def is_finished(self) -> torch.Tensor:
         return self.prompt_lens_cpu == self.seq_lens_cpu
 
 
 class PoolingStates:
-    def __init__(self):
+    def __init__(self) -> None:
         # for chunked prefill with ALL pooling
         self.hidden_states_cache: list[torch.Tensor] = []
 
-    def clean(self):
+    def clean(self) -> None:
         self.hidden_states_cache.clear()
 
 
@@ -72,7 +72,7 @@ class PoolingMetadata:
 
         self.tasks = tasks
 
-    def __getitem__(self, indices: slice):
+    def __getitem__(self, indices: slice) -> "PoolingMetadata":
         return PoolingMetadata(
             prompt_lens=self.prompt_lens[indices],
             prompt_token_ids=None
@@ -121,7 +121,7 @@ class PoolingMetadata:
         seq_lens_cpu: torch.Tensor,
         device: torch.device,
         query_start_loc_gpu: torch.Tensor | None = None,
-    ):
+    ) -> None:
         n_seq = len(num_scheduled_tokens_np)
         prompt_lens = self.prompt_lens
 

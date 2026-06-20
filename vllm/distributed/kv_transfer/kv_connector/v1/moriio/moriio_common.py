@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import os
 import threading
 import time
 from collections.abc import Iterator
@@ -12,8 +13,7 @@ import regex as re
 import torch
 import zmq
 
-from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
@@ -162,8 +162,10 @@ class TransferError(MoRIIOError):
     pass
 
 
-def get_moriio_mode() -> MoRIIOMode:
-    read_mode = envs.VLLM_MORIIO_CONNECTOR_READ_MODE
+def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
+    read_mode = str(
+        kv_transfer_config.kv_connector_extra_config.get("read_mode", "false")
+    ).lower().strip() in ("true", "1")
     logger.debug("MoRIIO Connector read_mode: %s", read_mode)
     if read_mode:
         return MoRIIOMode.READ
@@ -173,6 +175,38 @@ def get_moriio_mode() -> MoRIIOMode:
 
 def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
     return (dp_rank) * tp_size + tp_rank
+
+
+def resolve_host_ip(extra_config: dict) -> str:
+    """The IP this MoRIIO process advertises for KV transfer.
+
+    Honors an explicit ``host_ip`` in ``kv_connector_extra_config`` before
+    falling back to ``get_ip()``. An external router/orchestrator can set it to
+    the node's routable address; this is required under frameworks (e.g. Ray)
+    where ``get_ip()`` resolves to an unroutable public IP and ``VLLM_HOST_IP``
+    cannot be propagated to the worker processes that bind the transfer engine.
+    """
+    return extra_config.get("host_ip") or get_ip()
+
+
+_DEPRECATED_ENV_VARS: dict[str, str] = {
+    "VLLM_MORIIO_CONNECTOR_READ_MODE": "read_mode",
+    "VLLM_MORIIO_QP_PER_TRANSFER": "qp_per_transfer",
+    "VLLM_MORIIO_POST_BATCH_SIZE": "post_batch_size",
+    "VLLM_MORIIO_NUM_WORKERS": "num_workers",
+}
+
+
+def _warn_deprecated_env_vars() -> None:
+    for env_var, new_key in _DEPRECATED_ENV_VARS.items():
+        if env_var in os.environ:
+            logger.warning_once(
+                "The environment variable %s is deprecated and ignored. "
+                "Set %r inside kv_transfer_config.kv_connector_extra_config "
+                "instead.",
+                env_var,
+                new_key,
+            )
 
 
 @dataclass
@@ -189,6 +223,12 @@ class MoRIIOConfig:
     dp_rank: int
     dp_size: int
     tp_size: int
+    transfer_timeout: float
+    defer_timeout: float
+    read_mode: bool = False
+    qp_per_transfer: int = 1
+    post_batch_size: int = -1
+    num_workers: int = 1
     backend: str = "rdma"
 
     @classmethod
@@ -201,11 +241,28 @@ class MoRIIOConfig:
         # notify_port       -> For synchronizing stages between prefill and decode
         # handshake_port    -> For initial handshake between mori engine
 
+        # Optional tuning knobs
+        # read_mode        -> If true, run the connector in READ mode (consumer
+        #                     pulls KV from producer) instead of the default
+        #                     WRITE mode.
+        # transfer_timeout -> Timeout for waiting_for_transfer_complete before
+        #                     raising TransferError (sec).
+        # defer_timeout    -> Timeout before a deferred send with no finished_sending
+        #                     notification is reaped and its blocks force-freed (sec).
+
+        # Knobs for RDMA transfers, ignored if on xgmi backend
+        # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.
+        # post_batch_size  -> Batch size for posting transfer work requests
+        #                     (-1 lets the MoRI backend choose).
+        # num_workers      -> Number of background worker threads the MoRI
+        #                     engine uses for transfer processing.
+
         # TODO : merge notify_port and handshake_port to simplify port management
         #        supports non-contiguous ports
         assert vllm_config.kv_transfer_config is not None, (
             "kv_transfer_config must be set for MoRIIOConnector"
         )
+        _warn_deprecated_env_vars()
         kv_transfer_config = vllm_config.kv_transfer_config
         extra_config = kv_transfer_config.kv_connector_extra_config
         tp_rank = get_tensor_model_parallel_rank()
@@ -221,8 +278,17 @@ class MoRIIOConfig:
                 "must be one of 'rdma' or 'xgmi'."
             )
 
+        transfer_timeout = float(
+            extra_config.get(
+                "transfer_timeout", MoRIIOConstants.DEFAULT_TRANSFER_TIMEOUT
+            )
+        )
+        defer_timeout = float(
+            extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT)
+        )
+
         return cls(
-            local_ip=get_ip(),
+            local_ip=resolve_host_ip(extra_config),
             local_kv_port=get_open_port(),
             proxy_ip=extra_config["proxy_ip"],
             local_ping_port=get_open_port(),
@@ -234,7 +300,13 @@ class MoRIIOConfig:
             dp_rank=dp_rank,
             dp_size=dp_size,
             tp_size=tp_size,
+            read_mode=get_moriio_mode(kv_transfer_config) == MoRIIOMode.READ,
+            qp_per_transfer=int(extra_config.get("qp_per_transfer", 1)),
+            post_batch_size=int(extra_config.get("post_batch_size", -1)),
+            num_workers=int(extra_config.get("num_workers", 1)),
             backend=backend,
+            transfer_timeout=transfer_timeout,
+            defer_timeout=defer_timeout,
         )
 
 
@@ -255,8 +327,16 @@ class MoRIIOConstants:
 
     VLLM_MORI_READ_ABORT_REQUEST_TIMEOUT = 3600
 
+    # Timeout (seconds) for waiting_for_transfer_complete before raising TransferError.
+    # Overridable via kv_connector_extra_config["transfer_timeout"].
+    DEFAULT_TRANSFER_TIMEOUT = 30.0
+    # Timeout (seconds) before a deferred send with no finished_sending
+    # notification is reaped and its blocks force-freed.
+    # Overridable via kv_connector_extra_config["defer_timeout"].
+    DEFAULT_DEFER_TIMEOUT = 60.0
 
-# The router embeds both zmq_addresses in the request_id (similar to P2pNcclConnector):
+
+# The router embeds both zmq_addresses in the request_id:
 #   "___prefill_addr_{zmq}___decode_addr_{zmq}_{32-hex-uuid}"
 # MoRIIO zmq_address format: "host:IP,handshake:PORT,notify:PORT"
 #
