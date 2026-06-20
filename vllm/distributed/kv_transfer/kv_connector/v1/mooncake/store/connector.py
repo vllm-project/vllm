@@ -156,14 +156,26 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def shutdown(self):
         """Release connector resources on teardown.
 
-        Closes the worker's MooncakeDistributedStore handle so its
-        TransferEngine and RDMA registrations are released. Invoked from the
-        engine's explicit shutdown path and as a backstop from ``__del__``;
-        a no-op on the scheduler role, which holds no store handle.
+        Worker role: closes the MooncakeDistributedStore (TransferEngine,
+        RDMA buffers, master-server connection) and the LookupKeyServer
+        (ZMQ socket, IPC file).
+        Scheduler role: closes the LookupKeyClient (ZMQ socket).
+
+        Invoked from the engine's explicit shutdown path and as a backstop
+        from ``__del__``.
         """
         worker = getattr(self, "connector_worker", None)
         if worker is not None:
             worker.close()
+
+        scheduler = getattr(self, "connector_scheduler", None)
+        if scheduler is not None:
+            client = getattr(scheduler, "client", None)
+            if client is not None:
+                try:
+                    client.close()
+                except Exception as e:
+                    logger.warning("Error closing LookupKeyClient: %s", e)
 
     def __del__(self):
         self.shutdown()
