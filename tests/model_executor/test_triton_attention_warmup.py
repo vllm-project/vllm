@@ -17,6 +17,7 @@ def _make_key(
     cache_dtype: torch.dtype = torch.float16,
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
     sliding_window: tuple[int, int] = (-1, -1),
+    block_table_stride: int = 0,
 ) -> warmup.TritonUnifiedAttentionWarmupKey:
     return warmup.TritonUnifiedAttentionWarmupKey(
         num_query_heads=16,
@@ -34,6 +35,7 @@ def _make_key(
         use_sinks=False,
         chunk_lookback=-1,
         use_td=False,
+        block_table_stride=block_table_stride,
     )
 
 
@@ -59,7 +61,7 @@ def test_warmup_shapes_follow_cudagraph_3d_threshold() -> None:
     ]
 
 
-def test_warmup_shapes_add_nvfp4_raw_current_2d_representatives() -> None:
+def test_warmup_shapes_use_common_nvfp4_representatives() -> None:
     key = _make_key(
         num_kv_heads=2,
         head_size=256,
@@ -71,12 +73,18 @@ def test_warmup_shapes_add_nvfp4_raw_current_2d_representatives() -> None:
         key, cudagraph_batch_sizes=(1, 2, 4, 8, 16, 32, 40, 64)
     )
 
-    raw_current_shapes = [shape for shape in shapes if shape.use_raw_current]
-    assert raw_current_shapes == [
-        warmup._WarmupShape("raw_current_2d", (16,), (32,), False, True),
-        warmup._WarmupShape("raw_current_2d", (16, 16), (32, 32), False, True),
-        warmup._WarmupShape("raw_current_2d", (16,) * 16, (32,) * 16, False, True),
-    ]
+    assert shapes == (
+        warmup._WarmupShape("prefill_2d", (16,), (16,), False),
+        warmup._WarmupShape("decode_3d", (1,), (32,), True),
+        warmup._WarmupShape("decode_3d", (1,) * 2, (32,) * 2, True),
+        warmup._WarmupShape("decode_3d", (1,) * 4, (32,) * 4, True),
+        warmup._WarmupShape("decode_3d", (1,) * 8, (32,) * 8, True),
+        warmup._WarmupShape("decode_3d", (1,) * 16, (32,) * 16, True),
+        warmup._WarmupShape("decode_3d", (1,) * 32, (32,) * 32, True),
+        warmup._WarmupShape("decode_3d", (1,) * 40, (32,) * 40, True),
+        warmup._WarmupShape("decode_3d", (1,) * 64, (32,) * 64, True),
+        warmup._WarmupShape("decode_2d", (1,) * 65, (32,) * 65, False),
+    )
 
 
 def test_iter_triton_unified_attention_warmup_keys_dedupes_layers(
@@ -106,11 +114,23 @@ def test_iter_triton_unified_attention_warmup_keys_dedupes_layers(
         backend=TritonBackend(),
         layer_names=["layer.0", "layer.1"],
         kv_cache_spec=SimpleNamespace(block_size=16, dtype=torch.float16),
+        kv_cache_group_id=0,
     )
     runner = SimpleNamespace(
         attn_groups=[[group]],
         vllm_config=SimpleNamespace(),
         model_config=SimpleNamespace(dtype=torch.float16),
+        input_batch=SimpleNamespace(
+            block_table=SimpleNamespace(
+                block_tables=[
+                    SimpleNamespace(
+                        block_table=SimpleNamespace(
+                            gpu=torch.empty((1, 32), dtype=torch.int32)
+                        )
+                    )
+                ]
+            )
+        ),
     )
     monkeypatch.setattr(
         warmup,
@@ -123,7 +143,7 @@ def test_iter_triton_unified_attention_warmup_keys_dedupes_layers(
 
     keys = warmup._iter_triton_unified_attention_warmup_keys(runner)
 
-    assert keys == [_make_key(num_kv_heads=4)]
+    assert keys == [_make_key(num_kv_heads=4, block_table_stride=32)]
 
 
 def test_iter_triton_unified_attention_warmup_keys_includes_nvfp4(
@@ -153,11 +173,23 @@ def test_iter_triton_unified_attention_warmup_keys_includes_nvfp4(
         backend=TritonBackend(),
         layer_names=["layer.0"],
         kv_cache_spec=SimpleNamespace(block_size=16, dtype=torch.uint8),
+        kv_cache_group_id=0,
     )
     runner = SimpleNamespace(
         attn_groups=[[group]],
         vllm_config=SimpleNamespace(),
         model_config=SimpleNamespace(dtype=torch.float16),
+        input_batch=SimpleNamespace(
+            block_table=SimpleNamespace(
+                block_tables=[
+                    SimpleNamespace(
+                        block_table=SimpleNamespace(
+                            gpu=torch.empty((1, 64), dtype=torch.int32)
+                        )
+                    )
+                ]
+            )
+        ),
     )
     monkeypatch.setattr(
         warmup,
@@ -174,6 +206,7 @@ def test_iter_triton_unified_attention_warmup_keys_includes_nvfp4(
             cache_dtype=torch.uint8,
             kv_quant_mode=KVQuantMode.NVFP4,
             sliding_window=(1024, 1024),
+            block_table_stride=64,
         )
     ]
 
@@ -290,8 +323,6 @@ def test_warmup_unified_attention_key_passes_nvfp4_scales(monkeypatch) -> None:
         "kv_quant_mode": KVQuantMode.NVFP4,
         "k_scale_cache": ANY,
         "v_scale_cache": ANY,
-        "raw_k": None,
-        "raw_v": None,
         "chunk_lookback": -1,
         "use_td": False,
     }
@@ -306,7 +337,7 @@ def test_warmup_unified_attention_key_passes_nvfp4_scales(monkeypatch) -> None:
     assert calls[0]["softmax_segm_expsum"].shape == (64, 16, 16)
 
 
-def test_warmup_unified_attention_key_passes_nvfp4_raw_current_tensors(
+def test_warmup_unified_attention_key_uses_runtime_block_table_stride(
     monkeypatch,
 ) -> None:
     key = _make_key(
@@ -314,6 +345,7 @@ def test_warmup_unified_attention_key_passes_nvfp4_raw_current_tensors(
         head_size=256,
         cache_dtype=torch.uint8,
         kv_quant_mode=KVQuantMode.NVFP4,
+        block_table_stride=2784,
     )
     calls: list[dict] = []
 
@@ -323,7 +355,7 @@ def test_warmup_unified_attention_key_passes_nvfp4_raw_current_tensors(
         warmup,
         "_warmup_shapes",
         lambda _key, _cudagraph_batch_sizes=(): (
-            warmup._WarmupShape("raw_current_2d", (16, 16), (32, 32), False, True),
+            warmup._WarmupShape("prefill_2d", (16,), (32,), False),
         ),
     )
     monkeypatch.setattr(
@@ -335,20 +367,8 @@ def test_warmup_unified_attention_key_passes_nvfp4_raw_current_tensors(
     warmup._warmup_unified_attention_key(key, torch.device("cpu"))
 
     assert len(calls) == 1
-    assert calls[0]["max_seqlen_q"] == 16
-    assert calls[0]["max_seqlen_k"] == 32
-    assert calls[0]["seq_threshold_3D"] is None
-    assert calls[0]["num_par_softmax_segments"] is None
-    assert calls[0]["softmax_segm_output"] is None
-    assert calls[0]["raw_k"] is not None
-    assert calls[0]["raw_v"] is not None
-    assert calls[0]["raw_k"].shape == (32, 2, 256)
-    assert calls[0]["raw_v"].shape == (32, 2, 256)
-    assert calls[0]["raw_k"].dtype == torch.float16
-    assert calls[0]["raw_v"].dtype == torch.float16
-    assert calls[0]["block_table"].shape == (2, 16)
-    assert calls[0]["block_table"].stride(0) == 16
-    assert calls[0]["kv_quant_mode"] == KVQuantMode.NVFP4
+    assert calls[0]["block_table"].shape == (1, 2784)
+    assert calls[0]["block_table"].stride(0) == 2784
 
 
 def test_triton_unified_attention_warmup_skips_pooling_runner(monkeypatch) -> None:

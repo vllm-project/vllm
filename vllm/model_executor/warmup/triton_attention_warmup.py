@@ -46,6 +46,7 @@ class TritonUnifiedAttentionWarmupKey:
     use_sinks: bool
     chunk_lookback: int
     use_td: bool
+    block_table_stride: int
 
 
 @dataclass(frozen=True)
@@ -54,7 +55,6 @@ class _WarmupShape:
     query_lens: tuple[int, ...]
     seq_lens: tuple[int, ...]
     use_3d: bool
-    use_raw_current: bool = False
 
 
 def _is_triton_attention_backend(backend: object) -> bool:
@@ -114,12 +114,28 @@ def _iter_triton_unified_attention_warmup_keys(
                 use_sinks=impl.sinks is not None,
                 chunk_lookback=impl.chunk_lookback,
                 use_td=impl.use_td,
+                block_table_stride=_runtime_block_table_stride(runner, group),
             )
             if key not in seen:
                 seen.add(key)
                 keys.append(key)
 
     return keys
+
+
+def _runtime_block_table_stride(
+    runner: GPUModelRunner,
+    group: AttentionGroup,
+) -> int:
+    input_batch = getattr(runner, "input_batch", None)
+    block_tables = getattr(
+        getattr(input_batch, "block_table", None), "block_tables", None
+    )
+    group_id = getattr(group, "kv_cache_group_id", 0)
+    if not block_tables or group_id >= len(block_tables):
+        return 0
+    block_table = block_tables[group_id]
+    return int(block_table.block_table.gpu.stride(0))
 
 
 def _default_seq_threshold_3d(key: TritonUnifiedAttentionWarmupKey) -> int:
@@ -157,27 +173,6 @@ def _decode_warmup_batch_sizes(
     return tuple(sorted(selected))
 
 
-def _raw_current_warmup_batch_sizes(
-    cudagraph_batch_sizes: tuple[int, ...],
-) -> tuple[int, ...]:
-    # Triton specializes the raw-current 2D kernel on num_seqs attributes:
-    # equal-to-1, generic non-divisible, and divisible-by-16. Warm exactly one
-    # representative for each class instead of sweeping all capture sizes.
-    selected = {1}
-
-    non_divisible = next(
-        (size for size in cudagraph_batch_sizes if size > 1 and size % 16 != 0),
-        2,
-    )
-    divisible = next(
-        (size for size in cudagraph_batch_sizes if size > 1 and size % 16 == 0),
-        16,
-    )
-    selected.add(non_divisible)
-    selected.add(divisible)
-    return tuple(sorted(selected))
-
-
 def _warmup_shapes(
     key: TritonUnifiedAttentionWarmupKey,
     cudagraph_batch_sizes: tuple[int, ...] = (),
@@ -199,20 +194,6 @@ def _warmup_shapes(
             for size in decode_batch_sizes
         ),
     ]
-
-    if key.kv_quant_mode.is_nvfp4:
-        raw_current_len = min(16, key.block_size)
-        raw_current_seq_len = raw_current_len + key.block_size
-        shapes.extend(
-            _WarmupShape(
-                "raw_current_2d",
-                (raw_current_len,) * size,
-                (raw_current_seq_len,) * size,
-                False,
-                True,
-            )
-            for size in _raw_current_warmup_batch_sizes(cudagraph_batch_sizes)
-        )
 
     return tuple(shapes)
 
@@ -298,27 +279,13 @@ def _warmup_unified_attention_key(
             device=device,
         )
         out = torch.empty_like(q)
-        raw_k = raw_v = None
-        if shape.use_raw_current:
-            raw_k = torch.empty(
-                (num_tokens, key.num_kv_heads, key.head_size),
-                dtype=key.q_dtype,
-                device=device,
-            )
-            raw_v = torch.empty_like(raw_k)
         k, v, k_scale_cache, v_scale_cache = _allocate_kv_cache_tensors(
             key, shape, device
         )
         cu_seqlens_q = _make_cu_seqlens(shape.query_lens, device)
         seq_lens = torch.tensor(shape.seq_lens, dtype=torch.int32, device=device)
         max_blocks = (max_seq_len + key.block_size - 1) // key.block_size
-        block_table_cols = max_blocks
-        if shape.use_raw_current and key.kv_quant_mode.is_nvfp4:
-            # Match the runtime raw-current specialization class without
-            # broadening the warmup shapes. Short synthetic sequences only
-            # need two logical blocks, but server block tables usually have a
-            # divisible stride that participates in the Triton compile key.
-            block_table_cols = max(block_table_cols, 16)
+        block_table_cols = max(max_blocks, key.block_table_stride)
         block_table = (
             torch.arange(block_table_cols, dtype=torch.int32, device=device)
             .unsqueeze(0)
@@ -400,8 +367,6 @@ def _warmup_unified_attention_key(
             kv_quant_mode=key.kv_quant_mode,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
-            raw_k=raw_k,
-            raw_v=raw_v,
             chunk_lookback=key.chunk_lookback,
             use_td=key.use_td,
         )
