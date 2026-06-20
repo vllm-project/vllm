@@ -12,7 +12,7 @@ from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
     is_mistral_model_repo,
     list_filtered_repo_files,
-    retry_with_kwargs_in_ci,
+    retry_with_kwargs,
 )
 
 
@@ -159,8 +159,7 @@ def test_is_mistral_model_repo(files: list[str], expected_bool: bool):
         )
 
 
-def test_retry_with_kwargs_in_ci_retries_with_kwargs(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("CI", "1")
+def test_retry_with_kwargs_retries_with_kwargs():
     calls: list[dict[str, object]] = []
 
     def flaky_call(**kwargs):
@@ -169,8 +168,8 @@ def test_retry_with_kwargs_in_ci_retries_with_kwargs(monkeypatch: pytest.MonkeyP
             raise RuntimeError("transient failure")
         return kwargs["local_files_only"]
 
-    with retry_with_kwargs_in_ci(flaky_call, local_files_only=True) as call_with_retry:
-        assert call_with_retry(model="cached-model") is True
+    call_with_retry = retry_with_kwargs(flaky_call, local_files_only=True)
+    assert call_with_retry(model="cached-model") is True
 
     assert calls == [
         {"model": "cached-model"},
@@ -178,21 +177,38 @@ def test_retry_with_kwargs_in_ci_retries_with_kwargs(monkeypatch: pytest.MonkeyP
     ]
 
 
-def test_retry_with_kwargs_in_ci_does_not_retry_outside_ci(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.delenv("CI", raising=False)
+def test_retry_with_kwargs_does_not_retry_when_predicate_rejects():
     calls = 0
 
-    def failing_call():
+    def failing_call(**kwargs):
         nonlocal calls
         calls += 1
         raise RuntimeError("failure")
 
-    with (
-        retry_with_kwargs_in_ci(failing_call, local_files_only=True) as call_with_retry,
-        pytest.raises(RuntimeError, match="failure"),
-    ):
+    call_with_retry = retry_with_kwargs(
+        failing_call,
+        retry_on_exception=lambda e: False,
+        local_files_only=True,
+    )
+    with pytest.raises(RuntimeError, match="failure"):
         call_with_retry()
 
     assert calls == 1
+
+
+def test_retry_with_kwargs_retries_with_missing_none_kwarg():
+    calls: list[dict[str, object | None]] = []
+
+    def flaky_call(**kwargs):
+        calls.append(kwargs.copy())
+        if len(calls) == 1:
+            raise RuntimeError("transient failure")
+        return kwargs["revision"]
+
+    call_with_retry = retry_with_kwargs(flaky_call, revision=None)
+    assert call_with_retry(model="cached-model") is None
+
+    assert calls == [
+        {"model": "cached-model"},
+        {"model": "cached-model", "revision": None},
+    ]

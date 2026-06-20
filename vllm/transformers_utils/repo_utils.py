@@ -6,8 +6,7 @@ import fnmatch
 import json
 import os
 import time
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from functools import cache
 from pathlib import Path
 from typing import Any, TypeVar
@@ -53,30 +52,49 @@ def hf_fs() -> "huggingface_hub.HfFileSystem":
 _R = TypeVar("_R")
 
 
-@contextmanager
-def retry_with_kwargs_in_ci(
+def is_transient_hf_error(exc: Exception) -> bool:
+    """Return whether an exception looks like a transient HF transport failure."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        module = type(current).__module__
+        if module.startswith(("httpx", "requests", "urllib3")):
+            return True
+        if isinstance(current, (ConnectionError, TimeoutError)):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def retry_with_kwargs(
     func: Callable[..., _R],
+    *,
+    retry_on_exception: Callable[[Exception], bool] | None = None,
     **retry_kwargs: Any,
-) -> Iterator[Callable[..., _R]]:
-    """Retry a function with extra keyword arguments after a CI-only failure."""
+) -> Callable[..., _R]:
+    """Retry a function once with extra keyword arguments after a selected failure."""
 
     def wrapper(*args, **kwargs) -> _R:
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            if not os.environ.get("CI"):
+            if retry_on_exception is not None and not retry_on_exception(e):
                 raise
-            if all(kwargs.get(key) == value for key, value in retry_kwargs.items()):
+            if all(
+                key in kwargs and kwargs[key] == value
+                for key, value in retry_kwargs.items()
+            ):
                 raise
             logger.warning(
-                "Call to %s failed in CI; retrying with kwargs %s: %s",
+                "Call to %s failed; retrying with kwargs %s: %s",
                 getattr(func, "__qualname__", func),
                 tuple(retry_kwargs),
                 e,
             )
             return func(*args, **{**kwargs, **retry_kwargs})
 
-    yield wrapper
+    return wrapper
 
 
 def with_retry(

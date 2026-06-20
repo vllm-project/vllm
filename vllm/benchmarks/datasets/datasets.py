@@ -52,10 +52,9 @@ from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.mistral import is_mistral_tokenizer
 
 try:
-    from datasets import DownloadMode, load_dataset
+    from datasets import load_dataset
 except ImportError:
     datasets = PlaceholderModule("datasets")
-    DownloadMode = datasets.placeholder_attr("DownloadMode")
     load_dataset = datasets.placeholder_attr("load_dataset")
 
 try:
@@ -3231,14 +3230,6 @@ class HuggingFaceDataset(BenchmarkDataset):
         )
         if latest_revision is not None:
             load_kwargs["revision"] = latest_revision
-            if not self.load_stream and not self._has_cached_revision(latest_revision):
-                logger.info(
-                    "Latest revision %s for Hugging Face dataset %s is not "
-                    "present in the local cache; forcing a redownload.",
-                    latest_revision,
-                    self.dataset_path,
-                )
-                load_kwargs["download_mode"] = DownloadMode.FORCE_REDOWNLOAD
 
         self.data = load_dataset(**load_kwargs)
         if not getattr(self, "disable_shuffle", False):
@@ -3249,21 +3240,6 @@ class HuggingFaceDataset(BenchmarkDataset):
         with suppress(Exception):
             return hf_api().dataset_info(self.dataset_path).sha
         return None
-
-    def _has_cached_revision(self, revision: str) -> bool:
-        """Check whether the latest dataset snapshot is already cached."""
-        with suppress(Exception):
-            from huggingface_hub import scan_cache_dir
-
-            cache_info = scan_cache_dir()
-            for repo in cache_info.repos:
-                if repo.repo_type != "dataset" or repo.repo_id != self.dataset_path:
-                    continue
-                return any(
-                    cached_revision.commit_hash == revision
-                    for cached_revision in repo.revisions
-                )
-        return False
 
 
 # -----------------------------------------------------------------------------

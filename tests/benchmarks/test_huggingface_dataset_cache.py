@@ -40,7 +40,7 @@ def test_hf_dataset_does_not_check_latest_revision_by_default(
     assert "download_mode" not in calls[0]
 
 
-def test_mtbench_forces_redownload_when_latest_revision_is_not_cached(
+def test_mtbench_uses_latest_revision_without_forcing_redownload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[dict[str, Any]] = []
@@ -54,11 +54,6 @@ def test_mtbench_forces_redownload_when_latest_revision_is_not_cached(
         "_get_latest_revision",
         lambda self: "latest-revision",
     )
-    monkeypatch.setattr(
-        MTBenchDataset,
-        "_has_cached_revision",
-        lambda self, revision: False,
-    )
     monkeypatch.setattr(datasets_module, "load_dataset", fake_load_dataset)
 
     MTBenchDataset(
@@ -70,4 +65,4 @@ def test_mtbench_forces_redownload_when_latest_revision_is_not_cached(
 
     assert calls
     assert calls[0]["revision"] == "latest-revision"
-    assert calls[0]["download_mode"] == datasets_module.DownloadMode.FORCE_REDOWNLOAD
+    assert "download_mode" not in calls[0]
