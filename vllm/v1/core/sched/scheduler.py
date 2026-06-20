@@ -1111,6 +1111,13 @@ class Scheduler(SchedulerInterface):
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
 
+        # Set num_invalid_spec_tokens when adaptive K reduces K
+        if _adaptive_k_step is not None and _adaptive_k_step < self.num_spec_tokens:
+            num_invalid = self.num_spec_tokens - _adaptive_k_step
+            scheduler_output.num_invalid_spec_tokens = {
+                req.request_id: num_invalid for req in self.running
+            }
+
         # Restore lookahead after K=0 step.
         self.num_lookahead_tokens = _prev_lookahead
 
@@ -1616,7 +1623,7 @@ class Scheduler(SchedulerInterface):
                             self._pos_reached[j] += 1
                             if j < num_accepted:
                                 self._pos_accepted[j] += 1
-                    self._draft_steps += actual_k
+                    self._draft_steps += 1  # Track forward passes, not tokens
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,

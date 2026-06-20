@@ -1089,12 +1089,10 @@ class SpeculativeConfig:
             target_vocab_size = self.target_model_config.get_vocab_size()
             draft_vocab_size = self.draft_model_config.get_vocab_size()
             if target_vocab_size != draft_vocab_size:
-                logger.warning(
-                    "Target vocab_size=%s vs draft vocab_size=%s. "
-                    "Extra tokens are typically special/control tokens. "
-                    "Draft proposals are clipped to the smaller vocab.",
-                    target_vocab_size,
-                    draft_vocab_size,
+                raise ValueError(
+                    "Target and draft model should have the same vocabulary size. "
+                    f"Got target vocab_size={target_vocab_size} vs "
+                    f"draft vocab_size={draft_vocab_size}."
                 )
 
     @property
