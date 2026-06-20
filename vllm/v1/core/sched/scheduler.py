@@ -443,10 +443,7 @@ class Scheduler(SchedulerInterface):
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
         # Adaptive K: compute now so KV lookahead can be zeroed if K=0.
-        # If DSD is also active, Adaptive K refines DSD's K downward.
-        _adaptive_k_step = self._compute_adaptive_k(
-            max_k=num_spec_tokens_to_schedule
-        )
+        _adaptive_k_step = self._compute_adaptive_k(max_k=self.num_spec_tokens)
         _prev_lookahead = self.num_lookahead_tokens
         if _adaptive_k_step == 0:
             self.num_lookahead_tokens = 0
@@ -1088,6 +1085,11 @@ class Scheduler(SchedulerInterface):
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
                 len(num_scheduled_tokens)
             ]
+        # Cap Adaptive K to DSD's bound (DSD sets coarse K per batch).
+        _adaptive_k_step = min(
+            _adaptive_k_step,
+            num_spec_tokens_to_schedule,
+        )
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -1916,8 +1918,8 @@ class Scheduler(SchedulerInterface):
         min_k = self._adaptive_k_min_tokens
         max_k = max_k if max_k is not None else self.num_spec_tokens
 
-        best_k = prev_k
-        best_goodput = 1.0  # K=0 baseline (no speculation)
+        best_k = 0  # K=0 baseline (no speculation)
+        best_goodput = 1.0
         for k in range(max(min_k, 1), max_k + 1):
             prod = 1.0
             e_total = 1.0
@@ -1933,10 +1935,9 @@ class Scheduler(SchedulerInterface):
                 best_goodput = goodput
                 best_k = k
 
-        # K=0: disable speculation when goodput < 1
-        # (Saxena et al., MLSys 2026, Theorem 4.2).
-        if best_goodput < 1.0 and min_k == 0:
-            best_k = 0
+        # When min_k > 0 and no K beat baseline, enforce min_k.
+        if min_k > 0 and best_k == 0:
+            best_k = min_k
 
         if best_k != prev_k:
             self._previous_adaptive_k = best_k
