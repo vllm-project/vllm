@@ -409,16 +409,21 @@ def softmax_step(S, M, L):
     """
     # compute running maximum
     # m_j : (BLOCK_M,)
-    m_j = tl.maximum(M, tl.max(S, axis=1))
+    tile_max = tl.max(S, axis=1)
+    has_valid_score = tile_max > float("-inf")
+    m_j = tl.maximum(M, tile_max)
     # For sliding window there's a chance the max is -inf due to masking of
-    # the entire row. In this case we need to set m_j 0 to avoid NaN
-    m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
+    # the entire row. Use a temporary finite max for exp() only; all-masked
+    # rows must not advance M/L because segmented reducers consume those
+    # values as the partial softmax scaling contract.
+    safe_m_j = tl.where(has_valid_score | (float("-inf") < M), m_j, 0.0)
     # P : (BLOCK_M, TILE_SIZE)
-    P = tl.exp(S - m_j[:, None])
+    P = tl.exp(S - safe_m_j[:, None])
     # l_j : (BLOCK_M,)
     l_j = tl.sum(P, axis=1)
     # alpha : (BLOCK_M, )
-    alpha = tl.exp(M - m_j)
+    alpha = tl.where(has_valid_score, tl.exp(M - safe_m_j), 1.0)
     # update constants
-    L_new = L * alpha + l_j
-    return m_j, L_new, P, alpha
+    L_new = tl.where(has_valid_score, L * alpha + l_j, L)
+    M_new = tl.where(has_valid_score, safe_m_j, M)
+    return M_new, L_new, P, alpha

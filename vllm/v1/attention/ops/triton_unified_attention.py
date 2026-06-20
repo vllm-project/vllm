@@ -789,11 +789,15 @@ def kernel_unified_attention(
     USE_RAW_CURRENT_KV: tl.constexpr = False,
     USE_NVFP4_BYTEWISE_DECODE: tl.constexpr = False,
     USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE: tl.constexpr = False,
+    RAW_CURRENT_SPLIT_MODE: tl.constexpr = 0,
 ):
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE == 2 or KV_QUANT_MODE == 3
     USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
     USE_NVFP4: tl.constexpr = KV_QUANT_MODE == 4
     BYTE_SIZE_PADDED: tl.constexpr = HEAD_SIZE_PADDED // 2
+    RAW_CURRENT_SPLIT_PREFIX: tl.constexpr = RAW_CURRENT_SPLIT_MODE == 1
+    RAW_CURRENT_SPLIT_CURRENT: tl.constexpr = RAW_CURRENT_SPLIT_MODE == 2
+    STORE_PARTIALS: tl.constexpr = IS_3D or RAW_CURRENT_SPLIT_MODE != 0
 
     if USE_TD:
         tl.static_assert(
@@ -838,10 +842,22 @@ def kernel_unified_attention(
             USE_NVFP4_BYTEWISE_DECODE,
             "USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE requires bytewise decode",
         )
+    if RAW_CURRENT_SPLIT_MODE != 0:
+        tl.static_assert(USE_NVFP4, "raw-current split requires NVFP4 KV cache")
+        tl.static_assert(not IS_3D, "raw-current split is a 2D-only path")
+        tl.static_assert(
+            not USE_TD_QO,
+            "raw-current split does not support TD Q/O partial stores",
+        )
 
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
-    segm_idx = tl.program_id(2) if IS_3D else 0
+    if IS_3D:
+        segm_idx = tl.program_id(2)
+    elif RAW_CURRENT_SPLIT_MODE != 0:
+        segm_idx = RAW_CURRENT_SPLIT_MODE - 1
+    else:
+        segm_idx = 0
 
     (
         seq_idx,
@@ -940,7 +956,13 @@ def kernel_unified_attention(
     block_table_offset = seq_idx * block_table_stride
 
     M = init_softmax_M(
-        sink_ptr, query_offset_1, query_mask_1, segm_idx, BLOCK_M, USE_SINKS, IS_3D
+        sink_ptr,
+        query_offset_1,
+        query_mask_1,
+        segm_idx,
+        BLOCK_M,
+        USE_SINKS,
+        STORE_PARTIALS,
     )
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     if USE_NVFP4_BYTEWISE_DECODE:
@@ -990,15 +1012,27 @@ def kernel_unified_attention(
         CHUNK_LOOKBACK,
         CHUNK_SIZE,
     )
+    if RAW_CURRENT_SPLIT_PREFIX:
+        loop_hi = tl.minimum(loop_hi, cdiv_fn(context_len, TILE_SIZE))
+        max_seq_prefix_len = tl.minimum(max_seq_prefix_len, context_len)
+    elif RAW_CURRENT_SPLIT_CURRENT:
+        loop_lo = tl.maximum(loop_lo, context_len // TILE_SIZE)
 
     # iterate through tiles (now limited to the sliding window range)
     for j in range(loop_lo, loop_hi):
         seq_offset = j * TILE_SIZE + offs_t
         tile_mask = seq_offset < max_seq_prefix_len
+        if RAW_CURRENT_SPLIT_PREFIX:
+            tile_mask = tile_mask & (seq_offset < context_len)
+        elif RAW_CURRENT_SPLIT_CURRENT:
+            tile_mask = tile_mask & (seq_offset >= context_len)
 
-        physical_block_idx = tl.load(
-            block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
-        ).to(tl.int64)
+        if RAW_CURRENT_SPLIT_CURRENT:
+            physical_block_idx = tl.full([TILE_SIZE], 0, dtype=tl.int64)
+        else:
+            physical_block_idx = tl.load(
+                block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
+            ).to(tl.int64)
 
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = compute_kv_seq_mask(
@@ -1108,7 +1142,9 @@ def kernel_unified_attention(
                 )
                 if USE_NVFP4:
                     tile_start = j * TILE_SIZE
-                    if USE_RAW_CURRENT_KV and tile_start >= context_len:
+                    if RAW_CURRENT_SPLIT_CURRENT or (
+                        USE_RAW_CURRENT_KV and tile_start >= context_len
+                    ):
                         # Current chunk only: raw K/V is still live in the
                         # flattened per-token tensors, so avoid FP4 dequant
                         # for this tile.
@@ -1236,7 +1272,10 @@ def kernel_unified_attention(
             S = apply_softcap(S, softcap)
 
         S = tl.where(
-            query_mask_1[:, None] & query_mask_0[:, None] & seq_mask,
+            query_mask_1[:, None]
+            & query_mask_0[:, None]
+            & seq_mask
+            & tile_mask[None, :],
             S,
             float("-inf"),
         )
@@ -1312,7 +1351,9 @@ def kernel_unified_attention(
             else:
                 if USE_NVFP4:
                     tile_start = j * TILE_SIZE
-                    if USE_RAW_CURRENT_KV and tile_start >= context_len:
+                    if RAW_CURRENT_SPLIT_CURRENT or (
+                        USE_RAW_CURRENT_KV and tile_start >= context_len
+                    ):
                         V = _load_v_tile_raw_current(
                             raw_value_ptr,
                             context_len,
@@ -1425,7 +1466,7 @@ def kernel_unified_attention(
                 acc += tl.dot(P.to(V.dtype), V)
 
     # ---- Epilogue ---------------------------------------------------------
-    if IS_3D:
+    if STORE_PARTIALS:
         if USE_FP8_Q_DESCALE:
             acc *= value_scale
         # Store per-segment partials; finalized by ``reduce_segments``.
@@ -1673,6 +1714,66 @@ def reduce_segments(
         query_token_idx * output_stride_0
         + query_head_idx * output_stride_1
         + tl.arange(0, HEAD_SIZE_PADDED)
+    )
+    tl.store(output_ptr + output_offset, acc, mask=dim_mask)
+
+
+@triton.jit
+def reduce_raw_current_split(
+    output_ptr,  # [num_tokens, num_query_heads, head_size]
+    split_output_ptr,  # [num_tokens, num_query_heads, 2, head_size_padded]
+    split_max_ptr,  # [num_tokens, num_query_heads, 2]
+    split_expsum_ptr,  # [num_tokens, num_query_heads, 2]
+    out_scale_inv,
+    output_stride_0: tl.int64,
+    output_stride_1: tl.int64,
+    HEAD_SIZE: tl.constexpr,
+    HEAD_SIZE_PADDED: tl.constexpr,
+    USE_FP8: tl.constexpr,
+    FP8_MIN: tl.constexpr = float8_info.min,
+    FP8_MAX: tl.constexpr = float8_info.max,
+):
+    query_token_idx = tl.program_id(0)
+    query_head_idx = tl.program_id(1)
+    num_query_heads = tl.num_programs(1)
+
+    segm_ids = tl.arange(0, 2)
+    dim_ids = tl.arange(0, HEAD_SIZE_PADDED)
+    dim_mask = dim_ids < HEAD_SIZE
+
+    segm_offset = (
+        query_token_idx.to(tl.int64) * (num_query_heads * 2)
+        + query_head_idx * 2
+        + segm_ids
+    )
+    segm_max = tl.load(split_max_ptr + segm_offset)
+    overall_max = tl.max(segm_max)
+
+    segm_expsum = tl.load(split_expsum_ptr + segm_offset)
+    segm_expsum = segm_expsum * tl.exp(segm_max - overall_max)
+    overall_expsum = tl.sum(segm_expsum)
+
+    split_output_offset = (
+        query_token_idx.to(tl.int64) * (num_query_heads * 2 * HEAD_SIZE_PADDED)
+        + query_head_idx * (2 * HEAD_SIZE_PADDED)
+        + segm_ids[:, None] * HEAD_SIZE_PADDED
+        + dim_ids[None, :]
+    )
+    split_output = tl.load(
+        split_output_ptr + split_output_offset,
+        mask=dim_mask[None, :],
+        other=0.0,
+    )
+    split_output *= tl.exp(segm_max - overall_max)[:, None]
+    acc_sum = tl.sum(split_output, axis=0)
+    acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
+
+    if USE_FP8:
+        acc = acc * tl.load(out_scale_inv)
+        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
+
+    output_offset = (
+        query_token_idx * output_stride_0 + query_head_idx * output_stride_1 + dim_ids
     )
     tl.store(output_ptr + output_offset, acc, mask=dim_mask)
 
@@ -2041,6 +2142,145 @@ def unified_attention(
     if launch_num_stages is not None:
         launch_kwargs["num_stages"] = launch_num_stages
 
+    use_raw_current_split = (
+        use_nvfp4
+        and use_raw_current_kv
+        and not use_3d
+        and (not use_causal or use_per_seq_causal)
+        and max_seqlen_q >= 256
+        and chunk_lookback == -1
+        and mm_prefix_range is None
+        and output_scale is None
+        and sinks is None
+        and head_size_padded in (256, 512)
+    )
+    if use_raw_current_split:
+        split_output = torch.empty(
+            (q.shape[0], num_query_heads, 2, head_size_padded),
+            dtype=torch.float32,
+            device=q.device,
+        )
+        split_max = torch.empty(
+            (q.shape[0], num_query_heads, 2),
+            dtype=torch.float32,
+            device=q.device,
+        )
+        split_expsum = torch.empty_like(split_max)
+
+        split_kernel_kwargs = dict(
+            output_ptr=out,
+            segm_output_ptr=split_output,
+            segm_max_ptr=split_max,
+            segm_expsum_ptr=split_expsum,
+            query_ptr=q,
+            key_cache_ptr=k,
+            value_cache_ptr=v,
+            raw_key_ptr=raw_k_ptr,
+            raw_value_ptr=raw_v_ptr,
+            sink_ptr=sinks,
+            block_tables_ptr=block_table,
+            seq_lens_ptr=seqused_k,
+            alibi_slopes_ptr=alibi_slopes,
+            qq_bias_ptr=qq_bias,
+            k_scale_cache_ptr=k_scale_ptr,
+            v_scale_cache_ptr=v_scale_ptr,
+            scale=softmax_scale,
+            q_scale=q_descale,
+            k_scale=k_descale,
+            v_scale=v_descale,
+            out_scale=1.0,
+            softcap=softcap,
+            num_query_heads=num_query_heads,
+            num_queries_per_kv=num_queries_per_kv,
+            block_table_stride=block_table.stride(0),
+            query_stride_0=q.stride(0),
+            query_stride_1=q.stride(1),
+            output_stride_0=out.stride(0),
+            output_stride_1=out.stride(1),
+            qq_bias_stride_0=qq_bias.stride(0) if use_qq_bias else 0,
+            BLOCK_SIZE=block_size,
+            TILE_SIZE=tile_size,
+            HEAD_SIZE=head_size,
+            HEAD_SIZE_PADDED=head_size_padded,
+            USE_ALIBI_SLOPES=use_alibi_slopes,
+            USE_ALIBI_SQRT=use_alibi_sqrt,
+            USE_QQ_BIAS=use_qq_bias,
+            USE_SOFTCAP=(softcap > 0),
+            USE_SINKS=False,
+            SLIDING_WINDOW=(1 + window_size[0]),
+            USE_CAUSAL=use_causal,
+            USE_PER_SEQ_CAUSAL=use_per_seq_causal,
+            per_seq_causal_ptr=per_seq_causal_ptr,
+            USE_MM_PREFIX=False,
+            MAX_MM_RANGES=max_mm_ranges,
+            mm_prefix_range_ptr=mm_prefix_range,
+            stride_k_cache_0=k.stride(0),
+            stride_k_cache_1=k.stride(1),
+            stride_k_cache_2=k.stride(2),
+            stride_k_cache_3=k.stride(3),
+            stride_v_cache_0=v.stride(0),
+            stride_v_cache_1=v.stride(1),
+            stride_v_cache_2=v.stride(2),
+            stride_v_cache_3=v.stride(3),
+            stride_raw_k_0=raw_k_stride_0,
+            stride_raw_k_1=raw_k_stride_1,
+            stride_raw_k_2=raw_k_stride_2,
+            stride_raw_v_0=raw_v_stride_0,
+            stride_raw_v_1=raw_v_stride_1,
+            stride_raw_v_2=raw_v_stride_2,
+            stride_ks_blk=ks_blk,
+            stride_ks_slot=ks_slot,
+            stride_ks_head=ks_head,
+            stride_ks_dim=ks_dim,
+            stride_vs_blk=vs_blk,
+            stride_vs_slot=vs_slot,
+            stride_vs_head=vs_head,
+            stride_vs_dim=vs_dim,
+            query_start_len_ptr=cu_seqlens_q,
+            BLOCK_Q=BLOCK_Q,
+            num_seqs=num_seqs,
+            BLOCK_M=BLOCK_M,
+            NUM_SEGMENTS_PER_SEQ=2,
+            USE_FP8=False,
+            IS_3D=False,
+            KV_QUANT_MODE=kv_quant_mode,
+            Q_IS_FP8=(q.dtype == current_platform.fp8_dtype()),
+            CHUNK_LOOKBACK=-1,
+            CHUNK_SIZE=-1,
+            USE_TD=False,
+            USE_TD_QO=False,
+            **launch_kwargs,
+        )
+
+        prefix_use_bytewise = True
+        kernel_unified_attention[grid](
+            **split_kernel_kwargs,
+            USE_RAW_CURRENT_KV=False,
+            USE_NVFP4_BYTEWISE_DECODE=prefix_use_bytewise,
+            USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE=False,
+            RAW_CURRENT_SPLIT_MODE=1,
+        )
+        kernel_unified_attention[grid](
+            **split_kernel_kwargs,
+            USE_RAW_CURRENT_KV=True,
+            USE_NVFP4_BYTEWISE_DECODE=False,
+            USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE=False,
+            RAW_CURRENT_SPLIT_MODE=2,
+        )
+        reduce_raw_current_split[(q.shape[0], num_query_heads)](
+            output_ptr=out,
+            split_output_ptr=split_output,
+            split_max_ptr=split_max,
+            split_expsum_ptr=split_expsum,
+            out_scale_inv=1.0,
+            output_stride_0=out.stride(0),
+            output_stride_1=out.stride(1),
+            HEAD_SIZE=head_size,
+            HEAD_SIZE_PADDED=head_size_padded,
+            USE_FP8=False,
+        )
+        return
+
     kernel_unified_attention[grid](
         output_ptr=out,
         segm_output_ptr=segm_output_ptr,
@@ -2126,6 +2366,7 @@ def unified_attention(
         USE_RAW_CURRENT_KV=use_raw_current_kv,
         USE_NVFP4_BYTEWISE_DECODE=use_nvfp4_bytewise_decode,
         USE_NVFP4_TRANSPOSED_K_BYTEWISE_DECODE=(use_nvfp4_transposed_k_bytewise_decode),
+        RAW_CURRENT_SPLIT_MODE=0,
         **launch_kwargs,
     )
 

@@ -330,6 +330,8 @@ def test_triton_mixed_causal(
         ([(8, 32), (4, 64)], True, [False, True]),
         ([(32, 126)], True, [False]),
         ([(256, 350)], True, [False]),
+        ([(256, 350)], True, [True]),
+        ([(256, 350)], True, False),
         ([(256, 256)], False, [False]),
         ([(256, 256)], True, [False]),
     ],
@@ -340,7 +342,7 @@ def test_triton_mixed_causal(
 def test_triton_nvfp4_mixed_causal(
     seq_lens: list[tuple[int, int]],
     use_raw_current_kv: bool,
-    per_seq_causal: list[bool],
+    per_seq_causal: list[bool] | bool,
     head_size: int,
     num_kv_heads: int,
 ) -> None:
@@ -358,7 +360,14 @@ def test_triton_nvfp4_mixed_causal(
     block_size = 16
     scale = head_size**-0.5
 
-    assert len(seq_lens) == len(per_seq_causal)
+    if isinstance(per_seq_causal, bool):
+        causal_arg = per_seq_causal
+        ref_per_seq_causal = [per_seq_causal] * len(seq_lens)
+    else:
+        assert len(seq_lens) == len(per_seq_causal)
+        causal_arg = torch.tensor(per_seq_causal, dtype=torch.bool, device=device)
+        ref_per_seq_causal = per_seq_causal
+
     query_lens = [query_len for query_len, _ in seq_lens]
     kv_lens = [kv_len for _, kv_len in seq_lens]
     num_query_tokens = sum(query_lens)
@@ -456,7 +465,6 @@ def test_triton_nvfp4_mixed_causal(
         [0] + query_lens, dtype=torch.int32, device=device
     ).cumsum(dim=0, dtype=torch.int32)
     seqused_k = torch.tensor(kv_lens, dtype=torch.int32, device=device)
-    causal_tensor = torch.tensor(per_seq_causal, dtype=torch.bool, device=device)
     output = torch.empty_like(query)
 
     unified_attention(
@@ -469,7 +477,7 @@ def test_triton_nvfp4_mixed_causal(
         seqused_k=seqused_k,
         max_seqlen_k=max(kv_lens),
         softmax_scale=scale,
-        causal=causal_tensor,
+        causal=causal_arg,
         window_size=(-1, -1),
         block_table=block_tables,
         softcap=0.0,
@@ -491,7 +499,7 @@ def test_triton_nvfp4_mixed_causal(
         kv_lens,
         block_tables,
         scale,
-        per_seq_causal,
+        ref_per_seq_causal,
     )
     torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2)
 
