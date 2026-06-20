@@ -270,7 +270,7 @@ class Scheduler(SchedulerInterface):
         # Anti-thrashing cooldown.
         self._adaptive_k_cooldown: int = 0
         self._previous_adaptive_k: int = self.num_spec_tokens
-        # Online c_draft tracking (draft/target step counts).
+        # Online c_draft tracking.
         self._draft_steps: int = 0
         self._target_steps: int = 0
 
@@ -442,7 +442,7 @@ class Scheduler(SchedulerInterface):
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
-        # Adaptive K: compute now so KV lookahead can be zeroed if K=0.
+        # Adaptive K: compute before zeroing lookahead.
         _adaptive_k_step = self._compute_adaptive_k(max_k=self.num_spec_tokens)
         _prev_lookahead = self.num_lookahead_tokens
         if _adaptive_k_step == 0:
@@ -1085,7 +1085,7 @@ class Scheduler(SchedulerInterface):
             num_spec_tokens_to_schedule = self.dynamic_sd_lookup[
                 len(num_scheduled_tokens)
             ]
-        # Cap Adaptive K to DSD's bound (DSD sets coarse K per batch).
+        # Cap to DSD batch-size bound.
         _adaptive_k_step = min(
             _adaptive_k_step,
             num_spec_tokens_to_schedule,
@@ -1111,7 +1111,7 @@ class Scheduler(SchedulerInterface):
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
 
-        # Restore lookahead tokens after adaptive K=0 step.
+        # Restore lookahead after K=0 step.
         self.num_lookahead_tokens = _prev_lookahead
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1883,10 +1883,8 @@ class Scheduler(SchedulerInterface):
     def _compute_adaptive_k(self, max_k: int | None = None) -> int:
         """Select K maximising goodput = E_acc(K) / ITL(K, BS).
 
-        When DSD is also active, max_k is DSD's batch-size scheduled K and
-        this function refines it downward using runtime acceptance. When
-        DSD is inactive, max_k defaults to num_spec_tokens.
-        K=0 disables speculation when expected goodput falls below 1.0.
+        When DSD is active, max_k is DSD's batch-size K. K=0 disables
+        speculation when expected goodput falls below 1.0.
         """
         alphas = self._per_position_ema
         if alphas is None or not self._enable_adaptive_k:
@@ -1898,20 +1896,15 @@ class Scheduler(SchedulerInterface):
         if self._adaptive_k_cooldown > 0:
             self._adaptive_k_cooldown -= 1
             return max(0, prev_k)
-
-        # Online cost ratio: measured draft:target step ratio corrects the
-        # profiled base c_draft (which is draft_time / target_time).
+        # Online draft:target step ratio.
         total_draft = max(self._draft_steps, 1)
         total_target = max(self._target_steps, 1)
         scale = total_draft / total_target
 
-        # --- Cost breakdown (goodput = AL / ITL) ---
-        # Draft cost: K forwards at c_draft per token, scaled by online ratio.
+        # Draft cost: K forwards at c_draft, scaled online.
         draft_cost_per_token = self._adaptive_k_c_draft * scale
 
-        # Verification cost: target model processes K+1 tokens per sequence.
-        # At batch-size BS, the effective work grows with BS * (K+1), so
-        # verification cost scales with batch size.
+        # Verification cost: K+1 tokens per seq at batch size BS.
         batch_size = len(self.running)
         verify_cost_per_token = self._adaptive_k_bs_penalty * batch_size * scale
 
@@ -1927,15 +1920,15 @@ class Scheduler(SchedulerInterface):
                 a = max(0.001, min(0.999, alphas[i]))
                 prod *= a
                 e_total += prod
-
-            # ITL(K, BS) = K * draft_cost + 1 + K * verify_cost_per_token
+            # ITL(K) = K * draft + 1 + K * verify_cost.
             itl = k * draft_cost_per_token + 1.0 + k * verify_cost_per_token
+
             goodput = e_total / itl
             if goodput > best_goodput:
                 best_goodput = goodput
                 best_k = k
 
-        # When min_k > 0 and no K beat baseline, enforce min_k.
+        # Enforce min_k when all K below baseline.
         if min_k > 0 and best_k == 0:
             best_k = min_k
 
