@@ -690,11 +690,16 @@ async def test_e2e_parsed_tool_call(parser_client, parser_tokenizer):
     gen_req = await _e2e_render_chat(parser_client, PARSER_MODEL, messages)
 
     output_text = (
+        "<think>Let me check the weather.</think>"
         '<tool_call>\n{"name": "get_weather", '
         '"arguments": {"city": "Paris"}}\n</tool_call>'
     )
     output_ids = _require_markers_survive(
-        parser_tokenizer, output_text, "<tool_call>", "</tool_call>"
+        parser_tokenizer,
+        output_text,
+        "</think>",
+        "<tool_call>",
+        "</tool_call>",
     )
 
     resp = await parser_client.post(

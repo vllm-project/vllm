@@ -641,15 +641,17 @@ class OpenAIServingRender:
                     if not getattr(chat_request, "include_reasoning", True):
                         reasoning = None
 
-                    tc_items = None
-                    if tool_calls:
-                        tc_items = [
+                    tc_items = (
+                        [
                             ToolCall(
                                 id=random_uuid(),
                                 function=tc,
                             )
                             for tc in tool_calls
                         ]
+                        if tool_calls
+                        else []
+                    )
 
                     message = ChatMessage(
                         role="assistant",
