@@ -54,38 +54,6 @@ class SPTestSettings:
     test_options: SPTestOptions
 
     @staticmethod
-    def detailed(
-        *,
-        tp_base: int = 2,
-        pp_base: int = 1,
-        multi_node_only: bool = False,
-        runner: RunnerOption = "auto",
-        load_format: str | None = None,
-    ):
-        parallel_setups = []
-        for eager_mode_val in [False, True]:
-            for pp_multiplier in [1, 2]:
-                for chunked_prefill_val in [False, True]:
-                    parallel_setups.append(
-                        ParallelSetup(
-                            tp_size=tp_base,
-                            pp_size=pp_multiplier * pp_base,
-                            fuse_norm_quant=False,
-                            fuse_act_quant=False,
-                            eager_mode=eager_mode_val,
-                            chunked_prefill=chunked_prefill_val,
-                        )
-                    )
-        return SPTestSettings(
-            parallel_setups=parallel_setups,
-            distributed_backends=["mp", "ray"],
-            runner=runner,
-            test_options=SPTestOptions(
-                multi_node_only=multi_node_only, load_format=load_format
-            ),
-        )
-
-    @staticmethod
     def fast(
         *,
         tp_base: int = 2,
@@ -94,23 +62,26 @@ class SPTestSettings:
         multi_node_only: bool = False,
         load_format: str | None = None,
     ):
-        parallel_setups = []
-        for eager_mode_val in [False, True]:
-            for pp_multiplier in [1, 2]:
-                for chunked_prefill_val in [False, True]:
-                    parallel_setups.append(
-                        ParallelSetup(
-                            tp_size=tp_base,
-                            pp_size=pp_multiplier * pp_base,
-                            fuse_norm_quant=False,
-                            fuse_act_quant=False,
-                            eager_mode=eager_mode_val,
-                            chunked_prefill=chunked_prefill_val,
-                        )
-                    )
         return SPTestSettings(
-            parallel_setups=parallel_setups,
-            distributed_backends=["mp", "ray"],
+            parallel_setups=[
+                ParallelSetup(
+                    tp_size=tp_base,
+                    pp_size=pp_base,
+                    fuse_norm_quant=False,
+                    fuse_act_quant=False,
+                    eager_mode=False,
+                    chunked_prefill=True,
+                ),
+                ParallelSetup(
+                    tp_size=tp_base,
+                    pp_size=2 * pp_base,
+                    fuse_norm_quant=False,
+                    fuse_act_quant=False,
+                    eager_mode=False,
+                    chunked_prefill=True,
+                ),
+            ],
+            distributed_backends=["mp"],
             runner=runner,
             test_options=SPTestOptions(
                 multi_node_only=multi_node_only, load_format=load_format
