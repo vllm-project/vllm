@@ -3,7 +3,7 @@
 
 import torch
 
-from vllm.v1.worker.utils import bind_kv_cache
+from vllm.v1.worker.utils import KVBlockZeroer, bind_kv_cache
 
 
 def test_bind_kv_cache(default_vllm_config):
@@ -90,3 +90,29 @@ def test_bind_kv_cache_draft_model(default_vllm_config):
     assert runner_kv_caches[1] is kv_cache["draft_model.layers.0.attn"]
     assert runner_kv_caches[2] is kv_cache["model.layers.1.attn"]
     assert runner_kv_caches[3] is kv_cache["draft_model.layers.1.attn"]
+
+
+def test_kv_block_zeroer_warmup_compiles_minimal_runtime_meta_variants(
+    monkeypatch,
+):
+    sync_calls = 0
+
+    def fake_synchronize():
+        nonlocal sync_calls
+        sync_calls += 1
+
+    monkeypatch.setattr(torch.accelerator, "synchronize", fake_synchronize)
+
+    class FakeKVBlockZeroer(KVBlockZeroer):
+        def __init__(self):
+            self.calls: list[list[int]] = []
+
+        def zero_block_ids(self, block_ids: list[int]) -> None:
+            self.calls.append(block_ids)
+
+    zeroer = FakeKVBlockZeroer()
+
+    zeroer.warmup()
+
+    assert zeroer.calls == [[0], [0, 0]]
+    assert sync_calls == 1

@@ -218,6 +218,14 @@ class KVBlockZeroer:
             BLOCK_SIZE=blk_size,
         )
 
+    def warmup(self) -> None:
+        """Compile the KV block zeroing kernel before the first request."""
+        self.zero_block_ids([0])
+        # Runtime allocation commonly zeros a non-singleton, non-divisible
+        # number of blocks; Triton specializes that separately from n_blocks=1.
+        self.zero_block_ids([0, 0])
+        torch.accelerator.synchronize()
+
 
 @dataclass
 class AttentionGroup:
