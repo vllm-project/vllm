@@ -115,7 +115,7 @@ def backend_to_kernel_cls(
         return [CutlassExpertsFp4]
 
     elif backend == NvFp4MoeBackend.HUMMING:
-        import vllm.model_executor.layers.fused_moe.fused_humming_moe as humming_moe
+        import vllm.model_executor.layers.fused_moe.experts.fused_humming_moe as humming_moe
 
         return [
             humming_moe.BatchedHummingGroupedExperts,
@@ -537,10 +537,10 @@ def make_nvfp4_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
-    extra_kwargs = {}
+    extra_args = {}
     if "Humming" in experts_cls.__name__:
         assert layer is not None
-        extra_kwargs["layer"] = layer
+        extra_args["layer"] = layer
 
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
@@ -551,13 +551,13 @@ def make_nvfp4_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
-            **extra_kwargs,
+            **extra_args,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            **extra_kwargs,
+            **extra_args,
         )
 
     kernel = mk.FusedMoEKernel(

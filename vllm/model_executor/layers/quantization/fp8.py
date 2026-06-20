@@ -693,6 +693,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             w2_input_scale=w2_input_scale,
         )
 
+        # Replace parameters with updated versions. Note that this helper
+        # function ensures the replacement is compatible with RL weight reloads.
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)

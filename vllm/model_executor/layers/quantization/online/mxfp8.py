@@ -224,8 +224,8 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
             w1_bias=getattr(layer, "w13_bias", None),
             w2_bias=getattr(layer, "w2_bias", None),
             block_shape=self.weight_block_size,
-            layer=layer,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            layer=layer,
         )
 
     def process_weights_after_loading(self, layer: Module) -> None:

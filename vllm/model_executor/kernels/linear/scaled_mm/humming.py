@@ -30,12 +30,6 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
-        if envs.VLLM_USE_HUMMING_LINEAR_KERNEL is None:
-            return False, "Humming is disabled by default"
-
-        if envs.VLLM_USE_HUMMING_LINEAR_KERNEL is False:
-            return False, "Humming is disabled by VLLM_USE_HUMMING_LINEAR_KERNEL=0"
-
         if not current_platform.is_cuda():
             return False, "Humming only supported on CUDA"
 
