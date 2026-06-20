@@ -76,10 +76,10 @@ DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     }
 )
 
-DEEPSEEK_V4_CUDAGRAPH_ARCHITECTURES = frozenset(
+_BREAKABLE_CUDAGRAPH_AUTO_ENABLE_ARCHITECTURES = frozenset(
     {
-        "DeepseekV4ForCausalLM",
-        "DeepSeekV4MTPModel",
+        "MiniMaxM3SparseForCausalLM",
+        "MiniMaxM3SparseForConditionalGeneration",
     }
 )
 
@@ -111,20 +111,22 @@ IS_DENSE = False
 # See https://github.com/vllm-project/vllm/issues/25689.
 
 
-def _should_auto_enable_deepseek_v4_breakable_cudagraph(
+def _should_auto_enable_breakable_cudagraph(
     model_config: ModelConfig,
 ) -> bool:
-    # DeepSeek-V4 does NOT auto-enable breakable cudagraph. Breakable mode
-    # disables the torch.compile pipeline (equivalent to -O.mode=none) and runs
-    # attention eagerly every decode step; on SM12x that is 1.5-3.8x SLOWER for
-    # MTP decode and degrades with output length, measured on both RTX PRO 6000
-    # (SM120) and 2x GB10 (SM121). FULL_AND_PIECEWISE + torch.compile is correct
-    # (GSM8K parity, bare-prompt clean) and faster, so it is the default.
-    # Opt in with VLLM_USE_BREAKABLE_CUDAGRAPH=1 for the MTP + long-context +
-    # high-concurrency garbled-output workaround (which also engages the
-    # spec-decode attention eager-break).
-    del model_config  # architecture-independent: never auto-enable
-    return False
+    # Auto-enable breakable cudagraph only for architectures that lack
+    # @support_torch_compile and are known-good under it (MiniMax M3 retains its
+    # upstream unconditional auto-enable). DeepSeek-V4 is deliberately excluded:
+    # breakable mode disables the torch.compile pipeline (equivalent to
+    # -cc.mode=none) and runs attention eagerly every decode step, which on SM12x
+    # is 1.5-3.8x SLOWER for MTP decode and degrades with output length (measured
+    # on RTX PRO 6000 / SM120 and 2x GB10 / SM121). FULL_AND_PIECEWISE +
+    # torch.compile is correct (GSM8K parity, bare-prompt clean) and faster, so
+    # it is the DSv4 default. Opt in with VLLM_USE_BREAKABLE_CUDAGRAPH=1.
+    return any(
+        arch in _BREAKABLE_CUDAGRAPH_AUTO_ENABLE_ARCHITECTURES
+        for arch in model_config.architectures
+    )
 
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
@@ -1096,26 +1098,15 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
-        # DeepSeek V4's model classes don't carry @support_torch_compile.
-        # On SM120 the breakable cudagraph is the supported PIECEWISE path;
-        # on tested SM121/GB10 Ray configs the compiled PIECEWISE path is
-        # required for correctness (breakable can corrupt graph replay).
-        # Auto-enable only for the known-good DeepSeek V4 device path; MiniMax
-        # M3 retains its upstream unconditional auto-enable.
+        # Some model classes don't carry @support_torch_compile and rely on the
+        # breakable cudagraph PIECEWISE path; auto-enable it for those unless the
+        # user explicitly opted out. DeepSeek-V4 is deliberately excluded (see
+        # _should_auto_enable_breakable_cudagraph) — it is faster on
+        # FULL_AND_PIECEWISE + torch.compile.
         if (
             self.model_config is not None
             and "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
-            and (
-                _should_auto_enable_deepseek_v4_breakable_cudagraph(self.model_config)
-                or any(
-                    a
-                    in (
-                        "MiniMaxM3SparseForCausalLM",
-                        "MiniMaxM3SparseForConditionalGeneration",
-                    )
-                    for a in self.model_config.architectures
-                )
-            )
+            and _should_auto_enable_breakable_cudagraph(self.model_config)
         ):
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
             logger.info_once(
