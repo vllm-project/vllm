@@ -10,6 +10,17 @@ if TYPE_CHECKING:
 else:
     AttentionLayerBase = object
 
+# Backends that support Decode Context Parallelism (return softmax LSE on
+# decode). Kept as a constant so the error message always reflects the truth.
+_DCP_COMPATIBLE_BACKENDS = (
+    "FLASH_ATTN",
+    "FLASHINFER",
+    "FLASH_ATTN_MLA",
+    "FLASHMLA",
+    "TRITON_MLA",
+    "CUTLASS_MLA",
+)
+
 
 def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
     pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
@@ -24,23 +35,35 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                 continue
             if vllm_config.speculative_config is not None and interleave_size > 1:
                 assert layer_impl.supports_mtp_with_cp_non_trivial_interleave_size, (
-                    "MTP with cp_kv_cache_interleave_size > 1 is not "
-                    f"supported in {layer_impl.__class__.__name__}."
+                    f"{layer_impl.__class__.__name__} does not support MTP "
+                    "with cp_kv_cache_interleave_size > 1. "
+                    "Disable speculative decoding by removing "
+                    "--speculative-config (or setting "
+                    "--speculative-config '{\"method\": \"none\"}'), or set "
+                    "--cp-kv-cache-interleave-size 1."
                 )
             if dcp_size > 1:
+                _dcp_backends = ", ".join(_DCP_COMPATIBLE_BACKENDS)
                 assert layer_impl.need_to_return_lse_for_decode, (
                     "Decode Context Parallelism (DCP) requires attention "
                     "implementations to return the softmax LSE during decode, "
-                    f"but {layer_impl.__class__.__name__} does not. "
-                    "Try a different backend by setting "
-                    "--attention-backend or disable DCP."
+                    f"but {layer_impl.__class__.__name__} does not support "
+                    "this. To fix, switch to a DCP-compatible backend "
+                    f"({_dcp_backends}) by setting "
+                    "--attention-backend <BACKEND> or the environment variable "
+                    "VLLM_ATTENTION_BACKEND=<BACKEND>, "
+                    "or disable DCP with --decode-context-parallel-size 1."
                 )
 
             if pcp_size > 1:
                 assert layer_impl.supports_pcp, (
-                    "PCP requires attention impls' support, "
-                    f"but the impl {layer_impl.__class__.__name__} "
-                    "does not support PCP."
+                    "Prefill Context Parallelism (PCP) requires attention "
+                    "implementations that support PCP, but "
+                    f"{layer_impl.__class__.__name__} does not. "
+                    "Try a PCP-compatible backend by setting "
+                    "--attention-backend <BACKEND> or the environment variable "
+                    "VLLM_ATTENTION_BACKEND=<BACKEND>, "
+                    "or disable PCP with --prefill-context-parallel-size 1."
                 )
 
 
