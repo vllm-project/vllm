@@ -1,6 +1,8 @@
 model_name: "amd/Qwen3.5-35B-A3B-MXFP4"
 accuracy_threshold: 0.89
 tolerance: 0.03
+startup_max_wait_seconds: 1800
+rocm_request_timeout_seconds: 3600
 num_questions: 1319
 num_fewshot: 5
 server_args: >-

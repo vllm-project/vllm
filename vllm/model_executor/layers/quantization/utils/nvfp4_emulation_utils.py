@@ -214,6 +214,23 @@ def _nvfp4_quant_dequant_kernel(
     tl.store(output_ptr + indices, result, mask=mask_2d)
 
 
+def _as_triton_scalar_ptr(global_scale, device: torch.device) -> torch.Tensor:
+    if isinstance(global_scale, torch.Tensor):
+        global_scale_tensor = global_scale.to(device=device, dtype=torch.float32)
+    else:
+        global_scale_tensor = torch.tensor(
+            global_scale, device=device, dtype=torch.float32
+        )
+
+    if not torch.compiler.is_compiling():
+        assert global_scale_tensor.numel() == 1, (
+            "NVFP4 quantize-dequantize emulation expects a single global scale, "
+            f"got shape={tuple(global_scale_tensor.shape)}"
+        )
+
+    return global_scale_tensor.reshape(-1).contiguous()
+
+
 def _triton_nvfp4_quant_dequant(
     x: torch.Tensor,
     global_scale: torch.Tensor,
@@ -235,10 +252,11 @@ def _triton_nvfp4_quant_dequant(
     tile_blocks = min(64, triton.next_power_of_2(num_blocks))
     num_tiles = (num_blocks + tile_blocks - 1) // tile_blocks
     grid = (x_m, num_tiles)
+    global_scale_ptr = _as_triton_scalar_ptr(global_scale, x.device)
     _nvfp4_quant_dequant_kernel[grid](
         x,
         output,
-        global_scale,
+        global_scale_ptr,
         x_k,
         num_blocks,
         block_size,
