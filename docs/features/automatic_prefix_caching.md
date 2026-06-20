@@ -13,6 +13,27 @@ Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an exampl
 
 [examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py](../../examples/features/automatic_prefix_caching/automatic_prefix_caching_offline.py)
 
+## Verifying APC reuse
+
+Send two or more requests with a token-identical shared prefix and different
+suffixes. The first request typically populates the prefix cache. Later requests
+can reuse the full KV-cache blocks that correspond to the shared prefix.
+
+For online serving, compare the [`/metrics` endpoint](../usage/metrics.md) before
+and after the repeated requests. Reuse should generally increase
+`vllm:prefix_cache_hits`; the reused portion also reduces the newly computed
+prefill KV tokens reported by `vllm:request_prefill_kv_computed_tokens`.
+
+Zero or low prefix-cache hits can occur when:
+
+- The cache is cold.
+- The rendered and tokenized prefixes differ, for example because of a chat
+  template or whitespace difference.
+- The shared prefix does not contain enough complete reusable KV-cache blocks.
+- The requests use different LoRA adapters, multi-modal input hashes, or
+  `cache_salt` values.
+- The cached blocks were evicted or the prefix cache was reset.
+
 ## Example workloads
 
 We describe two example workloads, where APC can provide huge performance benefit:
