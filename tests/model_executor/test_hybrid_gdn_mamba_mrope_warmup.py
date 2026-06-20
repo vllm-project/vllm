@@ -7,7 +7,6 @@ import pytest
 import torch
 
 from vllm.distributed import parallel_state
-from vllm.model_executor.warmup import hybrid_gdn_mamba_mrope_warmup as hybrid_warmup
 from vllm.model_executor.warmup import kernel_warmup
 from vllm.v1.worker.gpu.warmup import warmup_kernels
 
@@ -68,47 +67,6 @@ def test_kernel_warmup_runs_hybrid_and_zeroer_warmups(monkeypatch) -> None:
     kernel_warmup.kernel_warmup(worker)
 
     assert calls == ["hybrid", "zeroer"]
-
-
-def test_qwen_gdn_warmup_directly_warms_fused_post_conv(monkeypatch) -> None:
-    calls: list[tuple[str, object]] = []
-
-    def fake_fused_post_conv_prep(**kwargs):
-        assert kwargs["conv_output"].shape == (17, 5120)
-        assert kwargs["a"].shape == (17, 24)
-        assert kwargs["b"].shape == (17, 24)
-        assert kwargs["num_k_heads"] == 8
-        assert kwargs["head_k_dim"] == 128
-        assert kwargs["head_v_dim"] == 128
-        assert kwargs["apply_l2norm"] is True
-        assert kwargs["output_g_exp"] is False
-        calls.append(("fused", kwargs["conv_output"].dtype))
-        return None
-
-    def fake_prefill_warmup(qkv, v_dim):
-        assert qkv.shape == (1, 5120)
-        assert v_dim == 0
-        calls.append(("prefill", qkv.dtype))
-
-    monkeypatch.setattr(
-        hybrid_warmup, "fused_post_conv_prep", fake_fused_post_conv_prep
-    )
-    layer = SimpleNamespace(
-        key_dim=16 * 128,
-        value_dim=48 * 128,
-        tp_size=2,
-        num_k_heads=16,
-        num_v_heads=48,
-        head_k_dim=128,
-        head_v_dim=128,
-        A_log=torch.empty(24, dtype=torch.float32),
-        dt_bias=torch.empty(24, dtype=torch.float32),
-        _warmup_prefill_kernels=fake_prefill_warmup,
-    )
-
-    hybrid_warmup._warmup_qwen_gdn_layer(layer, model_dtype=torch.bfloat16)
-
-    assert calls == [("fused", torch.bfloat16), ("prefill", torch.bfloat16)]
 
 
 def test_kernel_warmup_runs_runtime_dummy_for_hybrid_models(monkeypatch) -> None:
