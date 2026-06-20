@@ -27,7 +27,7 @@ def _create_vllm_config_for_dsd(
     cudagraph_mode: str = "FULL_AND_PIECEWISE",
     use_dynamic_sd: bool = True,
 ) -> MagicMock:
-    """Create a minimal config that exercises MRv2 DSD cudagraph dispatch.
+    """Create a minimal config that exercises DSD cudagraph dispatch.
 
     The test uses an exact capture-size grid so that every valid uniform decode
     shape has a directly matching FULL graph candidate.
