@@ -661,6 +661,16 @@ class SlidingWindowMomeSpec(SlidingWindowMLASpec):
         # for compatibility with mamba metadata builder
         return 0
 
+    def is_uniform_with_collection(
+        self, kv_cache_specs: dict[str, KVCacheSpec]
+    ) -> bool:
+        return all(
+            isinstance(spec, SlidingWindowMomeSpec)
+            and spec.sliding_window == self.sliding_window
+            and spec.component_dims == self.component_dims
+            for spec in kv_cache_specs.values()
+        )
+
     def __post_init__(self):
         super().__post_init__()
         if len(self.component_dims) != 3:
