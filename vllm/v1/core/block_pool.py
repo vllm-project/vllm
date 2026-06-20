@@ -542,9 +542,11 @@ class BlockPool:
                     # KVCacheBlock inside a meta; small blocks live inside a
                     # meta's ``small_blocks`` list at idx (block_id % N).
                     assert self.free_large_block_queue is not None
+
+                    # TODO: Is this a valid condition?
                     meta_for_large = (
                         self.large_block_metas[block.block_id]
-                        if block.block_id < len(self.large_block_metas)  #TODO: Is this a valid condition?
+                        if block.block_id < len(self.large_block_metas)
                         else None
                     )
                     if (
@@ -713,7 +715,8 @@ class BlockPool:
         assert self.free_large_block_queue is not None
         N = self.large_block_factor
         free = self.free_large_block_queue.num_free_blocks * N
-        # for meta in self.large_block_metas:  #TODO: Can ignore partial ; Note can be freed from head too
+        # TODO: Can ignore partial ; Note can be freed from head too
+        # for meta in self.large_block_metas:
         #     if 0 < meta.next_small_idx < N:
         #         free += N - meta.next_small_idx
         return free

@@ -1228,7 +1228,11 @@ class MambaManager(SingleTypeKVCacheManager):
                     assert num_new_blocks <= 1
                 else:
                     assert num_new_blocks <= self.num_speculative_blocks + 1
-                last_hit_id = None if self._is_large_block else _last_non_null_block_id(req_blocks) #TODO: Makes no sense for Mamba -> won't reuse intra
+                last_hit_id = (
+                    None
+                    if self._is_large_block
+                    else _last_non_null_block_id(req_blocks)
+                )  # TODO: Makes no sense for Mamba -> won't reuse intra
                 new_blocks = self.block_pool.get_new_blocks(
                     num_new_blocks,
                     large_block=self._is_large_block,

@@ -643,7 +643,7 @@ class MambaSpec(KVCacheSpec):
         return page_size
 
     @property
-    def page_size_bytes(self) -> int: #TODO: Factor is 1 here all the time -> remove this property? Use state_page_size_bytes ?
+    def page_size_bytes(self) -> int:
         # In hierarchical mode the per-block byte budget equals attention's
         # (one small-block share of a state). N consecutive small blocks
         # together hold one full mamba state. In flat mode (``N == 1``) this

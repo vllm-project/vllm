@@ -1818,7 +1818,7 @@ def _max_memory_usage_bytes_from_groups(
     page_size = get_uniform_page_size(
         [group.kv_cache_spec for group in kv_cache_groups]
     )
-    blocks_needed = sum(  #TODO: Here small blocks count is returned. Is it OK?
+    blocks_needed = sum(  # TODO: Here small blocks count is returned. Is it OK?
         cdiv(group.kv_cache_spec.max_memory_usage_bytes(vllm_config), page_size)
         for group in kv_cache_groups
     )
