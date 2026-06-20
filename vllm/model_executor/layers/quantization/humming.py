@@ -579,7 +579,7 @@ class HummingLinearMethod(LinearMethodBase):
         force_requant = self.force_weight_schema is not None
         if force_requant and self.weight_schema != self.force_weight_schema:
             force_weight_schema = self.force_weight_schema
-            assert isinstance(force_weight_schema, HummingWeightSchema)
+            assert isinstance(force_weight_schema, _hm.HummingWeightSchema)
             force_input_schema = self.force_input_schema or self.input_schema
             if force_weight_schema.hadamard_block_size == -1:
                 force_weight_schema = humming_update_schema_hadamard_block_size(
@@ -688,7 +688,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             if is_unquantized:
                 shape_k = layer.sublayer_configs[sublayer_name]["shape_k"]
 
-                assert isinstance(weight_schema, HummingWeightSchema)
+                assert isinstance(weight_schema, _hm.HummingWeightSchema)
                 f16_dtype = _hm.DataType.from_torch_dtype(layer.param_dtype)
                 has_global_scale = "TENSOR" in str(weight_schema.weight_scale_type)
 
