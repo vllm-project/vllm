@@ -8,6 +8,7 @@ from typing import Literal
 import torch
 
 from vllm.config import VllmConfig
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -76,6 +77,15 @@ class GDNAttentionMetadata:
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
+
+    # "all" mode prefix caching: block-level state indices
+    state_indices_all_d: torch.Tensor | None = None  # shape: [num_decodes, num_blocks]
+    state_indices_all_p: torch.Tensor | None = None  # shape: [num_prefills, num_blocks]
+    block_idx_last_computed_token: torch.Tensor | None = None  # shape: [batch,]
+    block_idx_first_scheduled_token: torch.Tensor | None = None  # shape: [batch,]
+    block_idx_last_scheduled_token: torch.Tensor | None = None  # shape: [batch,]
+    block_idx_last_scheduled_token_prev_step: torch.Tensor | None = None  # shape: [num_decodes,]
+    prev_last_scheduled_idx: torch.Tensor | None = None  # shape: [batch,]
 
 
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
@@ -164,6 +174,53 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             device=device,
         )
 
+        # "all" mode prefix caching buffers
+        self.cache_mode = vllm_config.cache_config.mamba_cache_mode
+        if self.cache_mode == "all":
+            num_blocks = cdiv(
+                vllm_config.cache_config.num_gpu_blocks_override
+                or vllm_config.cache_config.num_gpu_blocks,
+                vllm_config.cache_config.mamba_block_size,
+            )
+            # Pre-allocate state indices for all mode
+            self.state_indices_all_d_buf: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs, num_blocks),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.state_indices_all_p_buf: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs, num_blocks),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.block_idx_last_computed_token_buf: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.block_idx_first_scheduled_token_buf: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.block_idx_last_scheduled_token_buf: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.block_idx_last_scheduled_token_prev_step_buf: torch.Tensor = (
+                torch.empty(
+                    (self.decode_cudagraph_max_bs,),
+                    dtype=torch.int32,
+                    device=device,
+                )
+            )
+            self.prev_last_scheduled_idx_buf: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+
     def build(  # type: ignore[override]
         self,
         common_prefix_len: int,
@@ -171,6 +228,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
+        *,
+        prev_last_scheduled_idx: torch.Tensor | None = None,
     ) -> GDNAttentionMetadata:
         m = common_attn_metadata
 
@@ -478,6 +537,89 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
+        # Compute "all" mode prefix caching block indices if needed
+        state_indices_all_d: torch.Tensor | None = None
+        state_indices_all_p: torch.Tensor | None = None
+        block_idx_last_computed_token: torch.Tensor | None = None
+        block_idx_first_scheduled_token: torch.Tensor | None = None
+        block_idx_last_scheduled_token: torch.Tensor | None = None
+        block_idx_last_scheduled_token_prev_step: torch.Tensor | None = None
+
+        if self.cache_mode == "all" and block_table_tensor is not None:
+            # Compute block indices for "all" mode
+            state_indices_all_d, state_indices_all_p = self._compute_prefix_caching_block_indices(
+                block_table_tensor,
+                context_lens_tensor,
+                query_start_loc,
+                num_prefills,
+                num_decodes,
+                batch_size,
+                device=query_start_loc.device,
+            )
+
+            # For decode phases
+            if num_decodes > 0:
+                block_idx_last_computed_token = self.block_idx_last_computed_token_buf[
+                    :num_decodes
+                ]
+                block_idx_last_scheduled_token = self.block_idx_last_scheduled_token_buf[
+                    :num_decodes
+                ]
+                
+                # Compute block indices
+                context_lens_decode = context_lens_tensor[:num_decodes]
+                query_lens_decode = query_start_loc[1 : num_decodes + 1] - query_start_loc[
+                    :num_decodes
+                ]
+                last_computed_token = context_lens_decode
+                last_scheduled_token = context_lens_decode + query_lens_decode
+
+                block_idx_last_computed_token.copy_(
+                    cdiv(last_computed_token, self.vllm_config.cache_config.mamba_block_size),
+                    non_blocking=True,
+                )
+                block_idx_last_scheduled_token.copy_(
+                    cdiv(
+                        last_scheduled_token - 1,
+                        self.vllm_config.cache_config.mamba_block_size,
+                    ),
+                    non_blocking=True,
+                )
+
+                # For spec decode: compute prev_last_scheduled_idx
+                if prev_last_scheduled_idx is not None and num_spec_decodes > 0:
+                    block_idx_last_scheduled_token_prev_step = (
+                        self.block_idx_last_scheduled_token_prev_step_buf[:num_spec_decodes]
+                    )
+                    prev_idx_compute = prev_last_scheduled_idx[:num_spec_decodes]
+                    block_idx_last_scheduled_token_prev_step.copy_(
+                        cdiv(
+                            prev_idx_compute,
+                            self.vllm_config.cache_config.mamba_block_size,
+                        ),
+                        non_blocking=True,
+                    )
+            
+            # For prefill phases
+            if num_prefills > 0:
+                block_idx_first_scheduled_token = self.block_idx_first_scheduled_token_buf[
+                    :num_prefills
+                ]
+                # Compute first scheduled block per sequence
+                prefill_start_loc_offset = (
+                    num_decodes if num_decodes > 0 else 0
+                )
+                prefill_query_lens = (
+                    query_start_loc[
+                        prefill_start_loc_offset + 1 : prefill_start_loc_offset + num_prefills + 1
+                    ]
+                    - query_start_loc[prefill_start_loc_offset : prefill_start_loc_offset + num_prefills]
+                )
+                block_idx_first_scheduled_token.copy_(
+                    torch.zeros_like(prefill_query_lens),
+                    non_blocking=True,
+                )
+
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -503,8 +645,51 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
+            state_indices_all_d=state_indices_all_d,
+            state_indices_all_p=state_indices_all_p,
+            block_idx_last_computed_token=block_idx_last_computed_token,
+            block_idx_first_scheduled_token=block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+            block_idx_last_scheduled_token_prev_step=block_idx_last_scheduled_token_prev_step,
+            prev_last_scheduled_idx=prev_last_scheduled_idx,
         )
         return attn_metadata
+
+    def _compute_prefix_caching_block_indices(
+        self,
+        block_table_tensor: torch.Tensor,
+        context_lens_tensor: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_prefills: int,
+        num_decodes: int,
+        batch_size: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """
+        Compute block-level state indices for "all" mode prefix caching.
+
+        Returns:
+            (state_indices_all_d, state_indices_all_p): Block tables for decode and prefill sequences.
+        """
+        state_indices_all_d = None
+        state_indices_all_p = None
+
+        if block_table_tensor is None:
+            return state_indices_all_d, state_indices_all_p
+
+        if num_decodes > 0:
+            state_indices_all_d = self.state_indices_all_d_buf[:num_decodes].copy_(
+                block_table_tensor[:num_decodes], non_blocking=True
+            )
+        
+        if num_prefills > 0:
+            prefill_start_idx = num_decodes
+            state_indices_all_p = self.state_indices_all_p_buf[:num_prefills].copy_(
+                block_table_tensor[prefill_start_idx : prefill_start_idx + num_prefills],
+                non_blocking=True,
+            )
+
+        return state_indices_all_d, state_indices_all_p
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
