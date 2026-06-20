@@ -78,7 +78,16 @@ def test_gsm8k_correctness(config_filename):
             "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms "
             "due to agent pool disk space issues and pod evictions."
         )
+    if current_platform.is_rocm() and (
+        "Qwen3.5-35B-A3B-MXFP4-AITER-TP2" in config_filename.name
+    ):
+        from vllm.platforms.rocm import on_gfx950
 
+        if not on_gfx950():
+            pytest.skip(
+                "Skipping Qwen3.5-35B-A3B-MXFP4-AITER-TP2 on non-GFX950 platforms. "
+                "The quantization scheme is not supported on non-GFX950 platforms."
+            )
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
     server_args = shlex.split(server_args_str) if server_args_str else []

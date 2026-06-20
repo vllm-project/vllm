@@ -51,6 +51,7 @@ from vllm import LLM, SamplingParams, envs
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
+from vllm.config.cache import CacheConfig
 from vllm.config.model import ConvertOption, RunnerOption, _get_and_verify_dtype
 from vllm.connections import global_http_connection
 from vllm.distributed import (
@@ -924,6 +925,20 @@ class VllmRunner:
                     num_speculative_tokens + 1
                 )
 
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm():
+            gpu_memory_utilization = kwargs.get(
+                "gpu_memory_utilization",
+                CacheConfig.gpu_memory_utilization,
+            )
+            # V1 startup requires free_memory >= total * gpu_memory_utilization.
+            # ROCm CI can hand a test a device that is still lazily releasing
+            # VRAM from a previous process, so wait before constructing LLM.
+            from tests.utils import wait_for_rocm_memory_to_settle
+
+            wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+
         with init_ctx:
             self.llm = LLM(
                 model=model_name,
@@ -1279,6 +1294,7 @@ class VllmRunner:
             # Ignore shutdown errors as cleanup will still proceed
             pass
         del self.llm
+        torch._dynamo.reset()
         cleanup_dist_env_and_memory()
         self._wait_for_rocm_memory_release(gpu_memory_utilization)
 

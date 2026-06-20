@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
+    FunctionDefinition,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -113,6 +114,23 @@ def sample_tools(request):
                 parameters=AREA_PARAMS,
             ),
         ]
+
+
+def _with_strict(
+    tools: list[ChatCompletionToolsParam],
+) -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type=t.type,
+            function=FunctionDefinition(
+                name=t.function.name,
+                description=t.function.description,
+                parameters=t.function.parameters,
+                strict=True,
+            ),
+        )
+        for t in tools
+    ]
 
 
 def _as_chat_completion_tools(
@@ -1282,6 +1300,73 @@ def test_streaming_multi_param_single_chunk(qwen3_tool_parser, qwen3_tokenizer):
     assert args["unit"] == "fahrenheit"
 
 
+def test_streaming_complete_tool_call_single_delta(qwen3_tool_parser):
+    """Regression: one delta may contain a complete tool call."""
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        [
+            (
+                "<tool_call>\n"
+                "<function=get_current_weather>\n"
+                "<parameter=city>\nDallas\n</parameter>\n"
+                "<parameter=state>\nTX\n</parameter>\n"
+                "</function>\n"
+                "</tool_call>"
+            )
+        ],
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function.name == "get_current_weather"
+    args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    assert args == {"city": "Dallas", "state": "TX"}
+
+
+def test_streaming_next_tool_call_starts_in_close_delta(qwen3_tool_parser):
+    """Regression: a close delta may also contain the next tool call."""
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+
+    from tests.tool_parsers.utils import (
+        run_tool_extraction_streaming,
+    )
+
+    reconstructor = run_tool_extraction_streaming(
+        qwen3_tool_parser,
+        [
+            "<tool_call>\n",
+            "<function=get_current_weather>\n",
+            "<parameter=city>\nDallas\n</parameter>\n",
+            "<parameter=state>\nTX\n</parameter>\n",
+            "</function>",
+            (
+                "\n</tool_call>\n"
+                "<tool_call>\n"
+                "<function=get_current_weather>\n"
+                "<parameter=city>\nOrlando\n</parameter>\n"
+                "<parameter=state>\nFL\n</parameter>\n"
+                "</function>\n"
+                "</tool_call>"
+            ),
+        ],
+        request,
+        assert_one_tool_per_delta=False,
+    )
+
+    assert len(reconstructor.tool_calls) == 2
+    first_args = json.loads(reconstructor.tool_calls[0].function.arguments)
+    second_args = json.loads(reconstructor.tool_calls[1].function.arguments)
+    assert first_args == {"city": "Dallas", "state": "TX"}
+    assert second_args == {"city": "Orlando", "state": "FL"}
+
+
 def test_no_double_serialization_string_args(qwen3_tool_parser):
     """Regression: string arguments must not be double-serialized (PR #35615)."""
     tools = [
@@ -1323,10 +1408,11 @@ def test_get_vllm_registry_structural_tag_returns_structural_tag(
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
     request_tools = _as_chat_completion_tools(sample_tools)
+    strict_tools = _with_strict(request_tools)
     req = ChatCompletionRequest(
         messages=[],
         model="m",
-        tools=request_tools,
+        tools=strict_tools,
         tool_choice="auto",
     )
     tag = qwen3_tool_parser.get_structural_tag(req)
@@ -1364,10 +1450,11 @@ def test_adjust_request_auto_uses_vllm_registry_structural_tag(
         tool_parser_cls = Qwen3EngineToolParser
 
     request_tools = _as_chat_completion_tools(sample_tools)
+    strict_tools = _with_strict(request_tools)
     req = ChatCompletionRequest(
         messages=[],
         model="m",
-        tools=request_tools,
+        tools=strict_tools,
         tool_choice="auto",
         include_reasoning=include_reasoning,
     )

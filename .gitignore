@@ -199,7 +199,9 @@ cython_debug/
 .vscode/
 
 # Claude
-.claude/
+.claude/*
+!.claude/skills/
+!.claude/skills/**
 
 # Codex
 .codex/
