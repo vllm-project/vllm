@@ -172,7 +172,9 @@ class ParserEngine(Parser):
 
     def finish_streaming(self) -> DeltaMessage | None:
         events = self._engine.finish()
-        return self._events_to_delta(events) if events else None
+        if events or self._deferred_content:
+            return self._events_to_delta(events, finished=True)
+        return None
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
         self._engine.reset(initial_state=initial_state)
@@ -672,7 +674,7 @@ class ParserEngine(Parser):
         if len(tool_call_deltas) > 1:
             tool_call_deltas = self._coalesce_tool_call_deltas(tool_call_deltas)
 
-        if self._deferred_content and not seen_tool_event:
+        if self._deferred_content and (not seen_tool_event or not tool_call_deltas):
             content_parts.insert(0, self._deferred_content)
             self._deferred_content = ""
 
