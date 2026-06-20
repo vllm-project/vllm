@@ -94,6 +94,17 @@ def _as_sparse_sm120_cache(kv_cache: torch.Tensor) -> torch.Tensor:
     return kv_cache.unsqueeze(-2)
 
 
+def _get_prefill_swa_scratch(
+    num_tokens: int, window_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Graph-stable per-token SWA window indices + lengths for the prefill tokens.
+    swa_indices, swa_lens = current_workspace_manager().get_simultaneous(
+        ((num_tokens, 1, window_size), torch.int32),
+        ((num_tokens,), torch.int32),
+    )
+    return swa_indices, swa_lens
+
+
 class DeepseekV4FlashInferSM120Attention(DeepseekV4FlashMLAAttention):
     """FlashMLA V4 attention with the official FlashInfer SM120 packed decode.
 
@@ -270,6 +281,168 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4FlashMLAAttention):
         )
         self._sm120_runner.run(
             q,
+            swa_cache,
+            swa_indices,
+            output,
+            self.scale,
+            topk_length=swa_lens,
+            attn_sink=self.attn_sink,
+            extra_kv_cache=extra_cache,
+            extra_indices=topk_indices,
+            extra_topk_length=topk_lens,
+            mid_out=mid_out,
+            mid_lse=mid_lse,
+        )
+
+    def _forward_prefill(
+        self,
+        q: torch.Tensor,
+        positions: torch.Tensor,
+        compressed_k_cache: torch.Tensor | None,
+        swa_k_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: "DeepseekV4FlashMLAMetadata | None",
+        swa_metadata: "DeepseekSparseSWAMetadata",
+    ) -> None:
+        import vllm.envs as envs
+
+        # Packed prefill is an independent opt-in on top of the decode port; when
+        # off, defer to the FlashMLA indexed-D512 prefill path byte-for-byte.
+        if not envs.VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL:
+            super()._forward_prefill(
+                q,
+                positions,
+                compressed_k_cache,
+                swa_k_cache,
+                output,
+                attn_metadata,
+                swa_metadata,
+            )
+            return
+
+        swa_only = attn_metadata is None
+        num_decodes = swa_metadata.num_decodes
+        num_decode_tokens = swa_metadata.num_decode_tokens
+        num_prefills = swa_metadata.num_prefills
+        num_prefill_tokens = swa_metadata.num_prefill_tokens
+        num_reqs = num_decodes + num_prefills
+        num_tokens = num_decode_tokens + num_prefill_tokens
+        if num_prefill_tokens == 0:
+            return
+
+        assert swa_metadata.is_valid_token is not None
+        assert swa_metadata.query_start_loc is not None
+        assert swa_metadata.seq_lens is not None
+        assert swa_metadata.token_to_req_indices is not None
+        assert swa_metadata.block_table is not None
+
+        # --- Prefill SWA window indices. The metadata builder hoists this once per
+        # step (DeepseekSparseSWAMetadataBuilder.build widens its decode-SWA launch
+        # over the prefill tail), so steady-state just reads the precomputed views
+        # and skips ~60 redundant per-layer kernel launches. The builder deliberately
+        # leaves them None on the warmup/profile dummy (its all-(-1) slot_mapping
+        # makes is_valid_token all-False over the prefill tail) and during CUDA-graph
+        # capture; we then self-compute exactly as before, keeping those paths
+        # byte-identical to the validated v1 (the prefill packed kernel is a no-op
+        # over the all-invalid dummy: every token gets swa_len=0).
+        swa_indices = swa_metadata.prefill_swa_indices
+        swa_lens = swa_metadata.prefill_swa_lens
+        if swa_indices is None or swa_lens is None:
+            from vllm.v1.attention.backends.mla.sparse_swa import (
+                _compute_swa_indices_and_lens_kernel,
+            )
+
+            swa_idx_full, swa_len_full = _get_prefill_swa_scratch(
+                num_tokens, self.window_size
+            )
+            _compute_swa_indices_and_lens_kernel[(num_tokens,)](
+                swa_idx_full,
+                swa_idx_full.stride(0),
+                swa_len_full,
+                self.window_size,
+                swa_metadata.query_start_loc,
+                swa_metadata.seq_lens,
+                swa_metadata.token_to_req_indices,
+                swa_metadata.is_valid_token,
+                swa_metadata.block_table,
+                swa_metadata.block_table.stride(0),
+                swa_metadata.block_size,
+                TRITON_BLOCK_SIZE=1024,
+            )
+            swa_indices = swa_idx_full[num_decode_tokens:num_tokens]
+            swa_lens = swa_len_full[num_decode_tokens:num_tokens]
+
+        # --- Compressed (extra) prefill indices, mirroring the FlashMLA prefill
+        # construction but converted to global slots for the packed kernel.
+        topk_indices = None
+        topk_lens = None
+        if not swa_only:
+            assert attn_metadata is not None
+            block_size = attn_metadata.block_size // self.compress_ratio
+            if self.compress_ratio == 4:
+                assert self.topk_indices_buffer is not None
+                prefill_local = self.topk_indices_buffer[num_decode_tokens:num_tokens]
+                # Rebase the indexer's BATCH-GLOBAL compressed top-k positions
+                # (cu_seqlen_ks = exclusive cumsum of seq_len // compress_ratio; see
+                # indexer.py) to per-request-local so block_table[req] maps them
+                # in-range. Without this, req>0 positions overflow into the wrong
+                # request's physical blocks. No-op at num_prefills==1 (cu_base[0]==0).
+                comp_lens = (
+                    swa_metadata.seq_lens[num_decodes:num_reqs] // self.compress_ratio
+                )
+                cu_base = (torch.cumsum(comp_lens, dim=0) - comp_lens).to(torch.int32)
+                req_local = (
+                    swa_metadata.token_to_req_indices[num_decode_tokens:num_tokens]
+                    - num_decodes
+                ).long()
+                base_per_token = cu_base[req_local].unsqueeze(1)
+                prefill_local = torch.where(
+                    prefill_local >= 0, prefill_local - base_per_token, prefill_local
+                )
+                global_indices, topk_lens = compute_global_topk_indices_and_lens(
+                    prefill_local,
+                    swa_metadata.token_to_req_indices[num_decode_tokens:num_tokens],
+                    attn_metadata.block_table[:num_reqs],
+                    block_size,
+                    swa_metadata.is_valid_token[num_decode_tokens:num_tokens],
+                )
+                topk_indices = global_indices.view(num_prefill_tokens, 1, -1)
+            else:
+                assert attn_metadata.c128a_prefill_topk_indices is not None
+                topk_indices = attn_metadata.c128a_prefill_topk_indices.view(
+                    num_prefill_tokens, 1, -1
+                )
+            topk_indices = topk_indices.contiguous()
+
+        # --- Launch the packed prefill kernel via the runner. num_tokens > 64
+        # auto-dispatches the prefill kernel; mid_out/mid_lse are decode-only and
+        # only needed for the (rare) <=64-token prefill chunk.
+        query = self._prepare_sm120_query(q, output)
+        # Bug-C guard: under CUDA-graph padding or MTP-draft, q can carry more rows
+        # than the real prefill-token count; the runner sizes its writes by the
+        # query row count, so slice to num_prefill_tokens to match output/indices/
+        # scratch (no-op in the common, unpadded case).
+        if query.shape[0] > num_prefill_tokens:
+            query = query[:num_prefill_tokens]
+        swa_cache = _as_sparse_sm120_cache(swa_k_cache)
+        extra_cache = (
+            _as_sparse_sm120_cache(compressed_k_cache)
+            if (compressed_k_cache is not None and not swa_only)
+            else None
+        )
+        mid_out = None
+        mid_lse = None
+        if num_prefill_tokens <= _DECODE_MAX_TOKENS:
+            extra_topk = topk_indices.shape[-1] if topk_indices is not None else 0
+            mid_out, mid_lse = _get_decode_scratch(
+                num_prefill_tokens,
+                output.shape[1],
+                output.shape[-1],
+                swa_indices.shape[-1],
+                extra_topk,
+            )
+        self._sm120_runner.run(
+            query,
             swa_cache,
             swa_indices,
             output,
