@@ -414,7 +414,6 @@ class XPUPlatform(Platform):
         device_name = cls.get_device_name().lower()
         return device_name.count("data center gpu") > 0
 
-
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         if os.environ.get("TORCHCOMMS_USE_VLLM", "0").strip().lower() in (
