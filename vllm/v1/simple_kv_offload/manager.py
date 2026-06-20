@@ -187,7 +187,13 @@ class SimpleCPUOffloadScheduler:
 
         assert len(gpu_config.kv_cache_tensors) > 0
 
-        gpu_total_bytes = sum(t.size for t in gpu_config.kv_cache_tensors)
+        is_packed = any(t.block_stride for t in gpu_config.kv_cache_tensors)
+        assert not is_packed or all(t.block_stride for t in gpu_config.kv_cache_tensors)
+        gpu_total_bytes = (
+            gpu_config.kv_cache_tensors[0].size
+            if is_packed
+            else sum(t.size for t in gpu_config.kv_cache_tensors)
+        )
         num_gpu_blocks = gpu_config.num_blocks
         num_cpu_blocks = max(1, num_gpu_blocks * cpu_capacity_bytes // gpu_total_bytes)
         # Create CPU kv_cache_tensors mirroring GPU by scaling size proportionally.
@@ -195,6 +201,8 @@ class SimpleCPUOffloadScheduler:
             KVCacheTensor(
                 size=t.size // num_gpu_blocks * num_cpu_blocks,
                 shared_by=list(t.shared_by),
+                offset=t.offset,
+                block_stride=t.block_stride,
             )
             for t in gpu_config.kv_cache_tensors
         ]
