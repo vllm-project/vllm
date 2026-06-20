@@ -3,7 +3,6 @@
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-import vllm.envs as envs
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
     AllBlocksCleared,
@@ -71,25 +70,6 @@ class BlockHashToBlockMap:
             if isinstance(blocks, dict):
                 return next(iter(blocks.values()))
             self._unexpected_blocks_type(blocks)
-        return None
-
-    def get_one_block_retired(
-        self, key: BlockHashWithGroupId, retired_forward: int
-    ) -> "KVCacheBlock | None":
-        """Like get_one_block, but only returns a block whose committed_step
-        has retired (committed_step <= retired_forward), so a concurrent request
-        never binds a block whose writing forward is still in flight."""
-        blocks = self._cache.get(key)
-        if blocks is None:
-            return None
-        if isinstance(blocks, KVCacheBlock):
-            return blocks if blocks.committed_step <= retired_forward else None
-        if isinstance(blocks, dict):
-            for blk in blocks.values():
-                if blk.committed_step <= retired_forward:
-                    return blk
-            return None
-        self._unexpected_blocks_type(blocks)
         return None
 
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
@@ -205,22 +185,6 @@ class BlockPool:
 
         self.metrics_collector = metrics_collector
 
-        # Prefix-cache write-completion fence (VLLM_PREFIX_CACHE_WRITE_FENCE).
-        # schedule_pass advances at each schedule() start; retired_forward
-        # advances when a forward completes (update_from_output). A block
-        # committed at schedule_pass S is exposed to other requests only once
-        # retired_forward >= S (its writing forward has retired). Async-safe:
-        # the two clocks decouple commit-time from write-completion-time.
-        self.write_fence = envs.VLLM_PREFIX_CACHE_WRITE_FENCE
-        self.schedule_pass = 0
-        self.retired_forward = 0
-
-    def advance_schedule_pass(self) -> None:
-        self.schedule_pass += 1
-
-    def advance_retired_forward(self) -> None:
-        self.retired_forward += 1
-
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
@@ -240,14 +204,9 @@ class BlockPool:
             block_hash_with_group_id = make_block_hash_with_group_id(
                 block_hash, group_id
             )
-            if self.write_fence:
-                block = self.cached_block_hash_to_block.get_one_block_retired(
-                    block_hash_with_group_id, self.retired_forward
-                )
-            else:
-                block = self.cached_block_hash_to_block.get_one_block(
-                    block_hash_with_group_id
-                )
+            block = self.cached_block_hash_to_block.get_one_block(
+                block_hash_with_group_id
+            )
             if not block:
                 return None
             cached_blocks.append(block)
@@ -323,7 +282,6 @@ class BlockPool:
                 block_hash, kv_cache_group_id
             )
             blk.block_hash = block_hash_with_group_id
-            blk.committed_step = self.schedule_pass
             self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))

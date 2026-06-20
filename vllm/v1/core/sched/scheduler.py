@@ -420,8 +420,6 @@ class Scheduler(SchedulerInterface):
         scheduled_timestamp = time.monotonic()
 
         self.kv_cache_manager.new_step_starts()
-        if self.kv_cache_manager.block_pool.write_fence:
-            self.kv_cache_manager.block_pool.advance_schedule_pass()
 
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
@@ -1468,8 +1466,6 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
-        if self.kv_cache_manager.block_pool.write_fence:
-            self.kv_cache_manager.block_pool.advance_retired_forward()
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict

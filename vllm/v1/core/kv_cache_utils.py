@@ -133,11 +133,6 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
-    # Schedule-pass index at which this block was committed to the prefix cache.
-    # Used by the write-completion fence to withhold the block from other
-    # requests until the forward that wrote it has retired (-1 = uncommitted).
-    committed_step: int = -1
-
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash
