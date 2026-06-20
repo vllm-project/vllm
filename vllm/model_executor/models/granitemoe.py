@@ -431,6 +431,15 @@ class GraniteMoeModel(nn.Module):
             loaded_params.add(name)
         return loaded_params
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="w1",
+            ckpt_down_proj_name="w2",
+            ckpt_up_proj_name="w3",
+            num_experts=self.config.num_local_experts,
+        )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         new_weights = {}
         for n, p in weights:
@@ -541,6 +550,9 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 ),
             }
         )
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
