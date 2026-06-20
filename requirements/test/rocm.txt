@@ -861,6 +861,8 @@ pydantic-extra-types==2.11.1
     #   mistral-common
 pydantic-settings==2.13.1
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   fastapi
     #   mcp
 pygments==2.19.2

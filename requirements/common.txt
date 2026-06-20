@@ -16,6 +16,7 @@ starlette >= 1.0.1 # CVE-2026-48710: Host header injection in < 1.0.1
 aiohttp >= 3.13.3
 openai >= 2.0.0  # For Responses API with reasoning content
 pydantic >= 2.12.0
+pydantic-settings >= 2.4.0
 prometheus_client >= 0.18.0
 pillow  # Required for image processing
 prometheus-fastapi-instrumentator >= 8.0.0 # v8 unblocks starlette >= 1.0
