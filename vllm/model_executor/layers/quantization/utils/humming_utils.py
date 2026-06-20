@@ -61,7 +61,7 @@ def convert_linear_layer_to_humming_standard(
             else:
                 assert output_dim == 0 and input_dim == 1
 
-            tensor = tensor.view(tensor.size(0), -1).view(torch.int32)
+            tensor = tensor.view(tensor.size(0), -1).contiguous().view(torch.int32)
         elif name in ["weight_scale", "zero_point"]:
             if getattr(tensor, "output_dim", 0) == 1:
                 tensor = tensor.transpose(0, 1).contiguous()
@@ -82,7 +82,11 @@ def convert_linear_layer_to_humming_standard(
 
 def prepare_humming_layer(layer: LinearBase, quant_config: dict):
     weight_schema = BaseWeightSchema.from_config(quant_config)
-    input_schema = HummingInputSchema()
+    input_quant_config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG or {}
+    if humming_is_layer_skipped(input_quant_config, getattr(layer, "prefix", "")):
+        input_schema = HummingInputSchema()
+    else:
+        input_schema = HummingInputSchema.from_config(input_quant_config)
 
     # ReplicatedLinear has no TP partitioning and so does not set
     # input_size_per_partition; for it that is just input_size.

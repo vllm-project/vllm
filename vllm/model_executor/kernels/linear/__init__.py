@@ -232,7 +232,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         FlashInferB12xNvFp4LinearKernel,
     },
     "humming": {
-        HummingInt8ScaledMMLinearKernel,
+        HummingFP8ScaledMMLinearKernel,
         HummingInt8ScaledMMLinearKernel,
         HummingLinearKernel,
         HummingMxfp8LinearKernel,

@@ -11,6 +11,7 @@ from compressed_tensors.quantization import (
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -107,6 +108,21 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     return _AVAILABLE_BACKENDS
 
 
+def map_wna16_backend(runner_backend: MoEBackend) -> WNA16MoEBackend:
+    """Map user's MoEBackend to WNA16MoEBackend."""
+    mapping = {
+        "marlin": WNA16MoEBackend.MARLIN,
+        "humming": WNA16MoEBackend.HUMMING,
+        "flashinfer_trtllm": WNA16MoEBackend.FLASHINFER_TRTLLM,
+    }
+    if backend := mapping.get(runner_backend):
+        return backend
+    raise ValueError(
+        f"moe_backend='{runner_backend}' is not supported for WNA16 MoE. "
+        f"Expected one of {list(mapping.keys())}."
+    )
+
+
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
@@ -158,6 +174,14 @@ def select_wna16_moe_backend(
                 logger.info_once(_make_log_backend(backend), scope="local")
                 return backend, k_cls
         raise ValueError(_make_log_unsupported(backend, reason))
+
+    # Handle explicit moe_backend from user.
+    runner_backend = config.moe_backend
+    if runner_backend != "auto":
+        requested_backend = map_wna16_backend(runner_backend)
+        return _return_or_raise(
+            requested_backend, config, weight_key, None, activation_format
+        )
 
     # Select kernels in order of backend.
     AVAILABLE_BACKENDS = _get_priority_backends()
@@ -243,14 +267,18 @@ def make_wna16_moe_kernel(
     )
 
     # Currently, we only support TrtLlmMxint4ExpertsMonolithic, MarlinExperts,
-    # BatchedMarlinExperts, XPUExpertsWNA16, and CPUExpertsInt4
-    assert experts_cls in (
+    # BatchedMarlinExperts, XPUExpertsWNA16, CPUExpertsInt4, and the Humming
+    # grouped/indexed experts.
+    allowed_experts: tuple[type[mk.FusedMoEExperts], ...] = (
         MarlinExperts,
         BatchedMarlinExperts,
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
         CPUExpertsInt4,
     )
+    if backend == WNA16MoEBackend.HUMMING:
+        allowed_experts += tuple(backend_to_kernel_cls(WNA16MoEBackend.HUMMING))
+    assert experts_cls in allowed_experts
 
     is_monolithic = experts_cls.is_monolithic()
 

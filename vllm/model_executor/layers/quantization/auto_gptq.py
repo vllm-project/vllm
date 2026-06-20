@@ -649,6 +649,25 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+        if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
+            # Humming consumes the GPTQ weights in-place (no marlin repack).
+            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+                prepare_humming_moe_layer,
+            )
+
+            prepare_humming_moe_layer(
+                layer,
+                {
+                    "quant_method": "gptq",
+                    "bits": self.quant_config.weight_bits,
+                    "group_size": self.quant_config.group_size,
+                    "desc_act": self.quant_config.desc_act,
+                    "sym": self.quant_config.is_sym,
+                },
+            )
+            self._setup_kernel(layer)
+            return
+
         is_a_8bit = self.input_dtype is not None and self.input_dtype.itemsize == 1
 
         if is_a_8bit:
@@ -743,8 +762,8 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             backend=self.wna16_moe_backend,
             experts_cls=self.experts_cls,
             is_k_full=self.is_k_full,
-            w13_g_idx=layer.w13_g_idx,
-            w2_g_idx=layer.w2_g_idx,
+            w13_g_idx=getattr(layer, "w13_g_idx", None),
+            w2_g_idx=getattr(layer, "w2_g_idx", None),
             w13_g_idx_sort_indices=getattr(layer, "w13_g_idx_sort_indices", None),
             w2_g_idx_sort_indices=getattr(layer, "w2_g_idx_sort_indices", None),
             routing_tables=layer._expert_routing_tables(),
@@ -752,6 +771,13 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
         )
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
+        if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
+            from vllm.model_executor.layers.quantization.utils.humming_utils import (
+                get_humming_moe_quant_config,
+            )
+
+            return get_humming_moe_quant_config(layer)
+
         from vllm.model_executor.layers.fused_moe.config import (
             gptq_marlin_moe_quant_config,
         )
@@ -782,6 +808,15 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             "initialization logic. This function should not be called."
         )
 
+    def _moe_weights(
+        self, layer: RoutedExperts
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Humming converts weights in-place to the standard ``w13_weight`` /
+        # ``w2_weight`` names; other backends keep the GPTQ ``*_qweight`` params.
+        if self.wna16_moe_backend == WNA16MoEBackend.HUMMING:
+            return layer.w13_weight, layer.w2_weight
+        return layer.w13_qweight, layer.w2_qweight
+
     def apply(
         self,
         layer: RoutedExperts,
@@ -793,10 +828,11 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
     ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
+        w1, w2 = self._moe_weights(layer)
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_qweight,
-            w2=layer.w2_qweight,
+            w1=w1,
+            w2=w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
@@ -816,10 +852,11 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
     ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
+        w1, w2 = self._moe_weights(layer)
         return self.moe_kernel.apply_monolithic(
             hidden_states=x,
-            w1=layer.w13_qweight,
-            w2=layer.w2_qweight,
+            w1=w1,
+            w2=w2,
             router_logits=router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,

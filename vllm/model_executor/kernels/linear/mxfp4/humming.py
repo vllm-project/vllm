@@ -9,10 +9,10 @@ from vllm.model_executor.layers.quantization.utils.humming_utils import (
 )
 from vllm.platforms import current_platform
 
-from .base import Mxfp4LinearKernel, Mxfp4LinearLayerConfig
+from .base import MxFp4LinearKernel, MxFp4LinearLayerConfig
 
 
-class HummingMxfp8LinearKernel(Mxfp4LinearKernel):
+class HummingMxFp4LinearKernel(MxFp4LinearKernel):
     """Humming GEMM Kernel for MXFP4."""
 
     @classmethod
@@ -28,7 +28,7 @@ class HummingMxfp8LinearKernel(Mxfp4LinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: Mxfp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

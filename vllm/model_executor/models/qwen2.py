@@ -439,6 +439,12 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            if "scale" in name or "zero_point" in name:
+                # Remap FP8 kv-scale / zero point before the stacked-shard match
+                # so kv-scale params are not routed through the qkv shard path.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -448,11 +454,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
-                if name.endswith("scale"):
-                    # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
-                        continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 if weight_loader == default_weight_loader:
@@ -463,10 +464,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Remapping the name of FP8 kv-scale.
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue

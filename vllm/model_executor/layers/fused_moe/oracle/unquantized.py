@@ -219,7 +219,10 @@ def select_unquantized_moe_backend(
         raise ValueError(_make_log_unsupported(backend, reason))
 
     runner_backend = moe_config.moe_backend
-    if runner_backend != "auto":
+    # 'humming' is a quantization-only MoE backend; an unquantized layer here
+    # means a mixed checkpoint excluded it (e.g. via modules_to_not_convert), so
+    # fall through to automatic selection instead of failing on the request.
+    if runner_backend not in ["auto", "humming"]:
         requested_backend = map_unquantized_backend(runner_backend)
         if (
             activation_format == mk.FusedMoEActivationFormat.BatchedExperts

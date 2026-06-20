@@ -145,6 +145,7 @@ LinearBackend = Literal[
     "flashinfer_cudnn",
     "flashinfer_b12x",
     "marlin",
+    "humming",
     "triton",
     "deep_gemm",
     "torch",
