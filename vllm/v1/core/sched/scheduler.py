@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import random
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -254,19 +255,19 @@ class Scheduler(SchedulerInterface):
             self._adaptive_k_min_tokens = speculative_config.adaptive_k_min_tokens
             self._adaptive_k_bs_penalty = speculative_config.adaptive_k_bs_penalty
             self._cooldown_steps = speculative_config.adaptive_k_cooldown_steps
+            self._alpha_prior = speculative_config.adaptive_k_alpha_prior
         else:
             self._enable_adaptive_k = False
-            self._adaptive_k_ema_alpha = 0.3
+            self._adaptive_k_ema_alpha = 0.5
             self._adaptive_k_c_draft = 0.05
             self._adaptive_k_min_tokens = 0
             self._adaptive_k_bs_penalty = 0.002
-            self._cooldown_steps = 4
+            self._cooldown_steps = 2
+            self._alpha_prior = 0.5
         # Per-position EMA and per-step accumulators.
         self._per_position_ema: list[float] | None = None
         self._pos_accepted: list[int] | None = None
         self._pos_reached: list[int] | None = None
-        # Cold-start prior.
-        self._alpha_prior: float = 0.75
         # Anti-thrashing cooldown.
         self._adaptive_k_cooldown: int = 0
         self._previous_adaptive_k: int = self.num_spec_tokens
@@ -1897,6 +1898,14 @@ class Scheduler(SchedulerInterface):
 
         prev_k = self._previous_adaptive_k
 
+        # ε-greedy exploration: 10% chance to try max_k. Runs before cooldown
+        # so high positions get data even during cooldown. Prevents the
+        # self-reinforcing trap where untracked positions never get observed.
+        max_possible_k = max_k if max_k is not None else self.num_spec_tokens
+        if random.random() < 0.1 and max_possible_k > 1:
+            self._previous_adaptive_k = max_possible_k
+            return max_possible_k
+
         # Cooldown: skip recomputation after a change.
         if self._adaptive_k_cooldown > 0:
             self._adaptive_k_cooldown -= 1
@@ -1938,7 +1947,7 @@ class Scheduler(SchedulerInterface):
             itl = k * draft_cost_per_token + 1.0 + verify_overhead
 
             goodput = e_total / itl
-            if goodput > best_goodput:
+            if goodput >= best_goodput:
                 best_goodput = goodput
                 best_k = k
 
@@ -1946,8 +1955,9 @@ class Scheduler(SchedulerInterface):
         if min_k > 0 and best_k == 0:
             best_k = min_k
 
+        # Always update tracking. Cooldown only fires for large jumps.
+        self._previous_adaptive_k = best_k
         if abs(best_k - prev_k) > 1:
-            self._previous_adaptive_k = best_k
             self._adaptive_k_cooldown = self._cooldown_steps
         return best_k
 

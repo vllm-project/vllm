@@ -224,17 +224,22 @@ class SpeculativeConfig:
     cost model (goodput = AL / ITL). Complements DSD's batch-size schedule:
     DSD sets the coarse K per batch size, Adaptive K fine-tunes within
     it using runtime acceptance."""
-    adaptive_k_ema_alpha: float = Field(default=0.3, ge=0.0, le=1.0)
+    adaptive_k_ema_alpha: float = Field(default=0.5, ge=0.0, le=1.0)
     """EMA smoothing factor for per-position conditional acceptance rates.
-    Lower = smoother, higher = faster adaptation."""
+    Lower = smoother, higher = faster adaptation. Default 0.5 balances
+    smoothness with responsiveness to changing conditions."""
     adaptive_k_c_draft: float = Field(default=0.05, gt=0.0)
     """Profiled cost ratio: draft forward time / target forward time.
     Requires one-time measurement on target hardware.
     Typical: ~0.02-0.05 for EAGLE, ~0.05-0.10 for draft models."""
     adaptive_k_min_tokens: int = Field(default=0, ge=0)
     """Minimum spec tokens. 0 allows disabling speculation when goodput < 1."""
-    adaptive_k_cooldown_steps: int = Field(default=4, ge=1)
-    """Steps to wait after a K change before recomputing, preventing thrash."""
+    adaptive_k_cooldown_steps: int = Field(default=2, ge=0)
+    """Steps to wait after a K change before recomputing, preventing thrash.
+    Reduced from 4 to 2 for faster adaptation."""
+    adaptive_k_alpha_prior: float = Field(default=0.5, ge=0.0, le=1.0)
+    """Prior conditional acceptance rate for untracked positions.
+    Lower = more conservative (prefers smaller K when no data available)."""
     adaptive_k_bs_penalty: float = Field(default=0.002, ge=0.0)
     """Per-request verification overhead: c_verify = bs_penalty * BS.
     Accounts for target model verification cost scaling with batch size.
