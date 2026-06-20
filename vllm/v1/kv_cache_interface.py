@@ -219,6 +219,15 @@ class FullAttentionSpec(AttentionSpec):
     """
     attention_chunk_size: int | None = None
 
+    non_causal: bool = False
+    """
+    Whether the layer attends non-causally (e.g. Prefix LM). Carried on the
+    spec so the engine core, which collects specs from all workers before the
+    scheduler is built, can adjust scheduling policy (chunked prefill / prefix
+    caching) regardless of tensor-parallel layout. It does not affect the KV
+    cache layout itself.
+    """
+
     def __post_init__(self):
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
@@ -276,6 +285,9 @@ class FullAttentionSpec(AttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
+            # If any layer in the group is non-causal, treat the group as
+            # non-causal so the engine core disables incompatible scheduling.
+            non_causal=any(spec.non_causal for spec in specs),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -547,10 +559,12 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
-        if self.model_version == "deepseek_v4":
-            # DeepseekV4: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B per token.
+        if self.model_version == "deepseek_v4" and self.cache_dtype_str == "fp8_ds_mla":
+            # DeepseekV4 FlashMLA: 448B NoPE + 128B RoPE + 8B fp8 scale = 584B
+            # per token. FlashInfer's contiguous bf16/fp8 cache falls through to
+            # the element-size formula below.
             return self.storage_block_size * 584
-        assert self.model_version is None, (
+        assert self.model_version in (None, "deepseek_v4"), (
             f"Unsupported model version: {self.model_version}"
         )
         return (
@@ -699,6 +713,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
+            non_causal=any(spec.non_causal for spec in specs),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -832,6 +847,8 @@ class KVCacheTensor:
 
     size: int  # size of the KV cache tensor in bytes
     shared_by: list[str]  # layer names that share the same KV cache tensor
+    offset: int = 0  # byte offset of this layer within a contiguous block
+    block_stride: int = 0  # total bytes per block in a packed layout (0 = not packed)
 
 
 @dataclass

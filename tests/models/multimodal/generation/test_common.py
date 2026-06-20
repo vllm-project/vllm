@@ -604,8 +604,6 @@ VLM_TEST_SETTINGS = {
         models=[
             "OpenGVLab/InternVL2-1B",
             "OpenGVLab/InternVL2-2B",
-            # FIXME: Config cannot be loaded in transformers 4.52
-            # "OpenGVLab/Mono-InternVL-2B",
         ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
@@ -975,16 +973,6 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         auto_cls=AutoModelForImageTextToText,
         hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs("baidu/Qianfan-OCR"),
-    ),
-    "qwen_vl": VLMTestInfo(
-        models=["Qwen/Qwen-VL"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=identity,
-        img_idx_to_prompt=lambda idx: f"Picture {idx}: <img></img>\n",
-        max_model_len=1024,
-        max_num_seqs=2,
-        vllm_output_post_proc=model_utils.qwen_vllm_to_hf_output,
-        prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
     ),
     "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],

@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from importlib.util import find_spec
+from contextlib import suppress
+from importlib import import_module
 
 import torch
 
@@ -135,10 +136,11 @@ class ApplyRotaryEmb(CustomOp):
         self.enable_fp32_compute = enable_fp32_compute
 
         self.apply_rotary_emb_flash_attn = None
-        if not current_platform.is_cpu() and find_spec("flash_attn") is not None:
-            from flash_attn.ops.triton.rotary import apply_rotary
-
-            self.apply_rotary_emb_flash_attn = apply_rotary
+        if not current_platform.is_cpu():
+            with suppress(ModuleNotFoundError):
+                self.apply_rotary_emb_flash_attn = import_module(
+                    "flash_attn.ops.triton.rotary"
+                ).apply_rotary
 
     @staticmethod
     def forward_static(
@@ -253,8 +255,31 @@ class ApplyRotaryEmb(CustomOp):
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
+        _HIP_MAX_GRID_DIM = 65535
+        """
+        HIP/ROCm has a per-dim grid limit of 65535 on gridY/gridZ. The
+        flash_attn triton rotary kernel uses
+        grid = (cdiv(nheads, BLOCK_H), cdiv(seq_len, BLOCK_M), batch)
+        with BLOCK_M=8 (rotary_dim<=128) or BLOCK_M=4 (otherwise) and
+        BLOCK_H=2. When the visual encoder packs many image patches into one
+        batch (e.g. vLLM profile_run with max_num_seqs images), gridY can
+        exceed 65535 and hipModuleLaunchKernel returns
+        `Triton Error [HIP]: Code: 1, invalid argument`. Fall back to the
+        native PyTorch implementation in that case.
+        """
         if self.apply_rotary_emb_flash_attn is not None:
             x, cos, sin, origin_shape, origin_dtype = self._pre_process(x, cos, sin)
+
+            seq_len = x.shape[-3]
+            batch = x.shape[0]
+            rotary_dim = cos.shape[-1] * 2
+            block_m = 8 if rotary_dim <= 128 else 4
+            grid_y = (seq_len + block_m - 1) // block_m
+            if grid_y > _HIP_MAX_GRID_DIM or batch > _HIP_MAX_GRID_DIM:
+                output = self.forward_static(
+                    x, cos, sin, self.is_neox_style, self.enable_fp32_compute
+                )
+                return self._post_process(output, origin_shape, origin_dtype)
 
             """
             Arguments of apply_rotary() in flash_attn:
