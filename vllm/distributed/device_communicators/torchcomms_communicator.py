@@ -1,7 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from __future__ import annotations
 
 import os
+from contextlib import suppress
 from typing import Any
+
 import torch
 import torch.distributed as dist
 import torchcomms
@@ -16,9 +21,14 @@ logger = init_logger(__name__)
 
 
 def _infer_torchcomms_backend(device: torch.device | None) -> str:
+    if device is None:
+        raise RuntimeError(
+            "Could not infer torchcomms backend because device is None. "
+            "Set VLLM_TORCHCOMMS_BACKEND explicitly."
+        )
+
     if device.type == "xpu":
         return "xccl"
-
 
     raise RuntimeError(
         f"Could not infer torchcomms backend for device={device}. "
@@ -56,8 +66,7 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
             unique_name=unique_name,
         )
 
-        self.backend = os.environ.get(
-            "VLLM_TORCHCOMMS_BACKEND")
+        self.backend = os.environ.get("VLLM_TORCHCOMMS_BACKEND")
         if self.backend is None:
             self.backend = _infer_torchcomms_backend(self.device)
 
@@ -73,13 +82,11 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
             )
             return
 
-
         local_rank = int(os.environ.get("LOCAL_RANK", self.group_rank))
         local_size = int(os.environ.get("LOCAL_WORLD_SIZE", self.group_world_size))
 
         os.environ["TORCHCOMM_RANK"] = str(self.group_rank)
         os.environ["TORCHCOMM_SIZE"] = str(self.group_world_size)
-
 
         os.environ.setdefault("CCL_PROCESS_LAUNCHER", "none")
         os.environ["CCL_LOCAL_RANK"] = str(local_rank)
@@ -87,19 +94,18 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
 
         os.environ.setdefault("CCL_ATL_TRANSPORT", "ofi")
 
-
         logger.info(
-        "[torchcomms] env before new_comm: "
-        "TORCHCOMM_RANK=%s TORCHCOMM_SIZE=%s "
-        "CCL_PROCESS_LAUNCHER=%s CCL_LOCAL_RANK=%s CCL_LOCAL_SIZE=%s "
-        "CCL_ATL_TRANSPORT=%s CCL_LOG_LEVEL=%s",
-        os.environ.get("TORCHCOMM_RANK"),
-        os.environ.get("TORCHCOMM_SIZE"),
-        os.environ.get("CCL_PROCESS_LAUNCHER"),
-        os.environ.get("CCL_LOCAL_RANK"),
-        os.environ.get("CCL_LOCAL_SIZE"),
-        os.environ.get("CCL_ATL_TRANSPORT"),
-        os.environ.get("CCL_LOG_LEVEL"),
+            "[torchcomms] env before new_comm: "
+            "TORCHCOMM_RANK=%s TORCHCOMM_SIZE=%s "
+            "CCL_PROCESS_LAUNCHER=%s CCL_LOCAL_RANK=%s CCL_LOCAL_SIZE=%s "
+            "CCL_ATL_TRANSPORT=%s CCL_LOG_LEVEL=%s",
+            os.environ.get("TORCHCOMM_RANK"),
+            os.environ.get("TORCHCOMM_SIZE"),
+            os.environ.get("CCL_PROCESS_LAUNCHER"),
+            os.environ.get("CCL_LOCAL_RANK"),
+            os.environ.get("CCL_LOCAL_SIZE"),
+            os.environ.get("CCL_ATL_TRANSPORT"),
+            os.environ.get("CCL_LOG_LEVEL"),
         )
         self.comm = torchcomms.new_comm(
             self.backend,
@@ -116,6 +122,11 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
             self.group_world_size,
             unique_name,
         )
+
+    def _get_comm(self) -> Any:
+        if self.comm is None:
+            raise RuntimeError("TorchComms communicator is not initialized")
+        return self.comm
 
     def _log_tensor(self, op: str, tensor: torch.Tensor) -> None:
         logger.info(
@@ -137,15 +148,20 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
         output = input_.clone()
 
         logger.info(
-            "[torchcomms] all_reduce backend=%s rank=%s input_shape=%s dtype=%s device=%s",
+            " ".join(
+                (
+                    "[torchcomms] all_reduce backend=%s rank=%s input_shape=%s",
+                    "dtype=%s device=%s",
+                )
+            ),
             self.backend,
             self.group_rank,
             tuple(input_.shape),
             input_.dtype,
             input_.device,
         )
-
-        work = self.comm.all_reduce(
+        comm = self._get_comm()
+        work = comm.all_reduce(
             output,
             ReduceOp.SUM,
             async_op=False,
@@ -183,8 +199,8 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
             tuple(output.shape),
             dim,
         )
-
-        work = self.comm.all_gather_single(
+        comm = self._get_comm()
+        work = comm.all_gather_single(
             output,
             moved,
             async_op=False,
@@ -232,8 +248,8 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
             tuple(output.shape),
             dim,
         )
-
-        work = self.comm.reduce_scatter_single(
+        comm = self._get_comm()
+        work = comm.reduce_scatter_single(
             output,
             moved,
             ReduceOp.SUM,
@@ -253,7 +269,12 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
             return tensor
 
         logger.info(
-            "[torchcomms] broadcast backend=%s rank=%s src=%s shape=%s dtype=%s device=%s",
+            " ".join(
+                (
+                    "[torchcomms] broadcast backend=%s rank=%s src=%s shape=%s",
+                    "dtype=%s device=%s",
+                )
+            ),
             self.backend,
             self.group_rank,
             src,
@@ -262,7 +283,8 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
             tensor.device,
         )
 
-        work = self.comm.broadcast(
+        comm = self._get_comm()
+        work = comm.broadcast(
             tensor,
             root=src,
             async_op=False,
@@ -286,7 +308,5 @@ class TorchCommsCommunicator(DeviceCommunicatorBase):
         self.comm = None
 
     def __del__(self) -> None:
-        try:
+        with suppress(Exception):
             self.destroy()
-        except Exception:
-            pass
