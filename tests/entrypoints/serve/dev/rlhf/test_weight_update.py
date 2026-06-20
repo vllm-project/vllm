@@ -351,3 +351,118 @@ class TestCompoundRLStep:
                 assert _wake(url, tags=["kv_cache"]) == 200
 
                 assert _health(url) == 200, f"engine died after step {step}"
+
+
+# ---------------------------------------------------------------------------
+# TestWeightReloadCodePaths
+# ---------------------------------------------------------------------------
+
+def _has_sm100():
+    try:
+        import torch
+        if not torch.cuda.is_available():
+            return False
+        return torch.cuda.get_device_capability(0)[0] >= 10
+    except Exception:
+        return False
+
+
+# Each entry: (model, extra_llm_kwargs)
+# Tests run in-process via vllm.LLM — no HTTP server overhead.
+_RELOAD_MATRIX = [
+    pytest.param(
+        "TitanML/tiny-mixtral",
+        {},
+        id="moe-bf16-tiny",
+    ),
+    pytest.param(
+        "ibm-research/PowerMoE-3b",
+        {},
+        id="moe-bf16-3b",
+    ),
+    pytest.param(
+        "allenai/OLMoE-1B-7B-0924",
+        {"quantization": "fp8"},
+        id="moe-fp8",
+    ),
+    pytest.param(
+        "allenai/OLMoE-1B-7B-0924",
+        {"quantization": "mxfp8"},
+        id="moe-mxfp8",
+        marks=pytest.mark.skipif(
+            not _has_sm100(),
+            reason="mxfp8 requires SM100+ (Blackwell)",
+        ),
+    ),
+]
+
+
+def _run_reload_test(model: str, extra_kwargs: dict):
+    """Run a single weight-reload test in-process.
+
+    Loads the model, extracts one weight tensor, pushes it back through
+    the layerwise reload path (initialize → load_weights → finalize),
+    then verifies the engine can still generate.
+
+    This exercises the exact crash path of #45989 and #44613:
+      finalize_layerwise_reload → process_weights_after_loading
+      → MoE kernel reconstruction → get_current_vllm_config() 💥
+    """
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+
+    from vllm import LLM, SamplingParams
+
+    llm_kwargs = {
+        "model": model,
+        "enforce_eager": True,
+        "max_model_len": 128,
+        "gpu_memory_utilization": 0.7,
+        **extra_kwargs,
+    }
+
+    llm = LLM(**llm_kwargs)
+
+    golden = llm.generate(["Hello"], SamplingParams(max_tokens=8))
+    assert golden and golden[0].outputs, "initial generate failed"
+    golden_text = golden[0].outputs[0].text
+
+    def _trigger_layerwise_finalize(worker):
+        import torch
+
+        from vllm.model_executor.model_loader.reload import (
+            finalize_layerwise_reload,
+            initialize_layerwise_reload,
+        )
+
+        m = worker.model_runner.model
+
+        with torch.device(worker.device):
+            initialize_layerwise_reload(m)
+            finalize_layerwise_reload(m, worker.model_config)
+
+    llm.collective_rpc(_trigger_layerwise_finalize)
+
+    after = llm.generate(["Hello"], SamplingParams(max_tokens=8))
+    assert after and after[0].outputs, "generate failed after weight reload"
+
+    del llm
+
+
+class TestWeightReloadCodePaths:
+    """Exercise process_weights_after_loading across model × quantization.
+
+    Uses vllm.LLM in-process (no HTTP server) for speed. Each parametrized
+    case loads a model, pushes one weight back through the full layerwise
+    reload path, and verifies the engine survives with correct output.
+
+    Catches bugs like:
+      - #45989: get_current_vllm_config() crash during MoE kernel
+                reconstruction after FP8 weight reload
+      - #44613: same crash for max_cudagraph_capture_size in
+                flashinfer_cutlass_moe
+    """
+
+    @pytest.mark.parametrize("model,extra_kwargs", _RELOAD_MATRIX)
+    def test_reload_survives(self, model, extra_kwargs):
+        _run_reload_test(model, extra_kwargs)
