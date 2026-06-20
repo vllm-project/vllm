@@ -1898,9 +1898,11 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         # both the deepstack path and the final embedding merge.
         video_token_id = self.config.video_token_id
         audio_token_id = self.config.audio_token_id
+        image_token_id = self.config.image_token_id
         input_ids_cpu = input_ids.cpu()
         is_video = is_multimodal & (input_ids_cpu == video_token_id)
         is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
+        is_image = is_multimodal & (input_ids_cpu == image_token_id)
         num_video = is_video.sum().item()
         num_audio = is_audio.sum().item()
 
@@ -1921,9 +1923,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             multimodal_embeddings_multiscale = []
 
             if is_interleaved:
-                # Use input_ids-based mask for correct vision positions
-                # when audio and video tokens are interleaved.
-                is_vision = is_video.clone()
+                # Use input_ids-based mask for all vision positions when
+                # audio and video tokens are interleaved.
+                is_vision = is_video | is_image
             else:
                 is_vision = torch.zeros_like(is_multimodal)
                 mm_positions = torch.nonzero(is_multimodal, as_tuple=True)[0]
@@ -1984,6 +1986,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 is_multimodal,
                 num_video,
                 num_audio,
+                embedding_modalities=getattr(
+                    self, "_last_embedding_modalities", None
+                ),
             )
 
         # Default: standard merge (no interleaving), same as parent class.
