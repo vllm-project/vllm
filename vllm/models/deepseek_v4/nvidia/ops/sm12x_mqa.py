@@ -249,7 +249,7 @@ def _fp8_paged_mqa_logits_kernel(
 
     logits = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     scale = tl.load(
-        scale_ptr + block_idx * stride_sb + block_offset[None, :] * stride_ss,
+        scale_ptr + block_idx.to(tl.int64) * stride_sb + block_offset[None, :] * stride_ss,
         mask=context_mask,
         other=0.0,
     )
@@ -268,7 +268,7 @@ def _fp8_paged_mqa_logits_kernel(
             ).to(tl.float32)
             k = tl.load(
                 kv_ptr
-                + block_idx[:, :, None] * stride_kvb
+                + block_idx[:, :, None].to(tl.int64) * stride_kvb
                 + block_offset[None, :, None] * stride_kvs
                 + d[None, None, :] * stride_kvd,
                 mask=context_mask[:, :, None] & (d[None, None, :] < head_dim),
