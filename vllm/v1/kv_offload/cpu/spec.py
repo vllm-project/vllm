@@ -58,7 +58,15 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.cpu_page_size_per_worker = 0
         assert kv_cache_config is not None
         if kv_cache_config.num_blocks > 0 and world_size > 0:
-            total_gpu_kv_bytes = sum(t.size for t in kv_cache_config.kv_cache_tensors)
+            is_packed = any(t.block_stride for t in kv_cache_config.kv_cache_tensors)
+            assert not is_packed or all(
+                t.block_stride for t in kv_cache_config.kv_cache_tensors
+            )
+            total_gpu_kv_bytes = (
+                kv_cache_config.kv_cache_tensors[0].size
+                if is_packed
+                else sum(t.size for t in kv_cache_config.kv_cache_tensors)
+            )
             kv_bytes_per_block = (
                 total_gpu_kv_bytes // kv_cache_config.num_blocks
             ) * world_size
