@@ -769,6 +769,7 @@ class precompiled_wheel_utils:
                             "vllm/_C.abi3.so",
                             "vllm/_C_stable_libtorch.abi3.so",
                             "vllm/_moe_C_stable_libtorch.abi3.so",
+                            "vllm/_qutlass_C.abi3.so",
                             "vllm/_flashmla_C.abi3.so",
                             "vllm/_flashmla_extension_C.abi3.so",
                             "vllm/_sparse_flashmla_C.abi3.so",
@@ -1135,6 +1136,7 @@ if _is_cuda():
         # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
         # Optional since it won't build on unsupported architectures
         ext_modules.append(CMakeExtension(name="vllm._deep_gemm_C", optional=True))
+        ext_modules.append(CMakeExtension(name="vllm._qutlass_C", optional=True))
     # fmha_sm100 is a Python/CuTe-DSL package installed into vllm.third_party.
     ext_modules.append(CMakeExtension(name="vllm.fmha_sm100", optional=True))
 
@@ -1149,7 +1151,8 @@ if _is_cpu():
         ext_modules.append(CMakeExtension(name="vllm._C"))
 
 if _build_custom_ops():
-    ext_modules.append(CMakeExtension(name="vllm._C"))
+    if _is_hip():
+        ext_modules.append(CMakeExtension(name="vllm._C"))
     if _is_cuda() or _is_hip():
         ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
         ext_modules.append(CMakeExtension(name="vllm._moe_C_stable_libtorch"))
