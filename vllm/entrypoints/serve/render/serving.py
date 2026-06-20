@@ -578,9 +578,8 @@ class OpenAIServingRender:
     ) -> ChatCompletionResponse | ErrorResponse:
         """Postprocess a GenerateResponse into a ChatCompletionResponse.
 
-        This is the symmetric inverse of render_chat_request: it detokenizes
-        output token IDs, resolves token_id:N logprob placeholders, and
-        optionally parses reasoning/tool_calls via the configured Parser.
+        Non-streaming only: expects the complete GenerateResponse with all
+        token IDs present.  Uses ``parser.parse()`` for one-shot extraction.
 
         When ``request.chat_request`` is provided, the parser splits the
         output into (reasoning, content, tool_calls).  Otherwise falls
@@ -709,8 +708,9 @@ class OpenAIServingRender:
     ) -> CompletionResponse | ErrorResponse:
         """Postprocess a list of GenerateResponses into a CompletionResponse.
 
-        Mirrors the multi-prompt completions case: one GenerateResponse per
-        prompt, parallel to the list[GenerateRequest] from /v1/completions/render.
+        Non-streaming only.  Mirrors the multi-prompt completions case: one
+        GenerateResponse per prompt, parallel to the list[GenerateRequest]
+        from /v1/completions/render.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
