@@ -27,7 +27,7 @@ soundfile
 blobfile
 rapidfuzz
 gpt-oss
-schemathesis
+schemathesis>=3.39.15,<4
 jiwer
 bm25s
 pystemmer
