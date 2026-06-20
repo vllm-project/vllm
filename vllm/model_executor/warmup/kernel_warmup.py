@@ -7,12 +7,14 @@ happen during model execution.
 """
 
 import hashlib
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import torch
 
 import vllm.envs as envs
+from vllm.compilation import monitor as compilation_monitor
 from vllm.compilation.caching import aot_compile_hash_factors
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
@@ -30,6 +32,16 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
+
+
+@contextmanager
+def _temporary_cudagraph_capture_enabled():
+    previous_value = compilation_monitor.cudagraph_capturing_enabled
+    compilation_monitor.set_cudagraph_capturing_enabled(True)
+    try:
+        yield
+    finally:
+        compilation_monitor.set_cudagraph_capturing_enabled(previous_value)
 
 
 class _NoOpKVConnector:
@@ -269,7 +281,8 @@ def kernel_warmup(worker: "Worker"):
                 )
         if not getattr(worker, "use_v2_model_runner", False):
             try:
-                _warmup_scheduler_output_kernels(worker)
+                with _temporary_cudagraph_capture_enabled():
+                    _warmup_scheduler_output_kernels(worker)
             except Exception:
                 logger.warning(
                     "Hybrid GDN/Mamba/MRoPE scheduler-output warmup failed. "
@@ -277,7 +290,8 @@ def kernel_warmup(worker: "Worker"):
                     exc_info=True,
                 )
             try:
-                _warmup_single_request_decode_kernels(worker)
+                with _temporary_cudagraph_capture_enabled():
+                    _warmup_single_request_decode_kernels(worker)
             except Exception:
                 logger.warning(
                     "Hybrid GDN/Mamba/MRoPE single-request warmup failed. "

@@ -71,6 +71,7 @@ def test_kernel_warmup_runs_hybrid_and_zeroer_warmups(monkeypatch) -> None:
 
 def test_kernel_warmup_runs_runtime_dummy_for_hybrid_models(monkeypatch) -> None:
     calls: list[str] = []
+    guard_transitions: list[bool] = []
 
     model = object()
 
@@ -88,7 +89,24 @@ def test_kernel_warmup_runs_runtime_dummy_for_hybrid_models(monkeypatch) -> None
     )
     monkeypatch.setattr(kernel_warmup, "minimax_m3_msa_warmup", lambda worker: None)
 
+    monkeypatch.setattr(
+        kernel_warmup.compilation_monitor,
+        "cudagraph_capturing_enabled",
+        False,
+    )
+
+    def set_cudagraph_capturing_enabled(enabled: bool) -> None:
+        guard_transitions.append(enabled)
+        kernel_warmup.compilation_monitor.cudagraph_capturing_enabled = enabled
+
+    monkeypatch.setattr(
+        kernel_warmup.compilation_monitor,
+        "set_cudagraph_capturing_enabled",
+        set_cudagraph_capturing_enabled,
+    )
+
     def fake_scheduler_warmup(model_runner, execute_model, sample_tokens) -> None:
+        assert kernel_warmup.compilation_monitor.cudagraph_capturing_enabled
         assert model_runner.num_speculative_steps == 0
         assert model_runner.decode_query_len == 1
         assert hasattr(model_runner, "kv_connector")
@@ -96,10 +114,15 @@ def test_kernel_warmup_runs_runtime_dummy_for_hybrid_models(monkeypatch) -> None
         calls.append("scheduler")
 
     monkeypatch.setattr(kernel_warmup, "warmup_kernels", fake_scheduler_warmup)
+
+    def fake_single_request_warmup(worker) -> None:
+        assert kernel_warmup.compilation_monitor.cudagraph_capturing_enabled
+        calls.append("single")
+
     monkeypatch.setattr(
         kernel_warmup,
         "_warmup_single_request_decode_kernels",
-        lambda worker: calls.append("single"),
+        fake_single_request_warmup,
     )
     monkeypatch.setattr(
         parallel_state,
@@ -139,6 +162,8 @@ def test_kernel_warmup_runs_runtime_dummy_for_hybrid_models(monkeypatch) -> None
     kernel_warmup.kernel_warmup(worker)
 
     assert calls == ["hybrid", "dummy", "scheduler", "single"]
+    assert guard_transitions == [True, False, True, False]
+    assert not kernel_warmup.compilation_monitor.cudagraph_capturing_enabled
     assert not hasattr(model_runner, "num_speculative_steps")
     assert not hasattr(model_runner, "decode_query_len")
     assert not hasattr(model_runner, "kv_connector")
