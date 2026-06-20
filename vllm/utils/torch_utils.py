@@ -922,11 +922,6 @@ def _encode_layer_name(layer_name: str) -> str | LayerName:
     return LayerName(layer_name) if _USE_LAYERNAME else layer_name
 
 
-# Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
-def supports_xccl() -> bool:
-    return torch.distributed.is_xccl_available()
-
-
 # Supports XPU Graph with PyTorch versions >= 2.11.0.dev for XPU platform
 def supports_xpu_graph() -> bool:
     return is_torch_equal_or_newer("2.11.0.dev")

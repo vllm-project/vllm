@@ -134,9 +134,7 @@ def xpu_platform_plugin() -> str | None:
     try:
         import torch
 
-        from vllm.utils.torch_utils import supports_xccl
-
-        if supports_xccl():
+        if torch.distributed.is_xccl_available():
             dist_backend = "xccl"
             from vllm.platforms.xpu import XPUPlatform
 
