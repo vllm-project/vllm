@@ -189,6 +189,7 @@ class CudaGraphManager:
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
+        max_cg_capture_size = self.compilation_config.max_cudagraph_capture_size
 
         descs_by_token_lora: dict[tuple[int, int], list[BatchExecutionDescriptor]] = (
             defaultdict(list)
@@ -220,8 +221,7 @@ class CudaGraphManager:
 
                     if (
                         rounded_num_tokens > max_decode_tokens
-                        or rounded_num_tokens
-                        > self.compilation_config.max_cudagraph_capture_size
+                        or rounded_num_tokens > max_cg_capture_size
                         or rounded_num_reqs > self.max_num_reqs
                     ):
                         continue
