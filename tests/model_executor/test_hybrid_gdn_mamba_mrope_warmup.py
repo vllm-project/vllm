@@ -47,6 +47,7 @@ def test_kernel_warmup_runs_hybrid_and_zeroer_warmups(monkeypatch) -> None:
         "hybrid_gdn_mamba_mrope_warmup",
         fake_hybrid_warmup,
     )
+    monkeypatch.setattr(kernel_warmup, "minimax_m3_msa_warmup", lambda worker: None)
 
     worker = SimpleNamespace(
         get_model=lambda: model,
@@ -85,6 +86,7 @@ def test_kernel_warmup_runs_runtime_dummy_for_hybrid_models(monkeypatch) -> None
         "hybrid_gdn_mamba_mrope_warmup",
         lambda *args, **kwargs: calls.append("hybrid"),
     )
+    monkeypatch.setattr(kernel_warmup, "minimax_m3_msa_warmup", lambda worker: None)
 
     def fake_scheduler_warmup(model_runner, execute_model, sample_tokens) -> None:
         assert model_runner.num_speculative_steps == 0
@@ -168,6 +170,7 @@ def test_kernel_warmup_skips_scheduler_warmup_for_v2_runner(monkeypatch) -> None
         "_warmup_single_request_decode_kernels",
         lambda worker: calls.append("single"),
     )
+    monkeypatch.setattr(kernel_warmup, "minimax_m3_msa_warmup", lambda worker: None)
 
     def fake_dummy_run(**kwargs) -> None:
         calls.append("dummy")
