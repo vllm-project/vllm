@@ -543,7 +543,7 @@ class SpecDecodeBaseProposer:
         # No draft tokens requested (e.g. Dynamic SD decided K=0).
         # The prefill forward pass above already ran to keep the drafter
         # KV cache in sync, so just return an empty tensor.
-        if self.num_speculative_tokens == 0:
+        if self.current_spec_tokens == 0:
             return torch.empty(
                 batch_size,
                 0,
