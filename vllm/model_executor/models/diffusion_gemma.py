@@ -28,6 +28,7 @@ from transformers import AutoModel
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -478,9 +479,6 @@ def _compiled_sample_step(
     step_tensor: torch.Tensor,  # [max_num_reqs]
     is_encoder_phase: torch.Tensor,  # [max_num_reqs]
     confident_tensor: torch.Tensor,  # [max_num_reqs]
-    sc_embeds: torch.Tensor,  # [max_num_reqs, CL, hidden]
-    embed_weight: torch.Tensor,  # [vocab, hidden]
-    normalizer: torch.Tensor,
     history: torch.Tensor,  # [max_num_reqs, ST, CL]
     history_len_tensor: torch.Tensor,  # [max_num_reqs]
     # Output tensors (modified in-place)
@@ -620,16 +618,6 @@ def _compiled_sample_step(
         is_commit, is_commit.new_zeros(num_decode), converged
     )
 
-    # SC soft embedding: store ``probs @ embed_weight`` (the value the next step's
-    # self-conditioning MLP consumes) only for slots that will denoise next — i.e.
-    # this step denoised AND it isn't about to commit (is_encoder_phase now False).
-    # Masking here (rather than in the consumer) lets _apply_self_conditioning read
-    # sc_embeds directly. Storing the [.., hidden] soft embed instead of the full
-    # [.., vocab] probs avoids a giant persistent buffer.
-    sc_keep = (is_denoise & ~is_encoder_phase[decode_slots])[:, None, None]
-    soft_embeds = torch.matmul(probs.to(embed_weight.dtype), embed_weight) * normalizer
-    sc_embeds[decode_slots] = soft_embeds * sc_keep
-
     # Overwrite canvas with argmax for newly converged denoise requests
     newly_converged = (converged & is_denoise).unsqueeze(1)
     canvas[decode_slots] = torch.where(
@@ -640,6 +628,48 @@ def _compiled_sample_step(
     draft_tokens[all_slots, :CL] = canvas[all_slots]
 
     return scaled
+
+
+def _soft_embeddings_from_probs(
+    probs: torch.Tensor,
+    embed_tokens: Any,
+    normalizer: torch.Tensor,
+) -> torch.Tensor:
+    """Compute ``probs @ embedding_weight`` for TP-sharded embeddings."""
+    embed_weight = embed_tokens.weight
+    probs = probs.to(embed_weight.dtype)
+
+    if probs.shape[-1] == embed_weight.shape[0]:
+        soft_embeds = torch.matmul(probs, embed_weight)
+        return soft_embeds * normalizer
+
+    shard_indices = getattr(embed_tokens, "shard_indices", None)
+    if shard_indices is None:
+        raise RuntimeError(
+            "DiffusionGemma self-conditioning logits and embedding weight "
+            f"shapes are incompatible: {probs.shape[-1]} vs "
+            f"{embed_weight.shape[0]}."
+        )
+
+    local_probs = probs.new_zeros(*probs.shape[:-1], embed_weight.shape[0])
+    org_start = shard_indices.org_vocab_start_index
+    org_end = shard_indices.org_vocab_end_index
+    org_len = org_end - org_start
+    if org_len > 0:
+        local_probs[..., :org_len] = probs[..., org_start:org_end]
+
+    added_start = shard_indices.added_vocab_start_index
+    added_end = shard_indices.added_vocab_end_index
+    added_len = added_end - added_start
+    if added_len > 0:
+        added_offset = shard_indices.num_org_elements_padded
+        local_probs[..., added_offset : added_offset + added_len] = probs[
+            ..., added_start:added_end
+        ]
+
+    soft_embeds = torch.matmul(local_probs, embed_weight)
+    soft_embeds = tensor_model_parallel_all_reduce(soft_embeds)
+    return soft_embeds * normalizer
 
 
 class DiffusionGemmaRequestStates:
@@ -850,7 +880,7 @@ class DiffusionGemmaModelState(ModelState):
             t_max=gen["t_max"],
             entropy_bound=entropy_bound,
             confidence_threshold=gen["confidence_threshold"],
-            embed_weight=self.model.model.embed_tokens.weight,
+            embed_tokens=self.model.model.embed_tokens,
             normalizer=self.model.model.normalizer,
         ), None
 
@@ -1052,14 +1082,14 @@ class DiffusionSampler:
         t_min: float,
         t_max: float,
         entropy_bound: float,
-        embed_weight: torch.Tensor,
+        embed_tokens: Any,
         normalizer: torch.Tensor,
     ):
         self.sampling_states = sampler.sampling_states
         self.req_states = sampler.req_states
         # Self-conditioning soft embed = probs @ embed_weight * normalizer,
-        # computed in the sampler (see _compiled_sample_step).
-        self.embed_weight = embed_weight
+        # computed in the sampler after _compiled_sample_step.
+        self.embed_tokens = embed_tokens
         self.normalizer = normalizer
         self.canvas_length = (
             diffusion_config.canvas_length if diffusion_config is not None else 32
@@ -1281,9 +1311,6 @@ class DiffusionSampler:
             states.step,
             states.is_encoder_phase,
             states.confident,
-            states.self_conditioning_embeds,
-            self.embed_weight,
-            self.normalizer,
             states.accepted_canvas_history,
             states.accepted_canvas_history_len,
             # Output
@@ -1300,6 +1327,26 @@ class DiffusionSampler:
             ST=states.stability_threshold,
             entropy_bound=self.entropy_bound,
         )
+
+        # Store ``probs @ embed_weight`` (the value the next step's
+        # self-conditioning MLP consumes) only for slots that will denoise next
+        # — i.e. this step denoised AND it isn't about to commit. This lives
+        # outside _compiled_sample_step because embed_tokens.weight is
+        # vocabulary-sharded under tensor parallelism and needs a TP all-reduce.
+        sc_keep = (~is_committing) & ~states.is_encoder_phase[decode_slots]
+        if sc_keep.any():
+            probs = scaled.log_softmax(dim=-1).exp()
+            soft_embeds = _soft_embeddings_from_probs(
+                probs,
+                self.embed_tokens,
+                self.normalizer,
+            )
+            soft_embeds = soft_embeds.to(states.self_conditioning_embeds.dtype)
+            states.self_conditioning_embeds[decode_slots] = soft_embeds * sc_keep[
+                :, None, None
+            ].to(soft_embeds.dtype)
+        else:
+            states.self_conditioning_embeds[decode_slots] = 0
 
         # --- Logprobs: stash on convergence, return on commit ---
         slots_np = input_batch.idx_mapping_np[:num_reqs]
