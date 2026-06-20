@@ -182,8 +182,6 @@ def make_int8_moe_quant_config(
         assert isinstance(layer, RoutedExperts)
         return get_humming_moe_quant_config(layer)
 
-    assert int8_backend == Int8MoeBackend.TRITON
-
     if a1_scale is None or a2_scale is None:
         return int8_w8a16_moe_quant_config(
             w1_scale=w1_scale,
@@ -271,10 +269,10 @@ def make_int8_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
-    extra_args = {}
+    extra_kwargs = {}
     if int8_backend == Int8MoeBackend.HUMMING:
         assert layer is not None
-        extra_args = {"layer": layer}
+        extra_kwargs = {"layer": layer}
 
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
@@ -285,13 +283,13 @@ def make_int8_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
-            **extra_args,
+            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            **extra_args,
+            **extra_kwargs,
         )
 
     kernel = mk.FusedMoEKernel(

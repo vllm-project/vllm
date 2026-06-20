@@ -3,20 +3,17 @@
 
 import torch
 
-from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
     convert_linear_layer_to_humming_standard,
     prepare_humming_layer,
 )
 from vllm.platforms import current_platform
 
-from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
-
-logger = init_logger(__name__)
+from .base import Mxfp4LinearKernel, Mxfp4LinearLayerConfig
 
 
-class HummingNvFp4LinearKernel(NvFp4LinearKernel):
-    """Humming GEMM Kernel for NVFP4."""
+class HummingMxfp8LinearKernel(Mxfp4LinearKernel):
+    """Humming GEMM Kernel for MXFP4."""
 
     @classmethod
     def is_supported(
@@ -31,22 +28,19 @@ class HummingNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Mxfp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        name_map = {
-            "weight": "weight",
-            "weight_scale": "weight_scale",
-            "global_scale": "weight_global_scale",
-        }
+        layer.weight_scale.data = layer.weight_scale.data.view(torch.float8_e8m0fnu)
+        name_map = {"weight": "weight", "weight_scale": "weight_scale"}
 
         quant_config = {
             "quant_method": "humming",
             "dtype": "float4e2m1",
-            "scale_dtype": "float8e4m3",
-            "group_size": 16,
-            "weight_scale_type": "group_tensor",
+            "scale_dtype": "float8e8m0",
+            "group_size": 32,
+            "weight_scale_type": "group",
         }
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)

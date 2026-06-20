@@ -648,10 +648,10 @@ def make_fp8_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
-    extra_args = {}
+    extra_kwargs = {}
     if fp8_backend == Fp8MoeBackend.HUMMING:
         assert layer is not None
-        extra_args = {"layer": layer}
+        extra_kwargs = {"layer": layer}
 
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
@@ -662,13 +662,13 @@ def make_fp8_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
-            **extra_args,
+            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
-            **extra_args,
+            **extra_kwargs,
         )
 
     kernel = mk.FusedMoEKernel(

@@ -74,6 +74,9 @@ from vllm.model_executor.kernels.linear.mxfp4 import (
 from vllm.model_executor.kernels.linear.mxfp4.flashinfer import (
     FlashInferMxFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.humming import (
+    HummingMxFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4.marlin import (
     MarlinMxFp4LinearKernel,
 )
@@ -228,6 +231,14 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "flashinfer_b12x": {
         FlashInferB12xNvFp4LinearKernel,
     },
+    "humming": {
+        HummingInt8ScaledMMLinearKernel,
+        HummingInt8ScaledMMLinearKernel,
+        HummingLinearKernel,
+        HummingMxfp8LinearKernel,
+        HummingMxFp4LinearKernel,
+        HummingNvFp4LinearKernel,
+    },
     "marlin": {
         MarlinFP8ScaledMMLinearKernel,
         MarlinLinearKernel,
@@ -286,9 +297,9 @@ def _filter_kernels_by_backend(
 _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]] = {
     PlatformEnum.CPU: [ZentorchInt8ScaledMMLinearKernel, CPUInt8ScaledMMLinearKernel],
     PlatformEnum.CUDA: [
-        HummingInt8ScaledMMLinearKernel,
         CutlassInt8ScaledMMLinearKernel,
         TritonInt8ScaledMMLinearKernel,
+        HummingInt8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [AiterInt8ScaledMMLinearKernel, TritonInt8ScaledMMLinearKernel],
 }
@@ -296,12 +307,12 @@ _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]]
 # in priority/performance order (when available)
 _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
     PlatformEnum.CUDA: [
-        HummingFP8ScaledMMLinearKernel,
         MarlinFP8ScaledMMLinearKernel,
         FlashInferFP8ScaledMMLinearKernel,
         CutlassFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
+        HummingFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
         AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
@@ -327,12 +338,12 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel]]
 ] = {
     PlatformEnum.CUDA: [
-        HummingFP8ScaledMMLinearKernel,
         FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
         DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
         MarlinFP8ScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
+        HummingFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
         AiterFp8BlockScaledMMKernel,
@@ -366,15 +377,14 @@ _POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]
 # in priority/performance order (when available)
 _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     PlatformEnum.CUDA: [
-        HummingLinearKernel,
         CutlassW4A8LinearKernel,
         MacheteLinearKernel,
         AllSparkLinearKernel,
         MarlinLinearKernel,
-        HummingLinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
         TritonW4A16LinearKernel,
+        HummingLinearKernel,
     ],
     PlatformEnum.ROCM: [
         RDNA3W4A16LinearKernel,
@@ -396,10 +406,10 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
 # in priority/performance order (when available)
 _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
     PlatformEnum.CUDA: [
-        HummingMxfp8LinearKernel,
         FlashInferCutlassMxfp8LinearKernel,
         MarlinMxfp8LinearKernel,
         EmulationMxfp8LinearKernel,
+        HummingMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
         # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
@@ -415,7 +425,6 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
 
 _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
-        HummingNvFp4LinearKernel,
         # FlashInferB12xNvFp4LinearKernel excluded from auto-selection until
         # upstream CUTLASS SM121 MMA op guard is resolved; use
         # --linear-backend flashinfer_b12x to opt in explicitly.
@@ -426,6 +435,7 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
         FlashInferCudnnNvFp4LinearKernel,
         FbgemmNvFp4LinearKernel,
         EmulationNvFp4LinearKernel,
+        HummingNvFp4LinearKernel,
     ],
     PlatformEnum.ROCM: [
         EmulationNvFp4LinearKernel,
@@ -436,6 +446,7 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     PlatformEnum.CUDA: [
         FlashInferMxFp4LinearKernel,
         MarlinMxFp4LinearKernel,
+        HummingMxFp4LinearKernel,
     ],
     PlatformEnum.XPU: [
         XPUMxFp4LinearKernel,

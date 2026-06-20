@@ -3,7 +3,6 @@
 
 import humming.dtypes
 import torch
-from humming.layer import HummingMethod
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
@@ -81,14 +80,15 @@ class HummingFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        from humming.layer import HummingMethod
+
         flatten_inputs = x.view(-1, x.size(-1))
         output = HummingMethod.forward_layer(
             layer=layer,
             inputs=flatten_inputs,
             compute_config=layer.compute_config,
         )
-        output = output.view(*x.shape[:-1], output.size(-1))
-        return output
+        return output.view(*x.shape[:-1], output.size(-1))
 
     def apply_scaled_mm(
         self,
@@ -141,11 +141,12 @@ class HummingInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        from humming.layer import HummingMethod
+
         flatten_inputs = x.view(-1, x.size(-1))
         output = HummingMethod.forward_layer(
             layer=layer,
             inputs=flatten_inputs,
             compute_config=layer.compute_config,
         )
-        output = output.view(*x.shape[:-1], output.size(-1))
-        return output
+        return output.view(*x.shape[:-1], output.size(-1))

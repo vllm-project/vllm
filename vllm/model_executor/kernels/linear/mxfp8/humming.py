@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-from humming.layer import HummingMethod
 
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
     convert_linear_layer_to_humming_standard,
@@ -53,11 +52,12 @@ class HummingMxfp8LinearKernel(Mxfp8LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        from humming.layer import HummingMethod
+
         flatten_inputs = x.view(-1, x.size(-1))
         output = HummingMethod.forward_layer(
             layer=layer,
             inputs=flatten_inputs,
             compute_config=layer.compute_config,
         )
-        output = output.view(*x.shape[:-1], output.size(-1))
-        return output
+        return output.view(*x.shape[:-1], output.size(-1))
