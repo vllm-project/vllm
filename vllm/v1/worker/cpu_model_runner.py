@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.tracing import instrument
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -156,8 +156,6 @@ class CPUModelRunner(GPUModelRunner):
         # Zero newly allocated full-attention KV cache blocks to prevent stale
         # data from corrupting attention when a block is partially written and
         # the uninitialized tail is read before masking can apply.
-        from vllm.v1.kv_cache_interface import FullAttentionSpec
-
         seen_ptrs: set[int] = set()
         for group in self.kv_cache_config.kv_cache_groups:
             if not isinstance(group.kv_cache_spec, FullAttentionSpec):
