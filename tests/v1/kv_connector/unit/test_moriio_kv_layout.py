@@ -8,7 +8,16 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
+
+aiter_available = importlib.util.find_spec("aiter") is not None
+mori_available = importlib.util.find_spec("mori") is not None
+
+pytestmark = pytest.mark.skipif(
+    not (current_platform.is_rocm() and mori_available),
+    reason="MoRIIOs are only available on ROCm with aiter package installed",
+)
 
 _REPO_ROOT = next(
     parent for parent in Path(__file__).resolve().parents if (parent / "vllm").is_dir()
