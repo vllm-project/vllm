@@ -136,6 +136,9 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   CUresult rdma_result = cuDeviceGetAttribute(
       &flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
       device);
+  if (rdma_result != CUDA_SUCCESS && rdma_result != CUDA_ERROR_INVALID_VALUE) {
+    CUDA_CHECK(rdma_result);
+  }
   if (rdma_result == CUDA_SUCCESS &&
       flag) {  // support GPUDirect RDMA if possible
     prop.allocFlags.gpuDirectRDMACapable = 1;
@@ -143,6 +146,9 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   int fab_flag = 0;
   CUresult fab_result = cuDeviceGetAttribute(
       &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device);
+  if (fab_result != CUDA_SUCCESS && fab_result != CUDA_ERROR_INVALID_VALUE) {
+    CUDA_CHECK(fab_result);
+  }
   if (fab_result == CUDA_SUCCESS &&
       fab_flag) {  // support fabric handle if possible
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
