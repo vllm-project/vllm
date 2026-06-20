@@ -1568,3 +1568,10 @@ def test_load_config_rejects_invalid_safetensors_load_strategy():
 def test_load_config_rejects_non_string_load_format(bad_load_format):
     with pytest.raises(pydantic.ValidationError):
         LoadConfig(load_format=bad_load_format)
+
+
+def test_model_config_rejects_non_string_quantization():
+    with pytest.raises(
+        pydantic.ValidationError, match="Input should be a valid string"
+    ):
+        ModelConfig("facebook/opt-125m", quantization=123)
