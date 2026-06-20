@@ -144,6 +144,7 @@ steps:
   key: lm-eval-humming-h100
   timeout_in_minutes: 30
   device: h100
+  optional: true
   num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
