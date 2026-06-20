@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib.util
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -14,23 +13,15 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
 
-pytestmark = pytest.mark.skipif(
-    not (current_platform.is_rocm() and mori_available),
-    reason="MoRIIOs are only available on ROCm with aiter package installed",
-)
+if not (current_platform.is_rocm() and mori_available):
+    pytest.skip(
+        "MoRIIOs are only available on ROCm with mori package installed",
+        allow_module_level=True,
+    )
 
-_REPO_ROOT = next(
-    parent for parent in Path(__file__).resolve().parents if (parent / "vllm").is_dir()
+moriio_layout = importlib.import_module(
+    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout"
 )
-_LAYOUT_PATH = (
-    _REPO_ROOT / "vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_layout.py"
-)
-_LAYOUT_SPEC = importlib.util.spec_from_file_location(
-    "moriio_layout_under_test", _LAYOUT_PATH
-)
-assert _LAYOUT_SPEC is not None and _LAYOUT_SPEC.loader is not None
-moriio_layout = importlib.util.module_from_spec(_LAYOUT_SPEC)
-_LAYOUT_SPEC.loader.exec_module(moriio_layout)
 
 
 def _full_spec(block_size: int = 4) -> FullAttentionSpec:
