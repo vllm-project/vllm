@@ -7,6 +7,8 @@ import json
 import numpy as np
 import torch
 
+import vllm.kernels  # noqa: F401
+from vllm import ir
 from vllm.config import MultiModalConfig
 from vllm.kernels.triton.qkv_padded_fp8_quant import (
     quantize_fp8_maybe_pad_head_dim,
@@ -28,13 +30,9 @@ from vllm.utils.flashinfer import (
     is_flashinfer_cudnn_fp8_prefill_attn_supported,
 )
 from vllm.utils.math_utils import round_up
-from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.vit_attn_wrappers import (
-    vit_flash_attn_wrapper,
     vit_flashinfer_wrapper,
-    vit_torch_sdpa_wrapper,
-    vit_triton_attn_wrapper,
 )
 
 logger = init_logger(__name__)
@@ -360,12 +358,6 @@ class MMEncoderAttention(CustomOp):
             AttentionBackendEnum.ROCM_AITER_FA,
         }
 
-        self._fa_version = (
-            get_flash_attn_version(head_size=head_size)
-            if self.is_flash_attn_backend
-            else None
-        )
-
         if self.attn_backend == AttentionBackendEnum.FLASHINFER:
             _get_flashinfer_workspace_buffer()
 
@@ -483,31 +475,13 @@ class MMEncoderAttention(CustomOp):
     def enabled(cls) -> bool:
         return True
 
-    def view_qkv_to_4d(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        bsz: int,
-        q_len: int,
-        kv_len: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Reshape query, key, value to 4D tensors:
-        (batch_size, seq_len, num_heads, head_size)
-        """
-        query = query.view(bsz, q_len, self.num_heads, self.head_size)
-        key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
-        value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
-
-        return query, key, value
-
-    def _forward_sdpa(
+    def _call_ir_op(
         self,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Input shape:
         (batch_size x seq_len x hidden_size) or
@@ -517,88 +491,18 @@ class MMEncoderAttention(CustomOp):
         kv_len = key.size(1)
         is_reshaped = query.dim() != 4
 
-        query, key, value = self.view_qkv_to_4d(query, key, value, bsz, q_len, kv_len)
-
-        output = vit_torch_sdpa_wrapper(
-            q=query,
-            k=key,
-            v=value,
-            scale=self.scale,
-            cu_seqlens=cu_seqlens,
-            enable_gqa=self.num_heads > self.num_kv_heads,
-        )
         if is_reshaped:
-            output = output.reshape(bsz, q_len, -1)
-        return output
+            query = query.view(bsz, q_len, self.num_heads, self.head_size)
+            key = key.view(bsz, kv_len, self.num_kv_heads, self.head_size)
+            value = value.view(bsz, kv_len, self.num_kv_heads, self.head_size)
 
-    def _forward_fa(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        cu_seqlens: torch.Tensor | None = None,
-        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
-    ) -> torch.Tensor:
-        """Input shape:
-        (batch_size x seq_len x hidden_size) or
-        (batch_size x seq_len x num_heads x head_size)
-        """
-        assert (cu_seqlens is not None and max_seqlen is not None) or (
-            cu_seqlens is None and max_seqlen is None
-        ), "cu_seqlens and max_seqlen should be both set or both None."
-
-        bsz, q_len = query.size()[:2]
-        kv_len = key.size(1)
-        is_reshaped = query.dim() != 4
-
-        query, key, value = self.view_qkv_to_4d(query, key, value, bsz, q_len, kv_len)
-
-        output = vit_flash_attn_wrapper(
-            q=query,
-            k=key,
-            v=value,
-            batch_size=bsz,
-            is_rocm_aiter=(self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA),
-            fa_version=self._fa_version,
-            scale=self.scale,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+        max_seqlen_int = (
+            max_seqlen.item() if isinstance(max_seqlen, torch.Tensor) else max_seqlen
         )
-        if is_reshaped:
-            output = output.reshape(bsz, q_len, -1)
-        return output
-
-    def _forward_triton(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        cu_seqlens: torch.Tensor | None = None,
-        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
-    ) -> torch.Tensor:
-        """Input shape:
-        (batch_size x seq_len x hidden_size) or
-        (batch_size x seq_len x num_heads x head_size)
-        """
-        assert (cu_seqlens is not None and max_seqlen is not None) or (
-            cu_seqlens is None and max_seqlen is None
-        ), "cu_seqlens and max_seqlen should be both set or both None."
-
-        bsz, q_len = query.size()[:2]
-        kv_len = key.size(1)
-        is_reshaped = query.dim() != 4
-
-        query, key, value = self.view_qkv_to_4d(query, key, value, bsz, q_len, kv_len)
-
-        output = vit_triton_attn_wrapper(
-            q=query,
-            k=key,
-            v=value,
-            batch_size=bsz,
-            scale=self.scale,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
+        output = ir.ops.mm_encoder_attn(
+            query, key, value, self.scale, cu_seqlens, max_seqlen_int
         )
+
         if is_reshaped:
             output = output.reshape(bsz, q_len, -1)
         return output
@@ -702,11 +606,11 @@ class MMEncoderAttention(CustomOp):
         key: torch.Tensor,
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
-        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        max_seqlen: torch.Tensor | None = None,  # Used by FlashAttention and Triton
         sequence_lengths: torch.Tensor
-        | None = None,  # Only used for FlashInfer CuDNN backend
+        | None = None,  # Kept for API compatibility; routes only to FlashInfer
     ) -> torch.Tensor:
-        return self._forward_sdpa(query, key, value, cu_seqlens)
+        return self._call_ir_op(query, key, value, cu_seqlens, max_seqlen)
 
     def forward_cuda(
         self,
@@ -714,25 +618,15 @@ class MMEncoderAttention(CustomOp):
         key: torch.Tensor,
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
-        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        max_seqlen: torch.Tensor | None = None,  # Used by FlashAttention and Triton
         sequence_lengths: torch.Tensor
-        | None = None,  # Only used for FlashInfer CuDNN backend
+        | None = None,  # Kept for API compatibility; routes only to FlashInfer
     ) -> torch.Tensor:
-        if self.is_flash_attn_backend:
-            return self._forward_fa(query, key, value, cu_seqlens, max_seqlen)
-        elif self.attn_backend == AttentionBackendEnum.TRITON_ATTN:
-            return self._forward_triton(query, key, value, cu_seqlens, max_seqlen)
-        elif self.attn_backend == AttentionBackendEnum.FLASHINFER:
+        if self.attn_backend == AttentionBackendEnum.FLASHINFER:
             return self._forward_flashinfer(
                 query, key, value, cu_seqlens, max_seqlen, sequence_lengths
             )
-        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
-            return self._forward_sdpa(query, key, value, cu_seqlens)
-        else:
-            raise ValueError(
-                f"Unsupported multi-modal encoder attention backend for CUDA: "
-                f"{self.attn_backend}."
-            )
+        return self._call_ir_op(query, key, value, cu_seqlens, max_seqlen)
 
     def forward_cpu(
         self,
@@ -740,11 +634,11 @@ class MMEncoderAttention(CustomOp):
         key: torch.Tensor,
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
-        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        max_seqlen: torch.Tensor | None = None,  # Used by FlashAttention and Triton
         sequence_lengths: torch.Tensor
-        | None = None,  # Only used for FlashInfer CuDNN backend
+        | None = None,  # Kept for API compatibility; routes only to FlashInfer
     ) -> torch.Tensor:
-        return self._forward_sdpa(query, key, value, cu_seqlens)
+        return self._call_ir_op(query, key, value, cu_seqlens, max_seqlen)
 
     def forward_xpu(
         self,
@@ -752,18 +646,8 @@ class MMEncoderAttention(CustomOp):
         key: torch.Tensor,
         value: torch.Tensor,
         cu_seqlens: torch.Tensor | None = None,
-        max_seqlen: torch.Tensor | None = None,  # Only used for Flash Attention
+        max_seqlen: torch.Tensor | None = None,  # Used by FlashAttention and Triton
         sequence_lengths: torch.Tensor
-        | None = None,  # Only used for FlashInfer CuDNN backend
+        | None = None,  # Kept for API compatibility; routes only to FlashInfer
     ) -> torch.Tensor:
-        if self.attn_backend == AttentionBackendEnum.FLASH_ATTN:
-            return self._forward_fa(query, key, value, cu_seqlens, max_seqlen)
-        elif self.attn_backend == AttentionBackendEnum.TRITON_ATTN:
-            return self._forward_triton(query, key, value, cu_seqlens, max_seqlen)
-        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
-            return self._forward_sdpa(query, key, value, cu_seqlens)
-        else:
-            raise ValueError(
-                f"Unsupported multi-modal encoder attention backend for XPU: "
-                f"{self.attn_backend}."
-            )
+        return self._call_ir_op(query, key, value, cu_seqlens, max_seqlen)
