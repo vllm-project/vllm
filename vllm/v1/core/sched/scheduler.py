@@ -1112,10 +1112,13 @@ class Scheduler(SchedulerInterface):
         )
 
         # Set num_invalid_spec_tokens when adaptive K reduces K
+        # Only apply to decode-phase requests (num_computed_tokens > 0)
         if _adaptive_k_step is not None and _adaptive_k_step < self.num_spec_tokens:
             num_invalid = self.num_spec_tokens - _adaptive_k_step
             scheduler_output.num_invalid_spec_tokens = {
-                req.request_id: num_invalid for req in self.running
+                req.request_id: num_invalid
+                for req in self.running
+                if req.num_computed_tokens > 0
             }
 
         # Restore lookahead after K=0 step.
@@ -1574,6 +1577,8 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+        # Track if any request had draft tokens this step (for _draft_steps)
+        _step_had_draft = False
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
@@ -1624,7 +1629,7 @@ class Scheduler(SchedulerInterface):
                             if j < num_accepted:
                                 self._pos_accepted[j] += 1
                     if actual_k > 0:
-                        self._draft_steps += 1  # Only count steps where draft actually ran
+                        _step_had_draft = True
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
@@ -1777,6 +1782,10 @@ class Scheduler(SchedulerInterface):
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
+
+        # Increment _draft_steps once per step (not per-request) if any request had draft
+        if _step_had_draft:
+            self._draft_steps += 1
 
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
