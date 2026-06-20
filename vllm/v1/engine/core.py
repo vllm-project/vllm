@@ -74,7 +74,7 @@ from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
     SignalCallback,
-    get_device_indices,
+    get_physical_gpu_ids_for_local_dp_rank,
 )
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
@@ -2175,23 +2175,30 @@ class EngineCoreActorMixin:
             pass
         else:
             device_control_env_var = current_platform.device_control_env_var
-            self._set_cuda_visible_devices(
+            self._set_assigned_physical_gpu_ids(
                 vllm_config, local_dp_rank, device_control_env_var
             )
 
-    def _set_cuda_visible_devices(
-        self, vllm_config: VllmConfig, local_dp_rank: int, device_control_env_var: str
+    def _set_assigned_physical_gpu_ids(
+        self,
+        vllm_config: VllmConfig,
+        local_dp_rank: int,
+        device_control_env_var: str,
     ):
         world_size = vllm_config.parallel_config.world_size
-        # Set CUDA_VISIBLE_DEVICES or equivalent.
         try:
-            value = get_device_indices(
-                device_control_env_var, local_dp_rank, world_size
+            physical_gpu_ids = get_physical_gpu_ids_for_local_dp_rank(
+                device_control_env_var,
+                local_dp_rank,
+                world_size,
+                user_assigned_gpu_ids=(
+                    vllm_config.parallel_config.assigned_physical_gpu_ids
+                ),
             )
-            os.environ[device_control_env_var] = value
+            vllm_config.parallel_config.assigned_physical_gpu_ids = physical_gpu_ids
         except IndexError as e:
             raise Exception(
-                f"Error setting {device_control_env_var}: "
+                f"Error computing assigned_physical_gpu_ids: "
                 f"local range: [{local_dp_rank * world_size}, "
                 f"{(local_dp_rank + 1) * world_size}) "
                 f'base value: "{os.getenv(device_control_env_var)}"'
