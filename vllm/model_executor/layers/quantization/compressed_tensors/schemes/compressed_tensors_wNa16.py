@@ -18,6 +18,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     get_marlin_input_dtype,
     marlin_repeat_scales_on_all_ranks,
+    verify_group_size_divides_partition,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -127,7 +128,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         scales_and_zp_size = input_size // group_size
 
         if partition_scales:
-            assert input_size_per_partition % group_size == 0
+            verify_group_size_divides_partition(
+                input_size_per_partition, group_size, self.layer_name
+            )
             scales_and_zp_size = input_size_per_partition // group_size
 
         weight = PackedvLLMParameter(

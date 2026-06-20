@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_repeat_scales_on_all_ranks,
+    verify_group_size_divides_partition,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -171,7 +172,9 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         scales = (input_size_per_partition if partitioned else input_size) // group_size
         scale_data = torch.empty(out, scales, dtype=params_dtype)
         if partitioned:
-            assert input_size_per_partition % group_size == 0
+            verify_group_size_divides_partition(
+                input_size_per_partition, group_size, self.layer_name
+            )
             weight_scale = GroupQuantScaleParameter(
                 data=scale_data, output_dim=0, input_dim=1, weight_loader=weight_loader
             )
