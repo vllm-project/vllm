@@ -396,7 +396,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     )
             return supported
         else:
-            return False
+            return not match_exact
 
     @staticmethod
     def _is_nvfp4_format(quant_args: QuantizationArgs):
@@ -983,7 +983,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         type_ = kv_cache_scheme.get("type")
         num_bits = kv_cache_scheme.get("num_bits")
 
-        if type_ != "float" and num_bits != 8:
+        if type_ != "float" or num_bits != 8:
             raise NotImplementedError(
                 "Currently supported kv cache quantization is "
                 "num_bits=8, type=float, however "

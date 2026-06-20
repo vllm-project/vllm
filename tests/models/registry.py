@@ -145,22 +145,28 @@ class _HfExamplesInfo:
         # Only check the base version for the min/max version, otherwise preview
         # models cannot be run because `x.yy.0.dev0`<`x.yy.0`
         if min_version and Version(cur_base_version) < Version(min_version):
-            is_version_valid = not check_min_version
+            is_version_valid = False
+            should_check_version = check_min_version
             msg += f">={min_version}` is required to run this model."
         elif max_version and Version(cur_base_version) > Version(max_version):
-            is_version_valid = not check_max_version
+            is_version_valid = False
+            should_check_version = check_max_version
             msg += f"<={max_version}` is required to run this model."
         else:
             is_version_valid = True
+            should_check_version = False
 
-        # check if Transformers version breaks the corresponding model runner,
-        # skip test when model runner not compatible
-        is_reason_valid = not (
-            check_version_reason
-            and self.transformers_version_reason
+        # Reasons explain a known incompatibility with a violated version
+        # bound. They should not skip models when the installed version is
+        # already within the requested range.
+        is_reason_applicable = (
+            not is_version_valid
+            and self.transformers_version_reason is not None
             and check_version_reason in self.transformers_version_reason
         )
-        is_transformers_valid = is_version_valid and is_reason_valid
+        is_transformers_valid = is_version_valid or (
+            not should_check_version and not is_reason_applicable
+        )
         if is_transformers_valid:
             return None
         elif self.transformers_version_reason:
@@ -216,10 +222,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "BailingMoeV2_5ForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ring-2.5-1T", trust_remote_code=True
-    ),
-    "BambaForCausalLM": _HfExamplesInfo(
-        "ibm-ai-platform/Bamba-9B-v1",
-        extras={"tiny": "hmellor/tiny-random-BambaForCausalLM"},
     ),
     "BloomForCausalLM": _HfExamplesInfo(
         "bigscience/bloom-560m", {"1b": "bigscience/bloomz-1b1"}
@@ -329,6 +331,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "hpcai-tech/grok-1", trust_remote_code=True
     ),
     "Grok1ForCausalLM": _HfExamplesInfo("xai-org/grok-2", trust_remote_code=True),
+    "HrmTextForCausalLM": _HfExamplesInfo(
+        "sapientinc/HRM-Text-1B",
+        min_transformers_version="5.9.0",
+    ),
     "HunYuanDenseV1ForCausalLM": _HfExamplesInfo("tencent/Hunyuan-7B-Instruct"),
     "HunYuanMoEV1ForCausalLM": _HfExamplesInfo(
         "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
@@ -405,7 +411,15 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "openbmb/MiniCPM3-4B", trust_remote_code=True
     ),
     "MiniCPM4ForCausalLM": _HfExamplesInfo(
-        "openbmb/MiniCPM4.1-8B", trust_remote_code=True
+        "openbmb/MiniCPM4.1-8B",
+        min_transformers_version="4.56",
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "HF remote code imports removed `is_torch_fx_available`; "
+            "the upstream compatibility shim request was closed as not planned: "
+            "https://github.com/huggingface/transformers/issues/44561"
+        },
+        trust_remote_code=True,
     ),
     "MiniMaxForCausalLM": _HfExamplesInfo("MiniMaxAI/MiniMax-Text-01-hf"),
     "MiniMaxText01ForCausalLM": _HfExamplesInfo(
@@ -419,6 +433,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiniMaxM2ForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M2",
         trust_remote_code=True,
+    ),
+    "MiniMaxM3SparseForCausalLM": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "Ministral3ForCausalLM": _HfExamplesInfo("mistralai/Ministral-3-3B-Instruct-2512"),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
@@ -564,16 +583,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "TeleFLMForCausalLM": _HfExamplesInfo(
         "CofeAI/FLM-2-52B-Instruct-2407", trust_remote_code=True
     ),
-    "XverseForCausalLM": _HfExamplesInfo(
-        "xverse/XVERSE-7B-Chat",
-        tokenizer="meta-llama/Llama-2-7b",
-        trust_remote_code=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "vllm": "XVERSE tokenizer is incompatible with transformers v5 "
-            "(add_prefix_space / prepend_scheme mismatch).",
-        },
-    ),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
     "MiMoV2FlashForCausalLM": _HfExamplesInfo(
@@ -582,7 +591,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiMoV2ForCausalLM": _HfExamplesInfo(
         "XiaomiMiMo/MiMo-V2.5-Pro", trust_remote_code=True
     ),
-    "Dots1ForCausalLM": _HfExamplesInfo("rednote-hilab/dots.llm1.inst"),
 }
 
 _EMBEDDING_EXAMPLE_MODELS = {
@@ -791,7 +799,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
         "nvidia/music-flamingo-2601-hf",
-        min_transformers_version="5.3.0",
+        min_transformers_version="5.5.0",
         transformers_version_reason={
             "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
         },
@@ -1108,6 +1116,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-VL-01",
         trust_remote_code=True,
+    ),
+    "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
@@ -1609,6 +1622,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "XiaomiMiMo/MiMo-V2.5-Omni",
         trust_remote_code=True,
         speculative_model="XiaomiMiMo/MiMo-V2.5-Omni",
+        is_available_online=False,
+    ),
+    "MiniMaxM3MTP": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M3",
+        trust_remote_code=True,
         is_available_online=False,
     ),
     "NemotronHMTPModel": _HfExamplesInfo(
