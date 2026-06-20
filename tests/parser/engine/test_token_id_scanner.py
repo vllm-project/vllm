@@ -7,6 +7,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.parser.engine.events import EventType
+from vllm.parser.engine.parser_engine_config import (
+    ParserEngineConfig,
+    ParserState,
+)
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.engine.token_id_scanner import (
     PreLexedTerminal,
@@ -300,6 +304,57 @@ class TestDropTokens:
         assert "<eos>" not in combined
 
         assert len(scanner.flush_pending()) == 0
+
+
+class TestNonStreamingDrop:
+    """Drop tokens must be stripped in non-streaming mode too.
+
+    The non-streaming path wires the output token IDs through to the engine,
+    so bos/eos/pad (and configured ``drop_tokens``) are dropped by ID even
+    when the full output is fed in a single pass.
+    """
+
+    @staticmethod
+    def _tokenizer():
+        tok = MagicMock()
+        vocab = {"<bos>": 0, "<eos>": 1, "Hello": 100, " world": 101}
+        rev = {v: k for k, v in vocab.items()}
+        tok.get_vocab.return_value = vocab
+        tok.decode.side_effect = lambda ids: "".join(rev.get(i, f"<{i}>") for i in ids)
+        tok.bos_token_id = 0
+        tok.eos_token_id = 1
+        tok.pad_token_id = None
+        return tok
+
+    @staticmethod
+    def _content(events):
+        return "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+
+    def test_streaming_and_non_streaming_both_drop_bos(self):
+        config = ParserEngineConfig(name="test", initial_state=ParserState.CONTENT)
+        engine = StreamingParserEngine(config, self._tokenizer())
+
+        # Streaming: <bos> arrives with its token ID and is dropped.
+        engine.reset(initial_state=ParserState.CONTENT)
+        streamed = []
+        for tid, text in [(100, "Hello"), (0, "<bos>"), (101, " world")]:
+            streamed.extend(engine.feed(text, [tid]))
+        streamed.extend(engine.finish())
+        assert self._content(streamed) == "Hello world"
+
+        # Non-streaming: the full output and its token IDs arrive in one pass
+        # (as extract_reasoning now feeds them), and <bos> is dropped by ID.
+        engine.reset(initial_state=ParserState.CONTENT)
+        non_streamed = engine.feed("Hello<bos> world", [100, 0, 101])
+        non_streamed.extend(engine.finish())
+        assert self._content(non_streamed) == "Hello world"
+
+    def test_non_streaming_leaves_plain_content_untouched(self):
+        config = ParserEngineConfig(name="test", initial_state=ParserState.CONTENT)
+        engine = StreamingParserEngine(config, self._tokenizer())
+        engine.reset(initial_state=ParserState.CONTENT)
+        events = engine.parse_complete("just normal text")
+        assert self._content(events) == "just normal text"
 
 
 class TestEndToEndReasoningHoldback:

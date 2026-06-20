@@ -70,9 +70,12 @@ class ParserEngineReasoningAdapter(ReasoningParser):
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
+        model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None]:
         with self._skip_tool_parsing():
-            return self._parser_engine.extract_reasoning(model_output, request)
+            return self._parser_engine.extract_reasoning(
+                model_output, request, model_output_token_ids
+            )
 
     def extract_reasoning_streaming(
         self,

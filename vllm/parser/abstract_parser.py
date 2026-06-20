@@ -359,9 +359,17 @@ class DelegatingParser(Parser):
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
+        model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None]:
         if self._reasoning_parser is None:
             return None, model_output
+        # Engine parsers drop special tokens by ID, so wire the output token
+        # IDs through to them (non-streaming has none otherwise -> bos leaks).
+        # Legacy parsers keep the original two-arg signature.
+        if self._reasoning_parser.engine_based_streaming:
+            return self._reasoning_parser.extract_reasoning(
+                model_output, request, model_output_token_ids
+            )
         return self._reasoning_parser.extract_reasoning(model_output, request)
 
     def _get_function_name(
@@ -733,7 +741,9 @@ class DelegatingParser(Parser):
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
-        reasoning, content = self.extract_reasoning(model_output, request)
+        reasoning, content = self.extract_reasoning(
+            model_output, request, model_output_token_ids
+        )
         tool_calls, content = self._extract_tool_calls(
             content=content,
             request=request,

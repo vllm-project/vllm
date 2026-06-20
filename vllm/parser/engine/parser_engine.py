@@ -421,9 +421,12 @@ class ParserEngine(Parser):
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
+        model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None]:
         self._reset()
-        events = self._feed(model_output, [])
+        # Real token IDs let the scanner drop special tokens (bos/eos/pad) by
+        # ID; without them a leading bos leaks into non-streaming content.
+        events = self._feed(model_output, model_output_token_ids)
         events.extend(self._engine.finish())
 
         reasoning_parts: list[str] = []
