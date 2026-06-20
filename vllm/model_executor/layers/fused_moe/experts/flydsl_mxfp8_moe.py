@@ -50,7 +50,33 @@ class FlydslMxfp8Experts(Mxfp8TritonExpertsBase):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        return is_flydsl_mxfp8_moe_available()
+        # Device capability only (gfx950 / MX-capable ROCm). The flydsl package
+        # check lives in is_supported_config so a missing package is reported
+        # distinctly from an unsupported device.
+        return current_platform.is_rocm() and current_platform.supports_mx()
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config) -> bool:
+        # aiter.fused_moe is called per-rank with the full local expert set; the
+        # expert_map-based EP path is not wired up (apply() rejects expert_map).
+        # Reject EP at selection time so the oracle never picks FlyDSL for an EP
+        # deployment (it would otherwise crash in apply()); native is used there.
+        return moe_parallel_config.ep_size == 1
+
+    @staticmethod
+    def is_supported_config(
+        cls, moe_config, weight_key, activation_key, activation_format
+    ):
+        is_supported, reason = super().is_supported_config(
+            cls, moe_config, weight_key, activation_key, activation_format
+        )
+        # _supports_current_device() only gates on the device; surface a clear
+        # reason when the device is fine but the flydsl package is missing.
+        if is_supported and not is_flydsl_mxfp8_moe_available():
+            return False, (
+                "kernel requires the aiter flydsl package, which is not installed"
+            )
+        return is_supported, reason
 
     def apply(
         self,
