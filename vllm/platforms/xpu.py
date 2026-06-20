@@ -273,15 +273,20 @@ class XPUPlatform(Platform):
         if new_block_size == cache_config.block_size:
             return
 
-        if cache_config.mamba_cache_mode == "align":
-            cache_config.mamba_block_size = new_block_size
         original_mamba_page_size_padded = cache_config.mamba_page_size_padded
+        # `mamba_block_size` is N * block_size; when block_size grows, recompute N.
+        if cache_config.mamba_block_size is not None:
+            assert cache_config.mamba_block_size % new_block_size == 0
+            cache_config.mamba_large_block_factor = (
+                cache_config.mamba_block_size // new_block_size
+            )
         if cache_config.mamba_page_size_padded is not None:
             attn_page_size_1_token = (
                 cache_config.mamba_page_size_padded // cache_config.block_size
             )
+            assert cache_config.mamba_block_size is not None
             cache_config.mamba_page_size_padded = (
-                new_block_size * attn_page_size_1_token
+                cache_config.mamba_block_size * attn_page_size_1_token
             )
         cache_config.block_size = new_block_size
         logger.info(

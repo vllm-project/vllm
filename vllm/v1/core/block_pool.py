@@ -20,6 +20,7 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    LargeBlockMeta,
     generate_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
@@ -144,6 +145,11 @@ class BlockPool:
             actual block size can be a multiple of hash_block_size.
         enable_kv_cache_events: Whether to enable kv cache events.
         metrics_collector: Optional metrics collector for tracking block residency.
+        large_block_factor: Number `N` of small (attention) blocks that one
+            large (mamba) block spans. ``N == 1`` (default) means flat / legacy
+            behaviour. ``N > 1`` enables hierarchical allocation: small blocks
+            are dispensed from inside parent large blocks, and large blocks
+            are managed by their own free-queue.
     """
 
     def __init__(
@@ -153,28 +159,63 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        large_block_factor: int = 1,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
+        assert isinstance(large_block_factor, int) and large_block_factor >= 1
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
-        # All kv-cache blocks.
+        self.large_block_factor = large_block_factor
+        # All kv-cache blocks (small / attention granularity).
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
         ]
-        # Free block queue that constructs and manipulates a doubly linked
-        # list of free blocks (including eviction candidates when caching is
-        # enabled).
-        self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+        if large_block_factor == 1:
+            # Flat / legacy mode: one global free queue over all blocks. No
+            # large-block hierarchy.
+            self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+            self.large_block_metas: list[LargeBlockMeta] = []
+            self.free_large_block_queue: FreeKVCacheBlockQueue | None = None
+
+            # To represent a placeholder block with block_id=0.
+            # The ref_cnt of null_block is not maintained, needs special care to
+            # avoid freeing it.
+            self.null_block = self.free_block_queue.popleft()
+            self.null_block.is_null = True
+        else:
+            # Hierarchical mode: small blocks live inside parent large blocks
+            # and are dispensed via per-meta cursors. The flat ``free_block_queue``
+            # is created empty and unused; ``free_large_block_queue`` owns
+            # whole large blocks.
+            num_large_blocks = num_gpu_blocks // large_block_factor
+            assert num_large_blocks >= 2, (
+                "Hierarchical block pool requires at least 2 large blocks "
+                "(one is reserved for the null block)."
+            )
+            self.large_block_metas = [
+                LargeBlockMeta(
+                    large_block=KVCacheBlock(L),
+                    small_blocks=self.blocks[
+                        L * large_block_factor : (L + 1) * large_block_factor
+                    ],
+                )
+                for L in range(num_large_blocks)
+            ]
+            # Reserve large block 0 to host the null small block; never enters
+            # any free queue.
+            self.large_block_metas[0].num_small_in_use = large_block_factor
+            self.large_block_metas[0].next_small_idx = large_block_factor
+            self.null_block = self.large_block_metas[0].small_blocks[0]
+            self.null_block.is_null = True
+            # Truncated free queue carrying only large blocks for ids >= 1.
+            self.free_block_queue = FreeKVCacheBlockQueue([])
+            self.free_large_block_queue = FreeKVCacheBlockQueue(
+                [meta.large_block for meta in self.large_block_metas[1:]]
+            )
 
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
-
-        # To represent a placeholder block with block_id=0.
-        # The ref_cnt of null_block is not maintained, needs special care to
-        # avoid freeing it.
-        self.null_block = self.free_block_queue.popleft()
-        self.null_block.is_null = True
 
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
@@ -330,21 +371,55 @@ class BlockPool:
                 )
             )
 
-    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+    def get_new_blocks(
+        self,
+        num_blocks: int,
+        large_block: bool = False,
+        last_hit_block_id: int | None = None,
+    ) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
 
         Args:
             num_blocks: The number of blocks to allocate.
+            large_block: If True (only valid when ``large_block_factor > 1``),
+                allocate whole large blocks (returning ``KVCacheBlock`` objects
+                whose ``block_id`` is the large id). If False, allocate small
+                blocks (the legacy semantics).
+            last_hit_block_id: Optional small-block id of the last prefix-cache
+                hit for this request. When provided, the allocator tries to
+                continue allocating small blocks from the same parent large
+                block to keep the request's blocks within one large block.
+                Ignored for ``large_block=True`` and for legacy flat pools.
 
         Returns:
-            A list of new block.
+            A list of new blocks.
         """
-        if num_blocks > self.get_num_free_blocks():
+        if num_blocks == 0:
+            return []
+        capacity = (
+            self.get_num_free_large_blocks()
+            if large_block
+            else self.get_num_free_blocks()
+        )
+        if num_blocks > capacity:
             raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
-        ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        if self.large_block_factor == 1:
+            # Legacy / flat path. ``large_block`` and ``last_hit_block_id`` are
+            # no-ops here; small ids and large ids coincide.
+            ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
+        elif large_block:
+            assert self.free_large_block_queue is not None
+            large_blocks = self.free_large_block_queue.popleft_n(num_blocks)
+            for blk in large_blocks:
+                meta = self.large_block_metas[blk.block_id]
+                meta.num_small_in_use = self.large_block_factor
+                meta.next_small_idx = self.large_block_factor
+            ret = large_blocks
+        else:
+            ret = self._dispense_small_blocks(num_blocks, last_hit_block_id)
 
         # In order to only iterate the list once, we duplicated code a bit
         if self.enable_caching:
@@ -360,6 +435,52 @@ class BlockPool:
                 block.ref_cnt += 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
+        return ret
+
+    def _dispense_small_blocks(
+        self, num_blocks: int, last_hit_block_id: int | None
+    ) -> list[KVCacheBlock]:
+        """Hierarchical small-block dispensing.
+
+        Tries to continue inside the partial parent large block of
+        ``last_hit_block_id`` (when capacity remains there), then opens fresh
+        large blocks one at a time.
+        """
+        assert self.free_large_block_queue is not None
+        N = self.large_block_factor
+        ret: list[KVCacheBlock] = []
+        remaining = num_blocks
+
+        # 1. Try to continue inside the parent of last_hit_block_id.
+        if last_hit_block_id is not None:
+            parent_L = last_hit_block_id // N
+            if 0 <= parent_L < len(self.large_block_metas):
+                meta = self.large_block_metas[parent_L]
+                # The parent is a "partial" meta iff its cursor is in
+                # (0, N): fully-free metas live in the free-large queue;
+                # fully-consumed metas have next_small_idx == N.
+                if 0 < meta.next_small_idx < N:
+                    avail = N - meta.next_small_idx
+                    take = min(avail, remaining)
+                    for j in range(take):
+                        small = meta.small_blocks[meta.next_small_idx + j]
+                        ret.append(small)
+                    meta.next_small_idx += take
+                    meta.num_small_in_use += take
+                    remaining -= take
+
+        # 2. Open fresh large blocks as needed.
+        while remaining > 0:
+            large_blk = self.free_large_block_queue.popleft()
+            meta = self.large_block_metas[large_blk.block_id]
+            assert meta.next_small_idx == 0
+            take = min(N, remaining)
+            for j in range(take):
+                ret.append(meta.small_blocks[j])
+            meta.next_small_idx = take
+            meta.num_small_in_use = take
+            remaining -= take
+
         return ret
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
@@ -407,37 +528,122 @@ class BlockPool:
         Args:
             blocks: A list of blocks to touch.
         """
+        N = self.large_block_factor
         for block in blocks:
             # ref_cnt=0 means this block is in the free list (i.e. eviction
             # candidate), so remove it.
             if block.ref_cnt == 0 and not block.is_null:
-                self.free_block_queue.remove(block)
+                if N == 1:
+                    self.free_block_queue.remove(block)
+                else:
+                    # Hierarchical: figure out whether this is a large or a
+                    # small block by which list its block_id indexes into.
+                    # Mamba large blocks are touched as the ``large_block``
+                    # KVCacheBlock inside a meta; small blocks live inside a
+                    # meta's ``small_blocks`` list at idx (block_id % N).
+                    assert self.free_large_block_queue is not None
+                    meta_for_large = (
+                        self.large_block_metas[block.block_id]
+                        if block.block_id < len(self.large_block_metas)
+                        else None
+                    )
+                    if (
+                        meta_for_large is not None
+                        and meta_for_large.large_block is block
+                    ):
+                        # Large-block re-touch: reclaim from free-large.
+                        self.free_large_block_queue.remove(block)
+                        meta_for_large.num_small_in_use = N
+                        meta_for_large.next_small_idx = N
+                    else:
+                        # Small-block re-touch: parent meta may be partial
+                        # (still hosting smalls) or recycled (sitting in
+                        # free-large). Handle both.
+                        parent = self.large_block_metas[block.block_id // N]
+                        if parent.num_small_in_use == 0 and parent.next_small_idx == 0:
+                            # Recycled — pull parent back out of free-large.
+                            self.free_large_block_queue.remove(parent.large_block)
+                        slot_idx = (block.block_id % N) + 1
+                        if parent.next_small_idx < slot_idx:
+                            parent.next_small_idx = slot_idx
+                        parent.num_small_in_use += 1
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
-    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+    def free_blocks(
+        self,
+        ordered_blocks: Iterable[KVCacheBlock],
+        large_block: bool = False,
+    ) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
 
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
+            large_block: If True (hierarchical mode only), the passed
+                ``KVCacheBlock`` ids are large ids and the corresponding meta
+                is reset wholesale.
         """
-        # Identify blocks with hash (LRU cache) and without it (will never match in APC)
-        blocks_with_hash = []
-        blocks_without_hash = []
+        if self.large_block_factor == 1:
+            # Legacy / flat path.
+            blocks_with_hash = []
+            blocks_without_hash = []
+            for block in ordered_blocks:
+                block.ref_cnt -= 1
+                if block.ref_cnt == 0 and not block.is_null:
+                    if block.block_hash is None:
+                        blocks_without_hash.append(block)
+                    else:
+                        blocks_with_hash.append(block)
+
+            self.free_block_queue.prepend_n(blocks_without_hash)
+            self.free_block_queue.append_n(blocks_with_hash)
+            return
+
+        assert self.free_large_block_queue is not None
+        if large_block:
+            # Free whole large blocks: reset their metas and return them to
+            # the free-large queue. The large_block KVCacheBlock itself can
+            # carry a hash too (mamba prefix caching), so we honour the same
+            # eviction-order convention as the small-block path.
+            larges_with_hash: list[KVCacheBlock] = []
+            larges_without_hash: list[KVCacheBlock] = []
+            for blk in ordered_blocks:
+                blk.ref_cnt -= 1
+                if blk.ref_cnt == 0 and not blk.is_null:
+                    meta = self.large_block_metas[blk.block_id]
+                    meta.num_small_in_use = 0
+                    meta.next_small_idx = 0
+                    if blk.block_hash is None:
+                        larges_without_hash.append(blk)
+                    else:
+                        larges_with_hash.append(blk)
+            self.free_large_block_queue.prepend_n(larges_without_hash)
+            self.free_large_block_queue.append_n(larges_with_hash)
+            return
+
+        # Hierarchical small-block free. Mirrors the flat path's "linger"
+        # semantics: a freed but still-cached small can serve a future hit
+        # via ``touch`` until its parent meta is recycled. Cache eviction
+        # for smalls happens lazily in ``get_new_blocks`` (the per-block
+        # ``_maybe_evict_cached_block`` loop) and at meta-recycle time
+        # below.
+        N = self.large_block_factor
         for block in ordered_blocks:
             block.ref_cnt -= 1
             if block.ref_cnt == 0 and not block.is_null:
-                if block.block_hash is None:
-                    blocks_without_hash.append(block)
-                else:
-                    blocks_with_hash.append(block)
-
-        # Blocks without hash always get evicted first - prepend them last to the tail
-        self.free_block_queue.prepend_n(blocks_without_hash)
-        self.free_block_queue.append_n(blocks_with_hash)
+                meta = self.large_block_metas[block.block_id // N]
+                meta.num_small_in_use -= 1
+                # Recycle the meta when it has no in-use smalls. We don't
+                # require ``next_small_idx == N`` because a partial meta
+                # whose request finished early would otherwise leak.
+                if meta.num_small_in_use == 0 and meta.next_small_idx > 0:
+                    meta.next_small_idx = 0
+                    # Tail-append so existing small-block free behaviour
+                    # (LRU order) is preserved as much as possible.
+                    self.free_large_block_queue.append(meta.large_block)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
@@ -494,12 +700,31 @@ class BlockPool:
         return True
 
     def get_num_free_blocks(self) -> int:
-        """Get the number of free blocks in the pool.
+        """Get the number of free (small) blocks the pool can still dispense.
 
-        Returns:
-            The number of free blocks.
+        In hierarchical mode this counts: full free-large capacity (as
+        ``N * num_free_large``) plus the residual cursor capacity of every
+        partial meta. Smalls that were freed inside a still-partial meta
+        don't count — they're inaccessible until that meta is recycled
+        (anti-fragmentation invariant).
         """
-        return self.free_block_queue.num_free_blocks
+        if self.large_block_factor == 1:
+            return self.free_block_queue.num_free_blocks
+        assert self.free_large_block_queue is not None
+        N = self.large_block_factor
+        free = self.free_large_block_queue.num_free_blocks * N
+        for meta in self.large_block_metas:
+            if 0 < meta.next_small_idx < N:
+                free += N - meta.next_small_idx
+        return free
+
+    def get_num_free_large_blocks(self) -> int:
+        """Number of fully-free large blocks (hierarchical mode only)."""
+        if self.large_block_factor == 1:
+            # In flat mode there's no separate large-block notion.
+            return self.free_block_queue.num_free_blocks
+        assert self.free_large_block_queue is not None
+        return self.free_large_block_queue.num_free_blocks
 
     def get_usage(self) -> float:
         """Get the KV cache usage.

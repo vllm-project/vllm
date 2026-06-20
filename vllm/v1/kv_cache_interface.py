@@ -624,6 +624,10 @@ class MambaSpec(KVCacheSpec):
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
+    # Number `N` of attention `block_size`-sized blocks that one mamba block
+    # spans in the shared backing tensor. 1 means mamba and attention share
+    # block IDs (legacy behaviour); N > 1 enables hierarchical allocation.
+    large_block_factor: int = 1
 
     @property
     def page_size_bytes(self) -> int:

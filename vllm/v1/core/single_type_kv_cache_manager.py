@@ -29,11 +29,28 @@ from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 
 
+def _last_non_null_block_id(blocks: Sequence[KVCacheBlock]) -> int | None:
+    """Return the id of the last non-null block in ``blocks``, or None.
+
+    Used as the ``last_hit_block_id`` hint to ``BlockPool.get_new_blocks`` so
+    the hierarchical allocator can try to continue inside the parent large
+    block of the most recent real allocation/cache-hit.
+    """
+    for blk in reversed(blocks):
+        if not blk.is_null:
+            return blk.block_id
+    return None
+
+
 class SingleTypeKVCacheManager(ABC):
     """
     An abstract base class for a manager that handle the kv cache management
     logic of one specific type of attention layer.
     """
+
+    # Whether this manager allocates large blocks (mamba) or small blocks
+    # (attention) from the hierarchical block pool. Ignored by flat pools.
+    _is_large_block: bool = False
 
     def __init__(
         self,
@@ -263,8 +280,11 @@ class SingleTypeKVCacheManager(ABC):
             return
 
         req_blocks = self.req_to_blocks[request_id]
+        last_hit_id = _last_non_null_block_id(req_blocks)
         allocated_blocks = self.block_pool.get_new_blocks(
-            cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
+            cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks),
+            large_block=self._is_large_block,
+            last_hit_block_id=last_hit_id,
         )
         req_blocks.extend(allocated_blocks)
         if type(self.kv_cache_spec) in (
@@ -298,7 +318,12 @@ class SingleTypeKVCacheManager(ABC):
         if num_new_blocks <= 0:
             return []
         else:
-            new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+            last_hit_id = _last_non_null_block_id(req_blocks)
+            new_blocks = self.block_pool.get_new_blocks(
+                num_new_blocks,
+                large_block=self._is_large_block,
+                last_hit_block_id=last_hit_id,
+            )
             req_blocks.extend(new_blocks)
             if type(self.kv_cache_spec) in (
                 FullAttentionSpec,
@@ -406,7 +431,10 @@ class SingleTypeKVCacheManager(ABC):
             request_id: The request ID.
         """
         # Free blocks in reverse order so that the tail blocks are freed first.
-        self.block_pool.free_blocks(reversed(self.pop_blocks_for_free(request_id)))
+        self.block_pool.free_blocks(
+            reversed(self.pop_blocks_for_free(request_id)),
+            large_block=self._is_large_block,
+        )
 
     @abstractmethod
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
@@ -517,7 +545,7 @@ class SingleTypeKVCacheManager(ABC):
                 break
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
-        self.block_pool.free_blocks(removed_blocks)
+        self.block_pool.free_blocks(removed_blocks, large_block=self._is_large_block)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
@@ -956,6 +984,11 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
 
 class MambaManager(SingleTypeKVCacheManager):
+    # Mamba allocates from the large-block free queue when the block pool is
+    # hierarchical (large_block_factor > 1). For flat pools this attribute is
+    # ignored.
+    _is_large_block: bool = True
+
     def __init__(
         self, kv_cache_spec: MambaSpec, block_pool: BlockPool, **kwargs
     ) -> None:
@@ -1045,7 +1078,10 @@ class MambaManager(SingleTypeKVCacheManager):
             ):
                 blocks = self.req_to_blocks[request_id]
                 if blocks[last_state_block_idx] != self._null_block:
-                    self.block_pool.free_blocks([blocks[last_state_block_idx]])
+                    self.block_pool.free_blocks(
+                        [blocks[last_state_block_idx]],
+                        large_block=self._is_large_block,
+                    )
                     blocks[last_state_block_idx] = self._null_block
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
@@ -1192,7 +1228,12 @@ class MambaManager(SingleTypeKVCacheManager):
                     assert num_new_blocks <= 1
                 else:
                     assert num_new_blocks <= self.num_speculative_blocks + 1
-                new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+                last_hit_id = _last_non_null_block_id(req_blocks)
+                new_blocks = self.block_pool.get_new_blocks(
+                    num_new_blocks,
+                    large_block=self._is_large_block,
+                    last_hit_block_id=last_hit_id,
+                )
                 req_blocks.extend(new_blocks)
                 self._allocated_block_reqs.add(request_id)
                 return req_blocks[prev_block_len:]
