@@ -59,27 +59,47 @@ class XPUWorker(Worker):
             self.local_rank += dp_local_rank * tp_pp_world_size
 
             visible_device_count = torch.accelerator.device_count()
+
+        worker_device_index_env = os.environ.get(
+            "VLLM_XPU_WORKER_DEVICE_INDEX")
+        if worker_device_index_env is not None:
+            worker_device_index = int(worker_device_index_env)
+            assert worker_device_index < visible_device_count, (
+                "XPU worker device index is out of bounds. "
+                f"device_index={worker_device_index}, "
+                f"visible_device_count={visible_device_count}, "
+                f"ZE_AFFINITY_MASK={os.environ.get('ZE_AFFINITY_MASK')!r}")
+        else:
+            worker_device_index = self.local_rank
             assert self.local_rank < visible_device_count, (
-                f"DP adjusted local rank {self.local_rank} is out of bounds. "
-            )
+                f"DP adjusted local rank {self.local_rank} is out of "
+                "bounds.\n")
             assert parallel_config.local_world_size <= visible_device_count, (
                 f"local_world_size ({parallel_config.local_world_size}) must "
                 f"be less than or equal to the number of visible devices "
-                f"({visible_device_count})."
-            )
-
+                f"({visible_device_count}).")
         device = self.device_config.device
         if (
             isinstance(device, torch.device)
             and device.type == "xpu"
             and current_platform.is_xpu()
         ):
-            self.device = torch.device(f"xpu:{self.local_rank}")
+            logger.info(
+                "Initializing XPU worker rank=%s local_rank=%s "
+                "device_index=%s visible_device_count=%s "
+                "ZE_AFFINITY_MASK=%s",
+                self.rank,
+                self.local_rank,
+                worker_device_index,
+                visible_device_count,
+                os.environ.get("ZE_AFFINITY_MASK"),
+            )
+            self.device = torch.device(f"xpu:{worker_device_index}")
             torch.accelerator.set_device_index(self.device)
             current_platform.check_if_supports_dtype(self.model_config.dtype)
             torch.accelerator.empty_cache()
             self.init_gpu_memory = torch.xpu.get_device_properties(
-                self.local_rank
+                worker_device_index
             ).total_memory
         else:
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
@@ -90,13 +110,13 @@ class XPUWorker(Worker):
         )
         os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
         os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
-        os.environ["LOCAL_RANK"] = str(self.local_rank)
+        os.environ["LOCAL_RANK"] = str(worker_device_index)
 
         init_worker_distributed_environment(
             self.vllm_config,
             self.rank,
             self.distributed_init_method,
-            self.local_rank,
+            worker_device_index,
             current_platform.dist_backend,
         )
 

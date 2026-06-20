@@ -12,7 +12,7 @@ import weakref
 from collections import deque
 from collections.abc import Callable, Sequence
 from concurrent.futures import Future, InvalidStateError
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
@@ -65,6 +65,69 @@ from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOu
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
+
+
+@contextmanager
+def _temporary_env(overrides: dict[str, str]):
+    """Temporarily set environment variables around process start."""
+    old_values = {key: os.environ.get(key) for key in overrides}
+    os.environ.update(overrides)
+    try:
+        yield
+    finally:
+        for key, old_value in old_values.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
+
+
+def _get_xpu_worker_env_overrides(
+    vllm_config: VllmConfig,
+    local_rank: int,
+) -> dict[str, str]:
+    """Return per-worker XPU device visibility environment overrides.
+
+    vLLM keeps local_rank for orchestration, but XPU workers are masked down
+    to one physical XPU. Inside that masked process, the torch-visible device
+    is xpu:0.
+    """
+    parallel_config = vllm_config.parallel_config
+
+    adjusted_local_rank = local_rank
+    if (parallel_config.distributed_executor_backend
+            not in ("ray", "external_launcher")
+            and parallel_config.data_parallel_backend != "ray"
+            and parallel_config.nnodes_within_dp == 1):
+        dp_local_rank = parallel_config.data_parallel_rank_local
+        if dp_local_rank is None:
+            dp_local_rank = parallel_config.data_parallel_index
+        tp_pp_world_size = (parallel_config.pipeline_parallel_size *
+                            parallel_config.tensor_parallel_size)
+        adjusted_local_rank += dp_local_rank * tp_pp_world_size
+
+    parent_mask = os.environ.get("ZE_AFFINITY_MASK")
+    if parent_mask:
+        visible_devices = [
+            item.strip() for item in parent_mask.split(",") if item.strip()
+        ]
+        if adjusted_local_rank >= len(visible_devices):
+            raise RuntimeError(
+                "XPU worker local rank is out of bounds for "
+                f"ZE_AFFINITY_MASK={parent_mask!r}: "
+                f"adjusted_local_rank={adjusted_local_rank}, "
+                f"visible_count={len(visible_devices)}")
+        worker_mask = visible_devices[adjusted_local_rank]
+    else:
+        worker_mask = str(adjusted_local_rank)
+
+    return {
+        "ZE_ENABLE_PCI_ID_DEVICE_ORDER": os.environ.get(
+            "ZE_ENABLE_PCI_ID_DEVICE_ORDER", "1"),
+        "ZE_AFFINITY_MASK": worker_mask,
+        "VLLM_XPU_WORKER_DEVICE_INDEX": "0",
+    }
+
 
 
 class FutureWrapper(Future):
@@ -699,7 +762,13 @@ class WorkerProc:
         with numa_utils.configure_subprocess(
             vllm_config, local_rank, process_kind="worker"
         ):
-            proc.start()
+            worker_env: dict[str, str] = {}
+            if current_platform.is_xpu():
+                worker_env = _get_xpu_worker_env_overrides(
+                    vllm_config, local_rank)
+
+            with _temporary_env(worker_env):
+                proc.start()
 
         # Close child ends of pipes here in the parent
         ready_writer.close()
