@@ -61,6 +61,8 @@ class StreamingParserEngine:
 
         resolved_token_ids: dict[int, str] = {}
         drop_token_ids: set[int] = set()
+        drop_token_strings: set[str] = set(config.drop_tokens | STRUCTURAL_DROP_TOKENS)
+
         if tokenizer is not None:
             if vocab is None:
                 vocab = tokenizer.get_vocab()
@@ -69,8 +71,7 @@ class StreamingParserEngine:
                     tid = vocab.get(token_text)
                     if tid is not None:
                         resolved_token_ids[tid] = terminal_name
-            all_drop = config.drop_tokens | STRUCTURAL_DROP_TOKENS
-            for token_text in all_drop:
+            for token_text in drop_token_strings:
                 tid = vocab.get(token_text)
                 if tid is not None:
                     drop_token_ids.add(tid)
@@ -78,9 +79,17 @@ class StreamingParserEngine:
                 tid = getattr(tokenizer, attr, None)
                 if tid is not None:
                     drop_token_ids.add(tid)
+                    if hasattr(tokenizer, "decode"):
+                        try:
+                            token_text = tokenizer.decode([tid])
+                            if token_text:
+                                drop_token_strings.add(token_text)
+                        except Exception:
+                            pass
 
         self._resolved_token_ids = resolved_token_ids
         self._drop_token_ids = drop_token_ids
+        self._drop_token_strings = frozenset(drop_token_strings)
 
         self._scanner = TokenIDScanner(
             resolved_token_ids,
@@ -218,6 +227,11 @@ class StreamingParserEngine:
         return events
 
     def parse_complete(self, text: str) -> list[SemanticEvent]:
+        # Strip structural tokens from the full text in non-streaming mode.
+        for drop_str in sorted(self._drop_token_strings, key=len, reverse=True):
+            if drop_str:
+                text = text.replace(drop_str, "")
+
         token_ids: list[int] = []
         events = self.feed(text, token_ids)
         events.extend(self.finish())
