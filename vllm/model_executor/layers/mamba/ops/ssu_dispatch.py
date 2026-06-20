@@ -276,3 +276,108 @@ def selective_state_update(
         cu_seqlens=cu_seqlens,
         is_blackwell=is_blackwell,
     )
+
+
+def selective_state_update_replayssm(
+    state: torch.Tensor,
+    x: torch.Tensor,
+    dt: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    D: torch.Tensor | None = None,
+    dt_bias: torch.Tensor | None = None,
+    z: torch.Tensor | None = None,
+    dt_softplus: bool = False,
+    *,
+    x_cache: torch.Tensor,
+    dt_cache: torch.Tensor,
+    B_cache: torch.Tensor,
+    write_pos: torch.Tensor,
+    is_flush: torch.Tensor,
+    bc_pre: torch.Tensor | None = None,
+    route: str = "output_only",
+    max_cache_len: int = 16,
+    state_batch_indices: torch.Tensor | None = None,
+    null_block_id: int = NULL_BLOCK_ID,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Unified ReplaySSM decode dispatch (opt-in via ``--use-replayssm``).
+
+    Instead of writing the recurrent SSM state back to HBM each step, the
+    ReplaySSM kernels keep a per-layer ring buffer of recent inputs
+    (``x_cache``/``dt_cache``/``B_cache``) plus a cursor (``write_pos``) and
+    replay them to recompute the output, flushing the rebuilt state to the
+    checkpoint only every ``max_cache_len`` steps (``is_flush``). This trades a
+    little recompute for much less HBM traffic at batch-1 decode.
+
+    All replay decode paths (Mamba2 today; GDN as a follow-up) funnel through
+    this single dispatch rather than duplicating a decode kernel per
+    architecture.
+
+    Args:
+        route: ``"output_only"`` (inner-product, default; needs ``bc_pre``
+            scratch) or ``"state_and_output"`` (outer-product, rebuilds the
+            full state every step).
+    """
+    if route == "output_only":
+        from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_output_only import (  # noqa: E501
+            selective_state_update_replayssm_output_only,
+        )
+
+        if bc_pre is None:
+            raise ValueError(
+                "ReplaySSM 'output_only' route requires the bc_pre scratch tensor"
+            )
+        return selective_state_update_replayssm_output_only(
+            state,
+            x,
+            dt,
+            A,
+            B,
+            C,
+            D=D,
+            dt_bias=dt_bias,
+            z=z,
+            dt_softplus=dt_softplus,
+            x_cache=x_cache,
+            dt_cache=dt_cache,
+            B_cache=B_cache,
+            bc_pre=bc_pre,
+            write_pos=write_pos,
+            is_flush=is_flush,
+            max_cache_len=max_cache_len,
+            state_batch_indices=state_batch_indices,
+            null_block_id=null_block_id,
+            out=out,
+        )
+    if route == "state_and_output":
+        from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_state_and_output import (  # noqa: E501
+            selective_state_update_replayssm_state_and_output,
+        )
+
+        return selective_state_update_replayssm_state_and_output(
+            state,
+            x,
+            dt,
+            A,
+            B,
+            C,
+            D=D,
+            dt_bias=dt_bias,
+            z=z,
+            dt_softplus=dt_softplus,
+            x_cache=x_cache,
+            dt_cache=dt_cache,
+            B_cache=B_cache,
+            write_pos=write_pos,
+            is_flush=is_flush,
+            max_cache_len=max_cache_len,
+            state_batch_indices=state_batch_indices,
+            null_block_id=null_block_id,
+            out=out,
+        )
+    raise ValueError(
+        f"Unknown ReplaySSM route: {route!r}. "
+        "Valid options: 'output_only', 'state_and_output'"
+    )
