@@ -177,7 +177,6 @@ def cpu_platform_plugin() -> str | None:
                 logger.debug(
                     "Confirmed CPU platform is available because the machine is MacOS."
                 )
-
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))
 
@@ -188,7 +187,7 @@ def cpu_platform_plugin() -> str | None:
         try:
             import zentorch  # noqa: F401
 
-            logger.debug(
+            logger.info(
                 "AMD Zen CPU detected with zentorch installed, using ZenCpuPlatform."
             )
             return "vllm.platforms.zen_cpu.ZenCpuPlatform"

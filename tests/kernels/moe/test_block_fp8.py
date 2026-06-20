@@ -28,10 +28,10 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
     _valid_deep_gemm_shape,
 )
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
 from vllm.platforms import current_platform
@@ -269,7 +269,6 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
             moe_config=moe_config,
             quant_config=quant_config,
         ),
-        inplace=False,
     )
 
     def deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids):

@@ -13,7 +13,7 @@ import regex as re
 # Matches per-expert weight names like ".experts.42.gate_proj.weight".
 # Does NOT match 3D fused-expert names like ".experts.gate_proj.weight"
 # (no numeric id) — those are intentionally left unfiltered so the full
-# tensor is loaded and sliced later by FusedMoE.weight_loader.
+# tensor is loaded and sliced later by RoutedExperts.weight_loader.
 _EXPERT_ID_RE = re.compile(r"\.experts\.(\d+)\.")
 
 
@@ -72,5 +72,10 @@ def should_skip_weight(
     eid = parse_expert_id(weight_name)
     if eid is None:
         # Not an expert weight (dense / shared-expert / embedding) → keep.
+        return False
+    # Only skip heavy weight tensors, never scale/metadata tensors.
+    # Scale tensors are tiny and some backends need them from ALL experts
+    # (e.g. FlashInfer NVFP4 computes a global max of activation scales).
+    if not weight_name.endswith(".weight"):
         return False
     return eid not in local_expert_ids

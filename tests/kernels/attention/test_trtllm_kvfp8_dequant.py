@@ -12,6 +12,12 @@ import torch
 
 from vllm.platforms import current_platform
 
+if current_platform.is_rocm():
+    pytest.skip(
+        "trtllm kvfp8 dequant is not supported on ROCm.",
+        allow_module_level=True,
+    )
+
 FP8_DTYPE = current_platform.fp8_dtype()
 
 NUM_BLOCKS = 128

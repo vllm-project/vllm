@@ -46,16 +46,17 @@ class QuantFP8(CustomOp):
         compile_native: bool = True,
     ):
         """
-        :param static: static or dynamic quantization
-        :param group_shape: quantization group shape (PER_TOKEN, PER_TENSOR,
-            PER_CHANNEL, or arbitrary block size)
-        :param num_token_padding: Pad the token dimension of output to this
-            size
-        :param tma_aligned_scales: For group quantization, output scales in
-            TMA-aligned layout
-        :param column_major_scales: For group quantization, output scales in
-            column major format
-        :param compile_native: Manually compile forward_native if compile mode > None
+        Args:
+            static: static or dynamic quantization
+            group_shape: quantization group shape (PER_TOKEN, PER_TENSOR,
+                PER_CHANNEL, or arbitrary block size)
+            num_token_padding: Pad the token dimension of output to this
+                size
+            tma_aligned_scales: For group quantization, output scales in
+                TMA-aligned layout
+            column_major_scales: For group quantization, output scales in
+                column major format
+            compile_native: Manually compile forward_native if compile mode > None
         """
         super().__init__(compile_native=compile_native)
         self.static = static
@@ -91,6 +92,7 @@ class QuantFP8(CustomOp):
 
         if (
             self.is_group_quant
+            and self.use_ue8m0
             and self.use_deep_gemm_supported
             and (DeepGemmQuantScaleFMT.from_oracle() == DeepGemmQuantScaleFMT.UE8M0)
         ):
@@ -157,13 +159,27 @@ class QuantFP8(CustomOp):
         if use_aiter_per_token_quant:
             return rocm_aiter_ops.per_token_quant(x, _FP8_DTYPE, scale)
 
-        # Fallback to native implementation for group quantization.
-        if self.is_group_quant:
-            assert scale is None, "Dynamic group quantization does not use scale"
-            return self._quantize_group_native(x)
-
         # Fallback to CUDA implementation
         return self.forward_cuda(x, scale, scale_ub)
+
+    def forward_xpu(
+        self,
+        x: torch.Tensor,
+        scale: torch.Tensor | None = None,
+        scale_ub: torch.Tensor | None = None,
+        use_triton: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.is_group_quant and not self.static:
+            from vllm.model_executor.layers.quantization.utils import fp8_utils
+
+            return fp8_utils.per_token_group_quant_fp8(
+                x,
+                group_size=self.group_size,
+                column_major_scales=self.column_major_scales,
+                dtype=_FP8_DTYPE,
+                use_ue8m0=self.use_ue8m0,
+            )
+        return self.forward_cuda(x, scale, scale_ub, use_triton)
 
     def forward_native(
         self,

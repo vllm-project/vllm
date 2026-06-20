@@ -19,8 +19,6 @@ from vllm.platforms import current_platform
 
 from .gsm8k_eval import evaluate_gsm8k
 
-TOL = 0.08  # Absolute tolerance for accuracy comparison
-
 
 def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
     """Run GSM8K evaluation using our isolated script."""
@@ -41,11 +39,18 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
         host = f"http://{host}"
 
     # Run GSM8K evaluation
+    request_timeout_seconds = eval_config.get("request_timeout_seconds", 600)
+    if current_platform.is_rocm():
+        request_timeout_seconds = eval_config.get(
+            "rocm_request_timeout_seconds", request_timeout_seconds
+        )
+
     results = evaluate_gsm8k(
         num_questions=eval_config["num_questions"],
         num_shots=eval_config["num_fewshot"],
         host=host,
         port=port,
+        request_timeout_seconds=request_timeout_seconds,
     )
 
     return results
@@ -64,6 +69,25 @@ def test_gsm8k_correctness(config_filename):
             "Marlin kernels are not supported."
         )
 
+    # TODO(akaratza): Enable DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms
+    if current_platform.is_rocm() and (
+        "deepseek-ai/DeepSeek-V3.2" in eval_config["model_name"]
+        or "deepseek-ai/DeepSeek-R1" in eval_config["model_name"]
+    ):
+        pytest.skip(
+            "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms "
+            "due to agent pool disk space issues and pod evictions."
+        )
+    if current_platform.is_rocm() and (
+        "Qwen3.5-35B-A3B-MXFP4-AITER-TP2" in config_filename.name
+    ):
+        from vllm.platforms.rocm import on_gfx950
+
+        if not on_gfx950():
+            pytest.skip(
+                "Skipping Qwen3.5-35B-A3B-MXFP4-AITER-TP2 on non-GFX950 platforms. "
+                "The quantization scheme is not supported on non-GFX950 platforms."
+            )
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
     server_args = shlex.split(server_args_str) if server_args_str else []
@@ -82,6 +106,12 @@ def test_gsm8k_correctness(config_filename):
     print(f"Expected metric threshold: {eval_config['accuracy_threshold']}")
     print(f"Number of questions: {eval_config['num_questions']}")
     print(f"Number of few-shot examples: {eval_config['num_fewshot']}")
+    request_timeout_seconds = eval_config.get("request_timeout_seconds", 600)
+    if current_platform.is_rocm():
+        request_timeout_seconds = eval_config.get(
+            "rocm_request_timeout_seconds", request_timeout_seconds
+        )
+    print(f"Request timeout: {request_timeout_seconds}s")
     print(f"Server args: {' '.join(server_args)}")
     print(f"Environment variables: {env_dict}")
 
@@ -99,20 +129,20 @@ def test_gsm8k_correctness(config_filename):
 
         measured_metric = results["accuracy"]
         expected_metric = eval_config["accuracy_threshold"]
+        tol = eval_config.get("tolerance", 0.08)
 
         print(f"GSM8K Results for {eval_config['model_name']}:")
         print(f"  Measured metric: {measured_metric:.4f}")
         print(f"  Expected metric: {expected_metric:.4f}")
-        print(f"  Tolerance: {TOL:.4f}")
+        print(f"  Tolerance: {tol:.4f}")
         print(f"  Questions: {results['num_questions']}")
         print(f"  Invalid rate: {results['invalid_rate']:.3f}")
         print(f"  Latency: {results['latency']:.1f}s")
         print(f"  QPS: {results['questions_per_second']:.1f}")
 
-        # Verify metric is within tolerance
-        assert measured_metric >= expected_metric - TOL, (
+        assert measured_metric >= expected_metric - tol, (
             f"GSM8K metric too low: {measured_metric:.4f} < "
-            f"{expected_metric:.4f} - {TOL:.4f} = {expected_metric - TOL:.4f}"
+            f"{expected_metric:.4f} - {tol:.4f} = {expected_metric - tol:.4f}"
         )
 
         print(f"✅ GSM8K test passed for {eval_config['model_name']}")

@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import socket
+import struct
 from typing import Any, Optional
 
 import torch
-from torch.distributed import Backend, ProcessGroup
+from torch.distributed import Backend, ProcessGroup, Store
 
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.distributed.parallel_state import (
@@ -23,6 +25,38 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
+_PORTS_FMT = "!3I"
+
+
+def _allocate_group_ports(
+    key: str,
+    host: str,
+    coord_store: Store,
+) -> tuple[list[int], list[socket.socket]]:
+    """Bind 3 sockets and publish the ports to *coord_store*.
+
+    Called by rank 0 only.  Returns ``(ports, sockets)`` with the
+    sockets still open.
+    """
+    socks: list[socket.socket] = []
+    ports: list[int] = []
+    for _ in range(3):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind((host, 0))
+        s.listen()
+        socks.append(s)
+        ports.append(s.getsockname()[1])
+    coord_store.set(key, struct.pack(_PORTS_FMT, *ports))
+    return ports, socks
+
+
+def _fetch_group_ports(key: str, coord_store: Store) -> list[int]:
+    """Read 3 ports published by rank 0 from *coord_store*.
+
+    Blocks until the key is available.
+    """
+    return list(struct.unpack(_PORTS_FMT, coord_store.get(key)))
+
 
 class StatelessGroupCoordinator(GroupCoordinator):
     """
@@ -39,10 +73,10 @@ class StatelessGroupCoordinator(GroupCoordinator):
         local_rank: int,
         torch_distributed_backend: str | Backend,
         use_device_communicator: bool,
+        coord_store: Store,
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
         host: str = "127.0.0.1",
-        group_ports: list[list[int]] | None = None,
         global_rank: int = 0,
         global_world_size: int = 1,
     ):
@@ -61,17 +95,23 @@ class StatelessGroupCoordinator(GroupCoordinator):
 
         backend = str(torch_distributed_backend)
         self.backend = backend
-        assert group_ports is not None, "group_ports is not provided"
         for idx, ranks in enumerate(group_ranks):
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
                 self.rank_in_group = ranks.index(self.rank)
 
-                ports = group_ports[idx]
-                device_port = ports[0]
-                cpu_port = ports[1]
-                tcp_store_port = ports[2]
+                key = f"{group_name}_{idx}"
+                if self.rank_in_group == 0:
+                    ports, socks = _allocate_group_ports(
+                        key,
+                        host,
+                        coord_store,
+                    )
+                else:
+                    ports = _fetch_group_ports(key, coord_store)
+                    socks = []
+                device_port, cpu_port, tcp_store_port = ports
 
                 device_group = stateless_init_torch_distributed_process_group(
                     host=host,
@@ -80,6 +120,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                     world_size=self.world_size,
                     backend=backend,
                     group_name=f"{self.unique_name}_device",
+                    listen_socket=socks[0] if socks else None,
                 )
                 cpu_group = stateless_init_torch_distributed_process_group(
                     host=host,
@@ -88,12 +129,14 @@ class StatelessGroupCoordinator(GroupCoordinator):
                     world_size=self.world_size,
                     backend="gloo",
                     group_name=f"{self.unique_name}_cpu",
+                    listen_socket=socks[1] if socks else None,
                 )
                 tcp_store_group = StatelessProcessGroup.create(
                     host=host,
                     port=tcp_store_port,
                     rank=self.rank_in_group,
                     world_size=self.world_size,
+                    listen_socket=socks[2] if socks else None,
                 )
 
                 self_device_group = device_group

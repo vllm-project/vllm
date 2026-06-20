@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import bisect
 import mimetypes
 from collections import defaultdict
 from collections.abc import Generator, Sequence
@@ -12,14 +13,15 @@ import numpy.typing as npt
 from PIL import Image
 from typing_extensions import deprecated
 
+from vllm.inputs import MultiModalPlaceholders
 from vllm.utils.import_utils import LazyLoader
 
 from .hasher import MultiModalHasher
 from .inputs import (
     BatchedTensorInputs,
+    MultiModalFeatureSpec,
     MultiModalFieldElem,
     MultiModalKwargsItem,
-    MultiModalPlaceholderDict,
     MultiModalSharedField,
 )
 from .media import AudioMediaIO, ImageMediaIO, MediaConnector, VideoMediaIO
@@ -109,11 +111,34 @@ def encode_video_url(
     return f"data:{mimetype};base64,{video_b64}"
 
 
+def get_mm_features_in_window(
+    mm_features: list[MultiModalFeatureSpec],
+    start: int,
+    end: int,
+) -> tuple[int, int]:
+    """Return (lo, hi) indices for features overlapping [start, end).
+
+    Assumes mm_features are sorted by offset and non-overlapping, so
+    offset + length is also sorted.
+    """
+    lo = bisect.bisect_left(
+        mm_features,
+        start + 1,
+        key=lambda f: f.mm_position.offset + f.mm_position.length,
+    )
+    hi = bisect.bisect_left(
+        mm_features,
+        end,
+        key=lambda f: f.mm_position.offset,
+    )
+    return lo, hi
+
+
 def argsort_mm_positions(
-    mm_positions: MultiModalPlaceholderDict,
+    mm_positions: MultiModalPlaceholders,
 ) -> list[tuple[str, int]]:
     """
-    Given a `MultiModalPlaceholderDict`, output a sequence of keys to
+    Given a `MultiModalPlaceholders`, output a sequence of keys to
     sort the dictionary by `offset` (starting index in the input sequence)
     in ascending order.
 

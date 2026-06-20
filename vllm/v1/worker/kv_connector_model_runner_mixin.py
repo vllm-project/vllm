@@ -4,7 +4,6 @@
 Define KV connector functionality mixin for model runners.
 """
 
-import copy
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import TYPE_CHECKING
@@ -13,18 +12,13 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.distributed.kv_transfer import (
-    ensure_kv_transfer_shutdown,
-    get_kv_transfer_group,
-    has_kv_transfer_group,
-)
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import (
-    EMPTY_MODEL_RUNNER_OUTPUT,
     KVConnectorOutput,
     ModelRunnerOutput,
 )
@@ -39,12 +33,6 @@ logger = init_logger(__name__)
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
 class KVConnectorModelRunnerMixin:
     @staticmethod
-    def ensure_kv_transfer_shutdown() -> None:
-        # has_kv_transfer_group can be None during interpreter shutdown.
-        if has_kv_transfer_group and has_kv_transfer_group():  # type: ignore[truthy-function]
-            ensure_kv_transfer_shutdown()
-
-    @staticmethod
     def kv_connector_no_forward(
         scheduler_output: "SchedulerOutput", vllm_config: VllmConfig
     ) -> ModelRunnerOutput:
@@ -57,12 +45,7 @@ class KVConnectorModelRunnerMixin:
         ):
             pass
 
-        if kv_connector_output.is_empty():
-            return EMPTY_MODEL_RUNNER_OUTPUT
-
-        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.kv_connector_output = kv_connector_output
-        return output
+        return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
     @staticmethod
     def maybe_get_kv_connector_output(

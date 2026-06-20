@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for Helion kernel management."""
 
-import logging
+import torch
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 # Maps known variant GPU names (after lowercase/underscore normalization)
 # to their canonical form.
@@ -49,7 +50,7 @@ _GPU_NAME_ALIASES: dict[str, str] = {
 
 def get_gpu_name(device_id: int | None = None) -> str:
     if device_id is None:
-        logger.warning(
+        logger.warning_once(
             "get_gpu_name() called without device_id, defaulting to 0. "
             "This may return the wrong device name in multi-node setups."
         )
@@ -79,3 +80,16 @@ def canonicalize_gpu_name(name: str) -> str:
 
 def get_canonical_gpu_name(device_id: int | None = None) -> str:
     return canonicalize_gpu_name(get_gpu_name(device_id))
+
+
+def get_fp8_dtype() -> torch.dtype:
+    return current_platform.fp8_dtype()
+
+
+def get_int8_min_max() -> tuple[int, int]:
+    qtype_traits = torch.iinfo(torch.int8)
+    return qtype_traits.min, qtype_traits.max
+
+
+def get_int8_min_scaling_factor() -> float:
+    return torch.finfo(torch.float32).eps

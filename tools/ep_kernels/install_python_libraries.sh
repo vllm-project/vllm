@@ -8,7 +8,8 @@ set -ex
 #   --nvshmem-ver <ver>  NVSHMEM version 
 
 CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
-DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"73b6ea4"}
+DEEPEP_COMMIT_HASH=${DEEPEP_COMMIT_HASH:-"d4f41e4e93"}
+
 NVSHMEM_VER=${NVSHMEM_VER:-"3.3.24"}  # Default supports both CUDA 12 and 13
 WORKSPACE=${WORKSPACE:-$(pwd)/ep_kernels_workspace}
 MODE=${MODE:-install}
@@ -101,8 +102,9 @@ NVSHMEM_URL="https://developer.download.nvidia.com/compute/nvshmem/redist/libnvs
 
 pushd "$WORKSPACE"
 echo "Downloading NVSHMEM ${NVSHMEM_VER} for ${NVSHMEM_SUBDIR} ..."
-curl -fSL "${NVSHMEM_URL}" -o "${NVSHMEM_FILE}"
+curl -fSL --retry 3 --retry-delay 2 "${NVSHMEM_URL}" -o "${NVSHMEM_FILE}"
 tar -xf "${NVSHMEM_FILE}"
+rm -rf nvshmem
 mv "${NVSHMEM_FILE%.tar.xz}" nvshmem
 rm -f "${NVSHMEM_FILE}"
 rm -rf nvshmem/lib/bin nvshmem/lib/share

@@ -17,9 +17,9 @@ from transformers.models.got_ocr2.image_processing_got_ocr2 import (
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -357,6 +357,10 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
                 # Cohere2ForCausalLM and CohereForCausalLM are the same on vllm
                 architectures=["Cohere2ForCausalLM"],
             )
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
 
     @property
     def dtype(self):

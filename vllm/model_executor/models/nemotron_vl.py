@@ -11,7 +11,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.awq import AWQConfig
+from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.models.internvl import (
     BaseInternVLDummyInputsBuilder,
     BaseInternVLMultiModalProcessor,
@@ -26,8 +26,10 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processor import cached_image_processor_from_config
 from vllm.transformers_utils.processors.nemotron_vl import (
+    LlamaNemotronNanoVLImageProcessor,
+    LlamaNemotronNanoVLProcessor,
+    LlamaNemotronVLEmbedImageProcessor,
     LlamaNemotronVLEmbedProcessor,
-    NemotronVLProcessor,
 )
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
@@ -50,19 +52,34 @@ from .utils import (
 class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
     """Processing info for Nemotron VL models."""
 
-    def get_hf_processor(self, **kwargs: object) -> NemotronVLProcessor:
-        return self.ctx.init_processor(
-            NemotronVLProcessor,
-            config=self.get_hf_config(),
-            tokenizer=self.get_tokenizer(),
-            image_processor=self.get_image_processor(),
-            **kwargs,
+    def get_image_processor(self, **kwargs: object):
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        orig_processor = cached_image_processor_from_config(
+            self.ctx.model_config, **kwargs
         )
 
-    def get_image_processor(self, **kwargs: object):
-        return cached_image_processor_from_config(
-            self.ctx.model_config,
-            **kwargs,
+        return LlamaNemotronNanoVLImageProcessor(
+            image_size=orig_processor.image_size,
+            min_dynamic_patch=1,
+            max_dynamic_patch=orig_processor.max_num_tiles,
+            dynamic_image_size=True,
+            use_thumbnail=orig_processor.use_thumbnail,
+        )
+
+    def get_hf_processor(self, **kwargs: object) -> LlamaNemotronNanoVLProcessor:
+        config = self.get_hf_config()
+        vision_config = config.vision_config
+
+        image_processor = self.get_image_processor(**kwargs)
+        image_size = image_processor.image_size
+        patch_size = vision_config.patch_size
+        downsample_ratio = config.downsample_ratio
+        image_seq_length = int((image_size // patch_size) ** 2 * (downsample_ratio**2))
+
+        return LlamaNemotronNanoVLProcessor(
+            tokenizer=self.get_tokenizer(),
+            image_processor=image_processor,
+            image_seq_length=image_seq_length,
         )
 
 
@@ -127,7 +144,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
-        if isinstance(quant_config, AWQConfig):
+        if isinstance(quant_config, AutoAWQConfig):
             text_config = config.get_text_config()
             llm_quant_config = getattr(text_config, "quantization_config", None)
             if (not quant_config.modules_to_not_convert) and (
@@ -386,29 +403,58 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
 # --------------------------------------------------------
 
 
-class LlamaNemotronVLEmbedProcessingInfo(NemotronVLProcessingInfo):
+class LlamaNemotronVLEmbedProcessingInfo(BaseInternVLProcessingInfo):
     """Processing info for LlamaNemotronVL embedding model."""
 
-    def get_hf_processor(self, **kwargs: object) -> LlamaNemotronVLEmbedProcessor:
-        """Override to create embedding-specific processor without image_processor."""
+    def get_image_processor(self, **kwargs):
         model_config = self.ctx.model_config
-        processor_config = {}
-        if model_config.model is not None:
-            processor_config = (
-                get_hf_file_to_dict(
-                    "processor_config.json",
-                    model_config.model,
-                    model_config.revision,
-                )
-                or {}
-            )
 
-        return self.ctx.init_processor(
-            LlamaNemotronVLEmbedProcessor,
-            config=self.get_hf_config(),
+        config = self.get_hf_config()
+        processor_config = (
+            get_hf_file_to_dict(
+                "processor_config.json",
+                model_config.model,
+                model_config.revision,
+            )
+            or {}
+        )
+
+        min_dynamic_patch = processor_config.get(
+            "min_input_tiles",
+            getattr(config, "min_dynamic_patch", 1),
+        )
+        max_dynamic_patch = processor_config.get(
+            "max_input_tiles",
+            getattr(config, "max_dynamic_patch", 1),
+        )
+        dynamic_image_size = processor_config.get(
+            "dynamic_image_size",
+            getattr(config, "dynamic_image_size", True),
+        )
+
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        kwargs.setdefault("image_size", config.force_image_size)
+        kwargs.setdefault("min_dynamic_patch", min_dynamic_patch)
+        kwargs.setdefault("max_dynamic_patch", max_dynamic_patch)
+        kwargs.setdefault("dynamic_image_size", dynamic_image_size)
+        kwargs.setdefault("use_thumbnail", True)
+
+        return LlamaNemotronVLEmbedImageProcessor(**kwargs)
+
+    def get_hf_processor(self, **kwargs: object) -> LlamaNemotronVLEmbedProcessor:
+        config = self.get_hf_config()
+        vision_config = config.vision_config
+
+        image_processor = self.get_image_processor(**kwargs)
+        image_size = image_processor.image_size
+        patch_size = vision_config.patch_size
+        downsample_ratio = config.downsample_ratio
+        image_seq_length = int((image_size // patch_size) ** 2 * (downsample_ratio**2))
+
+        return LlamaNemotronVLEmbedProcessor(
             tokenizer=self.get_tokenizer(),
-            processor_config=processor_config,
-            **kwargs,
+            image_processor=image_processor,
+            image_seq_length=image_seq_length,
         )
 
 
@@ -431,7 +477,7 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
 
     # Weight mapping from checkpoint format to vLLM format
     # Different from parent class due to different vision model structure
-    weight_mapper = WeightsMapper(
+    hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # Language model mapping
             "language_model.layers.": "language_model.model.layers.",
@@ -487,7 +533,7 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Override to use different weight mapping for SigLIP."""
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.weight_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class LlamaNemotronVLForSequenceClassification(
@@ -497,8 +543,8 @@ class LlamaNemotronVLForSequenceClassification(
 
     # Reranker checkpoint places base model weights under `model.*`,
     # while `score.*` remains at the top level.
-    weight_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""}) | (
-        LlamaNemotronVLForEmbedding.weight_mapper
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""}) | (
+        LlamaNemotronVLForEmbedding.hf_to_vllm_mapper
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:

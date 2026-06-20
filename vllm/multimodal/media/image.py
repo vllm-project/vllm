@@ -4,14 +4,17 @@
 from io import BytesIO
 from pathlib import Path
 
+import numpy as np
 import pybase64
 import torch
 from PIL import Image
 
 from vllm.utils.serial_utils import tensor2base64
 
-from ..image import convert_image_mode, rgba_to_rgb
+from ..image import convert_image_mode, normalize_image, rgba_to_rgb
 from .base import MediaIO, MediaWithBytes
+
+MAGIC_NUMPY_PREFIX = b"\x93NUMPY"  # https://numpy.org/devdocs/reference/generated/numpy.lib.format.html#format-version-1-0
 
 
 class ImageMediaIO(MediaIO[Image.Image]):
@@ -62,20 +65,25 @@ class ImageMediaIO(MediaIO[Image.Image]):
         elif image.mode == "RGBA" and self.image_mode == "RGB":
             return rgba_to_rgb(image, self.rgba_background_color)
         else:
-            return convert_image_mode(image, self.image_mode)
+            return convert_image_mode(
+                image, self.image_mode, self.rgba_background_color
+            )
 
     def load_bytes(self, data: bytes) -> MediaWithBytes[Image.Image]:
-        image = Image.open(BytesIO(data))
-        return MediaWithBytes(self._convert_image_mode(image), data)
+        try:
+            image = Image.open(BytesIO(data))
+            image = normalize_image(image)
+            image.load()
+            image = self._convert_image_mode(image)
+        except (OSError, Image.UnidentifiedImageError) as e:
+            raise ValueError(f"Failed to load image: {e}") from e
+        return MediaWithBytes(image, data)
 
     def load_base64(self, media_type: str, data: str) -> MediaWithBytes[Image.Image]:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> MediaWithBytes[Image.Image]:
-        with open(filepath, "rb") as f:
-            data = f.read()
-        image = Image.open(BytesIO(data))
-        return MediaWithBytes(self._convert_image_mode(image), data)
+        return self.load_bytes(filepath.read_bytes())
 
     def encode_base64(
         self,
@@ -104,7 +112,7 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
     def __init__(self) -> None:
         super().__init__()
 
-    def load_bytes(self, data: bytes) -> torch.Tensor:
+    def _load_pickled_torch(self, data: bytes) -> torch.Tensor:
         buffer = BytesIO(data)
         # Enable sparse tensor integrity checks to prevent out-of-bounds
         # writes from maliciously crafted tensors
@@ -112,12 +120,23 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
             tensor = torch.load(buffer, weights_only=True)
             return tensor.to_dense()
 
+    def _load_numpy(self, data: bytes) -> torch.Tensor:
+        with BytesIO(data) as buffer:
+            return torch.from_numpy(np.load(buffer))
+
+    def load_bytes(self, data: bytes) -> torch.Tensor:
+        if data[:6] == MAGIC_NUMPY_PREFIX:
+            return self._load_numpy(data)
+
+        return self._load_pickled_torch(data)
+
     def load_base64(self, media_type: str, data: str) -> torch.Tensor:
         return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> torch.Tensor:
-        # Enable sparse tensor integrity checks to prevent out-of-bounds
-        # writes from maliciously crafted tensors
+        if filepath.suffix == ".npy":
+            return torch.from_numpy(np.load(filepath))
+
         with torch.sparse.check_sparse_tensor_invariants():
             tensor = torch.load(filepath, weights_only=True)
             return tensor.to_dense()

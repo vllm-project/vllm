@@ -3,9 +3,11 @@
 
 import os
 import types
+from importlib.metadata import version
 from importlib.util import find_spec
 
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -47,6 +49,17 @@ if HAS_TRITON:
                 len(active_drivers),
             )
             HAS_TRITON = False
+
+        # Check Triton CPU
+        if "cpu" in version("vllm"):
+            if "cpu" in backends:
+                HAS_TRITON = True
+            else:
+                logger.warning(
+                    "Triton is installed, but doesn't include CPU backend. "
+                    "Disabling Triton."
+                )
+                HAS_TRITON = False
     except ImportError:
         # This can occur if Triton is partially installed or triton.backends
         # is missing.
@@ -79,6 +92,7 @@ class TritonPlaceholder(types.ModuleType):
         self.autotune = self._dummy_decorator("autotune")
         self.heuristics = self._dummy_decorator("heuristics")
         self.Config = self._dummy_decorator("Config")
+        self.cdiv = cdiv
         self.language = TritonLanguagePlaceholder()
 
     def _dummy_decorator(self, name):
@@ -99,5 +113,6 @@ class TritonLanguagePlaceholder(types.ModuleType):
         self.int32 = None
         self.tensor = None
         self.exp = None
+        self.exp2 = None
         self.log = None
         self.log2 = None

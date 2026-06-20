@@ -1,23 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
 
-import regex as re
-
-from vllm.logger import init_logger
-from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.glm4_moe_tool_parser import Glm4MoeModelToolParser
-
-logger = init_logger(__name__)
+from vllm.parser.engine.registered_adapters import Glm47MoeParserToolAdapter
 
 
-class Glm47MoeModelToolParser(Glm4MoeModelToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
-        self.func_detail_regex = re.compile(
-            r"<tool_call>(.*?)(<arg_key>.*?)?</tool_call>", re.DOTALL
-        )
-        self.func_arg_regex = re.compile(
-            r"<arg_key>(.*?)</arg_key>(?:\\n|\s)*<arg_value>(.*?)</arg_value>",
-            re.DOTALL,
-        )
+class Glm47MoeModelToolParser(Glm47MoeParserToolAdapter):  # type: ignore[valid-type, misc]
+    supports_required_and_named = False
+    structural_tag_model = "glm_4_7"

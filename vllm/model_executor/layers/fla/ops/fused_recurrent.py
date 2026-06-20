@@ -106,12 +106,12 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
                 i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
             else:
                 i_t = 0
-            # Load state index and check for PAD_SLOT_ID (-1)
+            # Load state index and check for invalid entries
             state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
                 tl.int64
             )
-            # Skip if state index is invalid (PAD_SLOT_ID = -1)
-            if state_idx < 0:
+            # Skip if state index is invalid (NULL_BLOCK_ID=0)
+            if state_idx <= 0:
                 return
             p_h0 = h0 + state_idx * stride_init_state_token
         else:
@@ -150,12 +150,12 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
         # keep the states for multi-query tokens
         if INPLACE_FINAL_STATE:
-            # Load state index and check for PAD_SLOT_ID (-1)
+            # Load state index and check for invalid entries
             final_state_idx = tl.load(
                 ssm_state_indices + i_n * stride_indices_seq + i_t
             ).to(tl.int64)
-            # Only store if state index is valid (not PAD_SLOT_ID)
-            if final_state_idx >= 0:
+            # Only store if state index is valid (not NULL_BLOCK_ID=0)
+            if final_state_idx > 0:
                 p_ht = ht + final_state_idx * stride_final_state_token
                 p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
                 tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
@@ -184,7 +184,7 @@ def fused_recurrent_gated_delta_rule_fwd(
     scale: float,
     initial_state: torch.Tensor,
     inplace_final_state: bool = True,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
@@ -292,7 +292,8 @@ def fused_recurrent_gated_delta_rule_packed_decode_kernel(
     state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(tl.int64)
     p_o = o + (i_n * HV + i_hv) * V + o_v
 
-    if state_idx < 0:
+    # Skip if state index is invalid (NULL_BLOCK_ID=0)
+    if state_idx <= 0:
         zero = tl.zeros([BV], dtype=tl.float32).to(p_o.dtype.element_ty)
         tl.store(p_o, zero, mask=mask_v)
         return
@@ -489,7 +490,7 @@ class FusedRecurrentFunction(torch.autograd.Function):
         scale: float,
         initial_state: torch.Tensor,
         inplace_final_state: bool = True,
-        cu_seqlens: torch.LongTensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
         ssm_state_indices: torch.Tensor | None = None,
         num_accepted_tokens: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
@@ -521,7 +522,7 @@ def fused_recurrent_gated_delta_rule(
     scale: float = None,
     initial_state: torch.Tensor = None,
     inplace_final_state: bool = True,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
@@ -549,7 +550,7 @@ def fused_recurrent_gated_delta_rule(
         inplace_final_state: bool:
             Whether to store the final state in-place to save memory.
             Default: `True`.
-        cu_seqlens (torch.LongTensor):
+        cu_seqlens (torch.Tensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
         ssm_state_indices (Optional[torch.Tensor]):
@@ -583,7 +584,7 @@ def fused_recurrent_gated_delta_rule(
         # for variable-length inputs, the batch size `B` is expected to be 1 and `cu_seqlens` is required
         >>> q, k, v, g, beta = map(lambda x: rearrange(x, 'b t ... -> 1 (b t) ...'), (q, k, v, g, beta))
         # for a batch with 4 sequences, `cu_seqlens` with 5 start/end positions are expected
-        >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.long)
+        >>> cu_seqlens = q.new_tensor([0, 2048, 4096, 6144, 8192], dtype=torch.int32)
         >>> o_var, ht_var = fused_gated_recurrent_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,

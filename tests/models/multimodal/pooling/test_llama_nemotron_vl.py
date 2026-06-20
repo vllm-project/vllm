@@ -21,9 +21,11 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
-from vllm.entrypoints.pooling.score.utils import ScoreMultiModalParam
+from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
+from vllm.platforms import current_platform
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
+from ....utils import ROCM_ENGINE_KWARGS
 from ...utils import check_embeddings_close
 
 # Prefixes used by the model API
@@ -70,6 +72,7 @@ def _run_test(
         max_model_len=2048,
         enforce_eager=True,
         trust_remote_code=True,
+        **ROCM_ENGINE_KWARGS,
     ) as vllm_model:
         vllm_outputs = vllm_model.embed(input_texts, images=input_images)
 
@@ -250,6 +253,7 @@ def _run_vllm_reranker(
         max_model_len=2048,
         enforce_eager=True,
         trust_remote_code=True,
+        **ROCM_ENGINE_KWARGS,
     ) as vllm_model:
         has_images = any(img is not None for _, img in docs)
 
@@ -322,8 +326,11 @@ def _run_reranker_test(
     assert len(hf_scores) == len(vllm_scores), (
         f"Output length mismatch: HF={len(hf_scores)}, vLLM={len(vllm_scores)}"
     )
+    # NOTE: ROCm shows slightly higher numerical variance dues to different attention
+    # backend between vLLM and HF; use a marginally looser tolerance
+    rel_tol = 0.022 if current_platform.is_rocm() else 0.02
     for i, (hf_score, vllm_score) in enumerate(zip(hf_scores, vllm_scores)):
-        assert hf_score == pytest.approx(vllm_score, rel=0.02), (
+        assert hf_score == pytest.approx(vllm_score, rel=rel_tol), (
             f"Score mismatch at index {i}: HF={hf_score:.4f}, vLLM={vllm_score:.4f}"
         )
 

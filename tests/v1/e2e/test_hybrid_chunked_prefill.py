@@ -36,14 +36,20 @@ MESSAGES = [
 ]
 
 
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
 @pytest.mark.parametrize(
     "model_name",
     [
         pytest.param("Qwen/Qwen3.5-4B", marks=[large_gpu_mark(min_gb=40)]),
         pytest.param(
             "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
-            marks=[large_gpu_mark(min_gb=80)] + multi_gpu_marks(num_gpus=2),
+            marks=[large_gpu_mark(min_gb=80)]
+            + multi_gpu_marks(num_gpus=4)
+            + [
+                pytest.mark.skipif(
+                    not current_platform.is_cuda(),
+                    reason="modelopt quantization is supported only on CUDA",
+                )
+            ],
         ),
     ],
 )
@@ -68,7 +74,7 @@ def test_mtp_speculative_mixed_batch_short_prefill(
         max_num_batched_tokens=chunk_size,
         max_model_len=512,
         enforce_eager=True,
-        tensor_parallel_size=2,
+        tensor_parallel_size=4,
         trust_remote_code=True,
         enable_chunked_prefill=True,
         enable_prefix_caching=enable_prefix_caching,
