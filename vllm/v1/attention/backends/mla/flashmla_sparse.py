@@ -875,9 +875,12 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             softmax_scale=self.softmax_scale,
         )
 
-        # Slice output back to actual head count if we padded
+        # Slice output and LSE back to the actual head count. LSE must match
+        # attn_out's head count: the separate prefill/decode path reshapes LSE
+        # with the actual count, and a padded LSE would misalign there.
         if actual_num_heads < padded_num_heads:
             out = out[:, :, :actual_num_heads, :]
+            lse = lse[:, :actual_num_heads, :]
 
         return out, lse
 
