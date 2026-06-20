@@ -197,9 +197,9 @@ class CudaGraphManager:
             defaultdict(list)
         )
 
-        # When using Dynamic SD, the K specified is the max number of draft
-        # tokens. During inference, the scheduler might use optimal k < K
-        # so we need to capture graphs for all possible k values during decode.
+        # When using Dynamic SD, num_speculative_tokens is the max number of
+        # draft tokens. The scheduler might use a smaller number so we need
+        # to capture graphs for all possible values during decode.
         if (
             self.vllm_config.speculative_config
             and self.vllm_config.speculative_config.uses_dynamic_speculative_decoding()
