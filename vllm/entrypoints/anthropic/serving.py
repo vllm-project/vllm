@@ -12,6 +12,9 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
 
+import jinja2
+import jinja2.ext
+import jinja2.sandbox
 from fastapi import Request
 
 from vllm.config import ModelConfig
@@ -203,19 +206,11 @@ class AnthropicServingMessages(OpenAIServingChat):
         """
         if not chat_template:
             return True
-        # Import the submodules explicitly: ``jinja2``'s package init does
-        # not pull in ``jinja2.sandbox`` / ``jinja2.ext``, so referencing
-        # ``jinja2.sandbox.ImmutableSandboxedEnvironment`` only works when
-        # some other import has loaded them as a side effect.
-        from jinja2.exceptions import TemplateError
-        from jinja2.ext import loopcontrols
-        from jinja2.sandbox import ImmutableSandboxedEnvironment
-
         try:
-            env = ImmutableSandboxedEnvironment(
+            env = jinja2.sandbox.ImmutableSandboxedEnvironment(
                 trim_blocks=True,
                 lstrip_blocks=True,
-                extensions=[loopcontrols],
+                extensions=[jinja2.ext.loopcontrols],
             )
             env.from_string(chat_template).render(
                 messages=[
@@ -227,7 +222,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                 add_generation_prompt=False,
             )
             return False
-        except TemplateError:
+        except jinja2.TemplateError:
             # Templates that raise on mid-conversation system messages
             # (e.g. Qwen's loop.first guard) fall back to merging.
             return True
