@@ -185,8 +185,15 @@ class CoreEngineProcManager:
                 needs_device_env_isolation = not (
                     current_platform.is_cuda_alike() or current_platform.is_xpu()
                 )
+                # Skip per-DP-rank CUDA_VISIBLE_DEVICES masking when Ray DP uses
+                # the mp-style device layout, so gpu_worker can bind distinct
+                # cuda:{dp_rank} for symmetric memory (see ray_no_device_isolation).
                 if is_dp and (
-                    needs_device_env_isolation or vllm_config.parallel_config.use_ray
+                    needs_device_env_isolation
+                    or (
+                        vllm_config.parallel_config.use_ray
+                        and not vllm_config.parallel_config.ray_no_device_isolation
+                    )
                 ):
                     device_control_context = set_device_control_env_var(
                         vllm_config, local_dp_rank

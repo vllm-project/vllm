@@ -150,6 +150,7 @@ if TYPE_CHECKING:
     VLLM_MLA_DISABLE: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
+    VLLM_RAY_NO_DEVICE_ISOLATION: bool = True
     VLLM_CUDART_SO_PATH: str | None = None
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
@@ -1312,6 +1313,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # which indices are used for the Ray bundle, for every worker.
     # Format: comma-separated list of integers, e.g. "0,1,2,3"
     "VLLM_RAY_BUNDLE_INDICES": lambda: os.getenv("VLLM_RAY_BUNDLE_INDICES", ""),
+    # When a DP replica fits a node, leave all GPUs visible to each Ray worker
+    # and bind cuda:{dp_rank} like the multiprocessing backend, so
+    # symmetric-memory collectives see distinct devices. Set to 0 to restore
+    # per-worker CUDA_VISIBLE_DEVICES masking (multi-instance GPU isolation).
+    "VLLM_RAY_NO_DEVICE_ISOLATION": lambda: bool(
+        int(os.getenv("VLLM_RAY_NO_DEVICE_ISOLATION", "1"))
+    ),
     # In some system, find_loaded_library() may not work. So we allow users to
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH": lambda: os.getenv("VLLM_CUDART_SO_PATH", None),

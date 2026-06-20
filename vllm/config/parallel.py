@@ -945,6 +945,19 @@ class ParallelConfig:
             and getattr(self.distributed_executor_backend, "uses_ray", False)
         )
 
+    @property
+    def ray_no_device_isolation(self) -> bool:
+        """Ray DP workers use the mp-style device layout: all GPUs visible and
+        each rank bound to cuda:{dp_rank}, instead of per-worker
+        CUDA_VISIBLE_DEVICES masking. Applies only when a DP replica fits a node
+        and DP is not ray-backed (which has its own device handling)."""
+        return (
+            self.use_ray
+            and envs.VLLM_RAY_NO_DEVICE_ISOLATION
+            and self.data_parallel_backend != "ray"
+            and self.nnodes_within_dp == 1
+        )
+
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
         # Lazy import to avoid circular import

@@ -381,14 +381,22 @@ class RayExecutorV2(MultiprocExecutor):
         # Step 7: Initialize workers with correct local_rank and
         # CUDA_VISIBLE_DEVICES. Each worker sees all GPUs assigned to
         # this executor on its node; local_rank indexes into that set.
+        # With the mp-style device layout, leave CUDA_VISIBLE_DEVICES wide so
+        # each worker binds a distinct cuda:{dp_rank} in gpu_worker, which the
+        # symmetric-memory rendezvous needs (see ray_no_device_isolation).
+        # See https://github.com/vllm-project/vllm/issues/44556.
+        mp_device_layout = self.vllm_config.parallel_config.ray_no_device_isolation
         init_worker_refs = []
         for i, (node_id, _) in enumerate(worker_node_and_gpu_ids):
             local_rank = node_workers[node_id].index(i)
-            worker_env_vars = {
-                current_platform.device_control_env_var: ",".join(
-                    map(str, node_gpus[node_id])
-                ),
-            }
+            if mp_device_layout:
+                worker_env_vars = {}
+            else:
+                worker_env_vars = {
+                    current_platform.device_control_env_var: ",".join(
+                        map(str, node_gpus[node_id])
+                    ),
+                }
             self.ray_worker_handles[i].local_rank = local_rank
             init_worker_refs.append(
                 self.ray_worker_handles[i].actor.initialize_worker.remote(

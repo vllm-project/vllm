@@ -252,11 +252,16 @@ class Worker(WorkerBase):
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             parallel_config = self.parallel_config
-            if (
-                parallel_config.distributed_executor_backend
-                not in ("ray", "external_launcher")
+            # Bind each DP rank to a distinct cuda:{dp_rank} with all GPUs
+            # visible when a replica fits a node: always for the mp backend, and
+            # for Ray when ray_no_device_isolation is set. Lets symmetric-memory
+            # collectives see distinct devices instead of every rank as cuda:0.
+            # See https://github.com/vllm-project/vllm/issues/44556.
+            if parallel_config.ray_no_device_isolation or (
+                parallel_config.nnodes_within_dp == 1
                 and parallel_config.data_parallel_backend != "ray"
-                and parallel_config.nnodes_within_dp == 1
+                and parallel_config.distributed_executor_backend
+                not in ("ray", "external_launcher")
             ):
                 # Use local DP rank if available, otherwise use global DP rank.
                 dp_local_rank = self.parallel_config.data_parallel_rank_local
