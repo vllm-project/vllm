@@ -353,6 +353,14 @@ def gemma4_config() -> ParserEngineConfig:
                 ParserState.REASONING,
                 (EventType.REASONING_START,),
             ),
+            # No-op: if we pre-initialised the engine to REASONING from the
+            # prompt (see ``adjust_initial_state_from_prompt``) but the model
+            # still emits its own ``<|channel>`` opener, swallow it instead
+            # of leaking it as TEXT_CHUNK.
+            (ParserState.REASONING, "THINK_START"): Transition(
+                ParserState.REASONING,
+                (),
+            ),
             (ParserState.REASONING, "THINK_END"): Transition(
                 ParserState.CONTENT,
                 (EventType.REASONING_END,),
@@ -366,6 +374,10 @@ def gemma4_config() -> ParserEngineConfig:
             (ParserState.CONTENT, "TOOL_START"): Transition(
                 ParserState.TOOL_PREAMBLE,
                 (EventType.REASONING_END, EventType.TOOL_CALL_START),
+            ),
+            (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_PREAMBLE, "CALL_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
@@ -443,16 +455,22 @@ class Gemma4Parser(ParserEngine):
         self,
         request: ChatCompletionRequest | ResponsesRequest,
     ) -> ChatCompletionRequest | ResponsesRequest:
-        """Skip ``skip_special_tokens=False`` when thinking is disabled.
+        """Keep special tokens when thinking or tool calls need them.
 
-        When there are no reasoning channel tokens to preserve,
-        keeping the default prevents tool-call delimiter tokens
-        from leaking into content (e.g. with ``tool_choice="none"``).
+        ``skip_special_tokens`` must stay ``False`` when there is something to
+        preserve: reasoning channel tokens (thinking enabled) or tool-call
+        delimiters (tools active). Otherwise keep the default so stray
+        delimiters do not leak into content (e.g. ``tool_choice="none"`` with
+        thinking disabled).
         """
+        request = super().adjust_request(request)
         chat_template_kwargs = getattr(request, "chat_template_kwargs", None) or {}
-        if not chat_template_kwargs.get("enable_thinking", True):
-            return request
-        return super().adjust_request(request)
+        enable_thinking = chat_template_kwargs.get("enable_thinking", True)
+        has_tools = bool(getattr(request, "tools", None))
+        tools_active = has_tools and request.tool_choice != "none"
+        if not enable_thinking and not tools_active:
+            request.skip_special_tokens = True
+        return request
 
     def _reset(self, initial_state=None) -> None:
         super()._reset(initial_state=initial_state)
@@ -517,6 +535,26 @@ class Gemma4Parser(ParserEngine):
             if end_id is not None and tid == end_id:
                 return True
         return True
+
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        """Pre-initialise the engine to ``REASONING`` when the prompt does
+        not already end with reasoning concluded.
+
+        This covers the post-tool-response continuation case where the chat
+        template leaves the prompt ending inside an open ``<|channel>``
+        block (issue #45834). It is also safe in the common new-turn case
+        where the model itself emits ``<|channel>`` first: the no-op
+        ``(REASONING, THINK_START)`` transition swallows it, and the
+        ``thought\n`` prefix in the first reasoning chunk is stripped by
+        ``_events_to_delta`` as it already is in the default flow.
+        """
+        if self.is_reasoning_end(list(prompt_token_ids)):
+            return
+        self._engine.reset(initial_state=ParserState.REASONING)
+        # Prevent a later default ``initialize_streaming()`` (e.g. from
+        # ``ParserEngineReasoningAdapter.extract_reasoning_streaming``) from
+        # clobbering this with ``CONTENT``.
+        self._streaming_initialized = True
 
     def _events_to_delta(
         self,
