@@ -794,11 +794,10 @@ class DelegatingParser(Parser):
                 reasoning_transitioned = True
                 current_token_ids = self.extract_content_ids(delta_token_ids)
                 if self._engine_based:
+                    flush_delta = reasoning_parser.finish_streaming()  # type: ignore[union-attr, attr-defined]
                     current_text = (
-                        self.model_tokenizer.decode(current_token_ids)
-                        if current_token_ids
-                        else ""
-                    )
+                        (delta_message.content if delta_message else None) or ""
+                    ) + ((flush_delta.content if flush_delta else None) or "")
                     if delta_message and self._tool_parser is not None:
                         delta_message.content = None
                 else:
