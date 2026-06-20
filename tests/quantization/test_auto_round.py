@@ -521,9 +521,7 @@ def test_inc_gptq_row_tail_fallback_supports_all_inc_bit_widths(
 
 
 def test_inc_gptq_row_tail_fallback_registers_row_g_idx(monkeypatch) -> None:
-    monkeypatch.setattr(
-        parameter_module, "get_tensor_model_parallel_rank", lambda: 0
-    )
+    monkeypatch.setattr(parameter_module, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(
         parameter_module, "get_tensor_model_parallel_world_size", lambda: 1
     )
