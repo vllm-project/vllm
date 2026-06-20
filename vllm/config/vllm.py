@@ -766,7 +766,6 @@ class VllmConfig:
         apply_recursive(self, defaults)
 
     def _maybe_override_dynamic_sd_cudagraph_mode(self) -> None:
-        # Dynamic SD works with full CUDA graphs only with V2 model runner.
         speculative_config = self.speculative_config
         if (
             speculative_config is None
