@@ -9,7 +9,7 @@
 #include <torch/headeronly/core/ScalarType.h>
 
 #include "../../cuda_compat.h"
-#include "core/math.hpp"
+#include "libtorch_stable/core/math.hpp"
 #include "libtorch_stable/dispatch_utils.h"
 #include "libtorch_stable/torch_utils.h"
 

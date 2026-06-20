@@ -219,6 +219,15 @@ class FullAttentionSpec(AttentionSpec):
     """
     attention_chunk_size: int | None = None
 
+    non_causal: bool = False
+    """
+    Whether the layer attends non-causally (e.g. Prefix LM). Carried on the
+    spec so the engine core, which collects specs from all workers before the
+    scheduler is built, can adjust scheduling policy (chunked prefill / prefix
+    caching) regardless of tensor-parallel layout. It does not affect the KV
+    cache layout itself.
+    """
+
     def __post_init__(self):
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
@@ -276,6 +285,9 @@ class FullAttentionSpec(AttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
+            # If any layer in the group is non-causal, treat the group as
+            # non-causal so the engine core disables incompatible scheduling.
+            non_causal=any(spec.non_causal for spec in specs),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -701,6 +713,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             page_size_padded=specs[0].page_size_padded,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
+            non_causal=any(spec.non_causal for spec in specs),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
@@ -834,6 +847,8 @@ class KVCacheTensor:
 
     size: int  # size of the KV cache tensor in bytes
     shared_by: list[str]  # layer names that share the same KV cache tensor
+    offset: int = 0  # byte offset of this layer within a contiguous block
+    block_stride: int = 0  # total bytes per block in a packed layout (0 = not packed)
 
 
 @dataclass
