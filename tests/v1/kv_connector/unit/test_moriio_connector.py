@@ -23,12 +23,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOAgentMetadata,
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
+    MoRIIOMode,
     resolve_host_ip,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     KVConnectorRole,
     MoRIIOConnector,
+    MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
 )
 from vllm.platforms import current_platform
@@ -119,6 +121,16 @@ def _setup_kv_transfer_request(
         f"___prefill_addr_{zmq_addr}___decode_addr_{zmq_addr}_{fake_uuid}"
     )
     return request
+
+
+def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.is_producer = False
+    scheduler.mode = MoRIIOMode.WRITE
+    scheduler.tp_size = tp_size
+    scheduler._reqs_need_recv = {}
+    scheduler.unmap_request_id = MagicMock()
+    return scheduler
 
 
 class FakeMoRIIOWrapper:
@@ -432,6 +444,54 @@ def test_read_mode_loads_remote_block_ids():
         ],
     ):
         assert block_id == block.block_id, f"{block_id} != {block.block_id}"
+
+
+def test_write_mode_finished_before_alloc_notifies_prefill_without_recv_meta():
+    scheduler = _write_consumer_scheduler_for_finished_request(tp_size=2)
+    notifications = []
+    scheduler.send_notify_done = lambda transfer_id, host, port: notifications.append(
+        (transfer_id, host, port)
+    )
+    request = create_request(request_id=7, do_remote_prefill=True)
+    request.request_id = "plain-decode-id"
+    request.kv_transfer_params.update(
+        {
+            "transfer_id": "xfer-7",
+            "remote_host": "127.0.0.1",
+            "remote_notify_port": 7000,
+        }
+    )
+
+    delay_free, new_params = scheduler.request_finished(request, block_ids=[])
+
+    assert not delay_free
+    assert new_params is None
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+    assert scheduler._reqs_need_recv == {}
+    assert notifications == [
+        ("xfer-7", "127.0.0.1", 7000),
+        ("xfer-7", "127.0.0.1", 7001),
+    ]
+
+
+def test_write_mode_finished_before_alloc_with_plain_id_does_not_parse_as_recv():
+    scheduler = _write_consumer_scheduler_for_finished_request()
+    scheduler.send_notify_done = MagicMock()
+    request = create_request(request_id=8, do_remote_prefill=True)
+    request.request_id = "plain-decode-id"
+    request.kv_transfer_params = {
+        "do_remote_prefill": True,
+        "do_remote_decode": False,
+        "transfer_id": "xfer-8",
+    }
+
+    delay_free, new_params = scheduler.request_finished(request, block_ids=[])
+
+    assert not delay_free
+    assert new_params is None
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+    assert scheduler._reqs_need_recv == {}
+    scheduler.send_notify_done.assert_not_called()
 
 
 @pytest.mark.skipif(
