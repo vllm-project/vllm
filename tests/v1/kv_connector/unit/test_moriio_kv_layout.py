@@ -14,8 +14,7 @@ _REPO_ROOT = next(
     parent for parent in Path(__file__).resolve().parents if (parent / "vllm").is_dir()
 )
 _LAYOUT_PATH = (
-    _REPO_ROOT
-    / "vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_layout.py"
+    _REPO_ROOT / "vllm/distributed/kv_transfer/kv_connector/v1/moriio/moriio_layout.py"
 )
 _LAYOUT_SPEC = importlib.util.spec_from_file_location(
     "moriio_layout_under_test", _LAYOUT_PATH
@@ -226,6 +225,4 @@ def test_unsupported_shape_raises_value_error():
     worker = _worker({"layer": cache}, {"layer": _full_spec()})
 
     with pytest.raises(ValueError, match="Unsupported MoRIIO K/V cache shape"):
-        moriio_layout.get_layer_transfer_geometry(
-            "layer", cache, worker.layer_to_spec
-        )
+        moriio_layout.get_layer_transfer_geometry("layer", cache, worker.layer_to_spec)
