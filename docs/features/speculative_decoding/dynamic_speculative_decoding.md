@@ -71,5 +71,5 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 ## Limitations
 
-* only tested with Eagle and Eagle-3. Other SD methods may or may not work out of the box
+* Tested with Eagle, Eagle-3, and DFlash. Other SD methods may or may not work out of the box
 * Full Cudagraph only works with Model Runner V2. MRv1 only supports piece-wise cuda graph with this feature
