@@ -270,9 +270,6 @@ class Scheduler(SchedulerInterface):
         # Anti-thrashing cooldown.
         self._adaptive_k_cooldown: int = 0
         self._previous_adaptive_k: int = self.num_spec_tokens
-        # Online c_draft tracking.
-        self._draft_steps: int = 0
-        self._target_steps: int = 0
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -1111,14 +1108,14 @@ class Scheduler(SchedulerInterface):
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
 
-        # Set num_invalid_spec_tokens when adaptive K reduces K
-        # Only apply to decode-phase requests (num_computed_tokens > 0)
+        # Set num_invalid_spec_tokens when adaptive K reduces K.
+        # Only applies to requests actually scheduled this step (decode-phase).
         if _adaptive_k_step is not None and _adaptive_k_step < self.num_spec_tokens:
             num_invalid = self.num_spec_tokens - _adaptive_k_step
             scheduler_output.num_invalid_spec_tokens = {
-                req.request_id: num_invalid
-                for req in self.running
-                if req.num_computed_tokens > 0
+                req_id: num_invalid
+                for req_id in num_scheduled_tokens
+                if self.requests[req_id].num_computed_tokens > 0
             }
 
         # Restore lookahead after K=0 step.
@@ -1577,8 +1574,6 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
-        # Track if any request had draft tokens this step (for _draft_steps)
-        _step_had_draft = False
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             if failed_kv_load_req_ids and req_id in failed_kv_load_req_ids:
@@ -1628,8 +1623,6 @@ class Scheduler(SchedulerInterface):
                             self._pos_reached[j] += 1
                             if j < num_accepted:
                                 self._pos_accepted[j] += 1
-                    if actual_k > 0:
-                        _step_had_draft = True
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
@@ -1783,10 +1776,6 @@ class Scheduler(SchedulerInterface):
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
 
-        # Increment _draft_steps once per step (not per-request) if any request had draft
-        if _step_had_draft:
-            self._draft_steps += 1
-
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)
@@ -1893,7 +1882,6 @@ class Scheduler(SchedulerInterface):
             for j in range(self.num_spec_tokens):
                 self._pos_accepted[j] = 0
                 self._pos_reached[j] = 0
-            self._target_steps += 1
 
         return engine_core_outputs
 
@@ -1913,17 +1901,14 @@ class Scheduler(SchedulerInterface):
         if self._adaptive_k_cooldown > 0:
             self._adaptive_k_cooldown -= 1
             return max(0, prev_k)
-        # Online draft:target step ratio.
-        total_draft = max(self._draft_steps, 1)
-        total_target = max(self._target_steps, 1)
-        scale = total_draft / total_target
+        # Draft cost: K forwards at c_draft (profiled draft:target time ratio).
+        draft_cost_per_token = self._adaptive_k_c_draft
 
-        # Draft cost: K forwards at c_draft, scaled online.
-        draft_cost_per_token = self._adaptive_k_c_draft * scale
-
-        # Verification cost: K+1 tokens per seq at batch size BS.
-        batch_size = len(self.running)
-        verify_cost_per_token = self._adaptive_k_bs_penalty * batch_size * scale
+        # Verification processes num_spec_tokens + 1 tokens (padded to max),
+        # so the per-step overhead is constant for all K >= 1. It doesn't
+        # affect relative ordering between K values, but correctly penalizes
+        # all speculation vs the K=0 baseline.
+        verify_overhead = self._adaptive_k_bs_penalty * len(self.running)
 
         min_k = self._adaptive_k_min_tokens
         max_k = max_k if max_k is not None else self.num_spec_tokens
@@ -1947,8 +1932,10 @@ class Scheduler(SchedulerInterface):
             if k < min_k:
                 continue
 
-            # ITL(K) = K * draft + 1 + K * verify_cost.
-            itl = k * draft_cost_per_token + 1.0 + k * verify_cost_per_token
+            # ITL(K) = K * draft_cost + 1 (target forward) + verify_overhead.
+            # Verify overhead is constant (padded to max tokens) so all K >= 1
+            # share the same base overhead vs the K=0 baseline.
+            itl = k * draft_cost_per_token + 1.0 + verify_overhead
 
             goodput = e_total / itl
             if goodput > best_goodput:
@@ -1959,7 +1946,7 @@ class Scheduler(SchedulerInterface):
         if min_k > 0 and best_k == 0:
             best_k = min_k
 
-        if best_k != prev_k:
+        if abs(best_k - prev_k) > 1:
             self._previous_adaptive_k = best_k
             self._adaptive_k_cooldown = self._cooldown_steps
         return best_k

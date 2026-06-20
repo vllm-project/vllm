@@ -7,7 +7,7 @@ from __future__ import annotations
 from tests.v1.core.utils import create_scheduler
 
 
-def _setup_adaptive_k(scheduler, alphas, draft_steps=10, target_steps=5, prev_k=5):
+def _setup_adaptive_k(scheduler, alphas, prev_k=5):
     """Configure scheduler internals for adaptive K testing."""
     scheduler._enable_adaptive_k = True
     scheduler._per_position_ema = list(alphas)
@@ -17,8 +17,6 @@ def _setup_adaptive_k(scheduler, alphas, draft_steps=10, target_steps=5, prev_k=
     scheduler._adaptive_k_min_tokens = 0
     scheduler._cooldown_steps = 4
     scheduler._alpha_prior = 0.75
-    scheduler._draft_steps = draft_steps
-    scheduler._target_steps = target_steps
     scheduler._adaptive_k_cooldown = 0
     scheduler._previous_adaptive_k = prev_k
 
@@ -66,7 +64,7 @@ def test_k0_selected_when_utility_below_one():
 
 def test_ema_not_initialized_uses_prior():
     s = create_scheduler(num_speculative_tokens=5)
-    _setup_adaptive_k(s, [], draft_steps=0, target_steps=0)
+    _setup_adaptive_k(s, [])
     s._per_position_ema = None
     s._alpha_prior = 0.75
     assert s._compute_adaptive_k() >= 1

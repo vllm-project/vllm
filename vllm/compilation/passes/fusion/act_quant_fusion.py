@@ -28,23 +28,18 @@ logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 
-SILU_MUL_OP = (
-    torch.ops._C.silu_and_mul.default
-    if hasattr(torch.ops._C, "silu_and_mul")
-    else None
-)
+SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 
-FUSED_OPS: dict[QuantKey, OpOverload] = {}
-if hasattr(torch.ops._C, "silu_and_mul_quant"):
-    FUSED_OPS[kFp8StaticTensorSym] = torch.ops._C.silu_and_mul_quant.default
-
+FUSED_OPS: dict[QuantKey, OpOverload] = {
+    kFp8StaticTensorSym: torch.ops._C.silu_and_mul_quant.default,  # noqa: E501
+}
 silu_and_mul_nvfp4_quant_supported = current_platform.is_cuda() and hasattr(
     torch.ops._C, "silu_and_mul_nvfp4_quant"
 )
 if silu_and_mul_nvfp4_quant_supported:
-    FUSED_OPS[kNvfp4Dynamic] = torch.ops._C.silu_and_mul_nvfp4_quant.default
+    FUSED_OPS[kNvfp4Dynamic] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
 
-if current_platform.is_cuda_alike() and hasattr(torch.ops._C, "silu_and_mul_per_block_quant"):
+if current_platform.is_cuda_alike():
     FUSED_OPS[kFp8Dynamic128Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
     FUSED_OPS[kFp8Dynamic64Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
 

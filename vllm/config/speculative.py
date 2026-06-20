@@ -1077,6 +1077,17 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
+        if self.enable_adaptive_k:
+            if self.adaptive_k_min_tokens > self.num_speculative_tokens:
+                raise ValueError(
+                    f"adaptive_k_min_tokens ({self.adaptive_k_min_tokens}) "
+                    f"must be <= num_speculative_tokens "
+                    f"({self.num_speculative_tokens})."
+                )
+            # Adaptive K varies the forward loop count at runtime, which is
+            # incompatible with captured CUDA graphs. Force eager mode.
+            self.enforce_eager = True
+
         self.verify_equal_vocab_size_if_draft_model()
         return self
 
