@@ -54,7 +54,7 @@ from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.utils import AttentionGroup
 
-PAD_TOKEN_ID = -100
+PAD_TOKEN_ID = 0
 
 logger = init_logger(__name__)
 
