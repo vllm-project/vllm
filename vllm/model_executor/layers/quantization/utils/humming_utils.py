@@ -6,8 +6,6 @@ from typing import Any
 
 import regex as re
 import torch
-from humming.layer import HummingMethod
-from humming.schema import BaseWeightSchema, HummingInputSchema, HummingWeightSchema
 
 from vllm import envs
 from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -17,6 +15,12 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.utils.humming import (
+    BaseWeightSchema,
+    HummingInputSchema,
+    HummingMethod,
+    HummingWeightSchema,
+)
 
 
 def humming_update_schema_hadamard_block_size(
