@@ -991,7 +991,11 @@ class VllmBackend:
             },
             payload_fn=lambda: json.dumps(
                 {
-                    "model": self.vllm_config.model_config.model,
+                    "model": (
+                        self.vllm_config.model_config.model
+                        if self.vllm_config.model_config is not None
+                        else "unknown"
+                    ),
                     "prefix": self.prefix,
                     "mode": str(cc.mode),
                     "backend": cc.backend,
