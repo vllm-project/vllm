@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
 from vllm.v1.utils import tensor_data
 
@@ -325,6 +326,27 @@ class FreeKVCacheBlockQueue:
         self.fake_free_list_tail.prev_free_block = block
 
         self.num_free_blocks += 1
+
+    def prepend_n(self, blocks: list[KVCacheBlock]) -> None:
+        """Put a list of blocks at the front of the free list."""
+        if len(blocks) == 0:
+            return
+
+        first_block = self.fake_free_list_head.next_free_block
+        assert first_block is not None, (
+            "next_free_block of fake_free_list_head should always exist"
+        )
+
+        prev_block = self.fake_free_list_head
+        for block in blocks:
+            block.prev_free_block = prev_block
+            prev_block.next_free_block = block
+            prev_block = block
+
+        prev_block.next_free_block = first_block
+        first_block.prev_free_block = prev_block
+
+        self.num_free_blocks += len(blocks)
 
     def append_n(self, blocks: list[KVCacheBlock]) -> None:
         """Put a list of blocks back into the free list
@@ -916,17 +938,10 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
         kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
     ):
         return kv_cache_groups[0].kv_cache_spec.page_size_bytes
-    if all(
-        isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in kv_cache_groups
-    ):
-        # DeepseekV4: shared layout sized by the largest per-page-size bucket.
-        full_mla_spec = cast(UniformTypeKVCacheSpecs, kv_cache_groups[0].kv_cache_spec)
-        layer_tuple_page_bytes = sum(full_mla_spec.get_page_sizes())
-        num_layer_tuples = max(
-            cast(UniformTypeKVCacheSpecs, g.kv_cache_spec).get_num_layer_tuples()
-            for g in kv_cache_groups
-        )
-        return layer_tuple_page_bytes * num_layer_tuples
+    if _use_packed_kv_cache_groups(kv_cache_groups):
+        # buckets = {page_size: [[layer_names], [layer_names], ...]}
+        buckets = _bucket_layers_by_page_size(kv_cache_groups)
+        return sum(ps * len(slots) for ps, slots in buckets.items())
     group_size = max(len(g.layer_names) for g in kv_cache_groups)
     page_size = get_uniform_page_size([g.kv_cache_spec for g in kv_cache_groups])
     return page_size * group_size
@@ -1176,61 +1191,82 @@ def _get_kv_cache_groups_uniform_page_size(
     return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
 
 
-def _get_kv_cache_config_deepseek_v4(
+def _bucket_layers_by_page_size(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> dict[int, list[list[str]]]:
+    """Bucket layers by page size: ``result[ps][slot_idx] = [layer_names]``.
+
+    Layers from different groups at the same ``slot_idx`` share an underlying tensor
+    (they have independent block tables so block-id namespaces never collide).
+    """
+    buckets: dict[int, list[list[str]]] = defaultdict(list)
+    for group in kv_cache_groups:
+        spec = group.kv_cache_spec
+        slot_count: dict[int, int] = defaultdict(int)
+        for layer_name in group.layer_names:
+            if isinstance(spec, UniformTypeKVCacheSpecs):
+                ps = spec.kv_cache_specs[layer_name].page_size_bytes
+            else:
+                ps = spec.page_size_bytes
+            slot_idx = slot_count[ps]
+            slot_count[ps] += 1
+            if slot_idx == len(buckets[ps]):
+                buckets[ps].append([])
+            buckets[ps][slot_idx].append(layer_name)
+    return buckets
+
+
+def _use_packed_kv_cache_groups(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> bool:
+    is_dsv4 = all(
+        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for group in kv_cache_groups
+    )
+    return is_dsv4 or (
+        bool(envs.VLLM_USE_PACKED_HMA_KV_CACHE) and len(kv_cache_groups) > 1
+    )
+
+
+def _get_kv_cache_config_packed(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> tuple[int, list[KVCacheTensor]]:
-    """DeepseekV4 KV cache tensor layout planning.
+    """Plan a packed per-block KV cache tensor layout.
 
-    Precondition: kv_cache_groups[0] is the full-MLA group; its page sizes
-    define the canonical bucket set. Non-full-MLA groups must have been
-    page_size-padded upstream (see _get_kv_cache_groups_uniform_groups) so
-    every layer's page_size matches one of the full-MLA bucket sizes.
-
-    For each group, bucket its layers by page_size_bytes and place each
-    layer at tuple_idx = position-within-bucket. Emit one KVCacheTensor
-    per (tuple_idx, bucket) whose shared_by is the union of per-group
-    layers at that slot.
+    Emit one KVCacheTensor per (slot_idx, page_size). Layers from different
+    groups at the same slot share a tensor (they have independent block
+    tables so block-id namespaces never collide). Each emitted tensor aliases
+    one physical backing allocation, with per-block data laid out contiguously.
     """
-    full_mla_spec = kv_cache_groups[0].kv_cache_spec
-    assert isinstance(full_mla_spec, UniformTypeKVCacheSpecs)
-    page_sizes = sorted(full_mla_spec.get_page_sizes())
-    layer_tuple_page_bytes = sum(page_sizes)
+    # buckets = {page_size: [[layer_names], [layer_names], ...]}
+    buckets = _bucket_layers_by_page_size(kv_cache_groups)
+    total_num_bytes_per_block = sum(ps * len(slots) for ps, slots in buckets.items())
 
-    # Pre-bucket each group's layers by page_size (registration order within
-    # bucket). bucketed[g_idx][page_size] = [layer_name, ...].
-    bucketed: list[dict[int, list[str]]] = []
-    for group in kv_cache_groups:
-        assert isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        specs = group.kv_cache_spec.kv_cache_specs
-        b: dict[int, list[str]] = defaultdict(list)
-        for name in group.layer_names:
-            b[specs[name].page_size_bytes].append(name)
-        bucketed.append(b)
-
-    # num_layer_tuples = longest bucket list across all groups. For the
-    # full-MLA group this equals the count of layers in the largest
-    # per-page-size bucket (= get_num_layer_tuples()); for SWA sub-groups
-    # this equals the sub-group size (each has a single page_size).
-    num_layer_tuples = max(len(layers) for b in bucketed for layers in b.values())
-
-    num_blocks = available_memory // (layer_tuple_page_bytes * num_layer_tuples)
+    num_blocks = available_memory // total_num_bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
 
+    total_size = total_num_bytes_per_block * num_blocks
+
     kv_cache_tensors: list[KVCacheTensor] = []
-    for tuple_idx in range(num_layer_tuples):
-        for ps in page_sizes:
-            shared_by: list[str] = []
-            for b in bucketed:
-                bucket = b.get(ps)
-                if bucket is not None and tuple_idx < len(bucket):
-                    shared_by.append(bucket[tuple_idx])
+    byte_offset = 0
+    for ps, slots in buckets.items():
+        for slot in slots:
             kv_cache_tensors.append(
-                KVCacheTensor(size=ps * num_blocks, shared_by=shared_by)
+                KVCacheTensor(
+                    size=total_size,
+                    shared_by=slot,
+                    offset=byte_offset,
+                    block_stride=total_num_bytes_per_block,
+                )
             )
+            byte_offset += ps
 
     return num_blocks, kv_cache_tensors
+
+
+_get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_packed
 
 
 def get_kv_cache_config_from_groups(
@@ -1277,13 +1313,11 @@ def get_kv_cache_config_from_groups(
             )
             for layer_name in kv_cache_groups[0].layer_names
         ]
-    elif all(
-        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        for group in kv_cache_groups
-    ):
-        # DeepseekV4: UniformTypeKVCacheSpecs but multiple groups.
-        # Delegate to the DeepseekV4-specific allocator.
-        num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4(
+    elif _use_packed_kv_cache_groups(kv_cache_groups):
+        # DeepSeek V4 keeps the existing packed layout. Other multi-group
+        # attention-only HMA layouts can opt in with
+        # VLLM_USE_PACKED_HMA_KV_CACHE=1.
+        num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
             vllm_config, kv_cache_groups, available_memory
         )
     else:
@@ -1706,36 +1740,17 @@ def generate_scheduler_kv_cache_config(
     return cfg
 
 
-def _report_kv_cache_config(
+def get_kv_cache_capacity(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
-) -> None:
+) -> tuple[int, float]:
     """
-    Log resolved KV cache configuration.
-
-    Args:
-        vllm_config: The global VllmConfig
-        kv_cache_config: The resolved KV cache configuration
+    Get the group-aware KV cache token capacity and max concurrency.
     """
     max_model_len = vllm_config.model_config.max_model_len
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config
     )
-
-    # GPU KV cache size in tokens = max_concurrency * max_model_len: the total
-    # tokens of context the pool can hold at peak utilization. Sourcing this
-    # from the concurrency calculation handles hybrid layouts correctly: SWA /
-    # chunked-local groups have a per-request block count that's capped by
-    # their window, so a naive `num_blocks // num_groups * block_size` formula
-    # underestimates capacity for these models. DCP/PCP sharding is already
-    # accounted for in each spec's `max_memory_usage_bytes`.
-    num_tokens = int(max_concurrency * max_model_len)
-
-    logger.info_once("GPU KV cache size: %s tokens", f"{num_tokens:,}")
-    logger.info_once(
-        "Maximum concurrency for %s tokens per request: %.2fx",
-        f"{max_model_len:,}",
-        max_concurrency,
-    )
+    return int(max_concurrency * max_model_len), max_concurrency
 
 
 def _max_memory_usage_bytes_from_groups(
@@ -1991,6 +2006,9 @@ def get_kv_cache_configs(
                     "across workers. This is not supported yet."
                 )
 
+    # Check if the KV cache specs are registered correctly.
+    # This is to prevent that some layers are initialized with unregistered specs.
+    KVCacheSpecRegistry.check_kv_cache_spec_registry(merged_kv_cache_specs)
     # Get global KV cache groups. This also handles spec unification for
     # hybrid models when disable_hybrid_kv_cache_manager is enabled.
     # After this call, merged_kv_cache_specs may be modified in-place.
@@ -2071,7 +2089,21 @@ def get_kv_cache_configs(
             tensor.size = tensor.size // num_blocks_old * min_num_blocks
 
         if len(kv_cache_config.kv_cache_groups) > 0:
-            _report_kv_cache_config(vllm_config, kv_cache_config)
+            max_model_len = vllm_config.model_config.max_model_len
+            # GPU KV cache size in tokens = max_concurrency * max_model_len:
+            # the total tokens of context the pool can hold at peak
+            # utilization. Sourcing this from the concurrency calculation
+            # handles hybrid layouts correctly.
+            num_tokens, max_concurrency = get_kv_cache_capacity(
+                vllm_config, kv_cache_config
+            )
+
+            logger.info_once("GPU KV cache size: %s tokens", f"{num_tokens:,}")
+            logger.info_once(
+                "Maximum concurrency for %s tokens per request: %.2fx",
+                f"{max_model_len:,}",
+                max_concurrency,
+            )
 
     return kv_cache_configs
 

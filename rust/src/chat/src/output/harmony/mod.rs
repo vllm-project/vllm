@@ -35,6 +35,7 @@ use crate::request::ChatRequest;
 pub struct HarmonyChatOutputProcessor {
     encoding: &'static HarmonyEncoding,
     tool_calls_enabled: bool,
+    parallel_tool_calls: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -76,6 +77,7 @@ impl HarmonyChatOutputProcessor {
         Ok(Self {
             encoding: harmony_encoding()?,
             tool_calls_enabled: request.tool_parsing_enabled(),
+            parallel_tool_calls: request.parallel_tool_calls,
         })
     }
 }
@@ -110,7 +112,11 @@ impl ChatOutputProcessor for HarmonyChatOutputProcessor {
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
         let assistant =
             harmony_assistant_event_stream(decoded, self.encoding, self.tool_calls_enabled);
-        Ok(crate::output::structured::structured_chat_event_stream(assistant).boxed())
+        Ok(crate::output::structured::structured_chat_event_stream(
+            assistant,
+            self.parallel_tool_calls,
+        )
+        .boxed())
     }
 }
 
@@ -366,8 +372,7 @@ async fn harmony_assistant_event_stream(
 
                 if let Some(finished) = finished {
                     y.yield_ok(AssistantEvent::Done {
-                        prompt_token_count: finished.prompt_token_count,
-                        output_token_count: finished.output_token_count,
+                        usage: finished.usage,
                         finish_reason: finished.finish_reason,
                         kv_transfer_params: finished.kv_transfer_params,
                     })

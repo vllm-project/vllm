@@ -121,7 +121,11 @@ impl ToolState {
                     None => true,
                 };
                 if is_new_tool {
-                    let id = generate_tool_call_id();
+                    let id = self
+                        .parser
+                        .tool_call_id(item.tool_index)
+                        .map(str::to_string)
+                        .unwrap_or_else(generate_tool_call_id);
                     self.open_call_index = Some(item.tool_index);
                     events.push(AssistantEvent::ToolCallStart { id, name });
                 }
@@ -236,8 +240,7 @@ pub(crate) async fn tool_event_stream(
                 .await;
             }
             ContentEvent::Done {
-                prompt_token_count,
-                output_token_count,
+                usage,
                 finish_reason,
                 kv_transfer_params,
             } => {
@@ -246,8 +249,7 @@ pub(crate) async fn tool_event_stream(
                 }
 
                 y.yield_ok(AssistantEvent::Done {
-                    prompt_token_count,
-                    output_token_count,
+                    usage,
                     finish_reason,
                     kv_transfer_params,
                 })
@@ -289,6 +291,11 @@ mod tests {
 
     struct PartialThenFailParser {
         buffered: String,
+    }
+
+    struct IdScriptedParser {
+        output: ToolParserOutput,
+        tool_call_id: Option<String>,
     }
 
     impl ToolParser for FailingParser {
@@ -344,6 +351,35 @@ mod tests {
 
         fn finish(&mut self) -> Result<ToolParserOutput> {
             Ok(std::mem::take(&mut self.finish_output))
+        }
+
+        fn reset(&mut self) -> String {
+            String::new()
+        }
+    }
+
+    impl ToolParser for IdScriptedParser {
+        fn create(_tools: &[ChatTool]) -> vllm_tool_parser::Result<Box<dyn ToolParser>>
+        where
+            Self: Sized + 'static,
+        {
+            Ok(Box::new(Self {
+                output: ToolParserOutput::default(),
+                tool_call_id: None,
+            }))
+        }
+
+        fn tool_call_id(&self, tool_index: usize) -> Option<&str> {
+            (tool_index == 0).then_some(self.tool_call_id.as_deref()).flatten()
+        }
+
+        fn parse_into(&mut self, _chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
+            output.append(std::mem::take(&mut self.output));
+            Ok(())
+        }
+
+        fn finish(&mut self) -> Result<ToolParserOutput> {
+            Ok(ToolParserOutput::default())
         }
 
         fn reset(&mut self) -> String {
@@ -427,14 +463,17 @@ mod tests {
                 })
             })
             .chain(std::iter::once(Ok(ContentEvent::Done {
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 0,
+                },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             })));
         let parser = DeepSeekV4ToolParser::create(&deepseek_v4_test_tools()).unwrap();
         let assistant_events = tool_event_stream(stream::iter(events), Some(parser));
-        let chat_events = structured_chat_event_stream(assistant_events);
+        let chat_events = structured_chat_event_stream(assistant_events, true);
 
         ChatEventStream::new("req_deepseek_v4".to_string(), Box::pin(chat_events))
             .collect_message()
@@ -468,8 +507,11 @@ mod tests {
                 delta: "ignored".to_string(),
             }),
             Ok(ContentEvent::Done {
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 0,
+                },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -503,6 +545,70 @@ mod tests {
             }
         );
         assert!(matches!(events[3], AssistantEvent::Done { .. }));
+    }
+
+    #[tokio::test]
+    async fn tool_stream_preserves_parser_provided_tool_call_id() {
+        let events = stream::iter(vec![Ok(ContentEvent::TextDelta {
+            kind: AssistantBlockKind::Text,
+            delta: "ignored".to_string(),
+        })]);
+        let parser = IdScriptedParser {
+            output: ToolParserOutput {
+                normal_text: String::new(),
+                calls: vec![crate::parser::tool::ToolCallDelta {
+                    tool_index: 0,
+                    name: Some("get_weather".to_string()),
+                    arguments: "{}".to_string(),
+                }],
+            },
+            tool_call_id: Some("functions.get_weather:0".to_string()),
+        };
+
+        let events = tool_event_stream(events, Some(Box::new(parser)))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(matches!(
+            &events[0],
+            AssistantEvent::ToolCallStart { id, name }
+                if id == "functions.get_weather:0" && name == "get_weather"
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_stream_generates_tool_call_id_when_parser_omits_one() {
+        let events = stream::iter(vec![Ok(ContentEvent::TextDelta {
+            kind: AssistantBlockKind::Text,
+            delta: "ignored".to_string(),
+        })]);
+        let parser = IdScriptedParser {
+            output: ToolParserOutput {
+                normal_text: String::new(),
+                calls: vec![crate::parser::tool::ToolCallDelta {
+                    tool_index: 0,
+                    name: Some("get_weather".to_string()),
+                    arguments: "{}".to_string(),
+                }],
+            },
+            tool_call_id: None,
+        };
+
+        let events = tool_event_stream(events, Some(Box::new(parser)))
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(matches!(
+            &events[0],
+            AssistantEvent::ToolCallStart { id, name }
+                if id.starts_with("call_") && name == "get_weather"
+        ));
     }
 
     #[tokio::test]
@@ -557,8 +663,11 @@ mod tests {
                 delta: "def".to_string(),
             }),
             Ok(ContentEvent::Done {
-                prompt_token_count: 3,
-                output_token_count: 0,
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 3,
+                    output_token_count: 0,
+                    cached_token_count: 0,
+                },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -595,8 +704,11 @@ mod tests {
                     delta: "def".to_string(),
                 },
                 AssistantEvent::Done {
-                    prompt_token_count: 3,
-                    output_token_count: 0,
+                    usage: vllm_llm::TokenUsage {
+                        prompt_token_count: 3,
+                        output_token_count: 0,
+                        cached_token_count: 0,
+                    },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 },
@@ -605,9 +717,10 @@ mod tests {
 
         let message = ChatEventStream::new(
             "req_fallback".to_string(),
-            Box::pin(structured_chat_event_stream(stream::iter(
-                events.into_iter().map(Ok),
-            ))),
+            Box::pin(structured_chat_event_stream(
+                stream::iter(events.into_iter().map(Ok)),
+                true,
+            )),
         )
         .collect_message()
         .await
@@ -637,8 +750,11 @@ mod tests {
                 token_ids: vec![],
             }),
             Ok(ContentEvent::Done {
-                prompt_token_count: 1,
-                output_token_count: 0,
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 0,
+                    cached_token_count: 0,
+                },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -677,8 +793,11 @@ mod tests {
                     token_ids: vec![],
                 },
                 AssistantEvent::Done {
-                    prompt_token_count: 1,
-                    output_token_count: 0,
+                    usage: vllm_llm::TokenUsage {
+                        prompt_token_count: 1,
+                        output_token_count: 0,
+                        cached_token_count: 0,
+                    },
                     finish_reason: FinishReason::stop_eos(),
                     kv_transfer_params: None,
                 },
@@ -694,8 +813,11 @@ mod tests {
                 delta: "ignored".to_string(),
             }),
             Ok(ContentEvent::Done {
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 0,
+                },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -799,8 +921,11 @@ mod tests {
                 delta: "ignored".to_string(),
             }),
             Ok(ContentEvent::Done {
-                prompt_token_count: 1,
-                output_token_count: 1,
+                usage: vllm_llm::TokenUsage {
+                    prompt_token_count: 1,
+                    output_token_count: 1,
+                    cached_token_count: 0,
+                },
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
             }),
@@ -844,9 +969,10 @@ mod tests {
         ));
         let collected = ChatEventStream::new(
             "req_final_only".to_string(),
-            Box::pin(structured_chat_event_stream(stream::iter(
-                events.into_iter().map(Ok),
-            ))),
+            Box::pin(structured_chat_event_stream(
+                stream::iter(events.into_iter().map(Ok)),
+                true,
+            )),
         )
         .collect_message()
         .await

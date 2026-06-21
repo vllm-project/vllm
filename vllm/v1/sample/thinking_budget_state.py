@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
     MoveDirectionality,
@@ -21,12 +22,11 @@ def maybe_create_thinking_budget_state_holder(
     max_num_seqs: int,
     num_spec_tokens: int,
     device: torch.device,
-    is_pin_memory: bool,
 ) -> "ThinkingBudgetStateHolder | None":
     if reasoning_config is None:
         return None
     return ThinkingBudgetStateHolder(
-        reasoning_config, max_num_seqs, num_spec_tokens, device, is_pin_memory
+        reasoning_config, max_num_seqs, num_spec_tokens, device, PIN_MEMORY
     )
 
 
@@ -511,14 +511,31 @@ class ThinkingBudgetStateHolder:
 
         if active_indices_cpu:
             device = logits.device
-            active_indices = async_tensor_h2d(
-                active_indices_cpu, dtype=torch.long, device=device
-            )
-            force_tokens = async_tensor_h2d(
-                force_tokens_cpu, dtype=torch.long, device=device
-            )
-            # Avoid CPU->GPU sync.
-            fill = logits.new_full((len(active_indices_cpu),), 1e9)
-            logits.index_put_((active_indices, force_tokens), fill)
+            if current_platform.is_rocm() and logits.is_contiguous():
+                # Flattened index_fill avoids ROCm faults seen with 2-D
+                # advanced-indexing writes on the thinking-budget path.
+                vocab_size = logits.shape[1]
+                flat_indices_cpu = [
+                    row * vocab_size + token
+                    for row, token in zip(active_indices_cpu, force_tokens_cpu)
+                ]
+                flat_indices = async_tensor_h2d(
+                    flat_indices_cpu, dtype=torch.long, device=device
+                )
+                logits.view(-1).index_fill_(0, flat_indices, 1e9)
+            elif current_platform.is_rocm():
+                fill = logits.new_tensor(1e9)
+                for row, token in zip(active_indices_cpu, force_tokens_cpu):
+                    logits[row, token] = fill
+            else:
+                active_indices = async_tensor_h2d(
+                    active_indices_cpu, dtype=torch.long, device=device
+                )
+                force_tokens = async_tensor_h2d(
+                    force_tokens_cpu, dtype=torch.long, device=device
+                )
+                # Avoid CPU->GPU sync.
+                fill = logits.new_full((len(active_indices_cpu),), 1e9)
+                logits.index_put_((active_indices, force_tokens), fill)
 
         return logits

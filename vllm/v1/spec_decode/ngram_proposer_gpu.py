@@ -314,6 +314,7 @@ class NgramProposerGPU:
 
     def propose(
         self,
+        num_speculative_tokens: int,
         num_tokens_no_spec: torch.Tensor,  # [batch_size]
         token_ids_gpu: torch.Tensor,  # [batch_size, max_len]
         valid_sampled_token_ids_gpu: torch.Tensor,  # [batch_size, num_spec_tokens + 1]
@@ -326,6 +327,7 @@ class NgramProposerGPU:
         updated lengths, then run the kernel.
 
         Args:
+            num_speculative_tokens: Number of speculative tokens to propose.
             num_tokens_no_spec: Number of tokens per sequence (read-only)
             token_ids_gpu: Token IDs tensor (modified in-place with new tokens)
             valid_sampled_token_ids_gpu: Newly sampled tokens to scatter
@@ -336,6 +338,7 @@ class NgramProposerGPU:
             num_valid_draft_tokens: Count of leading valid draft tokens
                 per request [batch_size]
         """
+        assert num_speculative_tokens == self.k
         assert token_ids_gpu.device == self.device
         assert num_tokens_no_spec.device == self.device
 
@@ -542,7 +545,7 @@ def update_ngram_gpu_tensors_incremental(
             num_tokens = input_batch.num_tokens_no_spec[idx]
             if num_tokens > 0:
                 token_ids_gpu_tensor[idx, :num_tokens].copy_(
-                    input_batch.token_ids_cpu_tensor[idx, :num_tokens],
+                    input_batch.token_ids_cpu_tensor[idx, :num_tokens].pin_memory(),
                     non_blocking=True,
                 )
 
@@ -588,7 +591,7 @@ def update_ngram_gpu_tensors_incremental(
         num_tokens = input_batch.num_tokens_no_spec[new_req_idx]
         if num_tokens > 0:
             token_ids_gpu_tensor[new_req_idx, :num_tokens].copy_(
-                input_batch.token_ids_cpu_tensor[new_req_idx, :num_tokens],
+                input_batch.token_ids_cpu_tensor[new_req_idx, :num_tokens].pin_memory(),
                 non_blocking=True,
             )
 
