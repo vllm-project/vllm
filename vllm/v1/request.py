@@ -188,6 +188,7 @@ class Request:
         # Used for streaming
         self.resumable = resumable
         # None entry in the queue means finished.
+        self.thinking_state = True
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
         # If True, request should be aborted immediately after being added to
@@ -225,6 +226,19 @@ class Request:
         self,
         token_ids: int | list[int],
     ) -> None:
+        token_list = [token_ids] if isinstance(token_ids, int) else token_ids
+
+        if self.sampling_params is not None and getattr(
+            self.sampling_params, "monolingual_drift_mask", False
+        ):
+            think_id = self.sampling_params.think_token_id or 151648
+            end_think_id = self.sampling_params.end_think_token_id or 151649
+            for tid in token_list:
+                if tid == think_id:
+                    self.thinking_state = True
+                elif tid == end_think_id:
+                    self.thinking_state = False
+
         if isinstance(token_ids, int):
             self._output_token_ids.append(token_ids)
             self._all_token_ids.append(token_ids)
