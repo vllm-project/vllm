@@ -12,7 +12,6 @@ from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
-from math import prod
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -203,6 +202,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.attn_utils import _reshape_attention_kv_cache
 from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -7125,62 +7125,20 @@ class GPUModelRunner(
                         kv_cache_spec.head_size,
                         cache_dtype_str=self.cache_config.cache_dtype,
                     )
-                    dtype = kv_cache_spec.dtype
                     try:
                         kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
                         assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     except (AttributeError, NotImplementedError):
                         kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
-                    # The allocation respects the backend-defined stride order
-                    # to ensure the semantic remains consistent for each
-                    # backend. We first obtain the generic kv cache shape and
-                    # then permute it according to the stride order which could
-                    # result in a non-contiguous tensor.
-                    kv_cache_shape = tuple(
-                        kv_cache_shape[i] for i in kv_cache_stride_order
+                    raw_tensor = kv_cache_raw_tensors[layer_name]
+                    kv_caches[layer_name] = _reshape_attention_kv_cache(
+                        raw_tensor,
+                        kv_cache_spec,
+                        kv_cache_shape,
+                        kv_cache_stride_order,
+                        kernel_num_blocks,
+                        packing,
                     )
-                    # Maintain original KV shape view.
-                    inv_order = [
-                        kv_cache_stride_order.index(i)
-                        for i in range(len(kv_cache_stride_order))
-                    ]
-
-                    if packing is not None:
-                        offset, block_stride = packing
-                        assert inv_order[0] == 0
-                        page_bytes = prod(kv_cache_shape[1:]) * get_dtype_size(dtype)
-                        kv_cache = (
-                            kv_cache_raw_tensors[layer_name]
-                            .view(-1, block_stride)[:, offset : offset + page_bytes]
-                            .view(dtype)
-                            .view(kv_cache_shape)
-                        )
-                    elif kv_cache_spec.page_size_padded is not None:
-                        # Use strided view to handle page_size_bytes that
-                        # include padding. This follows
-                        # the same pattern as MambaSpec handling below.
-                        # NOTE: This assumes kv_cache_shape[0] == num_blocks
-                        # (i.e. the first physical dimension is the block
-                        # index), which holds for MLA backends but NOT for
-                        # standard attention backends whose shape starts with
-                        # a K/V dimension of size 2.
-                        dtype_size = get_dtype_size(dtype)
-                        page_stride = kv_cache_spec.page_size_bytes // dtype_size
-                        strides = list(torch.empty(kv_cache_shape).stride())
-                        strides[inv_order[0]] = page_stride
-                        kv_cache = torch.as_strided(
-                            kv_cache_raw_tensors[layer_name].view(dtype),
-                            size=kv_cache_shape,
-                            stride=tuple(strides),
-                        )
-                    else:
-                        # No padding — safe to use a contiguous view.
-                        kv_cache = (
-                            kv_cache_raw_tensors[layer_name]
-                            .view(dtype)
-                            .view(kv_cache_shape)
-                        )
-                    kv_caches[layer_name] = kv_cache.permute(*inv_order)
 
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
@@ -7265,7 +7223,7 @@ class GPUModelRunner(
 
         # Try creating KV caches optimized for kv-connector transfers
         cache_dtype = self.cache_config.cache_dtype
-        if self.use_uniform_kv_cache(self.attn_groups, cache_dtype):
+        if self.use_uniform_kv_cache(self.attn_groups):
             kv_caches, cross_layers_kv_cache, attn_backend = (
                 self.allocate_uniform_kv_caches(
                     kv_cache_config,
@@ -7515,6 +7473,13 @@ class GPUModelRunner(
                 continue
             # Skip modules that don't need KV cache (eg encoder-only attention)
             if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                if isinstance(spec, AttentionSpec):
+                    backend = attn_module.get_attn_backend()
+                    # indexes_kv_by_block_stride() -> get_kv_cache_stride_order()
+                    # -> get_kv_cache_layout() needs the current vLLM config.
+                    with set_current_vllm_config(self.vllm_config):
+                        indexes = backend.indexes_kv_by_block_stride()
+                    spec = replace(spec, indexes_kv_by_block_stride=indexes)
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec
