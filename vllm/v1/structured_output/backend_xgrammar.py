@@ -170,21 +170,34 @@ class XgrammarGrammar(StructuredOutputGrammar):
         self._is_terminated = self.matcher.is_terminated()
         return True
 
+    def fork(self) -> "XgrammarGrammar":
+        # Deep copy of the matcher state for probing draft / speculative
+        # tokens without ever advancing or rolling back the live FSM.
+        # xgrammar's rollback corrupts structural-tag grammar state
+        # (#46249), so we never roll back the real matcher.
+        forked = XgrammarGrammar(
+            vocab_size=self.vocab_size,
+            matcher=self.matcher.fork(),
+            ctx=self.ctx,
+        )
+        forked._is_terminated = self._is_terminated
+        return forked
+
     def validate_tokens(self, tokens: list[int]) -> list[int]:
         """Checks if the list of tokens are accepted by the FSM in sequence.
         Will not advance the FSM.
 
         Returns the prefix list of tokens that are accepted by the FSM.
         """
+        # Probe on a forked matcher so the live FSM is never advanced or
+        # rolled back (xgrammar structural-tag rollback corrupts state).
+        probe = self.matcher.fork()
         accepted_tokens = []
         for token in tokens:
-            if self.matcher.accept_token(token):
+            if probe.accept_token(token):
                 accepted_tokens.append(token)
             else:
                 break
-        if len(accepted_tokens) > 0:
-            # Rollback the FSM to the initial state
-            self.matcher.rollback(len(accepted_tokens))
         return accepted_tokens
 
     def rollback(self, num_tokens: int) -> None:

@@ -272,7 +272,6 @@ class StructuredOutputManager:
                 grammar = structured_output_request.grammar
                 apply_bitmask = self.should_fill_bitmask(request)
 
-                state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
                 if self.vllm_config.model_config.is_diffusion and req_tokens:
                     # Diffusion LLMs don't sample a bonus token after the
@@ -280,15 +279,29 @@ class StructuredOutputManager:
                     token_iter: Iterable[int] = req_tokens
                 else:
                     token_iter = itertools.chain(req_tokens, (-1,))
+
+                # Evolve speculative-position states on a forked matcher when
+                # the backend supports it, so the live FSM is never rolled
+                # back. xgrammar's rollback corrupts structural-tag grammar
+                # state and terminates the request (#46249); backends without
+                # fork keep the advance + rollback path.
+                probe = (
+                    grammar.fork()
+                    if req_tokens and hasattr(grammar, "fork")
+                    else None
+                )
+                src = probe if probe is not None else grammar
+                state_advancements = 0
                 for token in token_iter:
-                    self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
+                    self._fill_bitmasks(((src, cumulative_index, apply_bitmask),))
                     if token == -1:
                         # Stop advancing the grammar once we hit a padding token.
                         apply_bitmask = False
-                    if apply_bitmask and not grammar.is_terminated():
-                        accepted = grammar.accept_tokens(req_id, [token])
+                    if apply_bitmask and not src.is_terminated():
+                        accepted = src.accept_tokens(req_id, [token])
                         assert accepted, (token, req_id, scheduled_spec_decode_tokens)
-                        state_advancements += 1
+                        if probe is None:
+                            state_advancements += 1
                     cumulative_index += 1
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)
