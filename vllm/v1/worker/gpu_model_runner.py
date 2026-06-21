@@ -116,8 +116,10 @@ from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
-from vllm.utils.platform_utils import is_pin_memory_available, num_compute_units
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import (
+    PIN_MEMORY,
+    async_tensor_h2d,
     get_dtype_size,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
@@ -441,7 +443,6 @@ class GPUModelRunner(
         scheduler_config = self.scheduler_config
         parallel_config = self.parallel_config
         self.device = device
-        self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
 
         self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
@@ -666,7 +667,6 @@ class GPUModelRunner(
             max_model_len=max(self.max_model_len, self.max_encoder_len),
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
-            pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[placeholder_block_size],
             kernel_block_sizes=[placeholder_block_size],
@@ -674,7 +674,7 @@ class GPUModelRunner(
             logitsprocs=build_logitsprocs(
                 self.vllm_config,
                 self.device,
-                self.pin_memory,
+                PIN_MEMORY,
                 self.is_pooling_model,
                 custom_logitsprocs,
             ),
@@ -729,7 +729,7 @@ class GPUModelRunner(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
         self.optimistic_seq_lens_cpu = torch.zeros(
-            self.max_num_reqs, dtype=torch.int32, pin_memory=self.pin_memory
+            self.max_num_reqs, dtype=torch.int32, pin_memory=PIN_MEMORY
         )
         self.num_computed_tokens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=self.device
@@ -846,7 +846,7 @@ class GPUModelRunner(
             and self.speculative_config.use_ngram_gpu()
         ):
             self._num_valid_draft_tokens_cpu = torch.empty(
-                self.max_num_reqs, dtype=torch.int32, pin_memory=self.pin_memory
+                self.max_num_reqs, dtype=torch.int32, pin_memory=PIN_MEMORY
             )
             self._num_valid_draft_tokens_event = torch.cuda.Event()
             self._num_valid_draft_tokens_copy_stream = torch.cuda.Stream()
@@ -857,7 +857,7 @@ class GPUModelRunner(
             (self.max_num_reqs, 1),
             dtype=torch.int64,
             device="cpu",
-            pin_memory=self.pin_memory,
+            pin_memory=PIN_MEMORY,
         )
 
         # Pre-allocated tensor for copying valid sampled token counts to CPU,
@@ -879,7 +879,7 @@ class GPUModelRunner(
                 (self.max_num_reqs, self.num_spec_tokens),
                 dtype=torch.int64,
                 device="cpu",
-                pin_memory=self.pin_memory,
+                pin_memory=PIN_MEMORY,
             )
             if self.use_async_scheduling:
                 self.valid_sampled_token_count_event = torch.Event()
@@ -888,7 +888,7 @@ class GPUModelRunner(
                     self.max_num_reqs,
                     dtype=torch.int32,
                     device="cpu",
-                    pin_memory=self.pin_memory,
+                    pin_memory=PIN_MEMORY,
                 )
 
         # Model weight offloader
@@ -1000,7 +1000,6 @@ class GPUModelRunner(
             *size,
             dtype=dtype,
             device=self.device,
-            pin_memory=self.pin_memory,
             with_numpy=numpy,
         )
 
@@ -1055,7 +1054,7 @@ class GPUModelRunner(
             token_type_ids.append(ids)
 
         token_type_ids_cpu = torch.empty(
-            sum(seq_lens_cpu), dtype=torch.int32, pin_memory=self.pin_memory
+            sum(seq_lens_cpu), dtype=torch.int32, pin_memory=PIN_MEMORY
         )
         torch.cat(token_type_ids, out=token_type_ids_cpu)
         model_kwargs["token_type_ids"] = token_type_ids_cpu.to(
@@ -1095,12 +1094,12 @@ class GPUModelRunner(
         """
         self._kv_block_zeroer = KVBlockZeroer(
             self.device,
-            self.pin_memory,
+            pin_memory=PIN_MEMORY,
             attn_groups_iter=self._kv_cache_spec_attn_group_iterator(),
             kernel_block_sizes=self._kernel_block_sizes,
             cache_dtype=self.cache_config.cache_dtype,
             runner_only_attn_layers=self.runner_only_attn_layers,
-            static_forward_context=(self.compilation_config.static_forward_context),
+            static_forward_context=self.compilation_config.static_forward_context,
         )
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
@@ -1651,7 +1650,7 @@ class GPUModelRunner(
         for _, _, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs,
             device=self.device,
-            pin_memory=self.pin_memory,
+            pin_memory=PIN_MEMORY,
         ):
             mm_kwargs_combined.update(mm_kwargs_batch)
 
@@ -1807,10 +1806,10 @@ class GPUModelRunner(
             return
         # Upload the index tensors asynchronously so the scatter can be non-blocking.
         sampled_tokens_index_tensor = torch.tensor(
-            sample_flattened_indices, dtype=torch.int64, pin_memory=self.pin_memory
+            sample_flattened_indices, dtype=torch.int64, pin_memory=PIN_MEMORY
         ).to(self.device, non_blocking=True)
         prev_common_req_indices_tensor = torch.tensor(
-            prev_indices, dtype=torch.int64, pin_memory=self.pin_memory
+            prev_indices, dtype=torch.int64, pin_memory=PIN_MEMORY
         ).to(self.device, non_blocking=True)
         self.input_ids.gpu.scatter_(
             dim=0,
@@ -1826,10 +1825,10 @@ class GPUModelRunner(
 
         assert isinstance(self._draft_token_ids, torch.Tensor)
         draft_tokens_index_tensor = torch.tensor(
-            spec_flattened_indices, dtype=torch.int64, pin_memory=self.pin_memory
+            spec_flattened_indices, dtype=torch.int64, pin_memory=PIN_MEMORY
         ).to(self.device, non_blocking=True)
         prev_draft_token_indices_tensor = torch.tensor(
-            prev_draft_token_indices, dtype=torch.int64, pin_memory=self.pin_memory
+            prev_draft_token_indices, dtype=torch.int64, pin_memory=PIN_MEMORY
         ).to(self.device, non_blocking=True)
 
         # because input_ids dtype is torch.int32,
@@ -2788,21 +2787,16 @@ class GPUModelRunner(
         # [0, 1, 2, 5, 6, 9]
         target_logits_indices += self._arange_scratch[: cu_num_draft_tokens[-1]]
 
-        # TODO: Optimize the CPU -> GPU copy.
-        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
-            self.device, non_blocking=True
+        cu_num_draft_tokens = async_tensor_h2d(cu_num_draft_tokens, device=self.device)
+        cu_num_sampled_tokens = async_tensor_h2d(
+            cu_num_sampled_tokens, device=self.device
         )
-        cu_num_sampled_tokens = torch.from_numpy(cu_num_sampled_tokens).to(
-            self.device, non_blocking=True
+        logits_indices = async_tensor_h2d(logits_indices, device=self.device)
+        target_logits_indices = async_tensor_h2d(
+            target_logits_indices, device=self.device
         )
-        logits_indices = torch.from_numpy(logits_indices).to(
-            self.device, non_blocking=True
-        )
-        target_logits_indices = torch.from_numpy(target_logits_indices).to(
-            self.device, non_blocking=True
-        )
-        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
-            self.device, non_blocking=True
+        bonus_logits_indices = async_tensor_h2d(
+            bonus_logits_indices, device=self.device
         )
 
         # Compute the draft token ids.
@@ -3012,9 +3006,7 @@ class GPUModelRunner(
         # Track the current index in mm_kwargs/mm_lora_refs to map groups to request IDs
         current_item_idx = 0
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
-            mm_kwargs,
-            device=self.device,
-            pin_memory=self.pin_memory,
+            mm_kwargs, device=self.device, pin_memory=PIN_MEMORY
         ):
             batch_outputs: MultiModalEmbeddings
 
@@ -3048,7 +3040,7 @@ class GPUModelRunner(
                             group_and_batch_mm_kwargs(
                                 [video_mm_kwargs_item],
                                 device=self.device,
-                                pin_memory=self.pin_memory,
+                                pin_memory=PIN_MEMORY,
                             )
                         )
 
@@ -3107,7 +3099,10 @@ class GPUModelRunner(
 
         mm_embeds = list[torch.Tensor]()
         is_mm_embed = torch.zeros(
-            total_num_scheduled_tokens, dtype=torch.bool, device="cpu"
+            total_num_scheduled_tokens,
+            dtype=torch.bool,
+            device="cpu",
+            pin_memory=PIN_MEMORY,
         )
 
         req_start_idx = 0
@@ -3515,8 +3510,7 @@ class GPUModelRunner(
             token_ids_idx_np = np.nonzero(is_token_ids)[0]
             # Some tokens ids may need to become embeds
             if token_ids_idx_np.size > 0:
-                token_ids_idx = torch.from_numpy(token_ids_idx_np)
-                token_ids_idx = token_ids_idx.to(self.device, non_blocking=True)
+                token_ids_idx = async_tensor_h2d(token_ids_idx_np, device=self.device)
                 token_ids = self.input_ids.gpu[token_ids_idx]
                 tokens_to_embeds = self.model.embed_input_ids(input_ids=token_ids)
                 self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
@@ -4953,7 +4947,7 @@ class GPUModelRunner(
                 ):
                     indices.append(offset + len(tokens) - 1)
                     offset += num_draft + 1
-                indices = torch.tensor(indices, device=self.device)
+                indices = async_tensor_h2d(indices, device=self.device)
                 hidden_states = sample_hidden_states[indices]
 
             draft_token_ids = self.drafter.propose(
@@ -5483,8 +5477,8 @@ class GPUModelRunner(
                 continue
 
             num_prompt_tokens = len(request.prompt_token_ids)
-            prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
-                self.device, non_blocking=True
+            prompt_token_ids = async_tensor_h2d(
+                request.prompt_token_ids, device=self.device
             )
 
             # Set up target LogprobsTensors object.
@@ -5651,7 +5645,7 @@ class GPUModelRunner(
             for _, _, mm_kwargs_batch in group_and_batch_mm_kwargs(
                 [(modality, dummy_mm_item)] * max_items_per_batch,
                 device=self.device,
-                pin_memory=self.pin_memory,
+                pin_memory=PIN_MEMORY,
             )
         )
 
@@ -6995,7 +6989,6 @@ class GPUModelRunner(
                 max_model_len=max_model_len,
                 max_num_batched_tokens=self.max_num_tokens,
                 device=self.device,
-                pin_memory=self.pin_memory,
                 vocab_size=self.model_config.get_vocab_size(),
                 block_sizes=block_sizes,
                 kernel_block_sizes=kernel_block_sizes,
@@ -7430,7 +7423,7 @@ class GPUModelRunner(
             self.routed_experts_capturer.device_buffer.shape,
             dtype=self.routed_experts_capturer.device_buffer.dtype,
             device="cpu",
-            pin_memory=self.pin_memory,
+            pin_memory=PIN_MEMORY,
         )
         # ``slot_mapping`` dtype is fixed to int64 by
         # ``block_table.slot_mapping``; we mirror that here.
@@ -7439,7 +7432,7 @@ class GPUModelRunner(
             (max_tokens,),
             dtype=torch.int64,
             device="cpu",
-            pin_memory=self.pin_memory,
+            pin_memory=PIN_MEMORY,
         )
         # Private device buffer so the shared ``block_table.slot_mapping``
         # can be overwritten by the next ``_prepare_inputs`` while the
