@@ -349,15 +349,16 @@ class BlockPool:
         kv_cache_group_id: int,
         block_size: int | None = None,
     ) -> BlockHashWithGroupId | None:
-        """Register an additional prefix-cache key for an existing block.
+        """Register a partial prefix-cache entry for an existing block.
 
-        Prefix-cache lookup is normally one hash key per cached block. A
-        partial-cache entry needs a cache block to be reachable from a
-        finer-grained hash boundary inside that block. This method records that
-        hash key without allocating or copying a new ``KVCacheBlock``.
+        Prefix-cache keys normally identify full cache blocks. A partial entry
+        makes an existing cache block reachable from a fine-grained prefix
+        boundary inside that block without allocating or copying a new
+        ``KVCacheBlock``.
 
-        The alias is lookup metadata owned by ``block``. If ``block`` already
-        has a primary hash, the alias is also tracked in
+        The alias is lookup metadata owned by ``block``. If ``block`` has no
+        primary hash, the key becomes its primary hash. If the block already
+        has a primary hash, the alias is tracked in
         ``cached_block_hashes_by_block`` so eviction, reset, and promotion can
         remove every hash key that points to the block.
 
@@ -368,9 +369,10 @@ class BlockPool:
                 positive multiple of ``self.hash_block_size`` and cannot exceed
                 the request's computed block hashes.
             kv_cache_group_id: KV cache group that owns the alias.
-            block_size: Cache block size for the owning group. When larger than
-                ``self.hash_block_size``, the alias hash is computed from the
-                previous full-block hash plus the current block's partial tail.
+            block_size: Cache block size for the owning group. The alias hash
+                itself is always the prefix-chain hash at ``num_tokens``;
+                ``block_size`` is used to describe the alias token range in
+                KV-cache events.
 
         Returns:
             The hash key with group ID if an alias can be registered; otherwise
