@@ -628,3 +628,56 @@ def test_deepseek_v4_request_tools_do_not_mutate_caller_messages():
     _tokenizer().apply_chat_template(messages, tools=_request_tools(), tokenize=False)
 
     assert messages == snapshot
+
+
+def test_deepseek_v4_add_generation_prompt_appended_by_default():
+    prompt = _tokenizer().apply_chat_template(
+        [{"role": "user", "content": "Hello"}],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    assert prompt.endswith("<｜Assistant｜></think>")
+
+
+def test_deepseek_v4_add_generation_prompt_false_omits_cue():
+    prompt = _tokenizer().apply_chat_template(
+        [{"role": "user", "content": "Hello"}],
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+    assert "<｜Assistant｜>" not in prompt
+
+
+def test_deepseek_v4_add_generation_prompt_after_assistant_opens_turn():
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi"},
+        ],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    assert prompt.endswith("Hi<｜end▁of▁sentence｜><｜Assistant｜></think>")
+
+
+def test_deepseek_v4_continue_final_message_keeps_turn_open():
+    prompt = _tokenizer().apply_chat_template(
+        [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Partial answer"},
+        ],
+        tokenize=False,
+        continue_final_message=True,
+    )
+    assert prompt.endswith("Partial answer")
+    assert not prompt.endswith("<｜end▁of▁sentence｜>")
+    assert "<｜Assistant｜>" in prompt
+
+
+def test_deepseek_v4_continue_final_message_requires_assistant_last():
+    with pytest.raises(ValueError):
+        _tokenizer().apply_chat_template(
+            [{"role": "user", "content": "Hello"}],
+            tokenize=False,
+            continue_final_message=True,
+        )
