@@ -8,9 +8,6 @@ from typing_extensions import override
 from vllm.v1.kv_offload.base import OffloadKey
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 
 class LRUCachePolicy(CachePolicy):
     """
