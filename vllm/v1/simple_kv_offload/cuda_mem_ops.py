@@ -13,6 +13,14 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+# CUmemcpySrcAccessOrder values (CUDA driver API).
+#   STREAM (1): source reads are ordered after prior writes on the stream the
+#       copy runs on -> safe when the source may still be written.
+#   ANY (3): driver may read the source before prior writes complete -> only
+#       safe when the source is guaranteed stable (e.g. pinned host memory).
+CU_MEMCPY_SRC_ACCESS_ORDER_STREAM = 1
+CU_MEMCPY_SRC_ACCESS_ORDER_ANY = 3
+
 
 def pin_tensor(tensor: torch.Tensor) -> None:
     """Pin a CPU tensor via cudaHostRegister.
@@ -120,6 +128,7 @@ def build_params(
     src_caches: dict[str, torch.Tensor],
     dst_caches: dict[str, torch.Tensor],
     stream: torch.cuda.Stream,
+    src_access_order: int = CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
 ) -> BatchMemcpyParams:
     global _batch_memcpy_fn
     if _batch_memcpy_fn is None:
@@ -137,10 +146,12 @@ def build_params(
         dst_bases.append(d.data_ptr())
         bpb.append(s_bpb)
 
-    # ``srcAccessOrder=3`` == CU_MEMCPY_SRC_ACCESS_ORDER_ANY /
-    # hipMemcpySrcAccessOrderAny. See
+    # srcAccessOrder controls whether the DMA may read the source before prior
+    # writes to it complete. STREAM(1) for GPU->CPU stores (live KV cache is
+    # still being written by the compute stream); ANY(3) for CPU->GPU loads
+    # (source is stable pinned host memory). See
     # https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__MEM.html#group__CUDA__MEM_1g6f1ff58e3065df3eb4b573dba77ad31f  # noqa: E501
-    attrs = _CUmemcpyAttributes(srcAccessOrder=3)
+    attrs = _CUmemcpyAttributes(srcAccessOrder=src_access_order)
 
     return BatchMemcpyParams(
         src_bases=np.array(src_bases, dtype=np.uint64),

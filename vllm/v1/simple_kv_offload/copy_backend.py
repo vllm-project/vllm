@@ -12,6 +12,8 @@ import torch
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.simple_kv_offload.cuda_mem_ops import (
+    CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
+    CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
     BatchMemcpyParams,
     build_params,
     copy_blocks,
@@ -43,8 +45,22 @@ class DmaCopyBackend:
         self._load_stream = load_stream
         self._store_stream = store_stream
 
-        self._store_params = build_params(gpu_caches, cpu_caches, store_stream)
-        self._load_params = build_params(cpu_caches, gpu_caches, load_stream)
+        # Store (GPU->CPU): source is the live GPU KV cache, still written by
+        # the compute stream -> STREAM ordering (paired with a wait on the
+        # compute-done event in launch_copy). Load (CPU->GPU): source is stable
+        # pinned host memory -> ANY is safe and lets the driver pipeline reads.
+        self._store_params = build_params(
+            gpu_caches,
+            cpu_caches,
+            store_stream,
+            src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_STREAM,
+        )
+        self._load_params = build_params(
+            cpu_caches,
+            gpu_caches,
+            load_stream,
+            src_access_order=CU_MEMCPY_SRC_ACCESS_ORDER_ANY,
+        )
 
         self._queue = queue.SimpleQueue()
         self._thread = threading.Thread(
@@ -61,11 +77,20 @@ class DmaCopyBackend:
         is_store: bool,
         event_idx: int,
         events_list: list[tuple[int, torch.Event]],
+        wait_event: torch.Event | None = None,
     ) -> None:
         params = self._store_params if is_store else self._load_params
         assert params is not None and self._queue is not None
         self._queue.put(
-            (src_blocks, dst_blocks, params, is_store, event_idx, events_list)
+            (
+                src_blocks,
+                dst_blocks,
+                params,
+                is_store,
+                event_idx,
+                events_list,
+                wait_event,
+            )
         )
 
     def shutdown(self) -> None:
@@ -89,9 +114,23 @@ class DmaCopyBackend:
             item = q.get()
             if item is None:
                 return
-            src_blocks, dst_blocks, params, is_store, event_idx, events_list = item
-            copy_blocks(src_blocks, dst_blocks, params)
+            (
+                src_blocks,
+                dst_blocks,
+                params,
+                is_store,
+                event_idx,
+                events_list,
+                wait_event,
+            ) = item
             stream = store_stream if is_store else load_stream
+            # Gate the copy on the compute-done event so the GPU->CPU store
+            # cannot read KV blocks before the kernels that wrote them have
+            # retired on the compute stream. The wait is enqueued on the
+            # transfer stream before the copy, so the two are ordered on-device.
+            if wait_event is not None:
+                stream.wait_event(wait_event)
+            copy_blocks(src_blocks, dst_blocks, params)
             event = torch.Event()
             event.record(stream)
             events_list.append((event_idx, event))
