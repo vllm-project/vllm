@@ -466,3 +466,149 @@ class TestWeightReloadCodePaths:
     @pytest.mark.parametrize("model,extra_kwargs", _RELOAD_MATRIX)
     def test_reload_survives(self, model, extra_kwargs):
         _run_reload_test(model, extra_kwargs)
+
+
+# ---------------------------------------------------------------------------
+# TestWeightUpdateProtocolErrors  (new — Tier 1D supplement)
+# ---------------------------------------------------------------------------
+
+
+class TestWeightUpdateProtocolErrors:
+    """Protocol-violation error paths for the weight-transfer endpoints.
+
+    In vLLM v0.23.0 the weight transfer engine must be initialized via
+    /init_weight_transfer_engine before /start_weight_update is valid.
+    This class verifies that the engine handles pre-condition violations
+    gracefully — returning informative errors without crashing.
+
+    Reference: AReaL tests/experimental/weight_update/test_wu_controller.py
+               TestConnect, TestUpdateWeights, TestDisconnect
+               ROLL tests/third_party/vllm/test_collective_rpc.py
+    """
+
+    def test_start_without_init_returns_error_and_engine_survives(self):
+        """/start_weight_update without /init_weight_transfer_engine must error.
+
+        The endpoint must return 4xx/5xx with a message that mentions
+        configuration, and the engine must remain healthy.
+        """
+        with _server() as url:
+            r = _start_weight_update(url)
+            assert r.status_code in (400, 409, 500), (
+                f"start without init must return an error, got {r.status_code}: {r.text}"
+            )
+            # Error body should be informative
+            try:
+                body = r.json()
+                msg = str(body.get("error", {}).get("message", "")).lower()
+                assert any(kw in msg for kw in ("not configured", "weight transfer", "init", "config")), (
+                    f"error message not informative: {r.text}"
+                )
+            except (ValueError, KeyError):
+                pass  # non-JSON body is acceptable as long as status is error
+
+            assert _health(url) == 200
+            assert _ok(_gen(url)), "engine must still serve requests after protocol error"
+
+    def test_update_weights_without_start_returns_error(self):
+        """/update_weights without a preceding /start_weight_update must error.
+
+        Verifies the session guard: update is only valid inside a
+        start→finish session.
+        """
+        with _server() as url:
+            r = requests.post(
+                f"{url}/update_weights",
+                json={"update_info": {"name": "dummy", "dtype": "float32", "shape": [1]}},
+                timeout=10,
+            )
+            assert r.status_code in (400, 409, 500), (
+                f"update without start must return an error, got {r.status_code}"
+            )
+            assert _health(url) == 200
+            assert _ok(_gen(url)), "engine must still serve after update-without-start"
+
+    def test_finish_without_start_returns_error_and_engine_survives(self):
+        """/finish_weight_update without /start must return an error.
+
+        Extends the existing test to also verify the engine remains healthy
+        and can serve generate requests after the protocol violation.
+        """
+        with _server() as url:
+            r = _finish_weight_update(url)
+            assert r.status_code in (400, 409, 500), (
+                f"finish without start must return an error, got {r.status_code}"
+            )
+            assert _health(url) == 200
+            assert _ok(_gen(url)), "engine must generate after finish-without-start"
+
+
+# ---------------------------------------------------------------------------
+# TestCompoundRLStepExtended  (new — Tier 1D supplement)
+# ---------------------------------------------------------------------------
+
+
+class TestCompoundRLStepExtended:
+    """Extended compound RL step tests — more cycles and tighter assertions.
+
+    Extends TestCompoundRLStep (2 cycles) to 5 cycles with output correctness
+    and latency assertions.
+
+    Note: /start_weight_update and /finish_weight_update require a prior
+    /init_weight_transfer_engine (NCCL distributed setup) in vLLM v0.23.0.
+    These tests cover the sleep→staged-wake lifecycle used in colocate RL.
+    Weight transfer framing is covered in TestWeightTransferProtocol and
+    TestCompoundRLStep; this class adds cycle depth and correctness checks.
+
+    Reference: sglang test_update_weights_from_distributed.py — latency assert.
+    """
+
+    def test_five_colocate_rl_steps_output_stable(self):
+        """5 staged sleep/wake steps with golden output check on each cycle.
+
+        Tests the colocate RL lifecycle:
+          rollout → sleep(1) → wake(weights) → wake(kv_cache) → rollout
+
+        Uses --seed for deterministic text comparison across cycles.
+        """
+        with _server(extra_args=["--seed", "42"]) as url:
+            golden = _gen(url)
+            assert golden and _ok(golden)
+            golden_text = golden["choices"][0]["text"]
+            assert golden_text.strip(), "golden output must be non-empty"
+
+            for step in range(5):
+                assert _sleep(url, level=1) == 200
+                # staged wake: mirrors colocate RL (trainer releases GPU between these)
+                assert _wake(url, tags=["weights"]) == 200
+                assert _wake(url, tags=["kv_cache"]) == 200
+                assert _health(url) == 200, f"engine died after step {step}"
+
+                resp = _gen(url)
+                assert _ok(resp), f"generate failed at step {step}"
+                assert resp["choices"][0]["text"] == golden_text, (
+                    f"output drifted at step {step} — cumem weight restore broken"
+                )
+
+    def test_sleep_staged_wake_latency(self):
+        """sleep(1) + staged wake must complete in < 15 s per cycle.
+
+        Reference: sglang test_update_weights_from_distributed.py latency gate.
+        15 s is generous for a 0.6B model; catches multi-minute regressions
+        (e.g., accidental model re-download or page fault storm on wake).
+        """
+        with _server() as url:
+            _gen(url)  # warm up
+
+            t0 = time.perf_counter()
+            assert _sleep(url, level=1) == 200
+            assert _wake(url, tags=["weights"]) == 200
+            assert _wake(url, tags=["kv_cache"]) == 200
+            elapsed = time.perf_counter() - t0
+
+            assert elapsed < 15.0, (
+                f"sleep + staged wake took {elapsed:.2f}s — "
+                "cumem unmap/remap latency regression?"
+            )
+            assert _health(url) == 200
+            assert _ok(_gen(url))
