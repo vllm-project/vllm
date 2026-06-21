@@ -526,6 +526,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         try:
             if token_len == 0:
                 return
+
             if self._should_skip_request(req_id):
                 logger.debug(
                     "Skipping Mooncake store for request %s while CPU/disk "
@@ -536,36 +537,34 @@ class KVCacheStoreSendingThread(KVTransferThread):
 
             # Within each lcm region only per-spec relevant chunks are loaded
             # (e.g., SWA or linear attn), so mask out irrelevant chunks
-            store_masks = self.coord.store_mask(
-                token_len, num_prompt_tokens=req_meta.num_prompt_tokens
+            store_mask_ranges = self.coord.store_mask_ranges(
+                token_len,
+                req_meta.save_start_token,
+                num_prompt_tokens=req_meta.num_prompt_tokens,
             )
+
             starts: list[int] = []
             ends: list[int] = []
             keys: list[str] = []
-            block_hashes: list[BlockHash] = []
+            kv_event_block_hashes: list[BlockHash] = []
             group_indices: list[int] = []
+            put_step_rank = self.tp_rank % self.put_step
             for g_idx, db in enumerate(self.token_databases):
-                mask = store_masks[g_idx]
-                for chunk_idx, (start, end, key) in enumerate(
-                    db.process_tokens(token_len, req_meta.block_hashes)
+                mask_range = store_mask_ranges[g_idx]
+                for start, end, block_hash in db.process_tokens(
+                    token_len,
+                    req_meta.block_hashes,
+                    mask_num=req_meta.save_start_token,
+                    chunk_mask=mask_range.mask,
+                    put_step=self.put_step,
+                    put_step_rank=put_step_rank,
                 ):
-                    if mask is not None and (
-                        chunk_idx >= len(mask) or not mask[chunk_idx]
-                    ):
-                        continue
                     starts.append(start)
                     ends.append(end)
-                    keys.append(key.to_string())
-                    block_hashes.append(BlockHash(bytes.fromhex(key.chunk_hash)))
+                    keys.append(PoolKey(db.metadata, block_hash.hex()).to_string())
+                    if self.enable_kv_event:
+                        kv_event_block_hashes.append(block_hash)
                     group_indices.append(g_idx)
-
-            # Apply put_step striding for TP
-            sl = slice(self.tp_rank % self.put_step, None, self.put_step)
-            starts = starts[sl]
-            ends = ends[sl]
-            keys = keys[sl]
-            block_hashes = block_hashes[sl]
-            group_indices = group_indices[sl]
 
             if not keys:
                 return
@@ -595,11 +594,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if not missing_indices:
                 return
 
-            starts = [starts[i] for i in missing_indices]
-            ends = [ends[i] for i in missing_indices]
-            keys = [keys[i] for i in missing_indices]
-            block_hashes = [block_hashes[i] for i in missing_indices]
-            group_indices = [group_indices[i] for i in missing_indices]
+            if len(missing_indices) != len(keys):
+                starts = [starts[i] for i in missing_indices]
+                ends = [ends[i] for i in missing_indices]
+                keys = [keys[i] for i in missing_indices]
+                if self.enable_kv_event:
+                    kv_event_block_hashes = [
+                        kv_event_block_hashes[i] for i in missing_indices
+                    ]
+                group_indices = [group_indices[i] for i in missing_indices]
 
             logger.debug(
                 "Storing KV cache for %d blocks (groups=%s) for request %s",
@@ -612,8 +615,11 @@ class KVCacheStoreSendingThread(KVTransferThread):
             sizes: list[list[int]] = []
             stored_events: list[BlockStored] = []
             # parent_block_hash chains live within a group, not across.
-            prev_key_per_group: dict[int, Any] = {}
-            new_block_hashes = [maybe_convert_block_hash(bh) for bh in block_hashes]
+            if self.enable_kv_event:
+                prev_key_per_group: dict[int, Any] = {}
+                new_block_hashes = [
+                    maybe_convert_block_hash(bh) for bh in kv_event_block_hashes
+                ]
 
             for idx, (s, e, g_idx) in enumerate(
                 zip(starts, ends, group_indices, strict=True)
@@ -775,7 +781,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         block_id_list: list[int] = []
         for g_idx, db in enumerate(self.token_databases):
             mask = load_mask_per_group[g_idx]
-            for start, end, key in db.process_tokens(
+            for start, end, block_hash in db.process_tokens(
                 token_len, req_meta.block_hashes, mask_num
             ):
                 chunk_idx = start // db.block_size
@@ -784,7 +790,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 addr, size, block_id = db.prepare_value(
                     start, end, req_meta.block_ids[g_idx]
                 )
-                key_list.append(key.to_string())
+                key_list.append(PoolKey(db.metadata, block_hash.hex()).to_string())
                 addr_list.append(addr)
                 size_list.append(size)
                 block_id_list.append(block_id)

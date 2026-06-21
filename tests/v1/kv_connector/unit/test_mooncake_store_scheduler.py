@@ -122,6 +122,7 @@ def test_cached_request_without_spec_decode_keeps_current_step_save_overlap():
     assert req_meta.req_id == "req-0"
     assert req_meta.can_save is True
     assert req_meta.token_len_chunk == 48
+    assert req_meta.save_start_token == 32
     tracker = scheduler._request_trackers["req-0"]
     assert tracker.token_len == 48
     assert tracker.num_saved_tokens == 48
@@ -351,6 +352,7 @@ def test_from_request_tracker_load_overrides_caller_skip_save():
     assert req_meta is not None
     assert req_meta.can_save is False
     assert req_meta.load_spec is load_spec
+    assert req_meta.save_start_token == 0
     assert tracker.num_saved_tokens == 0
 
 
@@ -377,6 +379,7 @@ def test_from_request_tracker_load_with_can_load_false_still_saves():
     assert req_meta.can_save is True
     # from_request_tracker clears load_spec when can_load is False.
     assert req_meta.load_spec is None
+    assert req_meta.save_start_token == 0
     assert tracker.num_saved_tokens == 48
 
 
@@ -399,6 +402,7 @@ def test_from_request_tracker_no_load_saves_normally():
     assert req_meta is not None
     assert req_meta.can_save is True
     assert req_meta.load_spec is None
+    assert req_meta.save_start_token == 0
     assert tracker.num_saved_tokens == 48
 
 
