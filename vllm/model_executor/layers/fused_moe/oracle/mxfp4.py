@@ -962,12 +962,55 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
     elif mxfp4_backend == Mxfp4MoeBackend.AITER_MXFP4_MXFP4:
         from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 
         if w13_bias is not None:
             w13_bias = w13_bias.data.to(torch.float32)
         if w2_bias is not None:
             w2_bias = w2_bias.data.to(torch.float32)
 
+        # AITER fused_moe dispatches W4A4 + SwiGLU-OAI (per_1x32) to the ck_tile
+        # FlatMM kernel, which needs the gate/up interleave-16 weight+scale
+        # layout (shuffle_*_a16w4; activation-dtype independent). Other
+        # activations use the classic CK 2-stage kernel (generic shuffle_weights
+        # + e8m0 scale swizzle). Select the layout by activation so both paths
+        # work.
+        if layer.activation in (
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        ):
+            # ck_tile layout. M3 stores gate/up separated, so no row
+            # de-interleave (unlike the GPT-OSS W4A16 path below).
+            w13_weight.data = w13_weight.data.view(torch.float4_e2m1fn_x2)
+            w2_weight.data = w2_weight.data.view(torch.float4_e2m1fn_x2)
+
+            w13_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w13_weight, 16, True)
+            shuffled_w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
+                w13_weight_scale.view(-1, w13_weight_scale.shape[-1]),
+                num_experts,
+                True,
+            )
+
+            w2_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(w2_weight, 16, False)
+            shuffled_w2_scale = rocm_aiter_ops.shuffle_scale_a16w4(
+                w2_weight_scale.view(-1, w2_weight_scale.shape[-1]),
+                num_experts,
+                False,
+            )
+
+            w13_weight.is_shuffled = True
+            w2_weight.is_shuffled = True
+
+            return (
+                w13_weight,
+                w2_weight,
+                shuffled_w13_scale,
+                shuffled_w2_scale,
+                w13_bias,
+                w2_bias,
+            )
+
+        # Classic CK 2-stage layout (non-SwiGLU W4A4).
         # e8m0_shuffle on weight scales (GFX950 swizzle layout)
         from aiter.utility.fp4_utils import e8m0_shuffle
 
