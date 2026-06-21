@@ -75,23 +75,6 @@ def _decode_e2m1_nibble(nibble):
 
 
 @triton.jit
-def _e2m1_inline_fast(magnitude):
-    magnitude_i32 = magnitude.to(tl.int32)
-    normal_bits = (126 << 23) + (magnitude_i32 << 22)
-    normal = normal_bits.to(tl.uint32).to(tl.float32, bitcast=True)
-    subnormal = (magnitude & 0x01).to(tl.float32) * 0.5
-    return tl.where(magnitude < 2, subnormal, normal)
-
-
-@triton.jit
-def _decode_e2m1_nibble_fast(nibble):
-    magnitude = nibble & 0x07
-    sign = (nibble >> 3) & 1
-    value = _e2m1_inline_fast(magnitude)
-    return tl.where(sign == 1, -value, value)
-
-
-@triton.jit
 def _decode_e2m1_nibble_fast_signed(nibble):
     magnitude = nibble & 0x07
     magnitude_i32 = magnitude.to(tl.int32)
