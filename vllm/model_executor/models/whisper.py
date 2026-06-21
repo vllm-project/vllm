@@ -860,17 +860,34 @@ class WhisperForConditionalGeneration(
     def get_language_token_ids(
         cls,
         tokenizer: object,
+        languages: Sequence[str] | None = None,
     ) -> list[int]:
         """Return token IDs for all supported language tokens.
 
         Used with ``SamplingParams.allowed_token_ids`` to constrain
         language detection to only produce valid language tokens.
         """
-        token_ids = [
-            tokenizer.convert_tokens_to_ids(f"<|{lang_code}|>")
-            for lang_code in cls.supported_languages
+        language_codes = (
+            list(cls.supported_languages)
+            if languages is None
+            else list(languages)
+        )
+
+        unsupported = [
+            language
+            for language in language_codes
+            if language not in cls.supported_languages
         ]
-        return token_ids
+        if unsupported:
+            raise ValueError(
+                f"Unsupported language candidates: {unsupported}. "
+                f"Supported languages: {list(cls.supported_languages)}"
+            )
+
+        return [
+            tokenizer.convert_tokens_to_ids(f"<|{language}|>")
+            for language in language_codes
+        ]
 
     @classmethod
     def get_language_detection_prompt(
