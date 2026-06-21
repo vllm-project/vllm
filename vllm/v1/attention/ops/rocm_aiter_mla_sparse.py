@@ -826,6 +826,7 @@ def rocm_aiter_sparse_attn_indexer(
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
 
+            # TODO: gather only the causal key span each rank reads
             if not chunk.skip_kv_gather:
                 cp_gather_indexer_k_quant_cache_triton(
                     kv_cache,
@@ -887,6 +888,7 @@ def rocm_aiter_sparse_attn_indexer(
                     ],
                     group=pg,
                 )
+                # TODO: any all gather API in reverse order?
                 pynccl_comm = getattr(
                     get_tp_group().device_communicator, "pynccl_comm", None
                 )
