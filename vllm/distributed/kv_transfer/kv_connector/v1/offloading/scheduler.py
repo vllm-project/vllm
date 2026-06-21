@@ -73,6 +73,9 @@ class GroupOffloadConfig(NamedTuple):
     gpu_block_size: int
     offloaded_block_size: int
     hash_block_size_factor: int
+    # KV cache spec metadata propagated onto emitted BlockStored events so
+    # KV-aware consumers can classify and filter the group.
+    kv_event_group_spec: OffloadingEventGroupSpec
     # None below means full attention
     sliding_window_size_in_blocks: int | None
     # Number of this group's offloaded blocks per full-attention alignment
@@ -81,12 +84,6 @@ class GroupOffloadConfig(NamedTuple):
     # than the MLA full-attention group).
     # None for full-attention groups or when the optimization doesn't apply.
     alignment_block_count: int | None = None
-    # KV cache spec metadata propagated onto emitted BlockStored events so
-    # KV-aware consumers can classify and filter the group.
-    kv_event_group_spec: OffloadingEventGroupSpec = OffloadingEventGroupSpec(
-        kv_cache_spec_kind=None,
-        kv_cache_spec_sliding_window=None,
-    )
     # True for EAGLE/MTP draft-model attention groups. The trailing block
     # of these groups is volatile and lacks a stable hash, so it must
     # be excluded from store and load scheduling.

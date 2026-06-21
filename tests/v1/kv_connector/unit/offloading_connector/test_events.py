@@ -59,7 +59,7 @@ def _wire_hash(block_hash: BlockHash):
     return maybe_convert_block_hash(block_hash)
 
 
-def _request(*, block_hashes: list[BlockHash | None], token_count: int):
+def _request(*, block_hashes: list[BlockHash], token_count: int):
     req = MagicMock()
     req.block_hashes = block_hashes
     req.all_token_ids = list(range(1, token_count + 1))
@@ -257,43 +257,6 @@ def test_record_store_skips_sliding_window_group():
     assert events[0].block_size == 0
 
 
-def test_record_store_uses_placeholder_when_chunk_hash_is_missing():
-    block_size_factor = 3
-    tracker = _tracker()
-    group_config = _group_config(block_size_factor=block_size_factor)
-    req = _request(
-        block_hashes=[_hash(0), None, _hash(2)],
-        token_count=4 * block_size_factor,
-    )
-    key = make_offload_key(_hash(2), 0)
-
-    tracker.record_store(req, group_config, offload_block_idx=0, offload_key=key)
-
-    assert not tracker._pending_event_metadata
-    events = list(tracker.take_events([_stored_event([key])]))
-    assert len(events) == 1
-    assert isinstance(events[0], BlockStored)
-    assert events[0].block_hashes == [_wire_hash(_hash(2))]
-    assert events[0].block_size == 0
-
-
-def test_record_store_uses_placeholder_when_parent_hash_is_missing():
-    tracker = _tracker()
-    group_config = _group_config()
-    req = _request(block_hashes=[None, _hash(1)], token_count=8)
-    key = make_offload_key(_hash(1), 0)
-
-    tracker.record_store(req, group_config, offload_block_idx=1, offload_key=key)
-
-    assert not tracker._pending_event_metadata
-    events = list(tracker.take_events([_stored_event([key])]))
-    assert len(events) == 1
-    assert isinstance(events[0], BlockStored)
-    assert events[0].block_hashes == [_wire_hash(_hash(1))]
-    assert events[0].parent_block_hash is None
-    assert events[0].block_size == 0
-
-
 def test_take_events_groups_removed_hashes_by_kv_group():
     tracker = _tracker()
     group0_config = _group_config(group_idx=0, block_size_factor=2)
@@ -311,6 +274,32 @@ def test_take_events_groups_removed_hashes_by_kv_group():
         0: [_wire_hash(_hash(0)), _wire_hash(_hash(1))],
         1: [_wire_hash(_hash(10)), _wire_hash(_hash(11))],
     }
+
+
+def test_take_events_supports_restore_after_eviction():
+    block_size = 4
+    tracker = _tracker()
+    group_config = _group_config(block_size=block_size)
+    req = _request(block_hashes=[_hash(0)], token_count=block_size)
+    key = _record_chunks(tracker, req, group_config, num_chunks=1)[0]
+
+    first_store = list(tracker.take_events([_stored_event([key])]))
+    assert len(first_store) == 1
+    assert isinstance(first_store[0], BlockStored)
+    assert first_store[0].token_ids == [1, 2, 3, 4]
+
+    removed = list(tracker.take_events([_removed_event([key])]))
+    assert len(removed) == 1
+    assert isinstance(removed[0], BlockRemoved)
+    assert not tracker._pending_event_metadata
+
+    req.all_token_ids = [5, 6, 7, 8]
+    tracker.record_store(req, group_config, offload_block_idx=0, offload_key=key)
+
+    second_store = list(tracker.take_events([_stored_event([key])]))
+    assert len(second_store) == 1
+    assert isinstance(second_store[0], BlockStored)
+    assert second_store[0].token_ids == [5, 6, 7, 8]
 
 
 def test_reset_cache_clears_side_table():

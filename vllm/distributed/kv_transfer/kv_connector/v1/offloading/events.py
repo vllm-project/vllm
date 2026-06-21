@@ -114,8 +114,7 @@ class OffloadingEventsTracker:
         if group_config.sliding_window_size_in_blocks is not None:
             return
         meta = self._build_event_metadata(req, group_config, offload_block_idx)
-        if meta is not None:
-            self._pending_event_metadata[offload_key] = meta
+        self._pending_event_metadata[offload_key] = meta
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
@@ -144,11 +143,10 @@ class OffloadingEventsTracker:
         req: Request,
         group_config: "GroupOffloadConfig",
         offload_block_idx: int,
-    ) -> _OffloadEventMetadata | None:
+    ) -> _OffloadEventMetadata:
         """Build the payload snapshot for one offloaded chunk: its
         constituent per-block hashes, the whole chunk's tokens, and the
-        per-block ``block_size``. Returns None when metadata is incomplete
-        so take_events falls back to the placeholder payload."""
+        per-block ``block_size``."""
         hbf = group_config.hash_block_size_factor
         assert hbf > 0
         assert offload_block_idx >= 0
@@ -162,10 +160,7 @@ class OffloadingEventsTracker:
         assert last_hash_idx <= len(req.block_hashes)
         chunk_hashes: list[BlockHash] = []
         for block_hash in req.block_hashes[first_hash_idx:last_hash_idx]:
-            # This can happen for requests whose blocks do not have stable
-            # hashes. Keep the legacy placeholder event in that case.
-            if block_hash is None:
-                return None
+            assert block_hash is not None
             chunk_hashes.append(block_hash)
         assert len(chunk_hashes) == hbf
 
@@ -178,9 +173,7 @@ class OffloadingEventsTracker:
             parent_block_hash = None
         else:
             parent_block_hash = req.block_hashes[first_hash_idx - 1]
-            # A chunk cannot be self-describing if its parent is not hashable.
-            if parent_block_hash is None:
-                return None
+            assert parent_block_hash is not None
 
         tok_start = offload_block_idx * group_config.offloaded_block_size
         tok_end = tok_start + group_config.offloaded_block_size
@@ -232,9 +225,7 @@ class OffloadingEventsTracker:
                         "OffloadingEventsTracker: no event metadata for "
                         "offload key during BlockStored emission; emitting a "
                         "placeholder payload. Expected for non-full-attention "
-                        "groups or when block hashes were unavailable at "
-                        "store time; otherwise indicates a missing populate "
-                        "path."
+                        "groups; otherwise indicates a missing populate path."
                     )
                 yield self._placeholder_stored(key, event.medium)
                 continue

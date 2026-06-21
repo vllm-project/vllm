@@ -148,7 +148,11 @@ class OffloadingHistogramMetadata(OffloadingMetricMetadata):
 
 @dataclass(frozen=True)
 class OffloadingKVEventsConfig:
+    # Global vLLM KV event publishing flag. When false, connector-specific
+    # event capture must stay inert because take_events() is not drained.
     enable_kv_cache_events: bool
+    # OffloadingConnector opt-in for self-describing BlockStored payloads.
+    # Effective only when enable_kv_cache_events is true.
     self_describing_kv_events: bool
 
 
