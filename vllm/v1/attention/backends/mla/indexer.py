@@ -26,7 +26,7 @@ from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
-from vllm.v1.context_parallel.layout import (
+from vllm.v1.attention.ops.cp_utils import (
     DEFAULT_CP_LAYOUT,
     ContextParallelLayout,
     cp_global_to_local_pos,

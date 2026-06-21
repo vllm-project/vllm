@@ -3,7 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.context_parallel.layout import (
+from vllm.v1.attention.ops.cp_utils import (
     DEFAULT_CP_LAYOUT,
     ContextParallelLayout,
     cp_global_to_local_block,

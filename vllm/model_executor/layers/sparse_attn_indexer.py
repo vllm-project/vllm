@@ -32,8 +32,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
-from vllm.v1.context_parallel.collectives import dcp_global_topk
-from vllm.v1.context_parallel.layout import ContextParallelLayout
+from vllm.v1.attention.ops.cp_utils import ContextParallelLayout
 from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
@@ -171,6 +170,30 @@ def fused_indexer_q_rope_quant(
     return q_fp8, weights_out
 
 
+def _dcp_global_topk(
+    local_values: torch.Tensor,
+    local_global_indices: torch.Tensor,
+    topk_tokens: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    dcp_group = get_dcp_group()
+    candidate_values = dcp_group.all_gather(local_values.contiguous(), dim=1)
+    candidate_indices = dcp_group.all_gather(local_global_indices.contiguous(), dim=1)
+    candidate_values = torch.where(
+        candidate_indices >= 0,
+        candidate_values,
+        torch.full_like(candidate_values, float("-inf")),
+    )
+
+    values, offsets = torch.topk(candidate_values, k=topk_tokens, dim=-1)
+    indices = torch.gather(candidate_indices, 1, offsets)
+    indices = torch.where(
+        values == float("-inf"),
+        torch.full_like(indices, -1),
+        indices,
+    )
+    return values, indices.to(torch.int32)
+
+
 def _topk_per_row_prefill_dcp(
     logits: torch.Tensor,
     cu_seqlen_ks: torch.Tensor,
@@ -216,11 +239,10 @@ def _topk_per_row_prefill_dcp(
         )
 
     global_indices = layout.local_to_global(local_indices)
-    _, global_indices = dcp_global_topk(
+    _, global_indices = _dcp_global_topk(
         local_values,
         global_indices,
         topk_tokens,
-        get_dcp_group(),
     )
     return global_indices
 
@@ -253,11 +275,10 @@ def _topk_per_row_decode_dcp(
         torch.where(valid, local_indices, torch.full_like(local_indices, -1))
     )
 
-    global_values, global_indices = dcp_global_topk(
+    global_values, global_indices = _dcp_global_topk(
         local_values,
         local_global_indices,
         topk_tokens,
-        get_dcp_group(),
     )
     is_local = layout.owns(global_indices)
 

@@ -12,6 +12,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.models.deepseek_v4.common.ops.dcp import dcp_softmax_reduce
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     compress_norm_rope_store_triton,
     dsv4_dcp_compressor_partial_stats_kernel,
@@ -32,8 +33,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.context_parallel.collectives import dcp_softmax_reduce
-from vllm.v1.context_parallel.layout import ContextParallelLayout
+from vllm.v1.attention.ops.cp_utils import ContextParallelLayout
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -173,7 +173,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             sliding_window=self.sliding_window,
             alignment=576 if uses_fp8_ds_mla_layout else None,
-            supports_context_parallel=True,
+            supports_context_parallel=uses_fp8_ds_mla_layout,
         )
 
     def forward(self): ...

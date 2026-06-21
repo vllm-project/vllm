@@ -56,7 +56,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
-from vllm.v1.context_parallel.layout import ContextParallelLayout
+from vllm.v1.attention.ops.cp_utils import ContextParallelLayout
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
 logger = init_logger(__name__)
@@ -618,7 +618,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             cache_dtype_str=self.kv_cache_dtype,
             alignment=576 if uses_fp8_ds_mla_layout else None,
             model_version="deepseek_v4",
-            supports_context_parallel=True,
+            supports_context_parallel=is_flashmla,
         )
 
 
@@ -646,6 +646,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # head_dim already carries the fp8 scale padding
         # compress_ratio=1 for V3.2, >1 for DeepseekV4; both use the same cache layout.
+        is_flashmla = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
@@ -655,7 +656,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             # DeepseekV4 aligns indexer pages to FlashMLA's 576B so they can pack with
             # the indexer's compressor state cache. V3.2 keeps the legacy layout.
             alignment=576,
-            supports_context_parallel=self.compress_ratio > 1,
+            supports_context_parallel=self.compress_ratio > 1 and is_flashmla,
         )
 
     def forward(self): ...

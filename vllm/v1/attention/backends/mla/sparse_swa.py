@@ -18,12 +18,12 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
-from vllm.v1.context_parallel.layout import (
+from vllm.v1.attention.ops.cp_utils import (
     ContextParallelLayout,
     cp_global_to_local_block,
     cp_global_to_local_pos,
 )
+from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -96,7 +96,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             cache_dtype_str=self.cache_config.cache_dtype,
             alignment=576 if uses_fp8_ds_mla_layout else None,
             model_version="deepseek_v4",
-            supports_context_parallel=True,
+            supports_context_parallel=is_flashmla,
         )
 
     def forward(self): ...
