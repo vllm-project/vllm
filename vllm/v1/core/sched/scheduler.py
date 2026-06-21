@@ -1747,7 +1747,9 @@ class Scheduler(SchedulerInterface):
         structured_output_manager = self.structured_output_manager
         enable_return_routed_experts = self.enable_return_routed_experts
         for req_index, req_id in enumerate(model_runner_output.req_ids):
-            num_tokens_scheduled = num_scheduled_tokens[req_id]
+            num_tokens_scheduled = num_scheduled_tokens.get(req_id)
+            if not num_tokens_scheduled:
+                continue
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
             output_is_stale = False
