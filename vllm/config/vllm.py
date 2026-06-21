@@ -971,6 +971,13 @@ class VllmConfig:
                     executor_backend,
                 )
                 self.scheduler_config.async_scheduling = False
+            elif self.scheduler_config.tokens_per_step > 1:
+                logger.info_once(
+                    "Async scheduling enabled with tokens_per_step=%d "
+                    "(extra forward passes will run with async scheduling).",
+                    self.scheduler_config.tokens_per_step,
+                )
+                self.scheduler_config.async_scheduling = True
             else:
                 self.scheduler_config.async_scheduling = True
 

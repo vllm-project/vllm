@@ -211,13 +211,19 @@ class Scheduler(SchedulerInterface):
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
+        # Pre-allocate extra KV cache slots for extra autoregressive
+        # forward passes within a single execute_model step.
+        self.num_extra_forwards = self.scheduler_config.tokens_per_step - 1
+        self.num_lookahead_tokens = self.num_extra_forwards
         if speculative_config:
             self.num_spec_tokens = speculative_config.num_speculative_tokens
             if speculative_config.use_eagle():
                 self.use_eagle = True
-                self.num_lookahead_tokens = self.num_spec_tokens
+                self.num_lookahead_tokens = max(self.num_lookahead_tokens,
+                                                self.num_spec_tokens)
             if speculative_config.uses_draft_model():
-                self.num_lookahead_tokens = self.num_spec_tokens
+                self.num_lookahead_tokens = max(self.num_lookahead_tokens,
+                                                self.num_spec_tokens)
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -703,7 +709,9 @@ class Scheduler(SchedulerInterface):
                 # creates a mismatch between the number
                 # of local and remote blocks.
                 effective_lookahead_tokens = (
-                    0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
+                    0 if (request.num_computed_tokens == 0
+                          and self.num_extra_forwards == 0)
+                    else self.num_lookahead_tokens
                 )
 
                 # Determine if we need to allocate cross-attention blocks.
@@ -1390,6 +1398,18 @@ class Scheduler(SchedulerInterface):
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
                 )
+
+            # Advance num_computed_tokens for extra autoregressive forwards.
+            # Extra forwards produce (tokens_per_step - 1) additional tokens
+            # beyond the 1 normal sample. These tokens already have their KV
+            # cache computed, so advance num_computed_tokens accordingly.
+            # In async scheduling, this advancement is done eagerly in
+            # _update_after_schedule to keep num_new_tokens=1 for the next
+            # schedule() call, so skip it here to avoid double-counting.
+            if not scheduled_spec_token_ids and not self.scheduler_config.async_scheduling:
+                num_extra = len(generated_token_ids) - 1
+                if num_extra > 0:
+                    request.num_computed_tokens += num_extra
 
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:
