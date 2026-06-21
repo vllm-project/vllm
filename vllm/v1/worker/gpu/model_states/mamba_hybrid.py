@@ -13,7 +13,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.attn_utils import build_attn_metadata_from_input_batch
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
@@ -81,18 +81,8 @@ class MambaHybridModelState(DefaultModelState):
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
-            num_tokens = input_batch.num_tokens_after_padding
         else:
             num_reqs = input_batch.num_reqs
-            num_tokens = input_batch.num_tokens
-        query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
-        seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
-        if for_capture:
-            # Capture with worst-case max_seq_len so the graph is valid at any replay.
-            max_seq_len = self.max_model_len
-        else:
-            max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
 
         is_prefilling = torch.zeros(num_reqs, dtype=torch.bool, device="cpu")
         is_prefilling[: input_batch.num_reqs] = torch.from_numpy(
@@ -125,15 +115,11 @@ class MambaHybridModelState(DefaultModelState):
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
-        return build_attn_metadata(
+        return build_attn_metadata_from_input_batch(
             attn_groups=attn_groups,
-            num_reqs=num_reqs,
-            num_tokens=num_tokens,
-            query_start_loc_gpu=input_batch.query_start_loc,
-            query_start_loc_cpu=query_start_loc_cpu,
-            max_query_len=max_query_len,
-            seq_lens=input_batch.seq_lens,
-            max_seq_len=max_seq_len,
+            input_batch=input_batch,
+            cudagraph_mode=cudagraph_mode,
+            max_model_len=self.max_model_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,

@@ -12,6 +12,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
@@ -27,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
     get_attn_backend_cache_dtype_str,
 )
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
 from vllm.v1.worker.utils import (
     AttentionGroup,
@@ -530,3 +532,55 @@ def build_attn_metadata(
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata
+
+
+def build_attn_metadata_from_input_batch(
+    attn_groups: list[list[AttentionGroup]],
+    input_batch: InputBatch,
+    cudagraph_mode: CUDAGraphMode,
+    max_model_len: int,
+    block_tables: Sequence[torch.Tensor],
+    slot_mappings: torch.Tensor,
+    kv_cache_config: KVCacheConfig,
+    dcp_local_seq_lens: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
+    model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
+    for_cudagraph_capture: bool = False,
+    causal: bool | torch.Tensor = True,
+    max_seq_len: int | None = None,
+) -> dict[str, Any]:
+    if cudagraph_mode == CUDAGraphMode.FULL:
+        num_reqs = input_batch.num_reqs_after_padding
+        num_tokens = input_batch.num_tokens_after_padding
+    else:
+        num_reqs = input_batch.num_reqs
+        num_tokens = input_batch.num_tokens
+
+    seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
+    if max_seq_len is None:
+        if for_cudagraph_capture:
+            # Capture with worst-case max_seq_len so the graph is valid at
+            # replay time.
+            max_seq_len = max_model_len
+        else:
+            max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max().item())
+
+    return build_attn_metadata(
+        attn_groups=attn_groups,
+        num_reqs=num_reqs,
+        num_tokens=num_tokens,
+        query_start_loc_gpu=input_batch.query_start_loc,
+        query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
+        max_query_len=input_batch.num_scheduled_tokens.max().item(),
+        seq_lens=input_batch.seq_lens,
+        max_seq_len=max_seq_len,
+        block_tables=block_tables,
+        slot_mappings=slot_mappings,
+        kv_cache_config=kv_cache_config,
+        seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+        dcp_local_seq_lens=dcp_local_seq_lens,
+        positions=positions,
+        model_specific_attn_metadata=model_specific_attn_metadata,
+        for_cudagraph_capture=for_cudagraph_capture,
+        causal=causal,
+    )
