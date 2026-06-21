@@ -677,32 +677,32 @@ def resolve_kv_cache_block_sizes(
 
 
 class RequestBlockHasher:
-    """Compute request hashes at full-block and partial-cache boundaries."""
+    """Compute request block hashes at one or more block sizes."""
 
     def __init__(
         self,
-        partial_cache_unit: int,
+        block_size: int,
         caching_hash_fn: Callable[[Any], bytes],
     ) -> None:
-        self.partial_cache_unit = partial_cache_unit
+        self.block_size = block_size
         self.caching_hash_fn = caching_hash_fn
 
     def __call__(self, request: Request) -> list[BlockHash]:
-        start_token_idx = len(request.block_hashes) * self.partial_cache_unit
+        start_token_idx = len(request.block_hashes) * self.block_size
         prev_block_hash_value = (
             request.block_hashes[-1] if request.block_hashes else None
         )
         curr_mm_idx = -1 if start_token_idx > 0 else 0
         return self._compute_block_hashes(
             request=request,
-            block_size=self.partial_cache_unit,
+            block_size=self.block_size,
             start_token_idx=start_token_idx,
             prev_block_hash_value=prev_block_hash_value,
             curr_mm_idx=curr_mm_idx,
         )
 
     def get_block_hashes(self, request: Request, block_size: int) -> list[BlockHash]:
-        if block_size == self.partial_cache_unit:
+        if block_size == self.block_size:
             return request.block_hashes
         return self._compute_block_hashes(
             request=request,
@@ -715,11 +715,11 @@ class RequestBlockHasher:
     def get_partial_block_hash(
         self, request: Request, block_size: int, num_tokens: int
     ) -> BlockHash:
-        assert num_tokens % self.partial_cache_unit == 0
-        if block_size == self.partial_cache_unit:
-            return request.block_hashes[num_tokens // self.partial_cache_unit - 1]
+        assert num_tokens % self.block_size == 0
+        if block_size == self.block_size:
+            return request.block_hashes[num_tokens // self.block_size - 1]
 
-        assert block_size % self.partial_cache_unit == 0
+        assert block_size % self.block_size == 0
         full_block_hashes = self.get_block_hashes(request, block_size)
         if num_tokens % block_size == 0:
             full_block_idx = num_tokens // block_size - 1
@@ -782,13 +782,13 @@ class RequestBlockHasher:
 
 
 def get_request_block_hasher(
-    partial_cache_unit: int,
+    block_size: int,
     caching_hash_fn: Callable[[Any], bytes],
 ) -> Callable[[Request], list[BlockHash]]:
     """
     Returns a function which computes the list of un-computed block hashes
     of a request."""
-    return RequestBlockHasher(partial_cache_unit, caching_hash_fn)
+    return RequestBlockHasher(block_size, caching_hash_fn)
 
 
 def _check_enough_kv_cache_memory(

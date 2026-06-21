@@ -30,7 +30,7 @@ def _auto_init_hash_fn():
 def make_request(
     request_id: str,
     prompt_token_ids: list[int],
-    partial_cache_unit: int,
+    block_size: int,
     hash_fn: Callable,
 ) -> Request:
     sampling_params = SamplingParams(max_tokens=17)
@@ -40,7 +40,7 @@ def make_request(
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
         pooling_params=None,
-        block_hasher=get_request_block_hasher(partial_cache_unit, hash_fn),
+        block_hasher=get_request_block_hasher(block_size, hash_fn),
     )
 
 
@@ -49,15 +49,14 @@ def cache_full_block_and_tail_alias(
     *,
     enable_kv_cache_events: bool = False,
 ) -> tuple[BlockPool, Request, list[KVCacheBlock], BlockHash]:
-    partial_cache_unit = 2
+    hash_block_size = 2
     block_size = 6
     kv_cache_group_id = 0
-    req = make_request("0", token_ids, partial_cache_unit, sha256)
+    req = make_request("0", token_ids, hash_block_size, sha256)
     pool = BlockPool(
         num_gpu_blocks=3,
         enable_caching=True,
-        hash_block_size=block_size,
-        partial_cache_unit=partial_cache_unit,
+        hash_block_size=hash_block_size,
         enable_kv_cache_events=enable_kv_cache_events,
     )
     blocks = pool.get_new_blocks(2)
@@ -82,48 +81,44 @@ def cache_full_block_and_tail_alias(
 
 
 def test_partial_tail_hash_uses_previous_full_block_parent():
-    partial_cache_unit = 2
+    hash_block_size = 2
     block_size = 6
     token_ids = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
-    req = make_request("0", token_ids, partial_cache_unit, sha256)
+    req = make_request("0", token_ids, hash_block_size, sha256)
 
     full_hashes = req.block_hashes.get_block_hashes(block_size)
     tail_hash = req.block_hashes.get_partial_block_hash(block_size, 10)
     assert tail_hash == hash_block_tokens(
         sha256,
         full_hashes[0],
-        token_ids[block_size : block_size + 2 * partial_cache_unit],
+        token_ids[block_size : block_size + 2 * hash_block_size],
     )
     shorter_tail_hash = hash_block_tokens(
         sha256,
         full_hashes[0],
-        token_ids[block_size : block_size + partial_cache_unit],
+        token_ids[block_size : block_size + hash_block_size],
     )
     assert tail_hash != hash_block_tokens(
         sha256,
         shorter_tail_hash,
-        token_ids[
-            block_size + partial_cache_unit : block_size + 2 * partial_cache_unit
-        ],
+        token_ids[block_size + hash_block_size : block_size + 2 * hash_block_size],
     )
 
 
 def test_cache_block_alias_kv_cache_events():
-    partial_cache_unit = 4
-    block_size = partial_cache_unit
+    hash_block_size = 4
     kv_cache_group_id = 2
 
     pool = BlockPool(
         num_gpu_blocks=2,
         enable_caching=True,
-        hash_block_size=block_size,
-        partial_cache_unit=partial_cache_unit,
+        hash_block_size=hash_block_size,
         enable_kv_cache_events=True,
     )
     req = make_request(
         "req_alias_events",
-        prompt_token_ids=list(range(partial_cache_unit * 2)),
-        partial_cache_unit=partial_cache_unit,
+        prompt_token_ids=list(range(hash_block_size * 2)),
+        block_size=hash_block_size,
         hash_fn=sha256,
     )
 
@@ -131,7 +126,7 @@ def test_cache_block_alias_kv_cache_events():
     alias_hash = pool.cache_block_alias(
         request=req,
         block=block,
-        num_tokens=partial_cache_unit * 2,
+        num_tokens=hash_block_size * 2,
         kv_cache_group_id=kv_cache_group_id,
     )
 
@@ -146,14 +141,14 @@ def test_cache_block_alias_kv_cache_events():
     assert stored_event.parent_block_hash == kv_cache_utils.maybe_convert_block_hash(
         req.block_hashes[0]
     )
-    assert stored_event.token_ids == req.all_token_ids[partial_cache_unit:]
+    assert stored_event.token_ids == req.all_token_ids[hash_block_size:]
     assert stored_event.block_size == 4
     assert stored_event.group_idx == kv_cache_group_id
 
     duplicate_alias_hash = pool.cache_block_alias(
         request=req,
         block=block,
-        num_tokens=partial_cache_unit * 2,
+        num_tokens=hash_block_size * 2,
         kv_cache_group_id=kv_cache_group_id,
     )
     assert duplicate_alias_hash == alias_hash
@@ -169,53 +164,15 @@ def test_cache_block_alias_kv_cache_events():
     assert removed_event.group_idx == kv_cache_group_id
 
 
-def test_cache_block_alias_disabled_without_partial_cache_unit():
-    partial_cache_unit = 4
-    block_size = partial_cache_unit
-    req = make_request(
-        "req_alias_disabled",
-        prompt_token_ids=list(range(partial_cache_unit * 2)),
-        partial_cache_unit=partial_cache_unit,
-        hash_fn=sha256,
-    )
-    pool = BlockPool(
-        num_gpu_blocks=2,
-        enable_caching=True,
-        hash_block_size=block_size,
-    )
-    block = pool.get_new_blocks(1)[0]
-
-    alias_hash = pool.cache_block_alias(
-        request=req,
-        block=block,
-        num_tokens=partial_cache_unit * 2,
-        kv_cache_group_id=0,
-    )
-
-    assert alias_hash is None
-    assert pool.take_events() == []
-
-
-def test_partial_cache_unit_must_not_exceed_hash_block_size():
-    with pytest.raises(AssertionError):
-        BlockPool(
-            num_gpu_blocks=2,
-            enable_caching=True,
-            hash_block_size=4,
-            partial_cache_unit=8,
-        )
-
-
 def test_partial_block_replacement_emits_remove_then_store_events():
-    partial_cache_unit = 2
+    hash_block_size = 2
     block_size = 6
     kv_cache_group_id = 0
-    req = make_request("0", [0, 0, 1, 1, 2, 2, 3, 3], partial_cache_unit, sha256)
+    req = make_request("0", [0, 0, 1, 1, 2, 2, 3, 3], hash_block_size, sha256)
     pool = BlockPool(
         num_gpu_blocks=3,
         enable_caching=True,
-        hash_block_size=block_size,
-        partial_cache_unit=partial_cache_unit,
+        hash_block_size=hash_block_size,
         enable_kv_cache_events=True,
     )
     blocks = pool.get_new_blocks(2)
@@ -269,16 +226,15 @@ def test_partial_block_replacement_emits_remove_then_store_events():
 
 
 def test_later_request_hits_cached_partial_tail_alias():
-    partial_cache_unit = 2
+    hash_block_size = 2
     block_size = 6
     kv_cache_group_id = 0
     cached_token_ids = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
-    req = make_request("0", cached_token_ids, partial_cache_unit, sha256)
+    req = make_request("0", cached_token_ids, hash_block_size, sha256)
     pool = BlockPool(
         num_gpu_blocks=3,
         enable_caching=True,
-        hash_block_size=block_size,
-        partial_cache_unit=partial_cache_unit,
+        hash_block_size=hash_block_size,
     )
     blocks = pool.get_new_blocks(2)
 
@@ -299,28 +255,27 @@ def test_later_request_hits_cached_partial_tail_alias():
         block_size=block_size,
     )
 
-    replay = make_request("1", cached_token_ids, partial_cache_unit, sha256)
+    replay = make_request("1", cached_token_ids, hash_block_size, sha256)
     replay_hash_10 = replay.block_hashes.get_partial_block_hash(block_size, 10)
     assert replay_hash_10 == partial_hash_10
     assert pool.get_cached_block(replay_hash_10, [kv_cache_group_id]) == [blocks[1]]
 
-    extended = make_request("2", cached_token_ids + [10], partial_cache_unit, sha256)
+    extended = make_request("2", cached_token_ids + [10], hash_block_size, sha256)
     extended_hash_10 = extended.block_hashes.get_partial_block_hash(block_size, 10)
     assert extended_hash_10 == partial_hash_10
     assert pool.get_cached_block(extended_hash_10, [kv_cache_group_id]) == [blocks[1]]
 
 
 def test_cache_block_alias_only_computes_requested_partial_hash(monkeypatch):
-    partial_cache_unit = 2
+    hash_block_size = 2
     block_size = 6
     kv_cache_group_id = 0
     token_ids = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
-    req = make_request("0", token_ids, partial_cache_unit, sha256)
+    req = make_request("0", token_ids, hash_block_size, sha256)
     pool = BlockPool(
         num_gpu_blocks=3,
         enable_caching=True,
-        hash_block_size=block_size,
-        partial_cache_unit=partial_cache_unit,
+        hash_block_size=hash_block_size,
     )
     blocks = pool.get_new_blocks(2)
 
@@ -392,16 +347,15 @@ def test_evict_cached_block_removes_full_hash_and_partial_alias():
 
 
 def test_partial_block_promotes_to_direct_full_block_hash():
-    partial_cache_unit = 2
+    hash_block_size = 2
     block_size = 6
     kv_cache_group_id = 0
     token_ids = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
-    req = make_request("0", token_ids, partial_cache_unit, sha256)
+    req = make_request("0", token_ids, hash_block_size, sha256)
     pool = BlockPool(
         num_gpu_blocks=3,
         enable_caching=True,
-        hash_block_size=block_size,
-        partial_cache_unit=partial_cache_unit,
+        hash_block_size=hash_block_size,
     )
     blocks = pool.get_new_blocks(2)
 

@@ -25,7 +25,7 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
     maybe_convert_block_hash,
 )
-from vllm.v1.request import Request, RequestBlockHashes
+from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
@@ -143,9 +143,6 @@ class BlockPool:
             actual block size can be a multiple of hash_block_size.
         enable_kv_cache_events: Whether to enable kv cache events.
         metrics_collector: Optional metrics collector for tracking block residency.
-        partial_cache_unit: Token interval at which partial prefix-cache aliases
-            may be registered or probed inside a cache block. ``None`` disables
-            partial aliases.
     """
 
     def __init__(
@@ -155,14 +152,11 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
-        partial_cache_unit: int | None = None,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
-        assert partial_cache_unit is None or 0 < partial_cache_unit <= hash_block_size
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
-        self.partial_cache_unit = partial_cache_unit
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
@@ -252,11 +246,9 @@ class BlockPool:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert block_mask is None or len(block_mask) == len(new_full_blocks)
-        block_hashes: BlockHashList
-        if isinstance(request.block_hashes, RequestBlockHashes):
-            block_hashes = request.block_hashes.get_block_hashes(block_size)
-        elif block_size == self.hash_block_size:
-            block_hashes = request.block_hashes
+        if block_size == self.hash_block_size:
+            # Common case.
+            block_hashes: BlockHashList = request.block_hashes
         else:
             # block_size is a multiple of hash_block_size. This happens when
             # different KV cache groups have different block sizes.
@@ -370,11 +362,11 @@ class BlockPool:
             request: Request whose token IDs and block hashes define the alias.
             block: Existing cache block to make reachable by the alias.
             num_tokens: Prefix length represented by the alias. It must be a
-                positive multiple of ``self.partial_cache_unit`` and cannot exceed
+                positive multiple of ``self.hash_block_size`` and cannot exceed
                 the request's computed block hashes.
             kv_cache_group_id: KV cache group that owns the alias.
             block_size: Cache block size for the owning group. When larger than
-                ``self.partial_cache_unit``, the alias hash is computed from the
+                ``self.hash_block_size``, the alias hash is computed from the
                 previous full-block hash plus the current block's partial tail.
 
         Returns:
@@ -387,9 +379,8 @@ class BlockPool:
         block_hash = self.get_block_alias_hash(request, num_tokens, block_size)
         if block_hash is None:
             return None
-        assert self.partial_cache_unit is not None
-        block_size = block_size or self.partial_cache_unit
-        num_partial_units = num_tokens // self.partial_cache_unit
+        block_size = block_size or self.hash_block_size
+        num_hash_blocks = num_tokens // self.hash_block_size
         block_hash_with_group_id = make_block_hash_with_group_id(
             block_hash, kv_cache_group_id
         )
@@ -403,14 +394,14 @@ class BlockPool:
             not already_cached
             and block.block_hash is not None
             and block.block_hash_num_tokens is not None
-            and block.block_hash_num_tokens < num_tokens
+            and block.block_hash_num_tokens < num_hash_blocks * self.hash_block_size
         ):
             removed_hashes = self._remove_cached_block_hashes(block)
             self._emit_block_removed_events(removed_hashes)
         self._insert_block_hash(
             block_hash_with_group_id,
             block,
-            num_tokens=num_partial_units * self.partial_cache_unit,
+            num_tokens=num_hash_blocks * self.hash_block_size,
         )
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self.get_block_alias_parent_hash_and_start(
@@ -451,17 +442,15 @@ class BlockPool:
         num_tokens: int,
         block_size: int | None = None,
     ) -> BlockHash | None:
-        if self.partial_cache_unit is None:
+        if num_tokens % self.hash_block_size != 0:
             return None
-        if num_tokens % self.partial_cache_unit != 0:
-            return None
-        num_partial_units = num_tokens // self.partial_cache_unit
-        if num_partial_units == 0 or num_partial_units > len(request.block_hashes):
+        num_hash_blocks = num_tokens // self.hash_block_size
+        if num_hash_blocks == 0 or num_hash_blocks > len(request.block_hashes):
             return None
 
-        block_size = block_size or self.partial_cache_unit
-        if block_size == self.partial_cache_unit:
-            return request.block_hashes[num_partial_units - 1]
+        block_size = block_size or self.hash_block_size
+        if block_size == self.hash_block_size:
+            return request.block_hashes[num_hash_blocks - 1]
 
         return request.block_hashes.get_partial_block_hash(block_size, num_tokens)
 
@@ -471,15 +460,14 @@ class BlockPool:
         num_tokens: int,
         block_size: int,
     ) -> tuple[BlockHash | None, int]:
-        assert self.partial_cache_unit is not None
-        if block_size == self.partial_cache_unit:
-            num_partial_units = num_tokens // self.partial_cache_unit
+        if block_size == self.hash_block_size:
+            num_hash_blocks = num_tokens // self.hash_block_size
             parent_hash = (
-                request.block_hashes[num_partial_units - 2]
-                if num_partial_units > 1
+                request.block_hashes[num_hash_blocks - 2]
+                if num_hash_blocks > 1
                 else None
             )
-            return parent_hash, (num_partial_units - 1) * self.partial_cache_unit
+            return parent_hash, (num_hash_blocks - 1) * self.hash_block_size
 
         full_block_idx = num_tokens // block_size
         block_start = full_block_idx * block_size
