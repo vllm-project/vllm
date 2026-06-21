@@ -68,15 +68,19 @@ class EncoderRunner:
         query_start_loc: np.ndarray,
         prefill_lens: np.ndarray,
         computed_prefill_lens: np.ndarray,
+        draft_lookahead: int = 0,
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        is_prefilling = (computed_prefill_lens < prefill_lens).tolist()
-        all_decode = not any(is_prefilling)
-        if all_decode:
+        if draft_lookahead:
+            computed_prefill_lens = computed_prefill_lens + draft_lookahead
+
+        is_prefilling_np = computed_prefill_lens < prefill_lens
+        if not is_prefilling_np.any():
             # All decode requests, so no need to gather any embeddings.
             return [], torch.zeros(
                 total_num_scheduled_tokens, dtype=torch.bool, device=self.device
             )
 
+        is_prefilling = is_prefilling_np.tolist()
         query_start = computed_prefill_lens.tolist()
         query_end = (computed_prefill_lens + num_scheduled_tokens).tolist()
 
@@ -89,11 +93,14 @@ class EncoderRunner:
                 # OPTIMIZATION: Skip decode requests.
                 continue
 
+            cur_query_start = query_start[i]
+            cur_query_end = query_end[i]
+            # Select features within the unshifted processed boundary only.
+            cur_feature_window_end = cur_query_end - draft_lookahead
+
             mm_features = self.encoder_cache.mm_features[req_id]
             lo, hi = get_mm_features_in_window(
-                mm_features,
-                start=query_start[i],
-                end=query_end[i],
+                mm_features, start=cur_query_start, end=cur_feature_window_end
             )
             for idx in range(lo, hi):
                 mm_feature = mm_features[idx]
@@ -101,8 +108,8 @@ class EncoderRunner:
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
 
-                start_idx = max(query_start[i] - start_pos, 0)
-                end_idx = min(query_end[i] - start_pos, num_encoder_tokens)
+                start_idx = max(cur_query_start - start_pos, 0)
+                end_idx = min(cur_query_end - start_pos, num_encoder_tokens)
                 assert start_idx < end_idx
                 curr_embeds_start, curr_embeds_end = (
                     pos_info.get_embeds_indices_in_range(start_idx, end_idx)
@@ -122,7 +129,7 @@ class EncoderRunner:
                 else:
                     mm_embeds_item = encoder_output[start_idx:end_idx]
 
-                req_start_pos = query_start_loc[i] + start_pos - query_start[i]
+                req_start_pos = query_start_loc[i] + start_pos - cur_query_start
                 is_mm_embed[req_start_pos + start_idx : req_start_pos + end_idx] |= (
                     True if is_embed is None else is_embed
                 )

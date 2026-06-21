@@ -3117,10 +3117,10 @@ class GPUModelRunner(
             num_computed_tokens = req_state.num_computed_tokens + shift_computed_tokens
 
             mm_features = req_state.mm_features
+            # Select features within the unshifted processed boundary only.
+            feature_window_end = req_state.num_computed_tokens + num_scheduled_tokens
             lo, hi = get_mm_features_in_window(
-                mm_features,
-                start=num_computed_tokens,
-                end=num_computed_tokens + num_scheduled_tokens,
+                mm_features, start=num_computed_tokens, end=feature_window_end
             )
             for i in range(lo, hi):
                 mm_feature = mm_features[i]
