@@ -5452,3 +5452,61 @@ def test_update_from_output_structured_output_mixed_path_parity():
         [10, 11],
         setup_requests_fn=_mark_structured,
     )
+
+
+def test_update_from_output_skips_unscheduled_requests_in_stale_output():
+    """Stale model-runner req_ids must not crash update_from_output."""
+    scheduler = create_scheduler(max_num_seqs=2, max_num_batched_tokens=8192)
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=32,
+        max_tokens=64,
+        ignore_eos=True,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    prefill_output = scheduler.schedule()
+    scheduler.update_from_output(
+        prefill_output,
+        _make_decode_model_runner_output(prefill_output, token_id=0),
+    )
+    for request in requests:
+        request.num_computed_tokens = len(request.prompt_token_ids)
+
+    scheduled_req = requests[0]
+    waiting_req = requests[1]
+    sched_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={scheduled_req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    scheduler.running = [scheduled_req]
+    scheduled_req.status = RequestStatus.RUNNING
+    waiting_req.status = RequestStatus.WAITING
+
+    stale_mro = ModelRunnerOutput(
+        req_ids=[scheduled_req.request_id, waiting_req.request_id],
+        req_id_to_index={
+            scheduled_req.request_id: 0,
+            waiting_req.request_id: 1,
+        },
+        sampled_token_ids=[[42], [99]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=None,
+    )
+
+    engine_core_outputs = scheduler.update_from_output(sched_output, stale_mro)
+
+    assert scheduled_req._output_token_ids == [0, 42]
+    assert waiting_req._output_token_ids == [0]
+    assert len(engine_core_outputs[0].outputs) == 1
+    assert engine_core_outputs[0].outputs[0].request_id == scheduled_req.request_id
+    assert engine_core_outputs[0].outputs[0].new_token_ids == [42]
