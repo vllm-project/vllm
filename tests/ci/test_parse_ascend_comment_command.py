@@ -101,8 +101,7 @@ def test_parse_rejects_resource_limits_above_preview_bounds():
             assert expected in str(exc)
         else:
             raise AssertionError(
-                "expected oversized preview parameter to be rejected: "
-                f"{body}"
+                f"expected oversized preview parameter to be rejected: {body}"
             )
 
 
@@ -454,12 +453,14 @@ def test_cli_writes_deny_reason_for_fork_pr_comment(tmp_path):
         encoding="utf-8",
     )
     pr_path.write_text(
-        json.dumps({
-            "number": 42,
-            "user": {"login": "alice"},
-            "head": {"sha": "head-sha", "repo": {"full_name": "external/r"}},
-            "base": {"sha": "base-sha", "repo": {"full_name": "o/r"}},
-        }),
+        json.dumps(
+            {
+                "number": 42,
+                "user": {"login": "alice"},
+                "head": {"sha": "head-sha", "repo": {"full_name": "external/r"}},
+                "base": {"sha": "base-sha", "repo": {"full_name": "o/r"}},
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -523,7 +524,6 @@ def test_write_env_file_uses_github_multiline_format(tmp_path):
     content = env_file.read_text(encoding="utf-8")
     assert "ASCEND_COMMENT_COMMAND<<__ASCEND_COMMENT_COMMAND_EOF__\n1\n" in content
     assert (
-        "INPUT_BENCHMARK_SCENARIO<<__INPUT_BENCHMARK_SCENARIO_EOF__\n"
-        "random-online\n"
+        "INPUT_BENCHMARK_SCENARIO<<__INPUT_BENCHMARK_SCENARIO_EOF__\nrandom-online\n"
     ) in content
     assert "BENCH_NUM_PROMPTS<<__BENCH_NUM_PROMPTS_EOF__\n16\n" in content

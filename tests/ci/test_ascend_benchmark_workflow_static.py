@@ -31,7 +31,7 @@ def test_issue_comment_non_pr_commands_receive_denial_feedback():
     text = workflow_text()
 
     assert "if: ${{ github.event.comment.body != '' }}" in text
-    assert "--event-payload \"$GITHUB_EVENT_PATH\"" in text
+    assert '--event-payload "$GITHUB_EVENT_PATH"' in text
     assert "needs.issue-comment-command.outputs.deny_reason != ''" in text
     assert "persist-credentials: false" in text
     assert "const safeReason = reason.replace" in text
@@ -50,7 +50,7 @@ def test_fork_pr_security_note_is_blocking():
 
 def test_main_baseline_store_has_spec_file_and_benchmark_repo_checkout():
     text = workflow_text()
-    store_job = text[text.index("  store-main-perfgate-baseline:"):]
+    store_job = text[text.index("  store-main-perfgate-baseline:") :]
 
     assert "TARGET_REPO_SHA: ${{ github.sha }}" in store_job
     assert (
@@ -64,8 +64,7 @@ def test_main_baseline_store_has_spec_file_and_benchmark_repo_checkout():
     ) in store_job
     assert "PERFGATE_SPEC_FILE:" in store_job
     assert (
-        "BENCHMARK_REPO_URL: "
-        "https://github.com/vLLM-HUST/vllm-hust-benchmark.git"
+        "BENCHMARK_REPO_URL: https://github.com/vLLM-HUST/vllm-hust-benchmark.git"
     ) in store_job
     assert "BENCHMARK_REPO_REF:" in store_job
     assert "Checkout benchmark repo" in store_job
@@ -114,8 +113,7 @@ def test_benchmark_run_id_and_summary_use_target_repo_sha():
         "os.environ['GITHUB_SHA']"
     ) in text
     assert (
-        "const targetRepoSha = process.env.TARGET_REPO_SHA || "
-        "process.env.GITHUB_SHA;"
+        "const targetRepoSha = process.env.TARGET_REPO_SHA || process.env.GITHUB_SHA;"
     ) in text
     assert (
         "ci-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-"
@@ -129,8 +127,7 @@ def test_issue_comment_path_keeps_publish_secrets_disabled():
 
     assert "github.event_name != 'issue_comment') && secrets.HF_TOKEN" in text
     assert (
-        "github.event_name != 'issue_comment') && "
-        "secrets.VLLM_HUST_BENCHMARK_GH_TOKEN"
+        "github.event_name != 'issue_comment') && secrets.VLLM_HUST_BENCHMARK_GH_TOKEN"
     ) in text
     assert (
         "github.event_name != 'issue_comment') && "
@@ -150,8 +147,7 @@ def test_issue_comment_denial_feedback_is_posted_without_self_hosted_runner():
     text = workflow_text()
 
     assert (
-        "deny_reason: ${{ steps.parse-command.outputs."
-        "ASCEND_COMMENT_DENY_REASON }}"
+        "deny_reason: ${{ steps.parse-command.outputs.ASCEND_COMMENT_DENY_REASON }}"
     ) in text
     assert "issue-comment-denied:" in text
     assert "needs: [issue-comment-command]" in text
@@ -165,8 +161,7 @@ def test_issue_comment_help_is_posted_without_self_hosted_runner():
     text = workflow_text()
 
     assert (
-        "help_requested: ${{ steps.parse-command.outputs."
-        "ASCEND_COMMENT_HELP }}"
+        "help_requested: ${{ steps.parse-command.outputs.ASCEND_COMMENT_HELP }}"
     ) in text
     assert "issue-comment-help:" in text
     assert "needs.issue-comment-command.outputs.help_requested == '1'" in text

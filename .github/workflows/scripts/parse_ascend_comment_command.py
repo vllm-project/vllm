@@ -141,11 +141,7 @@ def _parse_request_rate(value: str) -> str:
             "--request-rate must be 'inf' or between 0 and "
             f"{MAX_COMMENT_REQUEST_RATE:g}"
         )
-    return (
-        str(parsed).rstrip("0").rstrip(".")
-        if "." in str(parsed)
-        else str(parsed)
-    )
+    return str(parsed).rstrip("0").rstrip(".") if "." in str(parsed) else str(parsed)
 
 
 def _validate_sharegpt_path(path: str, name: str) -> str:
@@ -233,8 +229,7 @@ def parse_comment_command(comment_body: str) -> AscendCommentCommand | None:
     if scenario is None:
         supported = ", ".join(SUPPORTED_SCENARIOS)
         raise ValueError(
-            f"unsupported benchmark scenario {args.scenario!r}; "
-            f"supported: {supported}"
+            f"unsupported benchmark scenario {args.scenario!r}; supported: {supported}"
         )
 
     missing = []
@@ -386,9 +381,7 @@ def main() -> int:
     try:
         command = parse_comment_command(args.comment_body)
         values = (
-            command.to_env()
-            if command is not None
-            else {"ASCEND_COMMENT_COMMAND": "0"}
+            command.to_env() if command is not None else {"ASCEND_COMMENT_COMMAND": "0"}
         )
         if isinstance(command, AscendHelpCommand):
             write_env_file(args.github_env, values)
