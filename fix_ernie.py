@@ -1,11 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 filepath = "vllm/model_executor/models/ernie45_vl_moe.py"
-with open(filepath, "r") as f:
+with open(filepath) as f:
     content = f.read()
 
 # 1. Add AutoWeightsLoader
 content = content.replace(
     "from .utils import (\n    PPMissingLayer,",
-    "from .utils import (\n    AutoWeightsLoader,\n    PPMissingLayer,"
+    "from .utils import (\n    AutoWeightsLoader,\n    PPMissingLayer,",
 )
 
 # 2. Add load_weights to Ernie4_5_VLMoeModel

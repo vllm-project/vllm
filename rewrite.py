@@ -1,6 +1,6 @@
-import re
-
-with open("vllm/model_executor/models/ernie45_vl_moe.py", "r") as f:
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+with open("vllm/model_executor/models/ernie45_vl_moe.py") as f:
     lines = f.readlines()
 
 # 1. Import AutoWeightsLoader
@@ -35,20 +35,26 @@ if start_idx == -1 or end_idx == -1:
     exit(1)
 
 # Extract original load_weights lines
-orig_lw_lines = lines[start_idx:end_idx+1]
+orig_lw_lines = lines[start_idx : end_idx + 1]
 
 # Build new load_weights for Model
 new_model_lw = []
 skip = False
 for line in orig_lw_lines:
-    if "if self.config.tie_word_embeddings and name.endswith(\"lm_head.weight\"):" in line:
+    if (
+        'if self.config.tie_word_embeddings and name.endswith("lm_head.weight"):'
+        in line
+    ):
         skip = True
-    if "if \"mtp\" in name or \"vision_model\" in name or \"resampler_model\" in name:" in line:
+    if (
+        'if "mtp" in name or "vision_model" in name or "resampler_model" in name:'
+        in line
+    ):
         skip = True
-        
+
     if not skip:
         new_model_lw.append(line)
-        
+
     if skip and line.strip() == "continue":
         skip = False
 
@@ -80,11 +86,17 @@ new_forcausal_lw = """    def load_weights(self, weights: Iterable[tuple[str, to
 # Or just build a new list.
 
 # First, replace the ForCausalLM load_weights
-new_lines = lines[:start_idx] + [new_forcausal_lw] + lines[end_idx+1:]
+new_lines = lines[:start_idx] + [new_forcausal_lw] + lines[end_idx + 1 :]
 
 # Next, insert Model load_weights at model_end_idx
 # Note: since model_end_idx < start_idx, the indices won't be messed up by the previous replacement!
-new_lines = new_lines[:model_end_idx] + ["\n"] + new_model_lw + ["\n"] + new_lines[model_end_idx:]
+new_lines = (
+    new_lines[:model_end_idx]
+    + ["\n"]
+    + new_model_lw
+    + ["\n"]
+    + new_lines[model_end_idx:]
+)
 
 with open("vllm/model_executor/models/ernie45_vl_moe.py", "w") as f:
     f.writelines(new_lines)
