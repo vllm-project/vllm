@@ -676,89 +676,42 @@ def resolve_kv_cache_block_sizes(
     return scheduler_block_size, hash_block_size
 
 
-class RequestBlockHasher:
-    """Compute request block hashes at one or more block sizes."""
+def get_request_block_hasher(
+    hash_block_size: int,
+    caching_hash_fn: Callable[[Any], bytes],
+) -> Callable[[Request], list[BlockHash]]:
+    """
+    Returns a function which computes the list of un-computed block hashes
+    of a request.
 
-    def __init__(
-        self,
-        block_size: int,
-        caching_hash_fn: Callable[[Any], bytes],
-    ) -> None:
-        self.block_size = block_size
-        self.caching_hash_fn = caching_hash_fn
+    Hashes are computed at ``hash_block_size`` granularity and chained over the
+    full prefix, so each hash uniquely fingerprints the prefix ending at its
+    boundary. Coarser group block sizes and partial-cache boundaries reuse
+    these hashes directly (see ``BlockHashListWithBlockSize``).
+    """
 
-    def __call__(self, request: Request) -> list[BlockHash]:
-        start_token_idx = len(request.block_hashes) * self.block_size
-        prev_block_hash_value = (
-            request.block_hashes[-1] if request.block_hashes else None
-        )
-        curr_mm_idx = -1 if start_token_idx > 0 else 0
-        return self._compute_block_hashes(
-            request=request,
-            block_size=self.block_size,
-            start_token_idx=start_token_idx,
-            prev_block_hash_value=prev_block_hash_value,
-            curr_mm_idx=curr_mm_idx,
-        )
-
-    def get_block_hashes(self, request: Request, block_size: int) -> list[BlockHash]:
-        if block_size == self.block_size:
-            return request.block_hashes
-        return self._compute_block_hashes(
-            request=request,
-            block_size=block_size,
-            start_token_idx=0,
-            prev_block_hash_value=None,
-            curr_mm_idx=0,
-        )
-
-    def get_partial_block_hash(
-        self, request: Request, block_size: int, num_tokens: int
-    ) -> BlockHash:
-        assert num_tokens % self.block_size == 0
-        if block_size == self.block_size:
-            return request.block_hashes[num_tokens // self.block_size - 1]
-
-        assert block_size % self.block_size == 0
-        full_block_hashes = self.get_block_hashes(request, block_size)
-        if num_tokens % block_size == 0:
-            full_block_idx = num_tokens // block_size - 1
-            return full_block_hashes[full_block_idx]
-
-        full_block_idx = num_tokens // block_size
-        block_start = full_block_idx * block_size
-        parent_block_hash = (
-            full_block_hashes[full_block_idx - 1] if full_block_idx > 0 else None
-        )
-        curr_mm_idx = -1 if block_start > 0 else 0
-        extra_keys, _ = generate_block_hash_extra_keys(
-            request, block_start, num_tokens, curr_mm_idx
-        )
-        return hash_block_tokens(
-            self.caching_hash_fn,
-            parent_block_hash,
-            request.all_token_ids[block_start:num_tokens],
-            extra_keys,
-        )
-
-    def _compute_block_hashes(
-        self,
-        *,
-        request: Request,
-        block_size: int,
-        start_token_idx: int,
-        prev_block_hash_value: BlockHash | None,
-        curr_mm_idx: int,
-    ) -> list[BlockHash]:
+    def request_block_hasher(request: Request) -> list[BlockHash]:
+        start_token_idx = len(request.block_hashes) * hash_block_size
         num_tokens = request.num_tokens
 
-        if start_token_idx + block_size > num_tokens:
+        if start_token_idx + hash_block_size > num_tokens:
             # Early stop when there no new full blocks created.
             return []
 
+        curr_mm_idx = 0
+        if start_token_idx > 0:
+            # Set curr_mm_idx = -1 to indicate the last mm input.
+            # Note that since we reach to this branch only when the block is
+            # completed with generated tokens, we only need to consider the
+            # last mm input.
+            curr_mm_idx = -1
+
+        prev_block_hash_value = (
+            request.block_hashes[-1] if request.block_hashes else None
+        )
         new_block_hashes: list[BlockHash] = []
         while True:
-            end_token_idx = start_token_idx + block_size
+            end_token_idx = start_token_idx + hash_block_size
             if end_token_idx > num_tokens:
                 # We only hash full blocks
                 break
@@ -771,24 +724,16 @@ class RequestBlockHasher:
             # Compute the hash of the current block
             block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
             block_hash = hash_block_tokens(
-                self.caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
+                caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
             )
 
             new_block_hashes.append(block_hash)
-            start_token_idx += block_size
+            start_token_idx += hash_block_size
             prev_block_hash_value = block_hash
 
         return new_block_hashes
 
-
-def get_request_block_hasher(
-    block_size: int,
-    caching_hash_fn: Callable[[Any], bytes],
-) -> Callable[[Request], list[BlockHash]]:
-    """
-    Returns a function which computes the list of un-computed block hashes
-    of a request."""
-    return RequestBlockHasher(block_size, caching_hash_fn)
+    return request_block_hasher
 
 
 def _check_enough_kv_cache_memory(
@@ -2175,11 +2120,14 @@ class BlockHashListWithBlockSize:
 
     Currently, only scaling up by an integer factor is supported (i.e.,
     `target_block_size` is a multiple of `hash_block_size`). Conversion is
-    performed lazily on access for efficiency, by concatenating consecutive
-    hashes at `hash_block_size` to form each hash at `target_block_size`.
+    performed lazily on access for efficiency. Each `hash_block_size` hash is
+    already chained over its entire prefix, so the hash at the last
+    `hash_block_size` boundary of a `target_block_size` block uniquely
+    fingerprints that block's prefix; we use it directly.
 
     Example (`hash_block_size` = 16, `target_block_size` = 32):
-    concatenating two 16-size hashes yields one 32-size hash:
+    the second 16-size hash already covers tokens 0-31, so it is the 32-size
+    hash:
 
     Block hashes with block_size 16:
     | Token Range | 0-15 | 16-31 | 32-47 | 48-63 |
@@ -2189,7 +2137,7 @@ class BlockHashListWithBlockSize:
     Block hashes with block_size 32:
     | Token Range | 0-31 | 32-63 |
     |-------------|------|-------|
-    | Hash        | AB   | CD    |
+    | Hash        | B    | D     |
 
     Args:
         block_hashes: Block hashes to convert, computed at `hash_block_size`.
@@ -2231,9 +2179,9 @@ class BlockHashListWithBlockSize:
             yield self._get_value_at(i)
 
     def _get_value_at(self, idx: int) -> BlockHash:
-        base = idx * self.scale_factor
-        end = base + self.scale_factor
-        return BlockHash(b"".join(self.block_hashes[base:end]))
+        # The last hash_block_size hash within the target block already chains
+        # over the whole prefix, so it is the target block's hash.
+        return self.block_hashes[(idx + 1) * self.scale_factor - 1]
 
 
 BlockHashList = list[BlockHash] | BlockHashListWithBlockSize

@@ -12,6 +12,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    BlockHashListWithBlockSize,
     KVCacheBlock,
     get_request_block_hasher,
     hash_block_tokens,
@@ -30,7 +31,7 @@ def _auto_init_hash_fn():
 def make_request(
     request_id: str,
     prompt_token_ids: list[int],
-    block_size: int,
+    hash_block_size: int,
     hash_fn: Callable,
 ) -> Request:
     sampling_params = SamplingParams(max_tokens=17)
@@ -40,8 +41,14 @@ def make_request(
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
         pooling_params=None,
-        block_hasher=get_request_block_hasher(block_size, hash_fn),
+        block_hasher=get_request_block_hasher(hash_block_size, hash_fn),
     )
+
+
+def boundary_hash(req: Request, hash_block_size: int, num_tokens: int) -> BlockHash:
+    # Every boundary at a hash_block_size multiple is just the fine-grained
+    # chain hash ending there.
+    return req.block_hashes[num_tokens // hash_block_size - 1]
 
 
 def cache_full_block_and_tail_alias(
@@ -69,7 +76,7 @@ def cache_full_block_and_tail_alias(
         block_size=block_size,
         kv_cache_group_id=kv_cache_group_id,
     )
-    partial_hash = req.block_hashes.get_partial_block_hash(block_size, len(token_ids))
+    partial_hash = boundary_hash(req, hash_block_size, len(token_ids))
     assert pool.cache_block_alias(
         request=req,
         block=blocks[1],
@@ -80,29 +87,24 @@ def cache_full_block_and_tail_alias(
     return pool, req, blocks, partial_hash
 
 
-def test_partial_tail_hash_uses_previous_full_block_parent():
+def test_boundary_hashes_reuse_fine_grained_chain():
     hash_block_size = 2
     block_size = 6
     token_ids = [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
     req = make_request("0", token_ids, hash_block_size, sha256)
 
-    full_hashes = req.block_hashes.get_block_hashes(block_size)
-    tail_hash = req.block_hashes.get_partial_block_hash(block_size, 10)
-    assert tail_hash == hash_block_tokens(
-        sha256,
-        full_hashes[0],
-        token_ids[block_size : block_size + 2 * hash_block_size],
+    coarse = BlockHashListWithBlockSize(req.block_hashes, hash_block_size, block_size)
+    # The block_size=6 full-block hash is the fine hash at the 6-token boundary,
+    # not a concatenation of the three fine hashes inside the block.
+    assert coarse[0] == req.block_hashes[6 // hash_block_size - 1]
+    assert coarse[0] != BlockHash(
+        req.block_hashes[0] + req.block_hashes[1] + req.block_hashes[2]
     )
-    shorter_tail_hash = hash_block_tokens(
-        sha256,
-        full_hashes[0],
-        token_ids[block_size : block_size + hash_block_size],
-    )
-    assert tail_hash != hash_block_tokens(
-        sha256,
-        shorter_tail_hash,
-        token_ids[block_size + hash_block_size : block_size + 2 * hash_block_size],
-    )
+    # A partial tail at 10 tokens is the fine hash at the 10-token boundary,
+    # which chains over the entire prefix.
+    tail_hash = boundary_hash(req, hash_block_size, 10)
+    assert tail_hash == req.block_hashes[4]
+    assert tail_hash == hash_block_tokens(sha256, req.block_hashes[3], token_ids[8:10])
 
 
 def test_cache_block_alias_kv_cache_events():
@@ -118,7 +120,7 @@ def test_cache_block_alias_kv_cache_events():
     req = make_request(
         "req_alias_events",
         prompt_token_ids=list(range(hash_block_size * 2)),
-        block_size=hash_block_size,
+        hash_block_size=hash_block_size,
         hash_fn=sha256,
     )
 
@@ -185,7 +187,7 @@ def test_partial_block_replacement_emits_remove_then_store_events():
         block_size=block_size,
         kv_cache_group_id=kv_cache_group_id,
     )
-    partial_hash_8 = req.block_hashes.get_partial_block_hash(block_size, 8)
+    partial_hash_8 = boundary_hash(req, hash_block_size, 8)
     assert pool.cache_block_alias(
         request=req,
         block=blocks[1],
@@ -197,7 +199,7 @@ def test_partial_block_replacement_emits_remove_then_store_events():
     pool.take_events()
 
     req.append_output_token_ids([4, 4])
-    partial_hash_10 = req.block_hashes.get_partial_block_hash(block_size, 10)
+    partial_hash_10 = boundary_hash(req, hash_block_size, 10)
     assert pool.cache_block_alias(
         request=req,
         block=blocks[1],
@@ -246,7 +248,7 @@ def test_later_request_hits_cached_partial_tail_alias():
         block_size=block_size,
         kv_cache_group_id=kv_cache_group_id,
     )
-    partial_hash_10 = req.block_hashes.get_partial_block_hash(block_size, 10)
+    partial_hash_10 = boundary_hash(req, hash_block_size, 10)
     assert pool.cache_block_alias(
         request=req,
         block=blocks[1],
@@ -256,17 +258,17 @@ def test_later_request_hits_cached_partial_tail_alias():
     )
 
     replay = make_request("1", cached_token_ids, hash_block_size, sha256)
-    replay_hash_10 = replay.block_hashes.get_partial_block_hash(block_size, 10)
+    replay_hash_10 = boundary_hash(replay, hash_block_size, 10)
     assert replay_hash_10 == partial_hash_10
     assert pool.get_cached_block(replay_hash_10, [kv_cache_group_id]) == [blocks[1]]
 
     extended = make_request("2", cached_token_ids + [10], hash_block_size, sha256)
-    extended_hash_10 = extended.block_hashes.get_partial_block_hash(block_size, 10)
+    extended_hash_10 = boundary_hash(extended, hash_block_size, 10)
     assert extended_hash_10 == partial_hash_10
     assert pool.get_cached_block(extended_hash_10, [kv_cache_group_id]) == [blocks[1]]
 
 
-def test_cache_block_alias_only_computes_requested_partial_hash(monkeypatch):
+def test_cache_block_alias_uses_fine_grained_boundary_hash():
     hash_block_size = 2
     block_size = 6
     kv_cache_group_id = 0
@@ -288,44 +290,35 @@ def test_cache_block_alias_only_computes_requested_partial_hash(monkeypatch):
         kv_cache_group_id=kv_cache_group_id,
     )
 
-    original_get_partial_block_hash = req._block_hasher.get_partial_block_hash
-    requested_num_tokens: list[int] = []
-
-    def get_requested_partial_hash(
-        request: Request, block_size: int, num_tokens: int
-    ) -> BlockHash:
-        requested_num_tokens.append(num_tokens)
-        return original_get_partial_block_hash(request, block_size, num_tokens)
-
-    monkeypatch.setattr(
-        req._block_hasher,
-        "get_partial_block_hash",
-        get_requested_partial_hash,
-    )
-    assert pool.cache_block_alias(
+    alias_hash = pool.cache_block_alias(
         request=req,
         block=blocks[1],
         num_tokens=10,
         kv_cache_group_id=kv_cache_group_id,
         block_size=block_size,
     )
-    assert requested_num_tokens == [10]
+    # The alias is keyed by the fine-grained hash at the 10-token boundary,
+    # regardless of the owning group's block_size.
+    expected = boundary_hash(req, hash_block_size, 10)
+    assert alias_hash == kv_cache_utils.make_block_hash_with_group_id(
+        expected, kv_cache_group_id
+    )
+    assert pool.get_cached_block(expected, [kv_cache_group_id]) == [blocks[1]]
 
 
 def test_reset_prefix_cache_clears_partial_alias_metadata():
     pool, req, blocks, partial_hash_10 = cache_full_block_and_tail_alias(
         [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
     )
+    full_hash = BlockHashListWithBlockSize(req.block_hashes, 2, 6)[0]
 
-    assert pool.get_cached_block(req.block_hashes.get_block_hashes(6)[0], [0]) == [
-        blocks[0]
-    ]
+    assert pool.get_cached_block(full_hash, [0]) == [blocks[0]]
     assert pool.get_cached_block(partial_hash_10, [0]) == [blocks[1]]
 
     pool.free_blocks(blocks)
     assert pool.reset_prefix_cache()
 
-    assert pool.get_cached_block(req.block_hashes.get_block_hashes(6)[0], [0]) is None
+    assert pool.get_cached_block(full_hash, [0]) is None
     assert pool.get_cached_block(partial_hash_10, [0]) is None
     assert pool.cached_block_hashes_by_block == {}
 
@@ -334,7 +327,7 @@ def test_evict_cached_block_removes_full_hash_and_partial_alias():
     pool, req, blocks, partial_hash_10 = cache_full_block_and_tail_alias(
         [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
     )
-    full_hash = req.block_hashes.get_block_hashes(6)[0]
+    full_hash = BlockHashListWithBlockSize(req.block_hashes, 2, 6)[0]
 
     assert pool.get_cached_block(full_hash, [0]) == [blocks[0]]
     assert pool.get_cached_block(partial_hash_10, [0]) == [blocks[1]]
@@ -367,7 +360,7 @@ def test_partial_block_promotes_to_direct_full_block_hash():
         block_size=block_size,
         kv_cache_group_id=kv_cache_group_id,
     )
-    partial_hash_10 = req.block_hashes.get_partial_block_hash(block_size, 10)
+    partial_hash_10 = boundary_hash(req, hash_block_size, 10)
     assert pool.cache_block_alias(
         request=req,
         block=blocks[1],
@@ -378,16 +371,15 @@ def test_partial_block_promotes_to_direct_full_block_hash():
     assert pool.get_cached_block(partial_hash_10, [kv_cache_group_id]) == [blocks[1]]
 
     req.append_output_token_ids([5, 5])
-    full_hashes = req.block_hashes.get_block_hashes(block_size)
-    promoted_full_hash = full_hashes[1]
-    concat_hash = BlockHash(
-        req.block_hashes[3] + req.block_hashes[4] + req.block_hashes[5]
+    full_hashes = BlockHashListWithBlockSize(
+        req.block_hashes, hash_block_size, block_size
     )
-    assert promoted_full_hash != concat_hash
-    assert promoted_full_hash == hash_block_tokens(
-        sha256,
-        full_hashes[0],
-        req.all_token_ids[block_size : 2 * block_size],
+    promoted_full_hash = full_hashes[1]
+    # The promoted full-block hash is the fine hash at the 12-token boundary,
+    # not a concatenation of the fine hashes inside the block.
+    assert promoted_full_hash == req.block_hashes[12 // hash_block_size - 1]
+    assert promoted_full_hash != BlockHash(
+        req.block_hashes[3] + req.block_hashes[4] + req.block_hashes[5]
     )
 
     pool.cache_full_blocks(

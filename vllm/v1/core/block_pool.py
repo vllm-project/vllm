@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     BlockHashList,
+    BlockHashListWithBlockSize,
     BlockHashWithGroupId,
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
@@ -253,7 +254,9 @@ class BlockPool:
             # block_size is a multiple of hash_block_size. This happens when
             # different KV cache groups have different block sizes.
             assert block_size % self.hash_block_size == 0
-            block_hashes = request.block_hashes.get_block_hashes(block_size)
+            block_hashes = BlockHashListWithBlockSize(
+                request.block_hashes, self.hash_block_size, block_size
+            )
         assert len(block_hashes) >= num_full_blocks
 
         new_block_hashes = block_hashes[num_cached_blocks:]
@@ -376,7 +379,7 @@ class BlockPool:
         if block.is_null:
             return None
 
-        block_hash = self.get_block_alias_hash(request, num_tokens, block_size)
+        block_hash = self.get_block_alias_hash(request, num_tokens)
         if block_hash is None:
             return None
         block_size = block_size or self.hash_block_size
@@ -440,7 +443,6 @@ class BlockPool:
         self,
         request: Request,
         num_tokens: int,
-        block_size: int | None = None,
     ) -> BlockHash | None:
         if num_tokens % self.hash_block_size != 0:
             return None
@@ -448,11 +450,9 @@ class BlockPool:
         if num_hash_blocks == 0 or num_hash_blocks > len(request.block_hashes):
             return None
 
-        block_size = block_size or self.hash_block_size
-        if block_size == self.hash_block_size:
-            return request.block_hashes[num_hash_blocks - 1]
-
-        return request.block_hashes.get_partial_block_hash(block_size, num_tokens)
+        # Each hash_block_size hash chains over its full prefix, so the alias
+        # for any group block size is the hash at that prefix boundary.
+        return request.block_hashes[num_hash_blocks - 1]
 
     def get_block_alias_parent_hash_and_start(
         self,
@@ -474,7 +474,9 @@ class BlockPool:
         if full_block_idx == 0:
             return None, block_start
 
-        full_block_hashes = request.block_hashes.get_block_hashes(block_size)
+        full_block_hashes = BlockHashListWithBlockSize(
+            request.block_hashes, self.hash_block_size, block_size
+        )
         return full_block_hashes[full_block_idx - 1], block_start
 
     def _remove_cached_block_hashes(

@@ -323,7 +323,7 @@ def test_recv_skips_swa_blocks_before_window():
 
 def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     """DSv4-style: hash_block_size=4, group block_size=16 — process_tokens
-    must merge every 4 fine hashes into one chunk hash via
+    derives each chunk hash from the last of its 4 fine hashes via
     BlockHashListWithBlockSize."""
     md = KeyMetadata("m", 0, 0, 0, 0, group_id=3)
     db = ChunkedTokenDatabase(md, block_size=16, hash_block_size=4)
@@ -335,8 +335,8 @@ def test_chunked_token_database_hash_block_size_smaller_than_block_size():
     assert len(out) == 2
     assert out[0][0] == 0 and out[0][1] == 16
     assert out[1][0] == 16 and out[1][1] == 32
-    # Each chunk's hash is the concatenation of 4 fine hashes.
-    expected0 = b"".join(fine_hashes[0:4]).hex()
-    expected1 = b"".join(fine_hashes[4:8]).hex()
+    # Each chunk's hash is the last of its 4 fine hashes (prefix-chained).
+    expected0 = fine_hashes[3].hex()
+    expected1 = fine_hashes[7].hex()
     assert out[0][2].chunk_hash == expected0
     assert out[1][2].chunk_hash == expected1

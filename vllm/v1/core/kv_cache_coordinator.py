@@ -24,7 +24,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     SlidingWindowSpec,
 )
-from vllm.v1.request import Request, RequestBlockHashes
+from vllm.v1.request import Request
 
 
 def _validate_prefix_cache_retention_interval(
@@ -644,8 +644,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
             if kv_cache_spec.block_size == self.hash_block_size:
                 return block_hashes
-            if isinstance(block_hashes, RequestBlockHashes):
-                return block_hashes.get_block_hashes(kv_cache_spec.block_size)
             return BlockHashListWithBlockSize(
                 block_hashes, self.hash_block_size, kv_cache_spec.block_size
             )
@@ -746,8 +744,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
             if kv_cache_spec.block_size == self.hash_block_size:
                 return block_hashes
-            if isinstance(block_hashes, RequestBlockHashes):
-                return block_hashes.get_block_hashes(kv_cache_spec.block_size)
             return BlockHashListWithBlockSize(
                 block_hashes, self.hash_block_size, kv_cache_spec.block_size
             )

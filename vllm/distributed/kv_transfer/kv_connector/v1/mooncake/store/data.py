@@ -138,8 +138,9 @@ class ChunkedTokenDatabase:
         Args:
             token_len: Total number of tokens.
             block_hashes: Block hashes computed at ``hash_block_size`` granularity.
-                When ``block_size > hash_block_size`` consecutive hashes are merged
-                up to the group's ``block_size`` via ``BlockHashListWithBlockSize``.
+                When ``block_size > hash_block_size`` the group's ``block_size``
+                hash is the prefix-chained hash at its last ``hash_block_size``
+                boundary, taken via ``BlockHashListWithBlockSize``.
             mask_num: Number of tokens to skip from the beginning.
         """
         if not block_hashes:

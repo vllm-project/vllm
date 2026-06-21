@@ -1106,9 +1106,9 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     assert full_event.group_idx == 0
     assert full_event.block_size == 32
     assert full_event.token_ids == list(range(32))
-    assert full_event.block_hashes == [
-        maybe_convert_block_hash(BlockHash(b"".join(hs)))
-    ]
+    # The 32-token group chunk reuses the fine hash at its last hash_block_size
+    # boundary (hs[3]), which already chains over the whole chunk's prefix.
+    assert full_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
 
     assert swa_event.group_idx == 1
     assert swa_event.block_size == 8
