@@ -35,6 +35,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     get_role,
     zmq_ctx,
 )
+
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
         MoRIIOConnectorWorker,
@@ -131,7 +132,12 @@ class MoRIIOWriter:
             task: The write task to schedule
         """
         self.ensure_worker_started()
+        if self._is_transfer_terminal(task.transfer_id):
+            return False
+
         with self._write_state_lock:
+            if self._is_transfer_terminal(task.transfer_id):
+                return False
             if task.layer_name in self._scheduled_layers[task.transfer_id]:
                 return False
             self._scheduled_layers[task.transfer_id].add(task.layer_name)
@@ -627,9 +633,7 @@ class MoRIIOWrapper:
         )
         return transfer_status
 
-    def waiting_for_transfer_complete(
-        self, transfer_statuses: list[Any] | None = None
-    ):
+    def waiting_for_transfer_complete(self, transfer_statuses: list[Any] | None = None):
         if transfer_statuses is None:
             with self.lock:
                 transfers_to_wait = self.transfer_status[:]

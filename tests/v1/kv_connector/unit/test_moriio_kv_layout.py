@@ -12,8 +12,8 @@ import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
-    MoRIIOError,
     ROLE,
+    MoRIIOError,
     RemoteAllocInfo,
     WriteTask,
     set_role,
@@ -363,9 +363,7 @@ def test_write_transfer_plan_caches_offsets_per_geometry():
 
     fake_worker = FakeWorker()
     fake_worker.kv_caches = kv_caches
-    fake_worker.layer_name_to_local_kv_cache_metadata = {
-        name: [] for name in kv_caches
-    }
+    fake_worker.layer_name_to_local_kv_cache_metadata = {name: [] for name in kv_caches}
     writer = MoRIIOWriter.__new__(MoRIIOWriter)
     writer._worker_ref = lambda: fake_worker
     request_info = RemoteAllocInfo(block_ids=[4, 5])
@@ -411,10 +409,9 @@ def test_write_transfer_plan_caches_offsets_per_geometry():
 
 def test_write_scheduler_deduplicates_layers_and_seals_expected_count():
     request_info = RemoteAllocInfo(block_ids=[4, 5])
-    fake_wrapper = SimpleNamespace(
-        done_remote_allocate_req_dict={"xfer": request_info}
-    )
-    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=fake_wrapper))
+    wrapper = _wrapper_for_messages()
+    wrapper.done_remote_allocate_req_dict["xfer"] = request_info
+    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=wrapper))
 
     assert writer.schedule_write(_write_task("dense0"))
     assert not writer.schedule_write(_write_task("dense0"))
@@ -448,9 +445,7 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
         def _mark_transfer_terminal_locked(self, transfer_id):
             self._terminal_transfer_ids[transfer_id] = None
 
-        def send_notify(
-            self, transfer_id, remote_ip, remote_port, message_type=None
-        ):
+        def send_notify(self, transfer_id, remote_ip, remote_port, message_type=None):
             self.notifications.append(
                 (transfer_id, remote_ip, remote_port, message_type)
             )
@@ -511,9 +506,7 @@ def test_moriio_wrapper_waits_scoped_statuses_without_global_drain():
 
 def test_write_failure_marks_terminal_and_clears_scheduled_state():
     wrapper = _wrapper_for_messages()
-    wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(
-        block_ids=[4, 5]
-    )
+    wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(block_ids=[4, 5])
     writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=wrapper))
     writer._scheduled_writes["xfer"] = 2
     writer._scheduled_layers["xfer"] = {"dense0", "indexer"}
@@ -524,6 +517,23 @@ def test_write_failure_marks_terminal_and_clears_scheduled_state():
     assert wrapper.done_req_ids == ["xfer"]
     assert wrapper.done_remote_allocate_req_dict == {}
     assert wrapper._is_transfer_terminal_locked("xfer")
+    assert "xfer" not in writer._scheduled_writes
+    assert "xfer" not in writer._scheduled_layers
+    assert "xfer" not in writer._sealed_writes
+
+
+def test_schedule_write_rejects_terminal_transfer_without_recreating_state():
+    wrapper = _wrapper_for_messages()
+    wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(block_ids=[4, 5])
+    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=wrapper))
+    writer._scheduled_writes["xfer"] = 1
+    writer._scheduled_layers["xfer"] = {"dense0"}
+    writer._sealed_writes["xfer"] = 1
+
+    writer._mark_request_done("xfer")
+
+    assert not writer.schedule_write(_write_task("indexer"))
+    assert writer._write_task_q.empty()
     assert "xfer" not in writer._scheduled_writes
     assert "xfer" not in writer._scheduled_layers
     assert "xfer" not in writer._sealed_writes
@@ -586,9 +596,7 @@ def test_moriio_wrapper_handles_structured_release_message():
     set_role(ROLE.PRODUCER)
     wrapper = _wrapper_for_messages()
 
-    wrapper._handle_message(
-        msgpack.dumps({"type": "release", "transfer_id": "xfer"})
-    )
+    wrapper._handle_message(msgpack.dumps({"type": "release", "transfer_id": "xfer"}))
 
     assert wrapper.done_req_ids == ["xfer"]
 
