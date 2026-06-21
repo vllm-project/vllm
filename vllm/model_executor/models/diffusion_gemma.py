@@ -47,7 +47,7 @@ from vllm.model_executor.models.transformers.utils import recursive_replace_line
 from vllm.model_executor.models.utils import WeightsMapper, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.v1.outputs import LogprobsTensors
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata_from_input_batch
+from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor, async_copy_to_gpu
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
@@ -986,8 +986,13 @@ class DiffusionGemmaModelState(ModelState):
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
+            num_tokens = input_batch.num_tokens_after_padding
         else:
             num_reqs = input_batch.num_reqs
+            num_tokens = input_batch.num_tokens
+
+        query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
+        max_query_len = input_batch.num_scheduled_tokens.max().item()
 
         # Per-request causal mode: encoder (commit) = causal,
         # denoise = bidirectional. Pass GPU tensor so the attention
@@ -1004,16 +1009,20 @@ class DiffusionGemmaModelState(ModelState):
             self._causal_buf[actual_num_reqs:num_reqs] = False
         causal: bool | torch.Tensor = self._causal_buf[:num_reqs]
 
-        return build_attn_metadata_from_input_batch(
+        return build_attn_metadata(
             attn_groups=attn_groups,
-            input_batch=input_batch,
-            cudagraph_mode=cudagraph_mode,
-            max_model_len=self.max_model_len,
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            query_start_loc_gpu=input_batch.query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=max_query_len,
+            seq_lens=input_batch.seq_lens,
+            max_seq_len=self.max_model_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
             causal=causal,
-            max_seq_len=self.max_model_len,
         )
 
     num_new_sampled_tokens_per_step: int = 0

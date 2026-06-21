@@ -10,7 +10,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata_from_input_batch
+from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
@@ -127,26 +127,41 @@ class WhisperModelState(ModelState):
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             num_reqs = input_batch.num_reqs_after_padding
+            num_tokens = input_batch.num_tokens_after_padding
         else:
             num_reqs = input_batch.num_reqs
+            num_tokens = input_batch.num_tokens
         whisper_attn_metadata = WhisperAttnMetadata(
             self._get_encoder_seq_lens(
                 input_batch.req_ids, attn_groups, for_capture, num_reqs
             )
         )
 
-        return build_attn_metadata_from_input_batch(
+        query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
+        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
+        if for_capture:
+            max_seq_len = self.max_model_len
+        else:
+            max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max().item())
+        attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
-            input_batch=input_batch,
-            cudagraph_mode=cudagraph_mode,
-            max_model_len=self.max_model_len,
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            query_start_loc_gpu=input_batch.query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=max_query_len,
+            seq_lens=input_batch.seq_lens,
+            max_seq_len=max_seq_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             model_specific_attn_metadata=whisper_attn_metadata,
             for_cudagraph_capture=for_capture,
         )
+        return attn_metadata
 
     def _get_encoder_seq_lens(
         self,
