@@ -938,9 +938,7 @@ def _pool_bytes_per_block(kv_cache_groups: list[KVCacheGroupSpec]) -> int:
         kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
     ):
         return kv_cache_groups[0].kv_cache_spec.page_size_bytes
-    if all(
-        isinstance(g.kv_cache_spec, UniformTypeKVCacheSpecs) for g in kv_cache_groups
-    ):
+    if _use_packed_kv_cache_groups(kv_cache_groups):
         # buckets = {page_size: [[layer_names], [layer_names], ...]}
         buckets = _bucket_layers_by_page_size(kv_cache_groups)
         return sum(ps * len(slots) for ps, slots in buckets.items())
@@ -1218,16 +1216,29 @@ def _bucket_layers_by_page_size(
     return buckets
 
 
-def _get_kv_cache_config_deepseek_v4(
+def _use_packed_kv_cache_groups(
+    kv_cache_groups: list[KVCacheGroupSpec],
+) -> bool:
+    is_dsv4 = all(
+        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
+        for group in kv_cache_groups
+    )
+    return is_dsv4 or (
+        bool(envs.VLLM_USE_PACKED_HMA_KV_CACHE) and len(kv_cache_groups) > 1
+    )
+
+
+def _get_kv_cache_config_packed(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
 ) -> tuple[int, list[KVCacheTensor]]:
-    """DeepseekV4 KV cache tensor layout planning.
+    """Plan a packed per-block KV cache tensor layout.
 
     Emit one KVCacheTensor per (slot_idx, page_size). Layers from different
     groups at the same slot share a tensor (they have independent block
-    tables so block-id namespaces never collide).
+    tables so block-id namespaces never collide). Each emitted tensor aliases
+    one physical backing allocation, with per-block data laid out contiguously.
     """
     # buckets = {page_size: [[layer_names], [layer_names], ...]}
     buckets = _bucket_layers_by_page_size(kv_cache_groups)
@@ -1236,12 +1247,26 @@ def _get_kv_cache_config_deepseek_v4(
     num_blocks = available_memory // total_num_bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
 
+    total_size = total_num_bytes_per_block * num_blocks
+
     kv_cache_tensors: list[KVCacheTensor] = []
+    byte_offset = 0
     for ps, slots in buckets.items():
         for slot in slots:
-            kv_cache_tensors.append(KVCacheTensor(size=ps * num_blocks, shared_by=slot))
+            kv_cache_tensors.append(
+                KVCacheTensor(
+                    size=total_size,
+                    shared_by=slot,
+                    offset=byte_offset,
+                    block_stride=total_num_bytes_per_block,
+                )
+            )
+            byte_offset += ps
 
     return num_blocks, kv_cache_tensors
+
+
+_get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_packed
 
 
 def get_kv_cache_config_from_groups(
@@ -1288,13 +1313,11 @@ def get_kv_cache_config_from_groups(
             )
             for layer_name in kv_cache_groups[0].layer_names
         ]
-    elif all(
-        isinstance(group.kv_cache_spec, UniformTypeKVCacheSpecs)
-        for group in kv_cache_groups
-    ):
-        # DeepseekV4: UniformTypeKVCacheSpecs but multiple groups.
-        # Delegate to the DeepseekV4-specific allocator.
-        num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4(
+    elif _use_packed_kv_cache_groups(kv_cache_groups):
+        # DeepSeek V4 keeps the existing packed layout. Other multi-group
+        # attention-only HMA layouts can opt in with
+        # VLLM_USE_PACKED_HMA_KV_CACHE=1.
+        num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
             vllm_config, kv_cache_groups, available_memory
         )
     else:
