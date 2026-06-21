@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -226,6 +227,42 @@ class TestSiluMulBlockQuantModel(torch.nn.Module):
         return [FUSED_OPS[self.quant_key]]
 
 
+class TestSiluMulPerTokenQuantModel(torch.nn.Module):
+    quant_key = kFp8DynamicTokenSym
+
+    def __init__(self, hidden_size: int, **kwargs):
+        super().__init__()
+        self.silu_and_mul = SiluAndMul()
+        self.quant_fp8 = QuantFP8(
+            static=False,
+            group_shape=GroupShape.PER_TOKEN,
+            compile_native=False,
+        )
+
+        self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
+        self.enable_quant_fp8_custom_op = self.quant_fp8.enabled()
+
+    def forward(self, x):
+        y = self.silu_and_mul(x)
+        out, scale = self.quant_fp8(y)
+        dequant = out.to(dtype=torch.float32) * scale
+        return (dequant,)
+
+    def ops_in_model_before(self):
+        ops = []
+        if self.enable_silu_mul_custom_op:
+            ops.append(SILU_MUL_OP)
+        ops.append(
+            QUANT_OPS[self.quant_key]
+            if self.enable_quant_fp8_custom_op
+            else torch.ops.aten.reciprocal.default
+        )
+        return ops
+
+    def ops_in_model_after(self):
+        return [FUSED_OPS[self.quant_key]]
+
+
 ROCM_KERNELS = [ROCmFP8ScaledMMLinearKernel, PerTensorTorchFP8ScaledMMLinearKernel]
 CUDA_KERNELS = [
     FlashInferFP8ScaledMMLinearKernel,
@@ -261,6 +298,16 @@ TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
                 not current_platform.is_rocm(), reason="ROCm only"
             ),
         ),
+        # Per-token dynamic FP8 quant fusion.
+        pytest.param(
+            TestSiluMulPerTokenQuantModel,
+            True,
+            None,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda_alike(), reason="CUDA/ROCm only"
+            ),
+            id="TestSiluMulPerTokenQuant",
+        ),
         # Block quant fusion for per-group FP8 (CUDA only).
         *[
             pytest.param(
@@ -288,6 +335,7 @@ def test_fusion_silu_and_mul_quant(
         | TestSiluMulNvfp4QuantModel
         | TestSiluMulGroupFp8QuantModel
         | TestSiluMulBlockQuantModel
+        | TestSiluMulPerTokenQuantModel
     ],
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
@@ -298,6 +346,13 @@ def test_fusion_silu_and_mul_quant(
         pytest.skip("NVFP4 is not supported on this GPU.")
     if model_class is TestSiluMulGroupFp8QuantModel and not IS_AITER_FOUND:
         pytest.skip("AITER is not supported on this GPU.")
+    if model_class is TestSiluMulPerTokenQuantModel:
+        from vllm.compilation.passes.fusion.act_quant_fusion import (
+            silu_and_mul_per_token_quant_supported,
+        )
+
+        if not silu_and_mul_per_token_quant_supported:
+            pytest.skip("silu_and_mul_per_token_quant kernel not available")
     if (
         isinstance(model_class, partial)
         and model_class.func is TestSiluMulBlockQuantModel
@@ -355,7 +410,9 @@ def test_fusion_silu_and_mul_quant(
             atol, rtol = 1e-3, 1e-3
         elif isinstance(model, TestSiluMulNvfp4QuantModel):
             atol, rtol = 1e-1, 1e-1
-        elif isinstance(model, TestSiluMulGroupFp8QuantModel):
+        elif isinstance(
+            model, (TestSiluMulGroupFp8QuantModel, TestSiluMulPerTokenQuantModel)
+        ):
             atol, rtol = 5e-2, 5e-2
         elif isinstance(model, TestSiluMulBlockQuantModel):
             if current_platform.is_rocm():
