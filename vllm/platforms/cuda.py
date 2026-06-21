@@ -7,6 +7,7 @@ pynvml. However, it should not initialize cuda context.
 from __future__ import annotations
 
 import os
+import platform
 from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
@@ -18,7 +19,6 @@ from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
-import vllm._C  # noqa
 import vllm._C_stable_libtorch  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -26,7 +26,7 @@ from vllm.utils.import_utils import import_pynvml
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interface import DeviceCapability, Platform, PlatformEnum
+from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -38,6 +38,11 @@ else:
     CacheDType = None
 
 logger = init_logger(__name__)
+
+try:
+    import vllm._qutlass_C  # noqa: F401
+except ImportError as e:
+    logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -159,6 +164,21 @@ def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
     return wrapper
 
 
+@cache
+def _get_wsl_kernel_version() -> tuple[int, ...] | None:
+    """Return the WSL2 kernel version as a tuple, or None on parse failure.
+
+    platform.uname().release on WSL2 looks like
+    "5.15.167.4-microsoft-standard-WSL2"; we take the numeric prefix.
+    """
+    try:
+        release = platform.uname().release
+        parts = release.split("-")[0].split(".")
+        return tuple(int(x) for x in parts[:3])
+    except Exception:
+        return None
+
+
 class CudaPlatformBase(Platform):
     _enum = PlatformEnum.CUDA
     device_name: str = "cuda"
@@ -170,6 +190,22 @@ class CudaPlatformBase(Platform):
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        """Import CUDA kernel extensions (_C_stable_libtorch, optional _qutlass_C)."""
+        try:
+            import vllm._C_stable_libtorch  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._C_stable_libtorch: %r", e)
+        try:
+            import vllm._moe_C_stable_libtorch  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._moe_C_stable_libtorch: %r", e)
+        try:
+            import vllm._qutlass_C  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -225,6 +261,27 @@ class CudaPlatformBase(Platform):
         pass
 
     @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        if in_wsl():
+            # WSL1 has no CUDA support, so being on the CUDA platform under
+            # WSL implies WSL2. Gate on kernel >= 4.19.121, the first WSL2
+            # kernel with limited pinned memory support for CUDA.
+            version = _get_wsl_kernel_version()
+            if version is None or version < (4, 19, 121):
+                logger.warning(
+                    "Using 'pin_memory=False' as WSL is detected and the "
+                    "WSL2 kernel version is below 4.19.121. This may slow "
+                    "down performance. Please run `wsl --update`."
+                )
+                return False
+            # On compatible WSL2 kernels, pinned memory is supported but
+            # disabled by default. Enable it via VLLM_WSL2_ENABLE_PIN_MEMORY=1.
+            import vllm.envs as envs
+
+            return envs.VLLM_WSL2_ENABLE_PIN_MEMORY
+        return True
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
@@ -245,6 +302,27 @@ class CudaPlatformBase(Platform):
                 "with multimodal-bidirectional attention."
             )
             scheduler_config.disable_chunked_mm_input = True
+
+        if (
+            in_wsl()
+            and vllm_config.offload_config.uva.cpu_offload_gb > 0
+            and bool(vllm_config.compilation_config.cudagraph_mode)
+        ):
+            logger.warning(
+                "--cpu-offload-gb is enabled with CUDA graphs on WSL2. "
+                "This combination requires pinned (page-locked) memory "
+                "allocations. WARNING: Windows (WDDM) enforces a hard "
+                "system-wide cap of roughly 50%% of physical RAM on pinned "
+                "memory shared across ALL processes by default (limit can "
+                "changed via %%USERPROFILE%%\\.wslconfig). "
+                "Excessive use of page-locked memory can prevent Windows "
+                "from reclaiming memory under load, which can cause the "
+                "entire host OS to become unresponsive and may require a "
+                "hard reboot to recover. Proceed at your own risk. "
+                "To raise the WSL2 VM memory ceiling, increase the `memory` "
+                "setting in %%USERPROFILE%%\\.wslconfig and run "
+                "`wsl --shutdown`."
+            )
 
     @classmethod
     def get_current_memory_usage(
@@ -607,6 +685,15 @@ class CudaPlatformBase(Platform):
 # all the related functions work on real physical device ids.
 # the major benefit of using NVML is that it will not initialize CUDA
 class NvmlCudaPlatform(CudaPlatformBase):
+    @classmethod
+    @with_nvml_context
+    def device_control_id_to_physical_device_id(cls, device_id: str) -> int:
+        try:
+            return int(device_id)
+        except ValueError:
+            handle = pynvml.nvmlDeviceGetHandleByUUID(device_id)
+            return pynvml.nvmlDeviceGetIndex(handle)
+
     @classmethod
     @cache
     @with_nvml_context
