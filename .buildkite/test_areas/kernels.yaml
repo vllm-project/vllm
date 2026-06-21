@@ -104,6 +104,7 @@ steps:
       source_file_dependencies:
       - csrc/quantization/
       - vllm/model_executor/layers/quantization
+      - vllm/config/
       - tests/kernels/quantization
       - tests/kernels/quantization/test_rocm_skinny_gemms.py
       - vllm/_aiter_ops.py
