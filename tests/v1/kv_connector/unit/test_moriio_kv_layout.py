@@ -3,7 +3,7 @@
 
 import importlib.util
 import threading
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from queue import Queue
 from types import SimpleNamespace
 
@@ -84,6 +84,16 @@ def _writer_with_fake_worker(fake_worker) -> MoRIIOWriter:
     writer._sealed_writes = {}
     writer.ensure_worker_started = lambda: None
     return writer
+
+
+def _wrapper_for_messages() -> MoRIIOWrapper:
+    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
+    wrapper.lock = threading.Lock()
+    wrapper.done_remote_allocate_req_dict = {}
+    wrapper.done_req_ids = []
+    wrapper.done_write_cache_req_ids = []
+    wrapper._terminal_transfer_ids = OrderedDict()
+    return wrapper
 
 
 def _write_task(layer_name: str, transfer_id: str = "xfer") -> WriteTask:
@@ -360,9 +370,16 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
             self.lock = threading.Lock()
             self.notifications = []
             self.wait_count = 0
+            self._terminal_transfer_ids = OrderedDict()
 
         def waiting_for_transfer_complete(self):
             self.wait_count += 1
+
+        def _is_transfer_terminal_locked(self, transfer_id):
+            return transfer_id in self._terminal_transfer_ids
+
+        def _mark_transfer_terminal_locked(self, transfer_id):
+            self._terminal_transfer_ids[transfer_id] = None
 
         def send_notify(
             self, transfer_id, remote_ip, remote_port, message_type=None
@@ -393,13 +410,53 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
     assert wrapper.done_req_ids == ["xfer"]
     assert wrapper.done_remote_allocate_req_dict == {}
     assert wrapper.wait_count == 1
+    assert wrapper._is_transfer_terminal_locked("xfer")
+
+
+def test_write_failure_marks_terminal_and_clears_scheduled_state():
+    wrapper = _wrapper_for_messages()
+    wrapper.done_remote_allocate_req_dict["xfer"] = RemoteAllocInfo(
+        block_ids=[4, 5]
+    )
+    writer = _writer_with_fake_worker(SimpleNamespace(moriio_wrapper=wrapper))
+    writer._scheduled_writes["xfer"] = 2
+    writer._scheduled_layers["xfer"] = {"dense0", "indexer"}
+    writer._sealed_writes["xfer"] = 2
+
+    writer._mark_request_done("xfer")
+
+    assert wrapper.done_req_ids == ["xfer"]
+    assert wrapper.done_remote_allocate_req_dict == {}
+    assert wrapper._is_transfer_terminal_locked("xfer")
+    assert "xfer" not in writer._scheduled_writes
+    assert "xfer" not in writer._scheduled_layers
+    assert "xfer" not in writer._sealed_writes
+
+
+def test_late_remote_blocks_message_is_ignored_after_transfer_done():
+    set_role(ROLE.PRODUCER)
+    wrapper = _wrapper_for_messages()
+    with wrapper.lock:
+        wrapper._mark_transfer_terminal_locked("xfer")
+
+    wrapper._handle_message(
+        msgpack.dumps(
+            {
+                "type": "remote_blocks",
+                "req_id": "req",
+                "transfer_id": "xfer",
+                "block_notify_list": [4, 5],
+                "decode_rank": 3,
+            }
+        )
+    )
+
+    assert "xfer" not in wrapper.done_remote_allocate_req_dict
 
 
 def test_moriio_wrapper_handles_structured_remote_blocks_message():
     set_role(ROLE.PRODUCER)
-    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
-    wrapper.lock = threading.Lock()
-    wrapper.done_remote_allocate_req_dict = {}
+    wrapper = _wrapper_for_messages()
 
     wrapper._handle_message(
         msgpack.dumps(
@@ -420,9 +477,7 @@ def test_moriio_wrapper_handles_structured_remote_blocks_message():
 
 def test_moriio_wrapper_handles_structured_write_done_message():
     set_role(ROLE.CONSUMER)
-    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
-    wrapper.lock = threading.Lock()
-    wrapper.done_write_cache_req_ids = []
+    wrapper = _wrapper_for_messages()
 
     wrapper._handle_message(
         msgpack.dumps({"type": "write_done", "transfer_id": "xfer"})
@@ -433,9 +488,7 @@ def test_moriio_wrapper_handles_structured_write_done_message():
 
 def test_moriio_wrapper_handles_structured_release_message():
     set_role(ROLE.PRODUCER)
-    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
-    wrapper.lock = threading.Lock()
-    wrapper.done_req_ids = []
+    wrapper = _wrapper_for_messages()
 
     wrapper._handle_message(
         msgpack.dumps({"type": "release", "transfer_id": "xfer"})
@@ -465,9 +518,7 @@ def test_moriio_wrapper_rejects_unknown_structured_message():
 
 def test_moriio_wrapper_rejects_empty_remote_blocks_message():
     set_role(ROLE.PRODUCER)
-    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
-    wrapper.lock = threading.Lock()
-    wrapper.done_remote_allocate_req_dict = {}
+    wrapper = _wrapper_for_messages()
 
     with pytest.raises(MoRIIOError, match="block_notify_list cannot be empty"):
         wrapper._handle_message(

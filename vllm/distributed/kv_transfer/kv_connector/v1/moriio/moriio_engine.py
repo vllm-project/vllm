@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
 from weakref import ref as weakref_ref
@@ -58,6 +58,9 @@ except ImportError:
 
 
 """Write task execution logic for MoRIIO connector."""
+
+
+_MAX_TERMINAL_TRANSFER_IDS = 4096
 
 
 WriteGeometryKey = tuple[tuple[int, ...], tuple[int, ...], torch.dtype]
@@ -179,6 +182,9 @@ class MoRIIOWriter:
             except Empty:
                 continue
 
+            if self._is_transfer_terminal(task.transfer_id):
+                continue
+
             # Check if remote blocks are ready
             if not self._is_remote_ready(task):
                 # task.retry_count += 1
@@ -209,6 +215,8 @@ class MoRIIOWriter:
         still_deferred: list[WriteTask] = []
 
         for task in self._deferred_tasks:
+            if self._is_transfer_terminal(task.transfer_id):
+                continue
             if now - task.enqueue_time > defer_timeout:
                 logger.error(
                     "Deferred write task for request %s expired after %.1fs "
@@ -232,12 +240,25 @@ class MoRIIOWriter:
 
         self._deferred_tasks = still_deferred
 
+    def _clear_transfer_state(self, transfer_id: TransferId) -> None:
+        with self._write_state_lock:
+            self._scheduled_writes.pop(transfer_id, None)
+            self._scheduled_layers.pop(transfer_id, None)
+            self._sealed_writes.pop(transfer_id, None)
+
+    def _is_transfer_terminal(self, transfer_id: TransferId) -> bool:
+        wrapper = self.worker.moriio_wrapper
+        with wrapper.lock:
+            return wrapper._is_transfer_terminal_locked(transfer_id)
+
     def _mark_request_done(self, transfer_id: str) -> None:
         """Mark a request done so its blocks are freed, even on transfer failure."""
         wrapper = self.worker.moriio_wrapper
         with wrapper.lock:
             wrapper.done_req_ids.append(transfer_id)
-        wrapper.done_remote_allocate_req_dict.pop(transfer_id, None)
+            wrapper.done_remote_allocate_req_dict.pop(transfer_id, None)
+            wrapper._mark_transfer_terminal_locked(transfer_id)
+        self._clear_transfer_state(transfer_id)
 
     def _is_remote_ready(self, task: WriteTask) -> bool:
         """Check if remote blocks are allocated for this task.
@@ -433,10 +454,8 @@ class MoRIIOWriter:
             self.worker.moriio_wrapper.done_remote_allocate_req_dict.pop(
                 transfer_id, None
             )
-        with self._write_state_lock:
-            self._scheduled_writes.pop(transfer_id, None)
-            self._scheduled_layers.pop(transfer_id, None)
-            self._sealed_writes.pop(transfer_id, None)
+            self.worker.moriio_wrapper._mark_transfer_terminal_locked(transfer_id)
+        self._clear_transfer_state(transfer_id)
         logger.debug(
             "Completed transfer for (request, transfer) %s, %s, notified port %d",
             request_id,
@@ -476,6 +495,7 @@ class MoRIIOWrapper:
         self.done_req_ids: list[str] = []
         self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
+        self._terminal_transfer_ids: OrderedDict[TransferId, None] = OrderedDict()
         self._transfer_timeout = transfer_timeout
         self.notify_thread: threading.Thread | None = None
         self.sessions: list[IOEngine.Session] = []
@@ -724,6 +744,12 @@ class MoRIIOWrapper:
             )
 
         with self.lock:
+            if self._is_transfer_terminal_locked(transfer_id):
+                logger.debug(
+                    "Ignoring remote allocation for terminal transfer %s",
+                    transfer_id,
+                )
+                return
             self.done_remote_allocate_req_dict[transfer_id] = RemoteAllocInfo(
                 block_ids=block_notify_list, decode_dp_rank=decode_dp_rank
             )
@@ -743,13 +769,26 @@ class MoRIIOWrapper:
         transfer_id = data["transfer_id"]
         with self.lock:
             self.done_req_ids.append(transfer_id)
+            self.done_remote_allocate_req_dict.pop(transfer_id, None)
+            self._mark_transfer_terminal_locked(transfer_id)
 
     def _handle_completion_message(self, msg: str):
         with self.lock:
             if get_role() == ROLE.PRODUCER:
                 self.done_req_ids.append(msg)
+                self.done_remote_allocate_req_dict.pop(msg, None)
+                self._mark_transfer_terminal_locked(msg)
             else:
                 self.done_write_cache_req_ids.append(msg)
+
+    def _is_transfer_terminal_locked(self, transfer_id: TransferId) -> bool:
+        return transfer_id in self._terminal_transfer_ids
+
+    def _mark_transfer_terminal_locked(self, transfer_id: TransferId) -> None:
+        self._terminal_transfer_ids[transfer_id] = None
+        self._terminal_transfer_ids.move_to_end(transfer_id)
+        while len(self._terminal_transfer_ids) > _MAX_TERMINAL_TRANSFER_IDS:
+            self._terminal_transfer_ids.popitem(last=False)
 
     def send_notify(
         self, req_ids, remote_ip, remote_port, message_type: str | None = None
