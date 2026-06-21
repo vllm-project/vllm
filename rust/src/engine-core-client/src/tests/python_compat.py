@@ -10,6 +10,7 @@
 # ]
 # ///
 
+from dataclasses import dataclass
 from enum import Enum, IntEnum
 
 import msgpack
@@ -30,12 +31,13 @@ class FinishReason(IntEnum):
     REPETITION = 4
 
 
-class EngineCoreSamplingParams(msgspec.Struct, dict=True):
+# Mirror of real SamplingParams; omit_defaults makes fixtures match real maps.
+class EngineCoreSamplingParams(msgspec.Struct, dict=True, omit_defaults=True):
     temperature: float = 1.0
     top_p: float = 1.0
     top_k: int = 0
     seed: int | None = None
-    max_tokens: int = 65536
+    max_tokens: int = 16
     min_tokens: int = 0
     min_p: float = 0.0
     frequency_penalty: float = 0.0
@@ -132,6 +134,16 @@ request = EngineCoreRequest(
     pooling_params=None,
     arrival_time=42.5,
     client_index=0,
+)
+
+# All defaults -> empty map. Regression guard for the sparse-map decode.
+defaults_request = EngineCoreRequest(
+    request_id="req-defaults",
+    prompt_token_ids=[5, 6, 7],
+    mm_features=None,
+    sampling_params=EngineCoreSamplingParams(),
+    pooling_params=None,
+    arrival_time=1.0,
 )
 
 multimodal_tensor = np.array([[1.0, 2.0], [3.5, 4.25]], dtype=np.float32)
@@ -337,7 +349,34 @@ multipart_prompt_logprobs = engine_outputs_wire(
     )
 )
 
+
+@dataclass
+class EngineCoreReadyResponse:
+    max_model_len: int
+    num_gpu_blocks: int
+    block_size: int
+    dp_stats_address: str | None
+    dtype: str
+    vllm_version: str
+    world_size: int
+    data_parallel_size: int
+    kv_cache_size_tokens: int | None = None
+    kv_cache_max_concurrency: float | None = None
+
+
+ready_response = EngineCoreReadyResponse(
+    max_model_len=32768,
+    num_gpu_blocks=1000,
+    block_size=16,
+    dp_stats_address=None,
+    dtype="float32",
+    vllm_version="0.0.0",
+    data_parallel_size=1,
+    world_size=1,
+)
+
 print(msgspec.msgpack.encode(request).hex())
+print(msgspec.msgpack.encode(defaults_request).hex())
 print(msgpack.packb(multimodal_request_wire, use_bin_type=True).hex())
 print(msgspec.msgpack.encode(outputs).hex())
 print(" ".join(frame.hex() for frame in encode_output_frames(inline_logprobs)))
@@ -354,3 +393,4 @@ print(
         for frame in encode_output_frames(multipart_prompt_logprobs, size_threshold=1)
     )
 )
+print(msgspec.msgpack.encode(ready_response).hex())
