@@ -19,6 +19,7 @@ from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.beam_search_utils import (
     get_beam_allowed_token_ids,
+    get_trie_allowed_token_ids,
     init_beam_search_so_backend,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
@@ -140,6 +141,10 @@ class ServeContext(Generic[RequestT]):
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
     engine_inputs: list[EngineInput] | None = None
+    result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
+        None
+    )
+    final_res_batch: list[PoolingRequestOutput] | None = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
@@ -187,7 +192,7 @@ class OpenAIServing(BeamSearchOnlineMixin):
     def _init_beam_search_so_backend(
         self,
         structured_outputs: StructuredOutputsParams,
-    ) -> tuple[StructuredOutputBackend, tuple, Any]:
+    ) -> tuple:
         """Initialize a structured output backend for beam search.
 
         Delegates to the shared utility in
@@ -265,19 +270,45 @@ class OpenAIServing(BeamSearchOnlineMixin):
         so_backend: StructuredOutputBackend | None = None
         so_key: tuple | None = None
         so_bitmask = None
+        so_trie = None
         if params.structured_outputs is not None:
-            so_backend, so_key, so_bitmask = self._init_beam_search_so_backend(
+            so_backend, so_key, so_bitmask, so_trie = self._init_beam_search_so_backend(
                 params.structured_outputs
             )
 
         try:
             for _ in range(max_tokens):
                 # -- Build per-beam sampling params ----------------------
-                if so_backend is not None:
-                    assert so_key is not None and so_bitmask is not None
-                    vocab_size = self.model_config.get_vocab_size()
+                if so_trie is not None:
+                    # Fast path: re-walk trie from root each step (stateless,
+                    # no per-beam pointer to maintain or clone).
                     beam_sp_list: list[SamplingParams] = []
                     active_beams: list[BeamSearchSequence] = []
+
+                    for beam in all_beams:
+                        allowed_ids = get_trie_allowed_token_ids(beam, so_trie)
+                        if not allowed_ids:
+                            # None = trie terminal (after EOS); [] = off-trie.
+                            # Both cases: drop beam (EOS already handled below).
+                            pass
+                        else:
+                            beam_sp_list.append(
+                                SamplingParams(
+                                    logprobs=logprobs_num,
+                                    max_tokens=1,
+                                    temperature=temperature,
+                                    allowed_token_ids=allowed_ids,
+                                )
+                            )
+                            active_beams.append(beam)
+
+                    if not active_beams:
+                        break
+                elif so_backend is not None:
+                    assert so_key is not None and so_bitmask is not None
+                    vocab_size = self.model_config.get_vocab_size()
+                    beam_sp_list = []
+                    active_beams = []
 
                     for beam in all_beams:
                         allowed_ids = self._get_beam_allowed_token_ids(
@@ -349,7 +380,7 @@ class OpenAIServing(BeamSearchOnlineMixin):
                 # from raw logits *before* the allowed_token_ids mask is
                 # applied, so they may include disallowed tokens.
                 allowed_sets: list[set[int] | None] = []
-                if so_backend is not None:
+                if so_backend is not None or so_trie is not None:
                     for sp in beam_sp_list:
                         if sp.allowed_token_ids:
                             allowed_sets.append(set(sp.allowed_token_ids))
@@ -428,15 +459,17 @@ class OpenAIServing(BeamSearchOnlineMixin):
                 if len(all_beams_logprob_np) == 0:
                     break
 
-                # Select top beam_width candidates.
+                # -- Select top beam_width candidates, deduplicating trie paths.
                 n_candidates = len(all_beams_logprob_np)
                 k = min(beam_width, n_candidates)
                 if k >= n_candidates:
-                    # All remaining candidates fit — no need to partition.
                     topn_idx = np.arange(n_candidates)
                 else:
                     topn_idx = np.argpartition(np.negative(all_beams_logprob_np), k)[:k]
+                # Sort so we pick highest-prob first (important for trie dedup).
+                topn_idx = topn_idx[np.argsort(all_beams_logprob_np[topn_idx])[::-1]]
 
+                seen_trie_sequences: set[tuple] = set()
                 for idx in topn_idx:
                     parent_beam_idx = self._flat_idx_to_beam(
                         int(idx),
@@ -449,10 +482,23 @@ class OpenAIServing(BeamSearchOnlineMixin):
                     _lp = output[parent_beam_idx].outputs[0].logprobs
                     assert _lp is not None
                     logprobs_entry = _lp[0]
+                    new_tokens = current_beam.tokens + [token_id]
+                    # Dedup by generated token sequence when using trie — two
+                    # beams with identical generated tokens are identical choices.
+                    if so_trie is not None:
+                        orig = current_beam.orig_prompt
+                        if orig["type"] == "enc_dec":
+                            prompt_len = len(orig["decoder_prompt"]["prompt_token_ids"])
+                        else:
+                            prompt_len = len(orig["prompt_token_ids"])
+                        gen_key = tuple(new_tokens[prompt_len:])
+                        if gen_key in seen_trie_sequences:
+                            continue
+                        seen_trie_sequences.add(gen_key)
                     new_beams.append(
                         BeamSearchSequence(
                             orig_prompt=prompt,
-                            tokens=current_beam.tokens + [token_id],
+                            tokens=new_tokens,
                             logprobs=current_beam.logprobs + [logprobs_entry],
                             lora_request=current_beam.lora_request,
                             cum_logprob=float(all_beams_logprob_np[idx]),

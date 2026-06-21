@@ -9,6 +9,7 @@ from tqdm import tqdm
 from vllm import RequestOutput, TextPrompt, TokensPrompt
 from vllm.entrypoints.beam_search_utils import (
     get_beam_allowed_token_ids,
+    get_trie_allowed_token_ids,
     init_beam_search_so_backend,
 )
 from vllm.entrypoints.offline_utils import OfflineInferenceMixin
@@ -83,8 +84,9 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         so_backend: StructuredOutputBackend | None = None
         so_key: tuple | None = None
         so_bitmask: Any = None
+        so_trie = None
         if params.structured_outputs is not None:
-            so_backend, so_key, so_bitmask = self._init_beam_search_so_backend(
+            so_backend, so_key, so_bitmask, so_trie = self._init_beam_search_so_backend(
                 params.structured_outputs
             )
 
@@ -113,6 +115,9 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 ),
             )
 
+        # Seed each instance's initial beam with the trie root for CHOICE requests.
+        if so_trie is not None:
+            pass  # no per-beam state needed; trie is re-walked each step
         for prompt_start in range(0, len(instances), concurrency_limit):
             instances_batch = instances[prompt_start : prompt_start + concurrency_limit]
 
@@ -142,12 +147,36 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 if len(all_beams) == 0:
                     break
 
-                if so_backend is not None:
-                    assert so_key is not None and so_bitmask is not None
-                    vocab_size = self.model_config.get_vocab_size()
+                if so_trie is not None:
+                    # Fast path: re-walk trie from root each step (stateless).
                     active_beams: list[BeamSearchSequence] = []
                     active_params: list[SamplingParams] = []
                     active_indices: list[int] = []
+                    for i, beam in enumerate(all_beams):
+                        allowed_ids = get_trie_allowed_token_ids(beam, so_trie)
+                        if not allowed_ids:
+                            # None = terminal after EOS; [] = off-trie. Drop.
+                            pass
+                        else:
+                            active_beams.append(beam)
+                            active_params.append(
+                                SamplingParams(
+                                    logprobs=2 * beam_width,
+                                    max_tokens=1,
+                                    temperature=temperature,
+                                    allowed_token_ids=allowed_ids,
+                                    skip_clone=True,
+                                )
+                            )
+                            active_indices.append(i)
+                    if not active_beams:
+                        break
+                elif so_backend is not None:
+                    assert so_key is not None and so_bitmask is not None
+                    vocab_size = self.model_config.get_vocab_size()
+                    active_beams = []
+                    active_params = []
+                    active_indices = []
                     for i, beam in enumerate(all_beams):
                         allowed_ids = get_beam_allowed_token_ids(
                             beam, so_backend, so_key, so_bitmask, vocab_size
@@ -197,7 +226,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
                 # Build per-beam allowed-id sets for logprob filtering.
                 allowed_sets: list[set[int] | None] = [None] * len(all_beams)
-                if so_backend is not None:
+                if so_backend is not None or so_trie is not None:
                     for idx, p in zip(active_indices, active_params):
                         if p.allowed_token_ids:
                             allowed_sets[idx] = set(p.allowed_token_ids)
@@ -239,6 +268,21 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     sorted_beams = sorted(
                         instance_new_beams, key=sort_beams_key, reverse=True
                     )
+                    # Deduplicate by generated token sequence when using trie.
+                    if so_trie is not None:
+                        seen: set[tuple] = set()
+                        deduped: list[BeamSearchSequence] = []
+                        for b in sorted_beams:
+                            orig = b.orig_prompt
+                            if orig["type"] == "enc_dec":
+                                plen = len(orig["decoder_prompt"]["prompt_token_ids"])
+                            else:
+                                plen = len(orig["prompt_token_ids"])
+                            key = tuple(b.tokens[plen:])
+                            if key not in seen:
+                                seen.add(key)
+                                deduped.append(b)
+                        sorted_beams = deduped
                     instance.beams = sorted_beams[:beam_width]
 
         if so_backend is not None:
@@ -262,7 +306,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
     def _init_beam_search_so_backend(
         self,
         structured_outputs: StructuredOutputsParams,
-    ) -> tuple[StructuredOutputBackend, tuple, Any]:
+    ) -> tuple:
         """Initialize the structured output backend for beam search."""
         return init_beam_search_so_backend(
             vllm_config=self.llm_engine.vllm_config,
