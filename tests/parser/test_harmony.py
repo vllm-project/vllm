@@ -418,6 +418,17 @@ class TestParse:
             ("get_weather", json.dumps({"location": "SF"}))
         ]
 
+    def test_unexpected_tokens_graceful_handling(self, harmony_parser, chat_request):
+        raw_text = "The task: Count rectangles..."
+        tokens = encode_output(raw_text)
+        reasoning, content, tool_calls = harmony_parser.parse(
+            "",
+            chat_request,
+            model_output_token_ids=tokens,
+        )
+        assert content is not None
+        assert "Count rectangles" in content
+
 
 class TestParseDelta:
     def test_basic(self, gpt_oss_tokenizer, chat_request):

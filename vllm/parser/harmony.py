@@ -23,9 +23,12 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.logger import init_logger
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from openai_harmony import Message, Role
@@ -267,10 +270,22 @@ class HarmonyParser(DelegatingParser):
         segments: list[Segment] = []
         reasoning_token_count = 0
         for token_id in token_ids:
-            self._harmony_parser.process(token_id)
-            channel = self.current_channel
-            recipient = self.current_recipient
-            delta = self._harmony_parser.last_content_delta or ""
+            try:
+                self._harmony_parser.process(token_id)
+                channel = self.current_channel
+                recipient = self.current_recipient
+                delta = self._harmony_parser.last_content_delta or ""
+            except Exception as e:
+                logger.warning(
+                    "Harmony parsing error for token %d: %s",
+                    token_id,
+                    e,
+                    exc_info=True,
+                )
+                channel = self.current_channel or "final"
+                recipient = self.current_recipient
+                delta = self.model_tokenizer.decode([token_id])
+
             completed_message = None
             _messages = self._harmony_parser.messages
             if len(_messages) > self._num_processed_messages:

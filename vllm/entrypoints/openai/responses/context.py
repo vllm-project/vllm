@@ -628,7 +628,15 @@ class HarmonyContext(ConversationContext):
         output_token_ids = output.outputs[0].token_ids
         self.parser = get_streamable_parser_for_assistant()
         for token_id in output_token_ids:
-            self.parser.process(token_id)
+            try:
+                self.parser.process(token_id)
+            except Exception as e:
+                logger.warning(
+                    "Harmony parsing error for token %d: %s",
+                    token_id,
+                    e,
+                    exc_info=True,
+                )
             # Check if the current token is part of reasoning content
             self._update_num_reasoning_tokens()
         self._update_prefill_token_usage(output)
@@ -941,8 +949,17 @@ class StreamingHarmonyContext(HarmonyContext):
         self.first_tok_of_message = output.finished
         last_delta_text = ""
         for tok in output.outputs[0].token_ids:
-            self.parser.process(tok)
-            last_delta_text += self.parser.last_content_delta or ""
+            try:
+                self.parser.process(tok)
+                last_delta_text += self.parser.last_content_delta or ""
+            except Exception as e:
+                logger.warning(
+                    "Harmony parsing error for token %d: %s",
+                    tok,
+                    e,
+                    exc_info=True,
+                )
+                last_delta_text += self.encoding.decode([tok])
         if last_delta_text:
             self.last_content_delta = last_delta_text
         self._update_decode_token_usage(output)
@@ -971,7 +988,15 @@ class StreamingHarmonyContext(HarmonyContext):
             msg.recipient = "assistant"
         toks = self.encoding.render(msg)
         for tok in toks:
-            self.parser.process(tok)
+            try:
+                self.parser.process(tok)
+            except Exception as e:
+                logger.warning(
+                    "Harmony parsing error for token %d: %s",
+                    tok,
+                    e,
+                    exc_info=True,
+                )
         self.last_tok = toks[-1]
         # TODO: add tool_output messages to self._messages
 
@@ -993,6 +1018,14 @@ class StreamingHarmonyContext(HarmonyContext):
             to_process.append(rendered_tokens[last_n])
             last_n -= 1
         for tok in reversed(to_process):
-            self.parser.process(tok)
+            try:
+                self.parser.process(tok)
+            except Exception as e:
+                logger.warning(
+                    "Harmony parsing error for token %d: %s",
+                    tok,
+                    e,
+                    exc_info=True,
+                )
 
         return rendered_tokens
