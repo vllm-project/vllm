@@ -101,6 +101,7 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids_dict: dict[int, set[str]] | None = (
             defaultdict(set) if include_finished_set else None
         )
+        # Track requests scheduled in prior step (MRV1-only).
         self.prev_step_scheduled_req_ids: set[str] = set()
 
         # Scheduling constraints.
@@ -1010,8 +1011,8 @@ class Scheduler(SchedulerInterface):
 
         # Construct the scheduler output.
         if self.use_v2_model_runner:
-            scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
-            scheduled_resumed_reqs = []
+            scheduled_new_reqs.extend(scheduled_resumed_reqs)
+            scheduled_resumed_reqs.clear()
             new_reqs_data = [
                 NewRequestData.from_request(
                     req,
@@ -1037,9 +1038,10 @@ class Scheduler(SchedulerInterface):
                 req_to_new_blocks,
             )
 
-        # Record the request ids that were scheduled in this step.
-        self.prev_step_scheduled_req_ids.clear()
-        self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
+        # Record the request ids that were scheduled in this step (MRV1-only).
+        if not self.use_v2_model_runner:
+            self.prev_step_scheduled_req_ids.clear()
+            self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
         new_block_ids_to_zero = (
             (self.kv_cache_manager.take_new_block_ids() or None)
@@ -1252,12 +1254,11 @@ class Scheduler(SchedulerInterface):
                     req.num_computed_tokens : req.num_computed_tokens + num_tokens
                 ]
                 new_token_ids.append(token_ids)
-            scheduled_in_prev_step = req_id in self.prev_step_scheduled_req_ids
             if idx >= num_running_reqs:
-                assert not scheduled_in_prev_step
                 resumed_req_ids.add(req_id)
-            if not scheduled_in_prev_step:
-                all_token_ids[req_id] = req.all_token_ids.copy()
+            if not self.use_v2_model_runner:  # noqa: SIM102
+                if req_id not in self.prev_step_scheduled_req_ids:
+                    all_token_ids[req_id] = req.all_token_ids.copy()
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
