@@ -96,6 +96,9 @@ class MockTokenizer:
         return "".join(parts)
 
 
+CHUNK_SIZES = [1, 2, 3, 5, 11, 23, None]
+
+
 def make_mock_tokenizer(sample: Sample) -> MockTokenizer:
     """Build a mock tokenizer from a sample's vocab and token data."""
     return MockTokenizer(
