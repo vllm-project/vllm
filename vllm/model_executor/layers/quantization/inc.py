@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
@@ -20,6 +21,7 @@ from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     QuantizationMethods,
 )
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -28,6 +30,7 @@ from vllm.model_executor.parameter import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.transformers_utils.config import get_safetensors_params_metadata
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -99,6 +102,11 @@ class INCConfig(QuantizationConfig):
         self.backend = backend
         self.pack_factor = Fraction(32, weight_bits)
 
+        # Hybrid INT4+FP8: populated by maybe_update_config when the checkpoint
+        # contains FP8 layers alongside INT4-quantized layers.
+        self.fp8_config: Fp8Config | None = None
+        self.fp8_layers: set[str] = set()
+
     def __repr__(self) -> str:
         return (
             f"INCConfig(weight_bits={self.weight_bits}, "
@@ -139,56 +147,72 @@ class INCConfig(QuantizationConfig):
         )
 
     def get_layer_config(self, layer, layer_name: str):
-        def get_config(name: str, quantized: bool = True):
-            if not self.extra_config:
-                return (
-                    self.weight_bits if quantized else 16,
-                    self.group_size if quantized else -1,
-                    self.sym if quantized else True,
-                )
+        def layer_name_aliases(name: str) -> list[str]:
+            aliases: list[str] = []
+            def add(candidate) -> None:
+                if candidate and candidate not in aliases:
+                    aliases.append(candidate)
+            add(name)
+            if name.startswith("language_model.model."):
+                suffix = name[len("language_model.model."):]
+                add("model.language_model." + suffix)
+                add("language_model." + suffix)
+            if name.startswith("model.language_model."):
+                suffix = name[len("model.language_model."):]
+                add("language_model.model." + suffix)
+                add("language_model." + suffix)
+            if name.startswith("language_model.layers."):
+                add("model." + name)
+            return aliases
 
-            # exact match first
-            if name in self.extra_config:
-                cfg = self.extra_config[name]
-                return (
-                    cfg.get("bits", self.weight_bits if quantized else 16),
-                    cfg.get("group_size", self.group_size if quantized else -1),
-                    cfg.get("sym", self.sym if quantized else True),
-                )
-
-            REGEX_SPECIAL_CHARS = set(r"*+?^$()[]{}|\\")
-            for pattern, cfg in self.extra_config.items():
-                if not isinstance(pattern, str) or not any(
-                    c in REGEX_SPECIAL_CHARS for c in pattern
-                ):
-                    continue
-
-                try:
-                    if re.search(re.compile(pattern), name) is not None:
-                        return (
-                            cfg.get("bits", self.weight_bits if quantized else 16),
-                            cfg.get("group_size", self.group_size if quantized else -1),
-                            cfg.get("sym", self.sym if quantized else True),
-                        )
-                except re.error:
-                    # Invalid regex, ignore.
-                    continue
-
+        def default_config(quantized: bool):
             return (
                 self.weight_bits if quantized else 16,
                 self.group_size if quantized else -1,
                 self.sym if quantized else True,
             )
 
+        def get_config(name: str, quantized: bool = True):
+            alias_names = layer_name_aliases(name)
+            if not self.extra_config:
+                return default_config(quantized)
+            for alias in alias_names:
+                if alias in self.extra_config:
+                    cfg = self.extra_config[alias]
+                    return (
+                        cfg.get("bits", self.weight_bits if quantized else 16),
+                        cfg.get("group_size", self.group_size if quantized else -1),
+                        cfg.get("sym", self.sym if quantized else True),
+                    )
+            REGEX_SPECIAL_CHARS = set(r"*+?^$()[]{}|\\")
+            for pattern, cfg in self.extra_config.items():
+                if not isinstance(pattern, str) or not any(c in REGEX_SPECIAL_CHARS for c in pattern):
+                    continue
+                try:
+                    compiled = re.compile(pattern)
+                    if any(re.search(compiled, alias) is not None for alias in alias_names):
+                        return (
+                            cfg.get("bits", self.weight_bits if quantized else 16),
+                            cfg.get("group_size", self.group_size if quantized else -1),
+                            cfg.get("sym", self.sym if quantized else True),
+                        )
+                except re.error:
+                    continue
+            return default_config(quantized)
+
+        layer_aliases = layer_name_aliases(layer_name)
+
         # 1. Exact match from config
-        if self.extra_config and layer_name in self.extra_config:
+        if self.extra_config and any(alias in self.extra_config for alias in layer_aliases):
             return get_config(layer_name)
 
         # 2. Determine whether layer should be quantized
         quantized = not isinstance(layer, ParallelLMHead)
         if self.block_name_to_quantize:
             quantized = any(
-                layer_name.startswith(name) for name in self.block_name_to_quantize
+                alias.startswith(name)
+                for alias in layer_aliases
+                for name in self.block_name_to_quantize
             )
 
         # 3. Handle fused MoE
@@ -196,7 +220,11 @@ class INCConfig(QuantizationConfig):
             moe_configs = [
                 get_config(name, quantized)
                 for name in self.extra_config
-                if name.startswith(layer_name)
+                if any(
+                    cfg_name.startswith(alias)
+                    for alias in layer_aliases
+                    for cfg_name in layer_name_aliases(name)
+                )
             ]
             if moe_configs:
                 if len(set(moe_configs)) == 1:
@@ -234,6 +262,80 @@ class INCConfig(QuantizationConfig):
             )
         if self.extra_config is not None:
             self.extra_config = hf_to_vllm_mapper.apply_dict(self.extra_config)
+        if self.fp8_layers:
+            self.fp8_layers = set(
+                hf_to_vllm_mapper.apply_list(list(self.fp8_layers))
+            )
+
+    def maybe_update_config(self, model_name: str, hf_config=None, revision: str | None = None):
+        """Detect FP8 layers in hybrid INT4+FP8 AutoRound checkpoints.
+
+        Some AutoRound checkpoints quantize expert FFN layers to INT4 while
+        leaving attention and shared-expert layers in FP8 with per-block
+        ``weight_scale_inv`` scales.  The base ``INCConfig`` has no way to
+        know this from ``quantization_config.json`` alone, so we scan the
+        safetensors metadata here and configure an ``Fp8Config`` for those
+        layers so that ``Fp8LinearMethod`` is used instead of
+        ``UnquantizedLinearMethod``.
+        """
+        metadata = get_safetensors_params_metadata(model_name, revision=revision)
+        fp8_weights: dict[str, dict[str, Any]] = {}
+        for param_name, info in metadata.items():
+            dtype_str = info.get("dtype", None)
+            if dtype_str is None:
+                continue
+            torch_dtype = _SAFETENSORS_TO_TORCH_DTYPE.get(dtype_str)
+            if torch_dtype == torch.float8_e4m3fn and param_name.endswith(".weight"):
+                scale_name = param_name.replace(".weight", ".weight_scale_inv")
+                if scale_name in metadata:
+                    fp8_weights[param_name] = info
+
+        if not fp8_weights:
+            return
+
+        block_size = None
+        for param_name, info in fp8_weights.items():
+            scale_name = param_name.replace(".weight", ".weight_scale_inv")
+            scale_info = metadata[scale_name]
+            w_shape = info.get("shape", [])
+            s_shape = scale_info.get("shape", [])
+            if len(w_shape) == 2 and len(s_shape) == 2:
+                block_size = [w_shape[0] // s_shape[0], w_shape[1] // s_shape[1]]
+                break
+
+        if block_size is None:
+            return
+
+        self.fp8_config = Fp8Config(
+            is_checkpoint_fp8_serialized=True,
+            activation_scheme="dynamic",
+            weight_block_size=block_size,
+        )
+        self.fp8_layers = {name.rsplit(".weight", 1)[0] for name in fp8_weights}
+        logger.info(
+            "INC hybrid checkpoint: detected %d FP8 layers (block_size=%s)",
+            len(self.fp8_layers),
+            block_size,
+        )
+
+    def _is_layer_fp8(self, prefix: str) -> bool:
+        """Check if layer should use FP8 in a hybrid checkpoint."""
+        if not self.fp8_layers:
+            return False
+        if prefix in self.fp8_layers:
+            return True
+        fused_mapping = getattr(self, "packed_modules_mapping", {})
+        proj_name = prefix.split(".")[-1]
+        if proj_name in fused_mapping:
+            shard_prefixes = [
+                prefix.replace(proj_name, shard)
+                for shard in fused_mapping[proj_name]
+            ]
+            return all(
+                any(fp8_layer in sp for fp8_layer in self.fp8_layers)
+                for sp in shard_prefixes
+            )
+        return any(fp8_layer in prefix for fp8_layer in self.fp8_layers)
 
     def apply_awq_quant_layer(self, layer, prefix: str, backend: str = "auto"):
         from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -328,6 +430,10 @@ class INCConfig(QuantizationConfig):
 
         weight_bits, group_size, sym = self.get_layer_config(layer, prefix)
         if not self.check_quantized(weight_bits):
+            # Hybrid checkpoint: dispatch FP8LinearMethod for layers detected
+            # as FP8 by maybe_update_config.
+            if self.fp8_config and self._is_layer_fp8(prefix):
+                return Fp8LinearMethod(self.fp8_config)
             if isinstance(layer, (LinearBase, ParallelLMHead)):
                 return UnquantizedLinearMethod()
             else:
