@@ -28,6 +28,7 @@ else
   ASCEND_E2E_ROOT_HELPER=$REPO_ASCEND_ROOT_HELPER
 fi
 VLLM_CLI=("$PYTHON_BIN" -m vllm.entrypoints.cli.main)
+VLLM_OPENAI_SERVER=("$PYTHON_BIN" -m vllm.entrypoints.openai.api_server)
 
 server_pid=""
 server_group_pid=""
@@ -275,6 +276,54 @@ print("torch.zeros preflight ok")
 PY
 }
 
+prepend_env_path() {
+  local var_name=$1
+  local path_value=$2
+  local current_value=${!var_name:-}
+
+  [[ -d "$path_value" ]] || return 0
+
+  case ":$current_value:" in
+    *":$path_value:"*) ;;
+    *)
+      if [[ -n "$current_value" ]]; then
+        export "$var_name=$path_value:$current_value"
+      else
+        export "$var_name=$path_value"
+      fi
+      ;;
+  esac
+}
+
+configure_ascend_python_runtime_paths() {
+  local runtime_root
+
+  for runtime_root in \
+    "${ASCEND_HOME_PATH:-}" \
+    "${ASCEND_TOOLKIT_HOME:-}" \
+    "${ASCEND_TOOLKIT_LATEST_HOME:-}" \
+    /usr/local/Ascend/ascend-toolkit/latest; do
+    [[ -n "$runtime_root" ]] || continue
+    prepend_env_path PYTHONPATH "$runtime_root/python/site-packages"
+    prepend_env_path LD_LIBRARY_PATH "$runtime_root/lib64"
+  done
+
+  "$PYTHON_BIN" - <<'PY'
+import os
+
+try:
+    from acl.rt import memcpy  # noqa: F401
+except Exception as exc:
+    raise RuntimeError(
+        "CANN acl Python bindings are not importable. "
+        f"ASCEND_HOME_PATH={os.environ.get('ASCEND_HOME_PATH')!r}, "
+        f"PYTHONPATH={os.environ.get('PYTHONPATH')!r}"
+    ) from exc
+
+print("ascend_acl_python_import=ok")
+PY
+}
+
 ensure_runner_npu_ready() {
   local max_attempts=${RUNNER_NPU_PREFLIGHT_ATTEMPTS:-3}
   local delay_seconds=${RUNNER_NPU_PREFLIGHT_DELAY_SECONDS:-10}
@@ -318,7 +367,8 @@ start_server() {
         PYTHON_BIN="$helper_python_bin" setsid sudo -E -n "$ASCEND_E2E_ROOT_HELPER" serve >"$SERVER_LOG" 2>&1 &
       fi
     else
-      setsid "${VLLM_CLI[@]}" serve "$MODEL_NAME" \
+      setsid "${VLLM_OPENAI_SERVER[@]}" \
+        --model "$MODEL_NAME" \
         --host "$HOST" \
         --port "$PORT" \
         --dtype "$DTYPE" \
@@ -332,7 +382,8 @@ start_server() {
     if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then
       run_ascend_root_helper serve >"$SERVER_LOG" 2>&1 &
     else
-      "${VLLM_CLI[@]}" serve "$MODEL_NAME" \
+      "${VLLM_OPENAI_SERVER[@]}" \
+        --model "$MODEL_NAME" \
         --host "$HOST" \
         --port "$PORT" \
         --dtype "$DTYPE" \
@@ -396,6 +447,7 @@ if [[ "$ASCEND_E2E_USE_SUDO" == "1" ]]; then
     exit "$?"
   fi
 else
+  configure_ascend_python_runtime_paths
   if ensure_runner_npu_ready; then
     :
   else

@@ -7,7 +7,7 @@ VLLM_ASCEND_HUST_REPO=${VLLM_ASCEND_HUST_REPO:-$WORKSPACE_ROOT/vllm-ascend-hust}
 VLLM_HUST_BENCHMARK_REPO=${VLLM_HUST_BENCHMARK_REPO:-$WORKSPACE_ROOT/vllm-hust-benchmark}
 VLLM_HUST_WEBSITE_REPO=${VLLM_HUST_WEBSITE_REPO:-$WORKSPACE_ROOT/vllm-hust-website}
 
-RUN_ID=${RUN_ID:-ci-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}-$(printf '%s' "${GITHUB_SHA:-local}" | cut -c1-8)}
+RUN_ID=${RUN_ID:-ci-${GITHUB_RUN_ID:-manual}-${GITHUB_RUN_ATTEMPT:-1}-$(printf '%s' "${TARGET_REPO_SHA:-${GITHUB_SHA:-local}}" | cut -c1-8)}
 RESULT_ROOT=${RESULT_ROOT:-$VLLM_HUST_REPO/.benchmarks/ci/$RUN_ID}
 RAW_RESULT_FILE=${RAW_RESULT_FILE:-$RESULT_ROOT/raw_benchmark.json}
 SUBMISSIONS_ROOT=${SUBMISSIONS_ROOT:-$RESULT_ROOT/submissions}
@@ -48,6 +48,7 @@ HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-910B3}
 CHIP_COUNT=${CHIP_COUNT:-1}
 NODE_COUNT=${NODE_COUNT:-1}
 PUBLISH_TO_HF=${PUBLISH_TO_HF:-0}
+PUBLISH_TO_BENCHMARK_REPO=${PUBLISH_TO_BENCHMARK_REPO:-0}
 HF_REPO_ID=${HF_REPO_ID:-}
 RUNTIME_READY_LOG=${RUNTIME_READY_LOG:-$RESULT_ROOT/runtime-ready.log}
 SUDO_AUTH_EXIT_CODE=${SUDO_AUTH_EXIT_CODE:-76}
@@ -355,6 +356,7 @@ SUDO_PRESERVE_ENV_VARS=(
   PATH
   PIP_CACHE_DIR
   PORT
+  PUBLISH_TO_BENCHMARK_REPO
   PYTHON_BIN
   PYTHONPATH
   READY_TIMEOUT_SECONDS
@@ -892,7 +894,7 @@ prepare_hf_publish_cache_for_runner() {
 sync_benchmark_publication_to_github() {
   local publisher_script=${BENCHMARK_PUBLICATION_SYNC_SCRIPT:-$VLLM_HUST_REPO/.github/workflows/scripts/sync_benchmark_snapshots_to_github.sh}
 
-  if [[ "$PUBLISH_TO_HF" != "1" ]]; then
+  if [[ "$PUBLISH_TO_BENCHMARK_REPO" != "1" ]]; then
     return 0
   fi
 
@@ -943,7 +945,7 @@ run_same_spec_current_benchmark() {
   current_vllm_hust_ref=${GITHUB_HEAD_REF:-${GITHUB_REF_NAME:-$(git -C "$VLLM_HUST_REPO" branch --show-current 2>/dev/null || echo main)}}
   current_plugin_commit=$(git -C "$VLLM_ASCEND_HUST_REPO" rev-parse HEAD 2>/dev/null || true)
   current_plugin_ref=$(git -C "$VLLM_ASCEND_HUST_REPO" branch --show-current 2>/dev/null || echo main)
-  display_version=$(printf '%s' "${GITHUB_SHA:-local}" | cut -c1-8)
+  display_version=$(printf '%s' "${TARGET_REPO_SHA:-${GITHUB_SHA:-local}}" | cut -c1-8)
 
   rm -f "$same_spec_raw_result" "$RAW_RESULT_FILE"
   rm -rf "$same_spec_submission_dir" "$SUBMISSION_DIR"
@@ -1101,6 +1103,7 @@ echo "run id: $RUN_ID"
 echo "result root: $RESULT_ROOT"
 echo "benchmark port: $PORT"
 echo "benchmark scenario: $BENCH_SCENARIO"
+echo "publish to benchmark repo: $PUBLISH_TO_BENCHMARK_REPO"
 echo "publish to hf: $PUBLISH_TO_HF"
 echo "same-spec benchmark enabled: $SAME_SPEC_BENCHMARK_ENABLED"
 echo "ascend benchmark use sudo: $ASCEND_BENCHMARK_USE_SUDO"
@@ -1290,7 +1293,7 @@ PY
     --submissions-dir "$SUBMISSIONS_ROOT"
 fi
 
-if [[ "$PUBLISH_TO_HF" == "1" ]]; then
+if [[ "$PUBLISH_TO_BENCHMARK_REPO" == "1" ]]; then
   sync_benchmark_publication_to_github
 else
   "$PYTHON_BIN" -m vllm_hust_benchmark.cli publish-website \
