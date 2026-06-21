@@ -7,13 +7,16 @@ from collections import defaultdict
 from queue import Queue
 from types import SimpleNamespace
 
+import msgpack
 import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOError,
+    ROLE,
     RemoteAllocInfo,
     WriteTask,
+    set_role,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
@@ -287,8 +290,12 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
         def waiting_for_transfer_complete(self):
             self.wait_count += 1
 
-        def send_notify(self, transfer_id, remote_ip, remote_port):
-            self.notifications.append((transfer_id, remote_ip, remote_port))
+        def send_notify(
+            self, transfer_id, remote_ip, remote_port, message_type=None
+        ):
+            self.notifications.append(
+                (transfer_id, remote_ip, remote_port, message_type)
+            )
 
     wrapper = FakeWrapper()
     request_info = RemoteAllocInfo(block_ids=[4, 5], writes_expected=2)
@@ -308,10 +315,59 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
     writer._mark_write_done("xfer", request_info)
     writer._finalize_if_complete("xfer", request_info)
 
-    assert wrapper.notifications == [("xfer", "127.0.0.1", 7002)]
+    assert wrapper.notifications == [("xfer", "127.0.0.1", 7002, "write_done")]
     assert wrapper.done_req_ids == ["xfer"]
     assert wrapper.done_remote_allocate_req_dict == {}
     assert wrapper.wait_count == 1
+
+
+def test_moriio_wrapper_handles_structured_remote_blocks_message():
+    set_role(ROLE.PRODUCER)
+    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
+    wrapper.lock = threading.Lock()
+    wrapper.done_remote_allocate_req_dict = {}
+
+    wrapper._handle_message(
+        msgpack.dumps(
+            {
+                "type": "remote_blocks",
+                "req_id": "req",
+                "transfer_id": "xfer",
+                "block_notify_list": [4, 5],
+                "decode_rank": 3,
+            }
+        )
+    )
+
+    request_info = wrapper.done_remote_allocate_req_dict["xfer"]
+    assert request_info.block_ids == [4, 5]
+    assert request_info.decode_dp_rank == 3
+
+
+def test_moriio_wrapper_handles_structured_write_done_message():
+    set_role(ROLE.CONSUMER)
+    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
+    wrapper.lock = threading.Lock()
+    wrapper.done_write_cache_req_ids = []
+
+    wrapper._handle_message(
+        msgpack.dumps({"type": "write_done", "transfer_id": "xfer"})
+    )
+
+    assert wrapper.done_write_cache_req_ids == ["xfer"]
+
+
+def test_moriio_wrapper_handles_structured_release_message():
+    set_role(ROLE.PRODUCER)
+    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
+    wrapper.lock = threading.Lock()
+    wrapper.done_req_ids = []
+
+    wrapper._handle_message(
+        msgpack.dumps({"type": "release", "transfer_id": "xfer"})
+    )
+
+    assert wrapper.done_req_ids == ["xfer"]
 
 
 def test_moriio_wrapper_accepts_plain_string_completion_message():
@@ -322,6 +378,34 @@ def test_moriio_wrapper_accepts_plain_string_completion_message():
     wrapper._handle_message(b"xfer")
 
     assert completions == ["xfer"]
+
+
+def test_moriio_wrapper_rejects_unknown_structured_message():
+    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
+
+    with pytest.raises(MoRIIOError, match="Unhandled structured message type"):
+        wrapper._handle_message(
+            msgpack.dumps({"type": "unknown", "transfer_id": "xfer"})
+        )
+
+
+def test_moriio_wrapper_rejects_empty_remote_blocks_message():
+    set_role(ROLE.PRODUCER)
+    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
+    wrapper.lock = threading.Lock()
+    wrapper.done_remote_allocate_req_dict = {}
+
+    with pytest.raises(MoRIIOError, match="block_notify_list cannot be empty"):
+        wrapper._handle_message(
+            msgpack.dumps(
+                {
+                    "type": "remote_blocks",
+                    "req_id": "req",
+                    "transfer_id": "xfer",
+                    "block_notify_list": [],
+                }
+            )
+        )
 
 
 def test_moriio_wrapper_rejects_empty_completion_message():

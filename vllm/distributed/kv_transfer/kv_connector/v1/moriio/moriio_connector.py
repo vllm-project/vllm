@@ -396,7 +396,7 @@ class MoRIIOConnectorScheduler:
         serialized_data = msgpack.dumps(data)
         self.paths[path].send(serialized_data)
 
-    def send_notify_done(self, transfer_id: TransferId, host: str, port: int):
+    def _send_transfer_release(self, transfer_id: TransferId, host: str, port: int):
         path = make_zmq_path("tcp", host, port)
         if path not in self.paths:
             ctx = zmq.Context.instance()
@@ -405,13 +405,15 @@ class MoRIIOConnectorScheduler:
             )
             self.paths[path] = sock
 
-        self.paths[path].send(transfer_id.encode("utf-8"))
+        self.paths[path].send(
+            msgpack.dumps({"type": "release", "transfer_id": transfer_id})
+        )
 
-    def _notify_write_prefill_done(self, request_id: ReqId, params: dict[str, Any]):
+    def _release_write_prefill_blocks(self, request_id: ReqId, params: dict[str, Any]):
         transfer_id = params.get("transfer_id")
         if transfer_id is None:
             logger.warning(
-                "Cannot notify WRITE prefill completion for request %s: "
+                "Cannot release WRITE prefill blocks for request %s: "
                 "missing transfer_id",
                 request_id,
             )
@@ -428,7 +430,7 @@ class MoRIIOConnectorScheduler:
                 remote_host, _, remote_notify_port = parse_moriio_zmq_address(peer_zmq)
             except ValueError:
                 logger.warning(
-                    "Cannot notify WRITE prefill completion for request %s: "
+                    "Cannot release WRITE prefill blocks for request %s: "
                     "missing remote notify address",
                     request_id,
                 )
@@ -439,7 +441,7 @@ class MoRIIOConnectorScheduler:
             target_port = remote_notify_port + get_port_offset(
                 remote_dp_rank, tp_index
             )
-            self.send_notify_done(transfer_id, remote_host, target_port)
+            self._send_transfer_release(transfer_id, remote_host, target_port)
 
     def update_state_after_alloc(
         self,
@@ -639,7 +641,7 @@ class MoRIIOConnectorScheduler:
             # to write into, and a plain request_id may not contain router-
             # embedded MoRIIO ZMQ addresses.
             if self.mode == MoRIIOMode.WRITE:
-                self._notify_write_prefill_done(request.request_id, params)
+                self._release_write_prefill_blocks(request.request_id, params)
             else:
                 self._reqs_need_recv[request.request_id] = (request, [])
             params["do_remote_prefill"] = False

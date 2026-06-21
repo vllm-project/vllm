@@ -69,8 +69,13 @@ def _get_write_geometry_key(kv_cache: torch.Tensor) -> WriteGeometryKey:
 
 class MoRIIOWriter:
     """Handles write operations for KV cache transfers.
-    Implements distributed KV cache transfer using the MoRIIO library
-    for RDMA-based communication between prefill and decode instances."""
+
+    WRITE mode state machine:
+    D sends destination block allocation, P schedules one write per layer
+    after the layer CUDA event, P seals the scheduled write count after
+    forward, then P notifies D and releases P blocks after all scheduled
+    writes complete.
+    """
 
     def __init__(self, worker: "MoRIIOConnectorWorker"):
         """Initialize the writer.
@@ -419,7 +424,9 @@ class MoRIIOWriter:
         # Consider including the first gen token from prefill in the notification
 
         # Send completion notification
-        self.worker.moriio_wrapper.send_notify(transfer_id, remote_ip, remote_port)
+        self.worker.moriio_wrapper.send_notify(
+            transfer_id, remote_ip, remote_port, message_type="write_done"
+        )
         # mark request as done, then we can free the blocks
         with self.worker.moriio_wrapper.lock:
             self.worker.moriio_wrapper.done_req_ids.append(transfer_id)
@@ -671,9 +678,8 @@ class MoRIIOWrapper:
         handled = False
         try:
             data = msgpack.loads(msg)
-            if isinstance(data, dict) and "req_id" in data:
+            if isinstance(data, dict):
                 self._handle_structured_message(data)
-
                 return
         except (
             msgpack.exceptions.ExtraData,
@@ -694,18 +700,49 @@ class MoRIIOWrapper:
             raise MoRIIOError(f"Unhandled message format: {msg_str}")
 
     def _handle_structured_message(self, data: dict):
+        message_type = data.get("type")
+        if message_type is None and "req_id" in data:
+            message_type = "remote_blocks"
+
+        if message_type == "remote_blocks":
+            self._handle_remote_blocks_message(data)
+        elif message_type == "write_done":
+            self._handle_write_done_message(data)
+        elif message_type == "release":
+            self._handle_release_message(data)
+        else:
+            raise MoRIIOError(f"Unhandled structured message type: {message_type}")
+
+    def _handle_remote_blocks_message(self, data: dict):
         assert get_role() == ROLE.PRODUCER, "Only prefill can get block messages"
         transfer_id = data["transfer_id"]
         block_notify_list = data.get("block_notify_list", [])
         decode_dp_rank = data.get("decode_rank", 0)
-        assert len(block_notify_list) > 0, (
-            "block_notify_list cannot be empty in remote allocate message"
-        )
+        if not block_notify_list:
+            raise MoRIIOError(
+                "block_notify_list cannot be empty in remote allocate message"
+            )
 
         with self.lock:
             self.done_remote_allocate_req_dict[transfer_id] = RemoteAllocInfo(
                 block_ids=block_notify_list, decode_dp_rank=decode_dp_rank
             )
+
+    def _handle_write_done_message(self, data: dict):
+        assert get_role() != ROLE.PRODUCER, (
+            "Only decode can get WRITE completion messages"
+        )
+        transfer_id = data["transfer_id"]
+        with self.lock:
+            self.done_write_cache_req_ids.append(transfer_id)
+
+    def _handle_release_message(self, data: dict):
+        assert get_role() == ROLE.PRODUCER, (
+            "Only prefill can get transfer release messages"
+        )
+        transfer_id = data["transfer_id"]
+        with self.lock:
+            self.done_req_ids.append(transfer_id)
 
     def _handle_completion_message(self, msg: str):
         with self.lock:
@@ -714,7 +751,9 @@ class MoRIIOWrapper:
             else:
                 self.done_write_cache_req_ids.append(msg)
 
-    def send_notify(self, req_ids, remote_ip, remote_port):
+    def send_notify(
+        self, req_ids, remote_ip, remote_port, message_type: str | None = None
+    ):
         if not remote_ip or not remote_port:
             logger.warning("Missing remote_ip or remote_port for notification")
             return
@@ -738,7 +777,12 @@ class MoRIIOWrapper:
                         "Invalid req_id type: %s, expected str", type(req_id)
                     )
                     continue
-                sock.send(req_id.encode("utf-8"))
+                if message_type is None:
+                    sock.send(req_id.encode("utf-8"))
+                else:
+                    sock.send(
+                        msgpack.dumps({"type": message_type, "transfer_id": req_id})
+                    )
         except Exception as e:
             logger.error("Failed to send notification to %s: %s", path, e)
             self.paths.pop(path, None)

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
+import socket
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -9,7 +10,6 @@ import pytest
 import torch
 import zmq
 
-from tests.conftest import _find_free_port
 from vllm.config import (
     CacheConfig,
     DeviceConfig,
@@ -46,6 +46,12 @@ from vllm.v1.kv_cache_interface import (
 )
 
 from .utils import create_request, create_scheduler
+
+
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return sock.getsockname()[1]
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
@@ -189,7 +195,7 @@ class FakeMoRIIOWrapper:
     def _handle_completion_message(self, msg: str):
         pass
 
-    def send_notify(self, req_ids, remote_ip, remote_port):
+    def send_notify(self, req_ids, remote_ip, remote_port, message_type=None):
         pass
 
     def pop_finished_req_ids(self):
@@ -449,8 +455,10 @@ def test_read_mode_loads_remote_block_ids():
 def test_write_mode_finished_before_alloc_notifies_prefill_without_recv_meta():
     scheduler = _write_consumer_scheduler_for_finished_request(tp_size=2)
     notifications = []
-    scheduler.send_notify_done = lambda transfer_id, host, port: notifications.append(
-        (transfer_id, host, port)
+    scheduler._send_transfer_release = (
+        lambda transfer_id, host, port: notifications.append(
+            (transfer_id, host, port)
+        )
     )
     request = create_request(request_id=7, do_remote_prefill=True)
     request.request_id = "plain-decode-id"
@@ -474,9 +482,24 @@ def test_write_mode_finished_before_alloc_notifies_prefill_without_recv_meta():
     ]
 
 
+def test_send_transfer_release_sends_structured_release_message():
+    scheduler = _write_consumer_scheduler_for_finished_request()
+    path = make_zmq_path("tcp", "127.0.0.1", 7000)
+    sock = MagicMock()
+    scheduler.paths = {path: sock}
+
+    scheduler._send_transfer_release("xfer-7", "127.0.0.1", 7000)
+
+    payload = sock.send.call_args.args[0]
+    assert msgspec.msgpack.decode(payload) == {
+        "type": "release",
+        "transfer_id": "xfer-7",
+    }
+
+
 def test_write_mode_finished_before_alloc_with_plain_id_does_not_parse_as_recv():
     scheduler = _write_consumer_scheduler_for_finished_request()
-    scheduler.send_notify_done = MagicMock()
+    scheduler._send_transfer_release = MagicMock()
     request = create_request(request_id=8, do_remote_prefill=True)
     request.request_id = "plain-decode-id"
     request.kv_transfer_params = {
@@ -491,7 +514,7 @@ def test_write_mode_finished_before_alloc_with_plain_id_does_not_parse_as_recv()
     assert new_params is None
     assert request.kv_transfer_params["do_remote_prefill"] is False
     assert scheduler._reqs_need_recv == {}
-    scheduler.send_notify_done.assert_not_called()
+    scheduler._send_transfer_release.assert_not_called()
 
 
 @pytest.mark.skipif(
