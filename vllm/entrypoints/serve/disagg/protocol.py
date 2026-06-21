@@ -181,6 +181,7 @@ class GenerateResponseStreamChoice(BaseModel):
     logprobs: ChatCompletionLogProbs | None = None
     finish_reason: str | None = None
     token_ids: list[int] | None = None
+    routed_experts: str | None = None
 
 
 class GenerateStreamResponse(BaseModel):
