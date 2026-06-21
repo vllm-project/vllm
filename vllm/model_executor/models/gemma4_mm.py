@@ -1685,6 +1685,9 @@ class Gemma4ForConditionalGeneration(
     # LoRA / multimodal mapping
     # ------------------------------------------------------------------ #
 
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.language_model.get_expert_mapping()
+
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix mapping for multimodal models."""
         connectors = ["embed_vision"]

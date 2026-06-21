@@ -8,6 +8,11 @@ import torch
 from tqdm import tqdm
 
 from vllm import RequestOutput, TextPrompt, TokensPrompt
+from vllm.entrypoints.beam_search_utils import (
+    get_trie_allowed_token_ids,
+    init_beam_search_so_backend,
+)
+from vllm.entrypoints.choice_trie import ChoiceTrie
 from vllm.entrypoints.offline_utils import OfflineInferenceMixin
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -19,7 +24,6 @@ from vllm.sampling_params import (
 )
 from vllm.tokenizers import TokenizerLike
 from vllm.v1.structured_output.backend_types import StructuredOutputBackend
-from vllm.v1.structured_output.request import get_structured_output_key
 
 from .utils import (
     BeamSearchInstance,
@@ -103,11 +107,13 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         structured_output_backend: StructuredOutputBackend | None = None
         structured_output_key = None
         structured_output_bitmask = None
+        so_trie: ChoiceTrie | None = None
         if params.structured_outputs is not None:
             (
                 structured_output_backend,
                 structured_output_key,
                 structured_output_bitmask,
+                so_trie,
             ) = self._init_beam_search_structured_output(
                 params.structured_outputs, tokenizer
             )
@@ -168,6 +174,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                         structured_output_backend=structured_output_backend,
                         structured_output_key=structured_output_key,
                         structured_output_bitmask=structured_output_bitmask,
+                        so_trie=so_trie,
                     )
                     if should_stop:
                         break
@@ -201,6 +208,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         structured_output_backend: StructuredOutputBackend | None,
         structured_output_key: tuple | None,
         structured_output_bitmask: torch.Tensor | None,
+        so_trie: ChoiceTrie | None = None,
     ) -> bool:
         """Run one token step of beam search across a batch of instances.
 
@@ -217,7 +225,33 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         if len(all_beams) == 0:
             return True
 
-        if structured_output_backend is not None:
+        trie_params: list[SamplingParams] = []
+        beam_entries: list[tuple[SamplingParams, list[int]] | None] = []
+
+        if so_trie is not None:
+            # Fast path: re-walk trie from root each step (stateless).
+            active_indices: list[int] = []
+            for i, beam in enumerate(all_beams):
+                allowed_ids = get_trie_allowed_token_ids(beam, so_trie)
+                if not allowed_ids:
+                    # None = terminal after EOS; [] = off-trie. Drop.
+                    pass
+                else:
+                    active_indices.append(i)
+                    trie_params.append(
+                        SamplingParams(
+                            logprobs=base_sampling_params.logprobs,
+                            max_tokens=1,
+                            temperature=base_sampling_params.temperature,
+                            allowed_token_ids=allowed_ids,
+                            skip_clone=True,
+                        )
+                    )
+            if not active_indices:
+                return True
+            active_beams = [all_beams[i] for i in active_indices]
+            active_params: Sequence[SamplingParams | PoolingParams] = trie_params
+        elif structured_output_backend is not None:
             assert (
                 structured_output_key is not None
                 and structured_output_bitmask is not None
@@ -250,7 +284,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 return True
 
             active_beams = [all_beams[i] for i in active_indices]
-            active_params: Sequence[SamplingParams | PoolingParams] = [
+            active_params = [
                 beam_entries[i][0]  # type: ignore[index]
                 for i in active_indices
             ]
@@ -275,13 +309,16 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         for idx, active_idx in enumerate(active_indices):
             output[active_idx] = active_output[idx]
 
-        # Logprobs are computed from raw logits before
-        # allowed_token_ids masking, so they may contain
-        # tokens outside the grammar's allowed set. This filtering is also
-        # the only grammar enforcement for beams whose allowed set exceeds
-        # the engine-side allowed_token_ids cap.
+        # Logprobs are computed from raw logits before allowed_token_ids
+        # masking, so they may contain tokens outside the grammar's allowed
+        # set. This filtering is also the only grammar enforcement for beams
+        # whose allowed set exceeds the engine-side allowed_token_ids cap.
         allowed_sets: list[set[int] | None] = [None] * len(all_beams)
-        if structured_output_backend is not None:
+        if so_trie is not None:
+            for idx, p in zip(active_indices, trie_params):
+                if p.allowed_token_ids:
+                    allowed_sets[idx] = set(p.allowed_token_ids)
+        elif structured_output_backend is not None:
             for i, entry in enumerate(beam_entries):
                 if entry is not None:
                     allowed_sets[i] = set(entry[1])
@@ -320,6 +357,21 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 key=sort_beams_key,
                 reverse=True,
             )
+            # Deduplicate by generated token sequence when using trie.
+            if so_trie is not None:
+                seen: set[tuple] = set()
+                deduped: list[BeamSearchSequence] = []
+                for b in sorted_beams:
+                    orig = b.orig_prompt
+                    if orig["type"] == "enc_dec":
+                        plen = len(orig["decoder_prompt"]["prompt_token_ids"])
+                    else:
+                        plen = len(orig["prompt_token_ids"])
+                    trie_key = tuple(b.tokens[plen:])
+                    if trie_key not in seen:
+                        seen.add(trie_key)
+                        deduped.append(b)
+                sorted_beams = deduped
             instance.beams = sorted_beams[:beam_width]
 
         return False
@@ -328,71 +380,19 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         self,
         structured_outputs: StructuredOutputsParams,
         tokenizer: TokenizerLike,
-    ) -> tuple[StructuredOutputBackend, tuple, torch.Tensor]:
-        """Initialize the structured output backend for beam search."""
-        vllm_config = self.llm_engine.vllm_config
-        so_config = vllm_config.structured_outputs_config
-        if so_config is None:
-            raise ValueError(
-                "structured_outputs_config is required for beam search "
-                "with structured outputs"
-            )
+    ) -> tuple:
+        """Initialize the structured output backend for beam search.
 
-        # Resolve the backend name from engine config if not already set.
-        if not structured_outputs._backend:
-            structured_outputs._backend = so_config.backend
-
-        backend_name = structured_outputs._backend
-        vocab_size = self.model_config.get_vocab_size()
-
-        backend: StructuredOutputBackend
-        if backend_name == "xgrammar":
-            from vllm.v1.structured_output.backend_xgrammar import (
-                XgrammarBackend,
-            )
-
-            backend = XgrammarBackend(
-                vllm_config=vllm_config,
-                tokenizer=tokenizer,
-                vocab_size=vocab_size,
-            )
-        elif backend_name == "guidance":
-            from vllm.v1.structured_output.backend_guidance import (
-                GuidanceBackend,
-            )
-
-            backend = GuidanceBackend(
-                vllm_config=vllm_config,
-                tokenizer=tokenizer,
-                vocab_size=vocab_size,
-            )
-        elif backend_name == "outlines":
-            from vllm.v1.structured_output.backend_outlines import (
-                OutlinesBackend,
-            )
-
-            backend = OutlinesBackend(
-                vllm_config=vllm_config,
-                tokenizer=tokenizer,
-                vocab_size=vocab_size,
-            )
-        elif backend_name == "lm-format-enforcer":
-            from vllm.v1.structured_output.backend_lm_format_enforcer import (
-                LMFormatEnforcerBackend,
-            )
-
-            backend = LMFormatEnforcerBackend(
-                vllm_config=vllm_config,
-                tokenizer=tokenizer,
-                vocab_size=vocab_size,
-            )
-        else:
-            raise ValueError(f"Unsupported structured output backend: {backend_name}")
-
-        structured_output_key = get_structured_output_key(structured_outputs)
-        bitmask = backend.allocate_token_bitmask(1)
-
-        return backend, structured_output_key, bitmask
+        Returns a 4-tuple (backend, key, bitmask, trie). For CHOICE requests
+        the trie fast-path is used and backend/key/bitmask are None. For all
+        other request types trie is None and the grammar backend is returned.
+        """
+        return init_beam_search_so_backend(
+            vllm_config=self.llm_engine.vllm_config,
+            tokenizer=tokenizer,
+            vocab_size=self.model_config.get_vocab_size(),
+            structured_outputs=structured_outputs,
+        )
 
     def _build_beam_sampling_params(
         self,
