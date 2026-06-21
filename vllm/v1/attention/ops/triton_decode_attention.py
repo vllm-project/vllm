@@ -57,11 +57,12 @@ def tanh(x):
 
 
 def _page_stride(buf, page_size):
-    # Page-dim stride of a (..., PAGE_SIZE, NUM_HEADS, HEAD_DIM) KV buffer.
-    # 3D buffers have no explicit page dim (pages are packed token-major);
-    # 4D buffers may have a page stride larger than PAGE_SIZE * token stride
-    # (e.g. per-layer views into a cross-layer block-major cache).
-    return buf.stride(-4) if buf.dim() >= 4 else page_size * buf.stride(-3)
+    # Stride between pages. 4D buffers have a page dim; 3D buffers pack pages
+    # along the token dim, so split it out first. Read the real stride (a
+    # cross-layer view has gaps), don't assume PAGE_SIZE * token stride.
+    if buf.ndim == 3:
+        buf = buf.unflatten(-3, (-1, page_size))
+    return buf.stride(-4)
 
 
 @triton.jit
