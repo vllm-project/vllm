@@ -248,8 +248,21 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
         # Classify single-token queries (plus num_speculative_tokens via
         # supports_spec_as_decode=True) as decodes; longer queries go to
-        # prefill.
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        # prefill. Under DCP the fp8 mixed-batch kernel metadata is shape-only
+        # (causality comes from the indexer's top-k indices, which the indexer
+        # builder localizes per token), so multi-token (spec-decode) decode rows
+        # need no extra handling here. Declare supports_dcp_with_varlen (gated on
+        # interleave == 1, mirroring FlashAttn MLA) so reorder_batch_threshold is
+        # not forced back to 1 under DCP -- otherwise MTP verify rows (q_len>1)
+        # get classified as prefills and break the full-cudagraph decode capture
+        # (silent corruption, issue #45425).
+        self._init_reorder_batch_threshold(
+            1,
+            supports_spec_as_decode=True,
+            supports_dcp_with_varlen=(
+                parallel_config.cp_kv_cache_interleave_size == 1
+            ),
+        )
 
         sm_count = num_compute_units(device.index)
 
