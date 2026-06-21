@@ -84,6 +84,7 @@ class RemoteAllocInfo:
     completion_remote_notify_port: int | None = None
     completion_remote_ip: str | None = None
     completion_notified: bool = False
+    transfer_statuses: list[Any] = field(default_factory=list)
     transfer_offsets: dict[
         tuple[tuple[int, ...], tuple[int, ...], torch.dtype],
         tuple[list[int], list[int], list[int]],

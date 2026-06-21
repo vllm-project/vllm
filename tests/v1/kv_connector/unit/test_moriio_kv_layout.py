@@ -370,10 +370,12 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
             self.lock = threading.Lock()
             self.notifications = []
             self.wait_count = 0
+            self.waited_statuses = []
             self._terminal_transfer_ids = OrderedDict()
 
-        def waiting_for_transfer_complete(self):
+        def waiting_for_transfer_complete(self, transfer_statuses=None):
             self.wait_count += 1
+            self.waited_statuses.append(list(transfer_statuses or []))
 
         def _is_transfer_terminal_locked(self, transfer_id):
             return transfer_id in self._terminal_transfer_ids
@@ -390,6 +392,7 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
 
     wrapper = FakeWrapper()
     request_info = RemoteAllocInfo(block_ids=[4, 5], writes_expected=2)
+    request_info.transfer_statuses.extend(["status-a", "status-b"])
     request_info.completion_request_id = "req"
     request_info.completion_remote_notify_port = 7000
     request_info.completion_remote_ip = "127.0.0.1"
@@ -410,7 +413,35 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
     assert wrapper.done_req_ids == ["xfer"]
     assert wrapper.done_remote_allocate_req_dict == {}
     assert wrapper.wait_count == 1
+    assert wrapper.waited_statuses == [["status-a", "status-b"]]
+    assert request_info.transfer_statuses == []
     assert wrapper._is_transfer_terminal_locked("xfer")
+
+
+def test_moriio_wrapper_waits_scoped_statuses_without_global_drain():
+    class FakeStatus:
+        def __init__(self):
+            self.checked = 0
+
+        def Succeeded(self):
+            self.checked += 1
+            return True
+
+        def Failed(self):
+            return False
+
+    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
+    wrapper.lock = threading.Lock()
+    wrapper._transfer_timeout = 1
+    global_status = FakeStatus()
+    scoped_status = FakeStatus()
+    wrapper.transfer_status = [global_status]
+
+    wrapper.waiting_for_transfer_complete([scoped_status])
+
+    assert scoped_status.checked == 1
+    assert global_status.checked == 0
+    assert wrapper.transfer_status == [global_status]
 
 
 def test_write_failure_marks_terminal_and_clears_scheduled_state():

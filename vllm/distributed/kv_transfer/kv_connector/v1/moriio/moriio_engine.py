@@ -337,7 +337,9 @@ class MoRIIOWriter:
         plan = self._prepare_transfer_plan(task, request_info, remote_moriio_meta)
 
         # Execute transfer
-        self._do_layer_write(plan, sessions)
+        transfer_statuses = self._do_layer_write(plan, sessions)
+        with self._write_state_lock:
+            request_info.transfer_statuses.extend(transfer_statuses)
 
         # Finalize if all layers complete
         self._mark_write_done(task.transfer_id, request_info)
@@ -386,7 +388,7 @@ class MoRIIOWriter:
             use_batch=True,
         )
 
-    def _do_layer_write(self, plan: LayerTransferPlan, sessions: list) -> None:
+    def _do_layer_write(self, plan: LayerTransferPlan, sessions: list) -> list[Any]:
         """Perform the actual layer write.
 
         Args:
@@ -394,20 +396,26 @@ class MoRIIOWriter:
             sessions: List of transfer sessions
         """
         if plan.use_batch:
-            self.worker.moriio_wrapper.write_remote_data(
-                plan.transfer_sizes,
-                plan.transfer_local_offsets,
-                plan.transfer_remote_offsets,
-                sessions[plan.sess_idx],
-            )
-        else:
-            for i in range(len(plan.transfer_local_offsets)):
+            return [
+                self.worker.moriio_wrapper.write_remote_data(
+                    plan.transfer_sizes,
+                    plan.transfer_local_offsets,
+                    plan.transfer_remote_offsets,
+                    sessions[plan.sess_idx],
+                )
+            ]
+
+        transfer_statuses: list[Any] = []
+        for i in range(len(plan.transfer_local_offsets)):
+            transfer_statuses.append(
                 self.worker.moriio_wrapper.write_remote_data_single(
                     plan.transfer_sizes[i],
                     plan.transfer_local_offsets[i],
                     plan.transfer_remote_offsets[i],
                     plan.sess_idx,
                 )
+            )
+        return transfer_statuses
 
     def _mark_write_done(
         self, transfer_id: TransferId, request_info: RemoteAllocInfo
@@ -432,10 +440,12 @@ class MoRIIOWriter:
             remote_ip = request_info.completion_remote_ip
             if request_id is None or remote_notify_port is None or remote_ip is None:
                 return
+            transfer_statuses = list(request_info.transfer_statuses)
+            request_info.transfer_statuses.clear()
             request_info.completion_notified = True
 
-        # Wait for transfer to complete
-        self.worker.moriio_wrapper.waiting_for_transfer_complete()
+        # Wait for this request's transfers to complete.
+        self.worker.moriio_wrapper.waiting_for_transfer_complete(transfer_statuses)
 
         remote_port = remote_notify_port + get_port_offset(
             request_info.decode_dp_rank, self.worker.tp_rank
@@ -602,8 +612,7 @@ class MoRIIOWrapper:
         transfer_status = session.batch_write(
             local_offset, remote_offset, transfer_size_byte, write_uid
         )
-        with self.lock:
-            self.transfer_status.append(transfer_status)
+        return transfer_status
 
     def write_remote_data_single(
         self, transfer_size_byte, local_offset=0, remote_offset=0, sess_idx=0
@@ -616,16 +625,20 @@ class MoRIIOWrapper:
             transfer_size_byte,
             self.moriio_engine.allocate_transfer_uid(),
         )
-        with self.lock:
-            self.transfer_status.append(transfer_status)
+        return transfer_status
 
-    def waiting_for_transfer_complete(self):
-        if not self.transfer_status:
+    def waiting_for_transfer_complete(
+        self, transfer_statuses: list[Any] | None = None
+    ):
+        if transfer_statuses is None:
+            with self.lock:
+                transfers_to_wait = self.transfer_status[:]
+                self.transfer_status.clear()
+        else:
+            transfers_to_wait = list(transfer_statuses)
+
+        if not transfers_to_wait:
             return
-
-        with self.lock:
-            transfers_to_wait = self.transfer_status[:]
-            self.transfer_status.clear()
 
         timeout = self._transfer_timeout
         deadline = time.monotonic() + timeout
