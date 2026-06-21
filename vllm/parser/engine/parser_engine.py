@@ -172,7 +172,9 @@ class ParserEngine(Parser):
 
     def finish_streaming(self) -> DeltaMessage | None:
         events = self._engine.finish()
-        return self._events_to_delta(events) if events else None
+        if events or self._deferred_content:
+            return self._events_to_delta(events, finished=True)
+        return None
 
     def _reset(self, initial_state: ParserState | None = None) -> None:
         self._engine.reset(initial_state=initial_state)
