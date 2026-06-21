@@ -83,8 +83,17 @@ def basic_cache(
     kv_cache: torch.Tensor,  # shape: [num_blocks, block_size, num_heads, head_size]
     slot_mapping: torch.Tensor,  # shape: [seq_len]
 ):
+    # Ignore padding slots (slot_mapping < 0): padded / chunked-prefill batches
+    # carry -1 slots that must not scatter hidden states into block 0.
+    valid = slot_mapping >= 0
+    if not valid.any():
+        return
+    valid_slot_mapping = slot_mapping[valid]
     block_size = kv_cache.shape[1]
-    kv_cache[slot_mapping // block_size, slot_mapping % block_size] = to_cache
+    kv_cache[
+        valid_slot_mapping // block_size,
+        valid_slot_mapping % block_size,
+    ] = to_cache[valid]
 
 
 ######### CacheOnlyAttentionBackend ########
