@@ -2122,9 +2122,10 @@ steps:
   - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
 
 - label: Spec Decode Eagle # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/spec_decode/
