@@ -27,6 +27,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
+    ToolCall,
     UsageInfo,
 )
 from vllm.entrypoints.openai.engine.serving import resolve_token_id_placeholder
@@ -43,7 +44,6 @@ from vllm.entrypoints.serve.disagg.protocol import (
     DerenderChatRequest,
     DerenderCompletionRequest,
     GenerateRequest,
-    GenerateResponseChoice,
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
@@ -76,21 +76,83 @@ from vllm.utils.mistral import mt as _mt
 logger = init_logger(__name__)
 
 
+def _parse_token_id_placeholder(token: str) -> int | None:
+    """Extract token ID from a 'token_id:N' placeholder string."""
+    if not token.startswith("token_id:"):
+        return None
+    try:
+        return int(token[len("token_id:") :])
+    except ValueError:
+        return None
+
+
+def _correct_decoded_token(
+    token_id: int, context_token_ids: list[int], tokenizer: TokenizerLike
+) -> str:
+    """Use preceding tokens as context to fix U+FFFD from byte-fallback.
+
+    Mirrors LogprobsProcessor._correct_decoded_token in v1/engine/logprobs.py.
+    """
+    max_ctx = min(len(context_token_ids), 4)
+
+    for num_ctx in range(1, max_ctx + 1):
+        context = context_token_ids[-num_ctx:]
+        full_decoded = tokenizer.decode(context + [token_id])
+
+        if full_decoded.endswith("�"):
+            continue
+
+        clean_end = len(context)
+        for j in range(len(context) - 1, -1, -1):
+            if tokenizer.decode([context[j]]).endswith("�"):
+                clean_end = j
+            else:
+                break
+
+        clean_prefix = tokenizer.decode(context[:clean_end]) if clean_end > 0 else ""
+
+        if full_decoded.startswith(clean_prefix):
+            return full_decoded[len(clean_prefix) :]
+
+        common_len = 0
+        for a, b in zip(clean_prefix, full_decoded):
+            if a != b:
+                break
+            common_len += 1
+        return full_decoded[common_len:]
+
+    return ""
+
+
 def _resolve_logprobs(
     logprobs: ChatCompletionLogProbs, tokenizer: TokenizerLike
 ) -> ChatCompletionLogProbs:
-    """Resolve all token_id:N placeholders in a ChatCompletionLogProbs object."""
+    """Resolve token_id:N placeholders in a ChatCompletionLogProbs object."""
     if logprobs.content is None:
         return logprobs
+
+    context_token_ids: list[int] = []
     resolved_content = []
+
     for entry in logprobs.content:
         token_str, token_bytes = resolve_token_id_placeholder(entry.token, tokenizer)
+        sampled_id = _parse_token_id_placeholder(entry.token)
+
+        if token_str.endswith("�") and sampled_id is not None:
+            token_str = _correct_decoded_token(sampled_id, context_token_ids, tokenizer)
+            token_bytes = list(token_str.encode("utf-8"))
+
         resolved_top = []
         for top in entry.top_logprobs:
             top_str, top_bytes = resolve_token_id_placeholder(top.token, tokenizer)
+            top_id = _parse_token_id_placeholder(top.token)
+            if top_str.endswith("�") and top_id is not None:
+                top_str = _correct_decoded_token(top_id, context_token_ids, tokenizer)
+                top_bytes = list(top_str.encode("utf-8"))
             resolved_top.append(
                 top.model_copy(update={"token": top_str, "bytes": top_bytes})
             )
+
         resolved_content.append(
             entry.model_copy(
                 update={
@@ -100,6 +162,10 @@ def _resolve_logprobs(
                 }
             )
         )
+
+        if sampled_id is not None:
+            context_token_ids.append(sampled_id)
+
     return ChatCompletionLogProbs(content=resolved_content)
 
 
@@ -133,30 +199,6 @@ def _convert_chat_logprobs_to_completion_logprobs(
         token_logprobs=token_logprobs,
         tokens=tokens,
         top_logprobs=top_logprobs_list,
-    )
-
-
-def _build_chat_choice(
-    choice: GenerateResponseChoice, tokenizer: TokenizerLike
-) -> ChatCompletionResponseChoice:
-    """Detokenize and resolve logprobs for a single GenerateResponseChoice.
-
-    Raises:
-        ValueError: if choice.token_ids is empty or None.
-    """
-    if not choice.token_ids:
-        raise ValueError(f"choice {choice.index} has empty or null token_ids")
-    decoded_text = tokenizer.decode(choice.token_ids, skip_special_tokens=True)
-    resolved_logprobs = (
-        _resolve_logprobs(choice.logprobs, tokenizer)
-        if choice.logprobs is not None
-        else None
-    )
-    return ChatCompletionResponseChoice(
-        index=choice.index,
-        message=ChatMessage(role="assistant", content=decoded_text),
-        logprobs=resolved_logprobs,
-        finish_reason=choice.finish_reason,
     )
 
 
@@ -536,9 +578,12 @@ class OpenAIServingRender:
     ) -> ChatCompletionResponse | ErrorResponse:
         """Postprocess a GenerateResponse into a ChatCompletionResponse.
 
-        This is the symmetric inverse of render_chat_request: it detokenizes
-        output token IDs, resolves token_id:N logprob placeholders, and
-        formats the result as an OpenAI-compatible chat completion response.
+        Non-streaming only: expects the complete GenerateResponse with all
+        token IDs present.  Uses ``parser.parse()`` for one-shot extraction.
+
+        When ``request.chat_request`` is provided, the parser splits the
+        output into (reasoning, content, tool_calls).  Otherwise falls
+        back to plain detokenization.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -546,11 +591,89 @@ class OpenAIServingRender:
 
         tokenizer = self.renderer.get_tokenizer()
         gen = request.generate_response
+        chat_request = request.chat_request
         choices: list[ChatCompletionResponseChoice] = []
 
         try:
             for choice in gen.choices:
-                choices.append(_build_chat_choice(choice, tokenizer))
+                if not choice.token_ids:
+                    raise ValueError(
+                        f"choice {choice.index} has empty or null token_ids"
+                    )
+
+                resolved_logprobs = (
+                    _resolve_logprobs(choice.logprobs, tokenizer)
+                    if choice.logprobs is not None
+                    else None
+                )
+
+                if self.parser is not None and chat_request is not None:
+                    # Parser path: decode with special tokens preserved
+                    # so the parser can see markers like </think>,
+                    # <tool_call>, or Harmony channel tokens.
+                    decoded_text = tokenizer.decode(
+                        choice.token_ids, skip_special_tokens=False
+                    )
+
+                    chat_template_kwargs: dict[str, Any] = {}
+                    if not self.use_harmony:
+                        chat_template_kwargs = (
+                            chat_request.build_chat_params(
+                                self.chat_template,
+                                self.chat_template_content_format,
+                            )
+                            .with_defaults(self.default_chat_template_kwargs)
+                            .chat_template_kwargs
+                        )
+
+                    parser = self.parser(
+                        tokenizer,
+                        chat_request.tools,
+                        chat_template_kwargs=chat_template_kwargs,
+                    )
+                    reasoning, content, tool_calls = parser.parse(
+                        decoded_text,
+                        chat_request,
+                        enable_auto_tools=self.enable_auto_tools,
+                        model_output_token_ids=choice.token_ids,
+                    )
+
+                    if not getattr(chat_request, "include_reasoning", True):
+                        reasoning = None
+
+                    tc_items = (
+                        [
+                            ToolCall(
+                                id=random_uuid(),
+                                function=tc,
+                            )
+                            for tc in tool_calls
+                        ]
+                        if tool_calls
+                        else []
+                    )
+
+                    message = ChatMessage(
+                        role="assistant",
+                        reasoning=reasoning,
+                        content=content,
+                        tool_calls=tc_items,
+                    )
+                else:
+                    # No parser: plain detokenization.
+                    decoded_text = tokenizer.decode(
+                        choice.token_ids, skip_special_tokens=True
+                    )
+                    message = ChatMessage(role="assistant", content=decoded_text)
+
+                choices.append(
+                    ChatCompletionResponseChoice(
+                        index=choice.index,
+                        message=message,
+                        logprobs=resolved_logprobs,
+                        finish_reason=choice.finish_reason,
+                    )
+                )
         except ValueError as exc:
             return self.create_error_response(str(exc))
 
@@ -587,8 +710,9 @@ class OpenAIServingRender:
     ) -> CompletionResponse | ErrorResponse:
         """Postprocess a list of GenerateResponses into a CompletionResponse.
 
-        Mirrors the multi-prompt completions case: one GenerateResponse per
-        prompt, parallel to the list[GenerateRequest] from /v1/completions/render.
+        Non-streaming only.  Mirrors the multi-prompt completions case: one
+        GenerateResponse per prompt, parallel to the list[GenerateRequest]
+        from /v1/completions/render.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
