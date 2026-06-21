@@ -3,7 +3,6 @@
 """Utility functions for Helion kernel management."""
 
 import regex as re
-
 import torch
 
 from vllm.logger import init_logger
