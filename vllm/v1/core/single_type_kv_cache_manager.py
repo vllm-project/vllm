@@ -71,12 +71,13 @@ class SingleTypeKVCacheManager(ABC):
                 block until the request finishes.
         """
         self.scheduler_block_size = scheduler_block_size
-        # The block size for this manager; used for actual block allocation.
-        self.block_size = kv_cache_spec.block_size
+        # Global logical block size used by scheduling and block allocation.
+        self.block_size = kv_cache_spec.logical_block_size(
+            dcp_world_size,
+            pcp_world_size,
+        )
         self.dcp_world_size = dcp_world_size
         self.pcp_world_size = pcp_world_size
-        if dcp_world_size * pcp_world_size > 1:
-            self.block_size *= dcp_world_size * pcp_world_size
         self.kv_cache_spec = kv_cache_spec
         self.block_pool = block_pool
         self.enable_caching = enable_caching
@@ -673,11 +674,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             "FullAttentionManager can only be used for full attention "
             "and chunked local attention groups"
         )
-        block_size = kv_cache_spec.block_size
-        if dcp_world_size * pcp_world_size > 1:
-            # DCP/PCP shard each block's KV across ranks; hashes must be
-            # viewed at the sharded (scaled) block size.
-            block_size *= dcp_world_size * pcp_world_size
+        block_size = kv_cache_spec.logical_block_size(dcp_world_size, pcp_world_size)
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
@@ -883,23 +880,26 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
-        assert dcp_world_size == 1, "DCP not support sliding window attn now."
+        assert dcp_world_size == 1 or getattr(
+            kv_cache_spec, "supports_context_parallel", False
+        ), "DCP only supports sliding window specs with context parallel support."
         assert pcp_world_size == 1, "PCP not support sliding window attn now."
         # Fine-grained partial hits are not supported for sliding window now
         assert alignment_tokens % kv_cache_spec.block_size == 0, (
             "SlidingWindowManager does not support fine-grained (partial) cache hits"
         )
+        block_size = kv_cache_spec.logical_block_size(dcp_world_size, pcp_world_size)
         block_hashes = resolve_block_hashes(
             block_hashes,
             block_pool.hash_block_size,
-            kv_cache_spec.block_size,
+            block_size,
             supports_fine_grained_hash_lookup=cls.supports_fine_grained_hash_lookup,
             alignment_tokens=alignment_tokens,
         )
 
         # The number of contiguous blocks needed for a prefix cache hit.
         sliding_window_contiguous_blocks = cls._contiguous_blocks_for_hit(
-            kv_cache_spec.sliding_window, kv_cache_spec.block_size, drop_eagle_block
+            kv_cache_spec.sliding_window, block_size, drop_eagle_block
         )
 
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
@@ -907,12 +907,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # O(max_num_blocks / sliding_window_contiguous_blocks +
         # sliding_window_contiguous_blocks),
         # which is good for low cache hit rate scenarios.
-        max_num_blocks = max_length // kv_cache_spec.block_size
-        computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
+        max_num_blocks = max_length // block_size
+        computed_blocks = tuple(
             [block_pool.null_block] * max_num_blocks
             for _ in range(len(kv_cache_group_ids))
         )
-        block_size = kv_cache_spec.block_size
         num_contiguous_blocks = 0
         match_found = False
         # Search from right to left and early stop when a match is found.
