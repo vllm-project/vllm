@@ -642,6 +642,15 @@ class OutputProcessor:
                 if stop_string:
                     finish_reason = FinishReason.STOP
                     stop_reason = stop_string
+                    # Mirror detokenizer trimming on delta outputs and logprobs.
+                    num_overflow_tokens = req_state.detokenizer.num_stop_overflow_tokens
+                    if num_overflow_tokens:
+                        keep = len(new_token_ids) - num_overflow_tokens
+                        del new_token_ids[keep:]
+                        if engine_core_output.new_logprobs is not None:
+                            engine_core_output.new_logprobs = (
+                                engine_core_output.new_logprobs.slice_request(0, keep)
+                            )
 
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.

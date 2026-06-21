@@ -30,6 +30,7 @@ INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 class IncrementalDetokenizer:
     def __init__(self):
         self.token_ids: list[int] = []
+        self.num_stop_overflow_tokens = 0
 
     @property
     def output_token_ids(self) -> list[int]:
@@ -114,7 +115,10 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # 1) Detokenize the new token ids incrementally.
         stop_check_offset = len(self.output_text)
+        first_new_token_index = len(self.token_ids)
+        token_start_offsets: list[int] = []
         for new_token_id in new_token_ids:
+            token_start_offsets.append(len(self.output_text))
             self.token_ids.append(new_token_id)
             self.output_text += self.decode_next(new_token_id)
             # Support min_tokens, see https://github.com/vllm-project/vllm/pull/22014
@@ -127,6 +131,7 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
 
         # 2) Evaluate stop strings.
         stop_string = None
+        self.num_stop_overflow_tokens = 0
         if self.stop and self.num_output_tokens() > self.min_tokens:
             stop = check_stop_strings(
                 output_text=self.output_text,
@@ -138,6 +143,20 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                 stop_string, truncate_to = stop
                 if truncate_to != -1:
                     self.output_text = self.output_text[:truncate_to]
+                if not stop_terminated:
+                    # Stop strings can land in the middle of a speculative
+                    # batch; stop-token termination keeps existing semantics.
+                    stop_end = len(self.output_text)
+                    if not self.include_stop_str_in_output:
+                        stop_end += len(stop_string)
+                    keep = first_new_token_index
+                    for start in token_start_offsets:
+                        if start >= stop_end:
+                            break
+                        keep += 1
+                    self.num_stop_overflow_tokens = len(self.token_ids) - keep
+                    if self.num_stop_overflow_tokens:
+                        del self.token_ids[keep:]
 
         return stop_string
 
