@@ -269,9 +269,7 @@ class TestPhysicalMemory:
             free_sleeping = _gpu_free_bytes()
             freed_gib = (free_sleeping - free_awake) / 2**30
 
-            # sleep(1) offloads model weights only (not KV cache).
-            # Qwen3-0.6B bf16 = ~1.2 GiB; threshold 0.5 GiB catches no-ops
-            # while staying below the actual freed amount on any reasonable GPU.
+            # 0.5 GiB threshold: sleep(1) offloads weights only (~1.2 GiB for 0.6B bf16)
             assert freed_gib > 0.5, (
                 f"sleep(1) freed only {freed_gib:.2f} GiB — "
                 "CuMemAllocator unmap may be a no-op"
@@ -283,8 +281,6 @@ class TestPhysicalMemory:
 
             assert _wake(url) == 200
             free_awake2 = _gpu_free_bytes()
-            # After wake, memory is re-allocated (free bytes decrease).
-            # re_allocated_gib = how much memory was mapped back onto the GPU.
             re_allocated_gib = (free_sleeping - free_awake2) / 2**30
             assert re_allocated_gib > 0.4, (
                 f"wake_up re-allocated only {re_allocated_gib:.2f} GiB — "

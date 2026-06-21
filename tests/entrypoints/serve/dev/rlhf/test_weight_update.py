@@ -28,6 +28,7 @@ RFC: https://github.com/vllm-project/vllm/issues/45585
 """
 
 import contextlib
+import errno
 import os
 import subprocess
 import sys
@@ -314,14 +315,18 @@ class TestWeightUpdateWithTensors:
 
 
 class TestCompoundRLStep:
-    """Full RL training-step sequence end-to-end.
+    """Tests the staged-wake guard from PR #44483.
 
-    Tests the exact lifecycle that PR #44483 protects:
-      rollout → sleep → weight_update → wake(weights) → wake(kv_cache) → rollout
+    Lifecycle under test:
+      rollout → sleep → wake(weights) → wake(kv_cache) → rollout
 
     The window between wake(weights) and wake(kv_cache) is the "danger zone"
     where pre-#44483 vLLM would dispatch a generate step with kv_cache
     unmapped → TMA descriptor 700 / illegal memory access.
+
+    Weight transfer is exercised separately by TestWeightTransferProtocol
+    and TestWeightUpdateProtocolErrors; these tests focus on the scheduler
+    guard across staged wakes.
     """
 
     def test_single_rl_step_engine_survives(self):
@@ -434,8 +439,7 @@ def _run_reload_test(model: str, extra_kwargs: dict):
     try:
         llm = LLM(**llm_kwargs)
     except OSError as exc:
-        # HF cache mounted read-only and model not pre-downloaded → skip.
-        if "Read-only file system" in str(exc) or "[Errno 30]" in str(exc):
+        if exc.errno == errno.EROFS:
             pytest.skip(
                 f"{model!r} not in local HF cache (read-only mount) — "
                 "pre-download the model to run this test"
