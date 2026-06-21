@@ -195,7 +195,10 @@ class SpinCondition:
         if current_time <= self.last_read + self.busy_loop_s:
             sched_yield()
         else:
-            events = dict(self.poller.poll(timeout=timeout_ms))
+            poll_timeout = timeout_ms
+            if poll_timeout is not None and poll_timeout > 0:
+                poll_timeout = min(poll_timeout, 100)
+            events = dict(self.poller.poll(timeout=poll_timeout))
 
             if self.read_cancel_socket in events:
                 logger.debug("Poller received cancel event")
