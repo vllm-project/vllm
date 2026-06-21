@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for Helion kernel management."""
 
-import re
+import regex as re
 
 import torch
 
