@@ -597,6 +597,7 @@ def test_flashinfer_nvfp4_requires_sm100():
             use_mla=False,
             has_sink=False,
             use_sparse=False,
+            use_mm_prefix=False,
             device_capability=DeviceCapability(9, 0),
         )
         == "nvfp4 KV cache in FlashInfer requires SM100"
@@ -610,6 +611,7 @@ def test_flashinfer_nvfp4_requires_sm100():
             use_mla=False,
             has_sink=False,
             use_sparse=False,
+            use_mm_prefix=False,
             device_capability=DeviceCapability(10, 0),
         )
         is None

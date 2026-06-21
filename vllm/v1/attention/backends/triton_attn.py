@@ -431,6 +431,7 @@ class TritonAttentionBackend(AttentionBackend):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
         if kv_cache_dtype == "nvfp4":
@@ -525,9 +526,11 @@ class TritonAttentionImpl(AttentionImpl):
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
-        if alibi_slopes is not None:
-            alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
-        self.alibi_slopes = alibi_slopes
+        self.alibi_slopes = (
+            torch.tensor(alibi_slopes, dtype=torch.float32)
+            if alibi_slopes is not None
+            else None
+        )
         if sliding_window is None:
             self.sliding_window = (-1, -1)
         elif attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_ONLY):
@@ -602,7 +605,7 @@ class TritonAttentionImpl(AttentionImpl):
 
     def forward(
         self,
-        layer: torch.nn.Module,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
@@ -818,7 +821,7 @@ class TritonAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         output: torch.Tensor,
         attn_metadata: TritonAttentionMetadata,
-        layer: torch.nn.Module,
+        layer: AttentionLayer,
     ) -> torch.Tensor:
         """Forward pass for encoder attention without KV cache.
 
@@ -876,6 +879,8 @@ class TritonAttentionImpl(AttentionImpl):
             if key_cache.dtype == torch.uint8:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
+            assert self._k_scale_cache is not None
+            assert self._v_scale_cache is not None
             triton_reshape_and_cache_flash_per_token_head_quant(
                 key,
                 value,

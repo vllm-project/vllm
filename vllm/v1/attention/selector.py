@@ -20,7 +20,6 @@ logger = init_logger(__name__)
 
 class AttentionSelectorConfig(NamedTuple):
     head_size: int
-    head_size_v: int | None
     dtype: torch.dtype
     kv_cache_dtype: CacheDType | None
     block_size: int | None
@@ -33,6 +32,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_non_causal: bool = False
     use_batch_invariant: bool = False
     use_kv_connector: bool = False
+    head_size_v: int | None = None
 
     def __repr__(self):
         return (

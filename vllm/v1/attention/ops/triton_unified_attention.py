@@ -2109,15 +2109,10 @@ def unified_attention(
     else:
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE
-    launch_kwargs: dict[str, int] = {}
     if use_nvfp4:
         tile_size, launch_num_warps, launch_num_stages = _get_nvfp4_launch_config(
             tile_size, head_size, head_size_padded, use_3d, sliding_window_val
         )
-        launch_kwargs = {
-            "num_warps": launch_num_warps,
-            "num_stages": launch_num_stages,
-        }
 
     launch_kwargs: dict[str, int] = {}
     if launch_num_warps is not None:
