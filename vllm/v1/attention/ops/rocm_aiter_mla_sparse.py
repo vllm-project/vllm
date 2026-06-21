@@ -6,10 +6,16 @@ import math
 from importlib.util import find_spec
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    get_tp_group,
+)
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -742,50 +748,172 @@ def rocm_aiter_sparse_attn_indexer(
             scale_fmt,
         )
 
-    topk_indices_buffer[: hidden_states.shape[0]] = -1
+    # Redundant on gfx950. Kept for other archs as a safety net.
+    if not _ON_GFX950:
+        topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = layer_attn_metadata.prefill
         assert prefill_metadata is not None
+
+        # TP row-sharding of the indexer prefill
+        num_prefill_tokens = layer_attn_metadata.num_prefill_tokens
+        tp_size = get_tensor_model_parallel_world_size()
+        do_shard = (
+            envs.VLLM_ROCM_USE_AITER_MLA_SPARSE_TP_SHARD
+            and _ON_GFX950
+            and tp_size > 1
+            and num_prefill_tokens >= 512 * tp_size
+        )
+        fold = False
+        if do_shard:
+            tp_rank = get_tensor_model_parallel_rank()
+
+            prefill_offset = num_decode_tokens
+            prefill_end = prefill_offset + num_prefill_tokens
+
+            if envs.VLLM_ROCM_USE_AITER_MLA_SPARSE_TP_SHARD_FOLD:
+                fold = True
+                P = num_prefill_tokens
+                # Fold: first half [0,M) = tp rank-ordered groups; second half
+                # [M,P) = tp groups in REVERSE rank order, so each rank pairs a
+                # cheap low-index group with an expensive high-index one. M is a
+                # multiple of tp so the first half can ring all_gather. The split
+                # is symmetric (M ~= P/2), which exactly balances the linear
+                # per-row indexer cost across ranks.
+                fold_M = max(
+                    tp_size,
+                    min(
+                        P - tp_size,
+                        round(0.5 * P / tp_size) * tp_size,
+                    ),
+                )
+                fb = [(i * fold_M) // tp_size for i in range(tp_size + 1)]
+                sb = [(j * (P - fold_M)) // tp_size for j in range(tp_size + 1)]
+                second_groups = [
+                    (
+                        prefill_offset + fold_M + sb[j],
+                        prefill_offset + fold_M + sb[j + 1],
+                        tp_size - 1 - j,
+                    )
+                    for j in range(tp_size)
+                ]
+                shard_ranges = [
+                    (prefill_offset + fb[tp_rank], prefill_offset + fb[tp_rank + 1]),
+                    (
+                        prefill_offset + fold_M + sb[tp_size - 1 - tp_rank],
+                        prefill_offset + fold_M + sb[tp_size - tp_rank],
+                    ),
+                ]
+            else:
+                base = num_prefill_tokens // tp_size
+                rem = num_prefill_tokens - base * tp_size
+                # rank 0 heuristically has lowest workload
+                if tp_rank == 0:
+                    rank_start = prefill_offset
+                    rank_end = prefill_offset + rem + base
+                else:
+                    rank_start = prefill_offset + rem + tp_rank * base
+                    rank_end = rank_start + base
+                shard_ranges = [(rank_start, rank_end)]
 
         workspace_manager = current_workspace_manager()
         k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
             ((total_seq_lens, head_dim), fp8_dtype),
             ((total_seq_lens, 4), torch.uint8),
         )
+
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
-            cp_gather_indexer_k_quant_cache_triton(
-                kv_cache,
-                k_fp8,
-                k_scale,
-                chunk.block_table,
-                chunk.cu_seq_lens,
-                token_to_seq=chunk.token_to_seq,
-            )
-            logits = rocm_fp8_mqa_logits(
-                q_fp8[chunk.token_start : chunk.token_end],
-                (k_fp8, k_scale.view(torch.float32)),
-                weights[chunk.token_start : chunk.token_end],
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-            )
-            topk_indices = topk_indices_buffer[
-                chunk.token_start : chunk.token_end, :topk_tokens
-            ]
 
-            num_rows = logits.shape[0]
+            if not chunk.skip_kv_gather:
+                cp_gather_indexer_k_quant_cache_triton(
+                    kv_cache,
+                    k_fp8,
+                    k_scale,
+                    chunk.block_table,
+                    chunk.cu_seq_lens,
+                    token_to_seq=chunk.token_to_seq,
+                )
 
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
+            seg_ranges = (
+                shard_ranges if do_shard else [(chunk.token_start, chunk.token_end)]
             )
+            for seg_start, seg_end in seg_ranges:
+                row_start = max(chunk.token_start, seg_start)
+                row_end = min(chunk.token_end, seg_end)
+                if row_start >= row_end:
+                    # This rank owns no rows of this segment in this chunk.
+                    continue
+                lo = row_start - chunk.token_start
+                hi = row_end - chunk.token_start
+                cu_seqlen_ks = chunk.cu_seqlen_ks[lo:hi]
+                cu_seqlen_ke = chunk.cu_seqlen_ke[lo:hi]
+
+                logits = rocm_fp8_mqa_logits(
+                    q_fp8[row_start:row_end],
+                    (k_fp8, k_scale.view(torch.float32)),
+                    weights[row_start:row_end],
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
+                )
+
+                topk_indices = topk_indices_buffer[row_start:row_end, :topk_tokens]
+
+                num_rows = logits.shape[0]
+
+                torch.ops._C.top_k_per_row_prefill(
+                    logits,
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
+
+        if do_shard:
+            pg = get_tp_group().device_group
+            if fold:
+                # First half rank-ordered -> ring all_gather; second half
+                # reverse-ordered -> per-group broadcasts.
+                dist.all_gather_into_tensor(
+                    topk_indices_buffer[
+                        prefill_offset : prefill_offset + fold_M, :topk_tokens
+                    ],
+                    topk_indices_buffer[
+                        shard_ranges[0][0] : shard_ranges[0][1], :topk_tokens
+                    ],
+                    group=pg,
+                )
+                pynccl_comm = getattr(
+                    get_tp_group().device_communicator, "pynccl_comm", None
+                )
+                assert pynccl_comm is not None
+                pynccl_comm.group_start()
+                for gs, ge, owner in second_groups:
+                    if ge > gs:
+                        pynccl_comm.broadcast(
+                            topk_indices_buffer[gs:ge, :topk_tokens], src=owner
+                        )
+                pynccl_comm.group_end()
+            else:
+                base = num_prefill_tokens // tp_size
+                rem = num_prefill_tokens - base * tp_size
+                ag_start = prefill_offset + rem
+                in_start = ag_start + tp_rank * base
+                dist.all_gather_into_tensor(
+                    topk_indices_buffer[ag_start:prefill_end, :topk_tokens],
+                    topk_indices_buffer[in_start : in_start + base, :topk_tokens],
+                    group=pg,
+                )
+                if rem:
+                    dist.broadcast(
+                        topk_indices_buffer[prefill_offset:ag_start, :topk_tokens],
+                        src=dist.get_global_rank(pg, 0),
+                        group=pg,
+                    )
 
     if has_decode:
         decode_metadata = layer_attn_metadata.decode
