@@ -4171,6 +4171,41 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
+def test_aborted_request_both_kv_xfers_same_step():
+    scheduler = create_scheduler(use_kv_connector=True)
+
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+
+    # Aborted request with in-flight recv+send; blocks still held.
+    request.status = RequestStatus.FINISHED_ABORTED
+    assert request.request_id in scheduler.requests
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(
+            finished_recving={request.request_id},
+            finished_sending={request.request_id},
+        ),
+    )
+
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    assert request.request_id not in scheduler.requests
+
+
 def test_delayed_kv_connector_free_keeps_scheduler_active():
     scheduler = create_scheduler(use_kv_connector=True)
     queued_request, request = create_requests(
