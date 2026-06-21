@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+import threading
 from http import HTTPStatus
 from typing import Annotated
 
@@ -23,7 +24,62 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
+# ---------------------------------------------------------------------------
+# Weight version state — lives on app.state, updated by finish_weight_update.
+#
+# Design (improvement over sglang):
+#   weight_gen:   monotonic int, auto-incremented on every finish_weight_update.
+#                 Used for off-policy detection (staleness = current - sample).
+#   weight_label: optional client-set string (e.g. "step-1500").
+#                 Purely informational, not used for ordering.
+#
+# Both are updated AFTER the engine client confirms finish_weight_update
+# succeeded, so there is no window where gen is bumped but weights are stale.
+# ---------------------------------------------------------------------------
+
+
+class _WeightVersionState:
+    """Thread-safe weight version tracker.
+
+    Attached to ``app.state.weight_version`` at router registration time.
+
+    NOTE: This state is per-process. With ``--data-parallel-size > 1``,
+    each API server process maintains its own gen counter. Clients that
+    use DP should either pin to one process or use weight_label for
+    cross-process identity.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._gen: int = 0
+        self._label: str = ""
+
+    def bump(self, label: str | None = None) -> int:
+        """Increment gen and optionally set label. Returns the new gen."""
+        with self._lock:
+            self._gen += 1
+            if label is not None:
+                self._label = label
+            return self._gen
+
+    def set_label(self, label: str) -> None:
+        with self._lock:
+            self._label = label
+
+    def get(self) -> dict:
+        with self._lock:
+            return {
+                "weight_gen": self._gen,
+                "weight_label": self._label,
+            }
+
+
 router = APIRouter()
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Pause / resume
+# ───────────────────────────────────────────────────────────────────────
 
 
 @router.post("/pause")
@@ -109,6 +165,11 @@ async def is_paused(raw_request: Request) -> JSONResponse:
     return JSONResponse(content={"is_paused": paused})
 
 
+# ───────────────────────────────────────────────────────────────────────
+# Weight transfer protocol
+# ───────────────────────────────────────────────────────────────────────
+
+
 @router.post("/init_weight_transfer_engine")
 async def init_weight_transfer_engine(raw_request: Request):
     try:
@@ -160,8 +221,84 @@ async def update_weights(raw_request: Request):
 
 @router.post("/finish_weight_update")
 async def finish_weight_update(raw_request: Request):
+    """Finish the current weight update session and bump weight_gen.
+
+    The weight_gen counter is incremented AFTER the engine confirms the
+    update is applied. An optional ``weight_label`` in the request body
+    is stored alongside the gen for human-readable identification.
+    """
+    try:
+        body = await raw_request.json()
+    except (json.JSONDecodeError, RuntimeError):
+        # RuntimeError: Starlette raises this if the body was already consumed.
+        body = {}
+
     await engine_client(raw_request).finish_weight_update()
-    return JSONResponse(content={"message": "Weight update finished"})
+
+    # Bump version after engine confirms success.
+    wv: _WeightVersionState = raw_request.app.state.weight_version
+    label = body.get("weight_label")
+    new_gen = wv.bump(label=label)
+
+    return JSONResponse(content={
+        "message": "Weight update finished",
+        "weight_gen": new_gen,
+        "weight_label": label if label is not None else wv.get()["weight_label"],
+    })
+
+
+# ───────────────────────────────────────────────────────────────────────
+# Weight version info
+# ───────────────────────────────────────────────────────────────────────
+
+
+@router.get("/weight_info")
+async def weight_info(raw_request: Request) -> JSONResponse:
+    """Return current weight version info.
+
+    Response::
+
+        {
+            "weight_gen": 3,          // monotonic int, bumped by finish_weight_update
+            "weight_label": "step-1500"  // client-set label, "" if never set
+        }
+    """
+    wv: _WeightVersionState = raw_request.app.state.weight_version
+    return JSONResponse(content=wv.get())
+
+
+@router.post("/update_weight_label")
+async def update_weight_label(raw_request: Request) -> JSONResponse:
+    """Set the weight_label without changing weight_gen.
+
+    Useful for tagging weights loaded from disk or external sync where
+    finish_weight_update was not called through the HTTP protocol.
+
+    Body::
+
+        {"weight_label": "step-1500"}
+    """
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+
+    label = body.get("weight_label")
+    if label is None:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="Missing 'weight_label' in request body",
+        )
+
+    wv: _WeightVersionState = raw_request.app.state.weight_version
+    wv.set_label(str(label))
+
+    return JSONResponse(content=wv.get())
+
+
+# ───────────────────────────────────────────────────────────────────────
+# World size
+# ───────────────────────────────────────────────────────────────────────
 
 
 @router.get("/get_world_size")
@@ -184,5 +321,13 @@ async def get_world_size(
     return JSONResponse(content={"world_size": world_size})
 
 
+# ───────────────────────────────────────────────────────────────────────
+# Registration
+# ───────────────────────────────────────────────────────────────────────
+
+
 def attach_router(app: FastAPI):
+    # Initialize weight version state on the app.
+    if not hasattr(app.state, "weight_version"):
+        app.state.weight_version = _WeightVersionState()
     app.include_router(router)
