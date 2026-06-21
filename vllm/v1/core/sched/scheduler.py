@@ -64,6 +64,15 @@ from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
+# Grace period before reclaiming KV blocks held for a remote KV recv that was
+# aborted mid-flight (request finished while WAITING_FOR_REMOTE_KVS) and never
+# completed -- i.e. no finished/failed_recving signal ever arrives because the
+# remote side also aborted. Chosen comfortably above the connector-side KV
+# lease so a slow remote prefill still gets its full window before we reclaim.
+# See https://github.com/vllm-project/vllm/issues/46283.
+# TODO: maintainers may want this surfaced via vllm.envs.
+_KV_RECV_RECLAIM_TIMEOUT_S = 300.0
+
 
 class Scheduler(SchedulerInterface):
     def __init__(
@@ -196,6 +205,29 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+        # KV Connector: blocks held for a remote KV recv that was aborted
+        # while WAITING_FOR_REMOTE_KVS. Release normally waits on a
+        # finished/failed_recving signal from the worker; if the remote side
+        # also aborted that signal never arrives and the blocks leak. Track
+        # (request, deadline) so we can reclaim them after a grace period.
+        # See https://github.com/vllm-project/vllm/issues/46283.
+        self._aborted_kv_recv_reclaim: dict[str, tuple[Request, float]] = {}
+        # The grace period must stay above the connector's KV lease so we never
+        # reclaim while a slow remote prefill could still be writing (#32255).
+        # MultiConnector nests per-connector configs under "connectors", so scan
+        # both the top level and any children and take the largest lease.
+        _kv_lease_duration = 0.0
+        kv_transfer_config = self.vllm_config.kv_transfer_config
+        if kv_transfer_config is not None:
+            _extra = kv_transfer_config.kv_connector_extra_config or {}
+            _lease_candidates = [_extra.get("kv_lease_duration", 30)]
+            for _child in _extra.get("connectors", []) or []:
+                _child_extra = (_child or {}).get("kv_connector_extra_config", {}) or {}
+                _lease_candidates.append(_child_extra.get("kv_lease_duration", 30))
+            _kv_lease_duration = max(float(_c) for _c in _lease_candidates)
+        self._kv_recv_reclaim_timeout_s: float = max(
+            _KV_RECV_RECLAIM_TIMEOUT_S, _kv_lease_duration + 60.0
+        )
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -1733,6 +1765,10 @@ class Scheduler(SchedulerInterface):
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
 
+        # KV Connector: reclaim blocks held for aborted remote-KV recvs that
+        # never completed within the grace period. See #46283.
+        self._reclaim_expired_aborted_kv_recvs()
+
         # Worker-side KV connector stats from the model runner output.
         kv_connector_stats: KVConnectorStats | None = (
             kv_connector_output.kv_connector_stats if kv_connector_output else None
@@ -2041,6 +2077,16 @@ class Scheduler(SchedulerInterface):
 
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
+            if delay_free_blocks and request.request_id in self.requests:
+                # Blocks were held for a remote KV recv that was aborted while
+                # WAITING_FOR_REMOTE_KVS. Arm a reclaim deadline so they are
+                # not leaked if no finished/failed_recving ever arrives (e.g.
+                # the remote side also aborted).
+                # See https://github.com/vllm-project/vllm/issues/46283.
+                self._aborted_kv_recv_reclaim[request.request_id] = (
+                    request,
+                    time.monotonic() + self._kv_recv_reclaim_timeout_s,
+                )
 
         return [(r.request_id, r.client_index) for r in valid_requests]
 
@@ -2066,6 +2112,9 @@ class Scheduler(SchedulerInterface):
     def _free_blocks(self, request: Request):
         assert request.is_finished()
         self._free_request_blocks(request)
+        # Drop any pending reclaim entry: the blocks are being freed now
+        # (via finished/failed_recving or the reclaim sweep). See #46283.
+        self._aborted_kv_recv_reclaim.pop(request.request_id, None)
         del self.requests[request.request_id]
 
     @property
@@ -2432,7 +2481,11 @@ class Scheduler(SchedulerInterface):
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            assert req_id in self.requests
+            if req_id not in self.requests:
+                # The request was already reclaimed -- its remote KV recv was
+                # aborted and the grace period elapsed before this (late)
+                # finished_recving arrived. Nothing left to free. See #46283.
+                continue
             req = self.requests[req_id]
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
@@ -2441,8 +2494,40 @@ class Scheduler(SchedulerInterface):
                 self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
+            if req_id not in self.requests:
+                # Already reclaimed before this late finished_sending. See #46283.
+                continue
             self._free_blocks(self.requests[req_id])
+
+    def _reclaim_expired_aborted_kv_recvs(self) -> None:
+        """Reclaim KV blocks held for aborted remote-KV recvs.
+
+        A request finished (aborted) while ``WAITING_FOR_REMOTE_KVS`` keeps its
+        blocks held until a finished/failed_recving signal arrives. If the
+        remote side also aborted, that signal never comes and the blocks would
+        leak. Free them once their grace period elapses.
+        See https://github.com/vllm-project/vllm/issues/46283.
+        """
+        if not self._aborted_kv_recv_reclaim:
+            return
+        now = time.monotonic()
+        expired = [
+            req_id
+            for req_id, (_, deadline) in self._aborted_kv_recv_reclaim.items()
+            if deadline <= now
+        ]
+        for req_id in expired:
+            request, _ = self._aborted_kv_recv_reclaim.pop(req_id)
+            # May already be gone if a finished/failed_recving raced in.
+            if req_id not in self.requests:
+                continue
+            logger.warning(
+                "Reclaiming KV blocks for request %s: remote KV recv was "
+                "aborted and did not complete within %.0fs.",
+                req_id,
+                self._kv_recv_reclaim_timeout_s,
+            )
+            self._free_blocks(request)
 
     def _update_requests_with_invalid_blocks(
         self,

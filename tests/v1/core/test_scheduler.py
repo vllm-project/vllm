@@ -346,6 +346,62 @@ def test_throttle_prefills_excludes_remote_kv_resume():
     assert "r1" in output.num_scheduled_tokens
 
 
+def test_aborted_remote_kv_recv_blocks_reclaimed_on_timeout():
+    """A request aborted while WAITING_FOR_REMOTE_KVS holds its KV blocks
+    pending a finished/failed_recving signal that may never arrive (e.g. the
+    remote side also aborted). The scheduler must reclaim those blocks after
+    the grace period instead of leaking them.
+    See https://github.com/vllm-project/vllm/issues/46283.
+    """
+    from tests.v1.kv_connector.unit.utils import create_model_runner_output
+
+    BLOCK_SIZE = 16
+    NUM_MATCHED = BLOCK_SIZE * 2
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        use_kv_connector=mock_kv(matched_tokens=NUM_MATCHED, is_async=True),
+        block_size=BLOCK_SIZE,
+    )
+    (request,) = create_requests(
+        num_requests=1,
+        num_tokens=NUM_MATCHED * 2,
+        max_tokens=20,
+        block_size=BLOCK_SIZE,
+        req_ids=["r"],
+    )
+    scheduler.add_request(request)
+    scheduler.schedule()  # r -> WAITING_FOR_REMOTE_KVS, blocks allocated
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    # Abort while waiting, with NO finished/failed_recving signal.
+    scheduler.finish_requests("r", RequestStatus.FINISHED_ABORTED)
+
+    # Blocks are held (delayed free) and tracked for reclaim -- not freed yet,
+    # but not leaked either.
+    assert "r" in scheduler.requests
+    assert "r" in scheduler._aborted_kv_recv_reclaim
+
+    # Before the grace period elapses, the sweep must not reclaim.
+    scheduler._reclaim_expired_aborted_kv_recvs()
+    assert "r" in scheduler.requests
+
+    # Force the deadline into the past (monotonic clock is always > 0); the
+    # next sweep reclaims the held blocks.
+    req_obj, _ = scheduler._aborted_kv_recv_reclaim["r"]
+    scheduler._aborted_kv_recv_reclaim["r"] = (req_obj, -1.0)
+    scheduler._reclaim_expired_aborted_kv_recvs()
+    assert "r" not in scheduler.requests
+    assert "r" not in scheduler._aborted_kv_recv_reclaim
+
+    # A late finished_recving for the already-reclaimed request must be
+    # ignored gracefully instead of crashing on a missing request.
+    late_output = scheduler.schedule()
+    scheduler.update_from_output(
+        late_output, create_model_runner_output([], finished_recving={"r"})
+    )
+    assert "r" not in scheduler.requests
+
+
 def test_throttle_defers_inflight_prefill_chunk():
     """DP prefill balancing throttles ALL prefill compute on a throttled step,
     not just new admissions: an in-progress (chunked) prefill already in the
