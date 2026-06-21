@@ -1864,10 +1864,24 @@ class EngineArgs:
                 TurboQuantConfig,
             )
 
+            num_layers = model_config.hf_text_config.num_hidden_layers
             boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
             existing = set(cache_config.kv_cache_dtype_skip_layers)
-            cache_config.kv_cache_dtype_skip_layers = sorted(
-                existing | set(boundary), key=int
+            merged = sorted(existing | set(boundary), key=lambda x: int(x))
+
+            hf_cfg = model_config.hf_text_config
+            merged = TurboQuantConfig.apply_yoco_skip_alignment(
+                merged=merged,
+                num_layers=num_layers,
+                layer_types=getattr(hf_cfg, "layer_types", None) or [],
+                num_kv_shared=getattr(hf_cfg, "num_kv_shared_layers", 0),
+            )
+
+            cache_config.kv_cache_dtype_skip_layers = merged
+            logger.info(
+                "TQ: skipping layers %s for boundary protection (num_layers=%d)",
+                merged,
+                num_layers,
             )
 
         ray_runtime_env = None

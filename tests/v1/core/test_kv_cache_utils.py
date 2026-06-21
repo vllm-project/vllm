@@ -1799,16 +1799,41 @@ def test_get_kv_cache_config_one_worker():
         ],
     )
 
-    # different hidden size that cannot be aligned by using different block size
+    # different hidden size and different type: the page-size guard converts
+    # SlidingWindowSpec → FullAttentionSpec, then UniformTypeKVCacheSpecs
+    # handles the two FullAttentionSpecs with different head sizes.
     kv_cache_specs_hybrid = {
         "layer_1": new_kv_cache_spec(head_size=64),
         "layer_2": new_sliding_window_spec(head_size=96),
     }
-
-    with pytest.raises(NotImplementedError):
-        get_kv_cache_configs(
-            vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
-        )[0]
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config,
+        [kv_cache_specs_hybrid],
+        [mem_per_block_per_layer * 2 * 32],
+    )[0]
+    expected_specs = {
+        "layer_1": new_kv_cache_spec(head_size=64),
+        "layer_2": new_kv_cache_spec(head_size=96, sliding_window=1),
+    }
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=25,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=mem_per_block_per_layer * 25,
+                shared_by=["layer_1"],
+            ),
+            KVCacheTensor(
+                size=new_kv_cache_spec(head_size=96).page_size_bytes * 25,
+                shared_by=["layer_2"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["layer_1", "layer_2"],
+                UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=expected_specs),
+            ),
+        ],
+    )
 
     # Test num_gpu_blocks_override
     vllm_config.cache_config.num_gpu_blocks_override = 16
