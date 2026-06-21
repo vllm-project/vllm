@@ -25,7 +25,7 @@ def server():
         "--runner",
         "pooling",
         "--max-model-len",
-        "5000",
+        "16384",
         "--enforce-eager",
         "--limit-mm-per-prompt",
         json.dumps({"video": MAXIMUM_VIDEOS}),
