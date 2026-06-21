@@ -1029,9 +1029,18 @@ def unify_kv_cache_spec_page_size(
 ) -> dict[str, KVCacheSpec]:
     """
     Unify the page size of the given KVCacheSpec. If the page size of all layers
-    are the same, return the original KVCacheSpec. If not same, unify the page
-    size by increasing the block size of layers with smaller page size. Raise
-    NotImplementedError if failed to unify the page size.
+    are the same, return the original KVCacheSpec. Otherwise, unify the page
+    size by increasing the block size of layers with smaller page size.
+
+    Fast path: if every smaller page size divides ``max_page_size`` evenly,
+    just scale each smaller layer's ``block_size`` (existing behavior).
+
+    Slow path (e.g. NVFP4 KV cache + ``--kv-cache-dtype-skip-layers`` mixing
+    a small packed-FP4 page with a larger bf16 page that isn't a multiple of
+    it): pad ``max_page_size`` up to the next multiple of the LCM of the
+    smaller page sizes via ``AttentionSpec.page_size_padded``. The smaller
+    layers then scale ``block_size`` against this padded target. Memory
+    overhead from the padding is typically <0.1% and is logged at INFO level.
 
     Args:
         kv_cache_spec: The KVCacheSpec of each attention layer in the model
@@ -1045,21 +1054,55 @@ def unify_kv_cache_spec_page_size(
         return kv_cache_spec
 
     max_page_size = max(page_sizes)
-    new_kv_cache_spec = {}
+    smaller_page_sizes = page_sizes - {max_page_size}
+
+    if all(max_page_size % p == 0 for p in smaller_page_sizes):
+        target_page_size = max_page_size
+    else:
+        smaller_lcm = math.lcm(*smaller_page_sizes)
+        target_page_size = round_up(max_page_size, smaller_lcm)
+        overhead_bytes = target_page_size - max_page_size
+        overhead_pct = overhead_bytes / max_page_size * 100
+        logger.info(
+            "Padding max KV cache page size from %d to %d bytes "
+            "(LCM-aligned with smaller pages %s, overhead %.3f%%) to unify "
+            "hybrid groups with non-divisible page sizes.",
+            max_page_size,
+            target_page_size,
+            sorted(smaller_page_sizes),
+            overhead_pct,
+        )
+
+    new_kv_cache_spec: dict[str, KVCacheSpec] = {}
     for layer_name, layer_spec in kv_cache_spec.items():
-        if layer_spec.page_size_bytes == max_page_size:
-            new_kv_cache_spec[layer_name] = layer_spec
-        else:
-            layer_page_size = layer_spec.page_size_bytes
-            if max_page_size % layer_page_size != 0:
-                raise NotImplementedError(
-                    "The page size of the layer is not divisible by the "
-                    "maximum page size. Cannot unify by adjusting block_size."
+        layer_page_size = layer_spec.page_size_bytes
+        if layer_page_size == max_page_size:
+            if target_page_size == max_page_size:
+                new_kv_cache_spec[layer_name] = layer_spec
+            else:
+                # Pad the largest layer's page via page_size_padded so its
+                # real layout is unchanged but its page_size_bytes matches
+                # target_page_size. Only AttentionSpec supports padding;
+                # everything else with the max page size already matches.
+                if not hasattr(layer_spec, "page_size_padded"):
+                    raise NotImplementedError(
+                        f"Cannot pad page size of {type(layer_spec).__name__} "
+                        f"to {target_page_size} bytes (no page_size_padded "
+                        f"field). All max-page-size layers must be "
+                        f"AttentionSpec subclasses to use LCM-padding."
+                    )
+                new_kv_cache_spec[layer_name] = replace(
+                    layer_spec, page_size_padded=target_page_size
                 )
-            ratio = max_page_size // layer_page_size
+        else:
+            ratio = target_page_size // layer_page_size
+            assert target_page_size == ratio * layer_page_size, (
+                f"target_page_size {target_page_size} is not a multiple of "
+                f"layer_page_size {layer_page_size} for layer {layer_name}"
+            )
             new_block_size = layer_spec.block_size * ratio
             new_spec = replace(layer_spec, block_size=new_block_size)
-            assert new_spec.page_size_bytes == max_page_size
+            assert new_spec.page_size_bytes == target_page_size
             new_kv_cache_spec[layer_name] = new_spec
     return new_kv_cache_spec
 
