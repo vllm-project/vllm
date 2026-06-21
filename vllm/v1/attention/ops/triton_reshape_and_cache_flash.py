@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -13,8 +11,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.kv_cache_interface import KVQuantMode
-from vllm.v1.attention.ops.fp8e4nv_bf16 import bf16_to_fp8e4m3
-from vllm.v1.attention.ops.fp8e4nv_fp16 import fp16_to_fp8e4m3
+from vllm.v1.attention.ops.fp8e4nv import convert_to_fp8e4m3
 
 
 def _fp8_software_conv(kv_cache_dtype: str) -> bool:
@@ -71,8 +68,6 @@ def reshape_and_cache_kernel_flash(
     FP8_KV_CACHE: tl.constexpr,
     # software fp8e4nv emulation (pre-SM89): cache is uint8, encode explicitly
     FP8_SOFTWARE_CONV: tl.constexpr,
-    # encode rounding mode for software fp8: "rn", "rne", or "trunc"
-    FP8_ENCODE_ROUND: tl.constexpr,
     # tune parameters
     TILE_SIZE: tl.constexpr,
 ):
@@ -147,32 +142,21 @@ def reshape_and_cache_kernel_flash(
         value_tile = value_load
 
     if FP8_SOFTWARE_CONV:
-        # Pre-SM89: no native fp8e4nv cast. Encode to fp8e4nv bits in software and
-        # store into the uint8 cache (no implicit hardware cvt). The activation
-        # (tile) dtype selects the encoder: fp16 (SM75, no bf16 hardware type) or
-        # bf16 (SM80/86).
-        if key_tile.dtype == tl.float16:
-            tl.store(
-                key_cache_ptr + tgt_idx_k,
-                fp16_to_fp8e4m3(key_tile, round=FP8_ENCODE_ROUND),
-                mask=tile_pos < (num_heads * head_size),
-            )
-            tl.store(
-                value_cache_ptr + tgt_idx_v,
-                fp16_to_fp8e4m3(value_tile, round=FP8_ENCODE_ROUND),
-                mask=tile_pos < (num_heads * head_size),
-            )
-        else:
-            tl.store(
-                key_cache_ptr + tgt_idx_k,
-                bf16_to_fp8e4m3(key_tile.to(tl.bfloat16), round=FP8_ENCODE_ROUND),
-                mask=tile_pos < (num_heads * head_size),
-            )
-            tl.store(
-                value_cache_ptr + tgt_idx_v,
-                bf16_to_fp8e4m3(value_tile.to(tl.bfloat16), round=FP8_ENCODE_ROUND),
-                mask=tile_pos < (num_heads * head_size),
-            )
+        # Pre-SM89: no native fp8e4nv cast. Encode to fp8e4nv bits in software (RNE)
+        # and store into the uint8 cache. The scaled tile is fp32 (a 16-bit value
+        # divided by an fp32 scale promotes to fp32), so cast it back to the
+        # activation dtype -- fp16 (SM75, no bf16 hardware type) or bf16 (SM80/86) --
+        # and encode through that representation. convert_to_fp8e4m3 asserts 16-bit.
+        tl.store(
+            key_cache_ptr + tgt_idx_k,
+            convert_to_fp8e4m3(key_tile.to(key_load.dtype)),
+            mask=tile_pos < (num_heads * head_size),
+        )
+        tl.store(
+            value_cache_ptr + tgt_idx_v,
+            convert_to_fp8e4m3(value_tile.to(value_load.dtype)),
+            mask=tile_pos < (num_heads * head_size),
+        )
     else:
         tl.store(
             key_cache_ptr + tgt_idx_k,
@@ -465,8 +449,6 @@ def triton_reshape_and_cache_flash(
     # On the software path the cache stays uint8 and the kernel encodes to
     # fp8e4nv bits explicitly.
     FP8_KV_CACHE = is_quantized_kv_cache(kv_cache_dtype)
-    # software fp8 encode rounding: "rn", "rne" (default), or "trunc"
-    fp8_encode_round = os.environ.get("VLLM_FP8_ENCODE_ROUND", "rne")
     # heuristics instead of autotuning
     TILE_SIZE = min(2048, triton.next_power_of_2(n))
     if current_platform.is_rocm() or current_platform.is_xpu():
@@ -508,7 +490,6 @@ def triton_reshape_and_cache_flash(
         USE_HEAD_MAJOR_LAYOUT=use_head_major_layout,
         FP8_KV_CACHE=FP8_KV_CACHE,
         FP8_SOFTWARE_CONV=fp8_software_conv,
-        FP8_ENCODE_ROUND=fp8_encode_round,
         # autotune parameters
         TILE_SIZE=TILE_SIZE,
         num_warps=num_warps,
