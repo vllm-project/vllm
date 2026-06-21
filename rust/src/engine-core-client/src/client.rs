@@ -738,6 +738,18 @@ impl EngineCoreClient {
         self.call_utility_consensus("is_scheduler_paused", ()).await
     }
 
+    /// Start profiling the engine.
+    pub async fn start_profile(&self) -> Result<()> {
+        self.call_utility::<(), _>("profile", (true, Option::<String>::None)).await?;
+        Ok(())
+    }
+
+    /// Stop profiling the engine.
+    pub async fn stop_profile(&self) -> Result<()> {
+        self.call_utility::<(), _>("profile", (false, Option::<String>::None)).await?;
+        Ok(())
+    }
+
     /// Shut down local client tasks and close transport state.
     pub async fn shutdown(self) -> Result<()> {
         let Self {

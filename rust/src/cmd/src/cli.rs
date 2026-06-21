@@ -290,6 +290,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub ssl_ciphers: Option<String>,
 
+    /// Profiler configuration forwarded by the Python supervisor.
+    ///
+    /// When set with a non-null `profiler` type, the Rust frontend registers
+    /// the `/start_profile` and `/stop_profile` routes and forwards calls to
+    /// the engine via the `"profile"` utility RPC.
+    #[arg(long, value_parser = parse_json::<ProfilerConfig>, value_name = "JSON")]
+    #[serde(default)]
+    pub profiler_config: Option<ProfilerConfig>,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -315,6 +324,11 @@ impl SharedRuntimeArgs {
     pub fn keep_alive_timeout(&self) -> Duration {
         self.http_timeout_keep_alive
             .map_or(DEFAULT_KEEP_ALIVE_TIMEOUT, Duration::from_secs)
+    }
+
+    /// Return `true` when profiling is enabled via `--profiler-config`.
+    pub fn profiling_enabled(&self) -> bool {
+        self.profiler_config.as_ref().and_then(|c| c.profiler.as_ref()).is_some()
     }
 
     /// Apply fallback logic for API key configuration from env variables.
@@ -345,6 +359,7 @@ impl SharedRuntimeArgs {
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
         let tls = self.tls_config();
+        let profiling_enabled = self.profiling_enabled();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -377,6 +392,7 @@ impl SharedRuntimeArgs {
             grpc_port: self.grpc_port,
             shutdown_timeout,
             keep_alive_timeout,
+            profiling_enabled,
         }
     }
 
@@ -397,6 +413,7 @@ impl SharedRuntimeArgs {
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
         let tls = self.tls_config();
+        let profiling_enabled = self.profiling_enabled();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -427,6 +444,7 @@ impl SharedRuntimeArgs {
             grpc_port: self.grpc_port,
             shutdown_timeout,
             keep_alive_timeout,
+            profiling_enabled,
         }
     }
 
@@ -475,6 +493,20 @@ fn default_cors_wildcard() -> JsonStringList {
 
 fn default_py_bootstrap_parser_selection() -> ParserSelection {
     ParserSelection::None
+}
+
+/// Minimal profiler configuration parsed from `--profiler-config`.
+///
+/// Only the `profiler` field is inspected by the Rust frontend to decide
+/// whether to register the `/start_profile` and `/stop_profile` routes.
+/// All other fields are accepted but ignored — they are consumed by the
+/// Python engine layer.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+pub struct ProfilerConfig {
+    /// Profiler backend type (e.g. `"torch"`, `"cuda"`). When `null` or
+    /// absent, profiling is disabled.
+    #[serde(default)]
+    pub profiler: Option<String>,
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {

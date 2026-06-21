@@ -71,6 +71,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         ssl_ca_certs: None,
                         ssl_cert_reqs: 0,
                         ssl_ciphers: None,
+                        profiler_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "../vllm/.venv/bin/python",
@@ -732,6 +733,7 @@ fn frontend_args_accept_json() {
                         ssl_ca_certs: None,
                         ssl_cert_reqs: 0,
                         ssl_ciphers: None,
+                        profiler_config: None,
                     },
                 },
             ),
@@ -1253,6 +1255,7 @@ fn serve_args_accept_handshake_aliases() {
                         ssl_ca_certs: None,
                         ssl_cert_reqs: 0,
                         ssl_ciphers: None,
+                        profiler_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "python3",
@@ -1392,6 +1395,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             grpc_port: None,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
+            profiling_enabled: false,
         }
     "#]]
     .assert_debug_eq(&Config {
@@ -1475,6 +1479,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             grpc_port: None,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
+            profiling_enabled: false,
         }
     "#]]
     .assert_debug_eq(&config);
@@ -1576,6 +1581,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             grpc_port: None,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
+            profiling_enabled: false,
         }
     "#]]
     .assert_debug_eq(&config);
@@ -1603,4 +1609,76 @@ fn serve_frontend_config_uses_unix_listener_when_uds_is_present() {
             path: "/tmp/vllm.sock".to_string(),
         }
     );
+}
+
+#[test]
+fn frontend_args_json_enables_profiling_when_profiler_config_set() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","profiler_config":{"profiler":"torch","torch_profiler_dir":"/tmp/profile"}}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert!(args.runtime.profiling_enabled());
+    let config = args.into_config();
+    assert!(config.profiling_enabled);
+}
+
+#[test]
+fn frontend_args_json_disables_profiling_when_profiler_config_absent() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert!(!args.runtime.profiling_enabled());
+    let config = args.into_config();
+    assert!(!config.profiling_enabled);
+}
+
+#[test]
+fn frontend_args_json_disables_profiling_when_profiler_type_is_null() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","profiler_config":{"profiler":null}}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert!(!args.runtime.profiling_enabled());
+    let config = args.into_config();
+    assert!(!config.profiling_enabled);
 }
