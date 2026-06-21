@@ -1371,13 +1371,13 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
 
         # fps/num_frames are video-only kwargs already consumed by the loop;
         # exclude them so the text/image processor call below never gets a list.
-        text_mm_kwargs = {
+        non_video_mm_kwargs = {
             k: v for k, v in mm_kwargs.items() if k not in ("fps", "num_frames")
         }
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
-            mm_kwargs=text_mm_kwargs,
+            mm_kwargs=non_video_mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
 
