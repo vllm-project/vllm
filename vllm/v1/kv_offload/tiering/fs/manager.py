@@ -26,7 +26,11 @@ from typing_extensions import override
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
+from vllm.v1.kv_offload.tiering.async_lookup import (
+    BaseAsyncLookupManager,
+    LookupBatch,
+    LookupResults,
+)
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -34,6 +38,7 @@ from vllm.v1.kv_offload.tiering.base import (
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
+from vllm.v1.kv_offload.tiering.fs.io_process import FsIoProcess
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 
 if TYPE_CHECKING:
@@ -42,21 +47,28 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class FsAsyncLookupManager(AsyncLookupManager):
-    """Async lookup manager for FileSystemTierManager."""
+class FsAsyncLookupManager(BaseAsyncLookupManager):
+    """Async lookup manager that routes FS lookup batches through FsIoProcess."""
 
     def __init__(
         self,
-        tier: "FileSystemTierManager",
+        io_process: FsIoProcess,
         tier_type: str,
     ) -> None:
         super().__init__(tier_type=tier_type)
-        self._tier = tier
+        self._io_process = io_process
 
-    def batch_lookup(
-        self, keys: list[OffloadKey], req_context: ReqContext
-    ) -> Iterable[bool]:
-        return (os.path.exists(self._tier.file_mapper.get_file_name(k)) for k in keys)
+    @override
+    def shutdown(self) -> None:
+        self._io_process.shutdown()
+
+    @override
+    def _send_lookup_batch(self, batch: LookupBatch) -> None:
+        self._io_process.enqueue_lookup_batch(batch)
+
+    @override
+    def _try_recv_result_batch(self) -> LookupResults | None:
+        return self._io_process.dequeue_lookup_results_nowait()
 
 
 class FileSystemTierManager(SecondaryTierManager):
@@ -130,7 +142,14 @@ class FileSystemTierManager(SecondaryTierManager):
             thread_name_prefix="vllm_kv_py_fs",
         )
 
-        self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
+        self._io_process = FsIoProcess(
+            tier_type=self.tier_type,
+            file_mapper=self.file_mapper,
+        )
+        self._lookup_manager = FsAsyncLookupManager(
+            io_process=self._io_process,
+            tier_type=self.tier_type,
+        )
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:

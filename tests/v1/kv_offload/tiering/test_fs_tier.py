@@ -104,11 +104,14 @@ def lookup_and_wait(
         tier.lookup(k, ctx)
     tier.on_schedule_end()
     deadline = time.monotonic() + timeout
+    latest: list[bool | None] = [None] * len(keys)
     while time.monotonic() < deadline:
-        if not tier._lookup_manager._pending_results.empty():
+        latest = [tier.lookup(k, ctx) for k in keys]
+        if all(v is not None for v in latest):
             break
         time.sleep(0.01)
-    return [tier.lookup(k, ctx) for k in keys]
+    assert all(v is not None for v in latest), "lookup results did not resolve in time"
+    return [bool(v) for v in latest]
 
 
 def _page_aligned_zero_tensor(
