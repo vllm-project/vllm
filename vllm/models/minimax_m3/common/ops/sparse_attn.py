@@ -127,7 +127,6 @@ def _gqa_sparse_fwd_kernel(
         return
     real_q_loop = min(num_q_loop, q_block_len - pid_q * num_q_loop)
     bt_row = block_table_ptr + pid_b * stride_bt_b
-    off_n = tl.arange(0, BLOCK_SIZE_K)
     off_d = tl.arange(0, BLOCK_SIZE_D)
     d_mask = off_d < head_dim
     for j in range(real_q_loop):
@@ -145,12 +144,6 @@ def _gqa_sparse_fwd_kernel(
             order=(2, 1, 0),
         )
         q = tl.load(q_ptrs, boundary_check=(0, 1, 2), padding_option="zero")
-        off_q = (
-            tl.arange(0, BLOCK_SIZE_Q)[:, None]
-            + pid_q_j * BLOCK_SIZE_Q
-            + prefix_len
-            - tl.arange(0, BLOCK_SIZE_K)[None, :]
-        )
         m_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
         lse_i = tl.full((BLOCK_SIZE_QH,), float("-inf"), dtype=tl.float32)
         acc_o = tl.zeros((BLOCK_SIZE_QH, BLOCK_SIZE_D), dtype=tl.float32)
@@ -184,7 +177,9 @@ def _gqa_sparse_fwd_kernel(
                     + prefix_len
                     - off_sub[None, :]
                 )
-                qk_sub_3d = tl.zeros((BLOCK_SIZE_Q, BLOCK_SIZE_H, SUB_K), dtype=tl.float32)
+                qk_sub_3d = tl.zeros(
+                    (BLOCK_SIZE_Q, BLOCK_SIZE_H, SUB_K), dtype=tl.float32
+                )
                 qk_sub_3d += tl.where(off_q_sub[:, None, :] >= c, 0, float("-inf"))
                 qk_sub = tl.reshape(qk_sub_3d, BLOCK_SIZE_QH, SUB_K)
                 qk_sub += tl.dot(q, k_sub) * sm_scale_log2e

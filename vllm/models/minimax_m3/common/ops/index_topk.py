@@ -380,9 +380,7 @@ def _decode_index_score_kernel(
             # and bloats accumulator VGPRs. Replace it with a vectorized fp32
             # multiply + reduce over the head dim (numerically equivalent).
             q_vec = tl.sum(q, axis=1).to(tl.float32)  # [D] (HQ==1 -> single column)
-            kq = tl.sum(
-                k.to(tl.float32) * q_vec[None, :], axis=1
-            )[:, None]  # [N,1]
+            kq = tl.sum(k.to(tl.float32) * q_vec[None, :], axis=1)[:, None]  # [N,1]
         else:
             kq = tl.dot(k, q)  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
