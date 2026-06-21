@@ -948,6 +948,16 @@ class MooncakeConnectorWorker:
         # and draft model may use different attention backends with different
         # physical block sizes. Pick the common (smallest) block size so that
         # KV-cache registration and transfer work correctly for both models.
+        #
+        # Some attention backends (e.g. MLA / DSA-indexer caches on ROCm) lay
+        # the KV cache out at a finer kernel-block granularity than the logical
+        # (cache_config) block size -- in the extreme the kernel block size is
+        # 1, so the cache tensor's leading dim is in per-token units. The
+        # scheduler still addresses KV by *logical* block id, so remember how
+        # many physical (kernel) blocks pack into one logical block and rescale
+        # num_blocks / block_len accordingly in register_kv_caches(). This
+        # mirrors NixlConnectorWorker._physical_blocks_per_logical_kv_block.
+        self._physical_blocks_per_logical_kv_block = 1
         backends = get_current_attn_backends(self.vllm_config)
         kernel_block_size = select_common_block_size(self.block_size, backends)
         if self.block_size != kernel_block_size:
@@ -958,6 +968,10 @@ class MooncakeConnectorWorker:
                 kernel_block_size,
             )
             assert self.block_size > kernel_block_size
+            assert self.block_size % kernel_block_size == 0
+            self._physical_blocks_per_logical_kv_block = (
+                self.block_size // kernel_block_size
+            )
             self.block_size = kernel_block_size
 
     def __del__(self):
@@ -1506,10 +1520,22 @@ class MooncakeConnectorWorker:
 
                 seen_base_addresses.append(base_addr)
 
+                # The cache tensor's leading dim is in physical (kernel) block
+                # units, while the scheduler addresses KV by logical block id.
+                # When they differ (e.g. MLA / DSA-indexer per-token layout,
+                # ratio > 1) collapse `ratio` physical blocks into one logical
+                # block so `base + logical_block_id * block_len` lands on real
+                # data. ratio == 1 (the common case) is a byte-for-byte no-op.
+                ratio = self._physical_blocks_per_logical_kv_block
+                assert cache.shape[0] % ratio == 0, (
+                    "kv cache leading dim must be a multiple of "
+                    "physical_blocks_per_logical_kv_block"
+                )
+                logical_num_blocks = cache.shape[0] // ratio
                 if tensor_size_bytes is None:
                     tensor_size_bytes = cache.nbytes
-                    self.num_blocks = cache.shape[0]
-                assert cache.shape[0] == self.num_blocks, (
+                    self.num_blocks = logical_num_blocks
+                assert logical_num_blocks == self.num_blocks, (
                     "All kv cache tensors must have the same number of blocks"
                 )
 
@@ -1517,8 +1543,9 @@ class MooncakeConnectorWorker:
                 # block's padding (e.g. DeepseekV4 MLA alignment). stride(0)
                 # reflects the actual byte distance between consecutive
                 # blocks in GPU memory, which matches or exceeds the
-                # shape-based size.
-                block_len = cache.stride(0) * cache.element_size()
+                # shape-based size. Scale by `ratio` so one descriptor spans a
+                # whole logical block.
+                block_len = cache.stride(0) * cache.element_size() * ratio
 
                 self.block_len_per_layer.append(block_len)
                 self.registered_layer_names.append(layer_name)

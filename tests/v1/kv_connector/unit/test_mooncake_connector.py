@@ -1188,6 +1188,74 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
         assert worker.registered_layer_indices == [0, 1]
 
 
+def test_register_kv_caches_per_token_layout():
+    """Per-token KV layout (ratio > 1) must register at logical-block granularity.
+
+    MLA / DSA-indexer caches on ROCm are laid out at kernel-block granularity
+    (kernel block size 1), so the cache tensor's leading dim is in per-token
+    units (num_pages * logical_block_size). The scheduler still addresses KV by
+    logical (page) block id, so register_kv_caches() must collapse `ratio`
+    physical blocks into one logical block: num_blocks = shape[0] // ratio and
+    block_len = stride(0) * elem * ratio. The registered byte length per layer
+    must be unchanged (whole tensor still pinned).
+    """
+
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Event"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Thread"
+        ) as mock_thread,
+    ):
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        worker = connector.connector_worker
+        mock_thread.return_value.is_alive.return_value = False
+
+        # MLA cache -> single (non-split) tensor, like the per-token DSA layout.
+        worker.use_mla = True
+        worker.transfer_topo.is_mla = True
+
+        # Simulate a backend whose logical block size (16) is 16x the kernel
+        # block size (1): 16 physical (per-token) blocks pack into one logical
+        # block.
+        ratio = 16
+        worker._physical_blocks_per_logical_kv_block = ratio
+
+        # 2 logical pages -> 2 * ratio per-token rows in the leading dim.
+        num_logical_pages = 2
+        per_token_rows = num_logical_pages * ratio
+        cache = torch.zeros((per_token_rows, 1, 96), dtype=torch.float16)
+        kv_caches = {"model.layers.0.self_attn": cache}
+
+        with patch.object(
+            worker.engine, "batch_register_memory", return_value=0
+        ) as mock_batch_register:
+            connector.register_kv_caches(kv_caches)
+
+        mock_batch_register.assert_called_once()
+        registered_ptrs, registered_lens = mock_batch_register.call_args[0]
+        assert registered_ptrs == [cache.data_ptr()]
+        # Whole tensor is still registered (ratio cancels out).
+        assert registered_lens == [cache.nbytes]
+
+        # num_blocks is the logical page count, not the per-token row count.
+        assert worker.num_blocks == num_logical_pages
+        # block_len spans a whole logical block (ratio per-token rows).
+        per_token_len = cache.stride(0) * cache.element_size()
+        assert worker.block_len_per_layer == [per_token_len * ratio]
+
+
 @pytest.mark.asyncio
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
