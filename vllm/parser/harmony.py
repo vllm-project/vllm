@@ -85,6 +85,8 @@ class HarmonyParser(DelegatingParser):
         self._harmony_parser = get_streamable_parser_for_assistant()
         self._next_tool_call_index = 0
         self._num_processed_messages = 0
+        self._prev_token_id = None
+        self._skip_next_ary = False
 
     @property
     def state(self) -> HarmonyStreamState:
@@ -267,6 +269,21 @@ class HarmonyParser(DelegatingParser):
         segments: list[Segment] = []
         reasoning_token_count = 0
         for token_id in token_ids:
+            if self._skip_next_ary:
+                self._skip_next_ary = False
+                try:
+                    decoded = self.model_tokenizer.decode([token_id]).strip().lower()
+                except Exception:
+                    decoded = ""
+                if decoded in ("ary", "ry", "y") or "ary" in decoded:
+                    continue
+
+            if self._prev_token_id == 200012 and token_id == 12606:
+                token_id = 200006
+                self._skip_next_ary = True
+
+            self._prev_token_id = token_id
+
             self._harmony_parser.process(token_id)
             channel = self.current_channel
             recipient = self.current_recipient
