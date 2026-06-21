@@ -1428,8 +1428,10 @@ class OpenAIServingResponses(OpenAIServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         state = StreamingState()
+        ctx = None
 
-        async for ctx in result_generator:
+        async for yielded_ctx in result_generator:
+            ctx = yielded_ctx
             assert isinstance(ctx, StreamingHarmonyContext)
 
             # finish_reason='error' indicates a retryable error
@@ -1450,6 +1452,25 @@ class OpenAIServingResponses(OpenAIServing):
 
             # Stream tool call outputs
             for event in emit_tool_action_events(ctx, state, self.tool_server):
+                yield _increment_sequence_number_and_return(event)
+
+        # Emit done events for the final in-progress or completed item if the loop finished
+        if ctx is not None and (state.sent_output_item_added or state.is_first_function_call_delta):
+            if ctx.is_expecting_start() and len(ctx.parser.messages) > 0:
+                previous_item = ctx.parser.messages[-1]
+            else:
+                from openai_harmony import Message as OpenAIHarmonyMessage, Role, TextContent
+                role = ctx.parser.current_role or Role.ASSISTANT
+                contents = [TextContent(text=ctx.parser.current_content or "")]
+                previous_item = OpenAIHarmonyMessage.from_role_and_contents(role, contents)
+                if ctx.parser.current_channel:
+                    previous_item = previous_item.with_channel(ctx.parser.current_channel)
+                if ctx.parser.current_recipient:
+                    previous_item = previous_item.with_recipient(ctx.parser.current_recipient)
+
+            for event in emit_previous_item_done_events(
+                previous_item, state, ctx.function_tool_names
+            ):
                 yield _increment_sequence_number_and_return(event)
 
     async def responses_stream_generator(
