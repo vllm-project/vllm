@@ -188,9 +188,9 @@ class SecondaryTierManager(ABC):
         """
         Called when a request has finished.
 
-        By the time this is called, all per-request calls for this request
-        (submit_store, submit_load, touch) have already been issued, and none
-        will follow. Note this does NOT imply the tier's transfers have
+        By the time this is called, all per-request submit calls for this
+        request (submit_store and submit_load) have already been issued, and
+        none will follow. This does NOT imply the tier's transfers have
         completed: jobs already submitted may still be in flight and will
         report via get_finished_jobs(). This is the right place to release
         per-request bookkeeping.

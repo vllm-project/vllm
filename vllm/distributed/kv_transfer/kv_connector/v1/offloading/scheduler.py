@@ -234,6 +234,10 @@ class RequestOffloadState:
     # In-flight job IDs. Per the connector's invariant, at any given time
     # this contains either a single load job, or one or more store jobs.
     transfer_jobs: set[int] = field(default_factory=set)
+    # True once manager.on_request_finished() has been called for this request.
+    # The req_status may remain tracked afterward while already-submitted
+    # transfer jobs drain and call complete_store()/complete_load().
+    request_finished_called: bool = False
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -372,6 +376,12 @@ class OffloadingConnectorScheduler:
             pending.remove(job_id)
             if not pending:
                 del self._block_id_to_pending_jobs[bid]
+
+    def _call_request_finished(self, req_status: RequestOffloadState) -> None:
+        if req_status.request_finished_called:
+            return
+        self.manager.on_request_finished(req_status.req_context)
+        req_status.request_finished_called = True
 
     def _maximal_prefix_lookup(
         self, keys: Iterable[OffloadKey], req_context: ReqContext
@@ -1122,11 +1132,11 @@ class OffloadingConnectorScheduler:
             del self._jobs[job_id]
             req_status.transfer_jobs.remove(job_id)
             if not req_status.transfer_jobs and req_status.req.is_finished():
-                # Deferred from request_finished: the request's last in-flight
-                # job is now done, so fire the finalize hook here, after the
-                # final complete_store/complete_load above (and any submit_store
-                # the complete_store cascade issued).
-                self.manager.on_request_finished(req_status.req_context)
+                # request_finished() normally fires the hook eagerly when the
+                # request stops. This fallback covers requests that became
+                # finished without going through request_finished() before their
+                # final transfer job completed.
+                self._call_request_finished(req_status)
                 del self._req_status[job_status.req_id]
 
     def get_stats(self) -> OffloadingConnectorStats | None:
@@ -1158,6 +1168,9 @@ class OffloadingConnectorScheduler:
         """
         # TODO(orozery): possibly kickoff offload for last block
         # which may have been deferred due to async scheduling
+        # If this starts issuing a final prepare_store(), it must do so before
+        # _call_request_finished() so on_request_finished remains the boundary
+        # after which no more submit-side calls are issued for this request.
         req_status = self._req_status.get(request.request_id)
 
         if req_status is None:
@@ -1166,17 +1179,18 @@ class OffloadingConnectorScheduler:
             self.manager.on_request_finished(_create_req_context(request))
             return False, None
 
+        self._call_request_finished(req_status)
+
         if not req_status.transfer_jobs:
-            # No in-flight jobs: all per-request calls are done, finalize now.
-            self.manager.on_request_finished(req_status.req_context)
+            # No in-flight jobs: no later complete_store()/complete_load() calls
+            # need this request's state.
             del self._req_status[request.request_id]
             return False, None
 
-        # In-flight jobs remain, so defer on_request_finished to
-        # update_connector_output, which fires it once the last job completes
-        # (after the final complete_store and any cascade submit_store it
-        # issues). These pending stores outlive the request's block ownership;
-        # register them so future reuse of those blocks triggers a flush.
+        # In-flight jobs remain after the request stopped. Their completion may
+        # still call manager.complete_store()/complete_load(), so keep req_status.
+        # Pending stores outlive the request's block ownership; register them so
+        # future reuse of those blocks triggers a flush.
         for job_id in req_status.transfer_jobs:
             job_status = self._jobs[job_id]
             for bid in job_status.non_sliding_window_block_ids or ():
@@ -1216,13 +1230,12 @@ class OffloadingConnectorScheduler:
         self._current_batch_jobs_to_flush.update(self._jobs.keys())
 
         # A finished request may still be tracked here with in-flight jobs that
-        # this reset discards, so its deferred on_request_finished() would never
-        # fire (completions are skipped as stale) and its _req_status entry would
-        # leak. Finalize such requests now, before resetting the manager.
+        # this reset discards. Ensure its on_request_finished() hook has fired
+        # before dropping the _req_status entry.
         # list() snapshots because we delete while iterating.
         for req_id, status in list(self._req_status.items()):
             if status.req.is_finished():
-                self.manager.on_request_finished(status.req_context)
+                self._call_request_finished(status)
                 del self._req_status[req_id]
 
         # Reset offloading manager cache

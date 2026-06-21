@@ -419,6 +419,120 @@ class TestTieringOffloadingManager:
         job_metadata = self.secondary_tier1.submit_store.call_args.args[0]
         assert job_metadata.req_context is ctx
 
+    def test_on_request_finished_delays_secondary_until_store_submitted(
+        self, manager_setup
+    ):
+        """Manager hook is eager; secondary hooks wait for cascade submission."""
+        blocks = to_keys(range(2))
+        ctx = ReqContext(req_id="req_delayed_secondary")
+        calls: list[tuple[str, str]] = []
+
+        self.primary_tier.on_request_finished = MagicMock(
+            side_effect=lambda req_context: calls.append(
+                ("primary_finish", req_context.req_id)
+            )
+        )
+
+        original_submit_store1 = self.secondary_tier1.submit_store
+        original_submit_store2 = self.secondary_tier2.submit_store
+        self.secondary_tier1.submit_store = MagicMock(
+            side_effect=lambda job_metadata: (
+                calls.append(("submit_store_1", job_metadata.req_context.req_id)),
+                original_submit_store1(job_metadata),
+            )
+        )
+        self.secondary_tier2.submit_store = MagicMock(
+            side_effect=lambda job_metadata: (
+                calls.append(("submit_store_2", job_metadata.req_context.req_id)),
+                original_submit_store2(job_metadata),
+            )
+        )
+        self.secondary_tier1.on_request_finished = MagicMock(
+            side_effect=lambda req_context: calls.append(
+                ("secondary_finish_1", req_context.req_id)
+            )
+        )
+        self.secondary_tier2.on_request_finished = MagicMock(
+            side_effect=lambda req_context: calls.append(
+                ("secondary_finish_2", req_context.req_id)
+            )
+        )
+
+        self.manager.prepare_store(blocks, ctx)
+        self.manager.on_request_finished(ctx)
+
+        assert calls == [("primary_finish", ctx.req_id)]
+        self.secondary_tier1.on_request_finished.assert_not_called()
+        self.secondary_tier2.on_request_finished.assert_not_called()
+
+        self.manager.complete_store(blocks, ctx, success=True)
+
+        assert calls == [
+            ("primary_finish", ctx.req_id),
+            ("submit_store_1", ctx.req_id),
+            ("submit_store_2", ctx.req_id),
+            ("secondary_finish_1", ctx.req_id),
+            ("secondary_finish_2", ctx.req_id),
+        ]
+
+    def test_reset_cache_finalizes_delayed_secondary_request(self, manager_setup):
+        """reset_cache abandons pending primary stores and finalizes secondaries."""
+        blocks = to_keys(range(2))
+        ctx = ReqContext(req_id="req_reset_finalize_secondary")
+
+        self.secondary_tier1.on_request_finished = MagicMock(
+            wraps=self.secondary_tier1.on_request_finished
+        )
+        self.secondary_tier2.on_request_finished = MagicMock(
+            wraps=self.secondary_tier2.on_request_finished
+        )
+
+        self.manager.prepare_store(blocks, ctx)
+        self.manager.on_request_finished(ctx)
+
+        self.secondary_tier1.on_request_finished.assert_not_called()
+        self.secondary_tier2.on_request_finished.assert_not_called()
+
+        self.manager.reset_cache()
+
+        self.secondary_tier1.on_request_finished.assert_called_once_with(ctx)
+        self.secondary_tier2.on_request_finished.assert_called_once_with(ctx)
+        assert self.manager._finished_req_contexts == {}
+        assert self.manager._pending_primary_store_counts == {}
+
+    def test_on_request_finished_flushes_only_matching_pending_promotions(
+        self, manager_setup
+    ):
+        """Finishing one request does not flush another request's promotions."""
+        block_a, block_b = to_keys([90, 91])
+        ctx_a = ReqContext(req_id="req_flush_a")
+        ctx_b = ReqContext(req_id="req_flush_b")
+        self.secondary_tier1.blocks[block_a] = True
+        self.secondary_tier1.blocks[block_b] = True
+
+        original_submit_load = self.secondary_tier1.submit_load
+        submitted_req_ids: list[str] = []
+        self.secondary_tier1.submit_load = MagicMock(
+            side_effect=lambda job_metadata: (
+                submitted_req_ids.append(job_metadata.req_context.req_id),
+                original_submit_load(job_metadata),
+            )
+        )
+
+        assert self.manager.lookup(block_a, ctx_a) is None
+        assert self.manager.lookup(block_b, ctx_b) is None
+        assert set(self.manager._pending_load_submissions[self.secondary_tier1]) == {
+            ctx_a.req_id,
+            ctx_b.req_id,
+        }
+
+        self.manager.on_request_finished(ctx_a)
+
+        assert submitted_req_ids == [ctx_a.req_id]
+        assert set(self.manager._pending_load_submissions[self.secondary_tier1]) == {
+            ctx_b.req_id,
+        }
+
     def test_on_new_request_lifecycle(self, manager_setup):
         """Policy defaults to BLOCK_LEVEL, escalates when a tier requests it,
         and is cleaned up on on_request_finished."""
@@ -429,10 +543,8 @@ class TestTieringOffloadingManager:
         self.manager.on_request_finished(ctx)
 
         # Escalate: tier1 requests REQUEST_LEVEL
-        self.secondary_tier1.on_new_request = (
-            lambda req_context: RequestOffloadingContext(
-                policy=OffloadPolicy.REQUEST_LEVEL
-            )
+        self.secondary_tier1.on_new_request = lambda req_context: (
+            RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
         )
 
         ctx = ReqContext(req_id="req_policy_lifecycle_2")
@@ -457,10 +569,8 @@ class TestTieringOffloadingManager:
         self._simulate_on_schedule_end()
 
         # Make tier1 request-level, tier2 stays block-level
-        self.secondary_tier1.on_new_request = (
-            lambda req_context: RequestOffloadingContext(
-                policy=OffloadPolicy.REQUEST_LEVEL
-            )
+        self.secondary_tier1.on_new_request = lambda req_context: (
+            RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
         )
 
         ctx = ReqContext(req_id="req_cascade")
@@ -510,10 +620,8 @@ class TestTieringOffloadingManager:
         assert self.manager._pending_load_submissions
 
         # Request-level tier registration.
-        self.secondary_tier1.on_new_request = (
-            lambda req_context: RequestOffloadingContext(
-                policy=OffloadPolicy.REQUEST_LEVEL
-            )
+        self.secondary_tier1.on_new_request = lambda req_context: (
+            RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
         )
         self.manager.on_new_request(ReqContext(req_id="rl"))
         assert self.manager._request_level_tiers

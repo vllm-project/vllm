@@ -169,6 +169,12 @@ class TieringOffloadingManager(OffloadingManager):
         self._request_level_tiers: defaultdict[str, set[SecondaryTierManager]] = (
             defaultdict(set)
         )
+        # Counts GPU->primary store jobs that were prepared for each request
+        # but have not yet reached complete_store(). Once a request is finished,
+        # secondary tiers are notified only after this count reaches zero, since
+        # complete_store() can still submit primary->secondary cascades.
+        self._pending_primary_store_counts: defaultdict[str, int] = defaultdict(int)
+        self._finished_req_contexts: dict[str, ReqContext] = {}
 
     def _next_job_id(self) -> JobId:
         """Generate a unique job ID for async transfer tracking."""
@@ -317,17 +323,25 @@ class TieringOffloadingManager(OffloadingManager):
         entry.block_ids.extend(store_spec.block_ids)
         return True
 
-    def _flush_pending_promotions(self) -> None:
+    def _flush_pending_promotions(self, req_id: str | None = None) -> None:
         """Submit one batched submit_load() per (tier, request).
 
         Called from on_schedule_end() at the end of each scheduler step,
-        flushing all promotion requests deferred during lookup().
+        flushing all promotion requests deferred during lookup(). When req_id is
+        provided, only that request's pending promotions are flushed.
         """
         if not self._pending_load_submissions:
             return
 
-        for tier, pending_by_ctx in self._pending_load_submissions.items():
-            for entry in pending_by_ctx.values():
+        for tier, pending_by_ctx in list(self._pending_load_submissions.items()):
+            if req_id is None:
+                pending_entries = list(pending_by_ctx.items())
+            elif req_id in pending_by_ctx:
+                pending_entries = [(req_id, pending_by_ctx[req_id])]
+            else:
+                pending_entries = []
+
+            for pending_req_id, entry in pending_entries:
                 job_id = self._next_job_id()
                 job_metadata = JobMetadata(
                     job_id=job_id,
@@ -338,8 +352,10 @@ class TieringOffloadingManager(OffloadingManager):
                 )
                 self._transfer_jobs[job_id] = job_metadata
                 tier.submit_load(job_metadata)
+                del pending_by_ctx[pending_req_id]
 
-        self._pending_load_submissions.clear()
+            if not pending_by_ctx:
+                del self._pending_load_submissions[tier]
 
     @override
     def prepare_load(
@@ -429,6 +445,9 @@ class TieringOffloadingManager(OffloadingManager):
         if primary_result is None:
             return None
 
+        if primary_result.keys_to_store:
+            self._pending_primary_store_counts[req_context.req_id] += 1
+
         # Step 3: For request-level tiers, cascade blocks already in primary
         request_level_tiers = self._request_level_tiers.get(req_context.req_id)
         if request_level_tiers is not None:
@@ -506,6 +525,7 @@ class TieringOffloadingManager(OffloadingManager):
         self.primary_tier.complete_store(keys, req_context, success)
 
         if not success:
+            self._mark_primary_store_completed(req_context)
             # If GPU→Primary transfer failed, don't cascade to secondary tiers
             return
 
@@ -535,6 +555,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
+        self._mark_primary_store_completed(req_context)
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -559,9 +580,32 @@ class TieringOffloadingManager(OffloadingManager):
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
         self.primary_tier.on_request_finished(req_context)
+        self._finished_req_contexts[req_context.req_id] = req_context
+        self._flush_pending_promotions(req_context.req_id)
+        self._maybe_finish_secondary_tiers(req_context.req_id)
+
+    def _mark_primary_store_completed(self, req_context: ReqContext) -> None:
+        req_id = req_context.req_id
+        count = self._pending_primary_store_counts.get(req_id)
+        if count is None:
+            return
+        if count <= 1:
+            self._pending_primary_store_counts.pop(req_id, None)
+            self._maybe_finish_secondary_tiers(req_id)
+        else:
+            self._pending_primary_store_counts[req_id] = count - 1
+
+    def _maybe_finish_secondary_tiers(self, req_id: str) -> None:
+        if self._pending_primary_store_counts.get(req_id, 0) != 0:
+            return
+
+        req_context = self._finished_req_contexts.pop(req_id, None)
+        if req_context is None:
+            return
+
         for tier in self.secondary_tiers:
             tier.on_request_finished(req_context)
-        self._request_level_tiers.pop(req_context.req_id, None)
+        self._request_level_tiers.pop(req_id, None)
 
     @override
     def on_schedule_end(self) -> None:
@@ -623,9 +667,17 @@ class TieringOffloadingManager(OffloadingManager):
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
 
+        # Finished requests may be waiting for GPU->primary stores that reset
+        # abandons. Since no more primary->secondary cascades can be submitted
+        # for them, finalize secondary-tier request state now.
+        self._pending_primary_store_counts.clear()
+        for req_id in list(self._finished_req_contexts):
+            self._maybe_finish_secondary_tiers(req_id)
+
         self.primary_tier.reset_cache()
 
         self._request_level_tiers.clear()
+        self._finished_req_contexts.clear()
         self._processed_jobs_this_step = False
 
     @override
