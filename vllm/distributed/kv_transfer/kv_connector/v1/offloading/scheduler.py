@@ -775,6 +775,9 @@ class OffloadingConnectorScheduler:
             if preempted:
                 for group_state in req_status.group_states:
                     group_state.block_ids.clear()
+                if req_status.transfer_jobs:
+                    self._current_batch_jobs_to_flush.update(req_status.transfer_jobs)
+                    req_status.transfer_jobs.clear()
 
             if new_block_id_groups:
                 if self._sliding_window_groups:
@@ -1113,7 +1116,7 @@ class OffloadingConnectorScheduler:
                     )
 
             del self._jobs[job_id]
-            req_status.transfer_jobs.remove(job_id)
+            req_status.transfer_jobs.discard(job_id)
             if not req_status.transfer_jobs and req_status.req.is_finished():
                 # Deferred from request_finished: the request's last in-flight
                 # job is now done, so fire the finalize hook here, after the
