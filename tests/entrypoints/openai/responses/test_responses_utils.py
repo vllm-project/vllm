@@ -266,6 +266,19 @@ class TestResponsesUtils:
         assert formatted_item["role"] == "assistant"
         assert formatted_item["content"] == "dongyi"
 
+        # Assistant messages with empty content (e.g. tool-only turns) should
+        # not crash; they map to empty string content.
+        empty_output_item = ResponseOutputMessage(
+            id="msg_empty_content",
+            content=[],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        formatted_item = _single_chat_message(empty_output_item)
+        assert formatted_item["role"] == "assistant"
+        assert formatted_item["content"] == ""
+
 
 class TestReasoningItemContentPriority:
     """Tests that content is prioritized over summary for reasoning items."""

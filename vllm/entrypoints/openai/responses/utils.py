@@ -283,7 +283,10 @@ def _construct_message_from_response_item(
             "reasoning": reasoning,
         }
     elif isinstance(item, ResponseOutputMessage):
-        output_text = item.content[0].text
+        # Assistant messages may legitimately have empty content (e.g. when the
+        # assistant emitted only a tool call). Fall back to empty string instead
+        # of crashing on item.content[0].text.
+        output_text = item.content[0].text if item.content else ""
         if prev_assistant_msg:
             previous_content = prev_assistant_msg.get("content")
             if previous_content is None:
@@ -306,6 +309,47 @@ def _construct_message_from_response_item(
             content=item.get("output"),
             tool_call_id=item.get("call_id"),
         )
+    elif isinstance(item, dict) and item.get("type") == "reasoning":
+        # Dict-form reasoning item (e.g. from TypedDict union parsing).
+        # Pydantic may leave Iterable fields as ValidatorIterator objects,
+        # so materialise them with list() before indexing.
+        reasoning_content = ""
+        content = item.get("content")
+        summary = item.get("summary")
+        if content:
+            content = list(content)
+            if len(content) >= 1:
+                text = content[0]
+                reasoning_content = (
+                    text.get("text", "") if isinstance(text, dict) else text
+                )
+        elif summary:
+            summary = list(summary)
+            if len(summary) >= 1:
+                s = summary[0]
+                reasoning_content = s.get("text", "") if isinstance(s, dict) else s
+        return {
+            "role": "assistant",
+            "reasoning": reasoning_content,
+        }
+    elif isinstance(item, dict) and item.get("role") == "assistant":
+        # Dict-form assistant message (e.g. from TypedDict union parsing).
+        content = item.get("content")
+        if content and not isinstance(content, str):
+            content = list(content)
+            if len(content) >= 1:
+                first = content[0]
+                text = first.get("text", "") if isinstance(first, dict) else first
+            else:
+                text = ""
+        elif isinstance(content, str):
+            text = content
+        else:
+            text = ""
+        return {
+            "role": "assistant",
+            "content": text,
+        }
     return item  # type: ignore[arg-type]
 
 
