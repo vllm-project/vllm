@@ -226,7 +226,7 @@ def find_last_user_index(messages: List[Dict[str, Any]]) -> int:
 # Message Rendering
 # ============================================================
 
-def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: str, drop_thinking: bool = True, reasoning_effort: Optional[str] = None) -> str:
+def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: str, drop_thinking: bool = True, reasoning_effort: Optional[str] = None, add_generation_prompt: bool = True, continue_final_message: bool = False) -> str:
     """
     Render a single message at the given index into its encoded string form.
 
@@ -256,7 +256,9 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
     response_format = msg.get("response_format")
     tool_calls = msg.get("tool_calls")
     reasoning = msg.get("reasoning")
-    wo_eos = msg.get("wo_eos", False)
+    wo_eos = msg.get("wo_eos", False) or (
+        continue_final_message and index == len(messages) - 1
+    )
 
     if tools:
         tools = tools_from_openai_format(tools)
@@ -388,14 +390,26 @@ def render_message(index: int, messages: List[Dict[str, Any]], thinking_mode: st
             prompt += task_sp_token
 
     elif messages[index].get("role") in ["user", "developer"]:
-        # Normal generation: append Assistant + thinking token
+        # This Assistant token is both the turn separator (when an assistant
+        # message follows) and the generation prompt (when this is the last
+        # message). Only the latter is suppressed by add_generation_prompt=False.
+        if index + 1 != len(messages) or add_generation_prompt:
+            prompt += ASSISTANT_SP_TOKEN
+            if not drop_thinking and thinking_mode == "thinking":
+                prompt += thinking_start_token
+            elif drop_thinking and thinking_mode == "thinking" and index >= last_user_idx:
+                prompt += thinking_start_token
+            else:
+                prompt += thinking_end_token
+
+    elif (
+        add_generation_prompt
+        and index + 1 == len(messages)
+        and messages[index].get("role") == "assistant"
+    ):
+        # add_generation_prompt after an assistant turn -> open a fresh turn.
         prompt += ASSISTANT_SP_TOKEN
-        if not drop_thinking and thinking_mode == "thinking":
-            prompt += thinking_start_token
-        elif drop_thinking and thinking_mode == "thinking" and index >= last_user_idx:
-            prompt += thinking_start_token
-        else:
-            prompt += thinking_end_token
+        prompt += thinking_start_token if thinking_mode == "thinking" else thinking_end_token
 
     return prompt
 
@@ -516,6 +530,8 @@ def encode_messages(
     drop_thinking: bool = True,
     add_default_bos_token: bool = True,
     reasoning_effort: Optional[str] = None,
+    add_generation_prompt: bool = True,
+    continue_final_message: bool = False,
 ) -> str:
     """
     Encode a list of messages into the DeepSeek-V4 prompt format.
@@ -538,6 +554,16 @@ def encode_messages(
     Returns:
         The encoded prompt string.
     """
+    if continue_final_message:
+        add_generation_prompt = False
+    if messages:
+        _last_role = messages[-1].get("role")
+        if continue_final_message and _last_role != "assistant":
+            raise ValueError(
+                "Cannot set `continue_final_message`=True when the last message is "
+                "not from the assistant."
+            )
+
     context = context if context else []
 
     # Preprocess: merge tool messages and sort tool results
@@ -573,6 +599,8 @@ def encode_messages(
             thinking_mode=thinking_mode,
             drop_thinking=effective_drop_thinking,
             reasoning_effort=reasoning_effort,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
         )
 
     return prompt
