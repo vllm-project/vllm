@@ -113,6 +113,7 @@ async fn collect_chat_completion(
     created: u64,
     ApiServerOptions {
         enable_log_requests,
+        max_log_len,
         enable_prompt_tokens_details,
         ..
     }: ApiServerOptions,
@@ -192,6 +193,10 @@ async fn collect_chat_completion(
         info!(
             model = %response_model,
             prompt_tokens = usage.prompt_tokens,
+            prompt_token_ids = %crate::config::format_prompt_token_ids_for_log(
+                &prompt_token_ids,
+                max_log_len,
+            ),
             output_tokens = usage.completion_tokens.unwrap_or(0),
             finish_reason = %finish_reason,
             "chat completion finished"

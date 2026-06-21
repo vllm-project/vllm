@@ -431,11 +431,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long, /* env = "VLLM_LOGGING_CONFIG_PATH" */)]
     pub log_config_file: Option<Unsupported>,
 
-    /// Max number of prompt characters or prompt ID numbers being printed in
-    /// log. The default of None means unlimited.
-    #[arg(long)]
-    pub max_log_len: Option<Unsupported>,
-
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,
