@@ -47,6 +47,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
     MoRIIOWriter,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
+    LayerTransferGeometry,
+    build_layer_to_spec,
+    compute_block_transfer_offsets,
+    get_layer_transfer_geometry,
+    is_mla_cache_layer,
+    iter_layer_registration_regions,
+)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
@@ -70,6 +78,7 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
 
 try:
     from mori.io import (
@@ -117,7 +126,9 @@ class MoRIIOConnector(KVConnectorBase_V1):
             self.connector_worker: MoRIIOConnectorWorker | None = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
-            self.connector_worker = MoRIIOConnectorWorker(vllm_config, self.engine_id)
+            self.connector_worker = MoRIIOConnectorWorker(
+                vllm_config, self.engine_id, kv_cache_config
+            )
         logger.info(
             "Initialized MoRIIO Connector,engine_id:%s,role: %s",
             self.engine_id,
@@ -683,7 +694,12 @@ class MoRIIOConnectorScheduler:
 class MoRIIOConnectorWorker:
     """Implementation of Worker side methods"""
 
-    def __init__(self, vllm_config: VllmConfig, engine_id: str):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        engine_id: str,
+        kv_cache_config: "KVCacheConfig",
+    ):
         if not is_moriio_available():
             raise RuntimeError(
                 "MoRIIO is not available. Please ensure the 'mori' package "
@@ -707,6 +723,7 @@ class MoRIIOConnectorWorker:
         )
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.is_producer = self.kv_transfer_config.is_kv_producer
+        self.layer_to_spec = build_layer_to_spec(kv_cache_config)
 
         if self.is_producer:
             set_role(ROLE.PRODUCER)
@@ -809,6 +826,8 @@ class MoRIIOConnectorWorker:
         self.kv_cache_shape = None
         self.block_shape = None
         self.kv_element_size = 0
+        self.kv_cache_shapes: dict[str, torch.Size] = {}
+        self.block_lens: dict[str, int] = {}
 
         # Map of engine_id -> {agent_name0, agent_name1..}.
         self._remote_agents: dict[EngineId, set[str]] = {}
@@ -1218,51 +1237,86 @@ class MoRIIOConnectorWorker:
         all_done_future = self._handshake_initiation_executor.submit(wait_all_dp)
         all_done_future.add_done_callback(request_ready)
 
+    def _is_mla_cache_layer(self, layer_name: str) -> bool:
+        return is_mla_cache_layer(self.layer_to_spec, layer_name)
+
+    def _get_layer_transfer_geometry(
+        self, layer_name: str, remote_num_blocks: int | None = None
+    ) -> LayerTransferGeometry:
+        return get_layer_transfer_geometry(
+            layer_name,
+            self.kv_caches[layer_name],
+            self.layer_to_spec,
+            remote_num_blocks,
+        )
+
+    def _iter_layer_registration_regions(
+        self, layer_name: str
+    ) -> list[tuple[torch.Tensor, int]]:
+        return iter_layer_registration_regions(
+            layer_name,
+            self.kv_caches[layer_name],
+            self.layer_to_spec,
+        )
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in moriio."""
 
-        _, first_kv_cache = next(iter(kv_caches.items()))
+        self.kv_caches = kv_caches  # layer name to kv cache
+        self.kv_cache_shapes = {
+            layer_name: kv_cache.shape for layer_name, kv_cache in kv_caches.items()
+        }
+
+        first_layer_name, first_kv_cache = next(
+            (
+                (layer_name, kv_cache)
+                for layer_name, kv_cache in kv_caches.items()
+                if (
+                    not self._is_mla_cache_layer(layer_name)
+                    and len(kv_cache.shape) == 5
+                    and (kv_cache.shape[0] == 2 or kv_cache.shape[1] == 2)
+                )
+            ),
+            next(iter(kv_caches.items())),
+        )
         kv_elem_size = first_kv_cache.element_size()
 
-        use_mla = len(first_kv_cache.shape) == 3
-        assert use_mla == self.use_mla
+        use_mla = self._is_mla_cache_layer(first_layer_name)
+        first_geometry = self._get_layer_transfer_geometry(first_layer_name)
 
         if use_mla:
             # MLA case.
-            self.num_blocks = first_kv_cache.shape[0]
             block_rank = 2  # [block_size, latent_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
-            block_size, kv_latent_dim = block_shape
-            self.slot_size_bytes = kv_elem_size * kv_latent_dim
         else:
-            # [2 (k and v), num_blocks, ...]
-            self.num_blocks = first_kv_cache.shape[1]
+            # [2, num_blocks, ...] or [num_blocks, 2, ...]
             block_rank = 3  # [block_size, kv_heads, head_dim]
             block_shape = first_kv_cache.shape[-block_rank:]
-            block_size, n_kv_heads, head_dim = block_shape[-3:]
-            # head size in bytes.
-            self.slot_size_bytes = (
-                kv_elem_size * n_kv_heads * head_dim
-            )  # 1 token 1 layer size , slot size
-        assert block_size == self.block_size
+        self.num_blocks = first_geometry.num_blocks
+        self.slot_size_bytes = first_geometry.slot_size_bytes
+        assert first_geometry.block_size == self.block_size
         # TODO(tms): self.block_len needs to be per-layer for sliding window,
         # hybrid attn, etc
         # block size in bytes
-        self.block_len = kv_elem_size * math.prod(block_shape)
+        self.block_len = first_geometry.block_len
         self.kv_cache_shape = first_kv_cache.shape
         self.block_shape = block_shape
         self.kv_element_size = kv_elem_size
 
         self.dst_num_blocks[self.engine_id] = self.num_blocks
-        self.kv_caches = kv_caches  # layer name to kv cache
         kv_caches_base_addr = []
         caches_data = []
 
-        for cache_or_caches in kv_caches.values():
-            cache_list = [cache_or_caches] if use_mla else cache_or_caches
-            for cache in cache_list:
+        for layer_name in kv_caches:
+            geometry = self._get_layer_transfer_geometry(layer_name)
+            if geometry.block_size != self.block_size:
+                raise ValueError(
+                    "MoRIIO KV cache block size mismatch for layer "
+                    f"{layer_name}: {geometry.block_size} != {self.block_size}"
+                )
+            self.block_lens[layer_name] = geometry.block_len
+            for cache, region_len in self._iter_layer_registration_regions(layer_name):
                 base_addr = cache.data_ptr()
-                region_len = self.num_blocks * self.block_len
                 caches_data.append((base_addr, region_len, cache.device.index, ""))
                 kv_caches_base_addr.append(base_addr)
 
@@ -1275,7 +1329,9 @@ class MoRIIOConnectorWorker:
                 moriio_mem_metadata
             )
 
-            self.local_kv_cache_size.append(cache.nelement() * cache.element_size())
+            self.local_kv_cache_size.append(
+                kv_cache.nelement() * kv_cache.element_size()
+            )
 
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
         self.num_regions = len(caches_data)
@@ -1666,47 +1722,17 @@ class MoRIIOConnectorWorker:
         Returns:
             Tuple of (local_offsets, remote_offsets, transfer_sizes)
         """
-        assert self.kv_cache_shape is not None, "KV caches shape not initialized"
-        is_mla = len(self.kv_cache_shape) == 3
-        stride = self.kv_caches[layer_name].stride()
-        sz = self.kv_caches[layer_name].element_size()
-        if is_mla:
-            blknum, blksize, hs = self.kv_cache_shape
-            hn = 1
-            block_stride = stride[0]
-        else:
-            _, blknum, blksize, hn, hs = self.kv_cache_shape
-            local_ktov_stride = stride[0]
-            block_stride = stride[1]
-            remote_ktov_stride = block_stride * remote_moriio_meta.num_blocks
-
-        transfer_size_byte = blksize * hn * hs * sz
-        per_block = 1 if is_mla else 2
-        total = len(local_block_ids) * per_block
-        offset_local = [0] * total
-        offset_remote = [0] * total
-        sizes = [transfer_size_byte] * total
-
-        w = 0
-        for i, lb in enumerate(local_block_ids):
-            rb = remote_block_ids[i]
-            # K
-            offset_local[w] = sz * (lb * block_stride)
-            offset_remote[w] = sz * (rb * block_stride)
-            w += 1
-            if not is_mla:
-                # V
-                # Handle num_block variations originating from PD (different kv strides)
-                # TODO: address block_sz differences in heterogeneous TP scenarios
-                # In MLA, we don't need to consider these two cases.
-                offset_local[w] = sz * (1 * local_ktov_stride + lb * block_stride)
-                offset_remote[w] = sz * (1 * remote_ktov_stride + rb * block_stride)
-                w += 1
-
-        merged_l, merged_r, merged_s = self.merge_contiguous_blocks(
-            offset_local, offset_remote, sizes, assume_sorted=False
+        return compute_block_transfer_offsets(
+            layer_name=layer_name,
+            kv_cache=self.kv_caches[layer_name],
+            layer_to_spec=self.layer_to_spec,
+            local_block_ids=local_block_ids,
+            remote_block_ids=remote_block_ids,
+            remote_num_blocks=remote_moriio_meta.num_blocks,
+            merge_fn=lambda local, remote, sizes: self.merge_contiguous_blocks(
+                local, remote, sizes, assume_sorted=False
+            ),
         )
-        return merged_l, merged_r, merged_s
 
     def _read_blocks(
         self,
@@ -1724,14 +1750,12 @@ class MoRIIOConnectorWorker:
         dp0_engine_id = self.get_engine_name_with_dp(dst_engine_id, 0)
         sessions, remote_moriio_meta = self._get_built_session(dp0_engine_id)
 
-        first_layer = list(self.layer_name_to_local_kv_cache_metadata.keys())[0]
-        offs = self._compute_block_transfer_offsets(
-            first_layer, local_block_ids, remote_block_ids, remote_moriio_meta
-        )
-
         for layer_name in self.layer_name_to_local_kv_cache_metadata:
             sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(
                 layer_name
+            )
+            offs = self._compute_block_transfer_offsets(
+                layer_name, local_block_ids, remote_block_ids, remote_moriio_meta
             )
             # TODO : apply multi-session batch-read when moriio support it
             transfer_status = self.moriio_wrapper.read_remote_data(
