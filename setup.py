@@ -305,8 +305,9 @@ class cmake_build_ext(build_ext):
                 "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
             ]
             try:
-                src = Path(self.build_temp) / "compile_commands.json"
-                dst = src.parent.parent / src.name
+                build_temp = ROOT_DIR / self.build_temp
+                src = build_temp / "compile_commands.json"
+                dst = build_temp.parent / src.name
                 if dst.is_symlink() or dst.exists():
                     dst.unlink()
                 dst.symlink_to(src.resolve())
