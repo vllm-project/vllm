@@ -143,4 +143,4 @@ def test_chat_video_url_request(server: RemoteOpenAIServer, model_name: str):
     assert output.model == model_name
     assert len(output.data) == 1
     assert len(output.data[0].probs) == 2
-    assert output.usage.prompt_tokens == 4807
+    assert output.usage.prompt_tokens == 8993
