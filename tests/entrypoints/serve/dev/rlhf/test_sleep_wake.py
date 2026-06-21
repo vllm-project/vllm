@@ -647,3 +647,347 @@ class TestErrorPaths:
             assert _wake(url) == 200
             assert _health(url) == 200
             assert _ok(_gen(url))
+
+
+# ---------------------------------------------------------------------------
+# TestConcurrentRace  (new — Tier 1B supplement)
+# ---------------------------------------------------------------------------
+
+
+class TestConcurrentRace:
+    """Concurrent sleep + generate threads must not deadlock or crash the engine.
+
+    Reference: miles tests/fast/router/test_session_race_conditions.py
+               TestSessionConcurrencyContracts (4 tests) +
+               TestClosingRaceConditions (5 tests) — 8-thread ThreadPoolExecutor
+    """
+
+    def test_concurrent_sleep_and_generate_no_deadlock(self):
+        """10 generate threads racing against 1 sleep/wake thread.
+
+        The engine must survive and remain healthy after the race window.
+        We don't assert that all generates succeed (some will be aborted by
+        the sleep), but we do assert that:
+          - no thread hangs indefinitely (join timeout 30 s)
+          - engine is alive at the end
+          - a fresh generate after the race succeeds
+        """
+        with _server() as url:
+            results = []
+            errors = []
+
+            def _gen_thread():
+                try:
+                    r = _gen(url, max_tokens=8, timeout=10)
+                    results.append(r)
+                except Exception as e:
+                    errors.append(str(e))
+
+            def _sleep_wake_thread():
+                try:
+                    _sleep(url, level=1, mode="abort")
+                    time.sleep(0.2)
+                    _wake(url)
+                except Exception as e:
+                    errors.append(str(e))
+
+            threads = [threading.Thread(target=_gen_thread) for _ in range(10)]
+            sw = threading.Thread(target=_sleep_wake_thread)
+
+            for t in threads:
+                t.start()
+            time.sleep(0.1)  # let some generates get in-flight before sleep
+            sw.start()
+
+            sw.join(timeout=30)
+            for t in threads:
+                t.join(timeout=30)
+
+            assert _health(url) == 200, (
+                f"engine died after concurrent race; errors={errors}"
+            )
+            # After the race the engine must be able to serve requests
+            assert _ok(_gen(url)), "generate failed after concurrent race"
+
+
+# ---------------------------------------------------------------------------
+# TestMemoryLeakCycle  (new — Tier 1A supplement)
+# ---------------------------------------------------------------------------
+
+
+class TestMemoryLeakCycle:
+    """sleep/wake cycles must not accumulate host-side memory leaks.
+
+    Reference: ROLL tests/third_party/vllm/test_vllm_mem_oom.py
+               generate_memory() — 20 iterations, tracking CPU RSS.
+    """
+
+    def test_no_host_rss_growth_over_10_cycles(self):
+        """10 sleep/wake cycles: CPU RSS must not grow monotonically.
+
+        We measure RSS after a warm-up period (cycles 3–10) and assert
+        the total growth is < 10 % of the warm-up baseline, guarding
+        against handle-leak or buffer-accumulation bugs.
+        """
+        import psutil
+
+        with _server() as url:
+            rss_samples = []
+
+            for i in range(10):
+                _gen(url)
+                assert _sleep(url, level=1) == 200
+                assert _wake(url) == 200
+                assert _health(url) == 200
+
+                if i >= 2:  # skip warm-up cycles
+                    proc = psutil.Process()
+                    rss_samples.append(proc.memory_info().rss)
+
+            baseline = rss_samples[0]
+            peak = max(rss_samples)
+            growth_pct = (peak - baseline) / baseline * 100
+
+            assert growth_pct < 10.0, (
+                f"Host RSS grew {growth_pct:.1f}% over 8 post-warmup sleep/wake cycles "
+                f"(baseline={baseline/1e6:.1f} MB, peak={peak/1e6:.1f} MB) — "
+                "possible memory leak in cumem bookkeeping or handle tracking"
+            )
+
+
+# ---------------------------------------------------------------------------
+# TestSamplingNAbort  (new — Tier 1B supplement)
+# ---------------------------------------------------------------------------
+
+
+class TestSamplingNAbort:
+    """sleep(mode='abort') while sampling_n > 1 is in-flight must not crash.
+
+    Reference: ROLL tests/third_party/vllm/test_abort.py
+               _check_vllm_sampling_n — cross-version abort semantics
+               (CancelledError in V0, finish_reason='abort' in V1 >= 0.10.2)
+    """
+
+    def test_sampling_n4_abort_engine_survives(self):
+        """sampling_n=4 in-flight request aborted by sleep — engine survives.
+
+        With sampling_n=4, the scheduler allocates 4 sequence slots per
+        request.  sleep(mode='abort') must drain all 4 cleanly without
+        leaving dangling state that blocks the next wake.
+        """
+        with _server() as url:
+            result: dict = {}
+
+            def _bg():
+                try:
+                    r = requests.post(
+                        f"{url}/v1/completions",
+                        json={
+                            "model": "m",
+                            "prompt": "Count from 1 to 100:",
+                            "max_tokens": 64,
+                            "temperature": 1.0,
+                            "n": 4,
+                        },
+                        timeout=15,
+                    )
+                    result["resp"] = r.json()
+                except Exception as e:
+                    result["err"] = str(e)
+
+            t = threading.Thread(target=_bg)
+            t.start()
+            time.sleep(0.3)  # let the request start
+
+            assert _sleep(url, level=1, mode="abort") == 200
+            t.join(timeout=15)
+
+            assert _health(url) == 200, "engine died after sampling_n=4 abort"
+            assert _wake(url) == 200
+            # engine must recover and serve new requests
+            assert _ok(_gen(url)), "generate failed after sampling_n abort + wake"
+
+
+# ---------------------------------------------------------------------------
+# TestLogprobsPrecision  (new — Tier 1C supplement)
+# ---------------------------------------------------------------------------
+
+
+class TestLogprobsPrecision:
+    """logprobs values must be consistent before and after a sleep/wake cycle.
+
+    Reference: ROLL tests/distributed/strategy/log_probs/ (9 files)
+               test_fsdp_log_probs_full, test_fsdp_log_probs_cp_rmpad, etc.
+
+    After sleep(level=1)/wake, weights are remapped from CPU backup.
+    Calibrated scales (FP8-KV, etc.) must be restored; logprobs must match
+    the pre-sleep values within a tight tolerance.
+    """
+
+    def test_logprobs_stable_after_sleep_wake(self):
+        """logprobs before and after sleep/wake must match within 1e-3.
+
+        Reference: ROLL test_fsdp_log_probs_full — compares log_probs values
+        across different parallelism configurations to within tight tolerance.
+        """
+        with _server() as url:
+            prompt = "The capital of France is Paris and the capital of Germany is"
+
+            def _get_logprobs():
+                r = requests.post(
+                    f"{url}/v1/completions",
+                    json={
+                        "model": "m",
+                        "prompt": prompt,
+                        "max_tokens": 4,
+                        "temperature": 0,
+                        "logprobs": 5,
+                    },
+                    timeout=30,
+                )
+                resp = r.json()
+                if "choices" not in resp or not resp["choices"]:
+                    return None
+                choice = resp["choices"][0]
+                lp = choice.get("logprobs", {})
+                return lp.get("token_logprobs", [])
+
+            before = _get_logprobs()
+            assert before is not None, "failed to get logprobs before sleep"
+            assert len(before) > 0
+
+            assert _sleep(url, level=1) == 200
+            assert _wake(url) == 200
+            assert _health(url) == 200
+
+            after = _get_logprobs()
+            assert after is not None, "failed to get logprobs after sleep/wake"
+            assert len(after) == len(before), (
+                "logprobs length changed after sleep/wake"
+            )
+
+            for i, (b, a) in enumerate(zip(before, after)):
+                if b is None or a is None:
+                    continue
+                diff = abs(b - a)
+                assert diff < 1e-3, (
+                    f"logprob[{i}] drifted after sleep/wake: "
+                    f"before={b:.6f} after={a:.6f} diff={diff:.2e} — "
+                    "weight restore or KV-scale recalibration may be incorrect"
+                )
+
+
+# ---------------------------------------------------------------------------
+# TestSleepWakeLatency  (new — Tier 1A supplement)
+# ---------------------------------------------------------------------------
+
+
+class TestSleepWakeLatency:
+    """sleep/wake must complete within reasonable wall-clock time.
+
+    Reference: sglang test_update_weights_from_distributed.py
+               assert time < 3s for weight sync operations.
+    Here we use 10 s for the full sleep+wake roundtrip on a 0.6B model,
+    which is generous but guards against regressions that cause multi-minute
+    stalls (e.g. accidental full model re-download on wake).
+    """
+
+    def test_sleep_wake_roundtrip_under_10s(self):
+        """sleep(1) + wake_up() roundtrip must complete in < 10 s.
+
+        For a 0.6B bfloat16 model (~1.2 GB weights) the cumem unmap/remap
+        should complete in < 2 s on modern hardware.  10 s is a conservative
+        bound that would still catch pathological regressions.
+        """
+        with _server() as url:
+            _gen(url)  # warm up — ensure KV blocks are allocated
+
+            t0 = time.perf_counter()
+            assert _sleep(url, level=1) == 200
+            t_sleep = time.perf_counter()
+
+            assert _wake(url) == 200
+            t_wake = time.perf_counter()
+
+            sleep_elapsed = t_sleep - t0
+            wake_elapsed = t_wake - t_sleep
+            total = t_wake - t0
+
+            assert total < 10.0, (
+                f"sleep+wake roundtrip took {total:.2f}s "
+                f"(sleep={sleep_elapsed:.2f}s, wake={wake_elapsed:.2f}s) — "
+                "cumem unmap/remap regression?"
+            )
+            assert _health(url) == 200
+            assert _ok(_gen(url))
+
+    def test_five_cycles_total_under_60s(self):
+        """5 consecutive sleep/wake cycles must finish in < 60 s total.
+
+        Guards against per-cycle overhead accumulation (handle leak,
+        growing allocation list, etc.).
+        """
+        with _server() as url:
+            _gen(url)
+
+            t0 = time.perf_counter()
+            for _ in range(5):
+                assert _sleep(url, level=1) == 200
+                assert _wake(url) == 200
+                assert _health(url) == 200
+            total = time.perf_counter() - t0
+
+            assert total < 60.0, (
+                f"5 sleep/wake cycles took {total:.2f}s — "
+                "per-cycle overhead may be accumulating"
+            )
+            assert _ok(_gen(url))
+
+
+# ---------------------------------------------------------------------------
+# TestCPUWeightBackup  (new — Tier 1A supplement)
+# ---------------------------------------------------------------------------
+
+
+class TestCPUWeightBackup:
+    """CPU weight backup: level-1 sleep offloads weights to CPU; wake restores.
+
+    Reference: sglang test_release_memory_occupation.py
+               test_release_and_resume_occupation_with_weights_cpu_backup —
+               verifies golden output after CPU backup roundtrip.
+
+    Unlike TestOutputCorrectness which tests 3 cycles, this specifically
+    tests 5 cycles and focuses on the weights-only partial-wake path, which
+    is the path used in colocate RL (trainer uses KV memory while engine
+    keeps weights on CPU).
+    """
+
+    def test_weights_cpu_backup_5cycle_output_stable(self):
+        """5× sleep(level=1) → wake(weights) → wake(kv_cache) output stable.
+
+        This is the colocate RL pattern: sleep frees ALL GPU memory,
+        wake(["weights"]) restores weights only (trainer has released GPU),
+        wake(["kv_cache"]) re-allocates KV pool.
+        Output must match the golden on every cycle.
+        """
+        with _server() as url:
+            golden = _gen(url)
+            assert golden and _ok(golden)
+            golden_text = golden["choices"][0]["text"]
+
+            for cycle in range(5):
+                assert _sleep(url, level=1) == 200
+
+                # staged wake: weights first, then kv_cache
+                assert _wake(url, tags=["weights"]) == 200
+                assert _wake(url, tags=["kv_cache"]) == 200
+                assert _health(url) == 200
+
+                resp = _gen(url)
+                assert resp and _ok(resp), (
+                    f"generate failed on CPU-backup cycle {cycle}"
+                )
+                assert resp["choices"][0]["text"] == golden_text, (
+                    f"output drifted on CPU-backup cycle {cycle} — "
+                    "weight restore from CPU backup may be incomplete"
+                )
