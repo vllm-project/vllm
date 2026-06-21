@@ -241,12 +241,14 @@ class MediaConnector:
     ) -> _M:  # type: ignore[type-var]
         # Format per RFC 2397:
         # data:[<mediatype>][;base64],<data>
+        # ;base64 is optional, so parse tolerantly and raise ValueError (a
+        # clean 4xx upstream) instead of crashing on the tuple unpack.
         data_spec, data = url[5:].split(",", 1)
-        media_type, data_type = data_spec.split(";", 1)
+        media_type, _, params = data_spec.partition(";")
 
-        if data_type != "base64":
+        if params.lower() != "base64":
             msg = "Only base64 data URLs are supported for now."
-            raise NotImplementedError(msg)
+            raise ValueError(msg)
 
         return media_io.load_base64(media_type, data)
 

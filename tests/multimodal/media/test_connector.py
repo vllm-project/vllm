@@ -192,6 +192,22 @@ async def test_fetch_image_error_conversion():
         connector.fetch_image(broken_img)
 
 
+@pytest.mark.parametrize(
+    "data_url",
+    [
+        # RFC 2397 allows data URLs without ";base64"; these must surface as a
+        # clean ValueError rather than an unpack crash (HTTP 500).
+        "data:image/png,not-base64-data",
+        "data:,not-base64-data",
+    ],
+)
+def test_fetch_image_non_base64_data_url_raises_value_error(data_url: str):
+    connector = MediaConnector()
+
+    with pytest.raises(ValueError, match="base64"):
+        connector.fetch_image(data_url)
+
+
 @pytest.mark.flaky(reruns=3, reruns_delay=5)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("video_url", TEST_VIDEO_URLS)
