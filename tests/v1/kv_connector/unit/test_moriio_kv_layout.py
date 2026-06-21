@@ -39,11 +39,13 @@ moriio_layout = importlib.import_module(
 )
 
 
-def _full_spec(block_size: int = 4) -> FullAttentionSpec:
+def _full_spec(
+    block_size: int = 4, num_kv_heads: int = 2, head_size: int = 3
+) -> FullAttentionSpec:
     return FullAttentionSpec(
         block_size=block_size,
-        num_kv_heads=2,
-        head_size=3,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
         dtype=torch.bfloat16,
     )
 
@@ -216,6 +218,69 @@ def test_interleaved_kernel_block_layout_transfers_full_logical_blocks():
     assert moriio_layout.compute_block_transfer_offsets(
         "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], _remote_meta().num_blocks
     ) == ([96, 288], [384, 480], [96, 96])
+
+
+def test_separated_kernel_block_layout_uses_spec_to_find_kernel_axis():
+    cache = torch.empty((2, 32, 8, 2, 3), dtype=torch.bfloat16)
+    worker = _worker(
+        {"layer": cache},
+        {"layer": _full_spec(block_size=16, num_kv_heads=8)},
+    )
+
+    geometry = moriio_layout.get_layer_transfer_geometry(
+        "layer", cache, worker.layer_to_spec, remote_num_blocks=8
+    )
+    assert geometry.num_blocks == 4
+    assert geometry.block_size == 16
+    assert geometry.block_len == 768
+    assert geometry.block_stride == 384
+    assert geometry.local_kv_stride == 1536
+    assert geometry.remote_kv_stride == 3072
+    assert geometry.split_kv_regions
+
+    assert moriio_layout.compute_block_transfer_offsets(
+        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], 8
+    ) == (
+        [768, 2304, 3840, 5376],
+        [3072, 3840, 9216, 9984],
+        [768, 768, 768, 768],
+    )
+
+
+def test_interleaved_kernel_block_layout_uses_spec_to_find_kernel_axis():
+    cache = torch.empty((32, 2, 8, 2, 3), dtype=torch.bfloat16)
+    worker = _worker(
+        {"layer": cache},
+        {"layer": _full_spec(block_size=16, num_kv_heads=8)},
+    )
+
+    geometry = moriio_layout.get_layer_transfer_geometry(
+        "layer", cache, worker.layer_to_spec, remote_num_blocks=8
+    )
+    assert geometry.num_blocks == 4
+    assert geometry.block_size == 16
+    assert geometry.block_len == 1536
+    assert geometry.block_stride == 768
+    assert geometry.local_kv_stride is None
+    assert geometry.remote_kv_stride is None
+    assert geometry.transfers_per_block == 1
+
+    assert moriio_layout.compute_block_transfer_offsets(
+        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], 8
+    ) == ([1536, 4608], [6144, 7680], [1536, 1536])
+
+
+def test_kernel_block_layout_without_spec_dimensions_rejects_ambiguous_axes():
+    cache = torch.empty((2, 32, 8, 2, 3), dtype=torch.bfloat16)
+    worker = _worker(
+        {"layer": cache},
+        {"layer": SimpleNamespace(block_size=16)},
+    )
+
+    with pytest.raises(ValueError, match="Ambiguous MoRIIO kernel-block"):
+        moriio_layout.get_layer_transfer_geometry(
+            "layer", cache, worker.layer_to_spec, remote_num_blocks=8
+        )
 
 
 def test_mla_key_only_layout_transfers_one_slab_per_block():

@@ -56,6 +56,42 @@ def is_mla_cache_layer(
     return isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
 
 
+def _spec_dim_matches(value: int, expected: int | None) -> bool:
+    return expected is None or value == expected
+
+
+def _kernel_layout_matches(
+    spec: KVCacheSpec, kernel_block_size: int, num_kv_heads: int, head_dim: int
+) -> bool:
+    if kernel_block_size <= 0 or spec.block_size % kernel_block_size != 0:
+        return False
+    return _spec_dim_matches(
+        num_kv_heads, getattr(spec, "num_kv_heads", None)
+    ) and _spec_dim_matches(head_dim, getattr(spec, "head_size", None))
+
+
+def _select_kernel_block_layout(
+    layer_name: str, shape: torch.Size, spec: KVCacheSpec
+) -> tuple[int, int, int]:
+    axis2_matches = _kernel_layout_matches(spec, shape[2], shape[3], shape[4])
+    axis3_matches = _kernel_layout_matches(spec, shape[3], shape[2], shape[4])
+
+    if axis2_matches and axis3_matches and shape[2] != shape[3]:
+        raise ValueError(
+            f"Ambiguous MoRIIO kernel-block K/V cache shape for layer "
+            f"{layer_name}: {tuple(shape)}"
+        )
+    if axis2_matches:
+        return shape[2], shape[3], shape[4]
+    if axis3_matches:
+        return shape[3], shape[2], shape[4]
+
+    raise ValueError(
+        f"Unsupported MoRIIO K/V cache shape for layer {layer_name}: "
+        f"{tuple(shape)} does not contain block size {spec.block_size}"
+    )
+
+
 def get_layer_transfer_geometry(
     layer_name: str,
     kv_cache: torch.Tensor,
@@ -92,9 +128,11 @@ def get_layer_transfer_geometry(
             block_size, num_kv_heads, head_dim = shape[2:]
         elif shape[3] == spec.block_size:
             num_kv_heads, block_size, head_dim = shape[2:]
-        elif spec.block_size % shape[2] == 0:
+        else:
             kernel_num_blocks = num_blocks
-            kernel_block_size, num_kv_heads, head_dim = shape[2:]
+            kernel_block_size, num_kv_heads, head_dim = (
+                _select_kernel_block_layout(layer_name, shape, spec)
+            )
             kernel_blocks_per_block = spec.block_size // kernel_block_size
             if kernel_num_blocks % kernel_blocks_per_block != 0:
                 raise ValueError(
@@ -104,11 +142,6 @@ def get_layer_transfer_geometry(
                 )
             num_blocks = kernel_num_blocks // kernel_blocks_per_block
             block_size = spec.block_size
-        else:
-            raise ValueError(
-                f"Unsupported MoRIIO K/V cache shape for layer {layer_name}: "
-                f"{tuple(shape)} does not contain block size {spec.block_size}"
-            )
         slot_size_bytes = num_kv_heads * head_dim * element_size
         block_len = block_size * slot_size_bytes
         return LayerTransferGeometry(
@@ -148,9 +181,11 @@ def get_layer_transfer_geometry(
             )
         elif shape[3] == spec.block_size:
             num_kv_heads, block_size, head_dim = shape[2:]
-        elif spec.block_size % shape[2] == 0:
+        else:
             kernel_num_blocks = num_blocks
-            kernel_block_size, num_kv_heads, head_dim = shape[2:]
+            kernel_block_size, _, _ = _select_kernel_block_layout(
+                layer_name, shape, spec
+            )
             kernel_blocks_per_block = spec.block_size // kernel_block_size
             if kernel_num_blocks % kernel_blocks_per_block != 0:
                 raise ValueError(
@@ -174,11 +209,6 @@ def get_layer_transfer_geometry(
                 transfers_per_block=1,
                 regions_per_block=1,
                 split_kv_regions=False,
-            )
-        else:
-            raise ValueError(
-                f"Unsupported MoRIIO K/V cache shape for layer {layer_name}: "
-                f"{tuple(shape)} does not contain block size {spec.block_size}"
             )
         slot_size_bytes = num_kv_heads * head_dim * element_size
         block_len = block_size * slot_size_bytes
