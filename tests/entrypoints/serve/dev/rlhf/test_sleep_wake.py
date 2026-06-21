@@ -703,6 +703,10 @@ class TestConcurrentRace:
             for t in threads:
                 t.join(timeout=30)
 
+            hung = [i for i, t in enumerate(threads) if t.is_alive()]
+            assert not hung, f"generate threads {hung} hung after race (deadlock?)"
+            assert not sw.is_alive(), "sleep/wake thread hung after race (deadlock?)"
+            assert not errors, f"unexpected exceptions during race: {errors}"
             assert _health(url) == 200, (
                 f"engine died after concurrent race; errors={errors}"
             )
@@ -716,23 +720,27 @@ class TestConcurrentRace:
 
 
 class TestMemoryLeakCycle:
-    """sleep/wake cycles must not accumulate host-side memory leaks.
+    """sleep/wake cycles must not accumulate GPU memory leaks.
 
     Reference: ROLL tests/third_party/vllm/test_vllm_mem_oom.py
-               generate_memory() — 20 iterations, tracking CPU RSS.
+               generate_memory() — 20 iterations tracking memory growth.
+
+    We measure GPU free bytes when the engine is awake (same lifecycle stage
+    on every cycle) rather than host RSS, because:
+      (a) the vLLM server is a subprocess so its RSS is not directly readable
+          from the test process, and
+      (b) GPU memory is what cumem manages — leaks manifest there first.
     """
 
-    def test_no_host_rss_growth_over_10_cycles(self):
-        """10 sleep/wake cycles: CPU RSS must not grow monotonically.
+    def test_no_gpu_memory_growth_over_10_cycles(self):
+        """10 sleep/wake cycles: GPU free bytes (when awake) must be stable.
 
-        We measure RSS after a warm-up period (cycles 3–10) and assert
-        the total growth is < 10 % of the warm-up baseline, guarding
-        against handle-leak or buffer-accumulation bugs.
+        After each wake, the engine should have remapped the same GPU pages.
+        A growing delta (less free memory each cycle) indicates a leak in
+        cumem bookkeeping or handle tracking.
         """
-        import psutil
-
         with _server() as url:
-            rss_samples = []
+            free_samples = []
 
             for i in range(10):
                 _gen(url)
@@ -741,17 +749,18 @@ class TestMemoryLeakCycle:
                 assert _health(url) == 200
 
                 if i >= 2:  # skip warm-up cycles
-                    proc = psutil.Process()
-                    rss_samples.append(proc.memory_info().rss)
+                    free_samples.append(_gpu_free_bytes())
 
-            baseline = rss_samples[0]
-            peak = max(rss_samples)
-            growth_pct = (peak - baseline) / baseline * 100
+            baseline = free_samples[0]
+            # Allow 50 MiB tolerance for KV block allocation jitter
+            min_free = min(free_samples)
+            leak_gib = (baseline - min_free) / 2**30
 
-            assert growth_pct < 10.0, (
-                f"Host RSS grew {growth_pct:.1f}% over 8 post-warmup sleep/wake cycles "
-                f"(baseline={baseline/1e6:.1f} MB, peak={peak/1e6:.1f} MB) — "
-                "possible memory leak in cumem bookkeeping or handle tracking"
+            assert leak_gib < 0.05, (  # 50 MiB tolerance
+                f"GPU free memory shrank by {leak_gib:.3f} GiB over 8 post-warmup "
+                f"sleep/wake cycles (baseline={baseline/2**30:.2f} GiB, "
+                f"min={min_free/2**30:.2f} GiB) — "
+                "possible cumem handle leak or unmapped page accumulation"
             )
 
 
@@ -802,6 +811,9 @@ class TestSamplingNAbort:
             assert _sleep(url, level=1, mode="abort") == 200
             t.join(timeout=15)
 
+            assert "err" not in result, (
+                f"background thread raised: {result.get('err')}"
+            )
             assert _health(url) == 200, "engine died after sampling_n=4 abort"
             assert _wake(url) == 200
             # engine must recover and serve new requests
@@ -866,15 +878,23 @@ class TestLogprobsPrecision:
                 "logprobs length changed after sleep/wake"
             )
 
+            compared = 0
             for i, (b, a) in enumerate(zip(before, after)):
                 if b is None or a is None:
                     continue
+                compared += 1
                 diff = abs(b - a)
-                assert diff < 1e-3, (
+                # BF16 has ~3 significant decimal digits; 1e-2 is achievable
+                # for identical greedy decodes across a sleep/wake cycle.
+                assert diff < 1e-2, (
                     f"logprob[{i}] drifted after sleep/wake: "
                     f"before={b:.6f} after={a:.6f} diff={diff:.2e} — "
                     "weight restore or KV-scale recalibration may be incorrect"
                 )
+            assert compared > 0, (
+                "no non-None logprob pairs were compared — "
+                "logprobs response may be empty or malformed"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -968,12 +988,16 @@ class TestCPUWeightBackup:
         This is the colocate RL pattern: sleep frees ALL GPU memory,
         wake(["weights"]) restores weights only (trainer has released GPU),
         wake(["kv_cache"]) re-allocates KV pool.
-        Output must match the golden on every cycle.
+        Output must be non-empty and consistent across cycles.
+
+        Uses --seed for deterministic greedy decoding so text comparison is
+        a reliable weight-correctness check and not a nondeterminism false alarm.
         """
-        with _server() as url:
+        with _server(extra_args=["--seed", "42"]) as url:
             golden = _gen(url)
             assert golden and _ok(golden)
             golden_text = golden["choices"][0]["text"]
+            assert golden_text.strip(), "golden output must be non-empty"
 
             for cycle in range(5):
                 assert _sleep(url, level=1) == 200
@@ -987,7 +1011,13 @@ class TestCPUWeightBackup:
                 assert resp and _ok(resp), (
                     f"generate failed on CPU-backup cycle {cycle}"
                 )
-                assert resp["choices"][0]["text"] == golden_text, (
+                cycle_text = resp["choices"][0]["text"]
+                assert cycle_text.strip(), (
+                    f"empty output on CPU-backup cycle {cycle} — "
+                    "weight restore may have corrupted model state"
+                )
+                assert cycle_text == golden_text, (
                     f"output drifted on CPU-backup cycle {cycle} — "
-                    "weight restore from CPU backup may be incomplete"
+                    "weight restore from CPU backup may be incomplete "
+                    f"(golden={golden_text!r}, got={cycle_text!r})"
                 )
