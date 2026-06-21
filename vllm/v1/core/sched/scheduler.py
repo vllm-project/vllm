@@ -357,6 +357,12 @@ class Scheduler(SchedulerInterface):
             or not is_remote_prefill
             or request.num_output_tokens > 0
             or num_computed_tokens < request.num_prompt_tokens - 1
+            or (
+                request.num_prompt_tokens
+                + self.num_spec_tokens
+                + self.num_sampled_tokens_per_step
+                > self.max_model_len
+            )
             or self.structured_output_manager.should_advance(request)
         ):
             return False
@@ -375,14 +381,7 @@ class Scheduler(SchedulerInterface):
         if request.spec_token_ids:
             return True
 
-        prompt_token_ids = request.prompt_token_ids
-        if not prompt_token_ids:
-            return False
-        pad_token_id = int(prompt_token_ids[0])
-        if pad_token_id < 0:
-            return False
-
-        request.spec_token_ids = [pad_token_id] * self.num_spec_tokens
+        request.spec_token_ids = [int(request.all_token_ids[0])] * self.num_spec_tokens
         return True
 
     def _mamba_block_aligned_split(
