@@ -2169,11 +2169,35 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         # weights to BF16 once, here, so the MoE runs like a BF16 checkpoint.
         # Opt out (VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD=0) to keep the 1-byte
         # MXFP8 weights and dequant per-step (~half the memory, much slower).
+        from vllm.model_executor.layers.fused_moe.experts.flydsl_emulation_moe import (
+            FlydslEmulationExperts,
+        )
+
+        is_flydsl_emulation = (
+            self.mxfp8_backend == Fp8MoeBackend.AITER_MXFP8
+            and self.experts_cls is FlydslEmulationExperts
+        )
         if (
-            self.mxfp8_backend == Fp8MoeBackend.EMULATION
+            (self.mxfp8_backend == Fp8MoeBackend.EMULATION or is_flydsl_emulation)
             and envs.VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD
         ):
             self._dequant_mxfp8_weights_to_bf16(layer)
+            # Shuffle BF16 weights into FlyDSL layout in-place to avoid
+            # per-call shuffle and doubled HBM from a separate copy.
+            if is_flydsl_emulation:
+                from vllm.model_executor.layers.fused_moe.experts import (
+                    flydsl_emulation_moe,
+                )
+
+                for nm in ("w13_weight", "w2_weight"):
+                    ws = flydsl_emulation_moe.shuffle_weight_to_fly_layout(
+                        getattr(layer, nm).data
+                    )
+                    replace_parameter(layer, nm, ws)
+                    getattr(layer, nm)._fly_shuffled = True
+                logger.info_once(
+                    "FlyDSL MoE: shuffled BF16 weights into FlyDSL layout at load."
+                )
 
     def maybe_make_prepare_finalize(
         self,
