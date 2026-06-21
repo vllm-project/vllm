@@ -22,13 +22,13 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.attention.ops.cp_utils import (
+from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.cp_utils import (
     DEFAULT_CP_LAYOUT,
     ContextParallelLayout,
     cp_global_to_local_block,
     cp_global_to_local_pos,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
 
 # Pad C128A topk width to this alignment. 128 covers both h_q=64 (B_TOPK=64) and
 # h_q=128 (B_TOPK=128). FlashMLA decode asserts extra_topk % B_TOPK == 0;

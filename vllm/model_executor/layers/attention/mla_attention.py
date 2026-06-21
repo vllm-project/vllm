@@ -267,7 +267,6 @@ from vllm.v1.attention.backends.mla.prefill import (
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
-from vllm.v1.attention.ops.cp_utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
@@ -277,6 +276,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     get_kv_quant_mode,
 )
+from vllm.v1.worker.cp_utils import get_dcp_local_seq_lens
 
 logger = init_logger(__name__)
 

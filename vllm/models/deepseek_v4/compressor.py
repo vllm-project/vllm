@@ -35,12 +35,12 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.attention.ops.cp_utils import ContextParallelLayout
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+from vllm.v1.worker.cp_utils import ContextParallelLayout
 
 
 def _prefer_two_stage_compressor() -> bool:

@@ -18,17 +18,17 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.attention.ops.cp_utils import (
-    ContextParallelLayout,
-    cp_global_to_local_block,
-    cp_global_to_local_pos,
-)
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     get_kv_quant_mode,
+)
+from vllm.v1.worker.cp_utils import (
+    ContextParallelLayout,
+    cp_global_to_local_block,
+    cp_global_to_local_pos,
 )
 
 # DeepseekV4 decode layer types, keyed by compress_ratio. Each type has a distinct

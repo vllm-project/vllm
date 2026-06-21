@@ -119,12 +119,19 @@ class KVCacheSpec:
     def storage_block_size(self) -> int:
         return self.block_size
 
+    @property
+    def scales_with_context_parallel(self) -> bool:
+        """Whether one physical block spans multiple logical CP shards."""
+        return True
+
     def logical_block_size(
         self,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
     ) -> int:
         """Global token span represented by one rank-local physical block."""
+        if not self.scales_with_context_parallel:
+            return self.block_size
         return self.block_size * dcp_world_size * pcp_world_size
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
@@ -863,6 +870,12 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         return sum(spec.page_size_bytes for spec in self.kv_cache_specs.values())
+
+    @property
+    def scales_with_context_parallel(self) -> bool:
+        return all(
+            spec.scales_with_context_parallel for spec in self.kv_cache_specs.values()
+        )
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_num_pages = max(

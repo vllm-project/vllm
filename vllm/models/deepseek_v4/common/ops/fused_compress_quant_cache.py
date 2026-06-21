@@ -25,7 +25,7 @@ from typing import Any
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.cp_utils import cp_global_to_local_block
+from vllm.v1.worker.cp_utils import cp_global_to_local_block
 
 from .fused_indexer_q import _fp32x2_to_fp4x2
 

@@ -28,12 +28,12 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.cp_utils import (
+from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
+from vllm.v1.worker.cp_utils import (
     DEFAULT_CP_LAYOUT,
     ContextParallelLayout,
+    get_total_cp_world_size,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
-from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 logger = init_logger(__name__)
 

@@ -148,7 +148,6 @@ from vllm.v1.attention.backends.utils import (
     create_fast_prefill_custom_backend,
     reorder_batch_to_split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.cp_utils import get_dcp_local_seq_lens
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
@@ -214,6 +213,7 @@ from vllm.v1.worker.block_table import SlotMappingMode
 from vllm.v1.worker.cp_utils import (
     check_attention_cp_compatibility,
     get_dcp_dummy_context_len,
+    get_dcp_local_seq_lens,
     prepare_dcp_dummy_context_metadata,
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
