@@ -1,9 +1,10 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import importlib.util
 import sys
 from pathlib import Path
-
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -12,7 +13,10 @@ SCRIPT_PATH = (
 
 
 def load_resolver():
-    spec = importlib.util.spec_from_file_location("resolve_ascend_benchmark_scenario", SCRIPT_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "resolve_ascend_benchmark_scenario",
+        SCRIPT_PATH,
+    )
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -38,6 +42,28 @@ def test_pr_without_l2_label_uses_default_scenario():
     assert selected.mode == "l1-smoke"
     assert selected.trigger_label == ""
     assert "no L2 benchmark label" in selected.reason
+
+
+def test_issue_comment_event_falls_back_to_default_scenario():
+    resolver = load_resolver()
+    selected = resolver.select_scenario(
+        event_name="issue_comment",
+        manual_scenario="",
+        pr_labels=[],
+        default_scenario="random-online",
+        default_dataset_path="",
+        default_constraints_file="",
+        same_spec_spec_file="",
+        same_spec_constraints_file="",
+    )
+
+    assert selected.scenario == "random-online"
+    assert selected.mode == "default"
+    assert selected.trigger_label == ""
+    assert (
+        "issue_comment event uses configured default benchmark scenario"
+        in selected.reason
+    )
 
 
 def test_parse_labels_accepts_github_label_objects():
@@ -246,5 +272,8 @@ def test_required_label_writes_perfgate_enforce_mode(tmp_path):
     content = env_file.read_text(encoding="utf-8")
 
     assert "L2_SCENARIO_MODE<<__L2_SCENARIO_MODE_EOF__\nl2-required\n" in content
-    assert "L2_SCENARIO_LABEL<<__L2_SCENARIO_LABEL_EOF__\nascend-targeted-required\n" in content
+    assert (
+        "L2_SCENARIO_LABEL<<__L2_SCENARIO_LABEL_EOF__\nascend-targeted-required\n"
+        in content
+    )
     assert "PERFGATE_MODE<<__PERFGATE_MODE_EOF__\nenforce\n" in content

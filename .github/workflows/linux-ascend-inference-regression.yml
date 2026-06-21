@@ -43,6 +43,7 @@ jobs:
       VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
       HUST_ASCEND_MANAGER_REPO_URL: git@github.com:vLLM-HUST/ascend-runtime-manager.git
+      VLLM_USE_PRECOMPILED: "0"
 
     steps:
       - name: Pre-clean stale checkout state
@@ -236,7 +237,7 @@ jobs:
         run: |
           source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
           bash "$VLLM_ASCEND_HUST_REPO/scripts/install_local_ascend_plugin.sh" "$VLLM_ASCEND_HUST_REPO"
-          "$PYTHON_BIN" -m pip install -e . --no-build-isolation --no-deps
+          VLLM_TARGET_DEVICE=empty "$PYTHON_BIN" -m pip install -e . --no-build-isolation --no-deps
 
       - name: Verify installation
         run: |

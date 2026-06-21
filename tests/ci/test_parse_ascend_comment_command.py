@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import importlib.util
@@ -6,7 +8,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
     / ".github/workflows/scripts/parse_ascend_comment_command.py"
@@ -14,7 +15,10 @@ SCRIPT_PATH = (
 
 
 def load_parser():
-    spec = importlib.util.spec_from_file_location("parse_ascend_comment_command", SCRIPT_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "parse_ascend_comment_command",
+        SCRIPT_PATH,
+    )
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -43,6 +47,8 @@ def test_parse_random_command_with_reasonable_defaults():
     assert command.action == "benchmark"
     assert command.scenario == "random-online"
     assert command.publish_to_hf is False
+    assert command.to_env()["PUBLISH_TO_HF"] == "0"
+    assert command.to_env()["PUBLISH_TO_BENCHMARK_REPO"] == "0"
     assert command.num_prompts == "8"
     assert command.request_rate == "inf"
     assert command.max_concurrency == "4"
@@ -146,7 +152,9 @@ def test_parse_rejects_resource_limits_above_preview_bounds():
         except ValueError as exc:
             assert expected in str(exc)
         else:
-            raise AssertionError(f"expected oversized preview parameter to be rejected: {body}")
+            raise AssertionError(
+                f"expected oversized preview parameter to be rejected: {body}"
+            )
 
 
 def test_parse_rejects_sharegpt_paths_outside_allowlist():
@@ -154,15 +162,18 @@ def test_parse_rejects_sharegpt_paths_outside_allowlist():
 
     for body, expected in [
         (
-            "/ascend benchmark sharegpt --dataset-path relative.jsonl --constraints-file /data/constraints.json",
+            "/ascend benchmark sharegpt --dataset-path relative.jsonl "
+            "--constraints-file /data/constraints.json",
             "absolute path",
         ),
         (
-            "/ascend benchmark sharegpt --dataset-path /tmp/sharegpt.jsonl --constraints-file /data/constraints.json",
+            "/ascend benchmark sharegpt --dataset-path /tmp/sharegpt.jsonl "
+            "--constraints-file /data/constraints.json",
             "under one of",
         ),
         (
-            "/ascend benchmark sharegpt --dataset-path /data/sharegpt.txt --constraints-file /data/constraints.json",
+            "/ascend benchmark sharegpt --dataset-path /data/sharegpt.txt "
+            "--constraints-file /data/constraints.json",
             ".json or .jsonl",
         ),
     ]:
@@ -171,7 +182,9 @@ def test_parse_rejects_sharegpt_paths_outside_allowlist():
         except ValueError as exc:
             assert expected in str(exc)
         else:
-            raise AssertionError(f"expected unsafe sharegpt path to be rejected: {body}")
+            raise AssertionError(
+                f"expected unsafe sharegpt path to be rejected: {body}"
+            )
 
 
 def test_parse_rejects_comment_publish_flag():
@@ -195,7 +208,9 @@ def test_parse_ignores_non_command_comments():
 def test_parse_accepts_command_from_multiline_comment():
     parser = load_parser()
 
-    command = parser.parse_comment_command("LGTM\n/ascend benchmark random --num-prompts 16\nthanks")
+    command = parser.parse_comment_command(
+        "LGTM\n/ascend benchmark random --num-prompts 16\nthanks"
+    )
 
     assert command is not None
     assert command.scenario == "random-online"
@@ -219,14 +234,19 @@ def test_parse_rejects_unsupported_protocol_targets():
     for body, expected in [
         ("/ascend group moe", "unsupported benchmark group"),
         ("/ascend scenario qwen25", "unsupported benchmark scenario"),
-        ("/ascend official official-ascend-qwen25", "reserved for future formal leaderboard runs"),
+        (
+            "/ascend official official-ascend-qwen25",
+            "reserved for future formal leaderboard runs",
+        ),
     ]:
         try:
             parser.parse_comment_command(body)
         except ValueError as exc:
             assert expected in str(exc)
         else:
-            raise AssertionError(f"expected unsupported protocol target to be rejected: {body}")
+            raise AssertionError(
+                f"expected unsupported protocol target to be rejected: {body}"
+            )
 
 
 def test_parse_rejects_sharegpt_without_dataset_and_constraints():
@@ -246,7 +266,12 @@ def test_parse_rejects_sharegpt_without_dataset_and_constraints():
 def test_resolve_issue_comment_pr_context_accepts_same_repo_pr():
     parser = load_parser()
     payload = {
-        "issue": {"number": 42, "pull_request": {"url": "https://api.github.test/repos/o/r/pulls/42"}},
+        "issue": {
+            "number": 42,
+            "pull_request": {
+                "url": "https://api.github.test/repos/o/r/pulls/42",
+            },
+        },
         "comment": {
             "body": "/ascend benchmark random",
             "author_association": "CONTRIBUTOR",
@@ -273,7 +298,12 @@ def test_resolve_issue_comment_pr_context_accepts_same_repo_pr():
 def test_resolve_issue_comment_pr_context_accepts_collaborator_commenter():
     parser = load_parser()
     payload = {
-        "issue": {"number": 42, "pull_request": {"url": "https://api.github.test/repos/o/r/pulls/42"}},
+        "issue": {
+            "number": 42,
+            "pull_request": {
+                "url": "https://api.github.test/repos/o/r/pulls/42",
+            },
+        },
         "comment": {
             "body": "/ascend benchmark random",
             "author_association": "COLLABORATOR",
@@ -296,7 +326,12 @@ def test_resolve_issue_comment_pr_context_accepts_collaborator_commenter():
 def test_resolve_issue_comment_pr_context_rejects_untrusted_commenter():
     parser = load_parser()
     payload = {
-        "issue": {"number": 42, "pull_request": {"url": "https://api.github.test/repos/o/r/pulls/42"}},
+        "issue": {
+            "number": 42,
+            "pull_request": {
+                "url": "https://api.github.test/repos/o/r/pulls/42",
+            },
+        },
         "comment": {
             "body": "/ascend benchmark random",
             "author_association": "CONTRIBUTOR",
@@ -338,7 +373,12 @@ def test_resolve_issue_comment_pr_context_rejects_non_pr_issue():
 def test_resolve_issue_comment_pr_context_rejects_fork_pr():
     parser = load_parser()
     payload = {
-        "issue": {"number": 42, "pull_request": {"url": "https://api.github.test/repos/o/r/pulls/42"}},
+        "issue": {
+            "number": 42,
+            "pull_request": {
+                "url": "https://api.github.test/repos/o/r/pulls/42",
+            },
+        },
         "comment": {
             "body": "/ascend benchmark random",
             "author_association": "COLLABORATOR",
@@ -388,11 +428,13 @@ def test_cli_writes_help_output_without_pr_context(tmp_path):
     event_path = tmp_path / "event.json"
     output_path = tmp_path / "output.env"
     event_path.write_text(
-        json.dumps({
-            "issue": {"number": 42},
-            "comment": {"body": "/ascend help"},
-            "repository": {"full_name": "o/r"},
-        }),
+        json.dumps(
+            {
+                "issue": {"number": 42},
+                "comment": {"body": "/ascend help"},
+                "repository": {"full_name": "o/r"},
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -448,24 +490,33 @@ def test_cli_writes_deny_reason_for_fork_pr_comment(tmp_path):
     pr_path = tmp_path / "pr.json"
     output_path = tmp_path / "output.env"
     event_path.write_text(
-        json.dumps({
-            "issue": {"number": 42, "pull_request": {"url": "https://api.github.test/repos/o/r/pulls/42"}},
-            "comment": {
-                "body": "/ascend benchmark random",
-                "author_association": "COLLABORATOR",
-                "user": {"login": "maintainer"},
-            },
-            "repository": {"full_name": "o/r"},
-        }),
+        json.dumps(
+            {
+                "issue": {
+                    "number": 42,
+                    "pull_request": {
+                        "url": "https://api.github.test/repos/o/r/pulls/42",
+                    },
+                },
+                "comment": {
+                    "body": "/ascend benchmark random",
+                    "author_association": "COLLABORATOR",
+                    "user": {"login": "maintainer"},
+                },
+                "repository": {"full_name": "o/r"},
+            }
+        ),
         encoding="utf-8",
     )
     pr_path.write_text(
-        json.dumps({
-            "number": 42,
-            "user": {"login": "alice"},
-            "head": {"sha": "head-sha", "repo": {"full_name": "external/r"}},
-            "base": {"sha": "base-sha", "repo": {"full_name": "o/r"}},
-        }),
+        json.dumps(
+            {
+                "number": 42,
+                "user": {"login": "alice"},
+                "head": {"sha": "head-sha", "repo": {"full_name": "external/r"}},
+                "base": {"sha": "base-sha", "repo": {"full_name": "o/r"}},
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -528,5 +579,7 @@ def test_write_env_file_uses_github_multiline_format(tmp_path):
 
     content = env_file.read_text(encoding="utf-8")
     assert "ASCEND_COMMENT_COMMAND<<__ASCEND_COMMENT_COMMAND_EOF__\n1\n" in content
-    assert "INPUT_BENCHMARK_SCENARIO<<__INPUT_BENCHMARK_SCENARIO_EOF__\nrandom-online\n" in content
+    assert (
+        "INPUT_BENCHMARK_SCENARIO<<__INPUT_BENCHMARK_SCENARIO_EOF__\nrandom-online\n"
+    ) in content
     assert "BENCH_NUM_PROMPTS<<__BENCH_NUM_PROMPTS_EOF__\n16\n" in content

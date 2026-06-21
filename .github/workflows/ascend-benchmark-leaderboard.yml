@@ -315,6 +315,10 @@ jobs:
       ISSUE_COMMENT_PR_NUMBER: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.pr_number || '' }}
       HUST_ASCEND_MANAGER_REPO_URL: git@github.com:vLLM-HUST/ascend-runtime-manager.git
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
+      # Disable precompiled CUDA wheel fetch from wheels.vllm.ai.
+      # The Ascend benchmark uses the vllm-ascend-hust plugin, not CUDA
+      # precompiled wheels, so this avoids transient SSL failures.
+      VLLM_USE_PRECOMPILED: "0"
 
     steps:
       - name: Detect runner user and Ascend devices
@@ -867,7 +871,7 @@ jobs:
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           bash "${VLLM_ASCEND_HUST_REPO}/scripts/install_local_ascend_plugin.sh" "$VLLM_ASCEND_HUST_REPO"
-          "${PYTHON_BIN}" -m pip install -e . --no-build-isolation --no-deps
+          VLLM_TARGET_DEVICE=empty "${PYTHON_BIN}" -m pip install -e . --no-build-isolation --no-deps
           "${PYTHON_BIN}" -m pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]" jsonschema
 
       - name: Verify installation
@@ -1335,6 +1339,7 @@ jobs:
         continue-on-error: true
         uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         with:
+          retries: 3
           script: |
             const fs = require('fs');
             const path = require('path');
@@ -1389,6 +1394,8 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
     needs: ascend-benchmark
     runs-on: ubuntu-latest
+    env:
+      TARGET_REPO_SHA: ${{ github.sha }}
     permissions:
       contents: write
       actions: read
@@ -1422,8 +1429,8 @@ jobs:
       - name: Store perfgate baseline
         shell: bash
         env:
-          RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
-          RESULT_ROOT: ${{ github.workspace }}/.benchmarks/ci/ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.TARGET_REPO_SHA }}
+          RESULT_ROOT: ${{ github.workspace }}/.benchmarks/ci/ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.TARGET_REPO_SHA }}
           PYTHON_BIN: python3
           PERFGATE_SPEC_FILE: ${{ vars.VLLM_HUST_PERFGATE_SPEC_FILE || 'docs/official-baselines/perfgate-ascend-qwen25-3b-910b3.json' }}
           BENCHMARK_REPO_URL: https://github.com/vLLM-HUST/vllm-hust-benchmark.git

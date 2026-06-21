@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import argparse
@@ -25,26 +27,37 @@ class ScenarioSelection:
 LABEL_SCENARIOS: dict[str, ScenarioSelection] = {
     "ascend-targeted-test": ScenarioSelection(
         scenario="random-online",
-        reason="PR label ascend-targeted-test selected random-online targeted verification",
+        reason=(
+            "PR label ascend-targeted-test selected random-online targeted verification"
+        ),
         mode="l2-targeted",
         trigger_label="ascend-targeted-test",
     ),
     "ascend-targeted-required": ScenarioSelection(
         scenario="random-online",
-        reason="PR label ascend-targeted-required selected required random-online targeted verification",
+        reason=(
+            "PR label ascend-targeted-required selected required "
+            "random-online targeted verification"
+        ),
         mode="l2-required",
         trigger_label="ascend-targeted-required",
         perfgate_mode="enforce",
     ),
     "ascend-benchmark:l2-random": ScenarioSelection(
         scenario="random-online",
-        reason="PR label ascend-benchmark:l2-random selected random-online targeted verification",
+        reason=(
+            "PR label ascend-benchmark:l2-random selected random-online "
+            "targeted verification"
+        ),
         mode="l2-targeted",
         trigger_label="ascend-benchmark:l2-random",
     ),
     "ascend-benchmark:l2-sharegpt": ScenarioSelection(
         scenario="sharegpt-online",
-        reason="PR label ascend-benchmark:l2-sharegpt selected sharegpt-online targeted verification",
+        reason=(
+            "PR label ascend-benchmark:l2-sharegpt selected sharegpt-online "
+            "targeted verification"
+        ),
         mode="l2-targeted",
         trigger_label="ascend-benchmark:l2-sharegpt",
     ),
@@ -64,7 +77,9 @@ def parse_labels(raw_labels: str) -> list[str]:
     except json.JSONDecodeError:
         return [item.strip() for item in raw_labels.split(",") if item.strip()]
     if not isinstance(payload, list):
-        raise ValueError("PR labels payload must be a JSON array or comma-separated list")
+        raise ValueError(
+            "PR labels payload must be a JSON array or comma-separated list"
+        )
     labels: list[str] = []
     for item in payload:
         if isinstance(item, str):
@@ -87,9 +102,7 @@ def _validate_selection(selection: ScenarioSelection) -> ScenarioSelection:
     if not selection.constraints_file:
         missing.append("BENCH_CONSTRAINTS_FILE")
     if missing:
-        raise ValueError(
-            "sharegpt-online requires " + ", ".join(missing)
-        )
+        raise ValueError("sharegpt-online requires " + ", ".join(missing))
     return selection
 
 
@@ -108,16 +121,21 @@ def select_scenario(
         scenario = manual_scenario.strip() or default_scenario
         if scenario not in SUPPORTED_MANUAL_SCENARIOS:
             supported = ", ".join(sorted(SUPPORTED_MANUAL_SCENARIOS))
-            raise ValueError(f"unsupported manual benchmark_scenario={scenario!r}; supported: {supported}")
-        return _validate_selection(ScenarioSelection(
-            scenario=scenario,
-            reason=f"workflow_dispatch input selected {scenario}",
-            mode="manual",
-            dataset_path=default_dataset_path,
-            constraints_file=default_constraints_file,
-            same_spec_spec_file=same_spec_spec_file,
-            same_spec_constraints_file=same_spec_constraints_file,
-        ))
+            raise ValueError(
+                f"unsupported manual benchmark_scenario={scenario!r}; "
+                f"supported: {supported}"
+            )
+        return _validate_selection(
+            ScenarioSelection(
+                scenario=scenario,
+                reason=f"workflow_dispatch input selected {scenario}",
+                mode="manual",
+                dataset_path=default_dataset_path,
+                constraints_file=default_constraints_file,
+                same_spec_spec_file=same_spec_spec_file,
+                same_spec_constraints_file=same_spec_constraints_file,
+            )
+        )
 
     if event_name == "pull_request":
         unknown_l2_labels = [
@@ -143,36 +161,47 @@ def select_scenario(
             )
         if matches:
             selected = LABEL_SCENARIOS[matches[0]]
-            return _validate_selection(ScenarioSelection(
-                scenario=selected.scenario,
-                reason=selected.reason,
-                mode=selected.mode,
-                trigger_label=selected.trigger_label,
+            return _validate_selection(
+                ScenarioSelection(
+                    scenario=selected.scenario,
+                    reason=selected.reason,
+                    mode=selected.mode,
+                    trigger_label=selected.trigger_label,
+                    dataset_path=default_dataset_path,
+                    constraints_file=default_constraints_file,
+                    same_spec_spec_file=same_spec_spec_file,
+                    same_spec_constraints_file=same_spec_constraints_file,
+                    perfgate_mode=selected.perfgate_mode,
+                )
+            )
+        return _validate_selection(
+            ScenarioSelection(
+                scenario=default_scenario,
+                reason=(
+                    "no L2 benchmark label found; using default PR benchmark scenario"
+                ),
+                mode="l1-smoke",
                 dataset_path=default_dataset_path,
                 constraints_file=default_constraints_file,
                 same_spec_spec_file=same_spec_spec_file,
                 same_spec_constraints_file=same_spec_constraints_file,
-                perfgate_mode=selected.perfgate_mode,
-            ))
-        return _validate_selection(ScenarioSelection(
+            )
+        )
+
+    return _validate_selection(
+        ScenarioSelection(
             scenario=default_scenario,
-            reason="no L2 benchmark label found; using default PR benchmark scenario",
-            mode="l1-smoke",
+            reason=(
+                f"{event_name or 'unknown'} event uses configured default "
+                "benchmark scenario"
+            ),
+            mode="default",
             dataset_path=default_dataset_path,
             constraints_file=default_constraints_file,
             same_spec_spec_file=same_spec_spec_file,
             same_spec_constraints_file=same_spec_constraints_file,
-        ))
-
-    return _validate_selection(ScenarioSelection(
-        scenario=default_scenario,
-        reason=f"{event_name or 'unknown'} event uses configured default benchmark scenario",
-        mode="default",
-        dataset_path=default_dataset_path,
-        constraints_file=default_constraints_file,
-        same_spec_spec_file=same_spec_spec_file,
-        same_spec_constraints_file=same_spec_constraints_file,
-    ))
+        )
+    )
 
 
 def _github_multiline_delimiter(key: str, value: str) -> str:
@@ -192,15 +221,35 @@ def write_env_file(path: str, values: dict[str, str]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Resolve Ascend benchmark scenario for L1/L2 CI runs.")
+    parser = argparse.ArgumentParser(
+        description="Resolve Ascend benchmark scenario for L1/L2 CI runs."
+    )
     parser.add_argument("--event-name", default=os.environ.get("GITHUB_EVENT_NAME", ""))
-    parser.add_argument("--manual-scenario", default=os.environ.get("INPUT_BENCHMARK_SCENARIO", ""))
+    parser.add_argument(
+        "--manual-scenario",
+        default=os.environ.get("INPUT_BENCHMARK_SCENARIO", ""),
+    )
     parser.add_argument("--pr-labels", default=os.environ.get("PR_LABELS", ""))
-    parser.add_argument("--default-scenario", default=os.environ.get("BENCH_SCENARIO", "random-online"))
-    parser.add_argument("--default-dataset-path", default=os.environ.get("BENCH_DATASET_PATH", ""))
-    parser.add_argument("--default-constraints-file", default=os.environ.get("BENCH_CONSTRAINTS_FILE", ""))
-    parser.add_argument("--same-spec-spec-file", default=os.environ.get("SAME_SPEC_SPEC_FILE", ""))
-    parser.add_argument("--same-spec-constraints-file", default=os.environ.get("SAME_SPEC_CONSTRAINTS_FILE", ""))
+    parser.add_argument(
+        "--default-scenario",
+        default=os.environ.get("BENCH_SCENARIO", "random-online"),
+    )
+    parser.add_argument(
+        "--default-dataset-path",
+        default=os.environ.get("BENCH_DATASET_PATH", ""),
+    )
+    parser.add_argument(
+        "--default-constraints-file",
+        default=os.environ.get("BENCH_CONSTRAINTS_FILE", ""),
+    )
+    parser.add_argument(
+        "--same-spec-spec-file",
+        default=os.environ.get("SAME_SPEC_SPEC_FILE", ""),
+    )
+    parser.add_argument(
+        "--same-spec-constraints-file",
+        default=os.environ.get("SAME_SPEC_CONSTRAINTS_FILE", ""),
+    )
     parser.add_argument("--github-env", default=os.environ.get("GITHUB_ENV", ""))
     parser.add_argument("--github-output", default=os.environ.get("GITHUB_OUTPUT", ""))
     args = parser.parse_args()

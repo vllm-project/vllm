@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
 import importlib.util
 import json
 import sys
 from pathlib import Path
-
 
 SCRIPT_PATH = (
     Path(__file__).resolve().parents[2]
@@ -17,7 +18,9 @@ REGISTRY_PATH = (
 
 
 def load_module():
-    spec = importlib.util.spec_from_file_location("ascend_targeted_scenarios", SCRIPT_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "ascend_targeted_scenarios", SCRIPT_PATH
+    )
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -43,14 +46,16 @@ def test_registry_rejects_unknown_group_scenario(tmp_path):
     module = load_module()
     registry_path = tmp_path / "bad-registry.json"
     registry_path.write_text(
-        json.dumps({
-            "scenarios": {
-                "random-online": {"aliases": ["random"]},
-            },
-            "groups": {
-                "moe": {"scenario": "moe-online"},
-            },
-        }),
+        json.dumps(
+            {
+                "scenarios": {
+                    "random-online": {"aliases": ["random"]},
+                },
+                "groups": {
+                    "moe": {"scenario": "moe-online"},
+                },
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -66,13 +71,15 @@ def test_registry_rejects_duplicate_alias(tmp_path):
     module = load_module()
     registry_path = tmp_path / "bad-registry.json"
     registry_path.write_text(
-        json.dumps({
-            "scenarios": {
-                "random-online": {"aliases": ["preview"]},
-                "sharegpt-online": {"aliases": ["preview"]},
-            },
-            "groups": {},
-        }),
+        json.dumps(
+            {
+                "scenarios": {
+                    "random-online": {"aliases": ["preview"]},
+                    "sharegpt-online": {"aliases": ["preview"]},
+                },
+                "groups": {},
+            }
+        ),
         encoding="utf-8",
     )
 
