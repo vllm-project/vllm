@@ -134,6 +134,80 @@ def test_interleaved_kv_layout_uses_block_axis_zero_and_kv_axis_one():
     ) == ([96, 288], [384, 480], [96, 96])
 
 
+def test_shuffled_separated_kv_layout_uses_spec_block_axis():
+    cache = torch.empty((2, 8, 2, 4, 3), dtype=torch.bfloat16)
+    worker = _worker({"layer": cache}, {"layer": _full_spec()})
+
+    geometry = moriio_layout.get_layer_transfer_geometry(
+        "layer", cache, worker.layer_to_spec, remote_num_blocks=16
+    )
+    assert geometry.block_size == 4
+    assert geometry.block_stride == 24
+    assert geometry.local_kv_stride == 192
+    assert geometry.remote_kv_stride == 384
+    assert geometry.split_kv_regions
+
+    assert moriio_layout.compute_block_transfer_offsets(
+        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], _remote_meta().num_blocks
+    ) == ([48, 144, 432, 528], [192, 240, 960, 1008], [48, 48, 48, 48])
+
+
+def test_shuffled_interleaved_kv_layout_uses_spec_block_axis():
+    cache = torch.empty((8, 2, 2, 4, 3), dtype=torch.bfloat16)
+    worker = _worker({"layer": cache}, {"layer": _full_spec()})
+
+    geometry = moriio_layout.get_layer_transfer_geometry(
+        "layer", cache, worker.layer_to_spec, remote_num_blocks=16
+    )
+    assert geometry.block_size == 4
+    assert geometry.block_stride == 48
+    assert geometry.local_kv_stride == 24
+    assert geometry.remote_kv_stride == 24
+    assert not geometry.split_kv_regions
+
+    assert moriio_layout.compute_block_transfer_offsets(
+        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], _remote_meta().num_blocks
+    ) == ([96, 288], [384, 480], [96, 96])
+
+
+def test_separated_kernel_block_layout_groups_kernel_blocks():
+    cache = torch.empty((2, 16, 2, 2, 3), dtype=torch.bfloat16)
+    worker = _worker({"layer": cache}, {"layer": _full_spec()})
+
+    geometry = moriio_layout.get_layer_transfer_geometry(
+        "layer", cache, worker.layer_to_spec, remote_num_blocks=16
+    )
+    assert geometry.num_blocks == 8
+    assert geometry.block_size == 4
+    assert geometry.block_stride == 24
+    assert geometry.local_kv_stride == 192
+    assert geometry.remote_kv_stride == 384
+    assert geometry.split_kv_regions
+
+    assert moriio_layout.compute_block_transfer_offsets(
+        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], _remote_meta().num_blocks
+    ) == ([48, 144, 432, 528], [192, 240, 960, 1008], [48, 48, 48, 48])
+
+
+def test_interleaved_kernel_block_layout_transfers_full_logical_blocks():
+    cache = torch.empty((16, 2, 2, 2, 3), dtype=torch.bfloat16)
+    worker = _worker({"layer": cache}, {"layer": _full_spec()})
+
+    geometry = moriio_layout.get_layer_transfer_geometry(
+        "layer", cache, worker.layer_to_spec, remote_num_blocks=16
+    )
+    assert geometry.num_blocks == 8
+    assert geometry.block_size == 4
+    assert geometry.block_stride == 48
+    assert geometry.local_kv_stride is None
+    assert geometry.remote_kv_stride is None
+    assert geometry.transfers_per_block == 1
+
+    assert moriio_layout.compute_block_transfer_offsets(
+        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], _remote_meta().num_blocks
+    ) == ([96, 288], [384, 480], [96, 96])
+
+
 def test_mla_key_only_layout_transfers_one_slab_per_block():
     cache = torch.empty((8, 4, 3), dtype=torch.bfloat16)
     worker = _worker({"layer": cache}, {"layer": _mla_spec()})
