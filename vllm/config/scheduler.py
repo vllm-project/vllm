@@ -77,7 +77,7 @@ class SchedulerConfig:
     this less than max_num_partial_prefills will allow shorter prompts to jump
     the queue in front of longer prompts in some cases, improving latency."""
 
-    long_prefill_token_threshold: int = 0
+    long_prefill_token_threshold: int = Field(default=0, ge=0)
     """For chunked prefill, a request is considered long if the prompt is
     longer than this number of tokens."""
 
@@ -233,20 +233,6 @@ class SchedulerConfig:
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialisation is delayed."""
         return None if value is None else handler(value)
-
-    @field_validator("long_prefill_token_threshold", mode="after")
-    @classmethod
-    def _check_long_prefill_token_threshold(cls, v: int) -> int:
-        # The clamp at `__post_init__` is guarded by `0 < threshold <
-        # num_new_tokens`, and the cap is guarded by `threshold > max_model_len`,
-        # so a negative value matches neither path and silently flows through.
-        # Reject at config-construction time, same shape as #43794.
-        if v < 0:
-            raise ValueError(
-                f"long_prefill_token_threshold must be >= 0 "
-                f"(0 = off, > 0 = clamp), got {v}."
-            )
-        return v
 
     def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
         if is_encoder_decoder:
