@@ -99,7 +99,7 @@ def validate_outputs(
             # We also count the <START_THINKING TOKEN> token
             # as well along with all the other budget
             # tokens
-            index_offset = 1
+            index_offset = 0
             if continue_thinking:
                 start_thinking_ids = tokenizer.encode(
                     "<|START_THINKING|>", add_special_tokens=False
@@ -108,7 +108,6 @@ def validate_outputs(
                     len(prompt) - 1 - prompt[::-1].index(start_thinking_ids)
                 )
                 index_et += len(prompt) - (start_thinking_pos + 1)
-                index_offset = 0
             assert index_et == thinking_token_budgets[request_id] + index_offset, (
                 f"Expected thinking budget \
                     {thinking_token_budgets[request_id] + index_offset}\
