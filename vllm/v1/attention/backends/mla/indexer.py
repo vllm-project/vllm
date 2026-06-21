@@ -28,7 +28,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
 )
-from vllm.v1.context_parallel.layout import (
+from vllm.v1.attention.ops.cp_utils import (
     DEFAULT_CP_LAYOUT,
     ContextParallelLayout,
 )

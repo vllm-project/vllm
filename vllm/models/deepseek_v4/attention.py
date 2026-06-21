@@ -56,7 +56,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
-from vllm.v1.context_parallel.layout import ContextParallelLayout
+from vllm.v1.attention.ops.cp_utils import ContextParallelLayout
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,

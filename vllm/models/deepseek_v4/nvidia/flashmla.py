@@ -5,12 +5,14 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from vllm.config import get_current_vllm_config
 from vllm.distributed.parallel_state import GroupCoordinator, get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
     combine_topk_swa_indices,
     compute_global_topk_indices_and_lens,
+    dcp_merge_flashmla_output,
     dequantize_and_gather_k_cache,
 )
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import (
@@ -25,7 +27,6 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
 )
-from vllm.v1.context_parallel.collectives import AttentionOutputReducer
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
@@ -86,6 +87,9 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
+        parallel_config = get_current_vllm_config().parallel_config
+        if self.cp_layout.enabled and parallel_config.dcp_comm_backend != "a2a":
+            raise ValueError("DeepseekV4 FlashMLA DCP requires dcp_comm_backend='a2a'.")
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
@@ -230,7 +234,10 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     block_size,
                     is_valid,
                 )
-                topk_indices = global_indices.view(num_decode_tokens, 1, -1)
+                topk_indices = self.topk_indices_buffer[:num_decode_tokens]
+                topk_indices.fill_(-1)
+                topk_indices[:, : global_indices.shape[-1]].copy_(global_indices)
+                topk_indices = topk_indices.view(num_decode_tokens, 1, -1)
             else:
                 # C128A: pre-computed during metadata build.
                 topk_indices = attn_metadata.c128a_global_decode_topk_indices
@@ -242,7 +249,6 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         # We treat queries in the same seq as different queries
         # and later we only attend by generated indices.
         q, num_real_heads, dcp_group, use_dcp = _maybe_gather_dcp_q(self, q)
-        output_reducer = AttentionOutputReducer(dcp_group) if use_dcp else None
         q = q.unsqueeze(1)
 
         # Prepare SWA cache (num_blocks, swa_block_size, 1, head_bytes)
@@ -301,13 +307,13 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             out=out_buffer,
         )
         if use_dcp:
-            assert output_reducer is not None
             out, lse = _get_dcp_flashmla_partials(out, lse, num_real_heads)
-            output_reducer.reduce_with_sink(
+            dcp_merge_flashmla_output(
                 out,
                 lse,
                 self.attn_sink,
                 output,
+                dcp_group,
             )
 
     def _forward_prefill(
@@ -339,7 +345,6 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         assert query_start_loc_cpu is not None
         assert query_start_loc is not None
         prefill_token_base = query_start_loc_cpu[num_decodes]
-        output_reducer = AttentionOutputReducer(dcp_group) if use_dcp else None
 
         if not swa_only:
             if self.compress_ratio == 4:
@@ -438,11 +443,11 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                 out=out_buffer,
             )
             if use_dcp:
-                assert output_reducer is not None
                 out, lse = _get_dcp_flashmla_partials(out, lse, num_real_heads)
-                output_reducer.reduce_with_sink(
+                dcp_merge_flashmla_output(
                     out,
                     lse,
                     self.attn_sink,
                     output[query_start:query_end],
+                    dcp_group,
                 )
