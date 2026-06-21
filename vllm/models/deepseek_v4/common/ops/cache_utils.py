@@ -22,7 +22,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.import_utils import has_cutedsl
-from vllm.v1.attention.ops.cp_utils import (
+from vllm.v1.worker.cp_utils import (
     DEFAULT_CP_LAYOUT,
     ContextParallelLayout,
     cp_global_to_local_pos,

@@ -33,12 +33,12 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.ops.cp_utils import ContextParallelLayout
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+from vllm.v1.worker.cp_utils import ContextParallelLayout
 
 
 class CompressorBackend(AttentionBackend):
