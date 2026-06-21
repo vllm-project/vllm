@@ -65,6 +65,7 @@ class RejectionSampler(nn.Module):
     ):
         super().__init__()
         self.sampler = sampler
+        self.use_fp64_gumbel = getattr(sampler, "use_fp64_gumbel", False)
         logprobs_mode = self.sampler.logprobs_mode
         self.is_processed_logprobs_mode = logprobs_mode.startswith("processed")
         self.is_logits_logprobs_mode = logprobs_mode.endswith("logits")
@@ -176,6 +177,7 @@ class RejectionSampler(nn.Module):
             sampling_metadata,
             synthetic_mode=self.synthetic_mode,
             synthetic_conditional_rates=self.synthetic_conditional_rates,
+            use_fp64_gumbel=self.use_fp64_gumbel,
         )
 
         logprobs_tensors = None
@@ -406,6 +408,7 @@ def rejection_sample(
     sampling_metadata: SamplingMetadata,
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
+    use_fp64_gumbel: bool = False,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
     assert draft_probs is None or draft_probs.ndim == 2
@@ -480,6 +483,7 @@ def rejection_sample(
         target_probs,
         sampling_metadata,
         device,
+        use_fp64_gumbel,
     )
 
     # Rejection sampling for random sampling requests.
@@ -669,13 +673,15 @@ def sample_recovered_tokens(
     target_probs: torch.Tensor,
     sampling_metadata: SamplingMetadata,
     device: torch.device,
+    use_fp64_gumbel: bool = False,
 ) -> torch.Tensor:
     # NOTE(woosuk): Create only one distribution for each request.
     batch_size = len(num_draft_tokens)
     vocab_size = target_probs.shape[-1]
+    q_dtype = torch.float64 if use_fp64_gumbel else torch.float32
     q = torch.empty(
         (batch_size, vocab_size),
-        dtype=torch.float32,
+        dtype=q_dtype,
         device=device,
     )
     q.exponential_()
@@ -699,6 +705,7 @@ def sample_recovered_tokens(
         vocab_size,
         BLOCK_SIZE,
         NO_DRAFT_PROBS=draft_probs is None,
+        USE_FP64_GUMBEL=use_fp64_gumbel,
     )
     return recovered_token_ids
 
@@ -725,7 +732,11 @@ def rejection_greedy_sample_kernel(
         # Early exit for non-greedy sampling requests.
         return
 
-    start_idx = 0 if req_idx == 0 else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    start_idx = (
+        tl.zeros([], dtype=cu_num_draft_tokens_ptr.dtype.element_ty)
+        if req_idx == 0
+        else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    )
     end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
     num_draft_tokens = end_idx - start_idx
 
@@ -781,7 +792,11 @@ def rejection_random_sample_kernel(
         # Early exit for greedy sampling requests.
         return
 
-    start_idx = 0 if req_idx == 0 else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    start_idx = (
+        tl.zeros([], dtype=cu_num_draft_tokens_ptr.dtype.element_ty)
+        if req_idx == 0
+        else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    )
     end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
     num_draft_tokens = end_idx - start_idx
 
@@ -837,8 +852,8 @@ def expand_kernel(
     MAX_NUM_TOKENS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    if req_idx == 0:  # noqa: SIM108
-        start_idx = 0
+    if req_idx == 0:
+        start_idx = tl.zeros([], dtype=cu_num_tokens_ptr.dtype.element_ty)
     else:
         start_idx = tl.load(cu_num_tokens_ptr + req_idx - 1)
     end_idx = tl.load(cu_num_tokens_ptr + req_idx)
@@ -861,9 +876,14 @@ def sample_recovered_tokens_kernel(
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     NO_DRAFT_PROBS: tl.constexpr,
+    USE_FP64_GUMBEL: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    start_idx = 0 if req_idx == 0 else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    start_idx = (
+        tl.zeros([], dtype=cu_num_draft_tokens_ptr.dtype.element_ty)
+        if req_idx == 0
+        else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    )
     end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
     num_draft_tokens = end_idx - start_idx
 
@@ -877,7 +897,10 @@ def sample_recovered_tokens_kernel(
     if NO_DRAFT_PROBS:
         draft_token_id = tl.load(draft_token_ids_ptr + token_idx)
 
-    max_val = float("-inf")
+    if USE_FP64_GUMBEL:
+        max_val = tl.full((), float("-inf"), tl.float64)
+    else:
+        max_val = tl.full((), float("-inf"), tl.float32)
     recovered_id = 0
     for v in range(0, vocab_size, BLOCK_SIZE):
         vocab_offset = v + tl.arange(0, BLOCK_SIZE)
@@ -910,12 +933,17 @@ def sample_recovered_tokens_kernel(
             other=0.0,
         )
 
-        # Local tile reduction
+        # Local tile reduction.
+        # Mask out-of-vocabulary entries to -inf so they can never win
+        # the argmax — prevents producing recovered_id >= vocab_size
+        # when all valid entries in the last tile have zero probability.
         score = prob * inv_q
+        score = tl.where(vocab_mask, score, float("-inf"))
         local_max, local_id = tl.max(score, axis=0, return_indices=True)
 
         if local_max > max_val:
             max_val = local_max
             recovered_id = v + local_id
 
+    recovered_id = tl.minimum(recovered_id, vocab_size - 1)
     tl.store(output_token_ids_ptr + token_idx, recovered_id)
