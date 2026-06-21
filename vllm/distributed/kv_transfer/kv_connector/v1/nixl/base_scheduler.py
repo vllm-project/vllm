@@ -243,25 +243,6 @@ class NixlBaseConnectorScheduler:
             ]
         )
 
-    def _clip_blocks_to_num_tokens(
-        self,
-        block_ids: BlockIds,
-        num_tokens: int,
-    ) -> BlockIds:
-        """Drop blocks that cannot contain tokens in ``[0, num_tokens)``."""
-        if len(block_ids) == 0:
-            return block_ids
-
-        clipped: list[list[int]] = []
-        for group, group_spec in zip(block_ids, self.kv_cache_config.kv_cache_groups):
-            if isinstance(group_spec.kv_cache_spec, MambaSpec):
-                clipped.append(list(group))
-                continue
-
-            num_blocks = cdiv(num_tokens, group_spec.kv_cache_spec.block_size)
-            clipped.append(list(group[:num_blocks]))
-        return tuple(clipped)
-
     def set_xfer_handshake_metadata(
         self, metadata: dict[int, KVConnectorHandshakeMetadata]
     ) -> None:

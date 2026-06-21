@@ -254,21 +254,14 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             self._reqs_need_send[request.request_id] = (
                 time.perf_counter() + request_kv_blocks_ttl
             )
-            remote_num_tokens = request.num_computed_tokens
-            if is_p_node:
-                # The P-side bootstrap request generates one token only to finish
-                # the request and expose prompt KV to D. That generated token is
-                # not part of the D request, so do not expose its KV block.
-                remote_num_tokens = min(remote_num_tokens, request.num_prompt_tokens)
-                block_ids = self._clip_blocks_to_num_tokens(
-                    block_ids, remote_num_tokens
-                )
 
             # NOTE HMA will "mark" empty/null blocks in groups with 0s (eg SWA ones),
             # trimming down after allocating for the whole sequence length. Empty
             # blocks are always at the start of the list.
             # Here we "unpad" blocks to send the actual remote blocks to be read.
             block_ids = self.get_sw_clipped_blocks(block_ids)
+
+            remote_num_tokens = request.num_computed_tokens
 
         return delay_free_blocks, dict(
             do_remote_prefill=is_p_node,
