@@ -114,11 +114,12 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 k_scale = 1.0
                 v_scale = 1.0
             else:
-                # If we find a single kv_scale in the checkpoint, we remap
-                # kv_scale to k_scale during weight loading, and duplicate
-                # k_scale to v_scale here
-                assert layer.k_scale > 0.0
+                # Exactly one of k_scale / v_scale was loaded; the other is the
+                # -1.0 sentinel. This covers the legacy single `kv_scale`
+                # (remapped to k_scale on load) as well as checkpoints that ship
+                # only one of the two. Duplicate the lone valid scale to both.
                 scale_to_duplicate = max(layer.k_scale, layer.v_scale)
+                assert scale_to_duplicate > 0.0
                 k_scale = scale_to_duplicate.to("cpu").tolist()
                 v_scale = scale_to_duplicate.to("cpu").tolist()
                 if current_platform.is_fp8_fnuz():
