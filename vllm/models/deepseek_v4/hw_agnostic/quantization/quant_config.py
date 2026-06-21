@@ -11,9 +11,11 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8KVCacheMethod,
-    Fp8LinearMethod,
     Fp8MoEMethod,
     Fp8OnlineMoEMethod,
+)
+from vllm.models.deepseek_v4.hw_agnostic.quantization.fp8_linear_method import (
+    Fp8LinearMethod,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,

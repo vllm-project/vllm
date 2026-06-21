@@ -87,7 +87,8 @@ CHECK_IMPORTS = {
         pattern=(
             r"^\s*from\s+vllm\."
             r"(?:"
-            r"model_executor\.layers(?!\.utils\b)(?!\.quantization\.base_config\b)(?!\.quantization\.utils\.fp8_utils\b)(?!\.fused_moe\.activation\b)(?!\.fused_moe\.fused_moe_method_base\b)(?!\.fused_moe\.modular_kernel\b)(?!\.fused_moe\.runner\.moe_runner_interface\b)(?!\.sparse_attn_indexer\b)(?!\.attention_layer_base\b)"
+            r"model_executor\.layers(?!\.utils\b)(?!\.quantization\.base_config\b)(?!\.quantization\.utils\.fp8_utils\b)(?!\.quantization\.utils\.quant_utils\b)(?!\.quantization\.utils\.w8a8_utils\b)(?!\.quantization\.utils\.layer_utils\b)(?!\.quantization\.input_quant_fp8\b)(?!\.quantization\.compressed_tensors\.triton_scaled_mm\b)(?!\.fusion\.quant_activation\b)(?!\.fused_moe\.activation\b)(?!\.fused_moe\.fused_moe_method_base\b)(?!\.fused_moe\.modular_kernel\b)(?!\.fused_moe\.runner\.moe_runner_interface\b)(?!\.sparse_attn_indexer\b)(?!\.attention_layer_base\b)"
+            r"|model_executor\.kernels\b"
             r"|model_executor\.models(?!\.utils\b)"
             r"|models\.[^.]+(?!\.hw_agnostic\b)"
             r"|v1\.attention\.backends(?!\.utils\b)(?!\.mla\.indexer\b)"
@@ -257,6 +258,51 @@ def test_regex():
         (
             "from vllm.model_executor.layers.quantization.utils.fp8_utils import "
             "per_token_group_quant_fp8",
+            False,
+        ),
+        # Vendored kernels.linear carve-outs: the kernel ABCs reach a small
+        # set of pure-data / pure-helper modules that don't pull in
+        # platform-specific kernel code.
+        (
+            "from vllm.model_executor.layers.quantization.utils.quant_utils import X",
+            False,
+        ),
+        (
+            "from vllm.model_executor.layers.quantization.utils.w8a8_utils import X",
+            False,
+        ),
+        (
+            "from vllm.model_executor.layers.quantization.utils.layer_utils import X",
+            False,
+        ),
+        (
+            "from vllm.model_executor.layers.quantization.input_quant_fp8 import "
+            "QuantFP8",
+            False,
+        ),
+        (
+            "from vllm.model_executor.layers.quantization.compressed_tensors."
+            "triton_scaled_mm import triton_scaled_mm",
+            False,
+        ),
+        (
+            "from vllm.model_executor.layers.fusion.quant_activation import X",
+            False,
+        ),
+        # model_executor.kernels: forbidden everywhere on hw_agnostic.
+        # The vendored kernel selector lives under hw_agnostic/shared/kernels/.
+        (
+            "from vllm.model_executor.kernels.linear import init_fp8_linear_kernel",
+            True,
+        ),
+        (
+            "from vllm.model_executor.kernels.linear.scaled_mm import X",
+            True,
+        ),
+        # Vendored kernel subtree inside hw_agnostic must not be flagged.
+        (
+            "from vllm.models.deepseek_v4.hw_agnostic.shared.kernels.linear "
+            "import init_fp8_linear_kernel",
             False,
         ),
         (

@@ -22,9 +22,6 @@ class DSv4OOTPlatform(NvmlCudaPlatform):
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         super().check_and_update_config(vllm_config)
 
-        if vllm_config.kernel_config.linear_backend == "auto":
-            vllm_config.kernel_config.linear_backend = "triton"
-
         if vllm_config.kernel_config.moe_backend == "auto":
             vllm_config.kernel_config.moe_backend = "triton"
 
