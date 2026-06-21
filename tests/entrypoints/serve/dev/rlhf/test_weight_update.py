@@ -37,7 +37,7 @@ from contextlib import contextmanager
 import pytest
 import requests
 
-MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "meta-llama/Llama-3.2-1B-Instruct")
+MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
 
 _BASE_ARGS = [
     "--dtype",

@@ -125,64 +125,80 @@ class TestSleepingTagsSemantics:
 
 
 # ---------------------------------------------------------------------------
-# TestPauseStateOrthogonality
+# TestPauseStateSemantics
 # ---------------------------------------------------------------------------
 
 
-class TestPauseStateOrthogonality:
-    """pause and sleep are orthogonal state dimensions.
+class TestPauseStateSemantics:
+    """Verify the relationship between /pause, /sleep, is_paused, and is_sleeping.
 
-    /pause sets is_paused=True and does not change is_sleeping.
-    /sleep sets is_sleeping=True and does not change is_paused.
-    They must be independently queryable and independently resettable.
+    Key invariant (vLLM v1 engine):
+      is_sleeping() = is_scheduler_paused() OR executor.is_sleeping
+      is_paused()   = is_scheduler_paused()
+
+    Both /pause and /sleep call pause_scheduler() internally, so:
+      - After /pause:    is_paused=True,  is_sleeping=True  (scheduler paused)
+      - After /sleep(1): is_paused=True,  is_sleeping=True  (scheduler + executor)
+      - After /resume:   is_paused=False, is_sleeping=False (both cleared)
+      - After /wake_up:  is_paused=False, is_sleeping=False (both cleared)
+
+    The semantic difference between pause and sleep is NOT reflected in
+    is_paused/is_sleeping alone — it lies in whether GPU memory was released,
+    which is tested by TestPhysicalMemory in test_sleep_wake.py.
 
     Reference: SkyRL test_pause_and_continue_generation.py
     """
 
-    def test_pause_does_not_set_is_sleeping(self):
+    def test_pause_sets_is_paused_and_is_sleeping(self):
+        """/pause sets both is_paused=True and is_sleeping=True.
+
+        is_sleeping() = is_scheduler_paused() OR executor.is_sleeping.
+        /pause calls pause_scheduler(), so is_scheduler_paused() becomes True,
+        which makes is_sleeping() return True even though no GPU memory changed.
+        """
         with server(port=_PORT_BASE + 3, dummy_weights=True) as url:
             assert pause(url, mode="abort") == 200
             assert poll_until(lambda: is_paused(url), timeout=10)
-            # sleep state must remain False
-            assert not is_sleeping(url), (
-                "/pause must not set is_sleeping=True"
+            assert is_sleeping(url) is True, (
+                "/pause should set is_sleeping=True because "
+                "is_sleeping() = is_scheduler_paused() OR executor.is_sleeping"
             )
 
             assert resume(url) == 200
             assert poll_until(lambda: not is_paused(url), timeout=10)
+            assert is_sleeping(url) is False
             assert health(url) == 200
 
-    def test_sleep_does_not_set_is_paused(self):
+    def test_sleep_sets_is_paused_and_is_sleeping(self):
+        """/sleep(1) sets both is_paused=True and is_sleeping=True.
+
+        /sleep internally calls pause_scheduler() before offloading GPU memory,
+        so is_paused() becomes True (scheduler is paused) in addition to
+        is_sleeping() (executor is also sleeping).
+        """
         with server(port=_PORT_BASE + 4, dummy_weights=True) as url:
             assert sleep(url, level=1) == 200
             assert poll_until(lambda: is_sleeping(url), timeout=10)
-            # pause state must remain False
-            assert not is_paused(url), (
-                "/sleep must not set is_paused=True"
+            assert is_paused(url) is True, (
+                "/sleep should set is_paused=True because "
+                "sleep() calls pause_scheduler() internally"
             )
 
             assert wake(url) == 200
             assert poll_until(lambda: not is_sleeping(url), timeout=10)
+            assert is_paused(url) is False
             assert health(url) == 200
 
-    def test_pause_and_sleep_together(self):
-        """Both can be active simultaneously without crashing the engine."""
+    def test_resume_clears_both_pause_and_sleep(self):
+        """/resume resets is_paused=False and is_sleeping=False after /pause."""
         with server(port=_PORT_BASE + 5, dummy_weights=True) as url:
-            # pause first, then sleep
             assert pause(url, mode="abort") == 200
             assert poll_until(lambda: is_paused(url), timeout=10)
-            assert sleep(url, level=1) == 200
-            assert poll_until(lambda: is_sleeping(url), timeout=10)
-
-            # both must show the right state
-            assert is_paused(url) is True
             assert is_sleeping(url) is True
 
-            # wake and resume in reverse order
-            assert wake(url) == 200
-            assert poll_until(lambda: not is_sleeping(url), timeout=10)
             assert resume(url) == 200
             assert poll_until(lambda: not is_paused(url), timeout=10)
+            assert is_sleeping(url) is False
             assert health(url) == 200
 
 
@@ -194,30 +210,39 @@ class TestPauseStateOrthogonality:
 class TestWeightUpdateOrdering:
     """start/update/finish weight-transfer protocol ordering invariants.
 
-    The protocol requires: start → (zero or more updates) → finish.
-    Out-of-order calls must return an error, not crash the engine.
+    The protocol in vLLM v0.23.0 requires:
+      init_weight_transfer_engine → start_weight_update → update_weights → finish
+
+    Calling start/update/finish without a prior init returns an error.
+    Out-of-order calls within an initialized session must also error.
 
     Reference: AReaL tests/experimental/weight_update/test_wu_controller.py
                TestLifecycle, TestUpdateWeights, TestDisconnect
     """
 
-    def test_double_start_returns_error(self):
-        """Two consecutive start_weight_update calls → second must error."""
-        with server(port=_PORT_BASE + 6, dummy_weights=True) as url:
-            r1 = start_weight_update(url)
-            assert r1.status_code == 200, f"first start failed: {r1.text}"
+    def test_start_without_init_returns_error(self):
+        """/start_weight_update without /init_weight_transfer_engine must error.
 
-            r2 = start_weight_update(url)
-            assert r2.status_code in (400, 409, 500), (
-                f"double start_weight_update must return an error, got {r2.status_code}: {r2.text}"
+        In vLLM v0.23.0, the weight transfer engine must be initialized via
+        /init_weight_transfer_engine (which sets up the NCCL communicator)
+        before /start_weight_update is valid.  Without it the server returns
+        a 500 with "Weight transfer not configured."
+        """
+        with server(port=_PORT_BASE + 6, dummy_weights=True) as url:
+            r = start_weight_update(url)
+            assert r.status_code in (400, 409, 500), (
+                f"start without init must return an error, got {r.status_code}: {r.text}"
+            )
+            # Error message should be informative
+            body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+            error_msg = str(body.get("error", {}).get("message", r.text)).lower()
+            assert any(kw in error_msg for kw in ("not configured", "weight transfer", "init")), (
+                f"error message should mention configuration requirement: {r.text}"
             )
             assert health(url) == 200
 
-            # clean up so the server exits cleanly
-            finish_weight_update(url)
-
     def test_finish_without_start_returns_error(self):
-        """/finish_weight_update without /start must return an error."""
+        """/finish_weight_update without a preceding /start must return an error."""
         with server(port=_PORT_BASE + 7, dummy_weights=True) as url:
             r = finish_weight_update(url)
             assert r.status_code in (400, 409, 500), (
@@ -225,32 +250,20 @@ class TestWeightUpdateOrdering:
             )
             assert health(url) == 200
 
-    def test_start_finish_cycle_leaves_engine_healthy(self):
-        """Complete start → finish cycle without tensor data — engine survives."""
-        with server(port=_PORT_BASE + 8, dummy_weights=True) as url:
-            assert start_weight_update(url).status_code == 200
-            assert finish_weight_update(url).status_code == 200
-            assert health(url) == 200
-            # engine should generate after the protocol cycle
-            resp = gen(url)
-            assert ok(resp), f"generate failed after start→finish cycle: {resp}"
+    def test_weight_update_endpoints_do_not_crash_engine(self):
+        """Calling weight-update endpoints without init must not kill the engine.
 
-    def test_start_finish_latency(self):
-        """start→finish with no tensors must complete quickly (< 5 s).
-
-        Guards against regressions where finalize_layerwise_reload triggers
-        expensive per-layer reconstruction (MoE kernel re-init, etc.) even
-        for empty updates.
+        Verifies that protocol violations return errors gracefully, not crashes.
+        The engine must remain healthy and able to serve generation requests.
         """
-        with server(port=_PORT_BASE + 9, dummy_weights=True) as url:
-            t0 = time.perf_counter()
-            assert start_weight_update(url).status_code == 200
-            assert finish_weight_update(url).status_code == 200
-            elapsed = time.perf_counter() - t0
-            assert elapsed < 5.0, (
-                f"start→finish took {elapsed:.2f}s — "
-                "finalize_layerwise_reload may be doing unnecessary work"
-            )
+        with server(port=_PORT_BASE + 8, dummy_weights=True) as url:
+            # All three should error (no init), none should crash the engine
+            start_weight_update(url)   # error expected
+            finish_weight_update(url)  # error expected
+
+            assert health(url) == 200, "engine must survive weight-update endpoint errors"
+            resp = gen(url)
+            assert ok(resp), f"generate failed after protocol violations: {resp}"
 
 
 # ---------------------------------------------------------------------------

@@ -38,7 +38,7 @@ from contextlib import contextmanager
 import requests
 from prometheus_client.parser import text_string_to_metric_families
 
-MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "meta-llama/Llama-3.2-1B-Instruct")
+MODEL_NAME = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
 
 _BASE_ARGS = [
     "--dtype",
