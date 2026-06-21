@@ -117,6 +117,7 @@ def _reshape_kv_cache_tensor_for_test(
     runner_stub = SimpleNamespace(
         runner_only_attn_layers=set(),
         cache_config=SimpleNamespace(cache_dtype=cache_dtype),
+        kv_cache_config=SimpleNamespace(kv_cache_tensors=[]),
         _kv_cache_spec_attn_group_iterator=lambda: iter([group]),
     )
     return GPUModelRunner._reshape_kv_cache_tensors(
