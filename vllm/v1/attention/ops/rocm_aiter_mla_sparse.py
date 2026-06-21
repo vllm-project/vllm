@@ -808,6 +808,8 @@ def rocm_aiter_sparse_attn_indexer(
                 base = num_prefill_tokens // tp_size
                 rem = num_prefill_tokens - base * tp_size
                 # rank 0 heuristically has lowest workload
+                # Compute rem tokens in rank 0 then broadcast cost is generally
+                # lower than recomputing it across all ranks.
                 if tp_rank == 0:
                     rank_start = prefill_offset
                     rank_end = prefill_offset + rem + base
