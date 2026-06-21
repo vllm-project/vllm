@@ -222,7 +222,7 @@ def _bias_kernel(
     num_stop_token_ids = tl.load(num_stop_token_ids_ptr + req_state_idx)
     pos = tl.load(pos_ptr + token_idx)
     min_len = tl.load(min_lens_ptr + req_state_idx)
-    if num_stop_token_ids > 0 and pos < min_len:
+    if num_stop_token_ids > 0 and pos + 1 < min_len:
         mask = block < num_stop_token_ids
         stop_token_ids = tl.load(
             stop_token_ids_ptr + req_state_idx * stop_token_ids_stride + block,

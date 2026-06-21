@@ -415,22 +415,6 @@ steps:
   commands:
   - pytest -v -s kernels/mamba
 
-#-----------------------------------------------------------  mi250 · lora  ------------------------------------------------------------#
-
-- label: LoRA %N # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  parallelism: 4
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/lora
-  - tests/lora
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
-
 #------------------------------------------------------  mi250 · models / basic  -------------------------------------------------------#
 
 - label: Basic Models Test (Other CPU) # TBD
@@ -608,6 +592,11 @@ steps:
   - pytest -v -s plugins_tests/test_bge_m3_sparse_io_processor_plugins.py
   - pip uninstall bge_m3_sparse_plugin -y
   # END: `bge_m3_sparse io_processor` test
+  # BEGIN: `colbert_query io_processor` test
+  - pip install -e ./plugins/colbert_query_plugin
+  - pytest -v -s plugins_tests/test_colbert_query_io_processor_plugins.py
+  - pip uninstall colbert_query_plugin -y
+  # END: `colbert_query io_processor` test
   # BEGIN: `stat_logger` plugins test
   - pip install -e ./plugins/vllm_add_dummy_stat_logger
   - pytest -v -s plugins_tests/test_stats_logger_plugins.py
@@ -658,7 +647,7 @@ steps:
   - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
 
 - label: e2e Core (1 GPU) # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   optional: true
@@ -1694,6 +1683,20 @@ steps:
 
 #-----------------------------------------------------------  mi300 · lora  ------------------------------------------------------------#
 
+- label: LoRA %N # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  parallelism: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/lora
+  - tests/lora
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
+
 - label: LoRA TP (Distributed) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -1778,10 +1781,9 @@ steps:
   - tests/models/multimodal/generation
   - tests/models/multimodal/test_mapping.py
   commands:
-  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
-  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
-  - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
-
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
+  - pytest -v -s models/multimodal/test_mapping.py
 
 - label: Multi-Modal Models (Extended Generation 2) # TBD
   timeout_in_minutes: 180
@@ -1793,9 +1795,8 @@ steps:
   - vllm/
   - tests/models/multimodal/generation
   commands:
-  - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
-  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
-  - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+  - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+  - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
 
 - label: Multi-Modal Models (Extended Generation 3) # TBD
@@ -2073,19 +2074,6 @@ steps:
   commands:
   - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
   - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
-
-- label: e2e Core (1 GPU) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/v1/
-  - tests/v1/e2e/
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
 
 - label: e2e Scheduling (1 GPU) # TBD
   timeout_in_minutes: 180
@@ -2754,7 +2742,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - python3 benchmarks/attention_benchmarks/benchmark.py --backends ROCM_ATTN ROCM_AITER_FA ROCM_AITER_UNIFIED_ATTN --batch-specs "8q1s1k" --repeats 1 --warmup-iters 1
+  - python3 benchmarks/attention_benchmarks/benchmark.py --backends ROCM_ATTN ROCM_AITER_FA ROCM_AITER_UNIFIED_ATTN --batch-specs "8q1s1k"
 
 #--------------------------------------------------------  mi355 · distributed  --------------------------------------------------------#
 
