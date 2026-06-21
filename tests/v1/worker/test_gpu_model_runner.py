@@ -11,6 +11,7 @@ import torch.nn as nn
 
 import vllm.config as vllm_config_module
 import vllm.v1.attention.ops.triton_prefill_attention as triton_prefill_attention_module
+import vllm.v1.attention.ops.triton_unified_attention as triton_unified_attention_module
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
     AttentionConfig,
@@ -33,6 +34,7 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.model_executor.warmup.kernel_warmup import (
     _warmup_triton_nvfp4_prefill_kernels,
+    _warmup_triton_nvfp4_raw_current_split_kernels,
 )
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
@@ -319,7 +321,9 @@ def _make_warmup_runner(
     cache_dtype: str = "nvfp4",
     backend_name: str = "TRITON_ATTN",
     is_pooling_model: bool = False,
+    is_diffusion: bool = False,
     layer_names: list[str] | None = None,
+    block_size: int = 16,
 ):
     calls = []
     layer_names = layer_names or []
@@ -331,6 +335,7 @@ def _make_warmup_runner(
                 SimpleNamespace(
                     backend=_NamedAttentionBackend(backend_name),
                     layer_names=layer_names,
+                    kv_cache_spec=SimpleNamespace(block_size=block_size),
                 )
             ]
         ],
@@ -340,7 +345,8 @@ def _make_warmup_runner(
         device=torch.device("cpu"),
         dtype=torch.float16,
         vllm_config=SimpleNamespace(
-            compilation_config=SimpleNamespace(static_forward_context={})
+            compilation_config=SimpleNamespace(static_forward_context={}),
+            model_config=SimpleNamespace(is_diffusion=is_diffusion),
         ),
     )
 
@@ -461,6 +467,138 @@ def test_triton_nvfp4_attention_warmup_compiles_prefill_variants(monkeypatch):
     assert {
         (call["sliding_window_q"], call["sliding_window_k"]) for call in prefill_calls
     } == {(1023, 0), (-1, -1)}
+
+
+def test_triton_nvfp4_attention_warmup_compiles_raw_current_split_variants(
+    monkeypatch,
+):
+    layer_names = ["layer.0", "layer.1", "layer.2", "layer.3"]
+    runner, calls = _make_warmup_runner(is_diffusion=True, layer_names=layer_names)
+    runner.attn_groups = [
+        [
+            SimpleNamespace(
+                backend=_NamedAttentionBackend("TRITON_ATTN"),
+                layer_names=["layer.0", "layer.1", "layer.3"],
+                kv_cache_spec=SimpleNamespace(block_size=16),
+            )
+        ],
+        [
+            SimpleNamespace(
+                backend=_NamedAttentionBackend("TRITON_ATTN"),
+                layer_names=["layer.2"],
+                kv_cache_spec=SimpleNamespace(block_size=32),
+            )
+        ],
+    ]
+    layers = {
+        "layer.0": _WarmupAttentionLayer(
+            _make_nvfp4_warmup_impl(head_size=256, sliding_window=(1023, 0))
+        ),
+        # Duplicate shape should be warmed once.
+        "layer.1": _WarmupAttentionLayer(
+            _make_nvfp4_warmup_impl(head_size=256, sliding_window=(1023, 0))
+        ),
+        "layer.2": _WarmupAttentionLayer(
+            _make_nvfp4_warmup_impl(
+                num_heads=16,
+                num_kv_heads=2,
+                head_size=512,
+                sliding_window=(-1, -1),
+            )
+        ),
+        # h128 is outside the split gate and should be skipped.
+        "layer.3": _WarmupAttentionLayer(
+            _make_nvfp4_warmup_impl(head_size=128, sliding_window=(1023, 0))
+        ),
+    }
+    attention_calls = []
+
+    def fake_get_layers_from_vllm_config(vllm_config, layer_type, names):
+        assert layer_type is AttentionLayerBase
+        return {name: layers[name] for name in names}
+
+    def fake_unified_attention(**kwargs):
+        attention_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        vllm_config_module,
+        "get_layers_from_vllm_config",
+        fake_get_layers_from_vllm_config,
+    )
+    monkeypatch.setattr(
+        triton_unified_attention_module,
+        "unified_attention",
+        fake_unified_attention,
+    )
+
+    _warmup_triton_nvfp4_raw_current_split_kernels(runner)
+
+    assert calls == []
+    assert len(attention_calls) == 2
+    assert {call["q"].shape for call in attention_calls} == {
+        torch.Size([256, 8, 256]),
+        torch.Size([256, 16, 512]),
+    }
+    assert {call["raw_k"].shape for call in attention_calls} == {
+        torch.Size([256, 2, 256]),
+        torch.Size([256, 2, 512]),
+    }
+    assert {call["k"].shape for call in attention_calls} == {
+        torch.Size([32, 16, 2, 128]),
+        torch.Size([16, 32, 2, 256]),
+    }
+    assert {call["k_scale_cache"].shape for call in attention_calls} == {
+        torch.Size([32, 16, 2, 16]),
+        torch.Size([16, 32, 2, 32]),
+    }
+    assert {call["block_table"].shape for call in attention_calls} == {
+        torch.Size([1, 32]),
+        torch.Size([1, 16]),
+    }
+    assert {call["max_seqlen_q"] for call in attention_calls} == {256}
+    assert {call["max_seqlen_k"] for call in attention_calls} == {350}
+    assert {call["causal"].shape for call in attention_calls} == {torch.Size([1])}
+    assert all(call["k_descale"].shape == torch.Size([]) for call in attention_calls)
+    assert all(call["v_descale"].shape == torch.Size([]) for call in attention_calls)
+    assert {
+        (call["window_size"][0], call["window_size"][1]) for call in attention_calls
+    } == {(1023, 0), (-1, -1)}
+
+
+def test_triton_nvfp4_attention_warmup_skips_raw_current_split_for_non_diffusion(
+    monkeypatch,
+):
+    layer_names = ["layer.0"]
+    runner, calls = _make_warmup_runner(layer_names=layer_names)
+    layers = {
+        "layer.0": _WarmupAttentionLayer(
+            _make_nvfp4_warmup_impl(head_size=256, sliding_window=(1023, 0))
+        ),
+    }
+    attention_calls = []
+
+    def fake_get_layers_from_vllm_config(vllm_config, layer_type, names):
+        assert layer_type is AttentionLayerBase
+        return {name: layers[name] for name in names}
+
+    def fake_unified_attention(**kwargs):
+        attention_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        vllm_config_module,
+        "get_layers_from_vllm_config",
+        fake_get_layers_from_vllm_config,
+    )
+    monkeypatch.setattr(
+        triton_unified_attention_module,
+        "unified_attention",
+        fake_unified_attention,
+    )
+
+    _warmup_triton_nvfp4_raw_current_split_kernels(runner)
+
+    assert calls == []
+    assert attention_calls == []
 
 
 def test_select_common_block_size_prefers_manager_block_size():
