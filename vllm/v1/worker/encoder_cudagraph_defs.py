@@ -80,6 +80,9 @@ class EncoderCudaGraphConfig:
     """Tokens per local patch (e.g. 100 for DeepSeek-OCR).
     Only used when ``enable_dual_path_graph`` is True."""
 
+    enable_secondary_capture_axis: bool = False
+    """Whether to enable secondary capture axis."""
+
 
 @dataclass
 class EncoderCudaGraphCaptureInputs:

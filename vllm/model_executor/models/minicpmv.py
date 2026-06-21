@@ -713,6 +713,16 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
         return max(max_frames_per_video, 1)
 
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        max_tokens = {"image": self.get_max_image_tokens()}
+        if "video" in self.get_supported_mm_limits():
+            max_tokens["video"] = self.get_max_video_tokens(seq_len, mm_counts)
+        return max_tokens
+
 
 _I = TypeVar("_I", bound=MiniCPMVProcessingInfo, default=MiniCPMVProcessingInfo)
 
@@ -1414,10 +1424,8 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
-        token_budget: int,
         ordered_secondary_capture_axis_keys: Sequence[Hashable],
     ) -> Hashable:
-        _ = token_budget
         keys = ordered_secondary_capture_axis_keys
         if not indices:
             return keys[0]
@@ -1472,6 +1480,7 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             buffer_keys=buffer_keys,
             out_hidden_size=int(self.embed_dim),
             max_frames_per_video=max_frames,
+            enable_secondary_capture_axis=True,
         )
 
     def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
@@ -1529,7 +1538,6 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
-        *,
         secondary_capture_axis_key: Hashable | None = None,
     ) -> dict[str, Any]:
         video = self.get_input_modality(mm_kwargs) == "video"
@@ -1572,7 +1580,6 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
             patch_grid_key = self.resolve_encoder_cudagraph_secondary_capture_axis_key(
                 mm_kwargs,
                 indices,
-                0,
                 self.get_encoder_cudagraph_secondary_capture_axis_keys(),
             )
         else:
@@ -1616,9 +1623,9 @@ class _MiniCPMVEncoderCudaGraphMixin(SupportsEncoderCudaGraph):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
-        *,
         secondary_capture_axis_key: Hashable | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
+        assert secondary_capture_axis_key is not None
         th = int(secondary_capture_axis_key[0])
         tw = int(secondary_capture_axis_key[1])
         normalized_key = (th, tw)

@@ -20,16 +20,12 @@ from vllm.model_executor.models.interfaces import (
 )
 from vllm.model_executor.models.utils import scatter_output_slices
 from vllm.model_executor.models.vision import get_load_balance_assignment
-from vllm.utils.func_utils import supports_kw
 from vllm.v1.worker.encoder_cudagraph_defs import (
-    EncoderCudaGraphCaptureInputs,
     EncoderCudaGraphConfig,
     EncoderItemSpec,
 )
 
 logger = init_logger(__name__)
-
-_SECONDARY_CAPTURE_AXIS_KW = "secondary_capture_axis_key"
 
 BudgetGraphMapKey: TypeAlias = int | tuple[int, Hashable]
 
@@ -83,6 +79,15 @@ class EncoderCudaGraphManager:
         user_max_frames = comp_config.encoder_cudagraph_max_frames_per_batch
 
         multimodal_config = vllm_config.model_config.multimodal_config
+
+        if (
+            self.config.enable_dual_path_graph
+            and self.config.enable_secondary_capture_axis
+        ):
+            raise NotImplementedError(
+                "Combining dual-path encoder CUDA graphs with secondary capture axis "
+                "is not supported yet."
+            )
 
         # Invariant: max_batch_size <= min_token_budget.
         # This ensures per_image_output = budget // max_batch_size >= 1
@@ -162,25 +167,13 @@ class EncoderCudaGraphManager:
         )
 
         self._ordered_secondary_capture_axis_keys: tuple[Hashable, ...] | None = None
-        get_axis_keys_fn = getattr(
-            model, "get_encoder_cudagraph_secondary_capture_axis_keys", None
-        )
-        if callable(get_axis_keys_fn):
-            keys = get_axis_keys_fn()
-            if keys is not None:
-                axis_tuple = tuple(keys)
-                if len(axis_tuple) > 0:
-                    self._ordered_secondary_capture_axis_keys = axis_tuple
-        
-
-        if (
-                self.config.enable_dual_path_graph
-                and self._ordered_secondary_capture_axis_keys is not None
-            ):
-                raise NotImplementedError(
-                    "Combining dual-path encoder CUDA graphs with "
-                    "user-provided budgets is not supported during this merge."
+        if self.config.enable_secondary_capture_axis:
+            keys = tuple(self.model.get_encoder_cudagraph_secondary_capture_axis_keys())
+            if not keys:
+                raise ValueError(
+                    "Secondary capture axis is enabled but no keys were returned."
                 )
+            self._ordered_secondary_capture_axis_keys = keys
 
         self.budget_graphs: dict[str, dict[BudgetGraphMapKey, BudgetGraphMetadata]] = {}
         self.graph_pool: Any | None = None
@@ -217,44 +210,7 @@ class EncoderCudaGraphManager:
                 self.max_frames_per_batch,
                 self.use_dp,
                 self._ordered_secondary_capture_axis_keys,
-        )
-
-    def _prepare_encoder_cudagraph_capture_inputs(
-        self,
-        token_budget: int,
-        path: str = "default",
-        secondary_capture_axis_key: Hashable | None = None,
-    ) -> EncoderCudaGraphCaptureInputs:
-        prepare_fn = self.model.prepare_encoder_cudagraph_capture_inputs
-        args = (
-            token_budget,
-            self.max_batch_size,
-            self.max_frames_per_batch,
-            self.device,
-            self.dtype,
-            path,
-        )
-        if supports_kw(prepare_fn, _SECONDARY_CAPTURE_AXIS_KW):
-            return prepare_fn(
-                *args,
-                secondary_capture_axis_key=secondary_capture_axis_key,
             )
-        return prepare_fn(*args)
-
-    def _select_encoder_cudagraph_items(
-        self,
-        mm_kwargs: dict[str, Any],
-        indices: list[int],
-        secondary_capture_axis_key: Hashable | None,
-    ) -> dict[str, Any]:
-        select_fn = self.model.select_encoder_cudagraph_items
-        if supports_kw(select_fn, _SECONDARY_CAPTURE_AXIS_KW):
-            return select_fn(
-                mm_kwargs,
-                indices,
-                secondary_capture_axis_key=secondary_capture_axis_key,
-            )
-        return select_fn(mm_kwargs, indices)
 
     @staticmethod
     def _generate_budgets(min_budget: int, max_budget: int) -> list[int]:
@@ -287,13 +243,13 @@ class EncoderCudaGraphManager:
             self._capture_one_path(self.global_token_budgets, path="global")
             self._capture_one_path(self.local_token_budgets, path="local")
             logger.info(
-                    "Encoder CUDA graph capture complete. "
-                    "Captured %d global + %d local budget graphs.",
-                    len(self.budget_graphs["global"]),
-                    len(self.budget_graphs["local"]),
+                "Encoder CUDA graph capture complete. "
+                "Captured %d global + %d local budget graphs.",
+                len(self.budget_graphs["global"]),
+                len(self.budget_graphs["local"]),
             )
             return
-        
+
         self._capture_one_path(self.token_budgets, path="default")
         logger.info(
             "Encoder CUDA graph capture complete. Captured %d budget graphs.",
@@ -305,41 +261,43 @@ class EncoderCudaGraphManager:
             if token_budget == 0:
                 continue
 
-            if self._ordered_secondary_capture_axis_keys is None:
+            if not self.config.enable_secondary_capture_axis:
                 self._capture_budget_graph(token_budget, path=path)
                 continue
 
-            for secondary_capture_axis_key in (
-                self._ordered_secondary_capture_axis_keys
-            ):
+            for secondary_capture_axis_key in self._ordered_secondary_capture_axis_keys:
                 self._capture_budget_graph(
-                    token_budget, 
-                    path=path, 
-                    secondary_capture_axis_key=secondary_capture_axis_key
+                    token_budget,
+                    path=path,
+                    secondary_capture_axis_key=secondary_capture_axis_key,
                 )
 
     def _num_graphs_for_budgets(self, budgets: list[int]) -> int:
         num_budgets = sum(1 for budget in budgets if budget != 0)
-        if self._ordered_secondary_capture_axis_keys is not None:
+        if self.config.enable_secondary_capture_axis:
+            assert self._ordered_secondary_capture_axis_keys is not None
             return num_budgets * len(self._ordered_secondary_capture_axis_keys)
         return num_budgets
 
     def get_num_graphs_to_capture(self) -> int:
         if self.config.enable_dual_path_graph:
-            return (self._num_graphs_for_budgets(self.global_token_budgets) 
-            + self._num_graphs_for_budgets(self.local_token_budgets))
+            return self._num_graphs_for_budgets(
+                self.global_token_budgets
+            ) + self._num_graphs_for_budgets(self.local_token_budgets)
         return self._num_graphs_for_budgets(self.token_budgets)
 
     def _get_graph_set(
-        self, path: str = "default") -> dict[BudgetGraphMapKey, BudgetGraphMetadata]:
+        self, path: str = "default"
+    ) -> dict[BudgetGraphMapKey, BudgetGraphMetadata]:
         # Lazy init global/local graph sets for dual-path models, or default graph
         # set for single-path models.
         if path not in self.budget_graphs:
             self.budget_graphs[path] = {}
         return self.budget_graphs[path]
 
-    def _capture_budget_graph(self,
-        token_budget: int, 
+    def _capture_budget_graph(
+        self,
+        token_budget: int,
         path: str = "default",
         secondary_capture_axis_key: Hashable | None = None,
     ):
@@ -355,10 +313,14 @@ class EncoderCudaGraphManager:
 
         graph_set = self._get_graph_set(path)
 
-        capture_inputs = self._prepare_encoder_cudagraph_capture_inputs(
+        capture_inputs = self.model.prepare_encoder_cudagraph_capture_inputs(
             token_budget,
+            self.max_batch_size,
+            self.max_frames_per_batch,
+            self.device,
+            self.dtype,
             path,
-            secondary_capture_axis_key
+            secondary_capture_axis_key,
         )
 
         values = capture_inputs.values
@@ -569,10 +531,9 @@ class EncoderCudaGraphManager:
             if token_budget is None:
                 # Single oversized image: item_tokens > max_budget.
                 # graph_misses counted here for this eager fallback.
-                batch_mm_kwargs = self._select_encoder_cudagraph_items(
+                batch_mm_kwargs = self.model.select_encoder_cudagraph_items(
                     mm_kwargs,
                     batch_orig_indices,
-                    None,
                 )
                 logger.debug(
                     "Encoder CUDA graph fallback to eager: no budget for "
@@ -592,24 +553,16 @@ class EncoderCudaGraphManager:
                 continue
 
             secondary_capture_axis_key: Hashable | None = None
-            if self._ordered_secondary_capture_axis_keys is not None:
-                resolve_fn = getattr(
-                    self.model,
-                    "resolve_encoder_cudagraph_secondary_capture_axis_key",
-                    None,
-                )
-                assert callable(resolve_fn), (
-                    "Model declares secondary capture axis keys but is missing "
-                    "resolve_encoder_cudagraph_secondary_capture_axis_key()"
-                )
-                secondary_capture_axis_key = resolve_fn(
-                    mm_kwargs,
-                    batch_orig_indices,
-                    token_budget,
-                    self._ordered_secondary_capture_axis_keys,
+            if self.config.enable_secondary_capture_axis:
+                secondary_capture_axis_key = (
+                    self.model.resolve_encoder_cudagraph_secondary_capture_axis_key(
+                        mm_kwargs,
+                        batch_orig_indices,
+                        self._ordered_secondary_capture_axis_keys,
+                    )
                 )
 
-            batch_mm_kwargs = self._select_encoder_cudagraph_items(
+            batch_mm_kwargs = self.model.select_encoder_cudagraph_items(
                 mm_kwargs,
                 batch_orig_indices,
                 secondary_capture_axis_key,
@@ -624,10 +577,10 @@ class EncoderCudaGraphManager:
 
             # graph_hits counted inside _run_budget_graph after replay.
             output = self._run_budget_graph(
-                batch_mm_kwargs, 
-                token_budget, 
-                path="default", 
-                secondary_capture_axis_key=secondary_capture_axis_key
+                batch_mm_kwargs,
+                token_budget,
+                path="default",
+                secondary_capture_axis_key=secondary_capture_axis_key,
             )
             assert output is not None
             self.model.postprocess_encoder_output(
@@ -762,7 +715,6 @@ class EncoderCudaGraphManager:
 
             # Execute global path: graph or eager fallback
             if global_budget is not None:
-                # TODO
                 global_output = self._run_budget_graph(
                     batch_mm_kwargs,
                     global_budget,
@@ -777,7 +729,6 @@ class EncoderCudaGraphManager:
 
             # Execute local path: graph or eager fallback
             if local_budget is not None and batch_local_tokens > 0:
-                # TODO
                 local_output = self._run_budget_graph(
                     batch_mm_kwargs,
                     local_budget,
@@ -841,11 +792,11 @@ class EncoderCudaGraphManager:
         ]
 
         if len(local_indices) > 0:
-            local_mm_kwargs = self._select_encoder_cudagraph_items(
-                mm_kwargs, local_indices, None
+            local_mm_kwargs = self.model.select_encoder_cudagraph_items(
+                mm_kwargs, local_indices
             )
         else:
-            local_mm_kwargs = self._select_encoder_cudagraph_items(mm_kwargs, [], None)
+            local_mm_kwargs = self.model.select_encoder_cudagraph_items(mm_kwargs, [])
 
         max_output_tokens_per_rank = (
             max(

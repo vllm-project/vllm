@@ -12,6 +12,7 @@ Test organization:
     - TestEncoderCudaGraphVideoReplay   — video modality capture, replay
 """
 
+from collections.abc import Hashable
 from typing import Any
 
 import pytest
@@ -114,6 +115,11 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
     mgr.graph_hits = 0
     mgr.graph_misses = 0
     mgr.log_stats_interval = 100
+    mgr.config = EncoderCudaGraphConfig(
+        modalities=["image"],
+        buffer_keys=[],
+        out_hidden_size=32,
+    )
     return mgr
 
 
@@ -311,6 +317,7 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
         self,
         mm_kwargs: dict[str, Any],
         indices: list[int],
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> dict[str, Any]:
         grid_thw = mm_kwargs["image_grid_thw"]
         pixel_values = mm_kwargs["pixel_values"]
@@ -343,6 +350,7 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
         per_image_output = token_budget // max_batch_size
         grid_config = [
@@ -619,7 +627,10 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
         ]
 
     def select_encoder_cudagraph_items(
-        self, mm_kwargs: dict[str, Any], indices: list[int]
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> dict[str, Any]:
         modality = self.get_input_modality(mm_kwargs)
         pv_key = "pixel_values_videos" if modality == "video" else "pixel_values"
@@ -649,6 +660,7 @@ class SimpleMockViTVideoModel(SimpleMockViTModel):
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        secondary_capture_axis_key: Hashable | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
         per_item_output = token_budget // max_batch_size
         frames_per_item = max_frames_per_batch // max_batch_size
