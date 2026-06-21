@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -27,7 +27,7 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -5134,3 +5134,72 @@ def test_update_from_output_simple_path_disabled_with_spec_decode():
     for request in requests:
         assert request._output_token_ids[-1] == 5
     assert len(engine_core_outputs[0].outputs) == len(requests)
+
+
+def _snapshot_request_states(requests: list[Request]) -> dict[str, tuple]:
+    return {
+        request.request_id: (
+            request.status,
+            list(request._output_token_ids),
+            request.stop_reason,
+            request.num_computed_tokens,
+        )
+        for request in requests
+    }
+
+
+def _snapshot_engine_outputs(
+    engine_core_outputs: dict[int, EngineCoreOutputs],
+) -> dict[str, tuple]:
+    snapshots: dict[str, tuple] = {}
+    for outputs in engine_core_outputs.values():
+        for output in outputs.outputs:
+            snapshots[output.request_id] = (
+                output.new_token_ids,
+                output.finish_reason,
+                output.stop_reason,
+                output.new_logprobs,
+                output.new_prompt_logprobs_tensors,
+                output.pooling_output,
+                output.routed_experts,
+                output.num_nans_in_logits,
+            )
+    return snapshots
+
+
+def test_update_from_output_simple_vs_full_path_parity():
+    """Simple and full update paths produce identical request/output state."""
+    num_requests = 8
+    token_id = 42
+
+    sched_simple, requests_simple = _setup_decode_batch(num_requests)
+    sched_full, requests_full = _setup_decode_batch(num_requests)
+
+    sched_out_simple = sched_simple.schedule()
+    sched_out_full = sched_full.schedule()
+    mro_simple = _make_decode_model_runner_output(sched_out_simple, token_id=token_id)
+    mro_full = _make_decode_model_runner_output(sched_out_full, token_id=token_id)
+
+    assert sched_simple._can_use_simple_update_path_global(
+        sched_out_simple,
+        mro_simple,
+        None,
+        has_logprobs=False,
+        has_pooler_outputs=False,
+        has_num_nans_in_logits=False,
+    )
+
+    outputs_simple = sched_simple.update_from_output(sched_out_simple, mro_simple)
+    with patch.object(
+        sched_full,
+        "_can_use_simple_update_path_global",
+        return_value=False,
+    ):
+        outputs_full = sched_full.update_from_output(sched_out_full, mro_full)
+
+    assert _snapshot_request_states(requests_simple) == _snapshot_request_states(
+        requests_full
+    )
+    assert _snapshot_engine_outputs(outputs_simple) == _snapshot_engine_outputs(
+        outputs_full
+    )
