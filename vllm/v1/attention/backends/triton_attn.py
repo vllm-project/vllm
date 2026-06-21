@@ -203,12 +203,15 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         slot_mapping = common_attn_metadata.slot_mapping
         is_all_pure_prefill = False
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
-        if max_query_len > 1 and seq_lens_cpu is not None:
+        if max_query_len > 1:
             query_lens = (
                 common_attn_metadata.query_start_loc_cpu[1:]
                 - common_attn_metadata.query_start_loc_cpu[:-1]
             )
-            seq_lens_cpu = seq_lens_cpu[: query_lens.shape[0]]
+            if seq_lens_cpu is None:
+                seq_lens_cpu = seq_lens[: query_lens.shape[0]].cpu()
+            else:
+                seq_lens_cpu = seq_lens_cpu[: query_lens.shape[0]]
             is_all_pure_prefill = bool(torch.all(seq_lens_cpu == query_lens).item())
         is_prefilling = common_attn_metadata.is_prefilling
         is_decode_only = is_prefilling is not None and not bool(
