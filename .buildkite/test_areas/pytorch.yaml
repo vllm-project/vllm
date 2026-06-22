@@ -107,6 +107,12 @@ steps:
     - tests/compile/passes
   commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
+  mirror:
+    amd:
+      device: mi300_1
+      timeout_in_minutes: 180
+      depends_on:
+      - image-build-amd
 
 - label: PyTorch Fullgraph Smoke Test
   key: pytorch-fullgraph-smoke-test
