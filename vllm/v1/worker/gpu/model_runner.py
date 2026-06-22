@@ -46,8 +46,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
-from vllm.utils.platform_utils import is_pin_memory_available
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import PIN_MEMORY, STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -498,7 +497,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
         self.kv_block_zeroer = KVBlockZeroer(
             self.device,
-            is_pin_memory_available(),
+            pin_memory=PIN_MEMORY,
             attn_groups_iter=(g for groups in self.attn_groups for g in groups),
             kernel_block_sizes=self.kernel_block_sizes,
             cache_dtype=self.cache_config.cache_dtype,
@@ -1204,6 +1203,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.kv_cache_config,
             )
 
+        input_ids = input_batch.input_ids
         inputs_embeds = None
         if self.supports_mm_inputs and self.is_first_pp_rank:
             # Run MM encoder (if needed) and get multimodal embeddings.
@@ -1222,11 +1222,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             inputs_embeds = self.model_state.get_mm_embeddings(
                 scheduler_output.scheduled_encoder_inputs, input_batch
             )
+            if inputs_embeds is not None and not self.model.requires_raw_input_tokens:
+                input_ids = None
 
         model_inputs = {
-            "input_ids": input_batch.input_ids,
+            "input_ids": input_ids,
             "positions": input_batch.positions,
             "inputs_embeds": inputs_embeds,
+            "intermediate_tensors": None,
             # NOTE: Values returned by `prepare_inputs` will override the default
             # values above.
             **self.model_state.prepare_inputs(input_batch, self.req_states),
