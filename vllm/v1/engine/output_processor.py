@@ -500,6 +500,13 @@ class OutputProcessor:
                     )
                 ):
                     req_state.queue.put(request_output)
+                    # Close the queue to release streaming input resources
+                    # and prevent memory leaks from unfinished input tasks.
+                    req_state.queue.close()
+                # Clear any pending streaming input chunks to free memory
+                if req_state.input_chunk_queue is not None:
+                    req_state.input_chunk_queue.clear()
+                    req_state.input_chunk_queue = None
             elif parent := self.parent_requests.get(request_id):
                 # Abort children prior to removing the parent.
                 if parent.child_requests:
