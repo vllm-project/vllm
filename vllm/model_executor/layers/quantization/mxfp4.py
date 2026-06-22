@@ -3,7 +3,6 @@
 
 import torch
 
-from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
@@ -141,9 +140,7 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         self.weight_dtype = "gpt_oss_mxfp4"
         self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
 
-        self.max_capture_size = (
-            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
-        )
+        self.max_capture_size = moe.max_capture_size
 
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         self.moe_kernel: mk.FusedMoEKernel | None = None
@@ -157,6 +154,14 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         # SM100_FI_MXFP4_MXFP8_TRTLLM supports padding with mxfp8 quant
         # so can skip the padding in the forward before applying the moe method
         return self.mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
+
+    # TODO(bnell): move to MK/expert_class?
+    @property
+    def has_unpadded_output(self) -> bool:
+        return self.mxfp4_backend in [
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        ]
 
     def maybe_roundup_sizes(
         self,
@@ -475,9 +480,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.weight_dtype = "mxfp4"
         self.mxfp4_backend, self.experts_cls = select_deepseek_v4_mxfp4_moe_backend(moe)
 
-        self.max_capture_size = (
-            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
-        )
+        self.max_capture_size = moe.max_capture_size
 
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         self.moe_kernel: mk.FusedMoEKernel | None = None
@@ -487,10 +490,22 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.w2_precision_config = None
 
     @property
+    def supports_eplb(self) -> bool:
+        return True
+
+    @property
     def skip_forward_padding(self) -> bool:
         # SM100_FI_MXFP4_MXFP8_TRTLLM supports padding with mxfp8 quant
         # so can skip the padding in the forward before applying the moe method
         return self.mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
+
+    # TODO(bnell): move to MK/expert_class?
+    @property
+    def has_unpadded_output(self) -> bool:
+        return self.mxfp4_backend in [
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        ]
 
     def maybe_roundup_sizes(
         self,

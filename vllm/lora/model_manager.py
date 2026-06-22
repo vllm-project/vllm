@@ -31,9 +31,10 @@ from vllm.lora.utils import (
     process_packed_modules_mapping,
     replace_submodule,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.models import (
     SupportsLoRA,
+    SupportsMultiModal,
     is_pooling_model,
     supports_multimodal,
 )
@@ -42,12 +43,18 @@ from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.utils.cache import LRUCache
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
 T = TypeVar("T")
 DEFAULT_LANGUAGE_WRAPPER_KEY = "language_model"
+
+
+class SupportsLoRAModel(nn.Module, SupportsLoRA): ...
+
+
+class SupportsLoRAMultiModalModel(SupportsLoRAModel, SupportsMultiModal): ...
 
 
 class AdapterLRUCache(LRUCache[int, T]):
@@ -66,13 +73,13 @@ class LoRAModelManager:
 
     def __init__(
         self,
-        model: SupportsLoRA,
+        model: SupportsLoRAModel,
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
         device: torch.device,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ):
         """Create a LoRAModelManager and adapter for a given model.
 
@@ -85,7 +92,7 @@ class LoRAModelManager:
             vocab_size: the vocab size of the model.
             lora_config: the LoRA configuration.
         """
-        self.model: SupportsLoRA = model
+        self.model: SupportsLoRAModel = model
         self.supported_lora_modules = get_supported_lora_modules(self.model)
         assert self.supported_lora_modules, (
             f"No supported LoRA modules found in {self.model.__class__.__name__}."
@@ -106,7 +113,6 @@ class LoRAModelManager:
         self.is_pooling_model = is_pooling_model(self.model)
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
-        # Dict instead of a set for compatibility with LRUCache.
         self._last_mapping: LoRAMapping | None = None
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
@@ -272,6 +278,7 @@ class LoRAModelManager:
 
     @property
     def capacity(self) -> int:
+        assert self.lora_config.max_cpu_loras is not None
         return self.lora_config.max_cpu_loras
 
     @property
@@ -431,7 +438,7 @@ class LoRAModelManager:
 
             parts = module_name.split(".")[-1]
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
-            if isinstance(module, FusedMoE):
+            if isinstance(module, MoERunner):
                 # packed_moduled_lst is used here to just determine whether to
                 # instantiate FusedMoE3DWithLoRA or FusedMoEWithLoRA, and the
                 # difference between these two LoRA layers is whether the
@@ -801,7 +808,7 @@ class LoRAModelManager:
         # 2. The weight packing above (e.g., pack_moe) may invalidate the
         # pin_memory allocation, so we execute it after packing.
 
-        pin_memory = str(lora_device) == "cpu" and is_pin_memory_available()
+        pin_memory = str(lora_device) == "cpu" and PIN_MEMORY
         if pin_memory:
             for lora in lora_model.loras.values():
                 if isinstance(lora.lora_a, list):
@@ -840,8 +847,8 @@ class LoRAModelManager:
                 # owned expert range before it gets copied into the local
                 # stacked buffer. For non-EP (local == global) this is a
                 # no-op slice.
-                global_num_experts = module.base_layer.global_num_experts
-                ep_rank = module.base_layer.ep_rank
+                global_num_experts = module.global_num_experts
+                ep_rank = module.ep_rank
                 expert_start = ep_rank * local_num_experts
                 expert_end = expert_start + local_num_experts
 
@@ -944,9 +951,9 @@ class LoRAModelManager:
             # untouched so set_lora can raise a clear error if needed.
             return
 
-        local_num_experts = module.base_layer.local_num_experts
-        global_num_experts = module.base_layer.global_num_experts
-        ep_rank = module.base_layer.ep_rank
+        local_num_experts = module.local_num_experts
+        global_num_experts = module.global_num_experts
+        ep_rank = module.ep_rank
         expert_start = ep_rank * local_num_experts
         expert_end = expert_start + local_num_experts
 
@@ -1023,15 +1030,15 @@ class LoRAModelManager:
         ``.bin``/``.pt`` adapters with weights mappers we don't recognize)
         still get sliced here.
         """
-        if not module.base_layer.use_ep:
+        if not module.use_ep:
             return
         module_lora = self._get_lora_layer_weights(lora_model, module_name)
         if module_lora is None or not isinstance(module_lora.lora_a, list):
             return
 
-        local_num_experts = module.base_layer.local_num_experts
-        global_num_experts = module.base_layer.global_num_experts
-        ep_rank = module.base_layer.ep_rank
+        local_num_experts = module.local_num_experts
+        global_num_experts = module.global_num_experts
+        ep_rank = module.ep_rank
         expert_start = ep_rank * local_num_experts
         expert_end = expert_start + local_num_experts
 
@@ -1052,7 +1059,7 @@ class LoRAModelManager:
         """Narrow a flat expert-major sub-module list to this rank's experts.
 
         ``new_module_names`` is produced by
-        ``FusedMoE.make_expert_params_mapping`` and is ordered
+        ``fused_moe_make_expert_params_mapping`` and is ordered
         ``[e=0,w1, e=0,w2, e=0,w3, e=1,w1, ...]`` (non-gated MoE has 2
         entries per expert instead of 3). When the module is a 2D
         ``FusedMoEWithLoRA`` with EP enabled, we slice the list to the
@@ -1069,11 +1076,11 @@ class LoRAModelManager:
             return new_module_names
         if isinstance(module, FusedMoE3DWithLoRA):
             return new_module_names
-        if not getattr(module.base_layer, "use_ep", False):
+        if not getattr(module, "use_ep", False):
             return new_module_names
-        global_num_experts = module.base_layer.global_num_experts
-        local_num_experts = module.base_layer.local_num_experts
-        ep_rank = module.base_layer.ep_rank
+        global_num_experts = module.global_num_experts
+        local_num_experts = module.local_num_experts
+        ep_rank = module.ep_rank
         if global_num_experts <= 0 or len(new_module_names) % global_num_experts != 0:
             return new_module_names
         per_expert = len(new_module_names) // global_num_experts
@@ -1098,11 +1105,10 @@ class LoRAModelManager:
         )
         if module is None:
             return None
-        base = module.base_layer
         return MoEEPLoadSpec(
-            ep_rank=base.ep_rank,
-            local_num_experts=base.local_num_experts,
-            global_num_experts=base.global_num_experts,
+            ep_rank=module.ep_rank,
+            local_num_experts=module.local_num_experts,
+            global_num_experts=module.global_num_experts,
         )
 
     def _get_lora_layer_weights(
@@ -1157,7 +1163,7 @@ class LoRAModelManager:
 
 
 class LoRALRUCache(AdapterLRUCache[LoRAModel]):
-    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int], bool]):
+    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int], object]):
         super().__init__(capacity, deactivate_lora_fn)
 
 
@@ -1166,13 +1172,13 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
     def __init__(
         self,
-        model: nn.Module,
+        model: SupportsLoRAModel,
         max_num_seqs: int,
         max_num_batched_tokens: int,
         vocab_size: int,
         lora_config: LoRAConfig,
         device: torch.device,
-        vllm_config: VllmConfig | None = None,
+        vllm_config: VllmConfig,
     ):
         super().__init__(
             model,
@@ -1183,10 +1189,10 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
             device,
             vllm_config,
         )
-        self._registered_adapters: LoRALRUCache = LoRALRUCache(
+        self._registered_adapters: LoRALRUCache = LoRALRUCache(  # type: ignore[assignment]
             self.capacity, self.deactivate_adapter
         )
-        self._active_adapters: LoRALRUCache = LoRALRUCache(
+        self._active_adapters: LoRALRUCache = LoRALRUCache(  # type: ignore[assignment]
             self.lora_slots, self._deactivate_adapter
         )
 
@@ -1249,7 +1255,7 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
 
 def create_lora_manager(
-    model: nn.Module,
+    model: SupportsLoRAModel,
     max_num_seqs: int,
     max_num_batched_tokens: int,
     vocab_size: int,

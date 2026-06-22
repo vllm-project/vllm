@@ -348,6 +348,14 @@ class CompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def normalize_null_max_tokens(cls, data):
+        if isinstance(data, dict) and data.get("max_tokens") is None:
+            data = data.copy()
+            data["max_tokens"] = cls.model_fields["max_tokens"].default
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def validate_response_format(cls, data):
         response_format = data.get("response_format")
         if response_format is None:

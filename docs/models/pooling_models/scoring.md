@@ -19,7 +19,7 @@ The score models is designed to compute similarity scores between two input prom
 - Offline APIs:
     - `LLM.score`
 - Online APIs:
-    - [Score API](scoring.md#score-api) (`/score`)
+    - [Score API](scoring.md#score-api) (`/score`, `/v1/score`)
     - [Cohere Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 
 !!! note
@@ -157,7 +157,7 @@ A code example can be found here: [examples/basic/offline_inference/score.py](..
 
 ### Score API
 
-Our Score API (`/score`) is similar to `LLM.score`, compute similarity scores between two input prompts.
+Our Score API (`/score`, `/v1/score`) is similar to `LLM.score`, compute similarity scores between two input prompts.
 
 #### Parameters
 

@@ -21,6 +21,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 
 
 class BaseSpeculator(ABC):
@@ -178,9 +179,15 @@ class DraftModelSpeculator(BaseSpeculator):
         num_reqs: int,
         num_reqs_padded: int,
         num_tokens_padded: int,
+        num_query_per_req: int = 1,
+        causal: bool = True,
     ) -> dict[str, Any] | None:
-        query_start_loc_cpu = torch.clamp(
-            self.arange[: num_reqs_padded + 1], max=num_reqs
+        # Uniform query: query_start_loc[i] = min(i, num_reqs) * num_query_per_req.
+        # Clamp keeps the series non-decreasing past num_reqs, which some
+        # attention backends require.
+        query_start_loc_cpu = (
+            torch.clamp(self.arange[: num_reqs_padded + 1], max=num_reqs)
+            * num_query_per_req
         )
         block_tables = [
             x[:num_reqs_padded] for x in self.block_tables.input_block_tables
@@ -194,14 +201,43 @@ class DraftModelSpeculator(BaseSpeculator):
                 : num_reqs_padded + 1
             ],
             query_start_loc_cpu=query_start_loc_cpu,
-            max_query_len=1,
+            max_query_len=num_query_per_req,
             seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
             max_seq_len=self.draft_max_seq_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
+            causal=causal,
         )
         return attn_metadata
+
+    def sample_draft(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        temperature: torch.Tensor,
+        seeds: torch.Tensor,
+        draft_step: torch.Tensor,
+        draft_logits: torch.Tensor | None,
+    ) -> torch.Tensor:
+        logits = self.model.compute_logits(hidden_states)
+        if draft_logits is not None:
+            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
+            # used for draft and target sampling.
+            return gumbel_sample(
+                logits,
+                idx_mapping,
+                temperature,
+                seeds,
+                positions + 1,
+                apply_temperature=True,
+                output_processed_logits=draft_logits,
+                output_processed_logits_col=draft_step,
+                use_fp64=self.use_fp64_gumbel,
+            )
+        else:
+            return logits.argmax(dim=-1)
 
     def _copy_request_inputs(
         self,

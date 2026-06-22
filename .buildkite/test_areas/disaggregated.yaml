@@ -61,6 +61,20 @@ steps:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
+- label: Hybrid SSM NixlConnector PD prefix cache test (2 GPUs)
+  key: hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
+  timeout_in_minutes: 25
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/v1/core/sched/
+    - vllm/v1/core/kv_cache_coordinator.py
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
+
 - label: MultiConnector (Nixl+Offloading) PD accuracy (2 GPUs)
   key: multiconnector-nixl-offloading-pd-accuracy-2-gpus
   timeout_in_minutes: 30

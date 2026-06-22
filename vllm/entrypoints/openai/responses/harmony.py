@@ -32,7 +32,8 @@ from openai_harmony import Author, Message, Role, StreamableParser, TextContent
 from vllm.entrypoints.openai.parser.harmony_utils import (
     BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
     extract_function_from_recipient,
-    flatten_chat_text_content,
+    flatten_input_text_content,
+    get_system_or_developer_message,
     is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import (
@@ -109,8 +110,7 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
         name = chat_msg.get("name", "")
         if name and not name.startswith("functions."):
             name = f"functions.{name}"
-        content = chat_msg.get("content", "") or ""
-        content = flatten_chat_text_content(content)
+        content = flatten_input_text_content(chat_msg.get("content")) or ""
         # NOTE: .with_recipient("assistant") is required on tool messages
         # to match parse_chat_input_to_harmony_message behavior and ensure
         # proper routing in the Harmony protocol.
@@ -121,7 +121,15 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
         )
         return [msg]
 
-    # Default: user/assistant/system messages
+    # System/developer messages into proper DeveloperContent
+    if role in ("system", "developer"):
+        text = flatten_input_text_content(chat_msg.get("content"))
+        if text:
+            msg = get_system_or_developer_message(role, text)
+            return [msg]
+        return []
+
+    # Default: user/assistant messages
     content = chat_msg.get("content", "")
     if isinstance(content, str):
         contents = [TextContent(text=content)]
@@ -151,13 +159,17 @@ def response_input_to_harmony(
     if "type" not in response_msg or response_msg["type"] == "message":
         role = response_msg["role"]
         content = response_msg["content"]
-        # Add prefix for developer messages.
-        # <|start|>developer<|message|># Instructions {instructions}<|end|>
-        text_prefix = "Instructions:\n" if role == "developer" else ""
-        if isinstance(content, str):
-            msg = Message.from_role_and_content(role, text_prefix + content)
+        if role in ("system", "developer"):
+            text = flatten_input_text_content(content)
+            if text:
+                msg = get_system_or_developer_message(role, text)
+            else:
+                # Empty content — skip, no message emitted.
+                return None
+        elif isinstance(content, str):
+            msg = Message.from_role_and_content(role, content)
         else:
-            contents = [TextContent(text=text_prefix + c["text"]) for c in content]
+            contents = [TextContent(text=c.get("text", "")) for c in content]
             msg = Message.from_role_and_contents(role, contents)
         if role == "assistant":
             msg = msg.with_channel("final")
