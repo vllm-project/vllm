@@ -815,6 +815,43 @@ def make_routing_data(
     return routing_data, gather_indx, scatter_indx
 
 
+@triton.jit
+def _masked_topk_sum_kernel(
+    inp_ptr,  # (M, topk, K) contiguous
+    topk_ids_ptr,  # (M, topk) int: -1 marks an invalid / non-local slot
+    out_ptr,  # (M, K), same dtype as inp
+    K,
+    topk: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid_m = tl.program_id(0).to(tl.int64)
+    k = tl.program_id(1) * BLOCK_K + tl.arange(0, BLOCK_K)
+    k_mask = k < K
+    base = pid_m * topk
+    acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
+    for j in tl.static_range(topk):
+        # Validity test (topk_ids != -1) fused in -- no separate mask tensor.
+        eid = tl.load(topk_ids_ptr + base + j)
+        x = tl.load(inp_ptr + (base + j) * K + k, mask=k_mask, other=0.0).to(tl.float32)
+        # tl.where SELECTS (it does not multiply), so stale nan/inf left in an
+        # invalid (-1) slot is discarded, not propagated (x * 0 would give nan).
+        acc += tl.where(eid != -1, x, 0.0)
+    tl.store(out_ptr + pid_m * K + k, acc.to(out_ptr.dtype.element_ty), mask=k_mask)
+
+
+def masked_moe_sum(
+    intermediate: torch.Tensor,  # (M, topk, K)
+    topk_ids: torch.Tensor,  # (M, topk) int, -1 = invalid / non-local slot
+    output: torch.Tensor,  # (M, K)
+) -> None:
+    M, topk, K = intermediate.shape
+    BLOCK_K = 1024
+    grid = (M, triton.cdiv(K, BLOCK_K))
+    _masked_topk_sum_kernel[grid](
+        intermediate, topk_ids, output, K, topk=topk, BLOCK_K=BLOCK_K
+    )
+
+
 class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -1191,13 +1228,6 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         # Set n_expts_act to 1 to unfuse the sum so we can do it manually via moe_sum.
         routing_data.n_expts_act = 1
 
-        # matmul_ogs only writes the scattered (valid) gate positions. Unwritten
-        # slots -- non-local / -1 topk entries and padding rows of EP-dispatched
-        # (e.g. deepep_v2) buffers -- otherwise retain uninitialized workspace
-        # garbage that the moe_sum below would fold into each token's output.
-        # Zero first so those slots contribute 0.
-        intermediate_cache3.zero_()
-
         matmul_ogs(
             intermediate_cache2[gather_indx.src_indx],
             w2,
@@ -1227,7 +1257,11 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
                 top_k_num=topk,
             )
 
-        self.moe_sum(intermediate_cache3.view(-1, topk, K), output)
+        # matmul_ogs leaves invalid (-1 / non-local EP) slots unwritten. Instead
+        # of zeroing the whole worst-case buffer, reduce over topk skipping those
+        # slots; the kernel reads topk_ids directly (-1 marks them). topk_ids is
+        # (M, topk), aligned with intermediate_cache3.view(M, topk, K).
+        masked_moe_sum(intermediate_cache3.view(-1, topk, K), topk_ids, output)
 
 
 class OAITritonMxfp4ExpertsMonolithic(mk.FusedMoEExpertsMonolithic):
