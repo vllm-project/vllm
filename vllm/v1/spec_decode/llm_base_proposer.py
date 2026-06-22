@@ -1794,6 +1794,12 @@ def compute_probs_and_sample_next_token(
     # Use epsilon comparison to detect greedy sampling (temperature ~ 0.0)
     # consistent with sampler.py's _SAMPLING_EPS threshold
     num_tokens = logits.shape[0]
+    # The triton top-k/top-p sampler (apply_top_k_top_p) asserts float32 logits,
+    # matching the main sampler (sampler.py). The MTP draft head emits bf16 logits,
+    # so without this cast MTP draft sampling with any top-k/top-p (i.e. ordinary
+    # non-greedy chat traffic) trips that assertion and kills the engine. Greedy
+    # requests return above and never reach here.
+    logits = logits.to(torch.float32)
     temperature = _expand_draft_sampling_tensor(
         sampling_metadata.temperature,
         num_tokens,
