@@ -877,7 +877,6 @@ def apply_expert_map(topk_ids: torch.Tensor, expert_map: torch.Tensor) -> torch.
     """Fused global->local expert-id mapping preserving -1.
 
     Replaces ``torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)``
-    (clamp + gather + compare + where, each materializing an ``[M, topk]`` temp)
     with one kernel. Returns a NEW int64 tensor -- the caller keeps the original
     ``topk_ids`` as ``global_topk_ids``, so this must not write in place.
     """
