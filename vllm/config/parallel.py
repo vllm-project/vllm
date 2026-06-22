@@ -36,6 +36,7 @@ DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
+DCPSparseIndexerMode = Literal["exact", "union"]
 EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "nixl", "pynccl"]
 All2AllBackend = Literal[
     "naive",
@@ -354,6 +355,19 @@ class ParallelConfig:
     - "a2a": All-to-All exchange of partial outputs + LSE, then
       combine with Triton kernel. Reduces NCCL calls from 3 to 2
       per layer for MLA models.
+    """
+    dcp_sparse_indexer_mode: DCPSparseIndexerMode = "union"
+    """How the sparse-MLA indexer (DeepSeek-V3.2 / GLM DSA) selects top-k
+    tokens under DCP, when the KV cache is sharded across decode-context-parallel
+    ranks:
+    - "union": each rank picks top-k over only its local KV shard; the per-rank
+      selections are reconciled by the cross-rank LSE merge (existing behavior).
+    - "exact": ranks all-gather their local top-k candidates and recompute a
+      single global top-k, so the selected token set is identical to the
+      non-DCP case (independent of dcp_world_size).
+    Only takes effect when decode_context_parallel_size > 1. The default is a
+    placeholder; the empirically-chosen default is decided from accuracy/perf
+    data (see the DCP rollout plan).
     """
 
     cp_kv_cache_interleave_size: int = 1
