@@ -21,7 +21,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
@@ -153,16 +152,6 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         )
         w2_dequant = self._dequantize_weights(
             w2, self.w2_scale_val, hidden_states.dtype
-        )
-
-        # Apply activation QDQ if needed by the OCP MX scheme
-        hidden_states, _ = moe_kernel_quantize_input(
-            A=hidden_states,
-            A_scale=None,
-            quant_dtype=self.quant_config.quant_dtype,
-            per_act_token_quant=False,
-            ocp_mx_scheme=self.ocp_mx_scheme,
-            quantization_emulation=True,
         )
 
         # Activation quantization/dequantization is deferred to
