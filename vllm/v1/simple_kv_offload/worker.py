@@ -57,6 +57,11 @@ class SimpleCPUOffloadWorker:
         # Metadata for the current step
         self._connector_metadata: SimpleCPUOffloadMetadata | None = None
 
+        # Compute-done event recorded before each store, reused across steps.
+        # Safe to reuse: get_finished runs once per step and the copy queue is
+        # FIFO, so each store's wait_event is enqueued before the next record.
+        self._store_compute_done: torch.Event | None = None
+
         # Pending event index sets, populated in bind_connector_metadata
         self._pending_load_event_indices: set[int] = set()
         self._pending_store_event_indices: set[int] = set()
@@ -206,14 +211,11 @@ class SimpleCPUOffloadWorker:
     ) -> tuple[set[str] | None, set[str] | None]:
         """Submit transfers and report completed events to the scheduler.
 
-        Called after model execution. The manager only schedules stores for
-        blocks whose KV data is confirmed computed on the host (scheduler
-        bookkeeping). That is NOT a device-side guarantee: under v1 overlapped
-        execution the host runs ahead of the GPU and the KV-write kernels may
-        still be in flight on the compute stream. Loads read from stable pinned
-        host memory and are safe to launch immediately; GPU->CPU stores read
-        the live KV cache and must be ordered after the compute stream, so we
-        record a compute-done event here and have the store stream wait on it.
+        Stores (GPU->CPU) read the live KV cache, which the compute stream may
+        still be writing under v1 overlapped execution, so they are ordered
+        after a compute-done event recorded on the current stream. Loads
+        (CPU->GPU) read stable pinned host memory and launch immediately. See
+        #45704 for the bug and #39306 for the srcAccessOrder rationale.
 
         Returns:
             tuple of (finished_sending, finished_recving).
@@ -223,9 +225,6 @@ class SimpleCPUOffloadWorker:
         # (1) Submit transfers
         metadata = self._connector_metadata
         if metadata is not None:
-            # Launch loads (CPU->GPU). Source is stable pinned host memory, so
-            # no cross-stream barrier is needed; load->use is gated separately
-            # by the load event.
             if metadata.load_cpu_blocks:
                 self._backend.launch_copy(
                     metadata.load_cpu_blocks,
@@ -234,21 +233,17 @@ class SimpleCPUOffloadWorker:
                     event_idx=metadata.load_event,
                     events_list=self._load_events,
                 )
-            # Launch stores (GPU->CPU). Record a compute-done event on the
-            # current (compute) stream so the store waits until every kernel
-            # enqueued so far — including the KV writes for the blocks being
-            # stored — has retired. Without this the store can read a partially
-            # written / stale block, silently corrupting the CPU cache.
             if metadata.store_gpu_blocks:
-                compute_done = torch.Event()
-                compute_done.record(torch.cuda.current_stream())
+                if self._store_compute_done is None:
+                    self._store_compute_done = torch.Event()
+                self._store_compute_done.record(torch.cuda.current_stream())
                 self._backend.launch_copy(
                     metadata.store_gpu_blocks,
                     metadata.store_cpu_blocks,
                     is_store=True,
                     event_idx=metadata.store_event,
                     events_list=self._store_events,
-                    wait_event=compute_done,
+                    wait_event=self._store_compute_done,
                 )
 
         # (2) Track completed transfer events

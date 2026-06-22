@@ -114,8 +114,9 @@ class BatchMemcpyParams(NamedTuple):
     dst_bases: np.ndarray  # [num_layers] uint64
     bpb: np.ndarray  # [num_layers] uint64 — bytes per block
     num_layers: int
-    # CUDA only: one attributes entry with srcAccessOrder=ANY. Unused on
-    # ROCm (7.2.1 or 7.2.2) because the current runtime rejects numAttrs > 0.
+    # CUDA only: one attributes entry carrying srcAccessOrder (STREAM for
+    # GPU->CPU stores, ANY for CPU->GPU loads). Unused on ROCm (7.2.1 or
+    # 7.2.2) because the current runtime rejects numAttrs > 0.
     attrs: _CUmemcpyAttributes
     attrs_idx: ctypes.c_size_t
     # NOTE: cuMemcpyBatchAsync_v2() removed fail_idx field, but we use
@@ -146,10 +147,12 @@ def build_params(
         dst_bases.append(d.data_ptr())
         bpb.append(s_bpb)
 
-    # srcAccessOrder controls whether the DMA may read the source before prior
-    # writes to it complete. STREAM(1) for GPU->CPU stores (live KV cache is
-    # still being written by the compute stream); ANY(3) for CPU->GPU loads
-    # (source is stable pinned host memory). See
+    # srcAccessOrder controls whether the DMA may read the source out of stream
+    # order. ANY lets the engine prefetch the source before stream barriers
+    # (wait_event) fire, so it is only safe when the source is stable: STREAM(1)
+    # for GPU->CPU stores (live KV cache, still written by the compute stream),
+    # ANY(3) for CPU->GPU loads (stable pinned host memory). Same split as the
+    # OffloadingConnector landed in #39306. See
     # https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__MEM.html#group__CUDA__MEM_1g6f1ff58e3065df3eb4b573dba77ad31f  # noqa: E501
     attrs = _CUmemcpyAttributes(srcAccessOrder=src_access_order)
 
