@@ -42,6 +42,8 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         self._initial_in_reasoning = chat_kwargs.get("thinking_mode") == "enabled"
         self._reasoning_ended_streaming = False
+        self._reasoning_active_streaming = self._initial_in_reasoning
+        self._pending_marker_streaming = False
 
     def _encode_marker(self, marker: str) -> tuple[int, ...]:
         try:
@@ -169,6 +171,9 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         if self._reasoning_ended_streaming:
             return True
 
+        if self._reasoning_active_streaming or self._pending_marker_streaming:
+            return False
+
         delta_ids = tuple(delta_ids)
         if self._contains_token_sequence(delta_ids, self._end_token_ids):
             return True
@@ -211,10 +216,24 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
 
         if not previous_text:
             self._reasoning_ended_streaming = False
+            self._reasoning_active_streaming = self._initial_in_reasoning
+            self._pending_marker_streaming = False
         previous_reasoning, previous_content = self._visible_segments(previous_text)
         current_reasoning, current_content = self._visible_segments(current_text)
         if self.end_token in current_text or current_content is not None:
             self._reasoning_ended_streaming = True
+            self._reasoning_active_streaming = False
+            self._pending_marker_streaming = False
+        else:
+            self._reasoning_active_streaming = (
+                self._initial_in_reasoning
+                or self.start_token in current_text
+                or current_reasoning is not None
+            )
+            self._pending_marker_streaming = not self._reasoning_active_streaming and (
+                self.start_token.startswith(current_text)
+                or self.end_token.startswith(current_text)
+            )
         reasoning = self._visible_delta(previous_reasoning, current_reasoning)
         content = self._visible_delta(previous_content, current_content)
         if reasoning is None and content is None:
