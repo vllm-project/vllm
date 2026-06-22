@@ -241,7 +241,9 @@ mod tests {
     use thiserror_ext::AsReport;
 
     use super::{Qwen3CoderToolParser, StructuralTagModel, ToolParser};
-    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::test_utils::{
+        assert_streaming_matches_complete, collect_stream, split_by_chars, test_tools,
+    };
     use crate::tool::{ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -479,6 +481,82 @@ mod tests {
                 "data": { "key": "value", "count": 42 },
             })
         );
+    }
+
+    #[test]
+    fn qwen_coder_streaming_matches_complete_across_boundaries() {
+        let between_calls = format!(
+            "I'll check two cities.{}Between calls.{}Done.",
+            build_tool_call("get_weather", &[("city", "Dallas"), ("state", "TX")]),
+            build_tool_call("get_weather", &[("city", "Orlando"), ("state", "FL")])
+        );
+        let tools = test_tools();
+        let cases = [
+            ("plain_text", "Hello, 杭州 🌦️. No tools here.".to_string()),
+            (
+                "single_tool_call",
+                build_tool_call("get_weather", &[("location", "SF")]),
+            ),
+            (
+                "parallel_tool_calls",
+                format!(
+                    "{}\n{}",
+                    build_tool_call("get_weather", &[("location", "SF")]),
+                    build_tool_call("get_weather", &[("location", "NYC")])
+                ),
+            ),
+            ("text_between_tool_calls", between_calls),
+            (
+                "unicode_parameter_value",
+                build_tool_call("get_weather", &[("location", "杭州 🌦️")]),
+            ),
+            ("no_parameter_call", build_tool_call("get_weather", &[])),
+            (
+                "xml_like_parameter_values",
+                build_tool_call(
+                    "process",
+                    &[
+                        (
+                            "html_content",
+                            r#"<div class="test"><span>Hello</span></div>"#,
+                        ),
+                        ("xml_snippet", r#"<root><child attr="value"/></root>"#),
+                    ],
+                ),
+            ),
+            (
+                "raw_closing_tag_text_in_parameter_value",
+                build_tool_call(
+                    "get_weather",
+                    &[
+                        (
+                            "location",
+                            "杭州 &lt;/parameter&gt;&lt;/function&gt;&lt;/tool_call&gt;",
+                        ),
+                        ("date", "2026-05-08"),
+                    ],
+                ),
+            ),
+            (
+                "nested_json_parameter",
+                build_tool_call(
+                    "convert",
+                    &[(
+                        "payload",
+                        r#"{"nested":{"value":[1,2,3],"child":{"enabled":true}}}"#,
+                    )],
+                ),
+            ),
+            (
+                "unterminated_tool_call",
+                "<tool_call>\n<function=get_weather>\n<parameter=location>SF</parameter>"
+                    .to_string(),
+            ),
+        ];
+
+        for (case_name, text) in cases {
+            assert_streaming_matches_complete::<Qwen3CoderToolParser>(&tools, case_name, &text);
+        }
     }
 
     #[test]
