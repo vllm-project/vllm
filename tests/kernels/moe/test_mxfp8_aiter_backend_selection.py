@@ -13,28 +13,31 @@ from unittest.mock import patch
 
 import pytest
 
-from tests.kernels.moe.utils import make_dummy_moe_config
-from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
+from vllm.platforms import current_platform
+
+if not current_platform.is_rocm():
+    pytest.skip("This test can only run on ROCm.", allow_module_level=True)
+
+from tests.kernels.moe.utils import make_dummy_moe_config  # noqa: E402
+from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (  # noqa: E402
     AiterMxfp8Experts,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import (
+from vllm.model_executor.layers.fused_moe.modular_kernel import (  # noqa: E402
     FusedMoEActivationFormat,
 )
-from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
-from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
+from vllm.model_executor.layers.fused_moe.oracle.fp8 import (  # noqa: E402
+    Fp8MoeBackend,
+)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (  # noqa: E402
     _BACKEND_NAME_MAP,
     _SUPPORTED_BACKENDS,
     _mxfp8_backend_to_kernel_cls,
     _select_kernel_cls,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
+from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa: E402
     kMxfp8Dynamic,
     kMxfp8Static,
 )
-from vllm.platforms import current_platform
-
-if not current_platform.is_rocm():
-    pytest.skip("This test can only run on ROCm.", allow_module_level=True)
 
 _AITER_MOD = "vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe"
 
