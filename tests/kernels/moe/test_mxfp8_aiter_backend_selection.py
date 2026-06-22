@@ -31,6 +31,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.platforms import current_platform
+
+if not current_platform.is_rocm():
+    pytest.skip("This test can only run on ROCm.", allow_module_level=True)
 
 _AITER_MOD = "vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe"
 
