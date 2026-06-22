@@ -6,6 +6,10 @@ steps:
   key: eplb-algorithm
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
