@@ -33,6 +33,14 @@ if [[ -n "${ATTENTION_BACKEND:-}" ]]; then
   EXTRA_ARGS+=(--attention-backend "${ATTENTION_BACKEND}")
 fi
 
+# ROCm HIP-graph replay intermittently corrupts decode output for this MoE model
+# (bisected to a ROCm/clr 7.2.x regression, not a vLLM bug); run eager on ROCm
+# until the runtime fix lands.
+if command -v rocm-smi &> /dev/null || [[ -d /opt/rocm ]] || [[ -n "${ROCM_PATH:-}" ]]; then
+  echo "ROCm platform detected: adding --enforce-eager to avoid HIP-graph decode corruption"
+  EXTRA_ARGS+=(--enforce-eager)
+fi
+
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
     kill "${SERVER_PID}" 2>/dev/null || true
