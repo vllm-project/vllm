@@ -32,6 +32,7 @@ DTYPES = [torch.float16, torch.bfloat16]
 SHAPES = [(128, 128, 64), (128, 128, 128), (256, 128, 64), (128, 256, 128)]
 PAD_SHAPES = [(150, 128, 64), (128, 128, 96)]
 SHAPES.extend(PAD_SHAPES)
+DEVICE_TYPE = current_platform.device_type
 
 
 CONSISTENCY_SHAPES = [
@@ -48,6 +49,7 @@ CONSISTENCY_SHAPES = [
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("shape", CONSISTENCY_SHAPES)
 @torch.inference_mode()
+@pytest.mark.device_type(DEVICE_TYPE)
 def test_nvfp4_gemm_batch_invariance(
     dtype: torch.dtype,
     shape: tuple[int, int, int],
@@ -64,8 +66,8 @@ def test_nvfp4_gemm_batch_invariance(
     m, n, packed_k = shape
     k = packed_k * 2  # real K (FP4 elements)
 
-    a_dtype = torch.randn((m, k), dtype=dtype, device="cuda")
-    b_dtype = torch.randn((n, k), dtype=dtype, device="cuda")
+    a_dtype = torch.randn((m, k), dtype=dtype)
+    b_dtype = torch.randn((n, k), dtype=dtype)
 
     a_global_scale = get_nvfp4_global_scale(a_dtype)
     b_global_scale = get_nvfp4_global_scale(b_dtype)
