@@ -1594,9 +1594,10 @@ steps:
 #----------------------------------------------------------  mi300 · kernels  ----------------------------------------------------------#
 
 - label: Kernels Attention Test %N # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -1627,10 +1628,11 @@ steps:
   - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py
 
 - label: Kernels MoE Test %N # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
-  parallelism: 4
+  optional: true
+  parallelism: 5
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
@@ -2120,9 +2122,10 @@ steps:
   - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
 
 - label: Spec Decode Eagle # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/v1/spec_decode/
@@ -3040,7 +3043,7 @@ steps:
 #----------------------------------------------------------  mi355 · kernels  ----------------------------------------------------------#
 
 - label: Kernels (B200-MI355) # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/"
@@ -3064,11 +3067,10 @@ steps:
   - pytest -v -s tests/kernels/attention/test_attention_selector.py
 
 - label: Kernels Attention Test %N # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   parallelism: 2
-  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/attention/
@@ -3082,10 +3084,10 @@ steps:
   - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels MoE Test %N # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
-  parallelism: 4
+  parallelism: 5
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
