@@ -51,8 +51,6 @@ backends:
   - FLASHMLA         # Hopper only
 
 device: "cuda:0"
-repeats: 5
-warmup_iters: 3
 profile_memory: true
 
 # Analyze chunked prefill workspace size impact

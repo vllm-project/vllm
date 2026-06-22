@@ -15,14 +15,10 @@ from starlette.datastructures import Headers
 from vllm import PoolingParams, PoolingRequestOutput, envs
 from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    ChatTemplateConfig,
-    ChatTemplateContentFormatOption,
-)
-from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.pooling.typing import AnyPoolingRequest, PoolingServeContext
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMNotFoundError
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
@@ -36,6 +32,7 @@ from vllm.tracing import (
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import make_async, merge_async_iterators
 
+from ..typing import AnyPoolingRequest, PoolingServeContext
 from .io_processor import PoolingIOProcessor
 
 
@@ -48,29 +45,23 @@ class PoolingServingBase(ABC):
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
-        chat_template: str | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        trust_request_chat_template: bool = False,
+        chat_template_config: ChatTemplateConfig,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
     ):
         self.engine_client = engine_client
         self.models = models
         self.model_config = models.model_config
-        self.renderer = models.renderer
+        self.renderer = engine_client.renderer
         self.vllm_config = engine_client.vllm_config
         self.max_model_len = self.model_config.max_model_len
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
         self.log_error_stack = log_error_stack
-        self.chat_template_config = ChatTemplateConfig(
-            chat_template=chat_template,
-            chat_template_content_format=chat_template_content_format,
-            trust_request_chat_template=trust_request_chat_template,
-        )
+        self.chat_template_config = chat_template_config
 
         # Shared thread pool executor for preprocessing and postprocessing.
-        self._executor: Executor = models.renderer._executor
+        self._executor: Executor = self.renderer._executor
         self._preprocessing_async = make_async(
             self._preprocessing, executor=self._executor
         )
@@ -292,6 +283,7 @@ class PoolingServingBase(ABC):
         request = ctx.request
         if request.model in self.models.lora_requests:
             ctx.lora_request = self.models.lora_requests[request.model]
+            return None
 
         # Currently only support default modality specific loras
         # if we have exactly one lora matched on the request.

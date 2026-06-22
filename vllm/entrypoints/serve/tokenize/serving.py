@@ -5,12 +5,13 @@ from typing import Any, Final
 
 from fastapi import Request
 
-from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import (
+    OpenAIModelRegistry,
+    OpenAIServingModels,
+)
+from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -20,6 +21,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
     TokenizerInfoResponse,
 )
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
@@ -27,11 +29,10 @@ from vllm.tokenizers import TokenizerLike
 logger = init_logger(__name__)
 
 
-class OpenAIServingTokenization(OpenAIServing):
+class ServingTokenization(BaseServing):
     def __init__(
         self,
-        engine_client: EngineClient,
-        models: OpenAIServingModels,
+        models: OpenAIServingModels | OpenAIModelRegistry,
         openai_serving_render: OpenAIServingRender,
         *,
         request_logger: RequestLogger | None,
@@ -41,11 +42,12 @@ class OpenAIServingTokenization(OpenAIServing):
         trust_request_chat_template: bool = False,
     ) -> None:
         super().__init__(
-            engine_client=engine_client,
             models=models,
+            model_config=openai_serving_render.model_config,
             request_logger=request_logger,
         )
 
+        self.renderer = openai_serving_render.renderer
         self.openai_serving_render = openai_serving_render
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format

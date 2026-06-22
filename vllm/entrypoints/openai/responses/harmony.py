@@ -31,7 +31,10 @@ from openai_harmony import Author, Message, Role, StreamableParser, TextContent
 
 from vllm.entrypoints.openai.parser.harmony_utils import (
     BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
-    flatten_chat_text_content,
+    extract_function_from_recipient,
+    flatten_input_text_content,
+    get_system_or_developer_message,
+    is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
@@ -107,8 +110,7 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
         name = chat_msg.get("name", "")
         if name and not name.startswith("functions."):
             name = f"functions.{name}"
-        content = chat_msg.get("content", "") or ""
-        content = flatten_chat_text_content(content)
+        content = flatten_input_text_content(chat_msg.get("content")) or ""
         # NOTE: .with_recipient("assistant") is required on tool messages
         # to match parse_chat_input_to_harmony_message behavior and ensure
         # proper routing in the Harmony protocol.
@@ -119,7 +121,15 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
         )
         return [msg]
 
-    # Default: user/assistant/system messages
+    # System/developer messages into proper DeveloperContent
+    if role in ("system", "developer"):
+        text = flatten_input_text_content(chat_msg.get("content"))
+        if text:
+            msg = get_system_or_developer_message(role, text)
+            return [msg]
+        return []
+
+    # Default: user/assistant messages
     content = chat_msg.get("content", "")
     if isinstance(content, str):
         contents = [TextContent(text=content)]
@@ -149,13 +159,17 @@ def response_input_to_harmony(
     if "type" not in response_msg or response_msg["type"] == "message":
         role = response_msg["role"]
         content = response_msg["content"]
-        # Add prefix for developer messages.
-        # <|start|>developer<|message|># Instructions {instructions}<|end|>
-        text_prefix = "Instructions:\n" if role == "developer" else ""
-        if isinstance(content, str):
-            msg = Message.from_role_and_content(role, text_prefix + content)
+        if role in ("system", "developer"):
+            text = flatten_input_text_content(content)
+            if text:
+                msg = get_system_or_developer_message(role, text)
+            else:
+                # Empty content — skip, no message emitted.
+                return None
+        elif isinstance(content, str):
+            msg = Message.from_role_and_content(role, content)
         else:
-            contents = [TextContent(text=text_prefix + c["text"]) for c in content]
+            contents = [TextContent(text=c.get("text", "")) for c in content]
             msg = Message.from_role_and_contents(role, contents)
         if role == "assistant":
             msg = msg.with_channel("final")
@@ -175,6 +189,8 @@ def response_input_to_harmony(
             Author.new(Role.TOOL, f"functions.{call_response.name}"),
             response_msg["output"],
         )
+        msg = msg.with_channel("commentary")
+        msg = msg.with_recipient("assistant")
     elif response_msg["type"] == "reasoning":
         content = response_msg.get("content")
         if content and len(content) >= 1:
@@ -292,7 +308,7 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
 
 def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
     """Parse function calls into function tool call items."""
-    function_name = recipient.split(".")[-1]
+    function_name = extract_function_from_recipient(recipient)
     output_items = []
     for content in message.content:
         random_id = random_uuid()
@@ -408,7 +424,10 @@ def _parse_message_no_recipient(
 # ---------------------------------------------------------------------------
 
 
-def harmony_to_response_output(message: Message) -> list[ResponseOutputItem]:
+def harmony_to_response_output(
+    message: Message,
+    function_tool_names: frozenset[str] | None = None,
+) -> list[ResponseOutputItem]:
     """Parse a Harmony message into a list of output response items.
 
     This is the main dispatcher that routes based on channel and recipient.
@@ -427,8 +446,8 @@ def harmony_to_response_output(message: Message) -> list[ResponseOutputItem]:
         if recipient.startswith("browser."):
             output_items.append(_parse_browser_tool_call(message, recipient))
 
-        # Function calls (should only happen on commentary channel)
-        elif message.channel == "commentary" and recipient.startswith("functions."):
+        # Function calls (with or without "functions." prefix)
+        elif is_function_recipient(recipient, function_tool_names):
             output_items.extend(_parse_function_call(message, recipient))
 
         # Built-in MCP tools (python, browser, container)
@@ -448,6 +467,7 @@ def harmony_to_response_output(message: Message) -> list[ResponseOutputItem]:
 
 def parser_state_to_response_output(
     parser: StreamableParser,
+    function_tool_names: frozenset[str] | None = None,
 ) -> list[ResponseOutputItem]:
     """Extract in-progress response items from incomplete parser state.
 
@@ -462,15 +482,15 @@ def parser_state_to_response_output(
     if current_recipient is not None and current_recipient.startswith("browser."):
         return []
 
-    if current_recipient and parser.current_channel in ("commentary", "analysis"):
-        if current_recipient.startswith("functions."):
+    if current_recipient:
+        if is_function_recipient(current_recipient, function_tool_names):
             rid = random_uuid()
             return [
                 ResponseFunctionToolCall(
                     arguments=parser.current_content,
                     call_id=f"call_{rid}",
                     type="function_call",
-                    name=current_recipient.split(".")[-1],
+                    name=extract_function_from_recipient(current_recipient),
                     id=f"fc_{rid}",
                     status="in_progress",
                 )

@@ -32,6 +32,9 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .monitor import monitor_profiling_run, monitor_torch_compile
 
+# shape_id parameter was added to mark_unbacked in PyTorch 2.11.0
+_SUPPORTS_SHAPE_ID = is_torch_equal_or_newer("2.11.0")
+
 if TYPE_CHECKING:
     # Only added on nightly/2.10 so wrap
     try:
@@ -89,7 +92,7 @@ def support_torch_compile(
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: dict[str, int | list[int]] | None,
+    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None,
 ) -> Callable[[type[_T]], type[_T]]: ...
 
 
@@ -103,7 +106,7 @@ def support_torch_compile(
 @overload
 def support_torch_compile(
     *,
-    dynamic_arg_dims: dict[str, int | list[int]] | None,
+    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None,
     mark_unbacked_dims: dict[str, int | list[int]] | None,
 ) -> Callable[[type[_T]], type[_T]]: ...
 
@@ -115,11 +118,10 @@ def support_torch_compile(cls: type[_T]) -> type[_T]: ...
 def support_torch_compile(
     cls: type[_T] | None = None,
     *,
-    dynamic_arg_dims: dict[str, int | list[int]] | None = None,
+    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]] | None = None,
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
     is_encoder: bool = False,
-    shape_invariants: Callable[..., None] = lambda *args, **kwargs: None,
 ) -> Callable[[type[_T]], type[_T]] | type[_T]:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -141,8 +143,12 @@ def support_torch_compile(
     ```
 
     `dynamic_arg_dims` is a dictionary that maps argument names to the dynamic
-    dimensions of the argument. The dynamic dimensions can be either a single
-    integer or a list of integers.
+    dimensions of the argument. The value can be:
+    - int: a single dimension index (e.g., 0)
+    - list[int]: multiple dimension indices (e.g., [0, 1])
+    - dict[int, str]: dimension to shape_id mapping for shape relations
+      (e.g., {0: "b"}). Dimensions with the same shape_id share the same
+      unbacked symbol.
 
     if `dynamic_arg_dims` is `None`, it is inferred from the type annotation
     of the `forward` method, based on the following default rules:
@@ -189,7 +195,7 @@ def support_torch_compile(
             torch._check(input_ids.size()[0] == inputs_embeds.size()[0])
     This enforces constraints on the symbolic shapes without hardcoding
     specific values. It is needed for some models to avoid data dependent
-    errors.
+    errors and maximize perf when unbacked shapes are used.
     """
 
     def cls_decorator_helper(cls: type[_T]) -> type[_T]:
@@ -229,13 +235,13 @@ def support_torch_compile(
                 raise ValueError(
                     f"Argument {k} not found in the forward method of {cls}"
                 )
+
         return _support_torch_compile(
             cls,
             inferred_dynamic_arg_dims,
             mark_unbacked_dims,
             enable_if,
             is_encoder,
-            shape_invariants,
         )
 
     if cls is not None:
@@ -285,7 +291,7 @@ def _try_load_aot_compiled_fn(
     Re-raises on failure when ``VLLM_FORCE_AOT_LOAD`` is set.
     """
     try:
-        with monitor_torch_compile(model.vllm_config):
+        with monitor_torch_compile(model.vllm_config, is_encoder=model._is_encoder):
             with (
                 set_current_vllm_config(model.vllm_config),
                 open(aot_compilation_path, "rb") as f,
@@ -324,15 +330,13 @@ def _try_load_aot_compiled_fn(
 
 def _support_torch_compile(
     cls: type[_T],
-    dynamic_arg_dims: dict[str, int | list[int]],
+    dynamic_arg_dims: dict[str, int | list[int] | dict[int, str]],
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
     is_encoder: bool = False,
-    shape_invariants: Callable[..., None] = lambda *args, **kwargs: None,
 ) -> type[_T]:
-    """
-    A decorator to add support for compiling the forward method of a class.
-    """
+    """Internal implementation of support_torch_compile decorator."""
+
     if TorchCompileWithNoGuardsWrapper in cls.__bases__:
         # support decorating multiple times
         return cls
@@ -392,7 +396,8 @@ def _support_torch_compile(
         if self.do_not_compile:
             return
 
-        self._check_shape_invariants = shape_invariants
+        self._dynamic_arg_dims = dynamic_arg_dims
+
         self.was_aot_compile_fn_loaded_from_disk = False
         compilation_counter.num_models_seen += 1
         self.compiled = False
@@ -409,48 +414,83 @@ def _support_torch_compile(
     def _mark_dynamic_inputs(
         mod: type[_T], ds_type: DynamicShapesType, *args: Any, **kwargs: Any
     ) -> None:
-        def mark_dynamic(arg: torch.Tensor, dims: list[int]) -> None:
+        def mark_dynamic(
+            arg: torch.Tensor, dim_shape_pairs: list[tuple[int, str | None]]
+        ) -> None:
             if ds_type == DynamicShapesType.UNBACKED:
                 if is_torch_equal_or_newer("2.10.0"):
-                    for dim in dims:
-                        torch._dynamo.decorators.mark_unbacked(
-                            arg, dim, hint_override=arg.size()[dim]
-                        )
+                    for dim, shape_id in dim_shape_pairs:
+                        if shape_id is not None:
+                            if not _SUPPORTS_SHAPE_ID:
+                                raise RuntimeError(
+                                    f"shape_id='{shape_id}' requires PyTorch >= 2.11.0"
+                                )
+                            torch._dynamo.decorators.mark_unbacked(
+                                arg,
+                                dim,
+                                hint_override=arg.size()[dim],
+                                shape_id=shape_id,
+                            )
+                        else:
+                            torch._dynamo.decorators.mark_unbacked(
+                                arg,
+                                dim,
+                                hint_override=arg.size()[dim],
+                            )
                 else:
+                    # For older versions, we can't use hint_override or shape_id
+                    dims = [dim for dim, _ in dim_shape_pairs]
                     torch._dynamo.decorators.mark_unbacked(arg, dims)
             else:
+                dims = [dim for dim, _ in dim_shape_pairs]
                 torch._dynamo.mark_dynamic(arg, dims)
 
         sig = inspect.signature(mod.__class__.forward)  # type: ignore[attr-defined]
         bound_args = sig.bind(mod, *args, **kwargs)
         bound_args.apply_defaults()
-        for k, dims in dynamic_arg_dims.items():
+
+        # Normalize dynamic_arg_dims to dict[str, dict[int, str | None]]
+        normalized_dims: dict[str, dict[int, str | None]] = {}
+        for k, v in dynamic_arg_dims.items():
+            if isinstance(v, dict):
+                normalized_dims[k] = {dim: shape_id for dim, shape_id in v.items()}
+            elif isinstance(v, int):
+                normalized_dims[k] = {v: None}
+            else:
+                normalized_dims[k] = {d: None for d in v}
+
+        for k, dim_to_shape_id in normalized_dims.items():
             arg = bound_args.arguments.get(k)
 
             if arg is not None:
-                dims = [dims] if isinstance(dims, int) else dims
+                dims = list(dim_to_shape_id.keys())
+
                 if isinstance(arg, torch.Tensor):
-                    # In case dims is specified with negative indexing
-                    dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
-                    mark_dynamic(arg, dims)
+                    dim_shape_pairs = [
+                        (arg.ndim + d if d < 0 else d, dim_to_shape_id.get(d))
+                        for d in dims
+                    ]
+                    mark_dynamic(arg, dim_shape_pairs)
                 elif isinstance(arg, IntermediateTensors):
                     for tensor in arg.tensors.values():
-                        # In case dims is specified with negative indexing
-                        dims = [tensor.ndim + dim if dim < 0 else dim for dim in dims]
-                        mark_dynamic(tensor, dims)
+                        dim_shape_pairs = [
+                            (tensor.ndim + d if d < 0 else d, dim_to_shape_id.get(d))
+                            for d in dims
+                        ]
+                        mark_dynamic(tensor, dim_shape_pairs)
                 else:
                     raise ValueError(
-                        "Unsupported dynamic dimensions"
-                        f" {dims} for argument {k} with type {type(arg)}."
+                        f"Unsupported dynamic dimensions {dims} "
+                        f"for argument {k} with type {type(arg)}."
                     )
+
         if mark_unbacked_dims:
-            for k, dims in mark_unbacked_dims.items():
+            for k, dims_val in mark_unbacked_dims.items():
                 arg = bound_args.arguments.get(k)
                 if arg is not None:
-                    dims = [dims] if isinstance(dims, int) else dims
+                    dims = [dims_val] if isinstance(dims_val, int) else list(dims_val)
                     if isinstance(arg, torch.Tensor):
-                        # In case dims is specified with negative indexing
-                        dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
+                        dims = [arg.ndim + d if d < 0 else d for d in dims]
                         if is_torch_equal_or_newer("2.10.0"):
                             for dim in dims:
                                 torch._dynamo.decorators.mark_unbacked(
@@ -506,6 +546,16 @@ def _support_torch_compile(
                 "torch_aot_compile",
                 hash_key,
             )
+
+            # Hash-level dir; shared across ranks on the same node.
+            self.compilation_config.local_cache_dir = cache_dir
+            inductor_cache = os.path.join(cache_dir, "inductor_cache")
+            os.makedirs(inductor_cache, exist_ok=True)
+            # Process-wide: post-load execution, CUDA-graph capture, and later
+            # autotune/recompile all need to write under {hash}/inductor_cache/.
+            # Unconditional because torch's cache_dir() may have pre-filled the
+            # /tmp default during import, making setdefault a no-op.
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
 
             rank = self.vllm_config.parallel_config.rank
             dp_rank = self.vllm_config.parallel_config.data_parallel_index
@@ -607,7 +657,9 @@ def _support_torch_compile(
                 # store the path for saving after warmup
                 self._aot_compilation_path = aot_compilation_path
                 self._aot_cache_dir = cache_dir
-                with monitor_torch_compile(self.vllm_config):
+                with monitor_torch_compile(
+                    self.vllm_config, is_encoder=self._is_encoder
+                ):
                     self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
                     compilation_counter.num_aot_compiles += 1
                     # All compilation is done at this point, save the
@@ -621,6 +673,7 @@ def _support_torch_compile(
                     self.vllm_config,
                     "torch.compile and initial profiling/warmup "
                     "run together took %.2f s in total",
+                    is_encoder=self._is_encoder,
                 ):
                     output = TorchCompileWithNoGuardsWrapper.__call__(
                         self,  # type: ignore[arg-type]
@@ -655,7 +708,6 @@ def _support_torch_compile(
             logger.info_once(
                 "saved AOT compiled function to %s",
                 self._aot_compilation_path,
-                scope="local",
             )
         except Exception as e:
             logger.warning(

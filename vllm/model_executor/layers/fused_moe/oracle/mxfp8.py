@@ -12,18 +12,41 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
 _SUPPORTED_BACKENDS = (
     Fp8MoeBackend.FLASHINFER_TRTLLM,
+    Fp8MoeBackend.DEEPGEMM,
     Fp8MoeBackend.MARLIN,
+    Fp8MoeBackend.XPU,
 )
 
 _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "flashinfer_trtllm": Fp8MoeBackend.FLASHINFER_TRTLLM,
+    "deep_gemm": Fp8MoeBackend.DEEPGEMM,
     "marlin": Fp8MoeBackend.MARLIN,
+    "xpu": Fp8MoeBackend.XPU,
 }
+
+
+def _mxfp8_backend_to_kernel_cls(
+    backend: Fp8MoeBackend,
+) -> list[type[mk.FusedMoEExperts]]:
+    """Resolve the MXFP8 expert classes for a backend.
+
+    DeepGEMM resolves directly to ``DeepGemmExperts`` (not the
+    ``TritonOrDeepGemmExperts`` wrapper, whose Triton fallback cannot handle the
+    MXFP8 1x32 scheme); all other backends defer to the FP8 resolver.
+    """
+    if backend == Fp8MoeBackend.DEEPGEMM:
+        from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+            DeepGemmExperts,
+        )
+
+        return [DeepGemmExperts]
+    return backend_to_kernel_cls(backend)
 
 
 def _select_kernel_cls(
@@ -37,7 +60,7 @@ def _select_kernel_cls(
         else mk.FusedMoEActivationFormat.Standard
     )
     last_reason: str | None = None
-    for cls in backend_to_kernel_cls(backend):
+    for cls in _mxfp8_backend_to_kernel_cls(backend):
         supported, reason = cls.is_supported_config(
             cls,
             config,
@@ -53,6 +76,29 @@ def _select_kernel_cls(
     )
 
 
+def _select_rocm_mxfp8_backend() -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
+    """ROCm fallback when vendor MXFP8 backends are unavailable."""
+
+    if current_platform.supports_mx():
+        from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+            Mxfp8NativeTritonExperts,
+        )
+
+        logger.info_once("Using native CDNA4 (gfx950) MXFP8 dot_scaled MoE backend.")
+        return Fp8MoeBackend.NATIVE_MXFP8, Mxfp8NativeTritonExperts
+
+    from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
+        Mxfp8EmulationTritonExperts,
+    )
+
+    logger.info_once(
+        "No native MXFP8 MoE backend available on this device; "
+        "MXFP8 weights will be dequantized to BF16 once at load time and the "
+        "MoE will run in BF16 (no per-step dequant)."
+    )
+    return Fp8MoeBackend.EMULATION, Mxfp8EmulationTritonExperts
+
+
 def select_mxfp8_moe_backend(
     config: FusedMoEConfig,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
@@ -61,8 +107,6 @@ def select_mxfp8_moe_backend(
     Returns:
         A tuple of (fp8_backend, experts_cls).
     """
-    if config.is_lora_enabled:
-        raise NotImplementedError("LoRA is not supported for MXFP8 MoE.")
 
     runner_backend = config.moe_backend
     if runner_backend != "auto":
@@ -87,5 +131,9 @@ def select_mxfp8_moe_backend(
             continue
         logger.info_once("Using '%s' MxFp8 MoE backend.", backend.value)
         return backend, experts_cls
+
+    # simplify the logic for rocm, refactor later when more backends are supported
+    if current_platform.is_rocm():
+        return _select_rocm_mxfp8_backend()
 
     raise ValueError("No MXFP8 MoE backends available.")

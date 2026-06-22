@@ -38,6 +38,15 @@ BACKEND_TOL: dict[str, float] = {
     "FLEX_ATTENTION": 0.045,  # gfx950:~3.25%, gfx942:~1.10%
 }
 
+# ROCm 7.2/gfx950 shows small absolute drift on the low text-vs-text
+# probability even though larger scores remain well inside the relative
+# tolerance. Keep the relative tolerances tight and add only a small floor.
+BACKEND_ABS_TOL: dict[str, float] = {
+    "default": 0.0,
+    "ROCM_AITER_FA": 0.005,
+    "FLEX_ATTENTION": 0.006,
+}
+
 # ROCm: disable skinny GEMM to avoid non-deterministic results from
 # atomic reductions in wvSplitKrc kernel.
 # See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
@@ -57,18 +66,23 @@ def get_tol(backend: str) -> float:
     return BACKEND_TOL.get(backend, BACKEND_TOL["default"])
 
 
+def get_abs_tol(backend: str) -> float:
+    return BACKEND_ABS_TOL.get(backend, BACKEND_ABS_TOL["default"])
+
+
 def assert_score(actual: float, expected: float, backend: str, label: str):
     tol = get_tol(backend)
+    abs_tol = get_abs_tol(backend)
     diff = abs(actual - expected)
     rel_diff = diff / abs(expected) if expected != 0 else diff
     print(
         f"[{backend}] {label}: actual={actual:.6f} expected={expected:.6f} "
-        f"diff={diff:.6f} rel_diff={rel_diff:.4f} tol={tol}"
+        f"diff={diff:.6f} rel_diff={rel_diff:.4f} tol={tol} abs_tol={abs_tol}"
     )
-    assert actual == pytest.approx(expected, rel=tol), (
+    assert actual == pytest.approx(expected, rel=tol, abs=abs_tol), (
         f"[{backend}] {label}: score mismatch — "
         f"actual={actual:.6f}, expected={expected:.6f}, "
-        f"rel_diff={rel_diff:.4f}, tol={tol}"
+        f"rel_diff={rel_diff:.4f}, tol={tol}, abs_tol={abs_tol}"
     )
 
 
@@ -363,3 +377,135 @@ async def test_score_api_queries_list_documents_list(
         backend,
         "paired[3]_text_vs_text_plus_image",
     )
+
+
+INSTRUCTION = (
+    "Given a multimodal retrieval query, retrieve candidates that "
+    "visually or textually match the requested scene, object, or action."
+)
+
+
+@pytest.mark.asyncio
+async def test_score_api_instruction_field(
+    server: tuple[RemoteOpenAIServer, str],
+):
+    remote_server, _ = server
+
+    default_response = requests.post(
+        remote_server.url_for("score"),
+        json={
+            "model": MODEL_NAME,
+            "queries": query,
+            "documents": document,
+        },
+    )
+    default_response.raise_for_status()
+    default_score = ScoreResponse.model_validate(default_response.json())
+
+    instruction_response = requests.post(
+        remote_server.url_for("score"),
+        json={
+            "model": MODEL_NAME,
+            "queries": query,
+            "documents": document,
+            "instruction": INSTRUCTION,
+        },
+    )
+    instruction_response.raise_for_status()
+    instruction_score = ScoreResponse.model_validate(instruction_response.json())
+
+    assert instruction_score.id is not None
+    assert instruction_score.data is not None
+    assert len(instruction_score.data) == 1
+    assert instruction_score.usage.prompt_tokens > default_score.usage.prompt_tokens
+
+
+@pytest.mark.asyncio
+async def test_rerank_api_instruction_field(
+    server: tuple[RemoteOpenAIServer, str],
+):
+    remote_server, _ = server
+
+    doc_list = [
+        document,
+        {"content": [documents[0]]},
+        {"content": [documents[1]]},
+        {"content": [documents[0], documents[1]]},
+    ]
+
+    default_response = requests.post(
+        remote_server.url_for("rerank"),
+        json={
+            "model": MODEL_NAME,
+            "query": query,
+            "documents": doc_list,
+        },
+    )
+    default_response.raise_for_status()
+    default_rerank = RerankResponse.model_validate(default_response.json())
+
+    instruction_response = requests.post(
+        remote_server.url_for("rerank"),
+        json={
+            "model": MODEL_NAME,
+            "query": query,
+            "documents": doc_list,
+            "instruction": INSTRUCTION,
+        },
+    )
+    instruction_response.raise_for_status()
+    instruction_rerank = RerankResponse.model_validate(instruction_response.json())
+
+    assert instruction_rerank.id is not None
+    assert instruction_rerank.model is not None
+    assert instruction_rerank.usage is not None
+    assert len(instruction_rerank.results) == len(default_rerank.results)
+    assert instruction_rerank.usage.prompt_tokens > default_rerank.usage.prompt_tokens
+
+
+@pytest.mark.asyncio
+async def test_rerank_api_instruction_field_matches_chat_template_kwargs(
+    server: tuple[RemoteOpenAIServer, str],
+):
+    remote_server, _ = server
+
+    doc_list = [
+        document,
+        {"content": [documents[0]]},
+        {"content": [documents[1]]},
+        {"content": [documents[0], documents[1]]},
+    ]
+
+    field_response = requests.post(
+        remote_server.url_for("rerank"),
+        json={
+            "model": MODEL_NAME,
+            "query": query,
+            "documents": doc_list,
+            "instruction": INSTRUCTION,
+        },
+    )
+    field_response.raise_for_status()
+    field_rerank = RerankResponse.model_validate(field_response.json())
+
+    kwargs_response = requests.post(
+        remote_server.url_for("rerank"),
+        json={
+            "model": MODEL_NAME,
+            "query": query,
+            "documents": doc_list,
+            "chat_template_kwargs": {"instruction": INSTRUCTION},
+        },
+    )
+    kwargs_response.raise_for_status()
+    kwargs_rerank = RerankResponse.model_validate(kwargs_response.json())
+
+    assert kwargs_rerank.usage.prompt_tokens == field_rerank.usage.prompt_tokens
+
+    field_scores = [
+        r.relevance_score for r in sorted(field_rerank.results, key=lambda x: x.index)
+    ]
+    kwargs_scores = [
+        r.relevance_score for r in sorted(kwargs_rerank.results, key=lambda x: x.index)
+    ]
+    assert field_scores == pytest.approx(kwargs_scores)
