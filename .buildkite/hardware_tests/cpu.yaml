@@ -51,11 +51,13 @@ steps:
   - vllm/
   - tests/models/language/generation/
   - tests/models/language/pooling/
+  - tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py
   commands:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 40m "
       pytest -x -v -s tests/models/language/generation -m cpu_model
-      pytest -x -v -s tests/models/language/pooling -m cpu_model"
+      pytest -x -v -s tests/models/language/pooling -m cpu_model
+      pytest -x -v -s tests/v1/e2e/test_cpu_linear_attn_chunked_prefix.py"
 
 - label: CPU-ModelRunnerV2 Tests
   depends_on: []
