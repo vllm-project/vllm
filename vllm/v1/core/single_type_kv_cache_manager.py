@@ -4,6 +4,7 @@ import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import ClassVar
 
 from vllm.utils.math_utils import cdiv
@@ -34,6 +35,13 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 from vllm.v1.request import Request
+
+
+@dataclass
+class _RetainedKVCacheBlockCopy:
+    source_block: KVCacheBlock
+    dst_block: KVCacheBlock
+    copy: KVCacheBlockCopy
 
 
 class SingleTypeKVCacheManager(ABC):
@@ -594,7 +602,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         full_block_hashes = BlockHashListWithBlockSize(
             block_hashes, hash_block_size, block_size
         )
-        max_num_partial_units = min(
+        max_num_hash_blocks = min(
             max_length // hash_block_size,
             len(block_hashes),
         )
@@ -602,38 +610,40 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             KVCacheBlockListWithHitLength() for _ in range(len(kv_cache_group_ids))
         )
-        for fine_idx in range(max_num_partial_units - 1, -1, -1):
-            num_tokens = (fine_idx + 1) * hash_block_size
-            block_hash = block_hashes[fine_idx]
-            last_block_idx = fine_idx // scale_factor
+        max_num_full_blocks = max_length // block_size
+        num_full_blocks = 0
+        for block_hash in itertools.islice(full_block_hashes, max_num_full_blocks):
+            cached_full_block = block_pool.get_cached_block(
+                block_hash, kv_cache_group_ids
+            )
+            if not cached_full_block:
+                break
+            for computed, cached in zip(computed_blocks, cached_full_block):
+                computed.append(cached)
+            num_full_blocks += 1
 
-            cached_tail = block_pool.get_cached_block(block_hash, kv_cache_group_ids)
+        hit_length = num_full_blocks * block_size
+        first_partial_idx = num_full_blocks * scale_factor
+        max_partial_idx = min(
+            first_partial_idx + scale_factor - 1,
+            max_num_hash_blocks,
+        )
+        for fine_idx in range(max_partial_idx - 1, first_partial_idx - 1, -1):
+            num_tokens = (fine_idx + 1) * hash_block_size
+            cached_tail = block_pool.get_cached_block(
+                block_hashes[fine_idx], kv_cache_group_ids
+            )
             if not cached_tail:
                 continue
 
-            prefix_blocks: list[list[KVCacheBlock]] = [[] for _ in kv_cache_group_ids]
-            prefix_ok = True
-            for block_idx in range(last_block_idx):
-                cached_prefix = block_pool.get_cached_block(
-                    full_block_hashes[block_idx], kv_cache_group_ids
-                )
-                if not cached_prefix:
-                    prefix_ok = False
-                    break
-                for blocks, cached in zip(prefix_blocks, cached_prefix):
-                    blocks.append(cached)
-            if not prefix_ok:
-                continue
-
-            for computed, prefix, cached in zip(
-                computed_blocks, prefix_blocks, cached_tail
-            ):
-                computed.extend(prefix)
+            for computed, cached in zip(computed_blocks, cached_tail):
                 computed.append(cached)
-                assert isinstance(computed, KVCacheBlockListWithHitLength)
-                computed.hit_length = num_tokens
+            hit_length = num_tokens
             break
 
+        for computed in computed_blocks:
+            assert isinstance(computed, KVCacheBlockListWithHitLength)
+            computed.hit_length = hit_length
         return computed_blocks
 
     @classmethod
@@ -1274,11 +1284,8 @@ class MambaManager(SingleTypeKVCacheManager):
             self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
             self._pending_cow_source_blocks: list[KVCacheBlock] = []
             self._kv_cache_block_copies: list[KVCacheBlockCopy] = []
-            self._active_snapshot_blocks: list[KVCacheBlock] = []
-            self._delayed_snapshot_blocks: list[KVCacheBlock] = []
-            self._active_snapshot_source_blocks: list[KVCacheBlock] = []
-            self._delayed_snapshot_source_blocks: list[KVCacheBlock] = []
-            self._delayed_kv_cache_block_copies: list[KVCacheBlockCopy] = []
+            self._active_snapshot_copies: list[_RetainedKVCacheBlockCopy] = []
+            self._delayed_snapshot_copies: list[_RetainedKVCacheBlockCopy] = []
 
     @classmethod
     def find_longest_cache_hit(
@@ -1615,18 +1622,12 @@ class MambaManager(SingleTypeKVCacheManager):
             if self._pending_cow_source_blocks:
                 self._free_retained_blocks(self._pending_cow_source_blocks)
                 self._pending_cow_source_blocks = []
-            if self._active_snapshot_source_blocks:
-                self._free_retained_blocks(self._active_snapshot_source_blocks)
-                self._active_snapshot_source_blocks = []
-            if self._active_snapshot_blocks:
-                self.block_pool.free_blocks(self._active_snapshot_blocks)
-                self._active_snapshot_blocks = []
-            self._active_snapshot_blocks = self._delayed_snapshot_blocks
-            self._delayed_snapshot_blocks = []
-            self._active_snapshot_source_blocks = self._delayed_snapshot_source_blocks
-            self._delayed_snapshot_source_blocks = []
-            self._kv_cache_block_copies = self._delayed_kv_cache_block_copies
-            self._delayed_kv_cache_block_copies = []
+            self._free_snapshot_copies(self._active_snapshot_copies)
+            self._active_snapshot_copies = self._delayed_snapshot_copies
+            self._delayed_snapshot_copies = []
+            self._kv_cache_block_copies = [
+                snapshot.copy for snapshot in self._active_snapshot_copies
+            ]
         self.cached_blocks_this_step.clear()
 
     def _cache_partial_snapshot(
@@ -1667,18 +1668,29 @@ class MambaManager(SingleTypeKVCacheManager):
             self.block_pool.free_blocks([snapshot_block])
             return None
 
-        self._delayed_snapshot_blocks.append(snapshot_block)
         self._retain_block(source_block)
-        self._delayed_snapshot_source_blocks.append(source_block)
-        self._delayed_kv_cache_block_copies.append(
-            KVCacheBlockCopy(
-                kv_cache_group_id=self.kv_cache_group_id,
-                src_block_id=source_block.block_id,
-                dst_block_id=snapshot_block.block_id,
-                num_tokens=self.block_size,
+        self._delayed_snapshot_copies.append(
+            _RetainedKVCacheBlockCopy(
+                source_block=source_block,
+                dst_block=snapshot_block,
+                copy=KVCacheBlockCopy(
+                    kv_cache_group_id=self.kv_cache_group_id,
+                    src_block_id=source_block.block_id,
+                    dst_block_id=snapshot_block.block_id,
+                    num_tokens=self.block_size,
+                ),
             )
         )
         return partial_hash
+
+    def _free_snapshot_copies(
+        self,
+        snapshots: list[_RetainedKVCacheBlockCopy],
+    ) -> None:
+        if not snapshots:
+            return
+        self._free_retained_blocks([snapshot.source_block for snapshot in snapshots])
+        self.block_pool.free_blocks([snapshot.dst_block for snapshot in snapshots])
 
     def take_kv_cache_block_copies(self) -> list[KVCacheBlockCopy]:
         copies = self._kv_cache_block_copies

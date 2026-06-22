@@ -38,6 +38,11 @@ from vllm.v1.kv_cache_interface import (
 
 logger = init_logger(__name__)
 
+# Distinct fake sizes used only to identify the num-blocks and block-size
+# dimensions returned by backend.get_kv_cache_shape().
+_KV_CACHE_SHAPE_NUM_BLOCKS_SENTINEL = 1_234_567
+_KV_CACHE_SHAPE_BLOCK_SIZE_SENTINEL = 1_234_560
+
 
 @triton.jit
 def _zero_kv_blocks_kernel(
@@ -616,15 +621,14 @@ def _get_kv_cache_token_dim(
     head_size: int,
     cache_dtype: str,
 ) -> int:
-    token_sentinel = 1234560
     shape = backend.get_kv_cache_shape(
-        1234567,
-        token_sentinel,
+        _KV_CACHE_SHAPE_NUM_BLOCKS_SENTINEL,
+        _KV_CACHE_SHAPE_BLOCK_SIZE_SENTINEL,
         num_kv_heads,
         head_size,
         cache_dtype_str=cache_dtype,
     )
-    token_dim = shape.index(token_sentinel)
+    token_dim = shape.index(_KV_CACHE_SHAPE_BLOCK_SIZE_SENTINEL)
     if token_dim > block_dim:
         token_dim -= 1
     return token_dim

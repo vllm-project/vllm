@@ -558,6 +558,16 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         )
         self.verify_and_split_kv_cache_groups()
 
+    @property
+    def _cache_hit_alignment_tokens(self) -> int:
+        # Fine-grained partial hits may return hash-block-aligned lengths;
+        # otherwise it must stay scheduler-block-aligned.
+        return (
+            self.hash_block_size
+            if self.enable_partial_hash_hits
+            else self.scheduler_block_size
+        )
+
     def verify_and_split_kv_cache_groups(self) -> None:
         """
         Groups KV cache groups by their spec type for efficient batch processing
@@ -686,11 +696,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         # ``curr_hit_length``. Each eagle group applies the drop at most once
         # per candidate length (see issue #32802).
         eagle_verified: set[int] = set()
-        alignment_tokens = (
-            self.hash_block_size
-            if self.enable_partial_hash_hits
-            else self.scheduler_block_size
-        )
 
         while True:
             curr_hit_length = hit_length
@@ -724,7 +729,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     block_pool=self.block_pool,
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
-                    alignment_tokens=alignment_tokens,
+                    alignment_tokens=self._cache_hit_alignment_tokens,
                 )
                 _new_hit_length = get_cache_hit_length(hit_blocks[0], spec.block_size)
                 if drop_eagle_block:
@@ -790,11 +795,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         num_groups = len(self.kv_cache_config.kv_cache_groups)
         hit_blocks: list[list[KVCacheBlock]] = [[] for _ in range(num_groups)]
         hit_lengths: list[int] = [0] * num_groups
-        alignment_tokens = (
-            self.hash_block_size
-            if self.enable_partial_hash_hits
-            else self.scheduler_block_size
-        )
 
         for spec, group_ids, manager_cls, use_eagle in self.attention_groups:
             blocks = manager_cls.find_longest_cache_hit(
@@ -804,7 +804,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 block_pool=self.block_pool,
                 kv_cache_spec=spec,
                 drop_eagle_block=use_eagle,
-                alignment_tokens=alignment_tokens,
+                alignment_tokens=self._cache_hit_alignment_tokens,
             )
             group_hit = get_cache_hit_length(blocks[0], spec.block_size)
             for gid, blks in zip(group_ids, blocks):
