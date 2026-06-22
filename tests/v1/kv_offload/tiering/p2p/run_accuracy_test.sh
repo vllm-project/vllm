@@ -25,7 +25,7 @@
 #   --decoder-first             toggle decoder-first proxy mode
 #
 # Examples:
-#   bash tests/v1/kv_offload/run_accuracy_test.sh
+#   bash tests/v1/kv_offload/tiering/p2p/run_accuracy_test.sh
 #   NUM_PREFILL_INSTANCES=2 NUM_DECODE_INSTANCES=2 \
 #       bash tests/v1/kv_offload/run_accuracy_test.sh
 #   bash tests/v1/kv_offload/run_accuracy_test.sh --decoder-first
