@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -71,9 +72,32 @@ def moe_mmk(
     use_w8a8: tl.constexpr,
     use_w8a16: tl.constexpr,
     per_act_token_quant: tl.constexpr,
+    # Tensor-descriptor operand loads 
+    # a_base_ptr, b_base_ptr are the (already expert/CTA-offset) bases
+    # of A [M, K] and B [N, K]; descriptors load the per-K tiles.
+    a_base_ptr=None,
+    b_base_ptr=None,
+    M=0,
+    N=0,
+    stride_am: tl.int64 = 0,
+    stride_bn: tl.int64 = 0,
+    USE_TD: tl.constexpr = False,
 ):
     offs_k = tl.arange(0, BLOCK_K)
 
+    if USE_TD:
+        a_desc = tl.make_tensor_descriptor(
+            a_base_ptr,
+            shape=[M, K],
+            strides=[stride_am, stride_ak],
+            block_shape=[BLOCK_M, BLOCK_K],
+        )
+        b_desc = tl.make_tensor_descriptor(
+            b_base_ptr,
+            shape=[N, K],
+            strides=[stride_bn, stride_bk],
+            block_shape=[BLOCK_N, BLOCK_K],
+        )
     if use_w8a16:
         b_scale_ptrs = (
             b_scale_ptr + expert_id * stride_bse + offs_n[None, :] * stride_bsn
@@ -110,12 +134,17 @@ def moe_mmk(
     for k in range(0, tl.cdiv(K, BLOCK_K)):
         # Load the next block of A and B, generate a mask by checking the
         # K dimension.
-        a = tl.load(
-            a_ptrs,
-            mask=mask_m[:, None] & (offs_k[None, :] < K - k * BLOCK_K),
-            other=0.0,
-        )
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
+        if USE_TD:
+            # B is [N, K]; tile is [BLOCK_N, BLOCK_K], transposed for dot.
+            a = a_desc.load([0, k * BLOCK_K])
+            b = tl.trans(b_desc.load([0, k * BLOCK_K]))
+        else:
+            a = tl.load(
+                a_ptrs,
+                mask=mask_m[:, None] & (offs_k[None, :] < K - k * BLOCK_K),
+                other=0.0,
+            )
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)
         # We accumulate along the K dimension.
         if use_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
@@ -193,6 +222,7 @@ def expert_triton_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    USE_TD: tl.constexpr = False,
 ):
     offs_m = tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N) % N
@@ -238,6 +268,14 @@ def expert_triton_kernel(
         use_fp8_w8a8,
         use_int8_w8a16,
         per_act_token_quant,
+        # Tensor-descriptor operand loads
+        a_ptr,
+        b_ptr,
+        M,
+        N,
+        stride_am,
+        stride_bn,
+        USE_TD,
     )
 
     # store in C
@@ -292,6 +330,7 @@ def batched_triton_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    USE_TD: tl.constexpr = False,
 ):
     expert_id = tl.program_id(axis=0)
     e_num_tokens = tl.load(expert_num_tokens + expert_id)
@@ -372,6 +411,7 @@ def batched_triton_kernel(
         BLOCK_M,
         BLOCK_N,
         BLOCK_K,
+        USE_TD,
     )
 
 
@@ -444,6 +484,25 @@ def invoke_moe_batched_triton_kernel(
         stride_asm = 0
         stride_ask = 0
 
+    # VLLM_TRITON_MOE_USE_TD: unset=auto, 1=force on, 0=force off.
+    td_override = envs.VLLM_TRITON_MOE_USE_TD
+    use_td = current_platform.is_xpu() if td_override is None else td_override
+    use_td = (
+        use_td
+        and A.stride(2) == 1
+        and B.stride(2) == 1
+        and (K * A.element_size()) % 16 == 0
+        and (BLOCK_M & (BLOCK_M - 1)) == 0
+        and (BLOCK_N & (BLOCK_N - 1)) == 0
+        and (BLOCK_K & (BLOCK_K - 1)) == 0
+    )
+    if use_td:
+
+        def _td_alloc(size: int, alignment: int, stream):
+            return torch.empty(size, dtype=torch.int8, device=A.device)
+
+        triton.set_allocator(_td_alloc)
+
     batched_triton_kernel[grid](
         A,
         B,
@@ -485,6 +544,7 @@ def invoke_moe_batched_triton_kernel(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
+        USE_TD=use_td,
     )
 
 
