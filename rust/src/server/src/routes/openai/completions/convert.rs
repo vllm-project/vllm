@@ -108,6 +108,7 @@ pub(super) fn prepare_completion_request(
             seed: request.seed,
             max_tokens,
             min_tokens: request.min_tokens,
+            thinking_token_budget: request.thinking_token_budget,
             logprobs,
             prompt_logprobs,
             min_p: request.min_p,
@@ -264,6 +265,34 @@ mod tests {
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
         assert!(!prepared.text_request.decode_options.skip_special_tokens);
+    }
+
+    #[test]
+    fn prepare_completion_request_passes_through_thinking_token_budget() {
+        let prepare = |budget: serde_json::Value| {
+            let request: CompletionRequest = serde_json::from_value(json!({
+                "model": "Qwen/Qwen1.5-0.5B-Chat",
+                "prompt": "hello",
+                "thinking_token_budget": budget,
+            }))
+            .expect("parse request");
+            prepare_completion_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("prepare")
+            .text_request
+            .sampling_params
+            .thinking_token_budget
+        };
+
+        // The convert layer forwards the raw value verbatim (including the `-1`
+        // "unlimited" sentinel); normalization/validation happens during
+        // lowering (see `vllm_text::lower`).
+        assert_eq!(prepare(json!(64)), Some(64));
+        assert_eq!(prepare(json!(-1)), Some(-1));
+        assert_eq!(prepare(json!(null)), None);
     }
 
     #[test]
