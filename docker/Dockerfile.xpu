@@ -126,6 +126,44 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
 CMD ["/bin/bash"]
 
+######################### WHEEL BUILD STAGE #########################
+# Produce a vLLM XPU wheel without installing it. Used by the release
+# pipeline to harvest wheels for upload (mirrors the `vllm-build` stage
+# in docker/Dockerfile.cpu and the `build` stage in docker/Dockerfile).
+FROM vllm-base AS vllm-build
+
+ARG GIT_REPO_CHECK=0
+
+# Install Python build dependencies (subset of what vllm-openai needs --
+# no test deps, no triton uninstall/reinstall dance: requirements/xpu.txt
+# already pins the correct triton-xpu shim wheel).
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,src=requirements/common.txt,target=/workspace/vllm/requirements/common.txt \
+    --mount=type=bind,src=requirements/xpu.txt,target=/workspace/vllm/requirements/xpu.txt \
+    uv pip install grpcio-tools protobuf nanobind && \
+    uv pip install -r /workspace/vllm/requirements/xpu.txt
+
+COPY . .
+
+# Drop the pre-built Rust artifacts into the source tree. setup.py detects
+# them and ships them as-is, skipping the local Rust build.
+COPY --from=rust-build /workspace/vllm/vllm-rs vllm/vllm-rs
+COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
+
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
+
+ENV VLLM_TARGET_DEVICE=xpu
+
+# Build the wheel. oneAPI / oneCCL env vars are required by the C++ build
+# (XPU kernels link against MKL / oneDNN / oneCCL provided by the base image).
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=.git,target=.git \
+    source /opt/intel/oneapi/setvars.sh --force && \
+    source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force && \
+    export CMAKE_PREFIX_PATH="$(python3 -c 'import site; print(site.getsitepackages()[0])'):${CMAKE_PREFIX_PATH}" && \
+    python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+
 ######################### UCX + NIXL BUILD STAGE #########################
 # Build UCX and NIXL in a dedicated stage so compiler/autotools layers are
 # never included in the final runtime image (mirrors ROCm's build_rixl stage).
