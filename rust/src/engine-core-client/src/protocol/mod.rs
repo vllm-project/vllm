@@ -277,6 +277,12 @@ pub struct EngineCoreSamplingParams {
     pub max_tokens: u32,
     /// Minimum number of tokens to generate before EOS or stop-token handling.
     pub min_tokens: u32,
+    /// Maximum number of reasoning ("thinking") tokens to emit before the
+    /// reasoning section is force-closed. `None` means unlimited; the
+    /// user-facing `-1` sentinel is normalized to `None` by the frontend before
+    /// reaching this DTO, so only non-negative values are sent. Enforced
+    /// engine-side (and only when a reasoning parser is configured).
+    pub thinking_token_budget: Option<u64>,
     /// Number of log probabilities to return per generated token.
     ///
     /// `None` disables sample logprobs. `-1` requests the full vocabulary.
@@ -345,6 +351,7 @@ impl EngineCoreSamplingParams {
             seed: None,
             max_tokens: 65536,
             min_tokens: 0,
+            thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
             min_p: 0.0,
