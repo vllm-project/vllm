@@ -69,13 +69,10 @@ def test_aiter_mxfp8_registered():
     ]
 
 
-def test_triton_native_selectable():
-    """``--moe-backend triton-native`` (and the ``triton`` alias) force the native
-    Triton dot_scaled path even though FlyDSL is auto-picked by default."""
-    assert _BACKEND_NAME_MAP["triton_native"] is Fp8MoeBackend.TRITON_NATIVE_MXFP8
-    assert _BACKEND_NAME_MAP["triton"] is Fp8MoeBackend.TRITON_NATIVE_MXFP8
+def test_triton_selectable():
+    assert _BACKEND_NAME_MAP["triton"] is Fp8MoeBackend.TRITON_MXFP8
     # Not auto-selected (only reachable explicitly), so FlyDSL still wins auto.
-    assert Fp8MoeBackend.TRITON_NATIVE_MXFP8 not in _SUPPORTED_BACKENDS
+    assert Fp8MoeBackend.TRITON_MXFP8 not in _SUPPORTED_BACKENDS
 
 
 @pytest.mark.parametrize("ep_size", [1, 2])
