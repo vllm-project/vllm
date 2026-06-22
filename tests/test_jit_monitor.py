@@ -40,10 +40,10 @@ def _make_fake_knobs(*, autotuning_print=False, jit_hook=None):
 def _fake_cute_import_modules(compile_fn):
     """Fake Python's parent package + submodule for ``import cutlass.cute``."""
     fake_cute = ModuleType("cutlass.cute")
-    fake_cute.compile = compile_fn
+    setattr(fake_cute, "compile", compile_fn)
     fake_parent_package = ModuleType("cutlass")
     fake_parent_package.__path__ = []
-    fake_parent_package.cute = fake_cute
+    setattr(fake_parent_package, "cute", fake_cute)
     return {
         "cutlass": fake_parent_package,
         "cutlass.cute": fake_cute,
@@ -58,7 +58,7 @@ def _default_cute_compile(*args, **kwargs):
 def _patch_jit_modules(fake_knobs, *, cute_compile=_default_cute_compile):
     """Patch the Triton and CuTeDSL imports touched by ``jit_monitor.activate``."""
     fake_triton = ModuleType("triton")
-    fake_triton.knobs = fake_knobs
+    setattr(fake_triton, "knobs", fake_knobs)
     with (
         mock.patch.dict(
             sys.modules,
