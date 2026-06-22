@@ -37,7 +37,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    WNA16_SUPPORTED_BITS,
+
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Mxfp4,
@@ -47,7 +47,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
-    CompressedTensorsWNA8O8Int,
+    CompressedTensorsWNAMInt,
     CompressedTensorsWNA16,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear import (  # noqa: E501
@@ -645,15 +645,18 @@ class CompressedTensorsConfig(QuantizationConfig):
         return is_channel_group and input_quant_none and is_static
 
     @staticmethod
-    def _is_wNa8o8_int(
+    def _is_wNaM_int(
         weight_quant: QuantizationArgs,
         input_quant: QuantizationArgs | None,
         output_quant: QuantizationArgs | None,
         format: str | None,
     ) -> bool:
-        """Weight N-bit INT (pack-quantized for sub-byte, int-quantized for 8-bit)
-        with static per-tensor INT8 input/output activation quant, applied as a float
-        fake-quant around a weight-only matmul."""
+        """Weight N-bit INT with any INT activation quantization.
+
+        Static per-tensor INT8 activations use a float fake-quant around a
+        weight-only matmul.  Other activation configs (e.g. dynamic int4) are
+        handled by the kernel (Humming) internally.
+        """
         is_int_pack_format = format in (
             CompressionFormat.pack_quantized.value,
             CompressionFormat.int_quantized.value,
@@ -666,28 +669,14 @@ class CompressedTensorsConfig(QuantizationConfig):
             weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
         )
         is_intN_weight = is_static_int and is_channel_group and is_int_pack_format
-        is_static_int8_in = (
+        has_int_activation = (
             input_quant is not None
             and input_quant.type == QuantizationType.INT
-            and input_quant.strategy == QuantizationStrategy.TENSOR.value
-            and input_quant.num_bits == 8
-            and not input_quant.dynamic
-        )
-        is_static_int8_out = (
+        ) or (
             output_quant is not None
             and output_quant.type == QuantizationType.INT
-            and output_quant.strategy == QuantizationStrategy.TENSOR.value
-            and output_quant.num_bits == 8
-            and not output_quant.dynamic
         )
-        # Static int8-activation layers, plus sub-byte weight-only layers (e.g.
-        # 2-bit lm_head) that marlin-backed WNA16 cannot serve. Standard 4/8-bit
-        # weight-only (no activations) falls through to WNA16.
-        is_subbyte_weight_only = weight_quant.num_bits not in WNA16_SUPPORTED_BITS
-        needs_wNa8o8 = is_intN_weight and (
-            (is_static_int8_in and is_static_int8_out) or is_subbyte_weight_only
-        )
-        return needs_wNa8o8
+        return is_intN_weight and has_int_activation
 
     def _get_scheme_from_parts(
         self,
@@ -727,15 +716,15 @@ class CompressedTensorsConfig(QuantizationConfig):
                 actorder=weight_quant.actorder,
             )
 
-        # Must come before the WNA16 check; standard 4/8-bit weight-only (no
-        # output-activation scale) still falls through to WNA16.
-        if self._is_wNa8o8_int(weight_quant, input_quant, output_quant, format):
-            return CompressedTensorsWNA8O8Int(
+        # Must come before the WNA16 check; catches layers with INT
+        # activation quant (static int8 uses fake-quant, others use Humming).
+        if self._is_wNaM_int(weight_quant, input_quant, output_quant, format):
+            return CompressedTensorsWNAMInt(
                 num_bits=weight_quant.num_bits,
                 strategy=weight_quant.strategy,
                 group_size=weight_quant.group_size,
-                has_input_act=input_quant is not None,
-                has_output_act=output_quant is not None,
+                input_quant=input_quant,
+                output_quant=output_quant,
                 layer_name=layer_name,
                 quant_format=format,
             )
@@ -743,7 +732,6 @@ class CompressedTensorsConfig(QuantizationConfig):
         if (
             self._is_wNa16_group_channel(weight_quant, input_quant)
             and (format == CompressionFormat.pack_quantized.value)
-            and (weight_quant.num_bits in WNA16_SUPPORTED_BITS)
         ):
             return CompressedTensorsWNA16(
                 num_bits=weight_quant.num_bits,

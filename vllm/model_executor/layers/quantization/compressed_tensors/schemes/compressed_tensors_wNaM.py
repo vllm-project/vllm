@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Weight N-bit INT scheme with static INT8 input/output activation quant.
+"""Weight N-bit INT scheme with INT activation quantization.
 
-Handles compressed-tensors INT weight checkpoints that carry static per-tensor
-INT8 ``input_activations`` and/or ``output_activations``. The activation quant is
-reproduced as a float fake-quant on the layer input and output, around a
-weight-only matmul, rather than a fused int8 GEMM.
+Handles compressed-tensors INT weight checkpoints that carry INT
+``input_activations`` and/or ``output_activations``.  For legacy static
+per-tensor INT8 activations the activation quant is reproduced as a float
+fake-quant on the layer input/output.  For other activation configs (e.g.
+dynamic int4) the kernel (Humming) handles activation quant internally.
 """
 
 import math
@@ -14,6 +15,7 @@ from fractions import Fraction
 
 import torch
 from compressed_tensors.compressors.pack_quantized.helpers import pack_to_int32
+from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
@@ -32,11 +34,14 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PackedvLLMParameter,
 )
+from vllm.logger import init_logger
 from vllm.scalar_type import scalar_types
 
-__all__ = ["CompressedTensorsWNA8O8Int", "fake_quant_static_int8"]
+logger = init_logger(__name__)
 
-WNA8O8_SUPPORTED_TYPES_MAP = {
+__all__ = ["CompressedTensorsWNAMInt", "fake_quant_static_int8"]
+
+WNAM_SUPPORTED_TYPES_MAP = {
     2: scalar_types.uint2b2,
     3: scalar_types.uint3b4,
     4: scalar_types.uint4b8,
@@ -54,14 +59,26 @@ def fake_quant_static_int8(x: torch.Tensor, scale: torch.Tensor) -> torch.Tensor
     return q * scale
 
 
-class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
+def _is_static_int8(q: QuantizationArgs | None) -> bool:
+    return (
+        q is not None
+        and q.type == "int"
+        and q.strategy == QuantizationStrategy.TENSOR.value
+        and q.num_bits == 8
+        and not q.dynamic
+    )
+
+
+class CompressedTensorsWNAMInt(CompressedTensorsScheme):
+    _kernel_backends_being_used: set[str] = set()
+
     def __init__(
         self,
         num_bits: int,
         strategy: str,
         group_size: int | None = None,
-        has_input_act: bool = False,
-        has_output_act: bool = False,
+        input_quant: QuantizationArgs | None = None,
+        output_quant: QuantizationArgs | None = None,
         layer_name: str | None = None,
         quant_format: str = "pack-quantized",
     ):
@@ -69,18 +86,21 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         self.pack_factor = Fraction(32, num_bits)
         self.strategy = strategy
         self.group_size = -1 if group_size is None else group_size
-        self.has_input_act = has_input_act
-        self.has_output_act = has_output_act
         self.layer_name = layer_name
-        # "pack-quantized" (sub-byte, int32-packed) or "int-quantized" (8-bit int8).
         self.quant_format = quant_format
         self.is_int_quantized = quant_format == "int-quantized"
-        if num_bits not in WNA8O8_SUPPORTED_TYPES_MAP:
+
+        self._input_quant = input_quant
+        self._output_quant = output_quant
+        self._is_static_int8_input = _is_static_int8(input_quant)
+        self._is_static_int8_output = _is_static_int8(output_quant)
+
+        if num_bits not in WNAM_SUPPORTED_TYPES_MAP:
             raise ValueError(
-                f"Unsupported num_bits = {num_bits} for WNA8O8Int; "
-                f"supported = {sorted(WNA8O8_SUPPORTED_TYPES_MAP)}"
+                f"Unsupported num_bits = {num_bits} for WNAMInt; "
+                f"supported = {sorted(WNAM_SUPPORTED_TYPES_MAP)}"
             )
-        self.quant_type = WNA8O8_SUPPORTED_TYPES_MAP[num_bits]
+        self.quant_type = WNAM_SUPPORTED_TYPES_MAP[num_bits]
         self._input_scale: torch.Tensor | None = None
         self._output_scale: torch.Tensor | None = None
 
@@ -102,8 +122,6 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         output_size_per_partition = sum(output_partition_sizes)
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
-        # Set for kernels' weight prep; also covers ParallelLMHead, which does
-        # not set these in __init__.
         layer.output_partition_sizes = output_partition_sizes
         layer.params_dtype = params_dtype
         if not hasattr(layer, "has_bias"):
@@ -116,12 +134,19 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
                 output_size_per_partition,
             ),
             weight_type=self.quant_type,
-            act_type=params_dtype,  # activation quant applied externally (SRQ)
+            act_type=params_dtype,
             group_size=self.group_size,
             zero_points=False,
             has_g_idx=False,
         )
-        self.kernel = choose_mp_linear_kernel(mp_config)(
+        kernel_type = choose_mp_linear_kernel(mp_config)
+
+        if kernel_type.__name__ not in self._kernel_backends_being_used:
+            logger.info("Using %s for CompressedTensorsWNAMInt",
+                        kernel_type.__name__)
+            self._kernel_backends_being_used.add(kernel_type.__name__)
+
+        self.kernel = kernel_type(
             mp_config,
             w_q_param_name="weight_packed",
             w_s_param_name="weight_scale",
@@ -136,7 +161,6 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
     ):
         out = layer.output_size_per_partition
         if self.is_int_quantized:
-            # Plain int8 weight; packed to the canonical int32 layout after load.
             layer.register_parameter(
                 "weight",
                 ModelWeightParameter(
@@ -170,7 +194,6 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
                 ),
             )
 
-        # Scale: per-output-channel, or per group along the input dim under TP.
         group_size = self.group_size if self.group_size != -1 else input_size
         partitioned = not marlin_repeat_scales_on_all_ranks(
             False, self.group_size, input_size != input_size_per_partition
@@ -189,8 +212,8 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
         layer.register_parameter("weight_scale", weight_scale)
 
         for name, present in (
-            ("input_scale", self.has_input_act),
-            ("output_scale", self.has_output_act),
+            ("input_scale", self._is_static_int8_input),
+            ("output_scale", self._is_static_int8_output),
         ):
             if present:
                 layer.register_parameter(
@@ -201,13 +224,28 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
                     ),
                 )
 
+        if (
+            self._input_quant is not None
+            and not self._is_static_int8_input
+        ):
+            layer._humming_input_quant_config = {
+                "num_bits": self._input_quant.num_bits,
+                "type": str(self._input_quant.type),
+                "strategy": str(self._input_quant.strategy),
+                "symmetric": self._input_quant.symmetric,
+                "dynamic": self._input_quant.dynamic,
+                "group_size": self._input_quant.group_size or 0,
+                "quant_method": "compressed-tensors",
+                "format": self.quant_format,
+            }
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Lift the static activation scales off the layer (applied externally) so
-        # the kernel only sees weight tensors. Drop uncalibrated (zero) scales.
-        self._input_scale = self._take_act_scale(layer, "input_scale")
-        self._output_scale = self._take_act_scale(layer, "output_scale")
-        self.has_input_act = self._input_scale is not None
-        self.has_output_act = self._output_scale is not None
+        if self._is_static_int8_input:
+            self._input_scale = self._take_act_scale(layer, "input_scale")
+            self._is_static_int8_input = self._input_scale is not None
+        if self._is_static_int8_output:
+            self._output_scale = self._take_act_scale(layer, "output_scale")
+            self._is_static_int8_output = self._output_scale is not None
 
         if self.is_int_quantized:
             self._pack_int_quantized_weight(layer)
@@ -256,9 +294,9 @@ class CompressedTensorsWNA8O8Int(CompressedTensorsScheme):
     def apply_weights(
         self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None
     ) -> torch.Tensor:
-        if self.has_input_act:
+        if self._is_static_int8_input and self._input_scale is not None:
             x = fake_quant_static_int8(x, self._input_scale)
         out = self.kernel.apply_weights(layer, x, bias)
-        if self.has_output_act:
+        if self._is_static_int8_output and self._output_scale is not None:
             out = fake_quant_static_int8(out, self._output_scale)
         return out
