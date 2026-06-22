@@ -1,0 +1,215 @@
+<mxfile host="app.diagrams.net" modified="2026-06-09T00:00:00.000Z" agent="Codex" version="24.7.17">
+  <diagram id="vllm-kv-cache-workflow" name="vLLM KV Cache Workflow">
+    <mxGraphModel dx="1600" dy="1000" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1700" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="vLLM KV Cache 工作流程" style="text;html=1;strokeColor=none;fillColor=none;fontSize=28;fontStyle=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="520" y="30" width="660" height="50" as="geometry" />
+        </mxCell>
+
+        <mxCell id="lane_config" value="1. 配置与 KVCacheSpec 生成" style="swimlane;html=1;startSize=34;horizontal=1;rounded=0;fillColor=#f8fafc;strokeColor=#94a3b8;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="110" width="360" height="520" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_sched" value="2. Scheduler 分配逻辑" style="swimlane;html=1;startSize=34;horizontal=1;rounded=0;fillColor=#f7fee7;strokeColor=#84cc16;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="110" width="390" height="520" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_worker" value="3. Worker / GPU KV Tensor 初始化" style="swimlane;html=1;startSize=34;horizontal=1;rounded=0;fillColor=#fff7ed;strokeColor=#fb923c;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="870" y="110" width="390" height="520" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_attn" value="4. Attention 前向读写 KV Cache" style="swimlane;html=1;startSize=34;horizontal=1;rounded=0;fillColor=#eef2ff;strokeColor=#818cf8;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="110" width="360" height="780" as="geometry" />
+        </mxCell>
+        <mxCell id="lane_lifecycle" value="5. 请求结束 / Prefix Cache 复用" style="swimlane;html=1;startSize=34;horizontal=1;rounded=0;fillColor=#fdf2f8;strokeColor=#f472b6;fontSize=15;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="680" width="820" height="210" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_cli" value="CLI / Engine Args&lt;br&gt;--kv-cache-dtype&lt;br&gt;--kv-cache-memory-bytes&lt;br&gt;--gpu-memory-utilization&lt;br&gt;--block-size" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e2e8f0;strokeColor=#64748b;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="80" y="170" width="280" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="n_cache_config" value="CacheConfig&lt;br&gt;vllm/config/cache.py" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontSize=14;fontStyle=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="100" y="310" width="240" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n_spec" value="每层 Attention 生成 KVCacheSpec&lt;br&gt;Attention.get_kv_cache_spec()&lt;br&gt;MLA.get_kv_cache_spec()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0f2fe;strokeColor=#0284c7;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="80" y="420" width="280" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n_configs" value="get_kv_cache_configs()&lt;br&gt;合并 worker specs&lt;br&gt;计算 num_blocks / groups / tensors" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#cffafe;strokeColor=#0891b2;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="80" y="540" width="280" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_kvcfg" value="KVCacheConfig&lt;br&gt;num_blocks&lt;br&gt;kv_cache_groups&lt;br&gt;kv_cache_tensors" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#16a34a;fontSize=14;fontStyle=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="500" y="160" width="260" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n_sched_init" value="Scheduler 初始化&lt;br&gt;KVCacheManager" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bbf7d0;strokeColor=#15803d;fontSize=14;fontStyle=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="500" y="290" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n_blockpool" value="BlockPool&lt;br&gt;管理 free / cached / evictable blocks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ecfccb;strokeColor=#65a30d;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="480" y="400" width="300" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n_coord" value="KVCacheCoordinator&lt;br&gt;NoPrefix / Unitary / Hybrid" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d9f99d;strokeColor=#4d7c0f;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="480" y="500" width="300" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n_single_mgr" value="SingleTypeKVCacheManager&lt;br&gt;Full / SlidingWindow / Mamba / CrossAttention" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bef264;strokeColor=#4d7c0f;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="480" y="600" width="300" height="70" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_worker_init" value="Worker 初始化&lt;br&gt;GPUWorker.initialize_from_config()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fed7aa;strokeColor=#ea580c;fontSize=13;fontStyle=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="930" y="180" width="270" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n_model_init" value="ModelRunner.initialize_kv_cache()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffedd5;strokeColor=#f97316;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="930" y="300" width="270" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="n_alloc_tensor" value="_allocate_kv_cache_tensors()&lt;br&gt;按 KVCacheTensor size 分配大块 GPU tensor" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fde68a;strokeColor=#d97706;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="910" y="410" width="310" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n_reshape_tensor" value="_reshape_kv_cache_tensors()&lt;br&gt;按 backend.get_kv_cache_shape()&lt;br&gt;切分/reshape/permutation 到每层 layout" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#d97706;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="910" y="520" width="310" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n_bind" value="bind_kv_cache()&lt;br&gt;注入 Attention.kv_cache&lt;br&gt;并绑定 forward context" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fcd34d;strokeColor=#b45309;fontSize=13;fontStyle=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="930" y="640" width="270" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_request" value="请求进入 Scheduler" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0e7ff;strokeColor=#4f46e5;fontSize=13;fontStyle=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1350" y="160" width="260" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="n_need_blocks" value="根据 prompt / decode tokens&lt;br&gt;计算需要的 KV blocks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c7d2fe;strokeColor=#4f46e5;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1350" y="250" width="260" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n_alloc_slots" value="KVCacheManager.allocate_slots()&lt;br&gt;申请新 blocks / 复用 computed blocks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ddd6fe;strokeColor=#7c3aed;fontSize=13;fontStyle=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1350" y="360" width="260" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="n_mapping" value="生成 block_table + slot_mapping&lt;br&gt;block_table: seq -&gt; cache block ids&lt;br&gt;slot_mapping: token -&gt; cache slot" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ede9fe;strokeColor=#7c3aed;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="480" width="280" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n_forward" value="ModelRunner forward&lt;br&gt;Attention.forward()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#bfdbfe;strokeColor=#2563eb;fontSize=13;fontStyle=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1360" y="610" width="240" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n_update" value="写 KV Cache&lt;br&gt;unified_kv_cache_update()&lt;br&gt;或 unified_mla_kv_cache_update()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#2563eb;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="720" width="280" height="85" as="geometry" />
+        </mxCell>
+        <mxCell id="n_kernel" value="CUDA / backend kernel&lt;br&gt;reshape_and_cache / reshape_and_cache_flash&lt;br&gt;paged_attention_v1 / paged_attention_v2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c4b5fd;strokeColor=#6d28d9;fontSize=13;fontStyle=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="835" width="280" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="n_read" value="Paged Attention 读取历史 KV&lt;br&gt;按 block_table 找到 cache blocks&lt;br&gt;输出 hidden states" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e9d5ff;strokeColor=#9333ea;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1340" y="965" width="280" height="85" as="geometry" />
+        </mxCell>
+
+        <mxCell id="n_finish" value="请求完成?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fbcfe8;strokeColor=#db2777;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="520" y="735" width="140" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="n_free" value="KVCacheManager.free()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f9a8d4;strokeColor=#be185d;fontSize=13;fontStyle=1;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="720" y="745" width="220" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="n_prefix" value="Prefix caching 开启?" style="rhombus;whiteSpace=wrap;html=1;fillColor=#fce7f3;strokeColor=#db2777;fontSize=13;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="990" y="730" width="150" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="n_cache_blocks" value="cache_blocks()&lt;br&gt;保留可复用 blocks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fbcfe8;strokeColor=#be185d;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="850" width="220" height="65" as="geometry" />
+        </mxCell>
+        <mxCell id="n_return_free" value="BlockPool.free_blocks()&lt;br&gt;归还 free queue" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fbcfe8;strokeColor=#be185d;fontSize=13;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="730" y="850" width="220" height="65" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend" value="核心数据结构&lt;br&gt;KVCacheConfig: cache 总容量和分组&lt;br&gt;KVCacheBlock: 逻辑 cache block&lt;br&gt;block_table: request 到 block id 的映射&lt;br&gt;slot_mapping: token 到物理 cache slot 的映射" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#64748b;dashed=1;fontSize=12;arcSize=8;" vertex="1" parent="1">
+          <mxGeometry x="60" y="720" width="330" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#475569;endArrow=block;endFill=1;" edge="1" parent="1" source="n_cli" target="n_cache_config">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#475569;endArrow=block;endFill=1;" edge="1" parent="1" source="n_cache_config" target="n_spec">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#475569;endArrow=block;endFill=1;" edge="1" parent="1" source="n_spec" target="n_configs">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#475569;endArrow=block;endFill=1;" edge="1" parent="1" source="n_configs" target="n_kvcfg">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#15803d;endArrow=block;endFill=1;" edge="1" parent="1" source="n_kvcfg" target="n_sched_init">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#15803d;endArrow=block;endFill=1;" edge="1" parent="1" source="n_sched_init" target="n_blockpool">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#15803d;endArrow=block;endFill=1;" edge="1" parent="1" source="n_sched_init" target="n_coord">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#15803d;endArrow=block;endFill=1;" edge="1" parent="1" source="n_coord" target="n_single_mgr">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ea580c;endArrow=block;endFill=1;" edge="1" parent="1" source="n_kvcfg" target="n_worker_init">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ea580c;endArrow=block;endFill=1;" edge="1" parent="1" source="n_worker_init" target="n_model_init">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ea580c;endArrow=block;endFill=1;" edge="1" parent="1" source="n_model_init" target="n_alloc_tensor">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ea580c;endArrow=block;endFill=1;" edge="1" parent="1" source="n_alloc_tensor" target="n_reshape_tensor">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ea580c;endArrow=block;endFill=1;" edge="1" parent="1" source="n_reshape_tensor" target="n_bind">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e14" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4f46e5;endArrow=block;endFill=1;" edge="1" parent="1" source="n_request" target="n_need_blocks">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e15" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4f46e5;endArrow=block;endFill=1;" edge="1" parent="1" source="n_need_blocks" target="n_alloc_slots">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e16" value="申请/复用 block ids" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4f46e5;endArrow=block;endFill=1;fontSize=12;" edge="1" parent="1" source="n_alloc_slots" target="n_blockpool">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e17" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4f46e5;endArrow=block;endFill=1;" edge="1" parent="1" source="n_alloc_slots" target="n_mapping">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e18" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#4f46e5;endArrow=block;endFill=1;" edge="1" parent="1" source="n_mapping" target="n_forward">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e19" value="Attention.kv_cache tensor" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#ea580c;endArrow=block;endFill=1;fontSize=12;" edge="1" parent="1" source="n_bind" target="n_forward">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e20" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2563eb;endArrow=block;endFill=1;" edge="1" parent="1" source="n_forward" target="n_update">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e21" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#2563eb;endArrow=block;endFill=1;" edge="1" parent="1" source="n_update" target="n_kernel">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e22" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#6d28d9;endArrow=block;endFill=1;" edge="1" parent="1" source="n_kernel" target="n_read">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e23" value="继续 decode" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#64748b;endArrow=block;endFill=1;dashed=1;fontSize=12;" edge="1" parent="1" source="n_read" target="n_request">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1650" y="1090" />
+              <mxPoint x="1650" y="130" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e24" value="完成" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#be185d;endArrow=block;endFill=1;fontSize=12;" edge="1" parent="1" source="n_read" target="n_finish">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1300" y="1010" />
+              <mxPoint x="1300" y="780" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e25" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#be185d;endArrow=block;endFill=1;fontSize=12;" edge="1" parent="1" source="n_finish" target="n_free">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e26" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#be185d;endArrow=block;endFill=1;" edge="1" parent="1" source="n_free" target="n_prefix">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e27" value="是" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#be185d;endArrow=block;endFill=1;fontSize=12;" edge="1" parent="1" source="n_prefix" target="n_cache_blocks">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e28" value="否" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;strokeColor=#be185d;endArrow=block;endFill=1;fontSize=12;" edge="1" parent="1" source="n_prefix" target="n_return_free">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

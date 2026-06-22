@@ -5,7 +5,7 @@ Prefix caching kv-cache blocks is a popular optimization in LLM inference to avo
 While there are many ways to implement prefix caching, vLLM chooses a hash-based approach. Specifically, we hash each kv-cache block by the tokens in the block and the tokens in the prefix before the block:
 
 ```text
-                    Block 1                  Block 2                  Block 3
+Block 1                  Block 2                  Block 3
          [A gentle breeze stirred] [the leaves as children] [laughed in the distance]
 Block 1: |<--- block tokens ---->|
 Block 2: |<------- prefix ------>| |<--- block tokens --->|
@@ -19,18 +19,20 @@ In the example above, the KV cache in the first block can be uniquely identified
 * Extra hashes: Other values required to make this block unique, such as LoRA IDs, multi-modality input hashes (see the example below), and cache salts to isolate caches in multi-tenant environments.
 
 !!! note "Note 1"
-    We only cache full blocks.
+We only cache full blocks.
 
 !!! note "Note 2"
-    In previous versions, the hash key was not guaranteed to be collision-free. As of v0.11, the default hashing algorithm is `sha256`, which addresses collision risks.
+In previous versions, the hash key was not guaranteed to be collision-free. As of v0.11, the default hashing algorithm is `sha256`, which addresses collision risks.
 
-    For `vllm serve`, you can control the hashing algorithm via `--prefix-caching-hash-algo`:
-    - `sha256` (default): Uses Python's `pickle` for serialization. Hashes may not be reproducible across different Python or vLLM versions.
-    - `sha256_cbor`: Uses `cbor2` for serialization, providing a reproducible, cross-language compatible hash. This is recommended for deterministic caching across environments.
-    - `xxhash`: `Uses Pickle serialization with xxHash (128-bit) for faster, non-cryptographic hashing. Requires the optional `xxhash` package. IMPORTANT: Use of a hashing algorithm that is not considered cryptographically secure theoretically increases the risk of hash collisions, which can cause undefined behavior or even leak private information in multi-tenant environments. Even if collisions are still very unlikely, it is important to consider your security risk tolerance against the performance benefits before turning this on.
-    - `xxhash_cbor` combines canonical CBOR serialization with xxHash for reproducible hashing. Requires the optional `xxhash` package.    
+```
+For `vllm serve`, you can control the hashing algorithm via `--prefix-caching-hash-algo`:
+- `sha256` (default): Uses Python's `pickle` for serialization. Hashes may not be reproducible across different Python or vLLM versions.
+- `sha256_cbor`: Uses `cbor2` for serialization, providing a reproducible, cross-language compatible hash. This is recommended for deterministic caching across environments.
+- `xxhash`: `Uses Pickle serialization with xxHash (128-bit) for faster, non-cryptographic hashing. Requires the optional `xxhash` package. IMPORTANT: Use of a hashing algorithm that is not considered cryptographically secure theoretically increases the risk of hash collisions, which can cause undefined behavior or even leak private information in multi-tenant environments. Even if collisions are still very unlikely, it is important to consider your security risk tolerance against the performance benefits before turning this on.
+- `xxhash_cbor` combines canonical CBOR serialization with xxHash for reproducible hashing. Requires the optional `xxhash` package.
+```
 
-**A hashing example with multi-modality inputs**  
+**A hashing example with multi-modality inputs**
 In this example, we illustrate how prefix caching works with multi-modality inputs (e.g., images). Assuming we have a request with the following messages:
 
 ```text
@@ -120,18 +122,18 @@ class KVCacheBlock:
 
 There are two design points to highlight:
 
-1. We allocate all KVCacheBlock when initializing the KV cache manager to be a block pool. This avoids Python object creation overheads and can easily track all blocks all the time.  
-2. We introduce doubly linked list pointers directly in the KVCacheBlock, so that we could construct a free queue directly. This gives us two benefits:  
-    1. We could have O(1) complexity moving elements in the middle to the tail.  
-    2. We could avoid introducing another Python queue (e.g., `deque`) which has a wrapper to the elements.
+1. We allocate all KVCacheBlock when initializing the KV cache manager to be a block pool. This avoids Python object creation overheads and can easily track all blocks all the time.
+2. We introduce doubly linked list pointers directly in the KVCacheBlock, so that we could construct a free queue directly. This gives us two benefits:
+   1. We could have O(1) complexity moving elements in the middle to the tail.
+   2. We could avoid introducing another Python queue (e.g., `deque`) which has a wrapper to the elements.
 
 As a result, we will have the following components when the KV cache manager is initialized:
 
 ![Component Overview](../assets/design/prefix_caching/overview.png)
 
-* Block Pool: A list of KVCacheBlock.  
-* Free Block Queue: Only store the pointers of head and tail blocks for manipulations.  
-* Cache blocks: Mapping from hash key to block IDs.  
+* Block Pool: A list of KVCacheBlock.
+* Free Block Queue: Only store the pointers of head and tail blocks for manipulations.
+* Cache blocks: Mapping from hash key to block IDs.
 * Request blocks: Mapping from request ID to allocated block IDs.
 
 ## Operations
@@ -140,21 +142,21 @@ As a result, we will have the following components when the KV cache manager is 
 
 **New request:** Workflow for the scheduler to schedule a new request with KV cache block allocation:
 
-1. The scheduler calls `kv_cache_manager.get_computed_blocks()` to get a sequence of blocks that have already been computed. This is done by hashing the prompt tokens in the request and looking up cache blocks.  
-2. The scheduler calls `kv_cache_manager.allocate_slots()`. It does the following steps:  
-    1. Compute the number of new required blocks, and return if there are no sufficient blocks to allocate.  
-    2. “Touch” the computed blocks. It increases the reference count of the computed block by one, and removes the block from the free queue if the block wasn’t used by other requests. This is to avoid these computed blocks being evicted. See the example in the next section for illustration.  
-    3. Allocate new blocks by popping the heads of the free queue. If the head block is a cached block, this also “evicts” the block so that no other requests can reuse it anymore from now on.  
-    4. If an allocated block is already full of tokens, we immediately add it to the cache block, so that the block can be reused by other requests in the same batch.
+1. The scheduler calls `kv_cache_manager.get_computed_blocks()` to get a sequence of blocks that have already been computed. This is done by hashing the prompt tokens in the request and looking up cache blocks.
+2. The scheduler calls `kv_cache_manager.allocate_slots()`. It does the following steps:
+   1. Compute the number of new required blocks, and return if there are no sufficient blocks to allocate.
+   2. “Touch” the computed blocks. It increases the reference count of the computed block by one, and removes the block from the free queue if the block wasn’t used by other requests. This is to avoid these computed blocks being evicted. See the example in the next section for illustration.
+   3. Allocate new blocks by popping the heads of the free queue. If the head block is a cached block, this also “evicts” the block so that no other requests can reuse it anymore from now on.
+   4. If an allocated block is already full of tokens, we immediately add it to the cache block, so that the block can be reused by other requests in the same batch.
 
 **Running request:** Workflow for the scheduler to schedule a running request with KV cache block allocation:
 
-1. The scheduler calls `kv_cache_manager.allocate_slots()`. It does the following steps:  
-    1. Compute the number of new required blocks, and return if there are no sufficient blocks to allocate.  
-    2. Allocate new blocks by popping the heads of the free queue. If the head block is a cached block, this also “evicts” the block so that no other requests can reuse it anymore from now on.  
-    3. Append token IDs to the slots in existing blocks as well as the new blocks. If a block is full, we add it to the cache block to cache it.
+1. The scheduler calls `kv_cache_manager.allocate_slots()`. It does the following steps:
+   1. Compute the number of new required blocks, and return if there are no sufficient blocks to allocate.
+   2. Allocate new blocks by popping the heads of the free queue. If the head block is a cached block, this also “evicts” the block so that no other requests can reuse it anymore from now on.
+   3. Append token IDs to the slots in existing blocks as well as the new blocks. If a block is full, we add it to the cache block to cache it.
 
-**Duplicated blocks**  
+**Duplicated blocks**
 Assuming block size is 4 and you send a request (Request 1\) with prompt ABCDEF and decoding length 3:
 
 ```text
@@ -203,8 +205,8 @@ When a request is finished, we free all its blocks if no other requests are usin
 
 When the head block (least recently used block) of the free queue is cached, we have to evict the block to prevent it from being used by other requests. Specifically, eviction involves the following steps:
 
-1. Pop the block from the head of the free queue. This is the LRU block to be evicted.  
-2. Remove the block ID from the cache block.  
+1. Pop the block from the head of the free queue. This is the LRU block to be evicted.
+2. Remove the block ID from the cache block.
 3. Remove the block hash.
 
 ## Example
@@ -220,6 +222,36 @@ In this example, we assume the block size is 4 (each block can cache 4 tokens), 
 ![Example Time 2](../assets/design/prefix_caching/example-time-3.png)
 
 **Time 3: Request 1 comes in with the 14 prompt tokens, where the first 10 tokens are the same as request 0.** We can see that only the first 2 blocks (8 tokens) hit the cache, because the 3rd block only matches 2 of 4 tokens.
+
+## 2. Root Refresh + Branch Aging
+
+这是我觉得最适合 Prefix-Chain Fracture 的技术路线。
+
+不要直接去挤掉整个 victim prefix。你可以让公共 root 保持 fresh，同时让 branch-entry block 逐渐 aging。
+
+假设 victim prefix 是：
+
+P=G+B+SP = G + B + S**P**=**G**+**B**+**S**其中：
+
+* GG**G**：global system prompt，很常见；
+* BB**B**：branch-specific template，比如某个 agent workflow、tool schema、RAG 模板；
+* SS**S**：长 suffix，比如 examples、document schema、instructions。
+
+攻击者周期性发送只包含 GG**G** 的请求，或者包含另一个分支 G+B′G+B'**G**+**B**′ 的请求：
+
+Arefresh=G+qaA\_{\\text{refresh}} = G + q\_a**A**refresh****=**G**+**q**a****或
+
+Arefresh=G+B′+qa,B′≠BA\_{\\text{refresh}} = G + B' + q\_a,\\quad B'\\neq B**A**refresh****=**G**+**B**′**+**q**a****,**B**′****=**B这样做会 touch GG**G**，但不会 touch victim branch BB**B**。结果是：
+
+Age(G)<Age(B)Age(G) < Age(B)**A**g**e**(**G**)**<**A**g**e**(**B**)**即 GG**G** 更年轻，BB**B** 更老。之后只需要很小的 allocation pressure，就更可能 evict BB**B** 的入口 block，而不是 evict GG**G**。
+
+这会产生一个非常漂亮的现象：
+
+G hit,B miss,S unusableG \\text{ hit},\\quad B \\text{ miss},\\quad S \\text{ unusable}**G** hit**,**B** miss**,**S** unusable也就是：
+
+> root remains cached, branch entry is evicted, suffix reuse collapses.
+
+这个比“把所有 cache 都替换掉”有新意很多。
 
 ![Example Time 3](../assets/design/prefix_caching/example-time-4.png)
 
