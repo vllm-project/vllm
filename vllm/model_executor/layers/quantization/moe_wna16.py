@@ -552,6 +552,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
 
             device = get_tp_group().device
             tp_rank = get_tensor_model_parallel_rank()
+            tp_size = layer.moe_config.moe_parallel_config.tp_size
             loaded_weight = loaded_weight.to(device)
             shard_size = layer.intermediate_size_per_partition
 

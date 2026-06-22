@@ -159,9 +159,6 @@ _TEXT_GENERATION_MODELS = {
     "MellumForCausalLM": ("mellum", "MellumForCausalLM"),
     "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
     "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
-    "MiniMaxForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
-    "MiniMaxText01ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
-    "MiniMaxM1ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxM2ForCausalLM": ("minimax_m2", "MiniMaxM2ForCausalLM"),
     "MiniMaxM3SparseForCausalLM": (
         "vllm.models.minimax_m3",
@@ -490,10 +487,6 @@ _MULTIMODAL_MODELS = {
         "vllm.models.minimax_m3",
         "MiniMaxM3SparseForConditionalGeneration",
     ),
-    "MiniMaxVL01ForConditionalGeneration": (
-        "minimax_vl_01",
-        "MiniMaxVL01ForConditionalGeneration",
-    ),
     "MiniCPMO": ("minicpmo", "MiniCPMO"),
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
     "MiniCPMV4_6ForConditionalGeneration": (
@@ -617,6 +610,8 @@ _SPECULATIVE_DECODING_MODELS = {
     "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen2_5vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen3vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
+    "Eagle3Qwen3ForCausalLM": ("qwen3_eagle3", "Eagle3Qwen3ForCausalLM"),
+    "PeagleQwen3ForCausalLM": ("qwen3_eagle3", "Eagle3Qwen3ForCausalLM"),
     "EagleMistralForCausalLM": ("mistral_eagle", "EagleMistralForCausalLM"),
     "EagleMistralLarge3ForCausalLM": (
         "mistral_large_3_eagle",
@@ -733,6 +728,10 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "XverseForCausalLM": "0.23.0",
     "Dots1ForCausalLM": "0.23.0",
     "BambaForCausalLM": "0.23.0",
+    "MiniMaxForCausalLM": "0.23.0",
+    "MiniMaxText01ForCausalLM": "0.23.0",
+    "MiniMaxM1ForCausalLM": "0.23.0",
+    "MiniMaxVL01ForConditionalGeneration": "0.23.0",
 }
 
 _OOT_SUPPORTED_MODELS = {
