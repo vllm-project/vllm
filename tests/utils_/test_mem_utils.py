@@ -81,8 +81,9 @@ def test_memory_snapshot_uses_psutil_on_integrated_gpu():
     with (
         patch("vllm.utils.mem_utils.current_platform") as mock_platform,
         patch("vllm.utils.mem_utils.psutil") as mock_psutil,
+        patch("torch.accelerator") as mock_accelerator,
     ):
-        mock_platform.mem_get_info.return_value = (
+        mock_accelerator.mem_get_info.return_value = (
             mock_cuda_free,
             mock_cuda_total,
         )
@@ -90,8 +91,8 @@ def test_memory_snapshot_uses_psutil_on_integrated_gpu():
         mock_platform.memory_stats.return_value = {
             "allocated_bytes.all.peak": 0,
         }
-        mock_platform.memory_reserved.return_value = 0
-        mock_platform.current_device = lambda: "cuda:0"
+        mock_accelerator.memory_reserved.return_value = 0
+        mock_accelerator.current_device = lambda: "cuda:0"
 
         mock_vmem = MagicMock()
         mock_vmem.available = mock_psutil_available
@@ -112,17 +113,18 @@ def test_memory_snapshot_uses_cuda_on_discrete_gpu():
     with (
         patch("vllm.utils.mem_utils.current_platform") as mock_platform,
         patch("vllm.utils.mem_utils.psutil") as mock_psutil,
+        patch("torch.accelerator") as mock_accelerator,
     ):
-        mock_platform.mem_get_info.return_value = (
+        mock_accelerator.mem_get_info.return_value = (
             mock_cuda_free,
             mock_cuda_total,
         )
         mock_platform.is_integrated_gpu.return_value = False
-        mock_platform.memory_stats.return_value = {
+        mock_accelerator.memory_stats.return_value = {
             "allocated_bytes.all.peak": 0,
         }
-        mock_platform.memory_reserved.return_value = 0
-        mock_platform.current_device = lambda: "cuda:0"
+        mock_accelerator.memory_reserved.return_value = 0
+        mock_accelerator.current_device = lambda: "cuda:0"
 
         snapshot = MemorySnapshot(device="cuda:0")
 
