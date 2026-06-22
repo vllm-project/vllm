@@ -199,6 +199,32 @@ class Worker(WorkerBase):
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
 
+    def compute_weight_checksums(self) -> dict[str, str]:
+        """Return SHA-256 hex digests for every named parameter.
+
+        Copies each tensor to CPU before hashing so the result is the same
+        regardless of which GPU the worker is on.  Non-persistent buffers
+        (e.g. RoPE sin/cos caches recomputed from config) are skipped
+        because they vary across restarts even when weights are unchanged.
+        """
+        import hashlib
+
+        # Patterns for non-persistent buffers that are recomputed from
+        # configuration, not from checkpoint data.
+        _SKIP_PATTERNS = (
+            "rotary_emb.cos_cached",
+            "rotary_emb.sin_cached",
+            "rotary_emb.cos_sin_cache",
+        )
+
+        checksums: dict[str, str] = {}
+        for name, param in self.model_runner.model.named_parameters():
+            if any(pat in name for pat in _SKIP_PATTERNS):
+                continue
+            raw = param.data.contiguous().cpu().view(torch.uint8).numpy().tobytes()
+            checksums[name] = hashlib.sha256(raw).hexdigest()
+        return checksums
+
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
             current_platform.is_cuda_alike()

@@ -355,6 +355,18 @@ class Executor(ABC):
         if not self.sleeping_tags:
             self.is_sleeping = False
 
+    def compute_weight_checksums(self) -> dict:
+        """Return SHA-256 digests for all named parameters across workers.
+
+        For TP>1, the result is a union of each rank's shard checksums.  For
+        TP=1 the list has one element and we return it directly.
+        """
+        results: list[dict] = self.collective_rpc("compute_weight_checksums")
+        combined: dict = {}
+        for worker_result in results:
+            combined.update(worker_result)
+        return combined
+
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:

@@ -3,6 +3,7 @@
 
 import json
 import threading
+import time
 from http import HTTPStatus
 from typing import Annotated
 
@@ -17,7 +18,18 @@ from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
 from vllm.v1.engine import PauseMode
 
+from .metrics import (
+    rl_weight_gen,
+    rl_weight_update_active,
+    rl_weight_update_duration_seconds,
+    rl_weight_update_total,
+)
+from .rl_state_machine import RLStateMachineState, require_update_active, require_update_inactive
+
 logger = init_logger(__name__)
+
+# Engine index label for Prometheus (always "0" for single-engine deployments).
+_ENGINE_IDX = "0"
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -53,14 +65,25 @@ class _WeightVersionState:
         self._lock = threading.Lock()
         self._gen: int = 0
         self._label: str = ""
+        self._update_start: float | None = None  # perf_counter at start_weight_update
 
-    def bump(self, label: str | None = None) -> int:
-        """Increment gen and optionally set label. Returns the new gen."""
+    def mark_start(self) -> None:
+        with self._lock:
+            self._update_start = time.perf_counter()
+
+    def bump(self, label: str | None = None) -> tuple[int, float | None]:
+        """Increment gen and optionally set label. Returns (new_gen, elapsed_s)."""
         with self._lock:
             self._gen += 1
             if label is not None:
                 self._label = label
-            return self._gen
+            elapsed = (
+                time.perf_counter() - self._update_start
+                if self._update_start is not None
+                else None
+            )
+            self._update_start = None
+            return self._gen, elapsed
 
     def set_label(self, label: str) -> None:
         with self._lock:
@@ -198,6 +221,16 @@ async def start_weight_update(raw_request: Request):
     await engine_client(raw_request).start_weight_update(
         is_checkpoint_format=is_checkpoint_format
     )
+    # Enforce state machine: mark update in-progress (raises 409 on double-start).
+    sm: RLStateMachineState = raw_request.app.state.rl_state
+    try:
+        sm.on_start_weight_update()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=HTTPStatus.CONFLICT.value, detail=str(exc)) from exc
+    # Record start time for duration histogram; mark Prometheus metric active.
+    wv: _WeightVersionState = raw_request.app.state.weight_version
+    wv.mark_start()
+    rl_weight_update_active.labels(engine=_ENGINE_IDX).set(1)
     return JSONResponse(content={"message": "Weight update started"})
 
 
@@ -213,6 +246,12 @@ async def update_weights(raw_request: Request):
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'update_info' in request body",
         )
+    # State machine: update_weights must follow start_weight_update.
+    sm: RLStateMachineState = raw_request.app.state.rl_state
+    try:
+        sm.on_update_weights()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=HTTPStatus.CONFLICT.value, detail=str(exc)) from exc
     await engine_client(raw_request).update_weights(
         request=WeightTransferUpdateRequest(update_info=update_info)
     )
@@ -233,12 +272,26 @@ async def finish_weight_update(raw_request: Request):
         # RuntimeError: Starlette raises this if the body was already consumed.
         body = {}
 
+    # State machine: finish requires preceding start.
+    sm: RLStateMachineState = raw_request.app.state.rl_state
+    try:
+        sm.on_finish_weight_update()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=HTTPStatus.CONFLICT.value, detail=str(exc)) from exc
+
     await engine_client(raw_request).finish_weight_update()
 
-    # Bump version after engine confirms success.
+    # Bump version after engine confirms success; collect elapsed time.
     wv: _WeightVersionState = raw_request.app.state.weight_version
     label = body.get("weight_label")
-    new_gen = wv.bump(label=label)
+    new_gen, elapsed_s = wv.bump(label=label)
+
+    # Update Prometheus metrics.
+    rl_weight_update_total.labels(engine=_ENGINE_IDX).inc()
+    rl_weight_gen.labels(engine=_ENGINE_IDX).set(new_gen)
+    rl_weight_update_active.labels(engine=_ENGINE_IDX).set(0)
+    if elapsed_s is not None:
+        rl_weight_update_duration_seconds.labels(engine=_ENGINE_IDX).observe(elapsed_s)
 
     return JSONResponse(content={
         "message": "Weight update finished",
@@ -297,6 +350,101 @@ async def update_weight_label(raw_request: Request) -> JSONResponse:
 
 
 # ───────────────────────────────────────────────────────────────────────
+# Weight checksum (snapshot / compare / checksum / reset)
+# ───────────────────────────────────────────────────────────────────────
+
+
+class _WeightCheckerState:
+    """Stores the last SHA-256 weight snapshot for compare operations.
+
+    Thread-safe because all HTTP handlers run in the same asyncio event loop
+    (single-threaded from the checker's perspective).
+    """
+
+    def __init__(self):
+        self.snapshot: dict[str, str] | None = None
+
+    def store(self, checksums: dict[str, str]) -> None:
+        self.snapshot = checksums
+
+    def compare(self, current: dict[str, str]) -> tuple[bool, list[str]]:
+        """Return (all_match, list_of_mismatched_names)."""
+        if self.snapshot is None:
+            raise RuntimeError("No snapshot taken yet; call action='snapshot' first")
+        mismatches = [
+            name for name, digest in current.items()
+            if self.snapshot.get(name) != digest
+        ]
+        # Also flag names present in snapshot but missing in current
+        missing = [n for n in self.snapshot if n not in current]
+        all_bad = mismatches + missing
+        return len(all_bad) == 0, all_bad
+
+    def reset(self) -> None:
+        self.snapshot = None
+
+
+@router.post("/weight_checker")
+async def weight_checker(raw_request: Request) -> JSONResponse:
+    """Snapshot, compare, or checksum model weights via SHA-256.
+
+    Request body::
+
+        {"action": "snapshot"}   -> take a fresh weight digest and store it
+        {"action": "compare"}    -> compare current weights against stored snapshot
+        {"action": "checksum"}   -> return per-tensor SHA-256 without storing
+        {"action": "reset"}      -> clear the stored snapshot
+
+    Responses (all 200 on success):
+
+    * **snapshot**: ``{"status": "snapshotted", "n_tensors": int}``
+    * **compare**:  ``{"match": bool, "mismatches": [str]}``
+    * **checksum**: ``{"checksums": {name: hex_str}}``
+    * **reset**:    ``{"status": "reset"}``
+
+    Use case in RL: call ``snapshot`` right before a weight update, then
+    ``compare`` after ``finish_weight_update`` to verify the engine's weights
+    actually changed (non-zero NCCL transfer).
+    """
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
+
+    action = body.get("action")
+    if action not in ("snapshot", "compare", "checksum", "reset"):
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail=f"action must be one of snapshot|compare|checksum|reset, got {action!r}",
+        )
+
+    client = engine_client(raw_request)
+    checker: _WeightCheckerState = raw_request.app.state.weight_checker
+
+    if action == "reset":
+        checker.reset()
+        return JSONResponse(content={"status": "reset"})
+
+    # All other actions require computing current checksums.
+    checksums: dict = await client.compute_weight_checksums()
+
+    if action == "snapshot":
+        checker.store(checksums)
+        return JSONResponse(content={"status": "snapshotted", "n_tensors": len(checksums)})
+
+    if action == "checksum":
+        return JSONResponse(content={"checksums": checksums})
+
+    # action == "compare"
+    try:
+        match, mismatches = checker.compare(checksums)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value, detail=str(exc)) from exc
+
+    return JSONResponse(content={"match": match, "mismatches": mismatches})
+
+
+# ───────────────────────────────────────────────────────────────────────
 # World size
 # ───────────────────────────────────────────────────────────────────────
 
@@ -326,8 +474,26 @@ async def get_world_size(
 # ───────────────────────────────────────────────────────────────────────
 
 
+@router.get("/weight_update_active")
+async def weight_update_active_endpoint(raw_request: Request) -> JSONResponse:
+    """Return whether a weight update is currently in progress.
+
+    Response::
+
+        {"weight_update_active": bool}
+
+    Use this to poll for completion or detect hung updates.
+    """
+    sm: RLStateMachineState = raw_request.app.state.rl_state
+    return JSONResponse(content=sm.to_dict())
+
+
 def attach_router(app: FastAPI):
-    # Initialize weight version state on the app.
+    # Initialize per-request state objects on the app.
     if not hasattr(app.state, "weight_version"):
         app.state.weight_version = _WeightVersionState()
+    if not hasattr(app.state, "weight_checker"):
+        app.state.weight_checker = _WeightCheckerState()
+    if not hasattr(app.state, "rl_state"):
+        app.state.rl_state = RLStateMachineState()
     app.include_router(router)

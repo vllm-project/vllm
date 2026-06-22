@@ -1150,6 +1150,9 @@ class AsyncMPClient(MPClient):
     async def is_sleeping_async(self) -> bool:
         return await self.call_utility_async("is_sleeping")
 
+    async def compute_weight_checksums_async(self) -> dict:
+        return await self.call_utility_async("compute_weight_checksums")
+
     async def execute_dummy_batch_async(self) -> None:
         await self.call_utility_async("execute_dummy_batch")
 
