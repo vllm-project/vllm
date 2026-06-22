@@ -2434,6 +2434,73 @@ ModelOptMxFp8Config.FusedMoEMethodCls = ModelOptMxFp8FusedMoE
 ModelOptMxFp8Config.KVCacheMethodCls = ModelOptKVCacheMethod
 
 
+_MIXED_LINEAR_STABLE_PARAMETER_NAMES = (
+    "alpha",
+    "input_scale",
+    "input_global_scale",
+    "input_global_scale_inv",
+    "pre_quant_scale",
+    "weight_global_scale",
+    "weight_scale",
+    "weight_scale_2",
+)
+
+
+def _ensure_mixed_linear_stable_parameters(layer: torch.nn.Module) -> None:
+    """Keep ModelOpt mixed Linear parameter names stable for torch.compile."""
+    weight = getattr(layer, "weight", None)
+    device = weight.device if weight is not None else None
+    dummy = torch.ones((), dtype=torch.float32, device=device)
+    for name in _MIXED_LINEAR_STABLE_PARAMETER_NAMES:
+        if not hasattr(layer, name):
+            layer.register_parameter(
+                name, Parameter(dummy.clone(), requires_grad=False)
+            )
+
+
+class ModelOptMixedLinearMethod(LinearMethodBase):
+    """Stable wrapper for ModelOpt mixed-precision Linear layers."""
+
+    def __init__(self, quant_algo: str, inner_method: LinearMethodBase) -> None:
+        self.quant_algo = quant_algo
+        self.inner_method = inner_method
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        layer.modelopt_mixed_quant_algo = self.quant_algo
+        self.inner_method.create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        self.inner_method.process_weights_after_loading(layer)
+        if self.quant_algo == "BF16" and isinstance(layer.weight, BasevLLMParameter):
+            layer.weight = Parameter(layer.weight.data, requires_grad=False)
+        _ensure_mixed_linear_stable_parameters(layer)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.inner_method.apply(layer, x, bias)
+
+
 class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
     """Config class for ModelOpt MIXED_PRECISION.
 
@@ -2706,6 +2773,23 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         return tuple(dict.fromkeys(candidates))
 
+    def _make_linear_method(self, quant_algo: str | None) -> LinearMethodBase:
+        if quant_algo == "FP8":
+            return ModelOptFp8LinearMethod(self.fp8_config)
+        if quant_algo == "FP8_PER_CHANNEL_PER_TOKEN":
+            return ModelOptFp8PcPtLinearMethod(self.fp8_pc_pt_config)
+        if quant_algo == "FP8_PB_WO":
+            return ModelOptFp8PbWoLinearMethod(self.fp8_pb_wo_config)
+        if quant_algo in NVFP4_STANDARD_ALGOS:
+            return ModelOptNvFp4LinearMethod(self.nvfp4_config)
+        if quant_algo in NVFP4_AWQ_ALGOS:
+            return ModelOptNvFp4AwqLinearMethod(self.nvfp4_awq_config)
+        if quant_algo in NVFP4_SVD_ALGOS:
+            return ModelOptNvFp4SvdLinearMethod(self.nvfp4_svd_config)
+        if quant_algo == "W4A16_NVFP4":
+            return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
+        return UnquantizedLinearMethod()
+
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
@@ -2719,28 +2803,17 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         # Excluded layers
         if self.is_layer_excluded(prefix):
             if isinstance(layer, (LinearBase, ParallelLMHead)):
-                return UnquantizedLinearMethod()
+                return ModelOptMixedLinearMethod("BF16", UnquantizedLinearMethod())
             return None
 
         quant_algo = self._resolve_quant_algo(prefix)
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
-            if quant_algo == "FP8":
-                return ModelOptFp8LinearMethod(self.fp8_config)
-            if quant_algo == "FP8_PER_CHANNEL_PER_TOKEN":
-                return ModelOptFp8PcPtLinearMethod(self.fp8_pc_pt_config)
-            if quant_algo == "FP8_PB_WO":
-                return ModelOptFp8PbWoLinearMethod(self.fp8_pb_wo_config)
-            if quant_algo in NVFP4_STANDARD_ALGOS:
-                return ModelOptNvFp4LinearMethod(self.nvfp4_config)
-            if quant_algo in NVFP4_AWQ_ALGOS:
-                return ModelOptNvFp4AwqLinearMethod(self.nvfp4_awq_config)
-            if quant_algo in NVFP4_SVD_ALGOS:
-                return ModelOptNvFp4SvdLinearMethod(self.nvfp4_svd_config)
-            if quant_algo == "W4A16_NVFP4":
-                return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
-            # Layer not in quantized_layers — leave unquantized
-            return UnquantizedLinearMethod()
+            # Keep the exposed LinearMethod class uniform for torch.compile.
+            # The concrete algorithm still comes from quantized_layers.
+            return ModelOptMixedLinearMethod(
+                quant_algo or "BF16", self._make_linear_method(quant_algo)
+            )
 
         if isinstance(layer, RoutedExperts):
             if quant_algo == "FP8":
