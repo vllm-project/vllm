@@ -146,7 +146,7 @@ class FlashAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        # K and V are packed into the content dim: logical (B, H, N, 2*C).
+        # K and V are packed into the content dim: logical (B, H, N, 2*D).
         return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
@@ -154,7 +154,7 @@ class FlashAttentionBackend(AttentionBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         # `stride_order` indicates the permutation that gets us from
-        # `get_kv_cache_shape` (logical (B, H, N, 2*C)) to the actual memory
+        # `get_kv_cache_shape` (logical (B, H, N, 2*D)) to the actual memory
         # layout we want.
         cache_layout = get_kv_cache_layout()
         if cache_layout == "NHD" and include_num_layers_dimension:
@@ -768,10 +768,10 @@ class FlashAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # KV cache arrives in logical (B, H, N, 2*C) order; transpose to
-        # (B, N, H, 2*C) = (num_blocks, block_size, num_kv_heads, 2*head_size)
+        # KV cache arrives in logical (B, H, N, 2*D) order; transpose to
+        # (B, N, H, 2*D) = (num_blocks, block_size, num_kv_heads, 2*head_size)
         # which FlashAttention expects, then split K/V on the content dim.
-        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
         # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
@@ -946,7 +946,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         # Scatter write into the KV cache using slot_mapping indices.
         # No TMA kernel is invoked here, so stride canonicalization is not needed.
-        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
         # Reshape the input keys and values and store them in the cache.

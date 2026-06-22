@@ -23,10 +23,13 @@ if current_platform.is_cuda():
     )
 
 elif current_platform.is_xpu():
-    from vllm import _custom_ops as ops
     from vllm._xpu_ops import xpu_ops
+    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+        triton_reshape_and_cache_flash,
+    )
 
-    reshape_and_cache_flash = ops.reshape_and_cache_flash
+    # TODO: Switch back once vllm-project/vllm-xpu-kernels#429 lands.
+    reshape_and_cache_flash = triton_reshape_and_cache_flash
     flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[assignment]
     get_scheduler_metadata = xpu_ops.get_scheduler_metadata  # type: ignore[assignment]
 elif current_platform.is_rocm():

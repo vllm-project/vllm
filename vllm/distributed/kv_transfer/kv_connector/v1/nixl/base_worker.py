@@ -667,8 +667,8 @@ class NixlBaseConnectorWorker:
                             # we can leverage host_buffer for permute.
                             self.host_buffer_kv_cache_layout = "HND"
                         else:
-                            # Packed KV layout is logical (B, H, N, 2*C). Allocate
-                            # (B, N, H, 2*C) and view it as logical (B, H, N, 2*C)
+                            # Packed KV layout is logical (B, H, N, 2*D). Allocate
+                            # (B, N, H, 2*D) and view it as logical (B, H, N, 2*D)
                             # so raw NIXL transfers see NHD physical strides.
                             kv_shape = tuple(kv_shape[i] for i in inv_order)
                             permute_shape = True
