@@ -100,13 +100,16 @@ def _torch_needs_torchinductor_cache_dir_patch():
 
 
 def _torchinductor_fallback_cache_dir():
-    """A TorchInductor cache dir that does not need a resolvable username.
+    """A copy of torch's fixed ``default_cache_dir()`` (pytorch/pytorch#184208).
 
-    Mirrors torch's own ``default_cache_dir()`` but substitutes a UID-based name
-    when ``getpass.getuser()`` cannot resolve the current UID (e.g. an
-    OpenShift/k8s arbitrary UID with no ``/etc/passwd`` entry).
+    Installed only for torch < 2.13, whose ``default_cache_dir()`` crashes in
+    ``getpass.getuser()`` when the current UID has no ``/etc/passwd`` entry
+    (e.g. an OpenShift/k8s arbitrary UID). This mirrors the upstream-fixed
+    version so the patched behavior matches torch >= 2.13.
     """
     import getpass
+
+    from torch._environment import is_fbcode
 
     try:
         username = getpass.getuser()
@@ -114,13 +117,10 @@ def _torchinductor_fallback_cache_dir():
         getuid = getattr(os, "getuid", None)
         username = f"uid_{getuid()}" if callable(getuid) else "unknown_user"
     sanitized_username = re.sub(r'[\\/:*?"<>|]', "_", username)
-    try:
-        from torch._environment import is_fbcode
-
-        base = "/var/tmp" if is_fbcode() else tempfile.gettempdir()
-    except Exception:
-        base = tempfile.gettempdir()
-    return os.path.join(base, "torchinductor_" + sanitized_username)
+    return os.path.join(
+        tempfile.gettempdir() if not is_fbcode() else "/var/tmp",
+        "torchinductor_" + sanitized_username,
+    )
 
 
 def _patch_torchinductor_default_cache_dir():
