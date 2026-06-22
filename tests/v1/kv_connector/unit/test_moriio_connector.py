@@ -36,13 +36,33 @@ from vllm.utils.network_utils import (
     get_ip,
     make_zmq_path,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+)
 
 from .utils import create_request, create_scheduler
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
-    return KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    layer_names = ["layer0", "layer1", "layer2"]
+    return KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[KVCacheTensor(size=0, shared_by=layer_names)],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=layer_names,
+                kv_cache_spec=FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=4,
+                    head_size=64,
+                    dtype=torch.float16,
+                ),
+            )
+        ],
+    )
 
 
 aiter_available = importlib.util.find_spec("aiter") is not None
@@ -175,9 +195,18 @@ class FakeMoRIIOConnectorWorker(MoRIIOConnectorWorker):
     REMOTE_ENGINE_ID = "remote_engine"
 
     def __init__(
-        self, *args, hand_shake_latency: float = 1.8, kv_cache_layout="HND", **kwargs
+        self,
+        vllm_config,
+        engine_id,
+        *args,
+        hand_shake_latency: float = 1.8,
+        kv_cache_layout="HND",
+        kv_cache_config=None,
+        **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            vllm_config, engine_id, kv_cache_config or _make_test_kv_cache_config()
+        )
 
 
 def create_vllm_config(

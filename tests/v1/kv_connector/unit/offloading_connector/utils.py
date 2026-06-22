@@ -14,7 +14,12 @@ from tests.v1.kv_connector.unit.utils import (
     create_vllm_config,
 )
 from vllm import SamplingParams
-from vllm.config import KVTransferConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    KVEventsConfig,
+    KVTransferConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -198,6 +203,9 @@ class RequestRunner:
             "spec_module_path": "tests.v1.kv_connector.unit.offloading_connector.utils",  # noqa: E501
             # Preserve legacy behavior for tests; new opt-in tests override.
             "offload_prompt_only": False,
+            # Exercise the self-describing KV events path by default;
+            # opt-out tests override this to cover the legacy placeholders.
+            "self_describing_kv_events": True,
         }
         if block_size_factor > 1:
             extra_config["block_size"] = block_size * block_size_factor
@@ -208,6 +216,13 @@ class RequestRunner:
             kv_connector="OffloadingConnector",
             kv_role="kv_both",
             kv_connector_extra_config=extra_config,
+        )
+        vllm_config.kv_events_config = KVEventsConfig(
+            # Enable so the offloading events tracker is active, but use the
+            # null publisher: these tests drain take_events directly and a
+            # real ZMQ publisher would bind a port per test.
+            enable_kv_cache_events=True,
+            publisher="null",
         )
 
         if kv_cache_groups is None:
