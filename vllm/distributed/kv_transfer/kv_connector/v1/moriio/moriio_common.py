@@ -499,6 +499,11 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         remote_host = kv_transfer_params.get("remote_host")
         remote_handshake_port = kv_transfer_params.get("remote_handshake_port")
         remote_notify_port = kv_transfer_params.get("remote_notify_port")
+        # Parse host/ports from request_id. The router normally embeds both
+        # zmq_addresses there. If the embedded address is absent, fall back to
+        # `kv_transfer_params.remote_hosts` (forwarded for multi-node TP) and
+        # MoRIIO's default well-known ports. Once a valid host/port triple is
+        # available, the rest of the path is unchanged.
         remote_hosts = _normalize_node_hosts(
             kv_transfer_params.get("remote_hosts"),
             "kv_transfer_params['remote_hosts']",
@@ -508,9 +513,6 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             or remote_handshake_port is None
             or remote_notify_port is None
         ):
-            # Parse host/ports from the request_id. The router embeds both
-            # zmq_addresses in PD request IDs, but WRITE decode requests may carry
-            # a plain request ID and get the remote address via kv_transfer_params.
             try:
                 peer_zmq = get_peer_zmq_from_request_id(
                     request_id, is_producer=write_mode
@@ -533,12 +535,8 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
                 remote_handshake_port = int(MoRIIOConstants.DEFAULT_HANDSHAKE_PORT)
                 remote_notify_port = int(MoRIIOConstants.DEFAULT_NOTIFY_PORT)
 
-        # Cleanup-path requests (the same "aborted before scheduling" branch
-        # that surfaces a short request_id) can also omit remote_block_ids
-        # and remote_engine_id. Use .get() defaults so we don't crash the
-        # same EngineCore the request_id fallback above is meant to keep
-        # alive — an empty block list is the correct no-op for an aborted
-        # request.
+        # If remote block metadata is absent, use empty defaults so the request
+        # remains a no-op.
         _req = ReqMeta(
             transfer_id=transfer_id,
             local_block_ids=local_block_ids,
@@ -548,9 +546,8 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_port=int(remote_handshake_port),
             remote_handshake_port=int(remote_handshake_port),
             remote_notify_port=int(remote_notify_port),
-            # Defense-in-depth: callers (e.g. moriio_toy_proxy_server in
-            # READ-mode multi-node TP) may forward `remote_tp_size` only.
-            # Read `tp_size` first, fall back to `remote_tp_size`, default 1.
+            # Callers may forward `remote_tp_size` without `tp_size`.
+            # Prefer `tp_size`, then fall back to `remote_tp_size`, then 1.
             tp_size=kv_transfer_params.get(
                 "tp_size",
                 kv_transfer_params.get("remote_tp_size", 1),
