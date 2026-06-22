@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from vllm.platforms import current_platform
 
 
 def test_mla_common_backend_rejects_cross_layer_kv_cache():
@@ -25,6 +26,10 @@ def test_mla_common_backend_rejects_cross_layer_kv_cache():
 @pytest.mark.parametrize(
     "backend_path",
     [
+        "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
+    ]
+    if current_platform.is_rocm()
+    else [
         "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
         "vllm.v1.attention.backends.mla.cutlass_mla.CutlassMLABackend",
         "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend",
