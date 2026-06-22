@@ -428,6 +428,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "MiniMaxM3SparseForCausalLM": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",
         trust_remote_code=True,
+        is_available_online=False,
     ),
     "Ministral3ForCausalLM": _HfExamplesInfo("mistralai/Ministral-3-3B-Instruct-2512"),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
@@ -1106,6 +1107,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniMaxM3SparseForConditionalGeneration": _HfExamplesInfo(
         "MiniMaxAI/MiniMax-M3",
         trust_remote_code=True,
+        is_available_online=False,
     ),
     "Mistral3ForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
