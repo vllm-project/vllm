@@ -74,8 +74,9 @@ class TestWeightCheckerCompare:
         with server(port=_PORT_BASE + 4, dummy_weights=True) as url:
             assert _wc(url, "snapshot").status_code == 200
 
-            assert sleep(url).status_code == 200
-            assert wake(url).status_code == 200
+            # conftest sleep/wake return the HTTP status code (int), not Response
+            assert sleep(url) == 200
+            assert wake(url) == 200
 
             r = _wc(url, "compare")
             assert r.status_code == 200, r.text

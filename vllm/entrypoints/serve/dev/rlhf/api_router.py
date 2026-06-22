@@ -496,4 +496,11 @@ def attach_router(app: FastAPI):
         app.state.weight_checker = _WeightCheckerState()
     if not hasattr(app.state, "rl_state"):
         app.state.rl_state = RLStateMachineState()
+    # Initialize Prometheus RL metrics with default label values so they appear
+    # in /metrics from server startup (labeled metrics are not collected until
+    # their first label-set is created).
+    rl_weight_gen.labels(engine=_ENGINE_IDX).set(0)
+    rl_weight_update_active.labels(engine=_ENGINE_IDX).set(0)
+    rl_weight_update_total.labels(engine=_ENGINE_IDX)   # creates child at 0
+    rl_weight_update_duration_seconds.labels(engine=_ENGINE_IDX)  # creates child
     app.include_router(router)
