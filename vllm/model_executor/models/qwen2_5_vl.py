@@ -83,9 +83,8 @@ from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
@@ -825,7 +824,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
     @staticmethod
     def invert_permutation(perm: torch.Tensor) -> torch.Tensor:
         # building the inverse permutation in O(n) time
-        inv = torch.empty_like(perm, pin_memory=is_pin_memory_available())
+        inv = torch.empty_like(perm, pin_memory=PIN_MEMORY)
         inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
         return inv
 
