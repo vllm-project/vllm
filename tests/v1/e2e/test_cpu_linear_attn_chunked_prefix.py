@@ -3,12 +3,8 @@
 """CPU chunked-prefill / prefix-caching correctness for linear-attention models.
 
 Compares multi-chunk and warm-cache output against the full-prefill / cold-cache
-reference for the same prompts. Regression coverage for the CPU GDN conv kernel
-ignoring ``has_initial_state`` on continued prefill chunks.
-
-Comparisons are batched-vs-batched: full prefill is not bit-stable across batch
-composition on this model, so the reference is generated with the same prompt
-list the chunked run uses.
+reference. Batched-vs-batched: full prefill is not bit-stable across batch
+composition, so the reference uses the same prompt list as the chunked run.
 """
 
 import os
@@ -55,10 +51,7 @@ def _make_llm(**overrides) -> LLM:
 
 @pytest.fixture(scope="module")
 def full_prefill_refs() -> tuple[list[tuple[int, ...]], tuple[int, ...]]:
-    """Greedy full-prefill token IDs for the batched prompt list plus the prefix
-    prompt, the ground truth the chunked / warm-cache runs compare against. Built
-    on one engine that is then freed.
-    """
+    """Reference greedy token IDs for PROMPTS and PREFIX_PROMPT under full prefill."""
     llm = _make_llm(enable_chunked_prefill=False, enable_prefix_caching=False)
     refs = [o.outputs[0].token_ids for o in llm.generate(PROMPTS, SP)]
     prefix_ref = llm.generate([PREFIX_PROMPT], SP)[0].outputs[0].token_ids

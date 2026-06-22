@@ -153,9 +153,7 @@ class CPUModelRunner(GPUModelRunner):
         pass
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
-        # Zero newly allocated full-attention KV cache blocks to prevent stale
-        # data from corrupting attention when a block is partially written and
-        # the uninitialized tail is read before masking can apply.
+        # Zero full-attention blocks to prevent stale data corruption on partial writes.
         seen_ptrs: set[int] = set()
         for group in self.kv_cache_config.kv_cache_groups:
             if not isinstance(group.kv_cache_spec, FullAttentionSpec):

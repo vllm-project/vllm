@@ -401,8 +401,7 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
 
     out_split = torch.cat([out1, out2], dim=1)
 
-    # Carried state is handed between steps, so it must be near-exact; the output
-    # gets a looser bound for the extra bf16 round-trip on chunk re-entry.
+    # State must be near-exact; output allows a looser bound for the bf16 round-trip.
     torch.testing.assert_close(state2, final_full, atol=1e-3, rtol=1e-3)
     torch.testing.assert_close(out_split, out_full, atol=2e-2, rtol=2e-2)
 
