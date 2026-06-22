@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING
 from vllm import envs
 from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import supports_xccl
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
@@ -135,7 +134,7 @@ def xpu_platform_plugin() -> str | None:
     try:
         import torch
 
-        if supports_xccl():
+        if torch.distributed.is_xccl_available():
             dist_backend = "xccl"
             from vllm.platforms.xpu import XPUPlatform
 
@@ -177,7 +176,6 @@ def cpu_platform_plugin() -> str | None:
                 logger.debug(
                     "Confirmed CPU platform is available because the machine is MacOS."
                 )
-
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))
 
@@ -188,7 +186,7 @@ def cpu_platform_plugin() -> str | None:
         try:
             import zentorch  # noqa: F401
 
-            logger.debug(
+            logger.info(
                 "AMD Zen CPU detected with zentorch installed, using ZenCpuPlatform."
             )
             return "vllm.platforms.zen_cpu.ZenCpuPlatform"

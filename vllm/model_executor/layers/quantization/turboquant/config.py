@@ -2,8 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TurboQuant configuration."""
 
+from __future__ import annotations
+
+import logging
 import math
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
+
+logger = logging.getLogger(__name__)
 
 # Named TQ presets: each maps to frozen config parameters.
 # key_quant_bits: 8 = FP8 keys, 3-4 = MSE (Lloyd-Max) quantized keys.
@@ -36,10 +45,28 @@ TQ_PRESETS: dict[str, dict] = {
 class TurboQuantConfig:
     """Configuration for TurboQuant KV-cache quantization.
 
-    Uses PolarQuant (WHT rotation + Lloyd-Max scalar quantization) for keys
-    and uniform quantization for values. QJL is intentionally omitted —
-    community consensus (5+ independent groups) found it hurts attention
-    quality by amplifying variance through softmax.
+    Applies Hadamard rotation followed by per-coordinate Lloyd-Max scalar
+    quantization for keys, and uniform quantization for values.
+
+    Historical note: the core algorithmic pattern implemented for key
+    quantization (Hadamard rotation followed by deterministic scalar
+    quantization and re-normalization) was originally established in DRIVE
+    (Vargaftik et al., NeurIPS 2021) and EDEN (Vargaftik et al., ICML
+    2022). This formulation is also mathematically equivalent to the
+    scalar case of the HIGGS quantization method (Malinovskii et al.,
+    "Pushing the Limits of Large Language Model Quantization via the
+    Linearity Theorem", NAACL 2025; preprint arXiv:2411.17525), which
+    subsequently generalized these concepts.
+
+    A first application of this approach to KV-cache compression is in
+    "Cache Me If You Must: Adaptive Key-Value Quantization for Large
+    Language Models" (Shutova et al., ICML 2025; preprint
+    arXiv:2501.19392). All of these foundational and application
+    references pre-date the TurboQuant paper (Zandieh et al., ICLR 2026).
+
+    QJL is intentionally omitted: community consensus (5+ independent
+    groups) found it hurts attention quality by amplifying variance
+    through softmax.
 
     Named presets (use via --kv-cache-dtype):
         turboquant_k8v4:   FP8 keys + 4-bit values, 2.6x, +1.17% PPL
@@ -53,8 +80,6 @@ class TurboQuantConfig:
             rotation/MSE). 3-4 = Lloyd-Max MSE quantized keys.
         value_quant_bits: Bits per value dimension for uniform quantization.
             3 = 8 levels, 4 = 16 levels (default).
-        seed: Base seed for deterministic random matrix generation.
-            Actual seed per layer = seed + layer_idx * 1337.
         norm_correction: Re-normalize centroid vectors to unit norm before
             inverse rotation during dequant. Fixes quantization-induced norm
             distortion, improving PPL by ~0.8% at 4-bit.
@@ -63,7 +88,7 @@ class TurboQuantConfig:
     head_dim: int = 128
     key_quant_bits: int = 3  # 3-4 = MSE keys, 8 = FP8 keys
     value_quant_bits: int = 4  # 3-4 = uniform quantized values
-    seed: int = 42
+    seed: int = 42  # kept for backward compatibility; no longer used internally
     norm_correction: bool = False
 
     @property
@@ -149,12 +174,34 @@ class TurboQuantConfig:
         return s + (s % 2)  # round up to even
 
     @staticmethod
-    def get_boundary_skip_layers(num_layers: int, n: int = 2) -> list[str]:
-        """Get layer indices to skip TQ compression (boundary protection).
+    def get_boundary_skip_layers(
+        model_config: ModelConfig,
+        n: int = 2,
+    ) -> list[str]:
+        """Layer indices to skip TQ compression (boundary protection).
 
-        Returns first N and last N layer indices as strings, suitable for
-        kv_cache_dtype_skip_layers.
+        For hybrid models (attention + Mamba/linear-attention), boundary
+        protection is disabled — hybrids typically have only 8-12
+        full-attention layers and a hard n=2 on each side would cover
+        ~40 % of them.  The dense GSM8K baselines that motivate n=2
+        don't apply to hybrids.
+
+        For dense models, skips first N and last N attention layers.
+        Empirically required for aggressive presets (k3v4_nc, 3bit_nc)
+        — without it GSM8K drops ~30 points on Qwen3-4B.
         """
+        if model_config.is_hybrid:
+            attn_indices = _get_full_attention_layer_indices(model_config)
+            if not attn_indices:
+                raise NotImplementedError(
+                    "TurboQuant KV cache requires identifiable "
+                    "full-attention layers, but none were found in "
+                    "the hybrid model config."
+                )
+            logger.info("TQ hybrid: full-attention layers %s", attn_indices)
+            return []
+
+        num_layers = model_config.hf_text_config.num_hidden_layers
         if n <= 0 or num_layers <= 0:
             return []
         n = min(n, num_layers // 2)  # don't skip more than half
@@ -165,7 +212,7 @@ class TurboQuantConfig:
         return [str(i) for i in indices]
 
     @staticmethod
-    def from_cache_dtype(cache_dtype: str, head_dim: int) -> "TurboQuantConfig":
+    def from_cache_dtype(cache_dtype: str, head_dim: int) -> TurboQuantConfig:
         """Create config from a named preset.
 
         Valid presets: turboquant_k8v4, turboquant_4bit_nc, etc.
@@ -183,3 +230,31 @@ class TurboQuantConfig:
             value_quant_bits=preset["value_quant_bits"],
             norm_correction=preset["norm_correction"],
         )
+
+
+def _get_full_attention_layer_indices(model_config: ModelConfig) -> list[int]:
+    """Global indices of full-attention layers in a hybrid model.
+
+    Covers the conventions used across vLLM: ``layer_types`` (Qwen3.5/Next),
+    ``layers_block_type`` (Jamba/Zamba2), ``attn_type_list`` (Minimax).
+    """
+    text_cfg = model_config.hf_text_config
+    hf_cfg = model_config.hf_config
+
+    layer_types = getattr(text_cfg, "layer_types", None)
+    if layer_types is not None:
+        return [
+            i for i, t in enumerate(layer_types) if t in ("full_attention", "attention")
+        ]
+
+    layers_block_type = getattr(text_cfg, "layers_block_type", None)
+    if layers_block_type is not None:
+        return [
+            i for i, t in enumerate(layers_block_type) if t in ("attention", "hybrid")
+        ]
+
+    attn_type_list = getattr(hf_cfg, "attn_type_list", None)
+    if attn_type_list is not None:
+        return [i for i, t in enumerate(attn_type_list) if t == 1]
+
+    return []

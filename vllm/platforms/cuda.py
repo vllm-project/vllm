@@ -7,6 +7,7 @@ pynvml. However, it should not initialize cuda context.
 from __future__ import annotations
 
 import os
+import platform
 from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
@@ -18,15 +19,13 @@ from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
-import vllm._C  # noqa
 import vllm._C_stable_libtorch  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from .interface import DeviceCapability, Platform, PlatformEnum
+from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -38,6 +37,11 @@ else:
     CacheDType = None
 
 logger = init_logger(__name__)
+
+try:
+    import vllm._qutlass_C  # noqa: F401
+except ImportError as e:
+    logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -83,6 +87,8 @@ def _get_backend_priorities(
     kv_cache_dtype: CacheDType | None = None,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
+    from vllm.utils.torch_utils import is_quantized_kv_cache
+
     if use_mla:
         if device_capability.major == 10:
             # Sparse MLA backend priorities
@@ -110,6 +116,10 @@ def _get_backend_priorities(
 
             return [
                 AttentionBackendEnum.FLASHINFER_MLA,
+                # R1 dims + FP8 KV only; rejected by supports_combination
+                # otherwise. Behind FLASHINFER_MLA: wins past bs≈8, regresses
+                # at bs≤2.
+                AttentionBackendEnum.TOKENSPEED_MLA,
                 AttentionBackendEnum.CUTLASS_MLA,
                 AttentionBackendEnum.FLASH_ATTN_MLA,
                 AttentionBackendEnum.FLASHMLA,
@@ -131,6 +141,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
+                AttentionBackendEnum.TURBOQUANT,
             ]
         else:
             return [
@@ -138,6 +149,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
+                AttentionBackendEnum.TURBOQUANT,
             ]
 
 
@@ -153,6 +165,21 @@ def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
     return wrapper
 
 
+@cache
+def _get_wsl_kernel_version() -> tuple[int, ...] | None:
+    """Return the WSL2 kernel version as a tuple, or None on parse failure.
+
+    platform.uname().release on WSL2 looks like
+    "5.15.167.4-microsoft-standard-WSL2"; we take the numeric prefix.
+    """
+    try:
+        release = platform.uname().release
+        parts = release.split("-")[0].split(".")
+        return tuple(int(x) for x in parts[:3])
+    except Exception:
+        return None
+
+
 class CudaPlatformBase(Platform):
     _enum = PlatformEnum.CUDA
     device_name: str = "cuda"
@@ -164,6 +191,22 @@ class CudaPlatformBase(Platform):
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        """Import CUDA kernel extensions (_C_stable_libtorch, optional _qutlass_C)."""
+        try:
+            import vllm._C_stable_libtorch  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._C_stable_libtorch: %r", e)
+        try:
+            import vllm._moe_C_stable_libtorch  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._moe_C_stable_libtorch: %r", e)
+        try:
+            import vllm._qutlass_C  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -197,6 +240,12 @@ class CudaPlatformBase(Platform):
         raise NotImplementedError
 
     @classmethod
+    def get_cuda_runtime_major(cls) -> int:
+        """Major ``torch.version.cuda`` version, or ``0`` if undetermined."""
+        major = (torch.version.cuda or "0").split(".", 1)[0]
+        return int(major) if major.isdigit() else 0
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         raise NotImplementedError
 
@@ -211,6 +260,27 @@ class CudaPlatformBase(Platform):
     @classmethod
     def log_warnings(cls):
         pass
+
+    @classmethod
+    def is_pin_memory_available(cls) -> bool:
+        if in_wsl():
+            # WSL1 has no CUDA support, so being on the CUDA platform under
+            # WSL implies WSL2. Gate on kernel >= 4.19.121, the first WSL2
+            # kernel with limited pinned memory support for CUDA.
+            version = _get_wsl_kernel_version()
+            if version is None or version < (4, 19, 121):
+                logger.warning(
+                    "Using 'pin_memory=False' as WSL is detected and the "
+                    "WSL2 kernel version is below 4.19.121. This may slow "
+                    "down performance. Please run `wsl --update`."
+                )
+                return False
+            # On compatible WSL2 kernels, pinned memory is supported but
+            # disabled by default. Enable it via VLLM_WSL2_ENABLE_PIN_MEMORY=1.
+            import vllm.envs as envs
+
+            return envs.VLLM_WSL2_ENABLE_PIN_MEMORY
+        return True
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
@@ -234,6 +304,27 @@ class CudaPlatformBase(Platform):
             )
             scheduler_config.disable_chunked_mm_input = True
 
+        if (
+            in_wsl()
+            and vllm_config.offload_config.uva.cpu_offload_gb > 0
+            and bool(vllm_config.compilation_config.cudagraph_mode)
+        ):
+            logger.warning(
+                "--cpu-offload-gb is enabled with CUDA graphs on WSL2. "
+                "This combination requires pinned (page-locked) memory "
+                "allocations. WARNING: Windows (WDDM) enforces a hard "
+                "system-wide cap of roughly 50%% of physical RAM on pinned "
+                "memory shared across ALL processes by default (limit can "
+                "changed via %%USERPROFILE%%\\.wslconfig). "
+                "Excessive use of page-locked memory can prevent Windows "
+                "from reclaiming memory under load, which can cause the "
+                "entire host OS to become unresponsive and may require a "
+                "hard reboot to recover. Proceed at your own risk. "
+                "To raise the WSL2 VM memory ceiling, increase the `memory` "
+                "setting in %%USERPROFILE%%\\.wslconfig and run "
+                "`wsl --shutdown`."
+            )
+
     @classmethod
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
@@ -254,11 +345,6 @@ class CudaPlatformBase(Platform):
     ]:
         valid_backends_priorities = []
         invalid_reasons: dict[AttentionBackendEnum, tuple[int, list[str]]] = {}
-
-        # TurboQuant KV cache: route directly to TQ backend
-        kv_cache_dtype = attn_selector_config.kv_cache_dtype
-        if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
-            return [(AttentionBackendEnum.TURBOQUANT, 0)], {}
 
         backend_priorities = _get_backend_priorities(
             attn_selector_config.use_mla,
@@ -372,7 +458,6 @@ class CudaPlatformBase(Platform):
             "Using %s attention backend out of potential backends: %s.",
             selected_backend.name,
             "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
-            scope="local",
         )
 
         return selected_backend.get_path()
@@ -426,7 +511,6 @@ class CudaPlatformBase(Platform):
                 if is_backend_supported:
                     logger.info_once(
                         f"Using backend {vit_attn_backend} for vit attention",
-                        scope="local",
                     )
                     return vit_attn_backend
             except ImportError:
@@ -525,8 +609,8 @@ class CudaPlatformBase(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from src_cache to dst_cache on GPU."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+        _src_cache = src_cache[src_block_indices]
+        dst_cache[dst_block_indices] = _src_cache.to(dst_cache.device)
 
     @classmethod
     def swap_out_blocks_to_host(
@@ -537,8 +621,8 @@ class CudaPlatformBase(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from GPU to host (CPU)."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.cpu()
+        _src_cache = src_cache[src_block_indices]
+        dst_cache[dst_block_indices] = _src_cache.cpu()
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
@@ -583,7 +667,18 @@ class CudaPlatformBase(Platform):
         if envs.VLLM_USE_OINK_OPS:
             rms_norm = ["oink"] + default
 
-        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
+        return IrOpPriorityConfig.with_default(
+            default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
+        )
+
+    @classmethod
+    def is_arch_support_pdl(cls) -> bool:
+        try:
+            device = torch.cuda.current_device()
+            major, _ = torch.cuda.get_device_capability(device)
+        except Exception:
+            return False
+        return major >= 9
 
 
 # NVML utils
@@ -591,6 +686,15 @@ class CudaPlatformBase(Platform):
 # all the related functions work on real physical device ids.
 # the major benefit of using NVML is that it will not initialize CUDA
 class NvmlCudaPlatform(CudaPlatformBase):
+    @classmethod
+    @with_nvml_context
+    def device_control_id_to_physical_device_id(cls, device_id: str) -> int:
+        try:
+            return int(device_id)
+        except ValueError:
+            handle = pynvml.nvmlDeviceGetHandleByUUID(device_id)
+            return pynvml.nvmlDeviceGetIndex(handle)
+
     @classmethod
     @cache
     @with_nvml_context
@@ -792,6 +896,22 @@ class NvmlCudaPlatform(CudaPlatformBase):
         except Exception as e:
             logger.warning("Failed to get NUMA nodes for GPUs: %s", e)
             return None
+
+    @classmethod
+    @with_nvml_context
+    def get_all_gpu_pci_bus_ids(cls) -> dict[int, str]:
+        """Query NVML for GPU index -> PCI bus ID mapping."""
+        out: dict[int, str] = {}
+        for idx in range(pynvml.nvmlDeviceGetCount()):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(idx)
+            pci_info = pynvml.nvmlDeviceGetPciInfo(handle)
+            bus_id = pci_info.busId
+            if isinstance(bus_id, bytes):
+                bus_id = bus_id.decode("utf-8")
+            out[idx] = bus_id.rstrip("\x00")
+        if not out:
+            raise RuntimeError("NVML returned no GPU PCI bus ID rows")
+        return out
 
     @classmethod
     @with_nvml_context

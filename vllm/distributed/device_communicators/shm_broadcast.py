@@ -38,6 +38,21 @@ from vllm.utils.network_utils import (
     is_valid_ipv6_address,
 )
 
+logger = init_logger(__name__)
+
+
+SPINLOOP_EXT_ENABLED = False
+if envs.VLLM_USE_SPINLOOP_EXT:
+    try:
+        from vllm.spinloop import spinloop
+
+        SPINLOOP_EXT_ENABLED = True
+    except ImportError:
+        logger.warning(
+            "spinloop extension could not be loaded, disabling VLLM_USE_SPINLOOP_EXT!"
+        )
+SPINLOOP_TIMEOUT_SECONDS = 0.1
+
 if TYPE_CHECKING:
     from _typeshed import SizedBuffer
 
@@ -75,9 +90,6 @@ def memory_fence():
 
 def to_bytes_big(value: int, size: int) -> bytes:
     return value.to_bytes(size, byteorder="big")
-
-
-logger = init_logger(__name__)
 
 
 LONG_WAIT_TIME_LOG_MSG = (
@@ -540,13 +552,17 @@ class MessageQueue:
         n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
-                # Memory fence ensures we see the latest read flags from readers.
-                # Without this, we may read stale flags from our CPU cache and
-                # spin indefinitely even though readers have completed.
-                memory_fence()
-                read_count = sum(metadata_buffer[1:])
-                written_flag = metadata_buffer[0]
-                if written_flag and read_count != self.buffer.n_reader:
+
+                def check():
+                    memory_fence()
+                    read_count = sum(metadata_buffer[1:])
+                    written_flag = metadata_buffer[0]
+                    return not (written_flag and read_count != self.buffer.n_reader)
+
+                if SPINLOOP_EXT_ENABLED and not check():
+                    spinloop(metadata_buffer, check, timeout=SPINLOOP_TIMEOUT_SECONDS)
+
+                if not check():
                     # this block is written and not read by all readers
                     # for writers, `self.current_idx` is the next block to write
                     # if this block is not ready to write,
@@ -657,13 +673,21 @@ class MessageQueue:
         )
         with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
             while True:
-                # Memory fence ensures we see the latest writes from the writer.
-                # Without this, we may read stale flags from our CPU cache
-                # and spin indefinitely even though writer has updated them.
-                memory_fence()
-                read_flag = metadata_buffer[self.local_reader_rank + 1]
-                written_flag = metadata_buffer[0]
-                if not written_flag or read_flag:
+
+                def check():
+                    memory_fence()
+                    read_flag = metadata_buffer[self.local_reader_rank + 1]
+                    written_flag = metadata_buffer[0]
+                    return not (not written_flag or read_flag)
+
+                if SPINLOOP_EXT_ENABLED and not check():
+                    spinloop(
+                        metadata_buffer[0 : self.local_reader_rank + 1],
+                        check,
+                        timeout=SPINLOOP_TIMEOUT_SECONDS,
+                    )
+
+                if not check():
                     # this block is either
                     # (1) not written
                     # (2) already read by this reader
@@ -816,7 +840,13 @@ class MessageQueue:
             The MessageQueue instance for the calling process,
             and a list of handles (only non-empty for the reader process).
         """
-        local_size = current_platform.device_count()
+        from vllm.platforms.interface import get_assigned_physical_gpu_ids
+
+        assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
+        if assigned_physical_gpu_ids is not None:
+            local_size = len(assigned_physical_gpu_ids)
+        else:
+            local_size = current_platform.device_count()
         rank = dist.get_rank()
         same_node = rank // local_size == reader_rank // local_size
         buffer_io = MessageQueue(

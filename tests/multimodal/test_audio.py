@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # test_audio.py
+import math
 from unittest.mock import patch
 
 import numpy as np
@@ -45,7 +46,6 @@ def test_resample_audio_scipy(dummy_audio):
     assert np.all(out_same == dummy_audio)
 
 
-@pytest.mark.xfail(reason="resample_audio_scipy is buggy for non-integer ratios")
 def test_resample_audio_scipy_non_integer_ratio(dummy_audio):
     out = resample_audio_scipy(dummy_audio, orig_sr=5, target_sr=3)
 
@@ -53,6 +53,26 @@ def test_resample_audio_scipy_non_integer_ratio(dummy_audio):
     assert len(out) == expected_len
 
     assert isinstance(out, np.ndarray)
+    assert np.isfinite(out).all()
+
+
+def test_resample_audio_scipy_non_divisible_sample_rates():
+    audio = np.arange(441, dtype=float)
+    out = resample_audio_scipy(audio, orig_sr=44100, target_sr=16000)
+
+    expected_len = math.ceil(len(audio) * 16000 / 44100)
+    assert len(out) == expected_len
+
+    assert isinstance(out, np.ndarray)
+    assert np.isfinite(out).all()
+
+
+def test_resample_audio_scipy_resamples_last_axis_for_multichannel():
+    audio = np.arange(2 * 441, dtype=float).reshape(2, 441)
+    out = resample_audio_scipy(audio, orig_sr=44100, target_sr=16000)
+
+    expected_len = math.ceil(audio.shape[-1] * 16000 / 44100)
+    assert out.shape == (2, expected_len)
     assert np.isfinite(out).all()
 
 

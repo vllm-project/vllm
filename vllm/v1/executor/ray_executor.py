@@ -26,6 +26,7 @@ from vllm.v1.executor.ray_utils import (
     WORKER_SPECIFIC_ENV_VARS,
     FutureWrapper,
     RayWorkerWrapper,
+    detach_zero_copy_from_model_runner_output,
     initialize_ray_cluster,
     ray,
 )
@@ -94,14 +95,6 @@ class RayDistributedExecutor(Executor):
         )
 
         self.scheduler_output: SchedulerOutput | None = None
-
-    @property
-    def max_concurrent_batches(self) -> int:
-        """Ray distributed executor supports pipeline parallelism,
-        meaning that it allows PP size batches to be executed concurrently.
-        """
-        pp_size = self.parallel_config.pipeline_parallel_size
-        return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def shutdown(self) -> None:
         if logger:
@@ -265,30 +258,35 @@ class RayDistributedExecutor(Executor):
         }
         self.collective_rpc("adjust_rank", args=(rerank_mapping,))
 
-        # Get the set of GPU IDs used on each node.
-        worker_node_and_gpu_ids = []
+        # Get the set of physical GPU IDs used on each node.
+        worker_node_and_physical_gpu_ids = []
         for worker in [self.driver_dummy_worker] + self.workers:
             if worker is None:
                 # driver_dummy_worker can be None when using ray spmd worker.
                 continue
-            worker_node_and_gpu_ids.append(
-                ray.get(worker.get_node_and_gpu_ids.remote())  # type: ignore[attr-defined]
+            worker_node_and_physical_gpu_ids.append(
+                ray.get(worker.get_node_and_physical_gpu_ids.remote())  # type: ignore[attr-defined]
             )
 
         node_workers = defaultdict(list)  # node id -> list of worker ranks
-        node_gpus = defaultdict(list)  # node id -> list of gpu ids
+        node_physical_gpu_ids = defaultdict(list)  # node id -> physical GPU IDs
 
-        for i, (node_id, gpu_ids) in enumerate(worker_node_and_gpu_ids):
+        for i, (node_id, physical_gpu_ids) in enumerate(
+            worker_node_and_physical_gpu_ids
+        ):
             node_workers[node_id].append(i)
-            # `gpu_ids` can be a list of strings or integers.
+            # `physical_gpu_ids` can be a list of strings or integers.
             # convert them to integers for consistency.
-            # NOTE: gpu_ids can be larger than 9 (e.g. 16 GPUs),
+            # NOTE: physical GPU IDs can be larger than 9 (e.g. 16 GPUs),
             # string sorting is not sufficient.
             # see https://github.com/vllm-project/vllm/issues/5590
-            gpu_ids = [int(x) for x in gpu_ids]
-            node_gpus[node_id].extend(gpu_ids)
-        for node_id, gpu_ids in node_gpus.items():
-            node_gpus[node_id] = sorted(gpu_ids)
+            physical_gpu_ids = [
+                current_platform.device_control_id_to_physical_device_id(str(x))
+                for x in physical_gpu_ids
+            ]
+            node_physical_gpu_ids[node_id].extend(physical_gpu_ids)
+        for node_id, physical_gpu_ids in node_physical_gpu_ids.items():
+            node_physical_gpu_ids[node_id] = sorted(physical_gpu_ids)
 
         all_ips = set(worker_ips + [driver_ip])
         n_ips = len(all_ips)
@@ -304,23 +302,8 @@ class RayDistributedExecutor(Executor):
                 " each node."
             )
 
-        # Set environment variables for the driver and workers.
-        # We set CUDA_VISIBLE_DEVICES to ALL GPUs on the node for each worker.
-        # This is needed because:
-        # 1. Ray's compiled DAG needs to find the allocated GPU in
-        #    CUDA_VISIBLE_DEVICES.
-        # 2. vLLM's communication layer (NCCL, CustomAllreduce) needs to see
-        #    all GPUs for P2P checks and communication setup. Though if it was
-        #    just this reason, we could have also just kept the visible devices
-        #    unset.
-        # Each worker will use local_rank to index into the visible devices.
-        all_args_to_update_environment_variables = [
-            {
-                current_platform.device_control_env_var: ",".join(
-                    map(str, node_gpus[node_id])
-                ),
-            }
-            for (node_id, _) in worker_node_and_gpu_ids
+        all_args_to_update_environment_variables: list[dict[str, str]] = [
+            {} for _ in worker_node_and_physical_gpu_ids
         ]
 
         # Environment variables to copy from driver to workers
@@ -343,7 +326,7 @@ class RayDistributedExecutor(Executor):
             "update_environment_variables", args=(self._get_env_vars_to_be_updated(),)
         )
 
-        if len(node_gpus) == 1:
+        if len(node_physical_gpu_ids) == 1:
             # in single node case, we don't need to get the IP address.
             # the loopback address is sufficient
             # NOTE: a node may have several IP addresses, one for each
@@ -359,10 +342,11 @@ class RayDistributedExecutor(Executor):
 
         # Initialize the actual workers inside worker wrapper.
         all_kwargs = []
-        for rank, (node_id, _) in enumerate(worker_node_and_gpu_ids):
+        for rank, (node_id, _) in enumerate(worker_node_and_physical_gpu_ids):
             local_rank = node_workers[node_id].index(rank)
             kwargs = dict(
                 vllm_config=self.vllm_config,
+                assigned_physical_gpu_ids=sorted(node_physical_gpu_ids[node_id]),
                 local_rank=local_rank,
                 rank=rank,
                 distributed_init_method=distributed_init_method,
@@ -463,7 +447,9 @@ class RayDistributedExecutor(Executor):
             # Get output only from a single worker (output_rank)
             # When PP is not used, we block here until the result is available.
             if not non_block:
-                return refs[0].get()
+                output = refs[0].get()
+                detach_zero_copy_from_model_runner_output(output)
+                return output
 
             # When PP is used, we return a FutureWrapper immediately so that
             # the scheduler can yield to the next batch.
@@ -473,7 +459,10 @@ class RayDistributedExecutor(Executor):
         assert self.kv_output_aggregator is not None
         if not non_block:
             # Block and get results from all workers
-            return self.kv_output_aggregator.aggregate(ray.get(refs))
+            outputs = ray.get(refs)
+            for output in outputs:
+                detach_zero_copy_from_model_runner_output(output)
+            return self.kv_output_aggregator.aggregate(outputs)
 
         # Return a future that will aggregate outputs from all workers
         return FutureWrapper(refs, self.kv_output_aggregator)

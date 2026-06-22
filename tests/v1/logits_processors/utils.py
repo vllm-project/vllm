@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import types
+import os
+import tempfile
 from enum import Enum, auto
+from pathlib import Path
 from typing import Any
 
 import torch
 
+from tests.utils import requires_spawn_multiprocessing
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
@@ -102,11 +105,6 @@ class DummyLogitsProcessor(LogitsProcessor):
         return logits
 
 
-"""Dummy module with dummy logitproc class"""
-dummy_module = types.ModuleType(DUMMY_LOGITPROC_MODULE)
-dummy_module.DummyLogitsProcessor = DummyLogitsProcessor  # type: ignore
-
-
 class EntryPoint:
     """Dummy entrypoint class for logitsprocs testing"""
 
@@ -187,5 +185,59 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
         return DummyPerReqLogitsProcessor(target_token)
 
 
-"""Fake version of importlib.metadata.entry_points"""
-entry_points = lambda group: EntryPoints(group)
+def register_fake_entrypoint(monkeypatch) -> str:
+    """Register the dummy logitsproc entrypoint in a way that is visible
+    to spawned subprocesses by creating a real dist-info directory on disk.
+
+    Unlike monkey-patching importlib.metadata.entry_points (which only works
+    with fork), this approach writes a real dist-info package that
+    importlib.metadata can discover in any subprocess via PYTHONPATH.
+
+    Returns the temp directory path.
+    """
+    tmpdir = Path(tempfile.mkdtemp(prefix="dummy-logitproc-"))
+    dist_info = tmpdir / "dummy_logitproc-0.1.dist-info"
+    dist_info.mkdir()
+
+    # Write METADATA file (required by importlib.metadata)
+    (dist_info / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: dummy-logitproc\nVersion: 0.1\n",
+        encoding="utf-8",
+    )
+
+    # Write entry_points.txt
+    (dist_info / "entry_points.txt").write_text(
+        f"[{LOGITSPROCS_GROUP}]\n"
+        f"{DUMMY_LOGITPROC_ENTRYPOINT} = {DUMMY_LOGITPROC_FQCN}\n",
+        encoding="utf-8",
+    )
+
+    # Add to PYTHONPATH so spawned subprocesses can discover it
+    existing = os.environ.get("PYTHONPATH", "")
+    monkeypatch.setenv(
+        "PYTHONPATH", str(tmpdir) + (os.pathsep + existing if existing else "")
+    )
+
+    # Also update sys.path for the current process so the driver can
+    # discover the entrypoint.
+    monkeypatch.syspath_prepend(str(tmpdir))
+
+    return str(tmpdir)
+
+
+def fake_entry_points(group: str) -> EntryPoints:
+    """Fake version of importlib.metadata.entry_points."""
+    return EntryPoints(group)
+
+
+def setup_fake_entrypoint(monkeypatch) -> None:
+    """Expose the dummy logitproc entrypoint for the current platform."""
+    if requires_spawn_multiprocessing():
+        register_fake_entrypoint(monkeypatch)
+        monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        return
+
+    import importlib.metadata
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", fake_entry_points)
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
