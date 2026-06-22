@@ -52,7 +52,7 @@ class PoolingServingBase(ABC):
         self.engine_client = engine_client
         self.models = models
         self.model_config = models.model_config
-        self.renderer = models.renderer
+        self.renderer = engine_client.renderer
         self.vllm_config = engine_client.vllm_config
         self.max_model_len = self.model_config.max_model_len
         self.request_logger = request_logger
@@ -61,7 +61,7 @@ class PoolingServingBase(ABC):
         self.chat_template_config = chat_template_config
 
         # Shared thread pool executor for preprocessing and postprocessing.
-        self._executor: Executor = models.renderer._executor
+        self._executor: Executor = self.renderer._executor
         self._preprocessing_async = make_async(
             self._preprocessing, executor=self._executor
         )
