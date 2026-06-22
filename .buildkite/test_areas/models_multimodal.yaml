@@ -68,7 +68,6 @@ steps:
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
   mirror:
     amd:
-      soft_fail: true
       device: mi325_1
       depends_on:
       - image-build-amd
