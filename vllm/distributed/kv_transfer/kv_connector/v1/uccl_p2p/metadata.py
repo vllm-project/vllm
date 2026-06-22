@@ -41,8 +41,7 @@ UCCL_P2P_CONNECTOR_VERSION: int = 4
 @dataclass
 class UcclP2pAgentMetadata:
     engine_id: str
-    data_endpoint_metadata: bytes
-    notif_endpoint_metadata: bytes
+    endpoint_metadata: bytes
     serialized_xfer_descs: bytes
     kv_caches_base_addr: list[int]
     device_id: int

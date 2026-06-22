@@ -1055,11 +1055,10 @@ class UcclP2pConnectorWorker:
         )
 
         # After KV Caches registered, listen for new connections.
-        data_ep_md, notif_ep_md = self.uccl_p2p_wrapper.get_agent_metadata()
+        endpoint_md = self.uccl_p2p_wrapper.get_agent_metadata()
         agent_metadata = UcclP2pAgentMetadata(
             engine_id=self.engine_id,
-            data_endpoint_metadata=data_ep_md,
-            notif_endpoint_metadata=notif_ep_md,
+            endpoint_metadata=endpoint_md,
             serialized_xfer_descs=self._serialized_xfer_descs,
             device_id=self.device_id,
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id][self.tp_rank],
@@ -1423,8 +1422,7 @@ class UcclP2pConnectorWorker:
 
         remote_agent_name = self.uccl_p2p_wrapper.add_remote_agent(
             f"{engine_id}_{remote_tp_rank}",
-            uccl_p2p_agent_meta.data_endpoint_metadata,
-            uccl_p2p_agent_meta.notif_endpoint_metadata,
+            uccl_p2p_agent_meta.endpoint_metadata,
         )
 
         # Create dst descs and xfer side handles. TP workers have same #blocks
@@ -1526,8 +1524,7 @@ class UcclP2pConnectorWorker:
         remote_base_addr_to_desc = dict(zip(remote_base_addrs, remote_base_descs))
         # Compute tensor sizes from block_lens and num_blocks.
         remote_tensor_sizes = [
-            bl * uccl_p2p_agent_meta.num_blocks
-            for bl in uccl_p2p_agent_meta.block_lens
+            bl * uccl_p2p_agent_meta.num_blocks for bl in uccl_p2p_agent_meta.block_lens
         ]
         remote_base_addr_to_size = dict(zip(remote_base_addrs, remote_tensor_sizes))
 
@@ -2025,7 +2022,8 @@ class UcclP2pConnectorWorker:
                             notif_msg, agent_name = notif_meta
                             try:
                                 self.uccl_p2p_wrapper.send_notif(
-                                    agent_name, notif_msg=notif_msg)
+                                    agent_name, notif_msg=notif_msg
+                                )
                             except Exception as e:
                                 self._log_failure(
                                     failure_type="notification_failed",
@@ -2108,7 +2106,8 @@ class UcclP2pConnectorWorker:
                 with self._handshake_lock:
                     if remote_engine_id not in self._remote_agents:
                         self._background_uccl_p2p_handshake(
-                            req_id, remote_engine_id, meta)
+                            req_id, remote_engine_id, meta
+                        )
                         continue
 
             # Handshake already completed, start async read xfer.
@@ -2230,9 +2229,7 @@ class UcclP2pConnectorWorker:
             else:
                 # Single read from remote, we write to the whole memory region.
                 # Also handle remote block size different from local block size.
-                local_xfer_descs = self.src_xfer_descs_by_block_size[
-                    remote_block_size
-                ]
+                local_xfer_descs = self.src_xfer_descs_by_block_size[remote_block_size]
 
             # Destination XferDesc list: remote_engine_id -> remote_rank -> list.
             remote_xfer_descs = self.dst_xfer_descs[meta.remote.engine_id][
@@ -2372,14 +2369,8 @@ class UcclP2pConnectorWorker:
         # Select per-block XferDesc objects by the computed indices.
         handle = None
         try:
-            local_descs = [
-                local_xfer_descs[int(i)]
-                for i in local_block_descs_ids
-            ]
-            remote_descs = [
-                remote_xfer_descs[int(i)]
-                for i in remote_block_descs_ids
-            ]
+            local_descs = [local_xfer_descs[int(i)] for i in local_block_descs_ids]
+            remote_descs = [remote_xfer_descs[int(i)] for i in remote_block_descs_ids]
             agent_name = self._remote_agents[dst_engine_id][remote_rank]
             transfer_id = self.uccl_p2p_wrapper.make_prepped_xfer(
                 "READ",

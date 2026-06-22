@@ -36,14 +36,12 @@ class FakeUcclP2pWrapper:
     """Stub that mimics the UcclP2pWrapper interface for smoke testing."""
 
     def __init__(self, local_gpu_idx: int):
-        self._data_md = b"fake_data_md"
-        self._notif_md = b"fake_notif_md"
-        self._data_conn_ids: dict[str, int] = {}
-        self._notif_conn_ids: dict[str, int] = {}
+        self._md = b"fake_md"
+        self._conn_ids: dict[str, int] = {}
         self._counter = 0
 
-    def get_agent_metadata(self) -> tuple[bytes, bytes]:
-        return (self._data_md, self._notif_md)
+    def get_agent_metadata(self) -> bytes:
+        return self._md
 
     def register_memory(self, tensor_list: list[torch.Tensor]) -> list[Any]:
         descs = [
@@ -64,18 +62,15 @@ class FakeUcclP2pWrapper:
     def add_remote_agent(
         self,
         agent_name: str,
-        data_endpoint_metadata: bytes,
-        notif_endpoint_metadata: bytes,
+        endpoint_metadata: bytes,
     ) -> str:
         self._counter += 1
         conn_id = self._counter
-        self._data_conn_ids[agent_name] = conn_id
-        self._notif_conn_ids[agent_name] = conn_id
+        self._conn_ids[agent_name] = conn_id
         return agent_name
 
     def remove_remote_agent(self, agent_name: str) -> None:
-        self._data_conn_ids.pop(agent_name, None)
-        self._notif_conn_ids.pop(agent_name, None)
+        self._conn_ids.pop(agent_name, None)
 
     def make_prepped_xfer(
         self,
