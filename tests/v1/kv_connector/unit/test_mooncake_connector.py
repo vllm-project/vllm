@@ -1222,9 +1222,12 @@ def test_register_kv_caches_per_token_layout():
         worker = connector.connector_worker
         mock_thread.return_value.is_alive.return_value = False
 
-        # MLA cache -> single (non-split) tensor, like the per-token DSA layout.
+        # MLA cache -> single (non-split) tensor, like the per-token DSA layout:
+        # one latent tensor, not a blocks-first K/V-interleaved layout.
         worker.use_mla = True
         worker.transfer_topo.is_mla = True
+        worker.transfer_topo._is_kv_layout_blocks_first = False
+        assert not worker.transfer_topo.virtually_split_kv_in_blocks
 
         # Simulate a backend whose logical block size (16) is 16x the kernel
         # block size (1): 16 physical (per-token) blocks pack into one logical
@@ -1254,6 +1257,57 @@ def test_register_kv_caches_per_token_layout():
         # block_len spans a whole logical block (ratio per-token rows).
         per_token_len = cache.stride(0) * cache.element_size()
         assert worker.block_len_per_layer == [per_token_len * ratio]
+
+
+def test_register_kv_caches_per_token_layout_rejects_kv_split():
+    """ratio > 1 must fail closed for a blocks-first, K/V-split layout.
+
+    Collapsing `ratio` physical blocks into one logical block assumes a whole
+    logical block is transferred as one contiguous unit. That assumption breaks
+    for a blocks-first, K/V-interleaved layout, where the K/V split
+    (block_len // 2) and heterogeneous-TP head offsets are derived from
+    block_len and would be sliced incorrectly by folding. register_kv_caches()
+    must reject that combination instead of silently corrupting KV addressing.
+    """
+
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Event"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Thread"
+        ) as mock_thread,
+    ):
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            _make_test_kv_cache_config(),
+        )
+        worker = connector.connector_worker
+        mock_thread.return_value.is_alive.return_value = False
+
+        # Non-MLA, blocks-first K/V-interleaved layout (virtual K/V split).
+        worker.use_mla = False
+        worker.transfer_topo.is_mla = False
+        worker.transfer_topo._is_kv_layout_blocks_first = True
+        worker.transfer_topo._cross_layers_blocks = False
+        assert worker.transfer_topo.virtually_split_kv_in_blocks
+
+        worker._physical_blocks_per_logical_kv_block = 2
+        cache = torch.zeros((4, 2, 1, 1, 96), dtype=torch.float16)
+        kv_caches = {"model.layers.0.self_attn": cache}
+
+        with (
+            patch.object(worker.engine, "batch_register_memory", return_value=0),
+            pytest.raises(AssertionError, match="folding"),
+        ):
+            connector.register_kv_caches(kv_caches)
 
 
 @pytest.mark.asyncio

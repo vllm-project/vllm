@@ -1502,6 +1502,25 @@ class MooncakeConnectorWorker:
         self.registered_layer_indices = []
 
         split_k_and_v = self.transfer_topo.split_k_and_v
+
+        # Folding `ratio` physical blocks into one logical block (below) assumes
+        # a whole logical block is transferred as a single contiguous unit. That
+        # holds for the MLA / DSA-indexer per-token layouts where ratio > 1
+        # actually occurs (KV replicated across TP, no in-block K/V split). It
+        # does NOT hold for a blocks-first, K/V-interleaved layout: there the
+        # K/V split (block_len // 2) and the heterogeneous-TP head offsets are
+        # derived from block_len, so folding would slice them incorrectly. Fail
+        # closed on that (currently unreached) combination rather than silently
+        # corrupting KV addressing.
+        assert (
+            self._physical_blocks_per_logical_kv_block == 1
+            or not self.transfer_topo.virtually_split_kv_in_blocks
+        ), (
+            "Mooncake logical->physical block folding (ratio > 1) is only "
+            "supported for non K/V-split (MLA-style) layouts; got "
+            "virtually_split_kv_in_blocks=True"
+        )
+
         tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
             layer_index = extract_layer_index(layer_name)
