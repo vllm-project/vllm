@@ -79,34 +79,21 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
-def _dcp_global_topk_merge(
+def _dcp_pack_local_candidates(
     topk_indices: torch.Tensor,
     logits: torch.Tensor,
     local_valid: torch.Tensor,
     cp_rank: int,
     dcp_world_size: int,
-    topk_tokens: int,
-) -> None:
-    """Merge per-rank local top-k into the global top-k under DCP exact-merge.
+) -> torch.Tensor:
+    """Pack this rank's local top-k into ``(global_pos, score)`` candidates.
 
-    Each DCP rank ran the local top-k over only its 1/N interleaved KV shard
-    (CP_INTERLEAVE=1, compress_ratio=1), producing request-relative LOCAL
-    indices into that shard. Local index ``i`` on rank ``r`` is the global
-    position ``g = r + i * dcp_world_size``. Ranks all-gather their
-    ``(global_pos, score)`` candidates and each independently recomputes the
-    same global top-k via a deterministic int64 total-order key: fp8 indexer
-    scores tie often, and a plain ``torch.topk`` breaks ties
-    per-rank-nondeterministically, so ranks could otherwise select different
-    tied tokens and their attention outputs would disagree (intermittent
-    garbled tokens). Each rank then keeps only the selected positions it owns,
-    mapped back to its LOCAL shard index (``g // dcp_world_size``, others
-    ``-1``). That is the same LOCAL-index representation the union path feeds
-    downstream, so the slot conversion, attention kernel and cross-rank LSE
-    merge are unchanged; the merge reconciles the per-rank owned subsets into
-    attention over exactly the global top-k. Writes ``topk_indices`` in place.
+    Returns a ``[T, K, 2]`` float32 tensor: ``[..., 0]`` is the global position
+    ``g = cp_rank + local_idx * dcp_world_size`` (CP_INTERLEAVE=1) and
+    ``[..., 1]`` the local indexer score, with invalid slots set to
+    ``(-1, -inf)``. Positions are < max_model_len (<< 2**24), so the float32
+    packing of the position is lossless.
     """
-    T = topk_indices.shape[0]
-    K = topk_tokens
     invalid = topk_indices < 0
     idx_safe = topk_indices.clamp(min=0)
     # A row whose shard holds fewer than K valid slots gets padded/OOB local
@@ -117,13 +104,28 @@ def _dcp_global_topk_merge(
     ).masked_fill(invalid, float("-inf"))
     global_pos = cp_rank + idx_safe.to(torch.int32) * dcp_world_size
     global_pos = torch.where(invalid, torch.full_like(global_pos, -1), global_pos)
-
-    # [T, K, 2] -> all_gather over ranks -> [dcp_world_size, T, K, 2]. Positions
-    # are < max_model_len (<< 2**24) so the float32 packing is lossless.
-    cand = torch.stack(
+    return torch.stack(
         [global_pos.to(torch.float32), local_scores.to(torch.float32)], dim=-1
     )
-    cand_all = get_dcp_group().all_gather(cand, dim=0).view(dcp_world_size, T, K, 2)
+
+
+def _dcp_select_owned_global_topk(
+    cand_all: torch.Tensor,
+    dcp_world_size: int,
+    topk_tokens: int,
+    cp_rank: int,
+) -> torch.Tensor:
+    """Select the global top-k from all-gathered candidates and return this
+    rank's owned positions as LOCAL shard indices.
+
+    ``cand_all`` is the ``[dcp_world_size * T, K, 2]`` all-gather of
+    :func:`_dcp_pack_local_candidates` over ranks. Returns ``[T, K]`` int32
+    LOCAL indices (``g // dcp_world_size``) for the selected positions this rank
+    owns, ``-1`` for positions owned by other ranks.
+    """
+    K = topk_tokens
+    T = cand_all.shape[0] // dcp_world_size
+    cand_all = cand_all.view(dcp_world_size, T, K, 2)
     # permute-before-reshape is load-bearing: a bare reshape would interleave
     # rows across ranks instead of concatenating each rank's K candidates.
     gp = cand_all[..., 0].permute(1, 0, 2).reshape(T, dcp_world_size * K)
@@ -149,10 +151,44 @@ def _dcp_global_topk_merge(
     # index; positions owned by other ranks become -1 (the attention kernel and
     # LSE merge treat -1 as "skip", and the other ranks contribute them).
     owned = (global_sel >= 0) & (global_sel % dcp_world_size == cp_rank)
-    local_sel = torch.where(
+    return torch.where(
         owned, global_sel // dcp_world_size, torch.full_like(global_sel, -1)
     )
-    topk_indices.copy_(local_sel)
+
+
+def _dcp_global_topk_merge(
+    topk_indices: torch.Tensor,
+    logits: torch.Tensor,
+    local_valid: torch.Tensor,
+    cp_rank: int,
+    dcp_world_size: int,
+    topk_tokens: int,
+) -> None:
+    """Merge per-rank local top-k into the global top-k under DCP exact-merge.
+
+    Each DCP rank ran the local top-k over only its 1/N interleaved KV shard
+    (CP_INTERLEAVE=1, compress_ratio=1), producing request-relative LOCAL
+    indices into that shard. Local index ``i`` on rank ``r`` is the global
+    position ``g = r + i * dcp_world_size``. Ranks all-gather their
+    ``(global_pos, score)`` candidates and each independently recomputes the
+    same global top-k via a deterministic int64 total-order key: fp8 indexer
+    scores tie often, and a plain ``torch.topk`` breaks ties
+    per-rank-nondeterministically, so ranks could otherwise select different
+    tied tokens and their attention outputs would disagree (intermittent
+    garbled tokens). Each rank then keeps only the selected positions it owns,
+    mapped back to its LOCAL shard index (others ``-1``). That is the same
+    LOCAL-index representation the union path feeds downstream, so the slot
+    conversion, attention kernel and cross-rank LSE merge are unchanged; the
+    merge reconciles the per-rank owned subsets into attention over exactly the
+    global top-k. Writes ``topk_indices`` in place.
+    """
+    cand = _dcp_pack_local_candidates(
+        topk_indices, logits, local_valid, cp_rank, dcp_world_size
+    )
+    cand_all = get_dcp_group().all_gather(cand, dim=0)
+    topk_indices.copy_(
+        _dcp_select_owned_global_topk(cand_all, dcp_world_size, topk_tokens, cp_rank)
+    )
 
 
 @eager_break_during_capture
