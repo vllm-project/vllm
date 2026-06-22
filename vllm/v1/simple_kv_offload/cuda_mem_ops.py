@@ -112,9 +112,8 @@ class BatchMemcpyParams(NamedTuple):
     dst_bases: np.ndarray  # [num_layers] uint64
     bpb: np.ndarray  # [num_layers] uint64 — bytes per block
     num_layers: int
-    # CUDA only: one attributes entry carrying srcAccessOrder (STREAM for
-    # GPU->CPU stores, ANY for CPU->GPU loads). Unused on ROCm (7.2.1 or
-    # 7.2.2) because the current runtime rejects numAttrs > 0.
+    # CUDA only: one attributes entry carrying srcAccessOrder. Unused on ROCm
+    # (7.2.1 or 7.2.2) because the current runtime rejects numAttrs > 0.
     attrs: _CUmemcpyAttributes
     attrs_idx: ctypes.c_size_t
     # NOTE: cuMemcpyBatchAsync_v2() removed fail_idx field, but we use
@@ -145,7 +144,6 @@ def build_params(
         dst_bases.append(d.data_ptr())
         bpb.append(s_bpb)
 
-    # STREAM for stores, ANY for loads; see #39306 and the enum above.
     attrs = _CUmemcpyAttributes(srcAccessOrder=src_access_order)
 
     return BatchMemcpyParams(
