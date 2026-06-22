@@ -221,6 +221,9 @@ def kernel_unified_attention(
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,
+    ref_sliding_window_decode_mask_ptr,
+    REF_SLIDING_WINDOW: tl.constexpr,
+    USE_REF_SLIDING_WINDOW: tl.constexpr,
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
@@ -390,7 +393,7 @@ def kernel_unified_attention(
         BLOCK_Q,
         num_queries_per_kv,
         SLIDING_WINDOW,
-        USE_MM_PREFIX,
+        USE_MM_PREFIX or USE_REF_SLIDING_WINDOW,
         IS_3D,
         USE_CAUSAL,
         USE_PER_SEQ_CAUSAL,
@@ -506,6 +509,9 @@ def kernel_unified_attention(
             USE_CAUSAL,
             USE_PER_SEQ_CAUSAL,
             per_seq_causal_ptr,
+            ref_sliding_window_decode_mask_ptr,
+            REF_SLIDING_WINDOW,
+            USE_REF_SLIDING_WINDOW,
             CHUNK_LOOKBACK,
             CHUNK_SIZE,
         )
@@ -806,6 +812,8 @@ def unified_attention(
     sinks=None,
     # Optional tensor for prefix lengths (PrefixLM support)
     mm_prefix_range=None,
+    ref_sliding_window: int | None = None,
+    ref_sliding_window_decode_mask=None,
     use_alibi_sqrt=False,
     # KV cache quantization mode and per-token-head scale caches.
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
@@ -846,6 +854,10 @@ def unified_attention(
             raise ValueError(
                 f"Unsupported mm_prefix_range shape: {mm_prefix_range.shape}"
             )
+
+    use_ref_sliding_window = ref_sliding_window is not None
+    if use_ref_sliding_window:
+        assert ref_sliding_window_decode_mask is not None
 
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
@@ -1060,7 +1072,12 @@ def unified_attention(
         per_seq_causal_ptr=per_seq_causal_ptr,
         USE_MM_PREFIX=use_mm_prefix,
         MAX_MM_RANGES=max_mm_ranges,
+        REF_SLIDING_WINDOW=ref_sliding_window or 0,
+        USE_REF_SLIDING_WINDOW=use_ref_sliding_window,
         mm_prefix_range_ptr=mm_prefix_range,
+        ref_sliding_window_decode_mask_ptr=ref_sliding_window_decode_mask
+        if use_ref_sliding_window
+        else seqused_k,
         stride_k_cache_0=k.stride(0),
         stride_k_cache_1=k.stride(1),
         stride_k_cache_2=k.stride(2),

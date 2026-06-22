@@ -279,6 +279,9 @@ def compute_kv_seq_mask(
     USE_CAUSAL: tl.constexpr = True,
     USE_PER_SEQ_CAUSAL: tl.constexpr = False,
     per_seq_causal_ptr=None,
+    ref_sliding_window_decode_mask_ptr=None,
+    REF_SLIDING_WINDOW: tl.constexpr = 0,
+    USE_REF_SLIDING_WINDOW: tl.constexpr = False,
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
 ):
@@ -329,6 +332,11 @@ def compute_kv_seq_mask(
             seq_mask = seq_mask & sw_left & sw_right
         else:
             seq_mask = seq_mask & sw_left
+
+    if USE_REF_SLIDING_WINDOW:
+        is_decode = tl.load(ref_sliding_window_decode_mask_ptr + seq_idx) != 0
+        sw_left = (query_abs_pos - seq_offset) < REF_SLIDING_WINDOW
+        seq_mask = seq_mask & tl.where(is_decode, sw_left, True)
 
     # PrefixLM: extend mask with bidirectional ranges for multimodal tokens.
     # Applied AFTER sliding window so mm_prefix ranges override SW restriction.

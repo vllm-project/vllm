@@ -76,8 +76,8 @@ def create_ref_sliding_window_attention_backend(
 class RefSlidingWindowAttention(Attention):
     """Decoder attention with causal prefill and sliding-window decode.
 
-    This layer relies on FlashAttention v4 mask_mod support to apply the
-    sliding-window predicate only to decode rows in mixed batches.
+    FlashAttention v4 uses mask_mod for this; Triton uses a dedicated
+    per-sequence decode mask in the unified attention kernel.
     """
 
     def __init__(
@@ -113,10 +113,10 @@ class RefSlidingWindowAttention(Attention):
             kv_cache_dtype,
             attn_type=AttentionType.DECODER,
         )
-        if underlying_attn_backend.get_name() != "FLASH_ATTN":
+        if underlying_attn_backend.get_name() not in {"FLASH_ATTN", "TRITON_ATTN"}:
             raise ValueError(
-                "RefSlidingWindowAttention requires the FLASH_ATTN backend "
-                "because mixed prefill/decode uses FlashAttention v4 mask_mod."
+                "RefSlidingWindowAttention requires FLASH_ATTN or TRITON_ATTN "
+                "for mixed prefill/decode support."
             )
         attn_backend = create_ref_sliding_window_attention_backend(
             underlying_attn_backend, sliding_window
