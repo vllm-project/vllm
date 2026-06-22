@@ -79,15 +79,21 @@ class Sm100ChunkOKernel:
         num_elems = 128 // (tensor.element_type.width // 8)
         swizzle_128B = cute.make_swizzle(3, 4, 3)
         slayout = cute.make_layout(
-            (1, self.V_dim, (num_elems, self.K_dim // num_elems), stages),
-            stride=(0, num_elems, (1, self.V_dim * num_elems), self.V_dim * self.K_dim),
+            (1, 1, self.V_dim, (num_elems, self.K_dim // num_elems), stages),
+            stride=(
+                0,
+                0,
+                num_elems,
+                (1, self.V_dim * num_elems),
+                self.V_dim * self.K_dim,
+            ),
         )
         slayout = cute.make_composed_layout(swizzle_128B, 0, slayout)
         atom, tma_tensor = cpasync.make_tiled_tma_atom(
             op,
-            cute.logical_divide(tensor, (None, None, num_elems)),
+            cute.logical_divide(tensor, (None, None, None, num_elems)),
             slayout,
-            cta_tiler=(1, self.V_dim, self.K_dim),
+            cta_tiler=(1, 1, self.V_dim, self.K_dim),
         )
         return atom, tma_tensor, slayout
 
@@ -177,7 +183,7 @@ class Sm100ChunkOKernel:
         sQ = allocate_tensor(smem, BFloat16, sQ_layout)[None, 0, None, None]
         sK = allocate_tensor(smem, BFloat16, sK_layout)[None, 0, None, None]
         sV = allocate_tensor(smem, BFloat16, sV_layout)[None, 0, None, None]
-        sH = allocate_tensor(smem, BFloat16, sH_layout)[0, None, None, None]
+        sH = allocate_tensor(smem, BFloat16, sH_layout)[0, 0, None, None, None]
         sO = allocate_tensor(smem, BFloat16, sO_layout)[None, 0, None, 0]
 
         s_g_cu = smem.allocate_array(Float32, BT)
@@ -245,7 +251,7 @@ class Sm100ChunkOKernel:
                 simple_tma_copy(K_tma_atom, k_tile, sK[None, None, stage_id], mbar)
 
                 # copy H and V
-                gH = tmaH[global_chunk_id * self.Hv + v_head_id, None, None]
+                gH = tmaH[global_chunk_id, v_head_id, None, None]
                 gV = cute.local_tile(
                     tmaV[None, v_head_id, None],
                     tiler=(BT, V_dim),
@@ -556,13 +562,14 @@ class Sm100ChunkOKernel:
         total_t = cute.sym_int()
         pad_t = cute.sym_int()
         total_chunks_n = cute.sym_int()
-        h_outer_n = cute.sym_int()
         cu_entries = cute.sym_int()
 
         q = make_fake_tensor(BFloat16, (total_t, H, K_dim), divisibility=16)
         k = make_fake_tensor(BFloat16, (total_t, H, K_dim), divisibility=16)
         v_new = make_fake_tensor(BFloat16, (pad_t, Hv, V_dim), divisibility=16)
-        h_flat = make_fake_tensor(BFloat16, (h_outer_n, V_dim, K_dim), divisibility=16)
+        h = make_fake_tensor(
+            BFloat16, (total_chunks_n, Hv, V_dim, K_dim), divisibility=16
+        )
         g_cu = make_fake_tensor(Float32, (total_t, Hv), divisibility=4)
         o = make_fake_tensor(BFloat16, (total_t, Hv, V_dim), divisibility=16)
         cu_seqlens = make_fake_tensor(Int32, (cu_entries,), divisibility=1)
@@ -583,7 +590,7 @@ class Sm100ChunkOKernel:
             q,
             k,
             v_new,
-            h_flat,
+            h,
             g_cu,
             o,
             cu_seqlens,
@@ -599,7 +606,7 @@ class Sm100ChunkOKernel:
 def o_cutedsl(
     q: torch.Tensor,
     k: torch.Tensor,
-    v_new_chunks: torch.Tensor,
+    v_new: torch.Tensor,
     h: torch.Tensor,
     g_cu: torch.Tensor,
     o: torch.Tensor,
@@ -615,8 +622,8 @@ def o_cutedsl(
     Sm100ChunkOKernel.compile(H, Hv, K_dim, V_dim)(
         q,
         k,
-        v_new_chunks.view(-1, Hv, V_dim),
-        h.view(-1, V_dim, K_dim),
+        v_new,
+        h,
         g_cu,
         o,
         cu_seqlens,

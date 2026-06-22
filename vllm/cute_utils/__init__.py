@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import cutlass
 from cutlass import BFloat16, Float32, Int64, Uint32, cute
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import llvm, vector
@@ -55,34 +54,6 @@ def fence_before_tma_store(*, loc=None, ip=None):
         [],
         "mov.u32 $0, 0;\n\t"
         "fence.proxy.async::generic.release.sync_restrict::shared::cta.cluster;",
-        "=r",
-        has_side_effects=True,
-        is_align_stack=False,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def setmaxnreg_inc(reg_count: cutlass.Constexpr[int], *, loc=None, ip=None):
-    llvm.inline_asm(
-        T.i32(),
-        [],
-        f"mov.u32 $0, 0;\n\tsetmaxnreg.inc.sync.aligned.u32 {reg_count};",
-        "=r",
-        has_side_effects=True,
-        is_align_stack=False,
-        loc=loc,
-        ip=ip,
-    )
-
-
-@dsl_user_op
-def setmaxnreg_dec(reg_count: cutlass.Constexpr[int], *, loc=None, ip=None):
-    llvm.inline_asm(
-        T.i32(),
-        [],
-        f"mov.u32 $0, 0;\n\tsetmaxnreg.dec.sync.aligned.u32 {reg_count};",
         "=r",
         has_side_effects=True,
         is_align_stack=False,
