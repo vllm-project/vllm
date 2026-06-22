@@ -549,7 +549,7 @@ __global__ void indexer_k_quant_and_cache_kernel(
     const int head_dim,                        // dimension of each head
     const int quant_block_size,                // quantization block size
     const int cache_block_size,                // cache block size
-    const int cache_stride,  // stride for each token in kv_cache
+    const int64_t cache_block_stride,  // stride for each block in kv_cache
 
     const bool use_ue8m0  // use ue8m0 scale format
 ) {
@@ -590,16 +590,15 @@ __global__ void indexer_k_quant_and_cache_kernel(
     scale = exp2f(ceilf(log2f(scale)));
   }
 
-  const int64_t dst_offset = block_idx * cache_block_size * cache_stride +
-                             block_offset * head_dim + head_dim_idx;
+  const int64_t dst_offset =
+      block_idx * cache_block_stride + block_offset * head_dim + head_dim_idx;
   for (int i = 0; i < VEC_SIZE; i++) {
     kv_cache[dst_offset + i] =
         fp8::scaled_convert<cache_t, scalar_t, kv_dt>(k_val_ptr[i], scale);
   }
   if (threadIdx.x == 0) {
     const int64_t dst_scale_idx =
-        block_idx * cache_block_size * cache_stride +
-        cache_block_size * head_dim +
+        block_idx * cache_block_stride + cache_block_size * head_dim +
         (block_offset * head_dim + head_dim_idx) * 4 / quant_block_size;
     reinterpret_cast<float*>(kv_cache)[dst_scale_idx / 4] = scale;
   }
@@ -1452,7 +1451,7 @@ void cp_gather_and_upconvert_fp8_kv_cache(
           reinterpret_cast<KV_T*>(k.data_ptr()),                              \
           reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                    \
           slot_mapping.const_data_ptr<int64_t>(), head_dim, quant_block_size, \
-          cache_block_size, cache_stride, use_ue8m0);
+          cache_block_size, cache_block_stride, use_ue8m0);
 
 void indexer_k_quant_and_cache(
     torch::stable::Tensor& k,         // [num_tokens, head_dim]
@@ -1463,7 +1462,7 @@ void indexer_k_quant_and_cache(
   int num_tokens = k.size(0);
   int head_dim = k.size(1);
   int cache_block_size = kv_cache.size(1);
-  int cache_stride = kv_cache.size(2);
+  int64_t cache_block_stride = kv_cache.stride(0);
   bool use_ue8m0 = scale_fmt == "ue8m0";
 
   STD_TORCH_CHECK(k.device() == kv_cache.device(),
