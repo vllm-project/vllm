@@ -1065,6 +1065,66 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
+    def _warmup_continuous_batching_update_kernel(
+        self,
+        *,
+        device: torch.device,
+        dtype: torch.dtype,
+        num_k_heads: int,
+        num_v_heads: int,
+    ) -> None:
+        """Warm the decode update variant that uses the bound SSM cache."""
+        kv_cache = getattr(self, "kv_cache", None)
+        if not isinstance(kv_cache, (tuple, list)) or len(kv_cache) < 2:
+            return
+
+        ssm_state = kv_cache[1]
+        if (
+            not isinstance(ssm_state, torch.Tensor)
+            or ssm_state.numel() == 0
+            or ssm_state.device != device
+        ):
+            return
+
+        decode_tokens = 1
+        q = torch.zeros(
+            1,
+            decode_tokens,
+            num_k_heads,
+            self.head_k_dim,
+            device=device,
+            dtype=dtype,
+        )
+        k = torch.zeros_like(q)
+        v = torch.zeros(
+            1,
+            decode_tokens,
+            num_v_heads,
+            self.head_v_dim,
+            device=device,
+            dtype=dtype,
+        )
+        a = torch.zeros(decode_tokens, num_v_heads, device=device, dtype=dtype)
+        b = torch.zeros_like(a)
+        cu_seqlens = torch.tensor([0, decode_tokens], device=device, dtype=torch.int32)
+        # NULL_BLOCK_ID=0 makes the runtime branch return without mutating cache,
+        # while still compiling the continuous-batching specialization.
+        state_indices = torch.zeros(decode_tokens, device=device, dtype=torch.int32)
+        fused_sigmoid_gating_delta_rule_update(
+            A_log=self.A_log,
+            a=a,
+            b=b,
+            dt_bias=self.dt_bias,
+            q=q,
+            k=k,
+            v=v,
+            initial_state=ssm_state,
+            inplace_final_state=True,
+            cu_seqlens=cu_seqlens,
+            ssm_state_indices=state_indices,
+            use_qk_l2norm_in_kernel=True,
+        )
+
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         """Warm up GDN prefill kernels during V1 profiling.
 
@@ -1262,6 +1322,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 out=decode_out,
                 ssm_state_indices=decode_state_indices,
                 use_qk_l2norm_in_kernel=True,
+            )
+            self._warmup_continuous_batching_update_kernel(
+                device=device,
+                dtype=dtype,
+                num_k_heads=num_k_heads,
+                num_v_heads=num_v_heads,
             )
 
         try:
