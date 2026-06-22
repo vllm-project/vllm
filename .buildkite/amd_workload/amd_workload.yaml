@@ -2,6 +2,7 @@
 # Each upstream AMD workload step uses Buildkite parallelism x3; sharded steps keep the same multiplier pattern.
 group: AMD workload x3
 steps:
+
 - label: 'AMD x3: V1 attention (H100-MI300)'
   key: amd-x3-v1-attention-h100-mi300
   timeout_in_minutes: 70
@@ -22,6 +23,7 @@ steps:
       working_dir: /vllm-workspace/tests
       commands:
       - pytest -v -s v1/attention
+
 - label: 'AMD x3: Engine'
   key: amd-x3-engine
   timeout_in_minutes: 60
@@ -42,6 +44,7 @@ steps:
       working_dir: /vllm-workspace/tests
       commands:
       - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_jit_monitor.py
+
 - label: 'AMD x3: Engine (1 GPU)'
   key: amd-x3-engine-1-gpu
   timeout_in_minutes: 40
@@ -63,6 +66,7 @@ steps:
       commands:
       - pytest -v -s v1/engine/test_preprocess_error_handling.py
       - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+
 - label: 'AMD x3: e2e Scheduling (1 GPU)'
   key: amd-x3-e2e-scheduling-1-gpu
   timeout_in_minutes: 60
@@ -83,6 +87,28 @@ steps:
       working_dir: /vllm-workspace/tests
       commands:
       - pytest -v -s v1/e2e/general/test_async_scheduling.py
+
+- label: 'AMD x3: e2e Core (1 GPU)'
+  key: amd-x3-e2e-core-1-gpu
+  timeout_in_minutes: 35
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/engine.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi250_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
+
 - label: 'AMD x3: Entrypoints Integration (LLM)'
   key: amd-x3-entrypoints-integration-llm
   timeout_in_minutes: 40
@@ -106,6 +132,7 @@ steps:
       - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode
       - pytest -v -s entrypoints/llm/test_generate.py
       - pytest -v -s entrypoints/llm/offline_mode
+
 - label: 'AMD x3: Entrypoints Integration (API Server)'
   key: amd-x3-entrypoints-integration-api-server
   timeout_in_minutes: 130
@@ -128,6 +155,7 @@ steps:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
       - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
       - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
+
 - label: 'AMD x3: Entrypoints Integration (API Server OpenAI - Part 1)'
   key: amd-x3-entrypoints-integration-api-server-openai-part-1
   timeout_in_minutes: 80
@@ -149,6 +177,7 @@ steps:
       commands:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
       - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
+
 - label: 'AMD x3: Entrypoints Integration (API Server OpenAI - Part 2)'
   key: amd-x3-entrypoints-integration-api-server-openai-part-2
   timeout_in_minutes: 80
@@ -171,6 +200,7 @@ steps:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
       - pytest -v -s entrypoints/openai/chat_completion
       - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
+
 - label: 'AMD x3: Entrypoints Integration (API Server Generate)'
   key: amd-x3-entrypoints-integration-api-server-generate
   timeout_in_minutes: 60
@@ -194,6 +224,7 @@ steps:
       - pytest -v -s entrypoints/tool_parsers
       - pytest -v -s entrypoints/generate
       - pytest -v -s entrypoints/anthropic
+
 - label: 'AMD x3: OpenAI API Correctness'
   key: amd-x3-openai-api-correctness
   timeout_in_minutes: 30
@@ -215,6 +246,28 @@ steps:
       commands:
       - bash ../tools/install_torchcodec_rocm.sh || exit 1
       - pytest -s entrypoints/openai/correctness/
+
+- label: 'AMD x3: Kernels Attention Test %N'
+  key: amd-x3-kernels-attention-test
+  timeout_in_minutes: 55
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 6
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/kernels.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
 - label: 'AMD x3: Kernels Quantization Test %N'
   key: amd-x3-kernels-quantization-test
   timeout_in_minutes: 90
@@ -235,6 +288,29 @@ steps:
       working_dir: /vllm-workspace/tests
       commands:
       - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
+- label: 'AMD x3: Kernels MoE Test %N'
+  key: amd-x3-kernels-moe-test
+  timeout_in_minutes: 50
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 15
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/kernels.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+      - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+
 - label: 'AMD x3: LM Eval Small Models'
   key: amd-x3-lm-eval-small-models
   timeout_in_minutes: 55
@@ -255,6 +331,73 @@ steps:
       working_dir: /vllm-workspace/tests
       commands:
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
+
+- label: 'AMD x3: LM Eval Large Models (H200)'
+  key: amd-x3-lm-eval-large-models-h200
+  timeout_in_minutes: 180
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/lm_eval.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_8
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - export PYTORCH_ROCM_ARCH=gfx942
+      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
+
+- label: 'AMD x3: LoRA %N'
+  key: amd-x3-lora
+  timeout_in_minutes: 60
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 12
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/lora.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
+
+- label: 'AMD x3: V1 Spec Decode'
+  key: amd-x3-v1-spec-decode
+  timeout_in_minutes: 65
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/misc.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -v -s -m 'not slow_test' v1/spec_decode
+
 - label: 'AMD x3: V1 Sample + Logits'
   key: amd-x3-v1-sample-logits
   timeout_in_minutes: 30
@@ -280,6 +423,38 @@ steps:
       - pytest -v -s v1/test_oracle.py
       - pytest -v -s v1/test_request.py
       - pytest -v -s v1/test_outputs.py
+
+- label: 'AMD x3: V1 Core + KV + Metrics'
+  key: amd-x3-v1-core-kv-metrics
+  timeout_in_minutes: 60
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/misc.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - pytest -v -s -m 'not cpu_test' v1/core
+      - pytest -v -s v1/executor
+      - pytest -v -s v1/kv_offload
+      - pytest -v -s v1/simple_kv_offload
+      - pytest -v -s v1/worker
+      - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
+      - pytest -v -s -m 'not cpu_test' v1/metrics
+      - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
+      - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+
 - label: 'AMD x3: Language Models Tests (Hybrid) %N'
   key: amd-x3-language-models-tests-hybrid
   timeout_in_minutes: 90
@@ -302,6 +477,7 @@ steps:
       - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
       - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
       - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+
 - label: 'AMD x3: Language Models Test (Extended Pooling)'
   key: amd-x3-language-models-test-extended-pooling
   timeout_in_minutes: 100
@@ -322,6 +498,7 @@ steps:
       working_dir: /vllm-workspace/tests
       commands:
       - pytest -v -s models/language/pooling -m 'not core_model'
+
 - label: 'AMD x3: Multi-Modal Models (Standard) 1: qwen2'
   key: amd-x3-multi-modal-models-standard-1-qwen2
   timeout_in_minutes: 45
@@ -344,6 +521,7 @@ steps:
       - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
       - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
       - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
+
 - label: 'AMD x3: Multi-Modal Models (Standard) 2: qwen3 + gemma'
   key: amd-x3-multi-modal-models-standard-2-qwen3-gemma
   timeout_in_minutes: 45
@@ -366,7 +544,7 @@ steps:
       - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
       - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
       - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
-      - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
+
 - label: 'AMD x3: Multi-Modal Models (Standard) 3: llava + qwen2_vl'
   key: amd-x3-multi-modal-models-standard-3-llava-qwen2-vl
   timeout_in_minutes: 45
@@ -389,6 +567,32 @@ steps:
       - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
       - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
       - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
+
+- label: 'AMD x3: Multi-Modal Models (Standard) 4: other + whisper'
+  key: amd-x3-multi-modal-models-standard-4-other-whisper
+  timeout_in_minutes: 45
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/models_multimodal.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+      - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/generation/test_vit_cudagraph.py --ignore models/multimodal/processing
+      - pytest -v -s models/multimodal/generation/test_vit_cudagraph.py -m core_model
+      - pytest models/multimodal/generation/test_memory_leak.py -m core_model
+      - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
+
 - label: 'AMD x3: Multi-Modal Models (Extended Generation 1)'
   key: amd-x3-multi-modal-models-extended-generation-1
   device: cpu-small
@@ -410,6 +614,7 @@ steps:
       - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
       - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
       - pytest -v -s models/multimodal/test_mapping.py
+
 - label: 'AMD x3: Multi-Modal Models (Extended Pooling)'
   key: amd-x3-multi-modal-models-extended-pooling
   timeout_in_minutes: 60
@@ -430,6 +635,28 @@ steps:
       working_dir: /vllm-workspace/tests
       commands:
       - pytest -v -s models/multimodal/pooling -m 'not core_model'
+
+- label: 'AMD x3: PyTorch Compilation Passes Unit Tests'
+  key: amd-x3-pytorch-compilation-passes-unit-tests
+  timeout_in_minutes: 180
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/pytorch.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pytest -s -v compile/passes --ignore compile/passes/distributed
+
 - label: 'AMD x3: Samplers Test'
   key: amd-x3-samplers-test
   timeout_in_minutes: 75
@@ -450,6 +677,28 @@ steps:
       working_dir: /vllm-workspace/tests
       commands:
       - pytest -v -s samplers
+
+- label: 'AMD x3: Spec Decode Eagle'
+  key: amd-x3-spec-decode-eagle
+  timeout_in_minutes: 45
+  device: cpu-small
+  no_plugin: true
+  optional: true
+  parallelism: 3
+  source_file_dependencies:
+  - .buildkite/amd_workload/amd_workload.yaml
+  - .buildkite/test_areas/spec_decode.yaml
+  commands:
+  - ':'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+      working_dir: /vllm-workspace/tests
+      commands:
+      - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
+
 - label: 'AMD x3: Spec Decode Speculators + MTP'
   key: amd-x3-spec-decode-speculators-mtp
   timeout_in_minutes: 65
@@ -470,6 +719,7 @@ steps:
       working_dir: /vllm-workspace/tests
       commands:
       - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
+
 - label: 'AMD x3: Spec Decode Ngram + Suffix'
   key: amd-x3-spec-decode-ngram-suffix
   timeout_in_minutes: 65
@@ -490,6 +740,7 @@ steps:
       working_dir: /vllm-workspace/tests
       commands:
       - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
+
 - label: 'AMD x3: Spec Decode Draft Model'
   key: amd-x3-spec-decode-draft-model
   timeout_in_minutes: 50
