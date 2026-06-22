@@ -62,6 +62,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
+from vllm.v1.attention.backend import AttentionType
 
 from .interfaces import (
     EagleModelMixin,
@@ -267,6 +268,15 @@ class Qwen3NextAttention(nn.Module):
             dual_chunk_attention_config=self.dual_chunk_attention_config,
         )
 
+        # Late-interaction retrieval models (e.g. ColQwen3.5) run BIDIRECTIONAL
+        # attention on the full_attention layers; they set config.is_causal=False
+        # via a VerifyAndUpdateConfig handler. Generation models leave is_causal
+        # unset (-> causal/DECODER), so this is a no-op for them. Mirrors qwen3.py.
+        attn_type = (
+            AttentionType.DECODER
+            if getattr(config, "is_causal", True)
+            else AttentionType.ENCODER_ONLY
+        )
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -275,6 +285,7 @@ class Qwen3NextAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            attn_type=attn_type,
             **{
                 "layer_idx": extract_layer_index(prefix),
                 "dual_chunk_attention_config": self.dual_chunk_attention_config,
