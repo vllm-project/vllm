@@ -9,8 +9,8 @@ from vllm.model_executor.kernels.mhc.tilelang import (
     _torch_hc_prenorm_gemm,
     _use_tf32_hc_prenorm_gemm,
 )
+from vllm.model_executor.layers.mhc import HAS_TILELANG_MHC
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_tilelang
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
@@ -112,8 +112,8 @@ def test_sm120_uses_tf32_hc_prenorm_gemm_without_deepgemm(monkeypatch):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() and has_tilelang()),
-    reason="CUDA or ROCm and tilelang required",
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
@@ -165,8 +165,8 @@ def test_mhc_pre_tilelang(num_tokens, hidden_size, hc_mult):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() and has_tilelang()),
-    reason="CUDA or ROCm and tilelang required",
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
 )
 @pytest.mark.parametrize(
     ("num_tokens", "hidden_size"),
@@ -205,8 +205,8 @@ def test_hc_prenorm_gemm_tilelang(num_tokens, hidden_size):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() and has_tilelang()),
-    reason="CUDA or ROCm and tilelang required",
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
@@ -232,8 +232,8 @@ def test_mhc_post_tilelang(num_tokens, hidden_size, hc_mult):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() and has_tilelang()),
-    reason="CUDA or ROCm and tilelang required",
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])
@@ -339,8 +339,8 @@ def test_hc_head_triton(num_tokens, hidden_size, hc_mult):
 
 
 @pytest.mark.skipif(
-    not (current_platform.is_cuda_alike() and has_tilelang()),
-    reason="CUDA or ROCm and tilelang required",
+    not HAS_TILELANG_MHC,
+    reason="TileLang MHC support required",
 )
 @pytest.mark.parametrize("num_tokens", [1, 4, 8, 128])
 @pytest.mark.parametrize("hidden_size", [4096, 7168])

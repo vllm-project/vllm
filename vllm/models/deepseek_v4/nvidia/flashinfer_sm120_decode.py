@@ -105,7 +105,7 @@ def _get_prefill_swa_scratch(
     return swa_indices, swa_lens
 
 
-class DeepseekV4FlashInferSM120Attention(DeepseekV4FlashMLAAttention):
+class DeepseekV4FlashInferSM120DecodeAttention(DeepseekV4FlashMLAAttention):
     """FlashMLA V4 attention with the official FlashInfer SM120 packed decode.
 
     Reuses every FlashMLA V4 behavior (packed ``fp8_ds_mla`` cache, metadata

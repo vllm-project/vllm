@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker as mooncake_store_worker,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    BlobBlockHashes,
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
@@ -32,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
 )
+from vllm.v1.core.kv_cache_utils import BlockHash
 
 
 def _default_send_coord() -> mooncake_store_worker.MooncakeStoreCoordinator:
@@ -1179,9 +1181,9 @@ def test_store_sending_thread_kv_events_use_group_chunk_metadata():
     assert full_event.group_idx == 0
     assert full_event.block_size == 32
     assert full_event.token_ids == list(range(32))
-    assert full_event.block_hashes == [
-        maybe_convert_block_hash(BlockHash(b"".join(hs)))
-    ]
+    # block_size=32 over hash_block_size=8 (scale 4): the chunk is keyed by its
+    # last sub-hash, not the concatenation of all four.
+    assert full_event.block_hashes == [maybe_convert_block_hash(BlockHash(hs[3]))]
 
     assert swa_event.group_idx == 1
     assert swa_event.block_size == 8
@@ -1749,3 +1751,33 @@ def test_store_worker_close_swallows_store_errors():
     worker.close()
 
     assert worker.store is None
+
+
+def test_blob_block_hashes_wire_roundtrip():
+    """The lookup wire format sends a ``hash_len`` frame plus the raw hashes
+    concatenated back-to-back; the server rebuilds them through a zero-copy
+    ``BlobBlockHashes`` view over the frame buffer."""
+    hashes = [BlockHash(bytes([i]) * 16) for i in range(5)]
+    hash_len = len(hashes[0])
+
+    # Client side (LookupKeyClient._lookup): flat payload frame.
+    blob = b"".join(hashes)
+
+    # Server side (LookupKeyServer): view over the frame buffer (a memoryview),
+    # never materializing the full hash list upfront.
+    view = BlobBlockHashes(memoryview(blob), hash_len)
+
+    assert len(view) == 5
+    assert list(view) == hashes  # default Sequence iter terminates via IndexError
+    assert [bytes(h) for h in view] == hashes
+    assert bytes(view[-1]) == hashes[-1]
+    assert [bytes(h) for h in view[1:3]] == hashes[1:3]
+    with pytest.raises(IndexError):
+        _ = view[5]
+
+
+def test_blob_block_hashes_empty():
+    """Empty lookups send hash_len=0 and an empty payload."""
+    view = BlobBlockHashes(memoryview(b""), 0)
+    assert len(view) == 0
+    assert list(view) == []
