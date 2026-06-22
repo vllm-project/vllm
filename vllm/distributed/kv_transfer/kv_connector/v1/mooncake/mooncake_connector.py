@@ -448,13 +448,6 @@ class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
             return None
         if vllm_config.model_config.use_mla:
             return None
-        backend = get_current_attn_backend(vllm_config)
-        if backend.get_name() not in (
-            "FLASH_ATTN",
-            "FLASHINFER",
-            "TRITON_ATTN",
-        ):
-            return None
         logger.info_once(
             "MooncakeConnector setting KV cache layout to HND for "
             "heterogeneous TP-safe KV transfer."
