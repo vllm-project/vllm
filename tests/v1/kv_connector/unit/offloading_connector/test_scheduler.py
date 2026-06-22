@@ -1755,7 +1755,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
@@ -1786,7 +1788,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
@@ -1857,7 +1861,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1, 2, 3, 4}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1, 2, 3, 4}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
 
@@ -1912,7 +1918,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1, 2}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1, 2}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
@@ -1945,7 +1953,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         # num_tokens=13 → max_hit=13-1=12, query_max=min(12+4,12)=12
@@ -1994,7 +2004,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
@@ -2049,7 +2061,9 @@ class TestEagle:
         # Group 0 keys [10,11,12]: only 10 hits.
         # Group 1 keys [1,2,3]: all hit.
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {10, 1, 2, 3}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {10, 1, 2, 3}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
@@ -2100,7 +2114,9 @@ class TestEagle:
             kv_cache_groups=groups,
         )
         runner.manager.lookup.side_effect = lambda key, req_context: (
-            int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            LookupResult.HIT
+            if int(get_offload_block_hash(key).decode()) in {1, 2, 3}
+            else LookupResult.MISS
         )
         sched = runner.connector_scheduler
         req_status = self._make_req_status(
