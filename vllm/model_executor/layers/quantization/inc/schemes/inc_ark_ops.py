@@ -1,0 +1,111 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from functools import lru_cache
+from typing import Any
+
+import torch
+
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
+
+logger = init_logger(__name__)
+
+
+@lru_cache(maxsize=1)
+def get_ark_state() -> tuple[bool, str | None, Any | None, Any | None]:
+    """Return ARK availability, error details, cached module, and QuantLinear."""
+    try:
+        import auto_round_kernel as ark
+        from auto_round_kernel.qlinear import QuantLinear
+
+        logger.info("Successfully imported auto_round_kernel.")
+    except ImportError as error:
+        return False, str(error), None, None
+
+    if getattr(ark, "cpu_lib", None) is None and getattr(ark, "xpu_lib", None) is None:
+        return (
+            False,
+            "No ARK backend library is available.",
+            None,
+            None,
+        )
+
+    logger.info("Successfully loaded auto_round_kernel backend library.")
+    return True, None, ark, QuantLinear
+
+
+def _inc_ark_woq_linear_impl(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    bias: torch.Tensor | None,
+    out_features: int,
+    in_features: int,
+    group_size: int,
+    compute_type: str,
+    weight_type: str,
+    scale_type: str,
+    asym: bool,
+) -> torch.Tensor:
+    is_available, error_str, ark, _ = get_ark_state()
+    if not is_available or ark is None:
+        reason = error_str or "unknown error"
+        raise RuntimeError(f"Failed to import auto_round_kernel. {reason}")
+
+    raw_input_dtype = x.dtype
+    target_dtype = torch.float16 if x.device.type == "xpu" else torch.float32
+    x = x.to(target_dtype)
+    out_shape = x.shape[:-1] + (out_features,)
+    x_2d = x.view(-1, x.shape[-1])
+
+    out = ark.woqgemm(
+        x_2d,
+        qweight,
+        bias,
+        out_features,
+        in_features,
+        group_size,
+        compute_type,
+        weight_type,
+        scale_type,
+        asym,
+    )
+    return out.to(raw_input_dtype).view(out_shape)
+
+
+def _inc_ark_woq_linear_fake(
+    x: torch.Tensor,
+    qweight: torch.Tensor,
+    bias: torch.Tensor | None,
+    out_features: int,
+    in_features: int,
+    group_size: int,
+    compute_type: str,
+    weight_type: str,
+    scale_type: str,
+    asym: bool,
+) -> torch.Tensor:
+    del qweight
+    del bias
+    del in_features
+    del group_size
+    del compute_type
+    del weight_type
+    del scale_type
+    del asym
+    return torch.empty(
+        (*x.shape[:-1], out_features),
+        dtype=x.dtype,
+        device=x.device,
+    )
+
+
+@lru_cache(maxsize=1)
+def register_ark_custom_op_once() -> None:
+    direct_register_custom_op(
+        op_name="inc_ark_woq_linear",
+        op_func=_inc_ark_woq_linear_impl,
+        fake_impl=_inc_ark_woq_linear_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
