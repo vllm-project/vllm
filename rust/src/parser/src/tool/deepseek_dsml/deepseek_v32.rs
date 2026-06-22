@@ -67,7 +67,9 @@ mod tests {
     use thiserror_ext::AsReport;
 
     use super::DeepSeekV32ToolParser;
-    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::test_utils::{
+        assert_streaming_matches_complete, collect_stream, split_by_chars, test_tools,
+    };
     use crate::tool::{ToolParser, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, params: &[(&str, &str)]) -> String {
@@ -427,6 +429,59 @@ mod tests {
             serde_json::from_str::<Value>(&second.calls()[0].arguments).unwrap(),
             json!({ "location": "NYC" })
         );
+    }
+
+    #[test]
+    fn deepseek_v32_streaming_matches_complete_across_boundaries() {
+        let parallel_calls = format!(
+            "{}\n<｜DSML｜invoke name=\"get_weather\">\n\
+             <｜DSML｜parameter name=\"location\" string=\"true\">NYC</｜DSML｜parameter>\n\
+             </｜DSML｜invoke>\n</｜DSML｜function_calls>",
+            build_tool_call("get_weather", &[("location", "SF")])
+                .trim_end_matches("</｜DSML｜function_calls>"),
+        );
+        let tools = test_tools();
+        let cases = [
+            ("plain_text", "Hello, 杭州 🌦️. No tools here.".to_string()),
+            (
+                "single_tool_call",
+                build_tool_call("get_weather", &[("location", "SF")]),
+            ),
+            ("parallel_tool_calls", parallel_calls),
+            (
+                "unicode_parameter_value",
+                build_tool_call("get_weather", &[("location", "杭州 🌦️")]),
+            ),
+            ("no_parameter_call", build_tool_call("get_weather", &[])),
+            (
+                "prefix_text",
+                format!(
+                    "Thinking... {}",
+                    build_tool_call("get_weather", &[("location", "NYC")])
+                ),
+            ),
+            (
+                "raw_closing_tag_text_in_parameter_value",
+                build_tool_call(
+                    "get_weather",
+                    &[
+                        (
+                            "location",
+                            "Hangzhou &lt;/｜DSML｜parameter&gt;&lt;/｜DSML｜invoke&gt;&lt;/｜DSML｜function_calls&gt;",
+                        ),
+                        ("date", "2026-05-08"),
+                    ],
+                ),
+            ),
+            (
+                "unterminated_tool_call",
+                "<｜DSML｜function_calls>\n<｜DSML｜invoke name=\"get_weather\">\n".to_string(),
+            ),
+        ];
+
+        for (case_name, text) in cases {
+            assert_streaming_matches_complete::<DeepSeekV32ToolParser>(&tools, case_name, &text);
+        }
     }
 
     #[test]

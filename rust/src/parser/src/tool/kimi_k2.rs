@@ -339,7 +339,9 @@ mod tests {
         KimiK2ToolParser, TOOL_CALL_ARGUMENT_START, TOOL_CALL_END, TOOL_CALL_START, TOOL_CALLS_END,
         TOOL_CALLS_START, ToolParser, tool_header,
     };
-    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::test_utils::{
+        assert_streaming_matches_complete, collect_stream, split_by_chars, test_tools,
+    };
     use crate::tool::{ToolParserOutput, ToolParserTestExt as _};
 
     fn build_tool_call(function_name: &str, index: usize, arguments: &str) -> String {
@@ -392,6 +394,70 @@ mod tests {
             .unwrap();
 
         assert_eq!(output.calls()[0].arguments, arguments);
+    }
+
+    #[test]
+    fn kimi_k2_streaming_matches_complete_across_boundaries() {
+        let marker_literal_argument = format!(r#"{{"text":"literal {TOOL_CALL_END} inside"}}"#);
+        let tools = test_tools();
+        let cases = [
+            ("plain_text", "Hello, 上海 🌦️. No tools here.".to_string()),
+            (
+                "single_tool_call",
+                build_tool_section(&[build_tool_call("get_weather", 0, r#"{"location":"NYC"}"#)]),
+            ),
+            (
+                "parallel_tool_calls",
+                build_tool_section(&[
+                    build_tool_call("get_weather", 0, r#"{"location":"Shanghai"}"#),
+                    build_tool_call("add", 1, r#"{"x":1,"y":2}"#),
+                ]),
+            ),
+            (
+                "prefix_and_ignored_suffix",
+                format!(
+                    "Checking. {} trailing text",
+                    build_tool_section(&[build_tool_call(
+                        "get_weather",
+                        0,
+                        r#"{ "location": "NYC", "days": "3" }"#,
+                    )])
+                ),
+            ),
+            (
+                "unicode_argument_value",
+                build_tool_section(&[build_tool_call(
+                    "get_weather",
+                    0,
+                    r#"{"location":"上海 🌦️"}"#,
+                )]),
+            ),
+            (
+                "no_parameter_call",
+                build_tool_section(&[build_tool_call("get_status", 0, "{}")]),
+            ),
+            (
+                "end_marker_literal_inside_json_string",
+                build_tool_section(&[build_tool_call("echo", 0, &marker_literal_argument)]),
+            ),
+            (
+                "malformed_header",
+                format!(
+                    "{TOOL_CALLS_START}{TOOL_CALL_START}get_weather{TOOL_CALL_ARGUMENT_START}{{}}"
+                ),
+            ),
+            (
+                "unterminated_tool_call",
+                format!(
+                    "{TOOL_CALLS_START}{TOOL_CALL_START}functions.get_weather:0\
+                     {TOOL_CALL_ARGUMENT_START}{{\"location\""
+                ),
+            ),
+        ];
+
+        for (case_name, text) in cases {
+            assert_streaming_matches_complete::<KimiK2ToolParser>(&tools, case_name, &text);
+        }
     }
 
     #[test]
