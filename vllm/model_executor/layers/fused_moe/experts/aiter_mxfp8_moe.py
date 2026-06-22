@@ -18,21 +18,42 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
-def is_flydsl_mxfp8_moe_available() -> bool:
-    """True when the FlyDSL MXFP8 MoE can run here (gfx950 + ``flydsl``
-    importable). This is capability only; the oracle adds the aiter-MoE-switch
-    gate for auto-selection (``--moe-backend flydsl`` selects it directly)."""
+def is_aiter_mxfp8_moe_available() -> bool:
+    """True when the FlyDSL MXFP8 MoE can run here: gfx950, the ``flydsl``
+    package is importable, AND the installed aiter carries the mxfp8 FlyDSL
+    2-stage support from ROCm/aiter#3811.
+
+    ``flydsl`` and ``aiter`` are separate packages, so ``is_flydsl_available()``
+    (flydsl pkg + arch) is necessary but not sufficient: an older aiter without
+    #3811 still ships the flydsl pkg and the ``aiter.ops.flydsl`` module but a
+    broken/missing ``per_1x32 + fp8`` 2-stage path. Without this extra gate a
+    nightly lacking #3811 would wrongly select FlyDSL instead of falling back to
+    the native Triton dot_scaled path. #3811 added no probe-able public symbol,
+    so detect the ``minimax_m3_mxfp8`` tuned config it shipped. Every check fails
+    closed (returns False -> triton dot_scaled), which is always safe."""
     if not (current_platform.is_rocm() and current_platform.supports_mx()):
         return False
     try:
+        import os
+
+        import aiter
         from aiter.ops.flydsl.utils import is_flydsl_available
 
-        return bool(is_flydsl_available())
+        if not is_flydsl_available():
+            return False
+        return os.path.exists(
+            os.path.join(
+                os.path.dirname(aiter.__file__),
+                "configs",
+                "model_configs",
+                "minimax_m3_mxfp8_tuned_fmoe.csv",
+            )
+        )
     except Exception:
         return False
 
 
-class FlydslMxfp8Experts(Mxfp8TritonExpertsBase):
+class AiterMxfp8Experts(Mxfp8TritonExpertsBase):
     """MXFP8 MoE through AITER's FlyDSL two-stage grouped GEMM (gfx950)."""
 
     @property
@@ -71,7 +92,7 @@ class FlydslMxfp8Experts(Mxfp8TritonExpertsBase):
         )
         # _supports_current_device() only gates on the device; surface a clear
         # reason when the device is fine but the flydsl package is missing.
-        if is_supported and not is_flydsl_mxfp8_moe_available():
+        if is_supported and not is_aiter_mxfp8_moe_available():
             return False, (
                 "kernel requires the aiter flydsl package, which is not installed"
             )

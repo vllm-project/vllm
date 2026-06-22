@@ -14,8 +14,8 @@ from unittest.mock import patch
 import pytest
 
 from tests.kernels.moe.utils import make_dummy_moe_config
-from vllm.model_executor.layers.fused_moe.experts.flydsl_mxfp8_moe import (
-    FlydslMxfp8Experts,
+from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
+    AiterMxfp8Experts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
@@ -32,7 +32,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Static,
 )
 
-_FLYDSL_MOD = "vllm.model_executor.layers.fused_moe.experts.flydsl_mxfp8_moe"
+_AITER_MOD = "vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe"
 
 
 def _config(ep_size: int = 1):
@@ -50,14 +50,14 @@ def _config(ep_size: int = 1):
 def _gfx950():
     """Patch the platform so the device gate (gfx950 / MX) passes off-ROCm."""
     return patch.multiple(
-        f"{_FLYDSL_MOD}.current_platform",
+        f"{_AITER_MOD}.current_platform",
         is_rocm=lambda: True,
         supports_mx=lambda: True,
     )
 
 
 def _flydsl_installed(present: bool):
-    return patch(f"{_FLYDSL_MOD}.is_flydsl_mxfp8_moe_available", return_value=present)
+    return patch(f"{_AITER_MOD}.is_aiter_mxfp8_moe_available", return_value=present)
 
 
 def test_aiter_mxfp8_registered():
@@ -65,7 +65,7 @@ def test_aiter_mxfp8_registered():
     assert Fp8MoeBackend.AITER_MXFP8 in _SUPPORTED_BACKENDS
     assert _BACKEND_NAME_MAP["aiter"] is Fp8MoeBackend.AITER_MXFP8
     assert _mxfp8_backend_to_kernel_cls(Fp8MoeBackend.AITER_MXFP8) == [
-        FlydslMxfp8Experts
+        AiterMxfp8Experts
     ]
 
 
@@ -82,7 +82,7 @@ def test_triton_native_selectable():
 def test_ep_supported(ep_size):
     """FlyDSL accepts both TP and EP: apply() forwards expert_map as expert_mask."""
     assert (
-        FlydslMxfp8Experts._supports_parallel_config(
+        AiterMxfp8Experts._supports_parallel_config(
             _config(ep_size).moe_parallel_config
         )
         is True
@@ -99,8 +99,8 @@ def test_ep_supported(ep_size):
 )
 def test_is_supported_config(present, ep_size, supported, reason_substr):
     with _gfx950(), _flydsl_installed(present):
-        ok, reason = FlydslMxfp8Experts.is_supported_config(
-            FlydslMxfp8Experts,
+        ok, reason = AiterMxfp8Experts.is_supported_config(
+            AiterMxfp8Experts,
             _config(ep_size),
             kMxfp8Static,
             kMxfp8Dynamic,
@@ -117,11 +117,11 @@ def test_explicit_moe_backend_aiter():
     with _gfx950(), _flydsl_installed(True):
         assert (
             _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1))
-            is FlydslMxfp8Experts
+            is AiterMxfp8Experts
         )
         assert (
             _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(2))
-            is FlydslMxfp8Experts
+            is AiterMxfp8Experts
         )
     with (
         _gfx950(),
