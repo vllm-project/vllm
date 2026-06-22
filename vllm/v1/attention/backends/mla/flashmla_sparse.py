@@ -642,13 +642,20 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             )
 
         # need_to_return_lse_for_decode is set in AttentionImplBase.__new__,
-        # so it is already available here.
-        if self.need_to_return_lse_for_decode and not is_quantized_kv_cache(
-            kv_cache_dtype
+        # so it is already available here. The bf16 sparse decode kernel now
+        # returns LSE, so union DCP works on a bf16 kv-cache. exact-merge writes
+        # scattered -1 top-k indices that the bf16 path's contiguous topk_length
+        # cannot express, so it stays fp8-only.
+        if (
+            self.need_to_return_lse_for_decode
+            and not is_quantized_kv_cache(kv_cache_dtype)
+            and vllm_config.parallel_config.dcp_sparse_indexer_mode == "exact"
         ):
             raise NotImplementedError(
-                "DCP for FlashMLA sparse requires fp8_ds_mla kv-cache "
-                "(bf16 sparse path does not return LSE)"
+                "DCP sparse exact-merge requires an fp8_ds_mla kv-cache; the "
+                "bf16 sparse path uses a contiguous topk_length incompatible "
+                "with the exact-merge's scattered indices. Use "
+                "--dcp-sparse-indexer-mode union with a bf16 kv-cache."
             )
 
         if kv_cache_dtype == "fp8_ds_mla":
@@ -675,7 +682,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill).
         topk_indices, topk_length = triton_convert_req_index_to_global_index(
@@ -687,6 +694,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             return_valid_counts=True,
         )
 
+        # Returns (out, lse); lse is [tokens, heads] for the DCP decode merge.
         return self._bf16_flash_mla_kernel(
             q,
             kv_c_and_k_pe_cache,
@@ -793,7 +801,8 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 chunk_topk_indices_workspace = topk_indices[chunk.tokens_slice]
                 chunk_topk_length = topk_length[chunk.tokens_slice]
 
-                attn_out[chunk.tokens_slice] = self._bf16_flash_mla_kernel(
+                # Prefill chunks do not feed the decode LSE merge; drop the lse.
+                attn_out[chunk.tokens_slice], _ = self._bf16_flash_mla_kernel(
                     chunk_q,
                     chunk_workspace,
                     chunk_topk_indices_workspace,
@@ -912,35 +921,45 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         topk_length: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = q.shape[0]
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(
             -1, 1, kv_c_and_k_pe_cache.shape[-1]
         )
 
         # NOTE(Chen): kernel requires num_local_head to be a multiple of
-        # 64 on hopper and 128 on blackwell
-        if self.num_heads % self.prefill_padding != 0:
-            assert self.prefill_padding % self.num_heads == 0
+        # 64 on hopper and 128 on blackwell. Pad from the ACTUAL head count of
+        # q -- under DCP this is num_heads * dcp_world_size after the public
+        # path's head-dim all-gather, not self.num_heads.
+        actual_num_heads = q.shape[1]
+        padded_num_heads = (
+            (actual_num_heads + self.prefill_padding - 1)
+            // self.prefill_padding
+            * self.prefill_padding
+        )
+        if actual_num_heads < padded_num_heads:
             logger.warning_once(
-                f"Padding num_heads from {self.num_heads} to "
-                f"{self.prefill_padding} for BF16 sparse prefill kernel"
+                f"Padding num_heads from {actual_num_heads} to "
+                f"{padded_num_heads} for BF16 sparse prefill kernel"
             )
-            q_padded = q.new_empty((q.shape[0], self.prefill_padding, q.shape[2]))
-            q_padded[:, : self.num_heads, :] = q
+            q_padded = q.new_empty((q.shape[0], padded_num_heads, q.shape[2]))
+            q_padded[:, :actual_num_heads, :] = q
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output = flash_mla_sparse_fwd(
+        # flash_mla_sparse_fwd returns (output, max_logits, lse); lse is
+        # [tokens, heads], the layout the DCP LSE reducer consumes.
+        output, _max_logits, lse = flash_mla_sparse_fwd(
             q,
             kv_c_and_k_pe_cache,
             topk_indices,
             self.softmax_scale,
             topk_length=topk_length,
-        )[0]
+        )
 
-        output = output[:, : self.num_heads, :]
-        return output
+        output = output[:, :actual_num_heads, :]
+        lse = lse[:, :actual_num_heads]
+        return output, lse
 
     def forward_mqa(
         self,
@@ -971,9 +990,13 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         lse: torch.Tensor | None = None
 
         if not use_fp8_cache:
-            attn_out = self._forward_bf16_kv(
+            attn_out, bf16_lse = self._forward_bf16_kv(
                 q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
             )
+            # The bf16 path runs the whole (decode) batch through one kernel, so
+            # its LSE feeds the DCP merge directly; skip the overhead off DCP.
+            if self.need_to_return_lse_for_decode:
+                lse = bf16_lse
         elif attn_metadata.fp8_use_mixed_batch:
             attn_out, lse = self._forward_fp8_kv_mixed_batch(
                 q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
