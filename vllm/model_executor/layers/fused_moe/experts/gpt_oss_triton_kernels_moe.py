@@ -850,6 +850,45 @@ def masked_moe_sum(
     )
 
 
+@triton.jit
+def _apply_expert_map_kernel(
+    topk_ids_ptr,  # [n] global expert IDs (-1 = invalid)
+    expert_map_ptr,  # [num_experts] global->local (-1 for non-local)
+    out_ptr,  # [n] int64 local expert IDs (-1 for invalid/non-local)
+    n_elements,
+    BLOCK: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    tid = tl.load(topk_ids_ptr + offs, mask=mask, other=-1)
+    # Gather expert_map[tid] for valid (tid >= 0); clamp the index so invalid
+    # rows don't read OOB, then select -1 for them. Matches
+    # torch.where(tid >= 0, expert_map[clamp(tid, 0)], -1) -- preserving -1 (a
+    # plain expert_map[-1] would wrap to a valid local id and misroute).
+    valid = tid >= 0
+    idx = tl.where(valid, tid, 0)
+    local = tl.load(expert_map_ptr + idx, mask=mask, other=-1)
+    out = tl.where(valid, local.to(tl.int64), -1)
+    tl.store(out_ptr + offs, out, mask=mask)
+
+
+def apply_expert_map(topk_ids: torch.Tensor, expert_map: torch.Tensor) -> torch.Tensor:
+    """Fused global->local expert-id mapping preserving -1.
+
+    Replaces ``torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)``
+    (clamp + gather + compare + where, each materializing an ``[M, topk]`` temp)
+    with one kernel. Returns a NEW int64 tensor -- the caller keeps the original
+    ``topk_ids`` as ``global_topk_ids``, so this must not write in place.
+    """
+    out = torch.empty_like(topk_ids, dtype=torch.int64)
+    n = topk_ids.numel()
+    BLOCK = 1024
+    grid = (triton.cdiv(n, BLOCK),)
+    _apply_expert_map_kernel[grid](topk_ids, expert_map, out, n, BLOCK=BLOCK)
+    return out
+
+
 class BaseOAITritonExperts(mk.FusedMoEExpertsModular):
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -982,8 +1021,8 @@ class OAITritonExperts(BaseOAITritonExperts):
 
         if expert_map is not None:
             # Preserve -1 (invalid / non-local slots, e.g. from EP dispatch):
-            # expert_map[-1] would wrap to a valid local id and misroute it.
-            topk_ids = torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)
+            # make_routing_data treats -1 as the skip sentinel.
+            topk_ids = apply_expert_map(topk_ids, expert_map)
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
@@ -1126,10 +1165,8 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
         global_topk_ids = topk_ids
         if expert_map is not None:
             # Preserve -1 (invalid / non-local slots, e.g. from EP dispatch):
-            # a plain expert_map[topk_ids] would wrap -1 to expert_map[-1] (a
-            # valid local id) and misroute it. make_routing_data treats -1 as
-            # the skip sentinel.
-            topk_ids = torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)
+            # make_routing_data treats -1 as the skip sentinel.
+            topk_ids = apply_expert_map(topk_ids, expert_map)
 
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
