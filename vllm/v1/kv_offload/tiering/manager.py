@@ -548,10 +548,10 @@ class TieringOffloadingManager(OffloadingManager):
         # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
         req_id = req_context.req_id
         state = self._req_state.get(req_id)
-        if state is not None:
-            assert state.pending_primary_stores > 0
-            state.pending_primary_stores -= 1
-            self._maybe_finish_secondary_tiers(req_id)
+        assert state is not None
+        assert state.pending_primary_stores > 0
+        state.pending_primary_stores -= 1
+        self._maybe_finish_secondary_tiers(req_id)
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:

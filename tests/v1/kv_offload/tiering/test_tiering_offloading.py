@@ -437,18 +437,17 @@ class TestTieringOffloadingManager:
 
         original_submit_store1 = self.secondary_tier1.submit_store
         original_submit_store2 = self.secondary_tier2.submit_store
-        self.secondary_tier1.submit_store = MagicMock(
-            side_effect=lambda job_metadata: (
-                calls.append(("submit_store_1", job_metadata.req_context.req_id)),
-                original_submit_store1(job_metadata),
-            )
-        )
-        self.secondary_tier2.submit_store = MagicMock(
-            side_effect=lambda job_metadata: (
-                calls.append(("submit_store_2", job_metadata.req_context.req_id)),
-                original_submit_store2(job_metadata),
-            )
-        )
+
+        def submit_store1(job_metadata):
+            calls.append(("submit_store_1", job_metadata.req_context.req_id))
+            return original_submit_store1(job_metadata)
+
+        def submit_store2(job_metadata):
+            calls.append(("submit_store_2", job_metadata.req_context.req_id))
+            return original_submit_store2(job_metadata)
+
+        self.secondary_tier1.submit_store = MagicMock(side_effect=submit_store1)
+        self.secondary_tier2.submit_store = MagicMock(side_effect=submit_store2)
         self.secondary_tier1.on_request_finished = MagicMock(
             side_effect=lambda req_context: calls.append(
                 ("secondary_finish_1", req_context.req_id)
