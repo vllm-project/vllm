@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, CLIPVisionConfig
+from transformers import BatchFeature, CLIPVisionConfig, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -429,7 +429,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
                 )
 
         with self._mark_language_model(vllm_config):
-            self.language_model = init_vllm_registered_model(
+            self.language_model = self._init_language_model(
                 vllm_config=vllm_config,
                 hf_config=self.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
@@ -437,6 +437,15 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
+        )
+
+    def _init_language_model(
+        self, vllm_config: VllmConfig, hf_config: PretrainedConfig, prefix: str
+    ):
+        return init_vllm_registered_model(
+            vllm_config=vllm_config,
+            hf_config=hf_config,
+            prefix=prefix,
         )
 
     def _parse_and_validate_image_input(
