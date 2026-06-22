@@ -16,36 +16,21 @@ if TYPE_CHECKING:
     )
 
 FA4ArchitectureFamily = Literal["sm90", "sm100f", "sm120"]
-FA4Architecture = Literal["sm90", "sm100", "sm103", "sm120"]
 
 FA4_STANDARD_DTYPES = (torch.bfloat16, torch.float16)
-FA4_ARCH_BY_COMPUTE_CAPABILITY: dict[tuple[int, int], FA4Architecture] = {
-    (9, 0): "sm90",
-    (10, 0): "sm100",
-    (10, 3): "sm103",
-    (12, 0): "sm120",
-}
-FA4_ARCH_FAMILY_BY_ARCH: dict[FA4Architecture, FA4ArchitectureFamily] = {
-    "sm90": "sm90",
-    "sm100": "sm100f",
-    "sm103": "sm100f",
-    "sm120": "sm120",
-}
 
-# FA4 derives compile-static fields from request shape: q_stage on Blackwell,
-# Split-KV for long K, and 2CTA/scheduler choices.
-FA4_MLA_PREFILL_SHAPE_PROBES: tuple[tuple[str, int, int, int], ...] = (
-    ("q_stage1_min_q_b1", 1, 1, 128),
-    ("q_stage1_short_q_b1", 1, 32, 128),
-    ("default_tile_q_stage_boundary_b1", 1, 129, 512),
-    ("long_k_split_candidate_b1", 1, 512, 4096),
-    ("very_long_k_split_candidate_b1", 1, 1024, 8192),
-    ("q_stage1_min_q_b2", 2, 1, 128),
-    ("q_stage1_short_q_b2", 2, 32, 128),
-    ("default_tile_q_stage_boundary_b2", 2, 129, 512),
-    ("long_k_split_candidate_b2", 2, 512, 4096),
-    ("very_long_k_split_candidate_b2", 2, 1024, 8192),
-)
+# Current vLLM MLA prefill expands K/V to num_heads before FA4, so this plan
+# covers qhead_per_kvhead=1.
+# Batch is not a current FA4 MLA-prefill key field. Use b1 for compile-only
+# specs because it is the conservative case for Split-KV shape heuristics.
+# TODO(roberto): FA4 also has direct-GQA and qv/top-k absorbed-MLA paths, but vLLM
+# does not use them in this backend yet; they need a separate
+# num_kv_heads/qv/top-k-aware warmup plan if wired in later.
+FA4_MLA_PREFILL_COMPILE_BATCH_SIZE = 1
+FA4_MLA_PREFILL_Q_TILE = 128
+FA4_MLA_PREFILL_K_TILE = 128
+FA4_MLA_PREFILL_LONG_K_BLOCKS = 32
+FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS = 64
 FA4_MLA_PREFILL_CAUSAL_OPTIONS = (False, True)
 FA4_MLA_PREFILL_LSE_OPTIONS = (False, True)
 
@@ -82,16 +67,6 @@ class FA4MLAPrefillCompileRequest:
         self.compile_spec.compile()
 
 
-@dataclass(frozen=True)
-class _FA4MLAPrefillProbe:
-    name: str
-    batch_size: int
-    max_seqlen_q: int
-    max_seqlen_k: int
-    causal: bool
-    return_lse: bool
-
-
 # Yield deduped compile requests.
 def iter_fa4_mla_prefill_compile_requests(
     ctx: FA4MLAPrefillCompileContext,
@@ -118,56 +93,96 @@ def iter_fa4_mla_prefill_compile_specs(
 ) -> Iterator[FlashAttentionCuTeDSLCompileSpec]:
     """Yield compile-only FA4 MLA prefill requests for this fixed setup."""
 
-    if not _supports_fa4_mla_prefill(ctx):
+    arch_family = _fa4_architecture_family_from_compute_capability(
+        *torch.cuda.get_device_capability()
+    )
+    if not _supports_fa4_mla_prefill(ctx, arch_family):
         return
 
-    compile_spec_cls = _flash_attention_compile_spec_cls()
-    for probe in _iter_fa4_mla_prefill_probes():
-        total_q_tokens = probe.batch_size * probe.max_seqlen_q
-        total_kv_tokens = probe.batch_size * probe.max_seqlen_k
-        yield compile_spec_cls(
-            q_shape=_q_shape(total_q_tokens, ctx),
-            k_shape=_q_shape(total_kv_tokens, ctx),
-            v_shape=_v_shape(total_kv_tokens, ctx),
-            v_stride=_v_stride(ctx),
-            q_dtype=ctx.dtype,
-            cu_seqlens_q_shape=(probe.batch_size + 1,),
-            cu_seqlens_k_shape=(probe.batch_size + 1,),
-            max_seqlen_q=probe.max_seqlen_q,
-            max_seqlen_k=probe.max_seqlen_k,
-            softmax_scale=ctx.scale,
-            causal=probe.causal,
-            return_softmax_lse=probe.return_lse,
-            num_splits=ctx.num_splits,
-            fa_version=ctx.fa_version,
+    from vllm.v1.attention.backends.fa_utils import (
+        FlashAttentionCuTeDSLCompileSpec,
+    )
+
+    batch_size = FA4_MLA_PREFILL_COMPILE_BATCH_SIZE
+    v_stride = None
+    if not ctx.requires_v_padding:
+        v_stride = (
+            ctx.num_heads * ctx.kv_nope_head_dim,
+            ctx.kv_nope_head_dim,
+            1,
         )
 
-
-# Expand shape probes with mask/LSE options.
-def _iter_fa4_mla_prefill_probes() -> Iterator[_FA4MLAPrefillProbe]:
-    for (
-        shape_name,
-        batch_size,
-        max_seqlen_q,
-        max_seqlen_k,
-    ) in FA4_MLA_PREFILL_SHAPE_PROBES:
+    for _, max_seqlen_q, max_seqlen_k in _shape_probes_for_context(ctx, arch_family):
+        total_q_tokens = batch_size * max_seqlen_q
+        total_kv_tokens = batch_size * max_seqlen_k
         for causal in FA4_MLA_PREFILL_CAUSAL_OPTIONS:
             for return_lse in FA4_MLA_PREFILL_LSE_OPTIONS:
-                yield _FA4MLAPrefillProbe(
-                    name=_probe_name(shape_name, causal, return_lse),
-                    batch_size=batch_size,
+                yield FlashAttentionCuTeDSLCompileSpec(
+                    q_shape=(total_q_tokens, ctx.num_heads, ctx.qk_head_dim),
+                    k_shape=(total_kv_tokens, ctx.num_heads, ctx.qk_head_dim),
+                    v_shape=(
+                        total_kv_tokens,
+                        ctx.num_heads,
+                        ctx.effective_v_head_dim,
+                    ),
+                    v_stride=v_stride,
+                    q_dtype=ctx.dtype,
+                    cu_seqlens_q_shape=(batch_size + 1,),
+                    cu_seqlens_k_shape=(batch_size + 1,),
                     max_seqlen_q=max_seqlen_q,
                     max_seqlen_k=max_seqlen_k,
+                    softmax_scale=ctx.scale,
                     causal=causal,
-                    return_lse=return_lse,
+                    return_softmax_lse=return_lse,
+                    num_splits=ctx.num_splits,
+                    fa_version=ctx.fa_version,
                 )
 
 
-# Check whether this setup can use FA4 MLA prefill.
-def _supports_fa4_mla_prefill(ctx: FA4MLAPrefillCompileContext) -> bool:
-    arch_family, _ = _fa4_architecture_from_compute_capability(
-        *torch.cuda.get_device_capability()
+# Pick one q/k point per current FA4 MLA-prefill shape regime.
+def _shape_probes_for_context(
+    ctx: FA4MLAPrefillCompileContext,
+    arch_family: FA4ArchitectureFamily,
+) -> tuple[tuple[str, int, int], ...]:
+    q_stage1_q = 1
+    q_stage2_q = FA4_MLA_PREFILL_Q_TILE + 1
+    # FA4 never auto-splits when ceil(max_seqlen_k / tile_n) <= 4.
+    no_split_k = 4 * FA4_MLA_PREFILL_K_TILE
+    long_k = FA4_MLA_PREFILL_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE
+    # Diff-head-dim Blackwell Split-KV switches tile_n at 64 K blocks.
+    very_long_k = FA4_MLA_PREFILL_VERY_LONG_K_BLOCKS * FA4_MLA_PREFILL_K_TILE
+
+    base_probes = (
+        ("q_stage1", q_stage1_q, FA4_MLA_PREFILL_K_TILE),
+        ("q_stage2", q_stage2_q, no_split_k),
     )
+    # SM120 currently rejects Split-KV in FA4; num_splits=1 also has no split
+    # shape regimes on any architecture.
+    if ctx.num_splits == 1 or arch_family == "sm120":
+        return base_probes
+
+    long_k_probes = (
+        ("q_stage1_long_k", q_stage1_q, long_k),
+        ("q_stage2_long_k", q_stage2_q, long_k),
+    )
+
+    # SM90 does not have the SM100 q_stage or diff-head-dim tile_n=64 branch.
+    # Same-dim SM100-family MLA also does not need the very-long-K probe.
+    if arch_family == "sm90" or ctx.qk_head_dim == ctx.effective_v_head_dim:
+        return (*base_probes, *long_k_probes)
+
+    very_long_k_probes = (
+        ("q_stage1_very_long_k", q_stage1_q, very_long_k),
+        ("q_stage2_very_long_k", q_stage2_q, very_long_k),
+    )
+    return (*base_probes, *long_k_probes, *very_long_k_probes)
+
+
+# Check whether this setup can use FA4 MLA prefill.
+def _supports_fa4_mla_prefill(
+    ctx: FA4MLAPrefillCompileContext,
+    arch_family: FA4ArchitectureFamily,
+) -> bool:
     return (
         ctx.dtype in FA4_STANDARD_DTYPES
         and ctx.num_heads > 0
@@ -175,57 +190,15 @@ def _supports_fa4_mla_prefill(ctx: FA4MLAPrefillCompileContext) -> bool:
     )
 
 
-# Map CUDA capability to FA4 arch names.
-def _fa4_architecture_from_compute_capability(
+# Map CUDA capability to the FA4 arch family used by warmup checks.
+def _fa4_architecture_family_from_compute_capability(
     major: int,
     minor: int,
-) -> tuple[FA4ArchitectureFamily, FA4Architecture]:
-    arch = FA4_ARCH_BY_COMPUTE_CAPABILITY.get((major, minor))
-    if arch is None and major == 10:
-        arch = "sm100"
-    if arch is None:
-        raise ValueError(f"FA4 warmup does not know CUDA capability {major}.{minor}")
-    return FA4_ARCH_FAMILY_BY_ARCH[arch], arch
-
-
-# Import the compile spec lazily.
-def _flash_attention_compile_spec_cls() -> type[FlashAttentionCuTeDSLCompileSpec]:
-    from vllm.v1.attention.backends.fa_utils import (
-        FlashAttentionCuTeDSLCompileSpec,
-    )
-
-    return FlashAttentionCuTeDSLCompileSpec
-
-
-# Name probes for logs/tests.
-def _probe_name(shape_name: str, causal: bool, return_lse: bool) -> str:
-    mask_name = "causal_mask" if causal else "full_mask"
-    lse_name = "return_lse" if return_lse else "no_lse"
-    return f"{shape_name}/{mask_name}/{lse_name}"
-
-
-# Build the Q/K tensor shape.
-def _q_shape(
-    num_tokens: int,
-    ctx: FA4MLAPrefillCompileContext,
-) -> tuple[int, int, int]:
-    return (num_tokens, ctx.num_heads, ctx.qk_head_dim)
-
-
-# Build the V tensor shape.
-def _v_shape(
-    num_tokens: int,
-    ctx: FA4MLAPrefillCompileContext,
-) -> tuple[int, int, int]:
-    return (num_tokens, ctx.num_heads, ctx.effective_v_head_dim)
-
-
-# Preserve V stride when unpadded.
-def _v_stride(ctx: FA4MLAPrefillCompileContext) -> tuple[int, int, int] | None:
-    if ctx.requires_v_padding:
-        return None
-    return (
-        ctx.num_heads * ctx.kv_nope_head_dim,
-        ctx.kv_nope_head_dim,
-        1,
-    )
+) -> FA4ArchitectureFamily:
+    if (major, minor) == (9, 0):
+        return "sm90"
+    if major == 10:
+        return "sm100f"
+    if (major, minor) == (12, 0):
+        return "sm120"
+    raise ValueError(f"FA4 warmup does not know CUDA capability {major}.{minor}")
