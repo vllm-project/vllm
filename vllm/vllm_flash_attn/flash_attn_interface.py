@@ -4,8 +4,6 @@
 # ruff: noqa: E501
 
 
-from typing import List, Optional, Tuple
-
 import torch
 
 # isort: off
@@ -421,19 +419,19 @@ def flash_attn_varlen_func(
 
 def compile_flash_attn_varlen_func_from_specs(
     *,
-    q_shape: Tuple[int, ...],
-    k_shape: Tuple[int, ...],
-    v_shape: Tuple[int, ...],
+    q_shape: tuple[int, ...],
+    k_shape: tuple[int, ...],
+    v_shape: tuple[int, ...],
     q_dtype: torch.dtype,
-    v_stride: Optional[Tuple[int, ...]] = None,
-    cu_seqlens_q_shape: Optional[Tuple[int, ...]] = None,
-    cu_seqlens_k_shape: Optional[Tuple[int, ...]] = None,
-    max_seqlen_q: Optional[int] = None,
-    max_seqlen_k: Optional[int] = None,
+    v_stride: tuple[int, ...] | None = None,
+    cu_seqlens_q_shape: tuple[int, ...] | None = None,
+    cu_seqlens_k_shape: tuple[int, ...] | None = None,
+    max_seqlen_q: int | None = None,
+    max_seqlen_k: int | None = None,
     dropout_p: float = 0.0,
     softmax_scale=None,
     causal=False,
-    window_size: Optional[List[int]] = None,
+    window_size: list[int] | None = None,
     deterministic=False,
     return_softmax_lse=False,
     num_splits: int = 0,
@@ -441,21 +439,17 @@ def compile_flash_attn_varlen_func_from_specs(
 ) -> None:
     if fa_version != 4:
         raise ValueError(
-            "Compile-only FlashAttention is only supported for FA4, "
-            f"got FA{fa_version}"
+            f"Compile-only FlashAttention is only supported for FA4, got FA{fa_version}"
         )
     if dropout_p != 0.0:
-        raise NotImplementedError(
-            "FA4 compile-only wrapper does not support dropout"
-        )
+        raise NotImplementedError("FA4 compile-only wrapper does not support dropout")
     del deterministic
 
     from vllm.vllm_flash_attn.cute.interface import (
-        compile_flash_attn_varlen_func_from_specs as
-        _fa4_compile_flash_attn_varlen_func_from_specs,
+        compile_flash_attn_varlen_func_from_specs as _fa4_compile_flash_attn_varlen_func_from_specs,
     )
 
-    real_window_size: Tuple[int, int]
+    real_window_size: tuple[int, int]
     if window_size is None:
         real_window_size = (-1, -1)
     else:

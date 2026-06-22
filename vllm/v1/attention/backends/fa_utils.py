@@ -37,6 +37,7 @@ elif current_platform.is_xpu():
 elif current_platform.is_rocm():
     try:
         from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
+
         compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
 
         # Mark that upstream flash-attn is available on ROCm
@@ -89,6 +90,7 @@ class FlashAttentionCuTeDSLCompileSpec:
 
     def compile(self) -> None:
         assert compile_flash_attn_varlen_func_from_specs is not None
+        window_size = list(self.window_size) if self.window_size is not None else None
         compile_flash_attn_varlen_func_from_specs(
             q_shape=self.q_shape,
             k_shape=self.k_shape,
@@ -101,7 +103,7 @@ class FlashAttentionCuTeDSLCompileSpec:
             max_seqlen_k=self.max_seqlen_k,
             softmax_scale=self.softmax_scale,
             causal=self.causal,
-            window_size=self.window_size,
+            window_size=window_size,
             return_softmax_lse=self.return_softmax_lse,
             fa_version=self.fa_version,
             num_splits=self.num_splits,
