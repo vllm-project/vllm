@@ -290,6 +290,7 @@ impl SharedRuntimeArgs {
         input_address: String,
         output_address: String,
         coordinator_address: Option<String>,
+        engine_start_index: u32,
         engine_count: usize,
     ) -> Config {
         let ready_timeout = self.ready_timeout();
@@ -301,6 +302,7 @@ impl SharedRuntimeArgs {
             transport_mode: TransportMode::Bootstrapped {
                 input_address,
                 output_address,
+                engine_start_index,
                 engine_count,
                 ready_timeout,
             },
@@ -435,6 +437,10 @@ pub struct FrontendArgs {
     /// `stats_update_address`.
     #[arg(long)]
     pub coordinator_address: Option<String>,
+    /// First data-parallel engine rank expected to register with this
+    /// bootstrapped frontend.
+    #[arg(long, default_value_t = 0)]
+    pub engine_start_index: u32,
     /// Total number of data-parallel engines expected for this frontend.
     #[arg(long, default_value_t = 1)]
     pub engine_count: usize,
@@ -452,6 +458,7 @@ impl FrontendArgs {
             self.input_address,
             self.output_address,
             self.coordinator_address,
+            self.engine_start_index,
             self.engine_count,
         )
     }

@@ -758,6 +758,13 @@ class DelegatingParser(Parser):
                 prompt_token_ids
             ):
                 state.reasoning_ended = True
+            else:
+                # Reasoning is still open at the end of the prompt; let the
+                # reasoning parser adjust its initial parsing state so the
+                # first generated tokens are classified correctly.
+                self._reasoning_parser.adjust_initial_state_from_prompt(
+                    prompt_token_ids
+                )
 
         current_text, current_token_ids = state.advance(delta_text, delta_token_ids)
         delta_message: DeltaMessage | None = None
@@ -787,11 +794,10 @@ class DelegatingParser(Parser):
                 reasoning_transitioned = True
                 current_token_ids = self.extract_content_ids(delta_token_ids)
                 if self._engine_based:
+                    flush_delta = reasoning_parser.finish_streaming()  # type: ignore[union-attr, attr-defined]
                     current_text = (
-                        self.model_tokenizer.decode(current_token_ids)
-                        if current_token_ids
-                        else ""
-                    )
+                        (delta_message.content if delta_message else None) or ""
+                    ) + ((flush_delta.content if flush_delta else None) or "")
                     if delta_message and self._tool_parser is not None:
                         delta_message.content = None
                 else:

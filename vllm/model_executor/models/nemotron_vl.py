@@ -11,7 +11,7 @@ from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.awq import AWQConfig
+from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.models.internvl import (
     BaseInternVLDummyInputsBuilder,
     BaseInternVLMultiModalProcessor,
@@ -144,7 +144,7 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
-        if isinstance(quant_config, AWQConfig):
+        if isinstance(quant_config, AutoAWQConfig):
             text_config = config.get_text_config()
             llm_quant_config = getattr(text_config, "quantization_config", None)
             if (not quant_config.modules_to_not_convert) and (
