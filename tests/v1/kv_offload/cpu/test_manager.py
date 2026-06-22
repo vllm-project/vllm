@@ -294,25 +294,25 @@ def test_cpu_manager():
     # prepare store with no space ([2, 3] is being loaded)
     assert cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX) is None
 
-    # complete load [2, 3]
+    # complete load [2, 3]. Load changes the eviction list, making 2, 3 recent.
     cpu_manager.complete_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
 
-    # prepare store [6, 7, 8] -> evicts [2, 3, 4] (oldest)
+    # prepare store [6, 7, 8] -> evicts [4, 5, 2] (oldest)
     prepare_store_output = cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[6, 7, 8],
-            store_block_ids=[3, 2, 1],
-            evicted_keys=[2, 3, 4],
+            store_block_ids=[1, 0, 3],
+            evicted_keys=[4, 5, 2],
         ),
     )
 
     # complete store [6, 7, 8]
     cpu_manager.complete_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
 
-    # touch [5, 6, 7] (move to end of LRU order)
-    cpu_manager.touch(to_keys([5, 6, 7]), _EMPTY_REQ_CTX)
+    # touch [3, 6, 7] (move to end of LRU order)
+    cpu_manager.touch(to_keys([3, 6, 7]), _EMPTY_REQ_CTX)
 
     # prepare store [7, 9] -> evicts [8] (oldest following previous touch)
     prepare_store_output = cpu_manager.prepare_store(to_keys([9]), _EMPTY_REQ_CTX)
@@ -320,7 +320,7 @@ def test_cpu_manager():
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[9],
-            store_block_ids=[1],
+            store_block_ids=[3],
             evicted_keys=[8],
         ),
     )
@@ -335,7 +335,7 @@ def test_cpu_manager():
     verify_events(
         cpu_manager.take_events(),
         expected_stores=({3, 4, 5}, {6, 7, 8}),
-        expected_evictions=({2, 3, 4}, {8}),
+        expected_evictions=({4, 5, 2}, {8}),
     )
 
 
