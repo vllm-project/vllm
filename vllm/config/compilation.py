@@ -1429,9 +1429,15 @@ class CompilationConfig:
         # sizes for decode and mixed prefill-decode.
         # MRV2 handles cudagraph capture sizing in cudagraph_utils.py
         # and doesn't need below: https://github.com/vllm-project/vllm/pull/45953
+        # Apply for any non-NONE cudagraph mode, not just FULL. PIECEWISE decode
+        # graphs are captured at the same sizes; with spec-decode
+        # (uniform_decode_query_len > 1) a partial-acceptance step dispatches to a
+        # graph keyed on a size that is not a multiple of uniform_decode_query_len,
+        # so slot_mapping/positions are read at offsets from the wrong graph ->
+        # cudaErrorIllegalAddress mid-decode. See issue #28207.
         if (
             not use_v2_model_runner
-            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and cudagraph_mode != CUDAGraphMode.NONE
             and uniform_decode_query_len > 1
         ):
             self.adjust_cudagraph_sizes_for_spec_decode(
