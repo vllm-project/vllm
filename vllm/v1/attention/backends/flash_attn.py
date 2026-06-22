@@ -333,6 +333,14 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         vllm_config: "VllmConfig",
         kv_cache_spec: "AttentionSpec",
     ) -> AttentionCGSupport:
+        # PCP's _forward_with_pcp prefill path is data-dependent (boolean
+        # unpad mask, torch.nonzero, .any() control flow) and cannot be
+        # captured into a CUDA graph. Declare NEVER so vLLM runs the PCP
+        # attention eagerly (piecewise) while still graphing the rest of the
+        # model. Without this, running without --enforce-eager crashes during
+        # CG capture on the CPU->GPU pcp_unpad_mask copy (and the dynamic ops).
+        if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+            return AttentionCGSupport.NEVER
         return cls._cudagraph_support
 
     def __init__(
