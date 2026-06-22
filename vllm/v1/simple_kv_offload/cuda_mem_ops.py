@@ -109,7 +109,6 @@ class BatchMemcpyParams(NamedTuple):
     # CUDA only: one attributes entry with srcAccessOrder=ANY. Unused on
     # ROCm (7.2.1 or 7.2.2) because the current runtime rejects numAttrs > 0.
     attrs: _CUmemcpyAttributes
-    attrs_idx: ctypes.c_size_t
     # NOTE: cuMemcpyBatchAsync_v2() removed fail_idx field, but we use
     # cuMemcpyBatchAsync() with fail_idx for backward compatibility
     fail_idx: ctypes.c_size_t
@@ -148,7 +147,6 @@ def build_params(
         bpb=np.array(bpb, dtype=np.uint64),
         num_layers=len(src_tensors),
         attrs=attrs,
-        attrs_idx=ctypes.c_size_t(0),
         fail_idx=ctypes.c_size_t(0),
         stream_handle=stream.cuda_stream,
     )
@@ -175,6 +173,7 @@ def copy_blocks(
     ).ravel()
     sz_all = np.repeat(params.bpb, n)
     total = n * params.num_layers
+    attrs_idx = np.zeros(total, dtype=np.uint64)
 
     # ROCm 7.2.1/7.2.2 rejects any call with numAttrs>0 (hipMemcpyBatchAsync
     # hipamd/src/hip_memory.cpp:2819-2822); CUDA uses one attrs entry so
@@ -187,7 +186,7 @@ def copy_blocks(
         sz_all.ctypes.data,
         total,
         ctypes.addressof(params.attrs),
-        ctypes.byref(params.attrs_idx),
+        attrs_idx.ctypes.data,
         num_attrs,
         ctypes.byref(params.fail_idx),
         params.stream_handle,
