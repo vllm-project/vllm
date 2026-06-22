@@ -4,7 +4,6 @@
 import pytest
 
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.abstract_parser import DelegatingParser
 
@@ -32,11 +31,8 @@ class _DummyDelegatingParser(DelegatingParser):
     ):
         return None
 
-    def extract_tool_calls(self, model_output: str, request):
-        return None
 
-
-def test_parse_tool_calls_from_content_allows_named_tool_choice_with_none_content():
+def test_chat_completion_named_tool_choice_with_none_content():
     request = ChatCompletionRequest.model_validate(
         {
             "model": "test-model",
@@ -53,17 +49,15 @@ def test_parse_tool_calls_from_content_allows_named_tool_choice_with_none_conten
             "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
         }
     )
+    parser = _DummyDelegatingParser(tokenizer=None)
 
-    tool_calls, content = OpenAIServing._parse_tool_calls_from_content(
-        request=request,
-        tokenizer=None,
-        enable_auto_tools=True,
-        tool_parser_cls=None,
+    tool_calls, content = parser._extract_tool_calls(
         content=None,
+        request=request,
+        enable_auto_tools=True,
     )
 
     assert content is None
-    assert tool_calls is not None
     assert tool_calls == []
 
 
@@ -84,9 +78,9 @@ def test_responses_parser_allows_named_tool_choice_with_none_content():
     )
     parser = _DummyDelegatingParser(tokenizer=None)
 
-    tool_calls, content = parser._parse_tool_calls(
-        request=request,
+    tool_calls, content = parser._extract_tool_calls(
         content=None,
+        request=request,
         enable_auto_tools=False,
     )
 

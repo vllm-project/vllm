@@ -26,7 +26,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Mxfp4,
     CompressedTensorsW4A8Fp8,
-    CompressedTensorsW4A16Fp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
@@ -37,9 +36,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    cutlass_fp4_supported,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
@@ -376,13 +372,12 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
 @pytest.mark.parametrize(
     "args",
     [
-        # TODO: Enable once model is available again
-        # ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16", CompressedTensorsW4A16Fp4),
-        ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", CompressedTensorsW4A4Fp4),
+        ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16", True),
+        ("nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4", False),
     ],
 )
 def test_compressed_tensors_nvfp4(vllm_runner, args):
-    model, scheme = args
+    model, use_a16 = args
     with vllm_runner(model, enforce_eager=True) as llm:
 
         def check_model(model):
@@ -390,15 +385,8 @@ def test_compressed_tensors_nvfp4(vllm_runner, args):
 
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
-            if (
-                isinstance(qkv_proj.scheme, scheme)
-                or isinstance(qkv_proj.scheme, CompressedTensorsW4A16Fp4)
-                and not cutlass_fp4_supported()
-            ):
-                assert True
-            else:
-                raise AssertionError("FP4 Scheme Mismatch")
-
+            assert isinstance(qkv_proj.scheme, CompressedTensorsW4A4Fp4)
+            assert qkv_proj.scheme.use_a16 == use_a16
             assert qkv_proj.scheme.group_size == 16
 
         llm.apply_model(check_model)
@@ -492,6 +480,7 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
             assert input_quant_op._forward_method in (
                 input_quant_op.forward_cuda,
                 input_quant_op.forward_hip,
+                input_quant_op.forward_xpu,
             )
 
         llm.apply_model(check_model)
@@ -525,20 +514,22 @@ def test_compressed_tensors_moe_ignore_with_model(vllm_runner):
     with vllm_runner(model_path, enforce_eager=True) as llm:
 
         def check_model(model):
-            from vllm.model_executor.layers.fused_moe import FusedMoE
+            from vllm.model_executor.layers.fused_moe import MoERunner
             from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa: E501
                 CompressedTensorsMoEMethod,
             )
 
             # Check layer 0 MoE (should be quantized)
             layer_quantized = model.model.layers[0].mlp.experts
-            assert isinstance(layer_quantized, FusedMoE)
-            assert isinstance(layer_quantized.quant_method, CompressedTensorsMoEMethod)
+            assert isinstance(layer_quantized, MoERunner)
+            assert isinstance(layer_quantized._quant_method, CompressedTensorsMoEMethod)
 
             # Check layer 10 MoE (should be unquantized + ignored)
             layer_unquantized = model.model.layers[3].mlp.experts
-            assert isinstance(layer_unquantized, FusedMoE)
-            assert isinstance(layer_unquantized.quant_method, UnquantizedFusedMoEMethod)
+            assert isinstance(layer_unquantized, MoERunner)
+            assert isinstance(
+                layer_unquantized._quant_method, UnquantizedFusedMoEMethod
+            )
 
         llm.apply_model(check_model)
 
@@ -670,7 +661,7 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
     ) as llm:
 
         def check_model(model):
-            from vllm.model_executor.layers.fused_moe import FusedMoE
+            from vllm.model_executor.layers.fused_moe import MoERunner
             from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8 import (  # noqa: E501
                 CompressedTensorsW8A8Mxfp8MoEMethod,
             )
@@ -682,8 +673,10 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
             assert isinstance(qkv.scheme, CompressedTensorsW8A8Mxfp8)
 
             experts = layer.mlp.experts
-            assert isinstance(experts, FusedMoE)
-            assert isinstance(experts.quant_method, CompressedTensorsW8A8Mxfp8MoEMethod)
+            assert isinstance(experts, MoERunner)
+            assert isinstance(
+                experts._quant_method, CompressedTensorsW8A8Mxfp8MoEMethod
+            )
 
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)

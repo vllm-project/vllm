@@ -59,7 +59,13 @@ SecondaryTierFactory.register_tier(
 )
 
 SecondaryTierFactory.register_tier(
-    "fs_python",
+    "fs",
     "vllm.v1.kv_offload.tiering.fs.manager",
     "FileSystemTierManager",
+)
+
+SecondaryTierFactory.register_tier(
+    "obj",
+    "vllm.v1.kv_offload.tiering.obj.manager",
+    "ObjectStoreSecondaryTierManager",
 )

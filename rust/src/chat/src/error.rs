@@ -66,6 +66,8 @@ pub enum Error {
     ToolCallStreamInvariant { message: String },
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
+    #[error(transparent)]
+    Tokenizer(#[from] vllm_tokenizer::TokenizerError),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

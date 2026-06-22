@@ -120,6 +120,7 @@ def transfer_run_periodically(
                     ep_group=eplb_group,
                     is_profile=is_profile,
                     cuda_stream=cuda_stream,
+                    layer_idx=layer_idx,
                 )
 
                 # Wait until all writes to expert_buffer have finished before making the

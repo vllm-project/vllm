@@ -724,20 +724,6 @@ class LagunaModel(nn.Module, EagleModelMixin):
                     loaded_params.add(name)
                 continue
 
-            # Handle KV cache quantization scales
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                assert loaded_weight.numel() == 1, (
-                    f"KV scale numel {loaded_weight.numel()} != 1"
-                )
-                loaded_weight = loaded_weight.squeeze()
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
             # Handle stacked params (QKV, gate_up for
             # non-expert layers and shared_expert)
             for param_name, weight_name, shard_id in stacked_params_mapping:

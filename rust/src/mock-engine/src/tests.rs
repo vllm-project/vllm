@@ -98,7 +98,8 @@ async fn mock_engine_connects_over_tcp() {
     let (client, shutdown, task) = connect_with_mock(handshake_address, 1, 1).await;
     assert_eq!(client.engine_count(), 1);
     assert_eq!(client.engine_identities()[0], &[0, 0]);
-    assert_eq!(client.max_model_len(), Some(1024 * 1024));
+    assert_eq!(client.max_model_len(), 1024 * 1024);
+    assert_eq!(client.vllm_version(), "test-vllm-version");
     shutdown_mock(client, shutdown, task).await;
 }
 

@@ -30,17 +30,18 @@ def warmup_kernels(
     pipeline parallel coordination.
 
     The first iteration simulates a prefill with requests of
-    2 + num_spec_steps prompt tokens each. The second iteration simulates
-    a decode step with all requests generating 1 + num_spec_steps tokens.
+    decode_query_len + 1 prompt tokens each. The second iteration simulates
+    a decode step with all requests generating decode_query_len tokens.
     """
     num_spec_steps = model_runner.num_speculative_steps
-    # Use 1 + num_spec_steps + 1 tokens so the prefill batch's per-request
-    # query length exceeds decode_query_len (= 1 + num_spec_steps), preventing
-    # it from being misclassified as a uniform decode batch.
-    prompt_len = 2 + num_spec_steps
+    decode_query_len = model_runner.decode_query_len
+    # Use decode_query_len + 1 tokens so the prefill batch's per-request query
+    # length exceeds decode_query_len, preventing it from being misclassified as
+    # a uniform decode batch.
+    prompt_len = decode_query_len + 1
     prompt_token_ids = list(range(prompt_len))
-    # After prefill, decode generates 1 verified + num_spec_steps draft tokens.
-    decode_len = prompt_len + 1 + num_spec_steps
+    # After prefill, decode generates decode_query_len tokens.
+    decode_len = prompt_len + decode_query_len
 
     kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
     num_kv_cache_groups = len(kv_cache_groups)
@@ -57,7 +58,7 @@ def warmup_kernels(
     num_reqs = min(
         model_runner.scheduler_config.max_num_seqs,
         model_runner.scheduler_config.max_num_batched_tokens
-        // max(prompt_len, 1 + num_spec_steps),
+        // max(prompt_len, decode_query_len),
         # Reserve block 0 (null block) and ensure we have enough blocks.
         max(1, (model_runner.kv_cache_config.num_blocks - 1) // max_blocks_per_req),
     )
@@ -79,7 +80,7 @@ def warmup_kernels(
         nonlocal next_block_id
         return list(range(next_block_id, next_block_id := next_block_id + num_blocks))
 
-    # Step 1: Prefill all requests with 2 + num_spec_steps prompt tokens each.
+    # Step 1: Prefill all requests with 1 + decode_query_len prompt tokens each.
     new_reqs = [
         NewRequestData.from_request(
             Request(req_ids[i], prompt_token_ids, sampling_params, pooling_params),
@@ -117,7 +118,7 @@ def warmup_kernels(
 
         worker_sample_tokens(grammar_output)
 
-        # Step 2: Decode all requests with 1 + num_spec_steps tokens each.
+        # Step 2: Decode all requests with decode_query_len tokens each.
         cached_req_data = CachedRequestData.make_empty()
         cached_req_data.req_ids = list(req_ids)
         cached_req_data.num_computed_tokens = [prompt_len] * num_reqs
@@ -131,7 +132,7 @@ def warmup_kernels(
         decode_output = SchedulerOutput.make_empty()
         decode_output.scheduled_cached_reqs = cached_req_data
         decode_output.num_scheduled_tokens = {
-            req_id: 1 + num_spec_steps for req_id in req_ids
+            req_id: decode_query_len for req_id in req_ids
         }
         if num_spec_steps > 0:
             decode_output.scheduled_spec_decode_tokens = {

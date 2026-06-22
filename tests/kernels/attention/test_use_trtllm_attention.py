@@ -6,11 +6,18 @@ from unittest.mock import patch
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
     supports_trtllm_attention,
     use_trtllm_attention,
 )
+
+if not current_platform.is_cuda():
+    pytest.skip(
+        "TRTLLM attention is only supported on CUDA platforms.",
+        allow_module_level=True,
+    )
 
 MODEL_CONFIGS = {
     "Llama-3-70B": dict(num_qo_heads=64, num_kv_heads=8),

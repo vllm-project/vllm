@@ -468,6 +468,7 @@ def _reference_kv_compress_norm_rope(
     use_fp4: bool = False,
     rms_eps: float = 1e-6,
     fp8_max: float = 448.0,
+    return_full_cache: bool = False,
 ):
     """Compress → RMSNorm → GPT-J RoPE → quantize.
 
@@ -520,6 +521,12 @@ def _reference_kv_compress_norm_rope(
         ).reshape(rope_dim)
         results.append(torch.cat([nope, rope]).to(state_cache.dtype))
     result = torch.stack(results)
+
+    if return_full_cache:
+        # Contiguous 512-wide bf16 row (nope unrotated + rope rotated), matching
+        # the FlashInfer full-cache layout before any per-tensor fp8 quant. The
+        # kernel rounds the fp32 result to bf16 once at the store.
+        return result.to(torch.bfloat16)
 
     if use_fp4:
         return quantize_to_mxfp4(result)
@@ -667,3 +674,145 @@ def test_fused_kv_insert_indexer(num_tokens: int, kv_block_size: int, use_fp4: b
             assert torch.equal(actual_scale, scale[i : i + 1]), (
                 f"token {i}: scale {actual_scale.item()} != {scale[i].item()}"
             )
+
+
+@pytest.mark.parametrize("compress_ratio", [4, 128])
+@pytest.mark.parametrize("store_fp8", [False, True])
+def test_cutedsl_full_cache_store(compress_ratio: int, store_fp8: bool):
+    """CuTeDSL compressor full-cache (FlashInfer) store parity for head=512.
+
+    Exercises the contiguous bf16 / per-tensor fp8 store branch of both the C4
+    fused kernel and the C128 split kernel against the PyTorch reference.
+    """
+    cutedsl = pytest.importorskip("cutlass")  # noqa: F841
+    from vllm.models.deepseek_v4.nvidia.ops.sparse_attn_compress_cutedsl import (
+        fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl,
+        split_kv_compress_norm_rope_insert_sparse_attn_cutedsl,
+    )
+
+    HEAD_DIM = 512
+    ROPE_DIM = 64
+    RMS_EPS = 1e-6
+    FP8_MAX = 448.0
+    # C128 compress (Block8 kernel) requires state-cache block_size=8; C4 uses 16.
+    BLOCK_SIZE = 8 if compress_ratio == 128 else 16
+    KV_BLOCK_SIZE = 64
+    device = "cuda"
+    torch.manual_seed(7)
+
+    overlap = 1 if compress_ratio == 4 else 0
+    coff = 1 + overlap
+    num_tokens = 8
+
+    num_pages = (compress_ratio * num_tokens - 1) // BLOCK_SIZE + 2
+    # The production CompressorStateCache is fp32.
+    state_cache = torch.randn(
+        num_pages, BLOCK_SIZE, 2 * coff * HEAD_DIM, dtype=torch.float32, device=device
+    )
+    block_table = torch.arange(num_pages, dtype=torch.int32, device=device).unsqueeze(0)
+    token_to_req = torch.zeros(num_tokens, dtype=torch.int32, device=device)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    positions = torch.arange(
+        compress_ratio - 1,
+        compress_ratio * num_tokens,
+        compress_ratio,
+        dtype=torch.int64,
+        device=device,
+    )
+    rms_weight = torch.randn(HEAD_DIM, dtype=torch.bfloat16, device=device)
+    cos_sin_cache = torch.randn(
+        compress_ratio * num_tokens, ROPE_DIM, dtype=torch.float32, device=device
+    )
+
+    dtype = torch.float8_e4m3fn if store_fp8 else torch.bfloat16
+    kv_n_blocks = (num_tokens + KV_BLOCK_SIZE - 1) // KV_BLOCK_SIZE + 1
+    k_cache = torch.zeros(
+        kv_n_blocks, KV_BLOCK_SIZE, HEAD_DIM, dtype=dtype, device=device
+    )
+    fp8_scale = torch.tensor(
+        [0.5 if store_fp8 else 1.0], dtype=torch.float32, device=device
+    )
+
+    if compress_ratio == 4:
+        fused_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
+            state_cache,
+            token_to_req,
+            positions,
+            slot_mapping,
+            block_table,
+            BLOCK_SIZE,
+            rms_weight,
+            RMS_EPS,
+            cos_sin_cache,
+            k_cache,
+            slot_mapping,
+            KV_BLOCK_SIZE,
+            k_cache.stride(0),
+            head_size=HEAD_DIM,
+            state_width=coff * HEAD_DIM,
+            rope_head_dim=ROPE_DIM,
+            fp8_max=FP8_MAX,
+            quant_block=64,
+            token_stride=576,
+            scale_dim=8,
+            compress_ratio=compress_ratio,
+            overlap=True,
+            store_full_kv=True,
+            store_full_fp8=store_fp8,
+            fp8_scale=fp8_scale,
+        )
+    else:
+        compressed_kv = torch.empty(
+            (num_tokens, HEAD_DIM), dtype=torch.float32, device=device
+        )
+        split_kv_compress_norm_rope_insert_sparse_attn_cutedsl(
+            state_cache,
+            token_to_req,
+            positions,
+            slot_mapping,
+            block_table,
+            BLOCK_SIZE,
+            compressed_kv,
+            rms_weight,
+            RMS_EPS,
+            cos_sin_cache,
+            k_cache,
+            slot_mapping,
+            KV_BLOCK_SIZE,
+            k_cache.stride(0),
+            head_size=HEAD_DIM,
+            state_width=coff * HEAD_DIM,
+            rope_head_dim=ROPE_DIM,
+            fp8_max=FP8_MAX,
+            quant_block=64,
+            token_stride=576,
+            scale_dim=8,
+            compress_ratio=compress_ratio,
+            overlap=bool(overlap),
+            store_full_kv=True,
+            store_full_fp8=store_fp8,
+            fp8_scale=fp8_scale,
+        )
+
+    ref = _reference_kv_compress_norm_rope(
+        state_cache,
+        block_table,
+        positions,
+        rms_weight,
+        cos_sin_cache,
+        compress_ratio,
+        overlap,
+        rms_eps=RMS_EPS,
+        return_full_cache=True,
+    )  # [num_tokens, HEAD_DIM] bf16
+
+    actual = torch.stack(
+        [k_cache[i // KV_BLOCK_SIZE, i % KV_BLOCK_SIZE] for i in range(num_tokens)]
+    )
+    if store_fp8:
+        ref_fp8 = torch.clamp(ref.float() / fp8_scale, -FP8_MAX, FP8_MAX).to(
+            torch.float8_e4m3fn
+        )
+        torch.testing.assert_close(actual.float(), ref_fp8.float(), rtol=0.0, atol=0.3)
+    else:
+        torch.testing.assert_close(actual.float(), ref.float(), rtol=3e-2, atol=3e-2)
