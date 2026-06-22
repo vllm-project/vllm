@@ -356,6 +356,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # Get compress_ratio for DeepseekV4 support
         if isinstance(self.kv_cache_spec, MLAAttentionSpec):
             self.compress_ratio = self.kv_cache_spec.compress_ratio
+        # Fail-closed: DCP localization and the exact-merge remap both assume
+        # compress_ratio == 1 (and CP_INTERLEAVE == 1, enforced via
+        # supports_dcp_with_varlen in the FlashMLA sparse builder). Generalizing
+        # to compress_ratio > 1 (DeepSeek-V4) needs a per-rank compressed-shard
+        # seq-len map plus a DCP+compress integration test; tracked as a
+        # fast-follow rather than relaxed here without coverage.
         if self.dcp_world_size > 1 and self.compress_ratio > 1:
             raise NotImplementedError(
                 "DCP is not supported with indexer KV compression "
