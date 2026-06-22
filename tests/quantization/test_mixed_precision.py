@@ -13,8 +13,11 @@ from dataclasses import dataclass
 
 import lm_eval
 import pytest
-import torch
 from packaging import version
+
+from tests.utils import (
+    multi_gpu_only,
+)
 
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec("quark") is not None and version.parse(
     importlib.metadata.version("amd-quark")
@@ -53,11 +56,8 @@ TEST_CONFIGS = {
 
 @pytest.mark.parametrize("model_name, accuracy_numbers", TEST_CONFIGS.items())
 @pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
+@multi_gpu_only(num_gpus=4)
 def test_mixed_precision_model_accuracies(model_name: str, accuracy_numbers: dict):
-    device_count = torch.accelerator.device_count()
-    if device_count < 4:
-        pytest.skip(f"This test requires >=4 gpus, got only {device_count}")
-
     results = lm_eval.simple_evaluate(
         model="vllm",
         model_args=EvaluationConfig(model_name).get_model_args(),
