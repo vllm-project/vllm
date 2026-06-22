@@ -158,7 +158,7 @@ cuda-bindings==13.0.3
     # via torch
 cuda-pathfinder==1.3.3
     # via cuda-bindings
-cuda-toolkit==13.0.2
+cuda-toolkit==13.0.3
     # via torch
 cupy-cuda12x==13.6.0
     # via ray
@@ -602,7 +602,7 @@ numpy==2.2.6
     #   tritonclient
     #   vocos
     #   xgrammar
-nvidia-cublas==13.1.0.3
+nvidia-cublas==13.1.1.3
     # via
     #   cuda-toolkit
     #   nvidia-cudnn-cu13
