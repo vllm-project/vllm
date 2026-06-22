@@ -63,7 +63,7 @@ class LoadConfig:
     Specifies the loading strategy for safetensors weights.
 
     - None (default): Uses memory-mapped (lazy) loading. When an NFS
-      filesystem is detected and the total checkpoint size fits within 90%%
+      filesystem is detected and the total checkpoint size fits within 90%
       of available RAM, prefetching is enabled automatically.
     - "lazy": Weights are memory-mapped from the file. This enables
       on-demand loading and is highly efficient for models on local storage.
