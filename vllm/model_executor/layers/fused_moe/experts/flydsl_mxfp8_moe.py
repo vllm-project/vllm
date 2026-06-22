@@ -57,11 +57,10 @@ class FlydslMxfp8Experts(Mxfp8TritonExpertsBase):
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config) -> bool:
-        # aiter.fused_moe is called per-rank with the full local expert set; the
-        # expert_map-based EP path is not wired up (apply() rejects expert_map).
-        # Reject EP at selection time so the oracle never picks FlyDSL for an EP
-        # deployment (it would otherwise crash in apply()); native is used there.
-        return moe_parallel_config.ep_size == 1
+        # Both TP (expert_map=None) and EP are supported: apply() forwards the
+        # expert_map as aiter's ``expert_mask`` (the per-rank local-expert
+        # selection), mirroring the native rocm_aiter_moe path.
+        return True
 
     @staticmethod
     def is_supported_config(
@@ -97,14 +96,9 @@ class FlydslMxfp8Experts(Mxfp8TritonExpertsBase):
         apply_router_weight_on_input: bool,
     ):
         from aiter import ActivationType, QuantType, dtypes
-        from aiter.fused_moe import fused_moe
         from aiter.ops.flydsl.moe_common import GateMode
 
-        if expert_map is not None:
-            raise NotImplementedError(
-                "FlydslMxfp8Experts does not support expert parallelism yet; "
-                "disable EP or use the native MXFP8 MoE backend."
-            )
+        from vllm._aiter_ops import rocm_aiter_ops
 
         # Re-tag the preshuffled weights: replace_parameter drops the
         # is_shuffled flag, without which aiter picks a broken CK kernel.
@@ -118,22 +112,38 @@ class FlydslMxfp8Experts(Mxfp8TritonExpertsBase):
         w1_scale = self.w1_scale_val.view(dtypes.fp8_e8m0)
         w2_scale = self.w2_scale_val.view(dtypes.fp8_e8m0)
 
-        # aiter requires FP32 routing weights / INT32 ids.
-        out = fused_moe(
+        # Under EP, aiter expects ``expert_mask`` as a 0/1 *local-expert* mask
+        # over global ids with a trailing fake-expert sentinel slot
+        # (shape ``[global_num_experts + 1]``), NOT vLLM's expert_map (a
+        # global->local index map with -1 for non-local). Convert it; aiter
+        # derives the global->local compaction from the mask itself. ``None``
+        # under pure TP.
+        if expert_map is not None:
+            local_mask = (expert_map >= 0).to(torch.int32)
+            expert_mask = torch.cat([local_mask, local_mask.new_zeros(1)])
+        else:
+            expert_mask = None
+
+        # Route through the graph-safe ``rocm_aiter_fused_moe`` custom op so the
+        # call is captured under HIP graphs / torch.compile (a direct
+        # ``aiter.fused_moe`` is opaque to the dispatcher). aiter requires FP32
+        # routing weights / INT32 ids.
+        out = rocm_aiter_ops.fused_moe(
             hidden_states,
             w1,
             w2,
             topk_weights.to(torch.float32),
             topk_ids.to(torch.int32),
-            expert_mask=None,
-            activation=ActivationType.Swiglu,
-            quant_type=QuantType.per_1x32,
+            expert_mask=expert_mask,
+            activation_method=ActivationType.Swiglu.value,
+            quant_method=QuantType.per_1x32.value,
+            doweight_stage1=apply_router_weight_on_input,
             w1_scale=w1_scale,
             w2_scale=w2_scale,
             a1_scale=None,
             a2_scale=None,
-            doweight_stage1=apply_router_weight_on_input,
-            swiglu_limit=swiglu_limit,
             gate_mode=GateMode.INTERLEAVE.value,
+            swiglu_limit=swiglu_limit,
+            output_dtype=output.dtype,
         )
         output.copy_(out.to(output.dtype))

@@ -3,9 +3,9 @@
 """MXFP8 MoE backend selection for the AITER FlyDSL kernel (gfx950).
 
 GPU-free: mocks the platform (gfx950) and the ``flydsl`` package check, then
-exercises the oracle so the FlyDSL backend is auto-picked when usable, skipped
-(native fallback) otherwise, and -- crucially -- NEVER selected under expert
-parallelism (EP), which the kernel does not support.
+exercises the oracle so the FlyDSL backend is auto-picked when usable (including
+under expert parallelism, since apply() forwards the expert_map as aiter's
+expert_mask) and skipped (native fallback) when the device/package is missing.
 """
 
 import dataclasses
@@ -69,22 +69,22 @@ def test_aiter_mxfp8_registered():
     ]
 
 
-@pytest.mark.parametrize("ep_size,expected", [(1, True), (2, False)])
-def test_ep_guard(ep_size, expected):
-    """FlyDSL must reject EP at selection time (apply() can't do EP)."""
+@pytest.mark.parametrize("ep_size", [1, 2])
+def test_ep_supported(ep_size):
+    """FlyDSL accepts both TP and EP: apply() forwards expert_map as expert_mask."""
     assert (
         FlydslMxfp8Experts._supports_parallel_config(
             _config(ep_size).moe_parallel_config
         )
-        is expected
+        is True
     )
 
 
 @pytest.mark.parametrize(
     "present,ep_size,supported,reason_substr",
     [
-        (True, 1, True, None),  # gfx950 + flydsl + no EP -> selectable
-        (True, 2, False, "parallel config"),  # EP -> rejected (native fallback)
+        (True, 1, True, None),  # gfx950 + flydsl + TP -> selectable
+        (True, 2, True, None),  # gfx950 + flydsl + EP -> selectable (expert_mask)
         (False, 1, False, "flydsl package"),  # package missing -> clear reason
     ],
 )
@@ -103,14 +103,17 @@ def test_is_supported_config(present, ep_size, supported, reason_substr):
 
 
 def test_explicit_moe_backend_aiter():
-    """--moe-backend aiter: returns FlyDSL when usable, else a clear ValueError."""
+    """--moe-backend aiter: returns FlyDSL when usable (TP or EP), else a clear
+    ValueError when the flydsl package is missing."""
     with _gfx950(), _flydsl_installed(True):
         assert (
             _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(1))
             is FlydslMxfp8Experts
         )
-        with pytest.raises(ValueError, match="parallel config"):
+        assert (
             _select_kernel_cls(Fp8MoeBackend.AITER_MXFP8, _config(2))
+            is FlydslMxfp8Experts
+        )
     with (
         _gfx950(),
         _flydsl_installed(False),
