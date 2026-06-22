@@ -830,12 +830,11 @@ def _masked_topk_sum_kernel(
     base = pid_m * topk
     acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
     for j in tl.static_range(topk):
-        # Validity test (topk_ids != -1) fused in -- no separate mask tensor.
         eid = tl.load(topk_ids_ptr + base + j)
-        x = tl.load(inp_ptr + (base + j) * K + k, mask=k_mask, other=0.0).to(tl.float32)
-        # tl.where SELECTS (it does not multiply), so stale nan/inf left in an
-        # invalid (-1) slot is discarded, not propagated (x * 0 would give nan).
-        acc += tl.where(eid != -1, x, 0.0)
+        # NOTE: This is NaN-safe because the invalid slots are skipped.
+        if eid >= 0:
+            x = tl.load(inp_ptr + (base + j) * K + k, mask=k_mask)
+            acc += x.to(tl.float32)
     tl.store(out_ptr + pid_m * K + k, acc.to(out_ptr.dtype.element_ty), mask=k_mask)
 
 
@@ -1257,10 +1256,8 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
                 top_k_num=topk,
             )
 
-        # matmul_ogs leaves invalid (-1 / non-local EP) slots unwritten. Instead
-        # of zeroing the whole worst-case buffer, reduce over topk skipping those
-        # slots; the kernel reads topk_ids directly (-1 marks them). topk_ids is
-        # (M, topk), aligned with intermediate_cache3.view(M, topk, K).
+        # matmul_ogs leaves invalid (-1 / non-local EP) slots unwritten.
+        # Reduce over topk skipping those slots.
         masked_moe_sum(intermediate_cache3.view(-1, topk, K), topk_ids, output)
 
 
