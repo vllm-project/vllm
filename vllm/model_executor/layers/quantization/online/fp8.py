@@ -109,6 +109,10 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
     def __init__(self):
         super().__init__()
 
+        self.block_quant = False
+        self.use_deep_gemm = False
+        self.use_marlin = False
+        self.marlin_input_dtype = None
         self.weight_quant_key = kFp8StaticTensorSym
         # Use per-token quantization for better perf if dynamic and cutlass
         if cutlass_fp8_supported():
@@ -144,6 +148,7 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
             out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
+        self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
@@ -156,6 +161,8 @@ class Fp8PerTensorOnlineLinearMethod(_Fp8OnlineLinearBase):
         replace_parameter(layer, "weight", qweight.t().data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
+        if self.use_marlin and hasattr(self.fp8_linear, "marlin_input_dtype"):
+            self.fp8_linear.marlin_input_dtype = self.marlin_input_dtype
         self.fp8_linear.process_weights_after_loading(layer)
 
         # Prevent duplicate processing (e.g., during weight reload)
@@ -476,6 +483,8 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
             per_act_token_quant=self.per_act_token_quant,
             per_out_ch_quant=self.per_out_ch_quant,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
         )
 
 

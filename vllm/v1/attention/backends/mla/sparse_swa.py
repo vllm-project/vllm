@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import ClassVar, cast
 
 import torch
@@ -193,6 +193,9 @@ class DeepseekSparseSWAMetadata:
     tile_sched_swaonly: "FlashMLASchedMeta | None" = None
     tile_sched_c4a: "FlashMLASchedMeta | None" = None
     tile_sched_c128a: "FlashMLASchedMeta | None" = None
+    flashinfer_sparse_index_cache: dict[str, tuple[torch.Tensor, torch.Tensor]] = field(
+        default_factory=dict
+    )
 
     def get_prefill_chunk_plan(
         self, compress_ratio: int, prefill_chunk_size: int

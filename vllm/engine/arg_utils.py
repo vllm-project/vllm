@@ -6,6 +6,7 @@ import copy
 import dataclasses
 import functools
 import json
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
@@ -73,6 +74,7 @@ from vllm.config.cache import (
 )
 from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
+from vllm.config.load import SafetensorsLoadStrategy
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import (
@@ -427,7 +429,9 @@ class EngineArgs:
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
     download_dir: str | None = LoadConfig.download_dir
-    safetensors_load_strategy: str | None = LoadConfig.safetensors_load_strategy
+    safetensors_load_strategy: SafetensorsLoadStrategy | None = (
+        LoadConfig.safetensors_load_strategy
+    )
     safetensors_prefetch_num_threads: int = LoadConfig.safetensors_prefetch_num_threads
     safetensors_prefetch_block_size: int = LoadConfig.safetensors_prefetch_block_size
     load_format: str | LoadFormats = LoadConfig.load_format
@@ -462,6 +466,7 @@ class EngineArgs:
     numa_bind: bool = ParallelConfig.numa_bind
     numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
+    device_ids: list[int | str] | None = None
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -599,6 +604,7 @@ class EngineArgs:
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
+    prefill_schedule_interval: int = SchedulerConfig.prefill_schedule_interval
 
     watermark: float = SchedulerConfig.watermark
 
@@ -637,6 +643,7 @@ class EngineArgs:
     enable_logging_iteration_details: bool = (
         ObservabilityConfig.enable_logging_iteration_details
     )
+    jit_monitor_verbose: bool = ObservabilityConfig.jit_monitor_verbose
     enable_mm_processor_stats: bool = ObservabilityConfig.enable_mm_processor_stats
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
@@ -973,6 +980,20 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--numa-bind-cpus", **parallel_kwargs["numa_bind_cpus"]
+        )
+        parallel_group.add_argument(
+            "--device-ids",
+            type=lambda s: [
+                int(device_id) if device_id.isdigit() else device_id
+                for device_id in (part.strip() for part in s.split(","))
+            ],
+            default=None,
+            help="Comma-separated physical GPU device IDs or UUIDs to use "
+            '(e.g. --device-ids "2,3,5,7"). Avoids setting '
+            "CUDA_VISIBLE_DEVICES, preserving full GPU topology "
+            "visibility for GPU-NIC affinity and DeepGEMM. "
+            "Note: has no effect with Ray executors; use Ray "
+            "placement groups for GPU selection instead.",
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -1357,6 +1378,10 @@ class EngineArgs:
             "--enable-logging-iteration-details",
             **observability_kwargs["enable_logging_iteration_details"],
         )
+        observability_group.add_argument(
+            "--jit-monitor-verbose",
+            **observability_kwargs["jit_monitor_verbose"],
+        )
 
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)
@@ -1412,6 +1437,10 @@ class EngineArgs:
             **scheduler_kwargs["scheduler_reserve_full_isl"],
         )
         scheduler_group.add_argument("--watermark", **scheduler_kwargs["watermark"])
+        scheduler_group.add_argument(
+            "--prefill-schedule-interval",
+            **scheduler_kwargs["prefill_schedule_interval"],
+        )
         scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
@@ -1702,6 +1731,47 @@ class EngineArgs:
             }
         )
         return SpeculativeConfig(**self.speculative_config)
+
+    def _resolve_device_ids(self) -> list[int] | None:
+        if not self.device_ids:
+            return None
+        if self.distributed_executor_backend == "ray":
+            logger.warning(
+                "--device-ids has no effect when using the Ray executor. "
+                "Use Ray placement groups for GPU selection instead."
+            )
+        ids = self.device_ids
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"--device-ids must not contain duplicates: {ids}")
+        if all(isinstance(i, str) for i in ids):
+            return [
+                current_platform.device_control_id_to_physical_device_id(i)
+                for i in cast(list[str], ids)
+            ]
+        if any(isinstance(i, str) for i in ids):
+            raise ValueError("--device-ids must not mix integer IDs and UUIDs")
+        int_ids = cast(list[int], ids)
+        # Compose with CUDA_VISIBLE_DEVICES: if CVD is set, treat
+        # --device-ids values as indices into the CVD-visible set.
+        cvd = getattr(
+            envs,
+            current_platform.device_control_env_var,
+            os.environ.get(current_platform.device_control_env_var),
+        )
+        if cvd:
+            cvd_ids = [
+                current_platform.device_control_id_to_physical_device_id(x)
+                for x in cvd.split(",")
+            ]
+            for i in int_ids:
+                if i >= len(cvd_ids):
+                    raise ValueError(
+                        f"--device-ids index {i} is out of range for "
+                        f"{current_platform.device_control_env_var}"
+                        f"={cvd} ({len(cvd_ids)} devices visible)"
+                    )
+            return [cvd_ids[i] for i in int_ids]
+        return int_ids
 
     def create_diffusion_config(self) -> DiffusionConfig | None:
         if self.diffusion_config is None:
@@ -2016,6 +2086,7 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+            assigned_physical_gpu_ids=self._resolve_device_ids(),
             numa_bind=self.numa_bind,
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,
@@ -2059,6 +2130,7 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
+            prefill_schedule_interval=self.prefill_schedule_interval,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
@@ -2202,6 +2274,7 @@ class EngineArgs:
             enable_mfu_metrics=self.enable_mfu_metrics,
             enable_mm_processor_stats=self.enable_mm_processor_stats,
             enable_logging_iteration_details=self.enable_logging_iteration_details,
+            jit_monitor_verbose=self.jit_monitor_verbose,
         )
 
         # Compilation config overrides
