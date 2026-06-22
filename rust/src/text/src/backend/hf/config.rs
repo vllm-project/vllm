@@ -91,9 +91,7 @@ impl HfSpecialTokens {
 #[serde(default)]
 pub struct ModelConfig {
     model_type: Option<String>,
-    max_position_embeddings: Option<u32>,
     vocab_size: Option<u32>,
-    num_attention_heads: Option<u32>,
     num_experts: Option<OneOrManyExpertCount>,
     moe_num_experts: Option<OneOrManyExpertCount>,
     n_routed_experts: Option<OneOrManyExpertCount>,
@@ -180,29 +178,18 @@ impl ModelConfig {
         self.model_type.as_deref().or_else(|| self.text_config.as_deref()?.model_type())
     }
 
-    /// Return the effective model vocabulary size, following the same simplified
-    /// text-config selection as `model_type`: the top-level config wins,
-    /// otherwise a single nested `text_config` may provide it.
-    pub fn vocab_size(&self) -> Option<u32> {
-        self.vocab_size.or_else(|| self.text_config.as_deref()?.vocab_size())
-    }
-
-    /// Reject partially nested `text_config` payloads that are unlikely to be
-    /// valid LLM configs for our current use.
-    ///
-    /// This keeps the simplified Rust-side parsing honest: if a model declares
-    /// `text_config`, it must at least look like a real text model config.
-    fn validate_text_config_selection(&self) -> Result<()> {
-        if let Some(text_config) = self.text_config.as_deref()
-            && text_config.num_attention_heads.is_none()
-        {
-            return Err(Error::Tokenizer(
-                "the text config extracted from the model config does not have `num_attention_heads`"
-                    .to_string(),
-            ));
+    /// Return the effective model vocabulary size, following the same
+    /// simplified text-config selection as `model_type`.
+    pub fn vocab_size(&self) -> Result<u32> {
+        if let Some(vocab_size) = self.vocab_size {
+            Ok(vocab_size)
+        } else if let Some(text_config) = self.text_config.as_deref() {
+            text_config.vocab_size()
+        } else {
+            Err(Error::Tokenizer(
+                "the model config does not define `vocab_size`".to_string(),
+            ))
         }
-
-        Ok(())
     }
 
     /// Match Python's current expert-count priority on the selected text
@@ -245,10 +232,6 @@ impl ModelConfig {
     pub(super) fn is_moe(&self) -> bool {
         self.num_experts() > 0
     }
-
-    pub(super) fn max_position_embeddings(&self) -> Option<u32> {
-        self.effective_text_config().max_position_embeddings
-    }
 }
 
 /// Load the tokenizer-side EOS metadata if a config file is present.
@@ -263,9 +246,7 @@ pub(super) fn load_generation_config(path: Option<&Path>) -> Result<GenerationCo
 
 /// Load the model-side config (`config.json`) if present.
 pub fn load_model_config(path: Option<&Path>) -> Result<ModelConfig> {
-    let config: ModelConfig = read_json_file(path)?;
-    config.validate_text_config_selection()?;
-    Ok(config)
+    read_json_file(path)
 }
 
 fn read_json_file<T>(path: Option<&Path>) -> Result<T>
@@ -343,12 +324,9 @@ mod tests {
             r#"{
                 "model_type": "top_level",
                 "num_experts": 64,
-                "max_position_embeddings": 8192,
                 "text_config": {
                     "model_type": "nested",
-                    "num_attention_heads": 32,
-                    "num_local_experts": 8,
-                    "max_position_embeddings": 4096
+                    "num_local_experts": 8
                 }
             }"#,
         )
@@ -356,26 +334,36 @@ mod tests {
 
         assert_eq!(config.num_experts(), 8);
         assert_eq!(config.model_type(), Some("top_level"));
-        assert_eq!(config.max_position_embeddings(), Some(4096));
         assert!(config.is_moe());
     }
 
     #[test]
-    fn model_config_defaults_to_non_moe_when_no_expert_metadata_exists() {
-        let config: ModelConfig =
-            serde_json::from_str(r#"{"max_position_embeddings":4096}"#).unwrap();
+    fn model_config_uses_nested_vocab_size_when_top_level_is_absent() {
+        let config: ModelConfig = serde_json::from_str(
+            r#"{
+                "text_config": {
+                    "vocab_size": 151936
+                }
+            }"#,
+        )
+        .unwrap();
 
-        assert_eq!(config.num_experts(), 0);
-        assert!(!config.is_moe());
-        assert_eq!(config.max_position_embeddings(), Some(4096));
+        assert_eq!(config.vocab_size().unwrap(), 151936);
     }
 
     #[test]
-    fn model_config_rejects_nested_text_config_without_attention_heads() {
-        let config: ModelConfig =
-            serde_json::from_str(r#"{"text_config":{"max_position_embeddings":4096}}"#).unwrap();
+    fn model_config_rejects_missing_vocab_size() {
+        let config: ModelConfig = serde_json::from_str(r#"{}"#).unwrap();
 
-        let error = config.validate_text_config_selection().unwrap_err();
-        assert!(error.to_string().contains("does not have `num_attention_heads`"),);
+        let error = config.vocab_size().unwrap_err();
+        assert!(error.to_string().contains("does not define `vocab_size`"));
+    }
+
+    #[test]
+    fn model_config_defaults_to_non_moe_when_no_expert_metadata_exists() {
+        let config: ModelConfig = serde_json::from_str(r#"{}"#).unwrap();
+
+        assert_eq!(config.num_experts(), 0);
+        assert!(!config.is_moe());
     }
 }

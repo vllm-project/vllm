@@ -55,15 +55,9 @@ except ImportError:
     SafetensorsStreamer = runai_model_streamer.placeholder_attr("SafetensorsStreamer")
 
 try:
-    import gguf
-except ImportError:
-    gguf = PlaceholderModule("gguf")
-
-try:
-    from fastsafetensors import SafeTensorsFileLoader, SingleGroup
+    from fastsafetensors import SingleGroup
 except ImportError:
     fastsafetensors = PlaceholderModule("fastsafetensors")
-    SafeTensorsFileLoader = fastsafetensors.placeholder_attr("SafeTensorsFileLoader")
     SingleGroup = fastsafetensors.placeholder_attr("SingleGroup")
 
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
@@ -250,10 +244,6 @@ def get_quant_config(
         raise ValueError("Model quantization method is not specified in the config.")
     quant_cls = get_quantization_config(model_config.quantization)
 
-    # GGUF doesn't have config file
-    if model_config.quantization == "gguf":
-        return quant_cls()
-
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
     # some vision model may keep quantization_config in their text_config
@@ -435,52 +425,6 @@ def get_sparse_attention_config(
     logger.info("Loaded sparse attention config from %s", config_file)
 
     return config
-
-
-def download_gguf(
-    repo_id: str,
-    quant_type: str,
-    cache_dir: str | None = None,
-    revision: str | None = None,
-    ignore_patterns: str | list[str] | None = None,
-) -> str:
-    # Use patterns that snapshot_download can handle directly
-    # Patterns to match:
-    # - *-{quant_type}.gguf (root)
-    # - *-{quant_type}-*.gguf (root sharded)
-    # - */*-{quant_type}.gguf (subdir)
-    # - */*-{quant_type}-*.gguf (subdir sharded)
-    allow_patterns = [
-        f"*-{quant_type}.gguf",
-        f"*-{quant_type}-*.gguf",
-        f"*/*-{quant_type}.gguf",
-        f"*/*-{quant_type}-*.gguf",
-    ]
-
-    # Use download_weights_from_hf which handles caching and downloading
-    folder = download_weights_from_hf(
-        model_name_or_path=repo_id,
-        cache_dir=cache_dir,
-        allow_patterns=allow_patterns,
-        revision=revision,
-        ignore_patterns=ignore_patterns,
-    )
-
-    # Find the downloaded file(s) in the folder
-    local_files = []
-    for pattern in allow_patterns:
-        # Convert pattern to glob pattern for local filesystem
-        glob_pattern = os.path.join(folder, pattern)
-        local_files.extend(glob.glob(glob_pattern))
-
-    if not local_files:
-        raise ValueError(
-            f"Downloaded GGUF files not found in {folder} for quant_type {quant_type}"
-        )
-
-    # Sort to ensure consistent ordering (prefer non-sharded files)
-    local_files.sort(key=lambda x: (x.count("-"), x))
-    return local_files[0]
 
 
 @instrument(span_name="Download weights - HF")
@@ -1077,25 +1021,19 @@ def runai_safetensors_weights_iterator(
             yield name, tensor.clone()
 
 
-def _init_fastsafetensors_loader(
-    pg: "torch.distributed.ProcessGroup",
-    device: torch.device,
-    f_list: list[str],
-    *,
-    nogds: bool = False,
-):
-    loader = SafeTensorsFileLoader(pg, device, nogds=nogds)
-    rank_file_map = {i: [f] for i, f in enumerate(f_list)}
-    loader.add_filenames(rank_file_map)
-    return loader
-
-
 def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
-    using fastsafetensor library."""
+    using fastsafetensor library.
+
+    Uses ParallelLoader for pipelined loading: the producer thread
+    prepares metadata for the next shard while the consumer yields
+    tensors from the current shard.
+    """
+    from fastsafetensors.parallel_loader import ParallelLoader
+
     if torch.distributed.is_initialized():
         pg = torch.distributed.group.WORLD
     else:
@@ -1103,48 +1041,53 @@ def fastsafetensors_weights_iterator(
 
     device = torch.device(f"cuda:{current_platform.current_device()}")
     hf_weights_files = sorted(hf_weights_files, key=_natural_sort_key)
-    weight_files_sub_lists = [
-        hf_weights_files[i : i + pg.size()]
-        for i in range(0, len(hf_weights_files), pg.size())
-    ]
 
     # Use nogds=True for TP > 1 to avoid cuFileDriverOpen() which
     # initializes the GDS DMA subsystem for all visible GPUs, creating
     # unwanted CUDA contexts on every device.
     nogds = pg.size() > 1
 
-    for f_list in tqdm(
-        weight_files_sub_lists,
-        desc="Loading safetensors using Fastsafetensor loader",
-        disable=not enable_tqdm(use_tqdm_on_load),
-        bar_format=_BAR_FORMAT,
-    ):
-        loader = _init_fastsafetensors_loader(pg, device, f_list, nogds=nogds)
+    queue_size = envs.VLLM_FASTSAFETENSORS_QUEUE_SIZE
+    tqdm_enabled = enable_tqdm(use_tqdm_on_load)
+
+    def _make_loader(nogds: bool) -> "ParallelLoader":
+        return ParallelLoader(
+            pg=pg,
+            hf_weights_files=hf_weights_files,
+            queue_size=queue_size,
+            use_tqdm_on_load=tqdm_enabled,
+            device=str(device),
+            nogds=nogds,
+        )
+
+    # GDS can fail either at construction or lazily inside the producer
+    # thread during iteration (e.g. cuFileHandleRegister returning
+    # CU_FILE_HANDLE_NOT_REGISTERED on a filesystem without GDS support).
+    # Catch both and fall back to nogds, but only before yielding any
+    # tensor -- restarting mid-stream would reload earlier shards.
+    pl = None
+    yielded = False
+    try:
         try:
-            try:
-                fb = loader.copy_files_to_device()
-            except RuntimeError as e:
-                if "gds" not in str(e):
-                    raise
-
-                loader.close()
-                nogds = True
-                logger.warning_once(
-                    "GDS not enabled, setting `nogds=True`.\n"
-                    "For more information, see: https://github.com/foundation-model-stack/fastsafetensors?tab=readme-ov-file#basic-api-usages"
-                )
-                loader = _init_fastsafetensors_loader(pg, device, f_list, nogds=nogds)
-                fb = loader.copy_files_to_device()
-
-            try:
-                keys = list(fb.key_to_rank_lidx.keys())
-                for k in keys:
-                    t = fb.get_tensor(k)
-                    yield k, t
-            finally:
-                fb.close()
-        finally:
-            loader.close()
+            pl = _make_loader(nogds)
+            for name, tensor in pl.iterate_weights():
+                yielded = True
+                yield name, tensor
+        except RuntimeError as e:
+            if nogds or yielded or "gds" not in str(e):
+                raise
+            logger.warning_once(
+                "GDS not enabled, setting `nogds=True`.\n"
+                "For more information, see: https://github.com/foundation-model-stack/"
+                "fastsafetensors?tab=readme-ov-file#basic-api-usages"
+            )
+            if pl is not None:
+                pl.close()
+            pl = _make_loader(nogds=True)
+            yield from pl.iterate_weights()
+    finally:
+        if pl is not None:
+            pl.close()
 
 
 def instanttensor_weights_iterator(
@@ -1235,118 +1178,6 @@ def multi_thread_pt_weights_iterator(
             state = future.result()
             yield from state.items()
             del state
-
-
-def get_gguf_extra_tensor_names(
-    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
-) -> list[str]:
-    reader = gguf.GGUFReader(gguf_file)
-    expected_gguf_keys = set(gguf_to_hf_name_map.keys())
-    exact_gguf_keys = set([tensor.name for tensor in reader.tensors])
-    extra_keys = expected_gguf_keys - exact_gguf_keys
-    return [gguf_to_hf_name_map[key] for key in extra_keys]
-
-
-def get_gguf_weight_type_map(
-    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
-) -> dict[str, str]:
-    """
-    Return GGUF mapped weight's name and its quant type
-    """
-    reader = gguf.GGUFReader(gguf_file)
-    return {
-        gguf_to_hf_name_map[tensor.name]: tensor.tensor_type.name
-        for tensor in reader.tensors
-        if tensor.name in gguf_to_hf_name_map
-    }
-
-
-def gguf_quant_weights_iterator(
-    gguf_file: str | Path, gguf_to_hf_name_map: dict[str, str]
-) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """
-    Iterate over the quant weights in the model gguf files and convert
-    them to torch tensors.
-    Be careful of the order of yielding weight types and weights data,
-    we have to yield all weight types first before yielding any weights.
-    Otherwise it would cause issue when loading weights with for packed
-    layer with different quant types.
-    """
-
-    reader = gguf.GGUFReader(gguf_file)
-
-    for tensor in reader.tensors:
-        if tensor.name in gguf_to_hf_name_map:
-            weight_type = tensor.tensor_type
-            name = gguf_to_hf_name_map[tensor.name]
-
-            if weight_type.name not in ("F32", "BF16", "F16"):
-                weight_type_name = name.replace("weight", "qweight_type")
-                weight_type = torch.tensor(weight_type)
-                yield weight_type_name, weight_type
-
-    for tensor in reader.tensors:
-        if tensor.name in gguf_to_hf_name_map:
-            weight = tensor.data
-            weight_type = tensor.tensor_type
-            name = gguf_to_hf_name_map[tensor.name]
-            if weight_type.name not in ("F32", "BF16", "F16"):
-                name = name.replace("weight", "qweight")
-            if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
-                # BF16 is currently the only "quantization" type that isn't
-                # actually quantized but is read as a raw byte tensor.
-                # Reinterpret as `torch.bfloat16` tensor.
-                weight = weight.view(np.uint16)
-                if reader.byte_order == "S":
-                    # GGUF endianness != system endianness
-                    weight = weight.byteswap()
-                param = torch.tensor(weight).view(torch.bfloat16)
-            else:
-                param = torch.tensor(weight)
-            yield name, param
-
-
-def gguf_quant_weights_iterator_multi(
-    gguf_files: list[str], gguf_to_hf_name_map: dict[str, str]
-) -> Generator[tuple[str, torch.Tensor], None, None]:
-    """
-    Iterate over the quant weights across multiple GGUF shard files
-    and convert them to torch tensors.
-
-    Like gguf_quant_weights_iterator, we yield all weight types first
-    before yielding any weights data to avoid issues with packed layers
-    that have different quant types.
-    """
-    readers = [gguf.GGUFReader(f) for f in gguf_files]
-
-    # First pass: yield all weight types across all shards
-    for reader in readers:
-        for tensor in reader.tensors:
-            if tensor.name in gguf_to_hf_name_map:
-                weight_type = tensor.tensor_type
-                name = gguf_to_hf_name_map[tensor.name]
-                if weight_type.name not in ("F32", "BF16", "F16"):
-                    weight_type_name = name.replace("weight", "qweight_type")
-                    weight_type = torch.tensor(weight_type)
-                    yield weight_type_name, weight_type
-
-    # Second pass: yield all weight data across all shards
-    for reader in readers:
-        for tensor in reader.tensors:
-            if tensor.name in gguf_to_hf_name_map:
-                weight = tensor.data
-                weight_type = tensor.tensor_type
-                name = gguf_to_hf_name_map[tensor.name]
-                if weight_type.name not in ("F32", "BF16", "F16"):
-                    name = name.replace("weight", "qweight")
-                if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
-                    weight = weight.view(np.uint16)
-                    if reader.byte_order == "S":
-                        weight = weight.byteswap()
-                    param = torch.tensor(weight).view(torch.bfloat16)
-                else:
-                    param = torch.tensor(weight)
-                yield name, param
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:

@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    align_moe_weights_for_fi,
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
     swap_w13_to_w31,
 )
@@ -269,13 +270,22 @@ def convert_to_unquantized_kernel_format(
             w13_weight = swap_w13_to_w31(w13_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
-        # Swap halves to arrange as [w3; w1] (kernel expectation)
-        w13_weight = swap_w13_to_w31(w13_weight)
+        is_act_and_mul = layer.moe_config.is_act_and_mul
+        if not is_act_and_mul:
+            # Kernel requires intermediate_size_per_partition % 128 == 0 (BlockMajorK
+            # weight layout uses block_k=128). Pad along the intermediate dim when
+            # the model + TP split don't satisfy the constraint.
+            w13_weight, w2_weight, padded_intermediate = align_moe_weights_for_fi(
+                w13_weight, w2_weight, is_act_and_mul, min_alignment=128
+            )
+            layer.moe_config.intermediate_size_per_partition = padded_intermediate
+
         _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         w13_weight, w2_weight = convert_moe_weights_to_flashinfer_trtllm_block_layout(
             _cache_permute_indices,
             w13_weight,
             w2_weight,
+            is_gated_act_gemm=is_act_and_mul,
         )
 
     return w13_weight.contiguous(), w2_weight.contiguous()

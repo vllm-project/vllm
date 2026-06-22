@@ -6,6 +6,7 @@ import torch
 
 from tests.kernels.quant_utils import FP8_DTYPE
 from tests.kernels.utils import opcheck
+from vllm import ir
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -25,6 +26,10 @@ SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
 ]
+
+
+def _rms_norm_tolerance(dtype: torch.dtype) -> dict[str, float]:
+    return ir.ops.rms_norm.get_tolerance(dtype)
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -78,6 +83,49 @@ def test_rms_norm(
     else:
         opcheck(
             torch.ops._C.rms_norm, (out, x, layer.weight.data, layer.variance_epsilon)
+        )
+
+
+@pytest.mark.parametrize("num_tokens", NUM_TOKENS)
+@pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
+@pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@torch.inference_mode()
+def test_rms_norm_weightless(
+    default_vllm_config,
+    num_tokens: int,
+    hidden_size: int,
+    add_residual: bool,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+) -> None:
+    set_random_seed(seed)
+    torch.set_default_device(device)
+    layer = RMSNorm(hidden_size, has_weight=False).to(dtype=dtype)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype)
+    residual = torch.randn_like(x) if add_residual else None
+
+    ref_out = layer.forward_native(x, residual)
+    out = layer(x, residual)
+    tol = _rms_norm_tolerance(dtype)
+    if add_residual:
+        torch.testing.assert_close(out[0], ref_out[0], **tol)
+        torch.testing.assert_close(out[1], ref_out[1], **tol)
+    else:
+        torch.testing.assert_close(out, ref_out, **tol)
+
+    if residual is not None:
+        opcheck(
+            torch.ops._C.fused_add_rms_norm,
+            (x, residual, None, layer.variance_epsilon),
+        )
+    else:
+        opcheck(
+            torch.ops._C.rms_norm,
+            (out, x, None, layer.variance_epsilon),
         )
 
 

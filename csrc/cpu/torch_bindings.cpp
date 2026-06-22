@@ -146,13 +146,16 @@ at::Tensor causal_conv1d_update_cpu(
 void activation_lut_bf16(torch::Tensor& out, torch::Tensor& input,
                          const std::string& activation);
 
+bool cpu_attn_has_isa(const std::string& isa);
+
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
     const int64_t num_heads_kv, const int64_t head_dim,
     const torch::Tensor& seq_lens, at::ScalarType dtype,
     const torch::Tensor& query_start_loc, const bool casual,
     const int64_t window_size, const std::string& isa_hint,
-    const bool enable_kv_split);
+    const bool enable_kv_split,
+    const std::optional<torch::Tensor>& dynamic_causal);
 
 void cpu_attn_reshape_and_cache(const torch::Tensor& key,
                                 const torch::Tensor& value,
@@ -169,10 +172,10 @@ void cpu_attention_with_kv_cache(
     const torch::Tensor& query_start_loc, const torch::Tensor& seq_lens,
     const double scale, const bool causal,
     const std::optional<torch::Tensor>& alibi_slopes,
-    const int64_t sliding_window_left, const int64_t sliding_window_right,
-    const torch::Tensor& block_table, const double softcap,
-    const torch::Tensor& scheduler_metadata,
-    const std::optional<torch::Tensor>& s_aux, const double k_scale,
+    const int64_t sliding_window_left, const torch::Tensor& block_table,
+    const double softcap, const torch::Tensor& scheduler_metadata,
+    const std::optional<torch::Tensor>& s_aux,
+    const std::optional<torch::Tensor>& dynamic_causal, const double k_scale,
     const double v_scale, const std::string& kv_cache_dtype);
 
 // Note: just for avoiding importing errors
@@ -309,13 +312,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
-      "rms_norm(Tensor! out, Tensor input, Tensor weight, float epsilon) -> "
+      "rms_norm(Tensor! out, Tensor input, Tensor? weight, float epsilon) -> "
       "()");
   ops.impl("rms_norm", torch::kCPU, &rms_norm);
 
   // In-place fused Add and RMS Normalization.
   ops.def(
-      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
+      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor? weight, "
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCPU, &fused_add_rms_norm);
 
@@ -496,11 +499,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("fused_gdn_gating_cpu", torch::kCPU, &fused_gdn_gating_cpu);
 
   // CPU attention kernels
+  ops.def("cpu_attn_has_isa(str isa) -> bool", &cpu_attn_has_isa);
   ops.def(
       "get_scheduler_metadata(int num_req, int num_heads_q, int num_heads_kv, "
       "int head_dim, Tensor seq_lens, ScalarType dtype, Tensor "
       "query_start_loc, bool casual, int window_size, str isa_hint, bool "
-      "enable_kv_split) -> Tensor",
+      "enable_kv_split, Tensor? dynamic_causal) -> Tensor",
       &get_scheduler_metadata);
   ops.def(
       "cpu_attn_reshape_and_cache(Tensor key, Tensor value, Tensor(a2!) "
@@ -512,8 +516,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "cpu_attention_with_kv_cache(Tensor query, Tensor key_cache, Tensor "
       "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "
       "seq_lens, float scale, bool causal, Tensor? alibi_slopes, SymInt "
-      "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
-      "float softcap, Tensor scheduler_metadata, Tensor? s_aux, "
+      "sliding_window_size, Tensor block_table, "
+      "float softcap, Tensor scheduler_metadata, Tensor? s_aux, Tensor? "
+      "dynamic_causal, "
       "float k_scale=1.0, float v_scale=1.0, str kv_cache_dtype=\"auto\") -> "
       "()",
       &cpu_attention_with_kv_cache);

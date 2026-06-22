@@ -8,6 +8,10 @@ event indicates a cache miss or unexpected input shape that causes a
 latency spike. This module registers hooks in the Triton runtime to
 detect and log such events so they can be investigated.
 
+Set ``--jit-monitor-verbose`` to log every Triton JIT compile with its
+dispatch key. This is intentionally opt-in because it can emit many logs and
+add overhead.
+
 Currently monitors:
 - Triton ``@triton.autotune`` cache misses (via ``knobs.autotuning.print``)
 - Triton ``@triton.jit`` first-time compilations
@@ -22,6 +26,7 @@ from vllm.triton_utils.importing import HAS_TRITON
 logger = init_logger(__name__)
 
 _active: bool = False
+_verbose: bool = False
 
 
 def is_active() -> bool:
@@ -29,7 +34,7 @@ def is_active() -> bool:
     return _active
 
 
-def activate() -> None:
+def activate(*, verbose: bool = False) -> None:
     """Enable JIT compilation monitoring after warmup.
 
     Call once per worker process at the end of
@@ -43,10 +48,11 @@ def activate() -> None:
     their environment, autotuning printing is left disabled; the JIT
     compilation hook is still registered regardless.
     """
-    global _active
+    global _active, _verbose
     if _active:
         return
     _active = True
+    _verbose = verbose
 
     _setup_triton_autotuning_print()
     _setup_triton_jit_hook()
@@ -84,6 +90,27 @@ def _setup_triton_autotuning_print() -> None:
 # ------------------------------------------------------------------
 
 
+def _log_jit_compile(fn_name: str, kwargs) -> None:
+    if _verbose:
+        compile_info = kwargs.get("compile")
+        if not isinstance(compile_info, dict):
+            compile_info = {}
+        logger.warning(
+            "Triton %sJIT compilation during inference: %s (key=%s).",
+            "autotune/warmup candidate " if kwargs.get("warmup") else "kernel ",
+            fn_name,
+            compile_info.get("key") or kwargs.get("key"),
+        )
+        return
+
+    logger.warning_once(
+        "Triton kernel JIT compilation during inference: %s. "
+        "This causes a latency spike; consider extending warmup "
+        "to cover this shape/config.",
+        fn_name,
+    )
+
+
 def _setup_triton_jit_hook() -> None:
     """Register a ``jit_post_compile_hook`` that warns on compilation."""
     if not HAS_TRITON:
@@ -100,12 +127,7 @@ def _setup_triton_jit_hook() -> None:
         # pre-existing hook unchanged.
         fn = kwargs.get("fn")
         fn_name = getattr(fn, "name", "<unknown>")
-        logger.warning_once(
-            "Triton kernel JIT compilation during inference: %s. "
-            "This causes a latency spike; consider extending warmup "
-            "to cover this shape/config.",
-            fn_name,
-        )
+        _log_jit_compile(fn_name, kwargs)
         if existing_hook is not None:
             return existing_hook(**kwargs)
         return None

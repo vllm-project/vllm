@@ -35,6 +35,10 @@ class DraftTokensHandler:
         self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
             self.draft_tokens_np = async_copy_to_np(draft_tokens)
+            # draft_tokens is a temporary allocation on the main stream and read here on
+            # copy_stream; without record_stream, the caching allocator may reuse its
+            # memory before the async copy executes.
+            draft_tokens.record_stream(self.copy_stream)
             self.copy_event.record()
 
     def get_draft_tokens(self) -> DraftTokenIds | None:
