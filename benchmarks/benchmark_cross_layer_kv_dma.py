@@ -350,7 +350,7 @@ def main() -> int:
     if max(args.transfer_blocks) > args.num_blocks:
         raise ValueError("--transfer-blocks cannot exceed --num-blocks")
 
-    device = torch.device("cuda")
+    device = torch.device("cuda:0")
     pin_memory = not args.no_pin_memory
     page_size = page_size_per_layer_bytes(args)
 
