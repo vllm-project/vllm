@@ -372,11 +372,20 @@ class Gemma4MultiTokenPredictor(nn.Module):
             self.hidden_size,
         )
 
+        if vllm_config.speculative_config is not None:
+            draft_model_config = vllm_config.speculative_config.draft_model_config
+            quant_config = VllmConfig.get_quantization_config(
+                draft_model_config, vllm_config.load_config
+            )
+        else:
+            quant_config = vllm_config.quant_config
+
         self.pre_projection = ColumnParallelLinear(
             2 * self.backbone_hidden_size,
             self.hidden_size,
             bias=False,
             gather_output=True,
+            quant_config=quant_config,
             prefix=f"{prefix}.pre_projection",
         )
 
@@ -385,6 +394,7 @@ class Gemma4MultiTokenPredictor(nn.Module):
             self.backbone_hidden_size,
             bias=False,
             input_is_parallel=False,
+            quant_config=quant_config,
             prefix=f"{prefix}.post_projection",
         )
 
@@ -392,7 +402,7 @@ class Gemma4MultiTokenPredictor(nn.Module):
             Gemma4MTPDecoderLayer(
                 text_config,
                 cache_config=vllm_config.cache_config,
-                quant_config=vllm_config.quant_config,
+                quant_config=quant_config,
                 prefix=f"{prefix}.layers.{idx}",
             )
             for idx in range(self.num_mtp_layers)
