@@ -164,6 +164,9 @@ class BOSEOSFilter(Pooler):
         self.bos_token_id = bos_token_id
         self.eos_token_id = eos_token_id
 
+    def extra_repr(self) -> str:
+        return f"bos_token_id={self.bos_token_id}, eos_token_id={self.eos_token_id}"
+
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return self.pooler.get_supported_tasks()
 

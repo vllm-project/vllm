@@ -587,7 +587,9 @@ def test_cannot_recv():
     assert_scheduler_empty(scheduler)
 
 
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
 def test_p_side_chunked_prefill_mamba(mock_platform):
     """P-side integration: Mamba N-1 truncation + chunked prefill completes.
 
@@ -655,3 +657,82 @@ def test_p_side_chunked_prefill_mamba(mock_platform):
     outputs = engine_core_outputs[0].outputs
     assert len(outputs) == 1
     assert outputs[0].finish_reason == FinishReason.LENGTH
+
+
+def test_async_load_reserves_blocks_for_inflight():
+    """A second async KV-connector load is not admitted if its initial
+    allocation would consume blocks reserved for an already in-flight sequence.
+
+    req_a gets a 1-block prefix (full sequence = 4 blocks), reserving 3 more.
+    req_b would need a 4-block initial allocation, but only
+    (free - req_a's 3-block reservation) = 3 blocks are available to it, so it is
+    held back in WAITING (holding no blocks) rather than wedging req_a.
+    """
+    vllm_config = create_vllm_config()
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    scheduler = create_scheduler(vllm_config, num_blocks=8)  # usable = 7
+
+    req_a = create_request(
+        request_id=1,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 4,
+        do_remote_prefill=True,
+        num_remote_blocks=1,
+    )
+    req_b = create_request(
+        request_id=2,
+        block_size=BLOCK_SIZE,
+        num_tokens=BLOCK_SIZE * 5,
+        do_remote_prefill=True,
+        num_remote_blocks=1,
+    )
+    scheduler.add_request(req_a)
+    scheduler.add_request(req_b)
+
+    # Partial external matches: req_a loads 1 block, req_b loads 4 blocks.
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        side_effect=[(BLOCK_SIZE, True), (BLOCK_SIZE * 4, True)],
+    ):
+        scheduler.schedule()
+
+    assert req_a.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert req_b.status == RequestStatus.WAITING
+
+    req_to_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0
+    ].req_to_blocks
+    assert req_a.request_id in req_to_blocks
+    assert req_b.request_id not in req_to_blocks
+
+
+def test_async_loads_both_admitted_when_pool_fits():
+    """Sanity: with a pool large enough, the reservation gate admits both async
+    loads (it is not over-conservative)."""
+    vllm_config = create_vllm_config()
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    scheduler = create_scheduler(vllm_config, num_blocks=64)
+
+    reqs = [
+        create_request(
+            request_id=i,
+            block_size=BLOCK_SIZE,
+            num_tokens=BLOCK_SIZE * 5,
+            do_remote_prefill=True,
+            num_remote_blocks=1,
+        )
+        for i in (1, 2)
+    ]
+    for req in reqs:
+        scheduler.add_request(req)
+
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        side_effect=[(BLOCK_SIZE, True), (BLOCK_SIZE, True)],
+    ):
+        scheduler.schedule()
+
+    for req in reqs:
+        assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS

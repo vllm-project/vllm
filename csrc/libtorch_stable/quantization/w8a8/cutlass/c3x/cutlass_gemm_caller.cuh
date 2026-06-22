@@ -19,8 +19,8 @@
 #include "cutlass/gemm/collective/collective_builder.hpp"
 #include "cutlass/util/packed_stride.hpp"
 
-#include "core/math.hpp"
-#include "cutlass_extensions/common.hpp"
+#include "libtorch_stable/core/math.hpp"
+#include "libtorch_stable/cutlass_extensions/common.hpp"
 // clang-format on
 
 namespace vllm::c3x {

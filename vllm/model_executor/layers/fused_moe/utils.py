@@ -296,6 +296,7 @@ def moe_kernel_quantize_input(
         if not quantization_emulation:
             return _nvfp4_quantize(A, A_scale, is_sf_swizzled_layout=is_scale_swizzled)
         else:
+            assert A_scale is not None
             A = ref_nvfp4_quant_dequant(A, A_scale, block_size=16)
             return A, None
     elif quant_dtype == "mxfp4":
@@ -313,6 +314,8 @@ def moe_kernel_quantize_input(
                 "moe_kernel_quantize_input does not support quant_dtype='mxfp8' MOE "
                 "quantization emulation. Please open an issue."
             )
+        # Non-swizzled (M, K/32) uint8 UE8M0 scales; deepgemm_moe_permute packs
+        # them for DeepGEMM, TRTLLM takes them as-is.
         return _mxfp8_e4m3_quantize(
             A,
             A_scale,

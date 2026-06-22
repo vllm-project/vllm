@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
@@ -14,7 +14,12 @@ from tests.v1.kv_connector.unit.utils import (
     create_vllm_config,
 )
 from vllm import SamplingParams
-from vllm.config import KVTransferConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    KVEventsConfig,
+    KVTransferConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
@@ -28,6 +33,7 @@ from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
+    resolve_kv_cache_block_sizes,
 )
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -197,6 +203,9 @@ class RequestRunner:
             "spec_module_path": "tests.v1.kv_connector.unit.offloading_connector.utils",  # noqa: E501
             # Preserve legacy behavior for tests; new opt-in tests override.
             "offload_prompt_only": False,
+            # Exercise the self-describing KV events path by default;
+            # opt-out tests override this to cover the legacy placeholders.
+            "self_describing_kv_events": True,
         }
         if block_size_factor > 1:
             extra_config["block_size"] = block_size * block_size_factor
@@ -207,6 +216,13 @@ class RequestRunner:
             kv_connector="OffloadingConnector",
             kv_role="kv_both",
             kv_connector_extra_config=extra_config,
+        )
+        vllm_config.kv_events_config = KVEventsConfig(
+            # Enable so the offloading events tracker is active, but use the
+            # null publisher: these tests drain take_events directly and a
+            # real ZMQ publisher would bind a port per test.
+            enable_kv_cache_events=True,
+            publisher="null",
         )
 
         if kv_cache_groups is None:
@@ -230,13 +246,18 @@ class RequestRunner:
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         self.num_kv_groups = len(kv_cache_config.kv_cache_groups)
 
+        scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
+            kv_cache_config, vllm_config
+        )
+
         scheduler_cls = AsyncScheduler if async_scheduling else Scheduler
         self.scheduler = scheduler_cls(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             log_stats=True,
             structured_output_manager=StructuredOutputManager(vllm_config),
-            block_size=block_size,
+            block_size=scheduler_block_size,
+            hash_block_size=hash_block_size,
         )
 
         self.worker_connector = OffloadingConnector(
@@ -318,10 +339,14 @@ class RequestRunner:
         self,
         token_ids: list[int],
         kv_transfer_params: dict | None = None,
+        skip_reading_prefix_cache: bool = False,
     ):
         self.req_id += 1
 
-        sampling_params = SamplingParams(max_tokens=1000)
+        sampling_params = SamplingParams(
+            max_tokens=1000,
+            skip_reading_prefix_cache=skip_reading_prefix_cache or None,
+        )
         sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
         req = Request(
@@ -420,7 +445,12 @@ class RequestRunner:
                 for block_idx, block in enumerate(blocks):
                     self.gpu_blocks[block.block_id] = GPUBlock(group_idx, block_idx)
 
-    def _run(self, decoded_tokens: list[int], complete_transfers: bool):
+    def _run(
+        self,
+        decoded_tokens: list[int],
+        complete_transfers: bool,
+        post_step_fn: Callable[[], None] | None = None,
+    ):
         """
         Runs multiple engine (scheduler + worker) steps.
         Assumes a single request is running.
@@ -428,6 +458,8 @@ class RequestRunner:
         Args:
             decoded_tokens: the tokens to yield at each step.
             complete_transfers: complete transfers immediately
+            post_step_fn: optional callback invoked after each step's
+                update_from_output(), before the next schedule().
         """
 
         tokens_iter = iter(decoded_tokens)
@@ -490,6 +522,9 @@ class RequestRunner:
             else:
                 self.scheduler.update_from_output(scheduler_output, model_runner_output)
 
+            if post_step_fn is not None:
+                post_step_fn()
+
             if (
                 prev_token_id == EOS_TOKEN_ID
                 and prev_token_id != token_id
@@ -535,6 +570,7 @@ class RequestRunner:
         expected_stored: tuple[int | tuple[int, int], ...] = (),
         expected_loaded: tuple[int | tuple[int, int], ...] = (),
         expected_flushed: tuple[int | tuple[int, int], ...] = (),
+        post_step_fn: Callable[[], None] | None = None,
     ):
         """
         Runs multiple engine (scheduler + worker) steps.
@@ -560,7 +596,7 @@ class RequestRunner:
         expected_flushed_gpu_blocks = self._to_gpu_blocks(expected_flushed)
 
         self.manager.reset_mock()
-        self._run(decoded_tokens, complete_transfers)
+        self._run(decoded_tokens, complete_transfers, post_step_fn=post_step_fn)
 
         loaded_gpu_blocks: set[GPUBlock] = set()
         for transfer in self.completed_loads:
