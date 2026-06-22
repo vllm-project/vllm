@@ -33,6 +33,12 @@ _BACKEND_NAME_MAP: dict[str, Fp8MoeBackend] = {
     "marlin": Fp8MoeBackend.MARLIN,
     "xpu": Fp8MoeBackend.XPU,
     "aiter": Fp8MoeBackend.AITER_MXFP8,
+    # Force the native Triton dot_scaled path even when FlyDSL is available
+    # (FlyDSL is otherwise auto-picked); useful for A/B testing. The CLI
+    # normalizes ``--moe-backend triton-native`` to ``triton_native``; ``triton``
+    # is a short alias.
+    "triton_native": Fp8MoeBackend.TRITON_NATIVE_MXFP8,
+    "triton": Fp8MoeBackend.TRITON_NATIVE_MXFP8,
 }
 
 
@@ -57,6 +63,21 @@ def _mxfp8_backend_to_kernel_cls(
         )
 
         return [FlydslMxfp8Experts]
+    if backend == Fp8MoeBackend.TRITON_NATIVE_MXFP8:
+        # Explicit ``--moe-backend triton-native``: the native Triton path, i.e.
+        # dot_scaled on MX-capable HW (gfx950) and BF16 emulation otherwise.
+        # Mirrors the ROCm auto-fallback in ``_select_rocm_mxfp8_backend``.
+        if current_platform.supports_mx():
+            from vllm.model_executor.layers.fused_moe.experts.mxfp8_native_moe import (
+                Mxfp8NativeTritonExperts,
+            )
+
+            return [Mxfp8NativeTritonExperts]
+        from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
+            Mxfp8EmulationTritonExperts,
+        )
+
+        return [Mxfp8EmulationTritonExperts]
     return backend_to_kernel_cls(backend)
 
 
@@ -102,7 +123,7 @@ def _select_rocm_mxfp8_backend() -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts
         )
 
         logger.info_once("Using native CDNA4 (gfx950) MXFP8 dot_scaled MoE backend.")
-        return Fp8MoeBackend.NATIVE_MXFP8, Mxfp8NativeTritonExperts
+        return Fp8MoeBackend.TRITON_NATIVE_MXFP8, Mxfp8NativeTritonExperts
 
     from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
         Mxfp8EmulationTritonExperts,

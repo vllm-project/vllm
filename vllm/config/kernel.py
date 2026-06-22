@@ -134,6 +134,7 @@ MoEBackend = Literal[
     "triton_unfused",
     "aiter",
     "flydsl",
+    "triton_native",
     "emulation",
 ]
 
@@ -189,6 +190,8 @@ class KernelConfig:
     - "triton_unfused": Use Triton unfused MoE kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
+    - "triton_native": Force the native Triton MXFP8 dot_scaled path even when
+                       FlyDSL is available (ROCm gfx950; "triton" is a short alias)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
     """
