@@ -130,7 +130,9 @@ class TokenIDScanner:
                 )
             return prefix_items or self._EMPTY
 
-        token_texts = [self._decode_token(tid) for tid in delta_token_ids]
+        token_texts: Sequence[str] = [
+            self._decode_token(tid) for tid in delta_token_ids
+        ]
 
         results: list[LexerInput] = []
         text_accum: list[str] = []

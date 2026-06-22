@@ -758,7 +758,8 @@ class DelegatingParser(Parser):
                 current_token_ids=model_output_token_ids,
                 delta_token_ids=model_output_token_ids,
             )
-            finish_delta = self._reasoning_parser.finish_streaming()
+            finish = getattr(self._reasoning_parser, "finish_streaming", None)
+            finish_delta = finish() if finish is not None else None
 
             reasoning_parts = []
             content_parts = []
