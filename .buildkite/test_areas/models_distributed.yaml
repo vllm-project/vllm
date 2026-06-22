@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Distributed Model Tests (2 GPUs)
+  key: distributed-model-tests-2-gpus
   timeout_in_minutes: 50
   working_dir: "/vllm-workspace/tests"
   num_devices: 2

@@ -1,0 +1,1134 @@
+use itertools::Itertools as _;
+use vllm_chat::{
+    AssistantContentBlock, AssistantToolCall, ChatContent, ChatContentPart,
+    ChatMessage as VllmChatMessage, ChatOptions, ChatRequest, ChatTool, ChatToolChoice,
+    GenerationPromptMode, SamplingParams,
+};
+
+use super::types::ChatCompletionRequest;
+use super::validate;
+use crate::error::{ApiError, bail_invalid_request};
+use crate::lora::LoraModelResolution;
+use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
+use crate::routes::openai::utils::types::{
+    ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue,
+};
+use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
+
+/// Lowered chat request plus the public response metadata carried by every SSE
+/// chunk.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct PreparedRequest {
+    /// Stable OpenAI-style request ID, reused as the external chat request ID.
+    pub request_id: String,
+    /// Public model ID echoed back to the client.
+    pub response_model: String,
+    /// Public response rendering options for route-layer helpers.
+    pub options: ResponseOptions,
+    /// Lowered chat request for `vllm-chat`.
+    pub chat_request: ChatRequest,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(super) struct ResponseOptions {
+    /// Whether the caller asked for the final streamed usage chunk.
+    pub include_usage: bool,
+    /// Whether every streamed chunk should carry cumulative usage.
+    pub include_continuous_usage: bool,
+    /// Whether the caller requested output logprobs on chat choices.
+    pub requested_logprobs: bool,
+    /// Whether the caller requested top-level prompt logprobs.
+    pub include_prompt_logprobs: bool,
+    /// Whether to include reasoning content in OpenAI responses.
+    pub include_reasoning: bool,
+    /// Last assistant-role message content to echo back when `echo=true`.
+    pub echo: Option<String>,
+    /// Whether to include token IDs alongside generated text.
+    pub return_token_ids: bool,
+    /// Whether to format logprob tokens as `token_id:{id}`.
+    pub return_tokens_as_token_ids: bool,
+}
+
+/// Validate and lower one OpenAI chat completion request into the internal chat
+/// format.
+///
+/// `lora_resolution.model_names` must be non-empty; the first entry is used as
+/// the base `model` field in responses when no LoRA adapter is selected.
+pub(super) fn prepare_chat_request(
+    request: ChatCompletionRequest,
+    lora_resolution: &LoraModelResolution,
+    ctx: ResolvedRequestContext,
+) -> Result<PreparedRequest, ApiError> {
+    validate::validate_request_compat(&request, &lora_resolution.model_names)?;
+
+    let request_id = format!("chatcmpl-{}", ctx.request_id);
+    let response_model = lora_resolution
+        .lora_request
+        .as_ref()
+        .map(|request| request.lora_name.clone())
+        .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
+    let include_reasoning = request.include_reasoning;
+    let echo = request
+        .echo
+        .then(|| extract_last_assistant_content(&request.messages))
+        .flatten();
+    let messages: Vec<_> = request.messages.into_iter().map(convert_message).try_collect()?;
+    let generation_prompt_mode = normalize_generation_prompt_mode(
+        request.add_generation_prompt,
+        request.continue_final_message,
+        &messages,
+    )?;
+
+    let template_kwargs = request.chat_template_kwargs.unwrap_or_default();
+
+    let include_usage = (request.stream_options.as_ref())
+        .and_then(|options| options.include_usage)
+        .unwrap_or(false);
+    let include_continuous_usage = include_usage
+        && request
+            .stream_options
+            .as_ref()
+            .and_then(|options| options.continuous_usage_stats)
+            .unwrap_or(false);
+    let requested_logprobs = request.logprobs;
+
+    // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
+    // behavior.
+    let top_logprobs = request.top_logprobs.unwrap_or(0);
+    let prompt_logprobs = request
+        .prompt_logprobs
+        .or((request.echo && !request.stream).then_some(top_logprobs));
+    let include_prompt_logprobs = prompt_logprobs.is_some();
+
+    let structured_outputs = convert_from_response_format(
+        request.response_format.as_ref(),
+        &request.structured_outputs,
+    )?;
+
+    let chat_request = ChatRequest {
+        request_id: request_id.clone(),
+        messages,
+        sampling_params: SamplingParams {
+            temperature: request.temperature,
+            top_p: request.top_p,
+            top_k: request.top_k,
+            seed: request.seed,
+            max_tokens: request.max_completion_tokens,
+            min_tokens: request.min_tokens,
+            thinking_token_budget: request.thinking_token_budget,
+            logprobs: request.logprobs.then_some(top_logprobs),
+            prompt_logprobs,
+            min_p: request.min_p,
+            frequency_penalty: request.frequency_penalty,
+            presence_penalty: request.presence_penalty,
+            repetition_penalty: request.repetition_penalty,
+            stop_token_ids: request.stop_token_ids,
+            ignore_eos: request.ignore_eos,
+            logit_bias: convert_logit_bias(request.logit_bias)?,
+            allowed_token_ids: request.allowed_token_ids,
+            bad_words: request.bad_words,
+            logprob_token_ids: None,
+            structured_outputs,
+            skip_reading_prefix_cache: None,
+            vllm_xargs: merge_kv_transfer_params(
+                request.vllm_xargs,
+                request.kv_transfer_params.as_ref(),
+            ),
+        },
+        chat_options: ChatOptions {
+            generation_prompt_mode,
+            chat_template: request.chat_template,
+            reasoning_effort: request.reasoning_effort,
+            template_kwargs,
+        },
+        tools: convert_tools(request.tools)?,
+        tool_choice: convert_tool_choice(request.tool_choice.as_ref())?,
+        parallel_tool_calls: request.parallel_tool_calls.unwrap_or(true),
+        decode_options: vllm_text::output::TextDecodeOptions {
+            skip_special_tokens: request.skip_special_tokens,
+            include_stop_str_in_output: request.include_stop_str_in_output,
+            stop_strings: request.stop.map(|stop| stop.into_vec()),
+            min_tokens: request.min_tokens.unwrap_or(0),
+        },
+        intermediate: request.stream,
+        priority: request.priority.unwrap_or(0),
+        documents: request.documents,
+        cache_salt: request.cache_salt,
+        add_special_tokens: request.add_special_tokens,
+        data_parallel_rank: ctx.data_parallel_rank,
+        lora_request: lora_resolution.lora_request.clone(),
+    };
+
+    Ok(PreparedRequest {
+        request_id,
+        response_model,
+        options: ResponseOptions {
+            include_usage,
+            include_continuous_usage,
+            requested_logprobs,
+            include_prompt_logprobs,
+            include_reasoning,
+            echo,
+            return_token_ids: request.return_token_ids.unwrap_or(false),
+            return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+        },
+        chat_request,
+    })
+}
+pub(crate) fn normalize_generation_prompt_mode(
+    add_generation_prompt: Option<bool>,
+    continue_final_message: bool,
+    messages: &[VllmChatMessage],
+) -> Result<GenerationPromptMode, ApiError> {
+    if add_generation_prompt == Some(true) && continue_final_message {
+        bail_invalid_request!(
+            "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
+        );
+    }
+
+    let last_role = messages.last().map(VllmChatMessage::role);
+    match (add_generation_prompt, continue_final_message, last_role) {
+        (Some(true), true, _) => unreachable!("rejected above"),
+        (_, true, Some(vllm_chat::ChatRole::Assistant)) => {
+            Ok(GenerationPromptMode::ContinueFinalAssistant)
+        }
+        (_, true, _) => {
+            bail_invalid_request!(
+                "Cannot set `continue_final_message` to True when the last message is not from the assistant."
+            );
+        }
+        (Some(false), false, _) => Ok(GenerationPromptMode::NoGenerationPrompt),
+        (None | Some(true), false, _) => Ok(GenerationPromptMode::StartNewAssistant),
+    }
+}
+
+/// Extract the text content of the last message if it has the assistant role.
+fn extract_last_assistant_content(messages: &[ChatMessage]) -> Option<String> {
+    let ChatMessage::Assistant { content, .. } = messages.last()? else {
+        return None;
+    };
+    let text = match content.as_ref()? {
+        MessageContent::Text(text) => text.clone(),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    (!text.is_empty()).then_some(text)
+}
+
+/// Lower one OpenAI chat message into the `vllm-chat` message shape.
+pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, ApiError> {
+    match message {
+        ChatMessage::System { content, .. } => {
+            Ok(VllmChatMessage::system(convert_content(content)?))
+        }
+        ChatMessage::User { content, .. } => Ok(VllmChatMessage::user(convert_content(content)?)),
+        ChatMessage::Assistant {
+            content,
+            tool_calls,
+            reasoning,
+            name: _,
+        } => {
+            let mut blocks = Vec::new();
+            if let Some(reasoning) = reasoning
+                && !reasoning.is_empty()
+            {
+                blocks.push(AssistantContentBlock::Reasoning { text: reasoning });
+            }
+            if let Some(content) = content {
+                blocks.extend(convert_assistant_text_blocks(content)?);
+            }
+            if let Some(tool_calls) = tool_calls {
+                blocks.extend(convert_assistant_tool_calls(tool_calls)?);
+            }
+            if blocks.is_empty() {
+                bail_invalid_request!(
+                    "Assistant messages must contain text, reasoning content, or tool_calls."
+                );
+            }
+
+            Ok(VllmChatMessage::assistant_blocks(blocks))
+        }
+        ChatMessage::Tool {
+            content,
+            tool_call_id,
+        } => Ok(VllmChatMessage::tool_response(
+            convert_content(content)?,
+            tool_call_id,
+        )),
+        ChatMessage::Function { .. } => {
+            bail_invalid_request!("Function messages are not supported.")
+        }
+        ChatMessage::Developer {
+            content,
+            tools,
+            name: _,
+        } => Ok(VllmChatMessage::developer(
+            convert_content(content)?,
+            convert_message_tools(tools)?,
+        )),
+    }
+}
+
+/// Convert the given OpenAI message content value into the internal format in
+/// `vllm-chat`.
+fn convert_content(content: MessageContent) -> Result<ChatContent, ApiError> {
+    match content {
+        MessageContent::Text(text) => Ok(ChatContent::Text(text)),
+        MessageContent::Parts(parts) => parts
+            .into_iter()
+            .map(|part| match part {
+                ContentPart::Text { text } => Ok(ChatContentPart::text(text)),
+                ContentPart::ImageUrl { image_url, uuid } => Ok(ChatContentPart::ImageUrl {
+                    image_url: image_url.url,
+                    detail: image_url.detail,
+                    uuid,
+                }),
+                _ => bail_invalid_request!("Only text and image_url content parts are supported."),
+            })
+            .try_collect()
+            .map(ChatContent::Parts),
+    }
+}
+
+/// Convert the given OpenAI assistant message content into the internal format
+/// in `vllm-chat`.
+fn convert_assistant_text_blocks(
+    content: MessageContent,
+) -> Result<Vec<AssistantContentBlock>, ApiError> {
+    match content {
+        MessageContent::Text(text) => Ok(vec![AssistantContentBlock::Text { text }]),
+        MessageContent::Parts(parts) => parts
+            .into_iter()
+            .map(|part| match part {
+                ContentPart::Text { text } => Ok(AssistantContentBlock::Text { text }),
+                _ => bail_invalid_request!(
+                    "Only text content parts are supported for assistant messages."
+                ),
+            })
+            .try_collect(),
+    }
+}
+
+fn convert_assistant_tool_calls(
+    tool_calls: Vec<crate::routes::openai::utils::types::ToolCall>,
+) -> Result<Vec<AssistantContentBlock>, ApiError> {
+    tool_calls
+        .into_iter()
+        .map(|tool_call| {
+            if tool_call.tool_type != "function" {
+                bail_invalid_request!("Only function tool calls are supported.");
+            }
+
+            Ok(AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: tool_call.id,
+                name: tool_call.function.name,
+                arguments: tool_call.function.arguments.unwrap_or_else(|| "{}".to_string()),
+            }))
+        })
+        .collect()
+}
+
+pub(crate) fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, ApiError> {
+    tools
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tool| {
+            if tool.tool_type != "function" {
+                bail_invalid_request!("Only function tools are supported.");
+            }
+            Ok(ChatTool {
+                name: tool.function.name,
+                description: tool.function.description,
+                parameters: tool.function.parameters,
+                strict: tool.function.strict,
+            })
+        })
+        .collect()
+}
+
+fn convert_message_tools(tools: Option<Vec<Tool>>) -> Result<Option<Vec<ChatTool>>, ApiError> {
+    let tools = convert_tools(tools)?;
+    Ok((!tools.is_empty()).then_some(tools))
+}
+
+fn convert_tool_choice(tool_choice: Option<&ToolChoice>) -> Result<ChatToolChoice, ApiError> {
+    match tool_choice {
+        None | Some(ToolChoice::Value(ToolChoiceValue::Auto)) => Ok(ChatToolChoice::Auto),
+        Some(ToolChoice::Value(ToolChoiceValue::None)) => Ok(ChatToolChoice::None),
+        _ => bail_invalid_request!("tool_choice={:?} is not supported yet.", tool_choice),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use axum::http::HeaderMap;
+    use expect_test::expect;
+    use llm_multimodal::ImageDetail;
+    use serde_json::json;
+    use vllm_chat::{
+        AssistantContentBlock, AssistantToolCall, ChatContentPart, ChatMessage as VllmChatMessage,
+        ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
+        SamplingParams as VllmSamplingParams,
+    };
+    use vllm_text::output::TextDecodeOptions;
+
+    use super::prepare_chat_request;
+    use crate::lora::LoraModelResolution;
+    use crate::routes::openai::chat_completions::types::{
+        AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
+    };
+    use crate::routes::openai::utils::types::{
+        ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent,
+        StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
+    };
+    use crate::utils::{ResolvedRequestContext, resolve_request_context};
+
+    fn request_context(headers: &HeaderMap, request_id: Option<&str>) -> ResolvedRequestContext {
+        resolve_request_context(headers, request_id)
+    }
+
+    fn served(names: &[&str]) -> LoraModelResolution {
+        LoraModelResolution {
+            model_names: names.iter().map(|s| s.to_string()).collect(),
+            lora_request: None,
+        }
+    }
+
+    fn base_request() -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: "Qwen/Qwen1.5-0.5B-Chat".to_string(),
+            messages: vec![ChatMessage::User {
+                content: MessageContent::Text("hello".to_string()),
+                name: None,
+            }],
+            stream: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_parallel_tool_calls() {
+        let mut request = base_request();
+        request.parallel_tool_calls = Some(false);
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(!prepared.chat_request.parallel_tool_calls);
+    }
+
+    #[test]
+    fn prepare_chat_request_defaults_parallel_tool_calls_to_true() {
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(prepared.chat_request.parallel_tool_calls);
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_text_parts() {
+        let mut request = base_request();
+        request.messages = vec![ChatMessage::Assistant {
+            content: Some(MessageContent::Parts(vec![ContentPart::Text {
+                text: "hello".to_string(),
+            }])),
+            name: None,
+            tool_calls: None,
+            reasoning: None,
+        }];
+        request.add_generation_prompt = Some(false);
+        request.continue_final_message = true;
+        request.skip_special_tokens = false;
+        request.chat_template_kwargs = Some(HashMap::from([("foo".to_string(), json!("bar"))]));
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(prepared.request_id.starts_with("chatcmpl-"));
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::assistant_text("hello")]
+        );
+        assert_eq!(
+            prepared.chat_request.sampling_params,
+            VllmSamplingParams::default()
+        );
+        assert_eq!(
+            prepared.chat_request.chat_options.generation_prompt_mode,
+            GenerationPromptMode::ContinueFinalAssistant
+        );
+        assert_eq!(
+            prepared.chat_request.chat_options.template_kwargs,
+            HashMap::from([("foo".to_string(), json!("bar"))])
+        );
+        assert_eq!(
+            prepared.chat_request.decode_options,
+            TextDecodeOptions {
+                skip_special_tokens: false,
+                include_stop_str_in_output: false,
+                stop_strings: None,
+                min_tokens: 0,
+            }
+        );
+        assert!(prepared.chat_request.tools.is_empty());
+        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Auto);
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_stream_usage_and_token_format_options() {
+        let mut request = base_request();
+        request.return_tokens_as_token_ids = Some(true);
+        request.stream_options = Some(StreamOptions {
+            include_usage: Some(true),
+            continuous_usage_stats: Some(true),
+        });
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(prepared.options.include_usage);
+        assert!(prepared.options.include_continuous_usage);
+        assert!(prepared.options.return_tokens_as_token_ids);
+    }
+
+    #[test]
+    fn prepare_chat_request_gates_continuous_usage_on_include_usage() {
+        let mut request = base_request();
+        request.stream_options = Some(StreamOptions {
+            include_usage: None,
+            continuous_usage_stats: Some(true),
+        });
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(!prepared.options.include_usage);
+        assert!(!prepared.options.include_continuous_usage);
+    }
+
+    #[test]
+    fn prepare_chat_request_keeps_optional_sampling_fields_unset() {
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(prepared.request_id.starts_with("chatcmpl-"));
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user("hello")]
+        );
+        assert_eq!(
+            prepared.chat_request.sampling_params,
+            VllmSamplingParams::default()
+        );
+        assert_eq!(
+            prepared.chat_request.chat_options.generation_prompt_mode,
+            GenerationPromptMode::StartNewAssistant
+        );
+        assert_eq!(
+            prepared.chat_request.decode_options,
+            TextDecodeOptions {
+                skip_special_tokens: true,
+                include_stop_str_in_output: false,
+                stop_strings: None,
+                min_tokens: 0,
+            }
+        );
+        assert!(prepared.chat_request.tools.is_empty());
+        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Auto);
+    }
+
+    #[test]
+    fn prepare_chat_request_preserves_include_reasoning_false() {
+        let request = ChatCompletionRequest {
+            include_reasoning: false,
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(!prepared.options.include_reasoning);
+    }
+
+    #[test]
+    fn prepare_chat_request_preserves_sampling_passthrough_fields() {
+        let request = ChatCompletionRequest {
+            seed: Some(42),
+            min_p: Some(0.2),
+            frequency_penalty: Some(0.3),
+            presence_penalty: Some(0.4),
+            repetition_penalty: Some(1.1),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+        let expected = VllmSamplingParams {
+            seed: Some(42),
+            min_p: Some(0.2),
+            frequency_penalty: Some(0.3),
+            presence_penalty: Some(0.4),
+            repetition_penalty: Some(1.1),
+            ..VllmSamplingParams::default()
+        };
+        assert_eq!(prepared.chat_request.sampling_params, expected);
+    }
+
+    #[test]
+    fn prepare_chat_request_passes_through_thinking_token_budget() {
+        let prepare = |budget: Option<i64>| {
+            prepare_chat_request(
+                ChatCompletionRequest {
+                    thinking_token_budget: budget,
+                    ..base_request()
+                },
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("request is valid")
+            .chat_request
+            .sampling_params
+            .thinking_token_budget
+        };
+
+        // The convert layer forwards the raw value verbatim (including the `-1`
+        // "unlimited" sentinel); normalization/validation happens during
+        // lowering (see `vllm_text::lower`).
+        assert_eq!(prepare(Some(64)), Some(64));
+        assert_eq!(prepare(Some(-1)), Some(-1));
+        assert_eq!(prepare(None), None);
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_developer_messages() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::Developer {
+                content: MessageContent::Text("hello".to_string()),
+                tools: Some(vec![Tool {
+                    tool_type: "function".to_string(),
+                    function: Function {
+                        name: "get_weather".to_string(),
+                        description: Some("Get weather".to_string()),
+                        parameters: json!({
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        }),
+                        strict: Some(true),
+                    },
+                }]),
+                name: None,
+            }],
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::developer(
+                "hello",
+                Some(vec![VllmChatTool {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }),
+                    strict: Some(true),
+                }]),
+            )]
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_image_url_content_parts() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::User {
+                content: MessageContent::Parts(vec![
+                    ContentPart::Text {
+                        text: "describe ".to_string(),
+                    },
+                    ContentPart::ImageUrl {
+                        image_url: ImageUrl {
+                            url: "https://example.com/image.png".to_string(),
+                            detail: Some(ImageDetail::Low),
+                        },
+                        uuid: Some("image-1".to_string()),
+                    },
+                    ContentPart::Text {
+                        text: " briefly".to_string(),
+                    },
+                ]),
+                name: None,
+            }],
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::user(vec![
+                ChatContentPart::text("describe "),
+                ChatContentPart::ImageUrl {
+                    image_url: "https://example.com/image.png".to_string(),
+                    detail: Some(ImageDetail::Low),
+                    uuid: Some("image-1".to_string()),
+                },
+                ChatContentPart::text(" briefly"),
+            ])]
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_developer_image_url_content_parts() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::Developer {
+                content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/image.png".to_string(),
+                        detail: None,
+                    },
+                    uuid: None,
+                }]),
+                tools: None,
+                name: None,
+            }],
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::developer(
+                vec![ChatContentPart::image_url("https://example.com/image.png")],
+                None,
+            )]
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_video_content_parts() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::User {
+                content: MessageContent::Parts(vec![ContentPart::VideoUrl {
+                    video_url: VideoUrl {
+                        url: "https://example.com/video.mp4".to_string(),
+                    },
+                }]),
+                name: None,
+            }],
+            ..base_request()
+        };
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        expect!["Only text and image_url content parts are supported."]
+            .assert_eq(&error.to_error_response().error.message);
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_assistant_image_url_content_parts() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::Assistant {
+                content: Some(MessageContent::Parts(vec![ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/image.png".to_string(),
+                        detail: None,
+                    },
+                    uuid: None,
+                }])),
+                name: None,
+                tool_calls: None,
+                reasoning: None,
+            }],
+            ..base_request()
+        };
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        expect!["Only text content parts are supported for assistant messages."]
+            .assert_eq(&error.to_error_response().error.message);
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_assistant_reasoning_history() {
+        let message = ChatCompletionMessage {
+            role: AssistantRole,
+            content: Some("answer".to_string()),
+            tool_calls: None,
+            reasoning: Some("inner".to_string()),
+        };
+        let message_json = serde_json::to_value(message).expect("message serializes");
+
+        let request = ChatCompletionRequest {
+            messages: vec![
+                serde_json::from_value(message_json).expect("response message is valid history"),
+            ],
+            add_generation_prompt: Some(false),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning {
+                    text: "inner".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "answer".to_string(),
+                },
+            ])]
+        );
+        assert!(prepared.chat_request.tools.is_empty());
+        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::Auto);
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_legacy_reasoning_content_alias() {
+        let request = ChatCompletionRequest {
+            messages: vec![
+                serde_json::from_value(json!({
+                    "role": "assistant",
+                    "content": "answer",
+                    "reasoning_content": "inner",
+                }))
+                .expect("legacy reasoning_content alias is accepted"),
+            ],
+            add_generation_prompt: Some(false),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Reasoning {
+                    text: "inner".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "answer".to_string(),
+                },
+            ])]
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_tools_and_tool_history() {
+        let request = ChatCompletionRequest {
+            messages: vec![
+                ChatMessage::Assistant {
+                    content: None,
+                    name: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: "call_1".to_string(),
+                        tool_type: "function".to_string(),
+                        function: FunctionCallResponse {
+                            name: "get_weather".to_string(),
+                            arguments: Some(r#"{"city":"Paris"}"#.to_string()),
+                        },
+                    }]),
+                    reasoning: None,
+                },
+                ChatMessage::Tool {
+                    content: MessageContent::Text("Sunny".to_string()),
+                    tool_call_id: "call_1".to_string(),
+                },
+            ],
+            tools: Some(vec![Tool {
+                tool_type: "function".to_string(),
+                function: Function {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }),
+                    strict: None,
+                },
+            }]),
+            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::None)),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![
+                VllmChatMessage::assistant_blocks(vec![AssistantContentBlock::ToolCall(
+                    AssistantToolCall {
+                        id: "call_1".to_string(),
+                        name: "get_weather".to_string(),
+                        arguments: r#"{"city":"Paris"}"#.to_string(),
+                    },
+                )]),
+                VllmChatMessage::tool_response("Sunny", "call_1"),
+            ]
+        );
+        assert_eq!(
+            prepared.chat_request.tools,
+            vec![VllmChatTool {
+                name: "get_weather".to_string(),
+                description: Some("Get weather".to_string()),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                }),
+                strict: None,
+            }]
+        );
+        assert_eq!(prepared.chat_request.tool_choice, ChatToolChoice::None);
+    }
+
+    #[test]
+    fn prepare_chat_request_lowers_logprobs_fields() {
+        let request = ChatCompletionRequest {
+            stream: false,
+            logprobs: true,
+            prompt_logprobs: Some(2),
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(prepared.options.requested_logprobs);
+        assert!(prepared.options.include_prompt_logprobs);
+        assert_eq!(prepared.chat_request.sampling_params.logprobs, Some(0));
+        assert_eq!(
+            prepared.chat_request.sampling_params.prompt_logprobs,
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_keeps_prompt_logprobs_independent_from_echo() {
+        let request = ChatCompletionRequest {
+            logprobs: true,
+            top_logprobs: Some(3),
+            echo: true,
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(prepared.chat_request.sampling_params.logprobs, Some(3));
+        assert_eq!(prepared.chat_request.sampling_params.prompt_logprobs, None);
+        assert!(!prepared.options.include_prompt_logprobs);
+    }
+
+    #[test]
+    fn prepare_chat_request_threads_data_parallel_rank() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-data-parallel-rank", "7".parse().unwrap());
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("request is valid");
+        assert_eq!(prepared.chat_request.data_parallel_rank, Some(7));
+    }
+
+    #[test]
+    fn prepare_chat_request_leaves_data_parallel_rank_none_when_absent() {
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+        assert_eq!(prepared.chat_request.data_parallel_rank, None);
+    }
+
+    #[test]
+    fn prepare_chat_request_maps_no_generation_prompt_mode() {
+        let mut request = base_request();
+        request.add_generation_prompt = Some(false);
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.chat_options.generation_prompt_mode,
+            GenerationPromptMode::NoGenerationPrompt
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_conflicting_explicit_generation_prompt_flags() {
+        let mut request = base_request();
+        request.add_generation_prompt = Some(true);
+        request.continue_final_message = true;
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        expect!["Cannot set both `continue_final_message` and `add_generation_prompt` to True."]
+            .assert_eq(&error.to_error_response().error.message);
+    }
+
+    #[test]
+    fn prepare_chat_request_accepts_continue_final_message_with_implicit_add_generation_prompt() {
+        let mut request = base_request();
+        request.messages = vec![ChatMessage::Assistant {
+            content: Some(MessageContent::Text("hello".to_string())),
+            name: None,
+            tool_calls: None,
+            reasoning: None,
+        }];
+        request.continue_final_message = true;
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.chat_options.generation_prompt_mode,
+            GenerationPromptMode::ContinueFinalAssistant
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_continue_final_message_without_final_assistant() {
+        let mut request = base_request();
+        request.continue_final_message = true;
+
+        let error = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .unwrap_err();
+
+        expect!["Cannot set `continue_final_message` to True when the last message is not from the assistant."]
+            .assert_eq(&error.to_error_response().error.message);
+    }
+
+    #[test]
+    fn prepare_chat_request_allows_new_assistant_mode_after_final_assistant() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::Assistant {
+                content: Some(MessageContent::Text("hello".to_string())),
+                name: None,
+                tool_calls: None,
+                reasoning: None,
+            }],
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.chat_options.generation_prompt_mode,
+            GenerationPromptMode::StartNewAssistant
+        );
+    }
+}

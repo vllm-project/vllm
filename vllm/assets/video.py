@@ -7,10 +7,10 @@ from typing import Any, ClassVar, Literal
 
 import numpy as np
 import numpy.typing as npt
-from huggingface_hub import hf_hub_download
 from PIL import Image
 
 from vllm.multimodal.media.audio import load_audio_pyav
+from vllm.transformers_utils.repo_utils import hf_api
 
 from .base import get_cache_dir
 
@@ -27,7 +27,7 @@ def download_video_asset(filename: str) -> str:
     video_path = video_directory / filename
     video_path_str = str(video_path)
     if not video_path.exists():
-        video_path_str = hf_hub_download(
+        video_path_str = hf_api().hf_hub_download(
             repo_id="raushan-testing-hf/videos-test",
             filename=filename,
             repo_type="dataset",
@@ -139,6 +139,6 @@ class VideoAsset:
         """
         Read audio data from the video asset, used in Qwen2.5-Omni examples.
 
-        See also: examples/offline_inference/qwen2_5_omni/only_thinker.py
+        See also: examples/generate/multimodal/qwen2_5_omni/only_thinker.py
         """
         return load_audio_pyav(self.video_path, sr=sampling_rate)[0]

@@ -50,6 +50,7 @@ from .partition_rules import (
     should_split,
 )
 from .passes.inductor_pass import InductorPass, pass_context
+from .passes.ir.inplace_functionalization import VllmIRInplaceFunctionalizationPass
 from .passes.pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
@@ -279,6 +280,7 @@ class CompilerManager:
         compilation_counter.num_backend_compilations += 1
 
         compiled_graph = None
+        handle = None
 
         # try to load from the cache
         compiled_graph = self.load(graph, example_inputs, graph_index, compile_range)
@@ -357,7 +359,7 @@ class CompilerManager:
                     )
                 except StopCompiling:
                     assert cache_key is not None
-                    return self.loaded_artifacts[cache_key]
+                    compiled_graph = self.loaded_artifacts[cache_key]
             if cache_key is not None and compiled_graph is not None:
                 self.loaded_artifacts[cache_key] = compiled_graph
 
@@ -925,6 +927,24 @@ class VllmBackend:
         return standalone_compile_artifacts, sym_shape_indices_map, returns_tuple_map
 
     def configure_post_pass(self) -> None:
+        # TODO proper PassManager?
+        pre_grad_pass_key = "pre_grad_custom_pass"
+        assert self.pass_key != pre_grad_pass_key
+        assert pre_grad_pass_key not in self.inductor_config
+        self.inductor_config[pre_grad_pass_key] = VllmIRInplaceFunctionalizationPass(
+            self.vllm_config
+        )
+
+        # Make sure pre_grad_custom_pass is not pickled
+        # as part of AOTAutograd built-in cache key
+        # TODO(luka) is there a cleaner way to do this
+        import torch._inductor.config as inductor_config
+
+        ignore = inductor_config._cache_config_ignore_prefix + [pre_grad_pass_key]
+        assert "_cache_config_ignore_prefix" not in self.inductor_config
+        self.inductor_config["_cache_config_ignore_prefix"] = ignore
+
+        # Configure the (nominally post-grad) pass manager
         self.pass_manager.configure(self.vllm_config)
 
         # Post-grad custom passes are run using the post_grad_custom_post_pass
@@ -971,7 +991,7 @@ class VllmBackend:
             },
             payload_fn=lambda: json.dumps(
                 {
-                    "model": self.vllm_config.model_config.model,
+                    "model": getattr(self.vllm_config.model_config, "model", "unknown"),
                     "prefix": self.prefix,
                     "mode": str(cc.mode),
                     "backend": cc.backend,
@@ -1248,7 +1268,7 @@ class VllmBackend:
             original_split_gm if envs.VLLM_USE_MEGA_AOT_ARTIFACT else self.graph
         )
 
-        execution_code, submod_names = generate_execution_code(self.split_gm)
+        execution_code, submod_names, consts = generate_execution_code(self.split_gm)
         # Use getattr to get correct callables: __dict__ has PiecewiseBackend
         # instances (from PiecewiseCompileInterpreter), _modules has originals.
         # getattr checks __dict__ first, then falls back to _modules.
@@ -1257,7 +1277,7 @@ class VllmBackend:
             for name, _ in self.split_gm.named_children()
         }
         runtime_callable = compile_execution_fn(
-            execution_code, submod_callables, submod_names
+            execution_code, submod_callables, submod_names, consts
         )
 
         if (
@@ -1273,6 +1293,7 @@ class VllmBackend:
                 vllm_backend=self,
                 execution_code=execution_code,
                 submod_names=submod_names,
+                consts=consts,
             )
 
         # index of tensors that have symbolic shapes (batch size)
@@ -1306,4 +1327,5 @@ class VllmBackend:
             sym_tensor_indices=sym_tensor_indices,
             execution_code=execution_code,
             submod_names=submod_names,
+            consts=consts,
         )

@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     align_fp4_moe_weights_for_fi,
@@ -15,13 +14,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import (
-    has_flashinfer_cutlass_fused_moe,
-)
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
         NvFp4MoeBackend,
     )
@@ -32,16 +27,6 @@ logger = init_logger(__name__)
 __all__ = [
     "reorder_w1w3_to_w3w1",
 ]
-
-
-def is_flashinfer_fp4_cutlass_moe_available() -> bool:
-    """Return `True` when FlashInfer CUTLASS NV-FP4 kernels can be used."""
-    return (
-        envs.VLLM_USE_FLASHINFER_MOE_FP4
-        and has_flashinfer_cutlass_fused_moe()
-        and current_platform.is_cuda()
-        and current_platform.has_device_capability(100)
-    )
 
 
 def reorder_w1w3_to_w3w1(
@@ -80,7 +65,7 @@ def interleave_linear_and_gate(
 
 
 def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
-    layer: "FusedMoE",
+    layer: "RoutedExperts",
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,
@@ -286,7 +271,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
 
 def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     backend: "NvFp4MoeBackend",
-    layer: "FusedMoE",
+    layer: "RoutedExperts",
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,
@@ -317,6 +302,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
+        NvFp4MoeBackend.FLASHINFER_B12X,
     ]
 
     # Reorder [w1, w3] to [w3, w1] for FI NVFP4 MoE kernels.
@@ -328,6 +314,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         in [
             NvFp4MoeBackend.FLASHINFER_CUTLASS,
             NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            NvFp4MoeBackend.FLASHINFER_B12X,
         ]
     ):
         w13, w13_scale = reorder_w1w3_to_w3w1(w13, w13_scale)

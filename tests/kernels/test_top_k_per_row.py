@@ -718,7 +718,6 @@ def test_persistent_topk_stress() -> None:
         pytest.param(
             {
                 "seq_lens": [2000, 6000, 30000, 80000],
-                "top_k": 2048,
                 "data_type": "random",
             },
             id="mixed_all_paths",
@@ -727,7 +726,6 @@ def test_persistent_topk_stress() -> None:
         pytest.param(
             {
                 "seq_lens": [2048, 4096, 8192, 16000],
-                "top_k": 2048,
                 "data_type": "random",
             },
             id="all_decode_medium",
@@ -736,7 +734,6 @@ def test_persistent_topk_stress() -> None:
         pytest.param(
             {
                 "seq_lens": [70000, 100000, 163840],
-                "top_k": 2048,
                 "data_type": "random",
             },
             id="all_large",
@@ -745,7 +742,6 @@ def test_persistent_topk_stress() -> None:
         pytest.param(
             {
                 "seq_lens": [32767, 32768, 32769, 32772],
-                "top_k": 2048,
                 "data_type": "random",
             },
             id="large_threshold_boundary",
@@ -754,7 +750,6 @@ def test_persistent_topk_stress() -> None:
         pytest.param(
             {
                 "seq_lens": [5000],
-                "top_k": 2048,
                 "data_type": "random",
             },
             id="single_row_medium",
@@ -772,15 +767,15 @@ def test_persistent_topk_stress() -> None:
         pytest.param(
             {
                 "seq_lens": [100, 2048, 10000, 80000],
-                "top_k": 2048,
                 "data_type": "random",
             },
             id="trivial_medium_large_mix",
         ),
     ],
 )
+@pytest.mark.parametrize("top_k", [512, 2048])
 @torch.inference_mode()
-def test_persistent_topk(test_config: dict) -> None:
+def test_persistent_topk(test_config: dict, top_k: int) -> None:
     """
     Tests specific to the persistent_topk kernel:
     - Mixed medium/large rows in the same batch (dynamic per-row dispatch)
@@ -790,14 +785,15 @@ def test_persistent_topk(test_config: dict) -> None:
     run_large_context_topk_test(
         batch_size=len(test_config["seq_lens"]),
         seq_lens=test_config["seq_lens"],
-        top_k=test_config["top_k"],
+        top_k=top_k,
         data_type=test_config.get("data_type", "random"),
     )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize("top_k", [512, 2048])
 @torch.inference_mode()
-def test_persistent_topk_padded_stride() -> None:
+def test_persistent_topk_padded_stride(top_k: int) -> None:
     """
     Test persistent_topk with padded logits (large stride, small seq_len)
     to simulate the e2e CUDAGraph scenario where fp8_paged_mqa_logits
@@ -806,7 +802,6 @@ def test_persistent_topk_padded_stride() -> None:
     set_random_seed(42)
     torch.set_default_device("cuda:0")
 
-    top_k = 2048
     batch_size = 4
     padded_stride = 163840  # DeepSeek-V3.2 max_model_len
     actual_seq_lens = [3000, 5000, 8000, 12000]

@@ -76,7 +76,16 @@ class DefaultModelLoader(BaseModelLoader):
         self.local_expert_ids: set[int] | None = None
 
         extra_config = load_config.model_loader_extra_config
-        allowed_keys = {"enable_multithread_load", "num_threads"}
+        if not isinstance(extra_config, dict):
+            raise ValueError(
+                f"model_loader_extra_config must be a dict for load format "
+                f"{load_config.load_format}, got {type(extra_config).__name__}"
+            )
+        allowed_keys = {
+            "enable_multithread_load",
+            "num_threads",
+            "enable_weights_track",
+        }
         unexpected_keys = set(extra_config.keys()) - allowed_keys
 
         if unexpected_keys:
@@ -84,6 +93,36 @@ class DefaultModelLoader(BaseModelLoader):
                 f"Unexpected extra config keys for load format "
                 f"{load_config.load_format}: "
                 f"{unexpected_keys}"
+            )
+
+        enable_multithread_load = extra_config.get("enable_multithread_load", False)
+        if not isinstance(enable_multithread_load, bool):
+            raise ValueError(
+                f"enable_multithread_load must be a bool, got "
+                f"{type(enable_multithread_load).__name__}"
+            )
+        num_threads = extra_config.get("num_threads")
+        if num_threads is not None and not (
+            isinstance(num_threads, int) and num_threads > 0
+        ):
+            raise ValueError(
+                f"num_threads must be a positive integer, got {num_threads!r}"
+            )
+
+        self.enable_weights_track: bool | None = extra_config.get(
+            "enable_weights_track", None
+        )
+
+        # The multi-thread loader ignores safetensors_load_strategy, so reject
+        # the combination instead of silently dropping the requested strategy.
+        if extra_config.get("enable_multithread_load") and (
+            load_config.safetensors_load_strategy not in (None, "lazy")
+        ):
+            raise ValueError(
+                "enable_multithread_load does not support "
+                "safetensors_load_strategy="
+                f"{load_config.safetensors_load_strategy!r}; the multi-thread "
+                "loader only implements the default lazy strategy."
             )
 
     def _prepare_weights(
@@ -144,7 +183,9 @@ class DefaultModelLoader(BaseModelLoader):
         else:
             raise ValueError(f"Unknown load_format: {load_format}")
 
-        if fall_back_to_pt:
+        # Don't fall back to .pt for explicit safetensors formats; otherwise a
+        # .pt file is matched and later opened as safetensors.
+        if fall_back_to_pt and not use_safetensors:
             allow_patterns += ["*.pt"]
 
         if allow_patterns_overrides is not None:
@@ -169,7 +210,7 @@ class DefaultModelLoader(BaseModelLoader):
         for pattern in allow_patterns:
             hf_weights_files += glob.glob(os.path.join(hf_folder, pattern))
             if len(hf_weights_files) > 0:
-                if pattern == "*.safetensors":
+                if pattern.endswith(".safetensors"):
                     use_safetensors = True
                 break
 
@@ -248,6 +289,12 @@ class DefaultModelLoader(BaseModelLoader):
                         self.load_config.use_tqdm_on_load,
                         self.load_config.safetensors_load_strategy,
                         local_expert_ids=self.local_expert_ids,
+                        safetensors_prefetch_num_threads=(
+                            self.load_config.safetensors_prefetch_num_threads
+                        ),
+                        safetensors_prefetch_block_size=(
+                            self.load_config.safetensors_prefetch_block_size
+                        ),
                     )
         else:
             if extra_config.get("enable_multithread_load"):
@@ -377,7 +424,6 @@ class DefaultModelLoader(BaseModelLoader):
 
         self._init_ep_weight_filter(model_config)
 
-        weights_to_load = {name for name, _ in model.named_parameters()}
         loaded_weights = model.load_weights(self.get_all_weights(model_config, model))
 
         self.counter_after_loading_weights = time.perf_counter()
@@ -386,8 +432,36 @@ class DefaultModelLoader(BaseModelLoader):
             self.counter_after_loading_weights - self.counter_before_loading_weights,
         )
         # We only enable strict check for non-quantized models
-        # that have loaded weights tracking currently.
-        if model_config.quantization is None and loaded_weights is not None:
+        # that have loaded weights tracking by default.
+        default_enable_weights_track = (
+            model_config.quantization is None and loaded_weights is not None
+        )
+        enable_weights_track = (
+            self.enable_weights_track
+            if self.enable_weights_track is not None
+            else default_enable_weights_track
+        )
+        if enable_weights_track:
+            self.track_weights_loading(model, loaded_weights)
+
+    def track_weights_loading(
+        self, model: nn.Module, loaded_weights: set[str] | None
+    ) -> None:
+        weights_to_load = {name for name, _ in model.named_parameters()}
+        if loaded_weights is not None:
+            # ignore online quantization scales
+            for name, module in model.named_modules():
+                quant_method = getattr(module, "quant_method", None)
+                has_online_quant = getattr(quant_method, "uses_meta_device", False)
+                has_postprocess_quant = getattr(
+                    quant_method, "process_weights_after_loading", None
+                )
+                # ignore kv_cache scale and online quant scale,
+                # which can be missing in checkpoints
+                if has_online_quant or has_postprocess_quant:
+                    for param_name, _ in module.named_parameters():
+                        full_name = f"{name}.{param_name}" if name else param_name
+                        loaded_weights.add(full_name)
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:
                 raise ValueError(
