@@ -499,8 +499,7 @@ class BlockPool:
                 is not None
             ):
                 removed_hashes.append(block_hash)
-        if removed_hashes:
-            block.reset_hash()
+        block.reset_hash()
         return removed_hashes
 
     def _emit_block_removed_events(
