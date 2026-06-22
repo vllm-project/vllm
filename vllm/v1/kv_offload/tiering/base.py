@@ -153,6 +153,14 @@ class SecondaryTierManager(ABC):
         """
         pass
 
+    def has_pending_work(self) -> bool:
+        """Whether this tier needs the engine to keep stepping.
+
+        While True, on_schedule_end() and get_finished_jobs() continue
+        to be called even when no requests are scheduled.
+        """
+        return False
+
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """
         Mark blocks as recently used for eviction policy.
@@ -179,6 +187,13 @@ class SecondaryTierManager(ABC):
     def on_request_finished(self, req_context: ReqContext) -> None:
         """
         Called when a request has finished.
+
+        By the time this is called, all per-request calls for this request
+        (submit_store, submit_load, touch) have already been issued, and none
+        will follow. Note this does NOT imply the tier's transfers have
+        completed: jobs already submitted may still be in flight and will
+        report via get_finished_jobs(). This is the right place to release
+        per-request bookkeeping.
 
         Args:
             req_context: per-request context.

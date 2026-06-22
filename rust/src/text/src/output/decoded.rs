@@ -309,7 +309,7 @@ fn matches_stop_string(stops: &[String], output: &str, new_bytes: usize) -> Opti
         .find_map(|(ss_idx, (ss, len, start_off))| {
             output[start_off..]
                 .windows(len)
-                .rposition(|w| w == ss)
+                .position(|w| w == ss)
                 .map(|pos| (ss_idx, start_off + pos))
         })
 }
@@ -560,6 +560,13 @@ mod tests {
         // "say wor" where last 3 bytes "wor" were added at once
         let result = matches_stop_string(&stops, "say wor", 3);
         assert_eq!(result, Some((0, 4)));
+    }
+
+    #[test]
+    fn stop_string_matches_leftmost_with_multiple_new_bytes() {
+        let stops = vec!["\n".to_string()];
+        let result = matches_stop_string(&stops, "Answer\n\n", 2);
+        assert_eq!(result, Some((0, 6)));
     }
 
     #[test]

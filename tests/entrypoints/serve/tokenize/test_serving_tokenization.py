@@ -15,7 +15,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeChatRequest,
     TokenizeCompletionRequest,
 )
-from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
+from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
@@ -58,7 +58,7 @@ class MockModelConfig:
         return self.diff_sampling_param or {}
 
 
-def _build_serving_tokenization(engine: AsyncLLM) -> OpenAIServingTokenization:
+def _build_serving_tokenization(engine: AsyncLLM) -> ServingTokenization:
     models = OpenAIServingModels(
         engine_client=engine,
         base_model_paths=BASE_MODEL_PATHS,
@@ -71,8 +71,7 @@ def _build_serving_tokenization(engine: AsyncLLM) -> OpenAIServingTokenization:
         chat_template=None,
         chat_template_content_format="auto",
     )
-    return OpenAIServingTokenization(
-        engine,
+    return ServingTokenization(
         models,
         openai_serving_render=serving_render,
         request_logger=None,

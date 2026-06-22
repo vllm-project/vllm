@@ -103,6 +103,7 @@ fn is_request_validation_error(error: &vllm_text::Error) -> bool {
             | vllm_text::Error::EmptyPromptTokenIds { .. }
             | vllm_text::Error::Logprobs(_)
             | vllm_text::Error::OutOfVocab(_)
+            | vllm_text::Error::InvalidThinkingTokenBudget
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
             | vllm_text::Error::Llm(vllm_llm::Error::EmptyPromptTokenIds { .. })
@@ -125,6 +126,18 @@ mod tests {
         assert_eq!(response.error.error_type, "invalid_request_error");
         assert!(response.error.message.contains("8192"));
         assert!(response.error.message.contains("9000"));
+    }
+
+    #[test]
+    fn invalid_thinking_token_budget_maps_to_invalid_request() {
+        let api_error = text_submit_error(
+            "failed to submit completion request",
+            vllm_text::Error::InvalidThinkingTokenBudget,
+        );
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("thinking_token_budget"));
     }
 
     #[test]

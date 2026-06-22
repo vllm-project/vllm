@@ -56,6 +56,12 @@ pub struct SamplingParams {
     pub max_tokens: Option<u32>,
     /// Minimum number of tokens to generate before EOS or stop-token handling.
     pub min_tokens: Option<u32>,
+    /// Maximum number of reasoning ("thinking") tokens to emit before the
+    /// reasoning section is force-closed. `None` or the user-facing `-1`
+    /// "unlimited" sentinel both disable the budget. The raw value is carried
+    /// here; `-1` is normalized to `None` (and other negatives rejected) during
+    /// lowering (see `lower_sampling_params`).
+    pub thinking_token_budget: Option<i64>,
     /// Number of log probabilities to return per generated token.
     ///
     /// `None` disables sample logprobs. `-1` requests the full vocabulary.
@@ -116,6 +122,7 @@ impl Default for SamplingParams {
             seed: None,
             max_tokens: None,
             min_tokens: None,
+            thinking_token_budget: None,
             logprobs: None,
             prompt_logprobs: None,
             min_p: None,

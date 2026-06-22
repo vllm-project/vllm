@@ -295,6 +295,8 @@ class TestTieringOffloadingManager:
         self.manager.prepare_store(blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
         self._simulate_on_schedule_end()
+        # for secondary tiers to drain jobs, so primary tier's blocks are evictable.
+        self._simulate_on_schedule_end()
 
         self.secondary_tier1.touch = MagicMock(wraps=self.secondary_tier1.touch)
         self.secondary_tier2.touch = MagicMock(wraps=self.secondary_tier2.touch)
@@ -303,7 +305,7 @@ class TestTieringOffloadingManager:
         self.manager.touch(blocks, _CTX)
 
         # Verify touch was called on primary tier (check LRU order)
-        primary_keys = list(self.primary_tier._policy.blocks.keys())
+        primary_keys = list(self.primary_tier._policy.evictable_blocks.keys())
         assert primary_keys[-3:] == list(reversed(blocks))
 
         # Verify touch was propagated to all secondary tiers
