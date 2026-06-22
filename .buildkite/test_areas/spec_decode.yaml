@@ -12,6 +12,20 @@ steps:
     - tests/v1/e2e/spec_decode/
   commands:
     - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 45
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/v1/spec_decode/
+      - vllm/v1/worker/gpu/spec_decode/
+      - vllm/model_executor/model_loader/
+      - vllm/v1/sample/
+      - vllm/model_executor/layers/
+      - tests/v1/e2e/spec_decode/
+      - vllm/platforms/rocm.py
 
 - label: Spec Decode Eagle Nightly B200
   key: spec-decode-eagle-nightly-b200
