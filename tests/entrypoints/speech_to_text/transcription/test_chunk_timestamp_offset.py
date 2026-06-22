@@ -28,10 +28,13 @@ async def test_chunk_offsets_are_cumulative_not_nominal():
     chunk_lengths = [int(29.5 * SR), int(29.7 * SR), int(5.0 * SR)]
     chunks = [np.zeros(n, dtype=np.float32) for n in chunk_lengths]
 
+    duration = sum(chunk_lengths) / SR
+
     expected_offsets = [0.0, 29.5, 29.5 + 29.7]  # cumulative seconds
     wrong_offsets = [0.0, 30.0, 60.0]  # what the old bug produced
 
     serving = OpenAISpeechToText.__new__(OpenAISpeechToText)
+    serving._decode_and_chunk_speech_async = AsyncMock(return_value=(chunks, duration))
     serving.asr_config = SpeechToTextConfig(
         sample_rate=float(SR),
         max_audio_clip_s=30,
@@ -56,13 +59,7 @@ async def test_chunk_offsets_are_cumulative_not_nominal():
     request.response_format = "json"
     request.build_stt_params.return_value = MagicMock()
 
-    audio = np.zeros(sum(chunk_lengths), dtype=np.float32)
-
-    with (
-        patch(f"{_PATCH}.load_audio", return_value=(audio, SR)),
-        patch(f"{_PATCH}.split_audio", return_value=chunks),
-        patch(f"{_PATCH}.parse_model_prompt", return_value=MagicMock()),
-    ):
+    with patch(f"{_PATCH}.parse_model_prompt", return_value=MagicMock()):
         _, _, offsets = await serving._preprocess_speech_to_text(
             request=request,
             audio_data=b"\x00",
