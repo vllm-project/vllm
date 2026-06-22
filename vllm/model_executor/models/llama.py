@@ -62,6 +62,7 @@ from vllm.v1.attention.backend import AttentionType
 from .adapters import as_embedding_model, as_seq_cls_model
 from .interfaces import (
     EagleModelMixin,
+    LocalArgmaxMixin,
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
@@ -238,9 +239,6 @@ class LlamaAttention(nn.Module):
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
-        is_gguf = quant_config and quant_config.get_name() == "gguf"
-        if is_gguf and config.model_type == "llama":
-            is_neox_style = False
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -267,7 +265,6 @@ class LlamaDecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
-        # Support internlm/internlm-7b with bias
         attention_bias = getattr(config, "attention_bias", False) or getattr(
             config, "bias", False
         )
@@ -487,7 +484,7 @@ class LlamaModel(nn.Module, EagleModelMixin):
 
 
 class LlamaForCausalLM(
-    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+    LocalArgmaxMixin, nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

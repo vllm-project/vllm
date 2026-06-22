@@ -42,6 +42,7 @@ from .interfaces_base import VllmModel
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.models.utils import WeightsMapper
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.multimodal.registry import _ProcessorFactories
@@ -554,6 +555,7 @@ class SupportsLoRA(Protocol):
     packed_modules_mapping: dict[str, list[str]] = {}
     # Module prefixes to skip during LoRA loading (e.g., ["mtp."] for MTP layers)
     lora_skip_prefixes: ClassVar[list[str]] = []
+    lora_manager: "LoRAModelManager | None"
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
@@ -1282,6 +1284,41 @@ def supports_any_eagle(
     return supports_eagle(model) or supports_eagle3(model)
 
 
+class LocalArgmaxMixin:
+    """Mixin for draft model heads in speculative decoding.
+
+    Provides a D2T-aware ``get_top_tokens`` that preserves the
+    local-argmax communication reduction even when the draft vocabulary
+    is smaller than the target vocabulary.
+
+    When ``draft_id_to_target_id`` is present (shape ``(draft_vocab_size,)``,
+    containing per-token offset to target vocab id), the draft argmax index
+    ``k`` is mapped to the target vocab id via::
+
+        target_id = k + draft_id_to_target_id[k]
+
+    This is mathematically equivalent to computing the full-vocab scatter
+    logits and taking the global argmax, but requires only
+    O(batch * 2 * tp_size) communication instead of O(batch * vocab_size).
+
+    Requires the subclass to expose:
+        ``self.logits_processor``: LogitsProcessor
+        ``self.lm_head``: ParallelLMHead
+        ``self.draft_id_to_target_id`` (optional): nn.Parameter
+    """
+
+    def get_top_tokens(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Vocab-parallel argmax with optional D2T remapping."""
+        top = self.logits_processor.get_top_tokens(
+            self.lm_head,
+            hidden_states,
+        )
+        d2t = getattr(self, "draft_id_to_target_id", None)
+        if d2t is not None:
+            top = top + d2t[top]
+        return top
+
+
 class EagleModelMixin:
     aux_hidden_state_layers: tuple[int, ...] = ()
 
@@ -1588,6 +1625,7 @@ class SupportsEncoderCudaGraph(Protocol):
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
+        local_output: torch.Tensor | None = None,
     ) -> None:
         """
         Post-process encoder output, directly call scatter_output_slices by default.
@@ -1608,6 +1646,7 @@ class SupportsEncoderCudaGraph(Protocol):
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ) -> "EncoderCudaGraphCaptureInputs":
         """Create dummy inputs and buffers for CUDA graph capture."""
         ...
@@ -1617,6 +1656,7 @@ class SupportsEncoderCudaGraph(Protocol):
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ) -> "EncoderCudaGraphReplayBuffers":
         """Compute buffer values from actual batch inputs for replay."""
         ...
@@ -1624,6 +1664,7 @@ class SupportsEncoderCudaGraph(Protocol):
     def encoder_cudagraph_forward(
         self,
         inputs: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         """Run the encoder forward pass with precomputed buffers.
 
@@ -1634,6 +1675,7 @@ class SupportsEncoderCudaGraph(Protocol):
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         """Run the encoder forward pass without precomputed buffers.
 

@@ -92,13 +92,6 @@ pub(super) fn validate_request_compat(
     // ---- Reject parameters that are accepted for deserialization but not yet
     // implemented ----
 
-    if request.parallel_tool_calls.is_some() {
-        bail_invalid_request!(
-            param = "parallel_tool_calls",
-            "parallel_tool_calls is not supported."
-        );
-    }
-
     reject_non_default(
         request.length_penalty.as_ref(),
         "length_penalty",
@@ -116,11 +109,6 @@ pub(super) fn validate_request_compat(
         "truncate_prompt_tokens is not supported.",
     )?;
     reject_non_default(
-        request.thinking_token_budget.as_ref(),
-        "thinking_token_budget",
-        "thinking_token_budget is not supported.",
-    )?;
-    reject_non_default(
         request.media_io_kwargs.as_ref(),
         "media_io_kwargs",
         "media_io_kwargs is not supported.",
@@ -135,15 +123,6 @@ pub(super) fn validate_request_compat(
         "repetition_detection",
         "repetition_detection is not supported.",
     )?;
-
-    if let Some(options) = &request.stream_options
-        && options.continuous_usage_stats.is_some()
-    {
-        bail_invalid_request!(
-            param = "stream_options",
-            "continuous_usage_stats is not supported."
-        );
-    }
 
     Ok(())
 }

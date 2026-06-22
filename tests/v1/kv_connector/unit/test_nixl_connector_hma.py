@@ -34,7 +34,9 @@ from .utils import (
         (False, [0]),
     ],
 )
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
 def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
     """Test sw_sizes is correctly computed based on SWA enabled/disabled."""
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
@@ -162,6 +164,7 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     worker = object.__new__(NixlConnectorWorker)
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
+    worker._engine_last_active = {}
 
     has_mamba = any(t is MambaSpec for t in resolved_types)
     has_swa = any(t is SlidingWindowSpec for t in resolved_types)
@@ -781,7 +784,9 @@ def test_mamba_n1_p_side_truncation():
     ],
     ids=["fa_swa_mamba", "fa_swa_only", "fa_only"],
 )
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler.current_platform"
+)
 def test_has_mamba_init(
     mock_platform,
     swa_enabled,

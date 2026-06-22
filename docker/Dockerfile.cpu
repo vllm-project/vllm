@@ -93,35 +93,34 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y \
     && apt-get install -y --no-install-recommends \
-        ca-certificates curl git build-essential unzip \
+        ca-certificates curl git build-essential unzip python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
 COPY tools/install_protoc.sh /tmp/install_protoc.sh
 RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
-# Install rustup; the toolchain itself is pinned by rust-toolchain.toml.
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --profile minimal --default-toolchain none
-ENV PATH="/root/.cargo/bin:${PATH}"
-
 WORKDIR /workspace
 
-# Copy only the rust workspace — the binary is the sole artifact we need.
+COPY requirements/build/rust.txt requirements/build/rust.txt
+RUN python3 -m pip install --no-cache-dir -r requirements/build/rust.txt
+
+# Copy only the Rust build inputs; build_rust.sh publishes artifacts needed
+# by the wheel build stage.
 COPY rust rust
 COPY rust-toolchain.toml rust-toolchain.toml
+COPY tools/build_rust.py tools/build_rust.py
 COPY build_rust.sh build_rust.sh
 
 # Cap cargo parallelism to avoid exhausting the CI host's open-file limit
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
 ENV CARGO_BUILD_JOBS=4
 
-# Build the release binary. Cache cargo registry/git and target/, but copy the
-# binary out of the target/ cache mount so it persists into the image layer
-# for later COPY --from=rust-build.
+# Build the release artifacts. Cache cargo registry/git, but not target/,
+# because stale target metadata can outlive source updates across BuildKit
+# cache reuse.
 RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,target=/root/.cargo/git,sharing=locked \
-    --mount=type=cache,target=/workspace/rust/target,sharing=locked \
-    VLLM_RS_TARGET_PATH=/workspace/vllm-rs bash build_rust.sh
+    bash build_rust.sh
 
 ######################### BUILD IMAGE #########################
 FROM base AS vllm-build
@@ -154,9 +153,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY . .
 
-# Drop the pre-built rust frontend binary into the source tree. setup.py
-# detects it and ships it as-is, skipping the local cargo build.
-COPY --from=rust-build /workspace/vllm-rs vllm/vllm-rs
+# Drop the pre-built Rust artifacts into the source tree. setup.py detects
+# them and ships them as-is, skipping the local Rust build.
+COPY --from=rust-build /workspace/vllm/vllm-rs vllm/vllm-rs
+COPY --from=rust-build /workspace/vllm/_rust_*.so vllm/
 
 RUN if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
@@ -167,6 +167,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 ######################### TRITON-CPU BUILD IMAGE #########################
 FROM base AS vllm-triton-cpu-build
+
+# Support for cross-compilation with x86 ISA including AVX2 and AVX512: docker build --build-arg VLLM_CPU_X86="true" ...
+# Re-declared here because this stage is `FROM base` (not `vllm-build`), so it
+# does not inherit the ARG/ENV defined there. Without it, the guard below would
+# see an empty value and build triton-cpu on non-x86 targets (e.g. arm64).
+ARG VLLM_CPU_X86=0
 
 WORKDIR /vllm-workspace
 
@@ -268,6 +274,11 @@ ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 
 ######################### RELEASE IMAGE #########################
 FROM base AS vllm-openai
+
+# Re-declared here because this stage is `FROM base` (not `vllm-build`), so the
+# RUN below that gates the triton-cpu wheel install on $VLLM_CPU_X86 would
+# otherwise see an empty value and try to install it on non-x86 targets.
+ARG VLLM_CPU_X86=0
 
 WORKDIR /vllm-workspace
 

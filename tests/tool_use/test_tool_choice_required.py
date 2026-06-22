@@ -5,13 +5,17 @@ from copy import deepcopy
 
 import pytest
 import regex as re
+from openai.types.responses import FunctionTool, WebSearchTool
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
-from vllm.tool_parsers.utils import get_json_schema_from_tools
+from vllm.tool_parsers.utils import (
+    find_tool_properties,
+    get_json_schema_from_tools,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -354,3 +358,37 @@ def test_streaming_output_valid_with_trailing_extra_data():
         previous_text = current_text
 
     assert len(messages) > 0
+
+
+FUNCTION_TOOL = FunctionTool(
+    type="function",
+    name="get_weather",
+    parameters={
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    },
+)
+WEB_SEARCH_TOOL = WebSearchTool(type="web_search")
+
+
+class TestNonFunctionToolsSkipped:
+    """Non-function tools (web_search, etc.) must be silently skipped
+    by the tool-schema utilities instead of raising TypeError."""
+
+    def test_find_tool_properties_skips_web_search(self):
+        tools = [WEB_SEARCH_TOOL, FUNCTION_TOOL]
+        props = find_tool_properties(tools, "get_weather")
+        assert props == {"city": {"type": "string"}}
+
+    def test_find_tool_properties_only_non_function_tools(self):
+        props = find_tool_properties([WEB_SEARCH_TOOL], "get_weather")
+        assert props == {}
+
+    def test_get_json_schema_with_mixed_tools(self):
+        tools = [WEB_SEARCH_TOOL, FUNCTION_TOOL]
+        schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
+        assert isinstance(schema, dict)
+        any_of = schema["items"]["anyOf"]
+        assert len(any_of) == 1
+        assert any_of[0]["properties"]["name"]["enum"] == ["get_weather"]

@@ -390,7 +390,7 @@ def test_evictable_cached_blocks_not_double_allocated():
     # should only allocate the truly new block.
     assert num_blocks_to_allocate == 2
 
-    manager.allocate_new_computed_blocks(
+    manager.add_local_computed_blocks(
         request_id,
         [evictable_block],
         num_local_computed_tokens=block_size,

@@ -18,7 +18,7 @@ import tempfile
 import threading
 import time
 import warnings
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, MutableMapping, Sequence
 from contextlib import ExitStack, contextmanager
 from multiprocessing import Process, get_context
 from pathlib import Path
@@ -149,6 +149,46 @@ ROCM_ENGINE_KWARGS: dict = (
     if current_platform.is_rocm()
     else {}
 )
+_TILELANG_TVM_PYTHONPATH_FRAGMENT = os.path.join(
+    "tilelang", "3rdparty", "tvm", "python"
+)
+
+
+def _sanitize_pythonpath_value(pythonpath: str | None) -> str:
+    if not pythonpath:
+        return ""
+    entries = []
+    for entry in pythonpath.split(os.pathsep):
+        normalized = entry.replace(os.sep, "/")
+        if _TILELANG_TVM_PYTHONPATH_FRAGMENT.replace(os.sep, "/") in normalized:
+            continue
+        entries.append(entry)
+    return os.pathsep.join(entries)
+
+
+def _sanitize_pythonpath_env(env: MutableMapping[str, str]) -> None:
+    cleaned = _sanitize_pythonpath_value(env.get("PYTHONPATH"))
+    if cleaned:
+        env["PYTHONPATH"] = cleaned
+    else:
+        env.pop("PYTHONPATH", None)
+
+
+def _sanitize_current_pythonpath_env() -> None:
+    _sanitize_pythonpath_env(os.environ)
+
+
+@contextmanager
+def _temporarily_sanitized_pythonpath_env():
+    original = os.environ.get("PYTHONPATH")
+    _sanitize_current_pythonpath_env()
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop("PYTHONPATH", None)
+        else:
+            os.environ["PYTHONPATH"] = original
 
 
 def requires_spawn_multiprocessing() -> bool:
@@ -253,7 +293,8 @@ class RemoteVLLMServer:
             getattr(args, "show_hidden_metrics_for_version", None) is not None
         )
 
-        self._pre_download_model(model, args)
+        with _temporarily_sanitized_pythonpath_env():
+            self._pre_download_model(model, args)
         self._shutdown_complete = False
 
         # Record GPU memory before server start so we know what
@@ -727,6 +768,7 @@ class RemoteOpenAIServer(RemoteVLLMServer):
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if env_dict is not None:
             env.update(env_dict)
+        _sanitize_pythonpath_env(env)
         serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
         print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
         print(f"Environment variables: {env}")
@@ -754,6 +796,7 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
         env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         if env_dict is not None:
             env.update(env_dict)
+        _sanitize_pythonpath_env(env)
         serve_cmd = ["vllm", "launch", "render", model, *vllm_serve_args]
         print(f"Launching RemoteLaunchRenderServer with: {' '.join(serve_cmd)}")
         self.proc: subprocess.Popen = subprocess.Popen(
@@ -795,7 +838,8 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
             target=_run_in_new_process_group,
             args=(self.child_process_fxn, env_dict, model, vllm_serve_args),
         )  # type: ignore[assignment]
-        self.proc.start()
+        with _temporarily_sanitized_pythonpath_env():
+            self.proc.start()
 
     def __init__(
         self,
