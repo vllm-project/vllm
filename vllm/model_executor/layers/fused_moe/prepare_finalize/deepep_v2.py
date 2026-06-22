@@ -289,12 +289,6 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             )
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        is_padding = get_forward_context().is_padding
-        if is_padding is not None:
-            n = topk_ids.shape[0]
-            # TODO: Properly support DBO.
-            topk_ids = torch.where(is_padding[:n].unsqueeze(1), -1, topk_ids)
-
         if quant_config.is_block_quantized and not defer_input_quant:
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
