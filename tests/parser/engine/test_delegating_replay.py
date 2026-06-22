@@ -19,6 +19,7 @@ import pytest
 from pydantic import TypeAdapter
 
 from tests.parser.engine.replay_harness import (
+    CHUNK_SIZES,
     MockTokenizer,
     assert_parse_output,
     collect_output,
@@ -112,8 +113,6 @@ def _discover_pairings() -> list[_PairingInfo]:
 _PAIRINGS = _discover_pairings()
 
 _ALL_SAMPLES = [(p.parser_cls, s) for p in _PAIRINGS for s in p.samples]
-
-CHUNK_SIZES = [1, 2, 3, 5, 11, 23, None]
 
 
 @pytest.mark.parametrize("chunk_size", CHUNK_SIZES, ids=lambda c: f"chunk={c}")

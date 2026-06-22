@@ -84,10 +84,13 @@ class FileMapper:
         ]
         # Only a single full-attention group is parallelism-invariant. MLA is
         # excluded: its latent KV is replicated per rank, never head-sharded.
+        # The V2 model runner is excluded: its KV layout is not known to be
+        # parallelism-invariant.
         groups = kv_cache_config.kv_cache_groups
         spec = groups[0].kv_cache_spec if len(groups) == 1 else None
         parallel_agnostic = (
             parallel_agnostic
+            and not vllm_config.use_v2_model_runner
             and isinstance(spec, FullAttentionSpec)
             and not isinstance(spec, MLAAttentionSpec)
         )
