@@ -135,8 +135,7 @@ mod tests {
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
     use crate::routes::openai::utils::structured_outputs::ResponseFormat;
     use crate::routes::openai::utils::types::{
-        ChatMessage, Function, FunctionChoice, MessageContent, StringOrArray, Tool, ToolChoice,
-        ToolChoiceValue,
+        ChatMessage, Function, MessageContent, StringOrArray, Tool, ToolChoice, ToolChoiceValue,
     };
 
     fn served(names: &[&str]) -> Vec<String> {
