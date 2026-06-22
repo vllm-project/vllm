@@ -1,11 +1,5 @@
 //! Minimal OpenAI-compatible HTTP server above [`vllm_chat`].
 
-#[cfg(all(feature = "rustls", feature = "openssl"))]
-compile_error!(
-    "features `rustls` and `openssl` are mutually exclusive; \
-     build the OpenSSL backend with `--no-default-features --features openssl`"
-);
-
 mod config;
 mod error;
 mod grpc;
