@@ -389,6 +389,8 @@ class SimpleCPUOffloadScheduler:
                 cpu_block_ids.append(cpu_blk.block_id)
                 cpu_blocks_to_touch.append(cpu_blk)
 
+        assert len(gpu_block_ids) == len(set(gpu_block_ids))
+
         # Touch CPU blocks to prevent eviction during async load.
         self.cpu_block_pool.touch(cpu_blocks_to_touch)
         # Release the temporary pin held since get_num_new_matched_tokens().
@@ -859,12 +861,12 @@ class SimpleCPUOffloadScheduler:
                 self.cpu_block_pool.blocks[bid]
                 for bid in dict.fromkeys(state.transfer_meta.cpu_block_ids)
             )
-            # Free GPU touch refs (defensive dedup; gpu_block_ids
-            # already deduped in update_state_after_alloc).
+            # Free GPU touch refs. CPU-hit allocation gives each loaded block a
+            # distinct GPU block, asserted in update_state_after_alloc.
             assert self._gpu_block_pool is not None
             self._gpu_block_pool.free_blocks(
                 self._gpu_block_pool.blocks[bid]
-                for bid in dict.fromkeys(state.transfer_meta.gpu_block_ids)
+                for bid in state.transfer_meta.gpu_block_ids
             )
 
     def _cleanup_store_request(self, req_id: str) -> None:
