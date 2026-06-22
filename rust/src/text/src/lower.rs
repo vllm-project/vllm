@@ -50,10 +50,8 @@ pub fn lower_text_request(
         priority: request.priority,
         data_parallel_rank: request.data_parallel_rank,
         lora_request: request.lora_request.clone(),
-        // Fields below are currently placeholders.
         arrival_time: None,
         trace_headers: None,
-        reasoning_ended: None,
     };
 
     Ok(PreparedTextRequest {
