@@ -91,7 +91,12 @@ pub enum Command {
 #[serde(transparent)]
 pub struct JsonStringList(pub Vec<String>);
 
-/// Runtime arguments shared by the external-engine and managed-engine paths.
+/// Runtime arguments shared by both paths of the Rust frontend:
+///
+/// - External-engine mode: Python-supervised bootstrap, `vllm serve` -> `vllm-rs frontend`.
+///   Arguments are deserialized from a single JSON object and defaults follow `serde` attrs.
+/// - Managed-engine mode: Rust-managed Python engine, `vllm-rs serve`.
+///   Arguments are parsed from CLI flags and defaults follow `clap` attrs.
 #[serde_as]
 #[derive(Educe, Clone, Args, PartialEq, Eq, Deserialize)]
 #[educe(Debug)]
@@ -114,12 +119,12 @@ pub struct SharedRuntimeArgs {
     /// Select the tool call parser depending on the model that you're using.
     /// Use `auto` to infer from the model or `none` to disable parsing.
     #[arg(long, default_value_t)]
-    #[serde(default)]
+    #[serde(default = "default_py_bootstrap_parser_selection")]
     pub tool_call_parser: ParserSelection,
     /// Select the reasoning parser depending on the model that you're using.
     /// Use `auto` to infer from the model or `none` to disable parsing.
     #[arg(long, default_value_t)]
-    #[serde(default)]
+    #[serde(default = "default_py_bootstrap_parser_selection")]
     pub reasoning_parser: ParserSelection,
     /// Select the chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
@@ -400,6 +405,10 @@ fn default_engine_ready_timeout_secs() -> u64 {
 
 fn default_cors_wildcard() -> JsonStringList {
     JsonStringList(vec!["*".to_string()])
+}
+
+fn default_py_bootstrap_parser_selection() -> ParserSelection {
+    ParserSelection::None
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {

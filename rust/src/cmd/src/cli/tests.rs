@@ -490,8 +490,8 @@ fn frontend_args_json_applies_defaults() {
     };
     assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
     assert_eq!(args.runtime.engine_ready_timeout_secs, 600);
-    assert_eq!(args.runtime.tool_call_parser, ParserSelection::Auto);
-    assert_eq!(args.runtime.reasoning_parser, ParserSelection::Auto);
+    assert_eq!(args.runtime.tool_call_parser, ParserSelection::None);
+    assert_eq!(args.runtime.reasoning_parser, ParserSelection::None);
     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
     assert_eq!(args.runtime.max_model_len, None);
     assert_eq!(args.runtime.max_logprobs, None);
