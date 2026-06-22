@@ -72,7 +72,7 @@ class BlockHashToBlockMap:
             self._unexpected_blocks_type(blocks)
         return None
 
-    def contains(self, key: BlockHashWithGroupId, block_id: int) -> bool:
+    def contain(self, key: BlockHashWithGroupId, block_id: int) -> bool:
         """
         Checks whether the key maps to the given block ID.
         """
@@ -404,7 +404,7 @@ class BlockPool:
             block_hash, kv_cache_group_id
         )
         already_cached = block.block_hash == block_hash_with_group_id or (
-            self.cached_block_hash_to_block.contains(
+            self.cached_block_hash_to_block.contain(
                 block_hash_with_group_id, block.block_id
             )
         )
@@ -524,7 +524,7 @@ class BlockPool:
         if block.block_hash == block_hash_with_group_id:
             return
 
-        if self.cached_block_hash_to_block.contains(
+        if self.cached_block_hash_to_block.contain(
             block_hash_with_group_id, block.block_id
         ):
             return
