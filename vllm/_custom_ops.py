@@ -14,6 +14,7 @@ from vllm.utils.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -800,6 +801,108 @@ def cutlass_scaled_fp4_mm(
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
     torch.ops._C.cutlass_scaled_fp4_mm(out, a, b, block_scale_a, block_scale_b, alpha)
     return out
+
+
+def _cutlass_scaled_fp4_quant_mm_impl(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    input_global_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    alpha: torch.Tensor,
+    out_dtype: torch.dtype,
+    is_sf_swizzled_layout: bool = True,
+    padded_n: int = -1,
+) -> torch.Tensor:
+    assert input.ndim >= 1, f"input.ndim needs to be >= 1, but got {input.ndim}."
+    n = input.shape[-1]
+    m = input.numel() // n
+    input_2d = input.reshape(m, n)
+    physical_n = padded_n if padded_n > 0 else n
+    assert physical_n >= n, (
+        f"padded_n must be >= input dim, got padded_n={physical_n}, n={n}."
+    )
+
+    out = torch.empty((m, weight.shape[0]), dtype=out_dtype, device=input.device)
+    if hasattr(torch.ops._C, "cutlass_scaled_fp4_quant_mm"):
+        torch.ops._C.cutlass_scaled_fp4_quant_mm(
+            out,
+            input_2d,
+            weight,
+            input_global_scale,
+            weight_scale,
+            alpha,
+            is_sf_swizzled_layout,
+            physical_n,
+        )
+    else:
+        x_fp4, x_blockscale = create_fp4_output_tensors(
+            m,
+            n,
+            input.device,
+            is_sf_swizzled_layout,
+            padded_n=physical_n,
+        )
+        torch.ops._C.scaled_fp4_quant.out(
+            input_2d,
+            input_global_scale,
+            is_sf_swizzled_layout,
+            output=x_fp4,
+            output_scale=x_blockscale,
+        )
+        torch.ops._C.cutlass_scaled_fp4_mm(
+            out,
+            x_fp4,
+            weight,
+            x_blockscale.view(torch.float8_e4m3fn),
+            weight_scale,
+            alpha,
+        )
+    return out
+
+
+def _cutlass_scaled_fp4_quant_mm_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    input_global_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    alpha: torch.Tensor,
+    out_dtype: torch.dtype,
+    is_sf_swizzled_layout: bool = True,
+    padded_n: int = -1,
+) -> torch.Tensor:
+    n = input.shape[-1]
+    m = input.numel() // n
+    return torch.empty((m, weight.shape[0]), dtype=out_dtype, device=input.device)
+
+
+direct_register_custom_op(
+    op_name="cutlass_scaled_fp4_quant_mm",
+    op_func=_cutlass_scaled_fp4_quant_mm_impl,
+    mutates_args=[],
+    fake_impl=_cutlass_scaled_fp4_quant_mm_fake,
+)
+
+
+def cutlass_scaled_fp4_quant_mm(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    input_global_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    alpha: torch.Tensor,
+    out_dtype: torch.dtype,
+    is_sf_swizzled_layout: bool = True,
+    padded_n: int = -1,
+) -> torch.Tensor:
+    return torch.ops.vllm.cutlass_scaled_fp4_quant_mm(
+        input,
+        weight,
+        input_global_scale,
+        weight_scale,
+        alpha,
+        out_dtype,
+        is_sf_swizzled_layout,
+        padded_n,
+    )
 
 
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:

@@ -3,10 +3,7 @@
 
 import torch
 
-from vllm._custom_ops import (
-    cutlass_scaled_fp4_mm,
-    scaled_fp4_quant,
-)
+from vllm._custom_ops import cutlass_scaled_fp4_quant_mm
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
     pad_nvfp4_weight_for_cutlass,
@@ -53,23 +50,16 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         output_shape = [*x.shape[:-1], output_size]
         weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
 
-        x_fp4, x_blockscale = scaled_fp4_quant(
+        out = cutlass_scaled_fp4_quant_mm(
             x,
-            layer.input_global_scale_inv,
-            is_sf_swizzled_layout=True,
-            backend="cutlass",
-            padded_n=x.shape[-1] + weights_padding_bytes * 2,
-        )
-
-        out = cutlass_scaled_fp4_mm(
-            x_fp4,
             layer.weight,
-            x_blockscale,
+            layer.input_global_scale_inv,
             layer.weight_scale,
             layer.alpha,
             output_dtype,
+            is_sf_swizzled_layout=True,
+            padded_n=x.shape[-1] + weights_padding_bytes * 2,
         )
-
         out = slice_nvfp4_output(out, output_size)
 
         if bias is not None:

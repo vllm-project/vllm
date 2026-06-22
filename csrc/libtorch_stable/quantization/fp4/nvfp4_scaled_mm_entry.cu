@@ -19,6 +19,9 @@
 #include "libtorch_stable/torch_utils.h"
 
 #include "libtorch_stable/cutlass_extensions/common.hpp"
+#include "nvfp4_utils.cuh"
+
+#include <array>
 
 #if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
 void cutlass_scaled_fp4_mm_sm100a(torch::stable::Tensor& D,
@@ -37,6 +40,12 @@ void cutlass_scaled_fp4_mm_sm120a(torch::stable::Tensor& D,
                                   torch::stable::Tensor const& B_sf,
                                   torch::stable::Tensor const& alpha);
 #endif
+
+void scaled_fp4_quant_out(torch::stable::Tensor const& input,
+                          torch::stable::Tensor const& input_sf,
+                          bool is_sf_swizzled_layout,
+                          torch::stable::Tensor& output,
+                          torch::stable::Tensor& output_sf);
 
 void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
                            const torch::stable::Tensor& A,
@@ -66,6 +75,52 @@ void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
   STD_TORCH_CHECK_NOT_IMPLEMENTED(
       false, "No compiled nvfp4 mm kernel for SM ", sm,
       ". Recompile with CUDA >= 12.8 and CC >= 100.");
+}
+
+void cutlass_scaled_fp4_quant_mm(torch::stable::Tensor& D,
+                                 torch::stable::Tensor const& input,
+                                 torch::stable::Tensor const& B,
+                                 torch::stable::Tensor const& input_scale,
+                                 torch::stable::Tensor const& B_sf,
+                                 torch::stable::Tensor const& alpha,
+                                 bool is_sf_swizzled_layout, int64_t padded_n) {
+  STD_TORCH_CHECK(input.dim() == 2, "input must be a matrix");
+  STD_TORCH_CHECK(B.dim() == 2, "b must be a matrix");
+  STD_TORCH_CHECK(D.dim() == 2, "out must be a matrix");
+  STD_TORCH_CHECK(is_sf_swizzled_layout,
+                  "CUTLASS fp4 GEMM requires swizzled activation scales");
+
+  const int64_t m = input.size(0);
+  const int64_t n = input.size(1);
+  const int64_t physical_n = padded_n > 0 ? padded_n : n;
+  STD_TORCH_CHECK(physical_n >= n, "padded_n must be >= input dim, got ",
+                  physical_n, " and input dim ", n);
+  STD_TORCH_CHECK(physical_n % 2 == 0,
+                  "padded_n must be even for packed fp4 output, got ",
+                  physical_n);
+  STD_TORCH_CHECK(D.size(0) == m && D.size(1) == B.size(0),
+                  "out shape must be (", m, ", ", B.size(0), "), got (",
+                  D.size(0), ", ", D.size(1), ")");
+
+  auto A = torch::stable::empty({m, physical_n / 2},
+                                torch::headeronly::ScalarType::Byte,
+                                std::nullopt, input.device());
+
+  auto [sf_m, sf_n_storage] = vllm::computeSwizzledSFShape(m, physical_n);
+  auto A_sf_storage = torch::stable::empty({sf_m, sf_n_storage},
+                                           torch::headeronly::ScalarType::Int,
+                                           std::nullopt, input.device());
+
+  scaled_fp4_quant_out(input, input_scale, is_sf_swizzled_layout, A,
+                       A_sf_storage);
+
+  std::array<int64_t, 2> sf_sizes{sf_m, sf_n_storage * 4};
+  std::array<int64_t, 2> sf_strides{sf_n_storage * 4, 1};
+  auto A_sf = torch::stable::from_blob(
+      A_sf_storage.mutable_data_ptr(), sf_sizes, sf_strides,
+      A_sf_storage.device(), torch::headeronly::ScalarType::Float8_e4m3fn);
+
+  cutlass_scaled_fp4_mm(D, A, B, A_sf, B_sf, alpha);
 }
 
 bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability) {
