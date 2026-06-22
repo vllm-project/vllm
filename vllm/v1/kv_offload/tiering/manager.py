@@ -262,11 +262,11 @@ class TieringOffloadingManager(OffloadingManager):
         any_retry = False
         for tier in self.secondary_tiers:
             result = tier.lookup(key, req_context)
-            if result is True:
+            if result is LookupResult.HIT:
                 if not self._initiate_promotion(tier, key, req_context):
                     return LookupResult.MISS
                 return LookupResult.RETRY
-            if result is None:
+            if result is LookupResult.RETRY:
                 any_retry = True
 
         if any_retry:
