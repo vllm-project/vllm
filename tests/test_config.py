@@ -188,7 +188,7 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
                 is_moe=False,
                 is_quantized=True,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(

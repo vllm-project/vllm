@@ -19,12 +19,10 @@ from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
-import vllm._C  # noqa
 import vllm._C_stable_libtorch  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
@@ -39,6 +37,11 @@ else:
     CacheDType = None
 
 logger = init_logger(__name__)
+
+try:
+    import vllm._qutlass_C  # noqa: F401
+except ImportError as e:
+    logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -84,6 +87,8 @@ def _get_backend_priorities(
     kv_cache_dtype: CacheDType | None = None,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
+    from vllm.utils.torch_utils import is_quantized_kv_cache
+
     if use_mla:
         if device_capability.major == 10:
             # Sparse MLA backend priorities
@@ -186,6 +191,22 @@ class CudaPlatformBase(Platform):
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
     ]
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        """Import CUDA kernel extensions (_C_stable_libtorch, optional _qutlass_C)."""
+        try:
+            import vllm._C_stable_libtorch  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._C_stable_libtorch: %r", e)
+        try:
+            import vllm._moe_C_stable_libtorch  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._moe_C_stable_libtorch: %r", e)
+        try:
+            import vllm._qutlass_C  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -665,6 +686,15 @@ class CudaPlatformBase(Platform):
 # all the related functions work on real physical device ids.
 # the major benefit of using NVML is that it will not initialize CUDA
 class NvmlCudaPlatform(CudaPlatformBase):
+    @classmethod
+    @with_nvml_context
+    def device_control_id_to_physical_device_id(cls, device_id: str) -> int:
+        try:
+            return int(device_id)
+        except ValueError:
+            handle = pynvml.nvmlDeviceGetHandleByUUID(device_id)
+            return pynvml.nvmlDeviceGetIndex(handle)
+
     @classmethod
     @cache
     @with_nvml_context
