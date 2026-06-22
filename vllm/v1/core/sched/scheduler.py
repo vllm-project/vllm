@@ -1454,7 +1454,7 @@ class Scheduler(SchedulerInterface):
             self.processed_step_seq += 1
             self._drain_deferred_frees()
 
-        dynamic_truncated_spec_tokens = model_runner_output.dynamic_truncated_spec_tokens
+        num_dyn_trunc_tokens = model_runner_output.dynamic_truncated_spec_tokens
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():
@@ -1530,8 +1530,8 @@ class Scheduler(SchedulerInterface):
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
                 num_rejected = num_draft_tokens - num_accepted
-                if dynamic_truncated_spec_tokens:
-                    num_draft_tokens -= dynamic_truncated_spec_tokens.get(req_id, 0)
+                if num_dyn_trunc_tokens:
+                    num_draft_tokens -= num_dyn_trunc_tokens.get(req_id, 0)
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,

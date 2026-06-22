@@ -768,15 +768,18 @@ class VllmConfig:
         speculative_config = self.speculative_config
         if (
             speculative_config is None
-            or not speculative_config.uses_dynamic_speculative_decoding()
             or not self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            or not (
+                speculative_config.uses_dynamic_speculative_decoding()
+                or speculative_config.use_dynamic_verifying()
+            )
         ):
             return
 
         logger.warning_once(
-            "Dynamic speculative decoding changes the target verification "
-            "length at runtime. Overriding cudagraph_mode from %s to "
-            "PIECEWISE for reliability.",
+            "Dynamic speculative decoding and dynamic verifying "
+            "change the target verification length at runtime. "
+            "Overriding cudagraph_mode from %s to PIECEWISE for reliability.",
             self.compilation_config.cudagraph_mode.name,
         )
         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
@@ -2034,6 +2037,9 @@ class VllmConfig:
 
             if speculative_config.uses_dynamic_speculative_decoding():
                 unsupported.append("dynamic speculative decoding")
+
+            if speculative_config.use_dynamic_verifying():
+                unsupported.append("dynamic verifying")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle)
             # DFlash uses parallel drafting natively in V2 via DFlashSpeculator.

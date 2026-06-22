@@ -273,6 +273,8 @@ class SpeculativeConfig:
     verification is enabled. Prevents over-truncation when confidence is
     uniformly low. Only takes effect when dynamic_verifying is not None."""
 
+    dynamic_verifying_min_batch_size: int = 16
+
     draft_sample_method: DraftSampleMethod = "greedy"
     """How the draft model samples tokens. 'greedy' always picks the argmax
     token, and the draft probabilities are treated as one-hot during rejection
@@ -939,6 +941,13 @@ class SpeculativeConfig:
                 f"num_speculative_tokens ({self.num_speculative_tokens})."
             )
 
+        if self.use_local_argmax_reduction:
+            raise ValueError(
+                "dynamic_verifying is incompatible with "
+                "use_local_argmax_reduction (needs full logits "
+                "for confidence scores). Disable one of them."
+            )
+
     @staticmethod
     def _maybe_override_draft_max_model_len(
         speculative_max_model_len: int | None,
@@ -1171,6 +1180,9 @@ class SpeculativeConfig:
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
 
+    def use_dynamic_verifying(self) -> bool:
+        return self.dynamic_verifying is not None
+    
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
 

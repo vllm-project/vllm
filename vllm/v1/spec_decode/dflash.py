@@ -68,8 +68,11 @@ class DFlashProposer(SpecDecodeBaseProposer):
         # For DFlash we use the input embeddings to embed the mask token
         self.parallel_drafting_hidden_state_tensor = None
         # For Dflash dynamic verifying
-        self.dynamic_verifying_method = self.vllm_config.speculative_config.dynamic_verifying
-        self.dynamic_verifying_min_length = self.vllm_config.speculative_config.dynamic_verifying_min_length
+        self.dyn_verify_method = self.vllm_config.speculative_config.dynamic_verifying
+        self.dyn_verify_min_length = \
+            self.vllm_config.speculative_config.dynamic_verifying_min_length
+        self.dyn_verify_min_batch_size = \
+            self.vllm_config.speculative_config.dynamic_verifying_min_batch_size
         if self.dynamic_verifying_method == 'auto':
             self.dynamic_verifying_min_length = 1
         self.num_valid_draft_tokens = None
@@ -353,29 +356,53 @@ class DFlashProposer(SpecDecodeBaseProposer):
                                         max=draft_confidence.shape[1])
         return num_draft_tokens.int()
     
+    def _should_dynamic_verify(self, hidden_states: torch.Tensor) -> bool:
+        """Check whether dynamic verifying should be activated this step."""
+        if not self.dynamic_verifying_method:
+            return False
+        if self.num_speculative_tokens <= 3:
+            return False
+        bs = hidden_states.shape[0] // self.num_speculative_tokens
+        return bs > self.dynamic_verifying_min_batch_size
+
+    def _get_dynamic_verifying_threshold(
+        self, draft_confidence: torch.Tensor,
+    ) -> float | torch.Tensor:
+        """Compute the confidence threshold for dynamic verifying."""
+        if self.dynamic_verifying_method == "auto":
+            # Per-request adaptive threshold: thr_i = clamp(mean(conf_i), 0.1, 0.8).
+            # Keeping high-confidence tokens and filtering out low-confidence ones.
+            return (draft_confidence.mean(dim=-1, keepdim=True)
+                    .clamp(min=0.1, max=0.8)
+                    .expand_as(draft_confidence))
+        return self.dynamic_verifying_method
+
     @override
     def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        if self.dynamic_verifying_method:
-            logits = self.model.compute_logits(hidden_states)
-            max_logits, draft_token_ids = logits.max(dim=-1)
-            # Numerically stable max-softmax: exp(max - logsumexp) equals
-            # the max probability from softmax without materializing the
-            # full softmax tensor.
-            log_sum_exp = logits.logsumexp(dim=-1)
-            draft_confidence = (max_logits - log_sum_exp).exp()
-            draft_confidence = draft_confidence.view(-1, self.num_speculative_tokens)
-
-            if self.dynamic_verifying_method == "auto":
-                # Per-request adaptive threshold: thr_i = clamp(mean(conf_i), 0.1, 0.8).
-                # Kepping high-confidence tokens and filtering out low-confidence ones.
-                threshold = draft_confidence.mean(dim=-1, keepdim=True)\
-                                            .clamp(min=0.1, max=0.8).expand_as(draft_confidence)
-            else:
-                threshold = self.dynamic_verifying_method
-
-            self.num_valid_draft_tokens = self._truncate_by_confidence(
-                draft_confidence, threshold, self.dynamic_verifying_min_length
-            )
-            return draft_token_ids
-        else:
+        if not self._should_dynamic_verify(hidden_states):
+            self.num_valid_draft_tokens = None
             return super()._greedy_sample(hidden_states)
+
+        # Dynamic verifying requires full logits for confidence computation,
+        # which is incompatible with the communication-efficient local argmax.
+        assert not self.use_local_argmax_reduction, (
+            "dynamic_verifying is incompatible with "
+            "use_local_argmax_reduction (needs full logits "
+            "for confidence scores). Disable one of them."
+        )
+
+        logits = self.model.compute_logits(hidden_states)
+        max_logits, draft_token_ids = logits.max(dim=-1)
+        # Numerically stable max-softmax: exp(max - logsumexp) equals
+        # the max probability from softmax without materializing the
+        # full softmax tensor.
+        log_sum_exp = logits.logsumexp(dim=-1)
+        draft_confidence = (max_logits - log_sum_exp).exp()
+        draft_confidence = draft_confidence.view(
+            -1, self.num_speculative_tokens)
+
+        threshold = self._get_dynamic_verifying_threshold(draft_confidence)
+        self.num_valid_draft_tokens = self._truncate_by_confidence(
+            draft_confidence, threshold, self.dynamic_verifying_min_length,
+        )
+        return draft_token_ids
