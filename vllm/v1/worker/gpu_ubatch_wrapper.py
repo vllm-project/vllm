@@ -61,7 +61,7 @@ class UbatchMetadata:
 @dataclass
 class CUDAGraphMetaData:
     cudagraph: torch.cuda.CUDAGraph
-    ubatch_metadata: list[UbatchMetadata]
+    ubatch_metadata: UbatchMetadata
     outputs: Any | None = None
 
 
