@@ -86,6 +86,15 @@ class StatelessGroupCoordinator(GroupCoordinator):
 
         self.rank = global_rank
         self.local_rank = local_rank
+        from vllm.distributed.parallel_state import _WORLD
+
+        if _WORLD is not None:
+            self.device_index = _WORLD.device_index
+        else:
+            assert local_rank >= 0, (
+                "local_rank must be provided when creating the world group"
+            )
+            self.device_index = local_rank
 
         self_device_group = None
         self_cpu_group = None
@@ -152,11 +161,18 @@ class StatelessGroupCoordinator(GroupCoordinator):
         self.tcp_store_group = self_tcp_store_group
 
         if current_platform.is_cuda_alike():
-            self.device = torch.device(f"cuda:{local_rank}")
+            visible_device_index = (
+                current_platform.logical_device_id_to_visible_device_id(
+                    self.device_index
+                )
+            )
+            self.device = torch.device(f"cuda:{visible_device_index}")
         elif current_platform.is_xpu():
-            self.device = torch.device(f"xpu:{local_rank}")
+            self.device = torch.device(f"xpu:{self.device_index}")
         elif current_platform.is_out_of_tree():
-            self.device = torch.device(f"{current_platform.device_name}:{local_rank}")
+            self.device = torch.device(
+                f"{current_platform.device_name}:{self.device_index}"
+            )
         else:
             self.device = torch.device("cpu")
 
