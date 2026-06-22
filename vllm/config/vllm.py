@@ -704,7 +704,20 @@ class VllmConfig:
             model_config.hf_config, "tie_word_embeddings"
         ):
             tie_word_embeddings = model_config.hf_config.tie_word_embeddings
-            hf_config.get_text_config().tie_word_embeddings = tie_word_embeddings
+            text_cfg = hf_config.get_text_config()
+            # Do not overwrite a tie_word_embeddings value that is already set
+            # on the text_config to a different value. Some multimodal configs
+            # (e.g. Qwen2AudioConfig) default the top-level tie_word_embeddings
+            # to True, while their text_config (Qwen2Config) has the actual,
+            # correct value (False) because the language_model's checkpoint
+            # contains an independent lm_head.weight. Blindly propagating the
+            # top-level default would force vLLM to skip lm_head weights and
+            # alias lm_head to embed_tokens, producing garbage logits at
+            # generation time (the model emits prompt-special tokens like
+            # ``<|audio_bos|>`` / ``<|audio_eos|>`` forever instead of text).
+            existing = getattr(text_cfg, "tie_word_embeddings", None)
+            if existing is None or existing == tie_word_embeddings:
+                text_cfg.tie_word_embeddings = tie_word_embeddings
 
         model_config.hf_config = hf_config
         model_config.model_arch_config = model_config.get_model_arch_config()
