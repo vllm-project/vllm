@@ -263,8 +263,10 @@ class CuMemAllocator:
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor
-            unmap_and_release(handle)
-            data.is_asleep = True
+            try:
+                unmap_and_release(handle)
+            finally:
+                data.is_asleep = True
 
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "

@@ -11,7 +11,10 @@ from vllm.platforms import current_platform
 
 # py_device, py_size_or_aligned_size, py_ptr, py_handle
 # py_handle has type list[int] on ROCm and int otherwise
-HandleType: TypeAlias = tuple[int, int, int, int | list[int]]
+if current_platform.is_rocm():
+    HandleType: TypeAlias = tuple[int, int, int, list[int]]
+else:
+    HandleType: TypeAlias = tuple[int, int, int, int]
 
 
 @dataclasses.dataclass
