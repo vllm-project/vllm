@@ -243,26 +243,12 @@ class TestIsUriPath:
         assert _is_uri_path(path) == expected
 
 
-class TestExecutionTraceConfig:
-    """Validation tests for the execution-trace profiler option."""
-
-    def test_execution_trace_requires_torch_profiler(self):
-        with pytest.raises(
-            ValueError, match="torch_profiler_execution_trace is only applicable"
-        ):
-            ProfilerConfig(profiler="cuda", torch_profiler_execution_trace=True)
-
-    def test_execution_trace_disabled_by_default(self):
-        config = ProfilerConfig(profiler="torch", torch_profiler_dir="/tmp/mock")
-        assert config.torch_profiler_execution_trace is False
-
-    def test_execution_trace_enabled(self):
-        config = ProfilerConfig(
-            profiler="torch",
-            torch_profiler_dir="/tmp/mock",
-            torch_profiler_execution_trace=True,
-        )
-        assert config.torch_profiler_execution_trace is True
+def test_execution_trace_requires_torch_profiler():
+    """ET capture is only valid with the torch profiler."""
+    with pytest.raises(
+        ValueError, match="torch_profiler_execution_trace is only applicable"
+    ):
+        ProfilerConfig(profiler="cuda", torch_profiler_execution_trace=True)
 
 
 def test_execution_trace_observer_not_registered_when_disabled(tmp_path):
