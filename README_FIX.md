@@ -58,6 +58,5 @@ After applying the patch, sleep mode wake-up should complete without errors:
 
 ```bash
 POST /sleep?level=1           → 200 OK
-POST /wake_up?tags=weights    → 200 OK
-POST /wake_up?tags=kv_cache   → 200 OK (no crash)
+POST /wake_up                 → 200 OK (no crash)
 ```
