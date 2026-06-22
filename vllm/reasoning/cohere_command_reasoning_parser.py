@@ -128,19 +128,32 @@ def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
         tool_dictionary[tool_name] = f"{tool_name} ::= {tool_name}root\n{tool_grammar}"
     # Emitted grammar shape:
     #   root  ::= tools
-    #   tools ::= ws "[" ws tool ws ("," ws tool)* ws "]" ws
+    # cohere start
+    #   tools ::= ws "[" ws tool (ws "," ws tool)* ws "]" ws
+    # cohere end
     #   ws    ::= (" " | "\t" | "\n")*
     #   tool  ::= <tool_a> | <tool_b> | ...         (one alternative per input)
     #   <tool_x>     ::= <tool_x>root               (per-tool xgrammar rules)
     #   <tool_x>root ::= ...                        (from xgr.Grammar.from_json_schema)
     tool_alternatives = "tool ::= " + " | ".join(tool_dictionary.keys())
     tool_rules = "\n    ".join(tool_dictionary.values())
+    # cohere start
+    # Keep whitespace unambiguous: exactly one nullable `ws` between tokens. The old
+    # rule `tool ws ("," ws tool)* ws "]"` places two nullable `ws*` adjacent whenever
+    # the repetition is empty (the common single-tool case), so a long whitespace run
+    # can be partitioned arbitrarily between them. That makes xgrammar's Earley parser
+    # accumulate ambiguous states it never collapses, an O(n^2)
+    # `fill_next_token_bitmask` blowup that pins EngineCore on one CPU core
+    # (GPU idle) and wedges the replica.
+    # See issue #849. NOTE: this is the builder used by the live chat structural-tag
+    # path; `tool_grammar.collect_tool_schema_v2` carries the identical fix.
     grammar = f"""root ::= tools
-    tools ::= ws "[" ws tool ws ("," ws tool)*  ws "]" ws
+    tools ::= ws "[" ws tool (ws "," ws tool)* ws "]" ws
     ws    ::= (" " | "\\t" | "\\n")*
     {tool_alternatives}
     {tool_rules}
     """
+    # cohere end
     return grammar
 
 

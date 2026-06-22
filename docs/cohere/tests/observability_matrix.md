@@ -86,6 +86,11 @@ This matrix is part of a three-layer documentation structure:
 
 - *Diagnostic / investigation tool — no asserted entries (does not gate CI on rendered prompt, tokens, or parser output). Logs the chat-template + tokenization + parser pipeline end-to-end for `c5-3a30t_fp8` across `no_parsers` and `with_parsers` passes, with and without thinking budget.*
 
+#### 4.6 [Tool-Call Grammar (Guided Decoding)](./features/tool_grammar.md)
+
+- 4.6.1 `test_guided_decoding_builder_has_no_ambiguous_adjacent_whitespace` (CPU unit; `collect_tool_schema_v2`, `CohereForCausalLM` + `Cohere2ForCausalLM`)
+- 4.6.2 `test_structural_tag_builder_has_no_ambiguous_adjacent_whitespace` (CPU unit; `collect_tool_schema` prod structural-tag builder)
+
 ### 5. Speculative Decoding
 
 #### 5.1 [Request Cancellation](./features/speculative_decoding_test.md)

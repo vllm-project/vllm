@@ -51,6 +51,25 @@ New `vllm/cohere/guided_decoding/*` utilities provide:
 Notable contract:
 
 - tool grammar and structural tags depend on text architecture resolution (`get_text_model_name`), especially for vision models with separate text config.
+- The top-level `tools` array rule must keep **exactly one nullable `ws`**
+  between adjacent tokens. The original rule
+  `tools ::= ws "[" ws tool ws ("," ws tool)* ws "]" ws` placed two nullable
+  `ws*` stars adjacent: when the repetition is empty (the common single-tool
+  call), it collapses to `tool ws ws "]"`, so a whitespace run can be
+  partitioned arbitrarily between the two `ws*`. That makes xgrammar's Earley
+  parser accumulate ambiguous states it never collapses, turning
+  `fill_next_token_bitmask` into an O(n^2) blowup on long whitespace runs that
+  pins EngineCore on one CPU core (GPU idle) and wedges the serving replica.
+  The fixed rule moves the leading `ws` inside the repetition group:
+  `tools ::= ws "[" ws tool (ws "," ws tool)* ws "]" ws` (#849). This contract
+  is duplicated across **both** EBNF builders and they must stay in sync:
+  `collect_tool_schema_v2` in
+  [`vllm/cohere/guided_decoding/tool_grammar.py`](../../../vllm/cohere/guided_decoding/tool_grammar.py)
+  (guided-decoding path) and `collect_tool_schema` in
+  [`vllm/reasoning/cohere_command_reasoning_parser.py`](../../../vllm/reasoning/cohere_command_reasoning_parser.py)
+  (the live chat structural-tag path actually used in prod). Regression guard:
+  [`tests/cohere/test_tool_grammar.py`](../../../tests/cohere/test_tool_grammar.py)
+  (see [Tool-Call Grammar test doc](../tests/features/tool_grammar.md)).
 
 ## 5) Spec Decode and Multimodal Benchmarking Utilities
 

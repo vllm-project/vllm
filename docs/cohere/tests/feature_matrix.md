@@ -256,6 +256,37 @@ formulas.
 | --- | --- | --- | --- | --- | --- | --- |
 | | | | | | | T.6.2.1 |
 
+### Guided Generation
+
+Pure CPU unit suite over the EBNF tool-call grammar — no model inputs, no GPU,
+no engine launch. Input, Quantization, Hardware, and vLLM Feature axes are not
+exercised; entries are intentionally blank. The suite gates the whitespace
+contract of the tool-call grammar builders (regression #849).
+
+| Input | Basic | Long Context | Multilingual | Multi Turn | Image | Audio |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | |
+
+| Cohere Feature | Speculative Decoding | Guided Generation | Thinking Budget | Melody | Weight Reload | Auto-Config |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | T.4.6.1 | | | | |
+
+| Model Architecture | C3 Arch | C4 Arch | C5 Arch | Reward | LoRA | ASR |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | T.4.6.1 | T.4.6.1 | | | |
+
+| Quantization | BF16 | FP8 | MXFP8 | W4A16 | FP32 Logits | Online Config | Online/Offline Quant |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | | |
+
+| Hardware | A100 | H100 | B200 | GB200 | MI300x |
+| --- | --- | --- | --- | --- | --- |
+| | | | | | |
+
+| vLLM Feature | Chunked Prefill | Hybrid Memory Allocator | Asynchronous Scheduling | Torch Compile | CUDA Graphs | Sliding Window |
+| --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | |
+
 ### Online Config
 
 | Input | Basic | Long Context | Multilingual | Multi Turn | Image | Audio |
