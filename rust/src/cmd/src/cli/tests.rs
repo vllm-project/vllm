@@ -47,6 +47,13 @@ fn serve_args_forward_python_flags_with_separator() {
                         enable_request_id_headers: false,
                         disable_log_stats: false,
                         served_model_name: [],
+                        frontend_host: "127.0.0.1",
+                        frontend_port: 8000,
+                        ssl_cert_file: None,
+                        ssl_key_file: None,
+                        ssl_ca_certs: None,
+                        ssl_cert_reqs: 0,
+                        ssl_ciphers: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "../vllm/.venv/bin/python",
@@ -275,6 +282,13 @@ fn frontend_args_accept_json() {
                         enable_request_id_headers: false,
                         disable_log_stats: false,
                         served_model_name: [],
+                        frontend_host: "127.0.0.1",
+                        frontend_port: 8000,
+                        ssl_cert_file: None,
+                        ssl_key_file: None,
+                        ssl_ca_certs: None,
+                        ssl_cert_reqs: 0,
+                        ssl_ciphers: None,
                     },
                 },
             ),
@@ -676,6 +690,13 @@ fn serve_args_accept_handshake_aliases() {
                         enable_request_id_headers: false,
                         disable_log_stats: false,
                         served_model_name: [],
+                        frontend_host: "127.0.0.1",
+                        frontend_port: 8000,
+                        ssl_cert_file: None,
+                        ssl_key_file: None,
+                        ssl_ca_certs: None,
+                        ssl_cert_reqs: 0,
+                        ssl_ciphers: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "python3",
@@ -966,4 +987,242 @@ fn serve_frontend_config_uses_unix_listener_when_uds_is_present() {
             path: "/tmp/vllm.sock".to_string(),
         }
     );
+}
+
+// TLS/HTTPS support tests
+#[test]
+fn serve_args_accept_tls_arguments_with_cert_and_key() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--ssl-cert-file",
+        "/tmp/server-cert.pem",
+        "--ssl-key-file",
+        "/tmp/server-key.pem",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.ssl_cert_file, Some("/tmp/server-cert.pem".to_string()));
+    assert_eq!(args.runtime.ssl_key_file, Some("/tmp/server-key.pem".to_string()));
+    assert_eq!(args.runtime.ssl_cert_reqs, 0); // Default: CERT_NONE
+    assert_eq!(args.runtime.ssl_ciphers, None);
+    assert_eq!(args.runtime.ssl_ca_certs, None);
+}
+
+#[test]
+fn serve_args_accept_tls_with_client_auth_required() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--ssl-cert-file",
+        "/tmp/server-cert.pem",
+        "--ssl-key-file",
+        "/tmp/server-key.pem",
+        "--ssl-ca-certs",
+        "/tmp/ca-cert.pem",
+        "--ssl-cert-reqs",
+        "2",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.ssl_cert_file, Some("/tmp/server-cert.pem".to_string()));
+    assert_eq!(args.runtime.ssl_key_file, Some("/tmp/server-key.pem".to_string()));
+    assert_eq!(args.runtime.ssl_ca_certs, Some("/tmp/ca-cert.pem".to_string()));
+    assert_eq!(args.runtime.ssl_cert_reqs, 2); // CERT_REQUIRED
+}
+
+#[test]
+fn serve_args_accept_tls_with_client_auth_optional_mode() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--ssl-cert-file",
+        "/tmp/server-cert.pem",
+        "--ssl-key-file",
+        "/tmp/server-key.pem",
+        "--ssl-cert-reqs",
+        "1",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.ssl_cert_reqs, 1); // CERT_OPTIONAL (maps to CERT_NONE in rustls)
+}
+
+#[test]
+fn serve_args_accept_tls_with_ciphers() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--ssl-cert-file",
+        "/tmp/server-cert.pem",
+        "--ssl-key-file",
+        "/tmp/server-key.pem",
+        "--ssl-ciphers",
+        "ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(
+        args.runtime.ssl_ciphers,
+        Some("ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256".to_string())
+    );
+}
+
+#[test]
+fn serve_frontend_config_creates_tls_listener_mode() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--ssl-cert-file",
+        "/tmp/server-cert.pem",
+        "--ssl-key-file",
+        "/tmp/server-key.pem",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:29550".to_string());
+
+    assert_eq!(
+        config.listener_mode,
+        HttpListenerMode::BindTcpTls {
+            host: "127.0.0.1".to_string(),
+            port: 8000,
+            cert_path: "/tmp/server-cert.pem".to_string(),
+            key_path: "/tmp/server-key.pem".to_string(),
+            ca_certs_path: None,
+            ssl_cert_reqs: 0,
+            ssl_ciphers: None,
+        }
+    );
+}
+
+#[test]
+fn serve_frontend_config_creates_tls_listener_with_client_auth() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--ssl-cert-file",
+        "/tmp/server-cert.pem",
+        "--ssl-key-file",
+        "/tmp/server-key.pem",
+        "--ssl-ca-certs",
+        "/tmp/ca-cert.pem",
+        "--ssl-cert-reqs",
+        "2",
+        "--ssl-ciphers",
+        "ECDHE-RSA-AES256-GCM-SHA384",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:29550".to_string());
+
+    assert_eq!(
+        config.listener_mode,
+        HttpListenerMode::BindTcpTls {
+            host: "127.0.0.1".to_string(),
+            port: 8000,
+            cert_path: "/tmp/server-cert.pem".to_string(),
+            key_path: "/tmp/server-key.pem".to_string(),
+            ca_certs_path: Some("/tmp/ca-cert.pem".to_string()),
+            ssl_cert_reqs: 2,
+            ssl_ciphers: Some("ECDHE-RSA-AES256-GCM-SHA384".to_string()),
+        }
+    );
+}
+
+#[test]
+fn serve_frontend_config_no_tls_without_cert() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:29550".to_string());
+
+    assert_eq!(
+        config.listener_mode,
+        HttpListenerMode::BindTcp {
+            host: "127.0.0.1".to_string(),
+            port: 8000,
+        }
+    );
+}
+
+#[test]
+fn frontend_args_json_accepts_tls_fields() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","ssl_cert_file":"/tmp/server-cert.pem","ssl_key_file":"/tmp/server-key.pem","ssl_cert_reqs":0}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.runtime.ssl_cert_file, Some("/tmp/server-cert.pem".to_string()));
+    assert_eq!(args.runtime.ssl_key_file, Some("/tmp/server-key.pem".to_string()));
+    assert_eq!(args.runtime.ssl_cert_reqs, 0);
+}
+
+#[test]
+fn frontend_args_json_accepts_tls_with_ca_certs() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","ssl_cert_file":"/tmp/server-cert.pem","ssl_key_file":"/tmp/server-key.pem","ssl_ca_certs":"/tmp/ca-cert.pem","ssl_cert_reqs":2,"ssl_ciphers":"ECDHE-RSA-AES256-GCM-SHA384"}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    assert_eq!(args.runtime.ssl_cert_file, Some("/tmp/server-cert.pem".to_string()));
+    assert_eq!(args.runtime.ssl_key_file, Some("/tmp/server-key.pem".to_string()));
+    assert_eq!(args.runtime.ssl_ca_certs, Some("/tmp/ca-cert.pem".to_string()));
+    assert_eq!(args.runtime.ssl_cert_reqs, 2);
+    assert_eq!(args.runtime.ssl_ciphers, Some("ECDHE-RSA-AES256-GCM-SHA384".to_string()));
 }

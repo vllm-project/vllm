@@ -195,6 +195,61 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub served_model_name: Vec<String>,
 
+    /// HTTP bind host for the OpenAI-compatible server (passed to frontend in bootstrap mode).
+    #[arg(long, default_value = "127.0.0.1")]
+    #[serde(default = "default_frontend_host", alias = "host")]
+    pub frontend_host: String,
+
+    /// HTTP bind port for the OpenAI-compatible server (passed to frontend in bootstrap mode).
+    #[arg(long, default_value_t = 8000)]
+    #[serde(default = "default_frontend_port", alias = "port")]
+    pub frontend_port: u16,
+
+    /// Path to TLS certificate file (PEM format). If set, enables TLS on the HTTP server.
+    #[arg(long)]
+    #[serde(default, alias = "ssl_certfile")]
+    pub ssl_cert_file: Option<String>,
+
+    /// Path to TLS private key file (PEM format). Required if ssl_cert_file is set.
+    #[arg(long)]
+    #[serde(default, alias = "ssl_keyfile")]
+    pub ssl_key_file: Option<String>,
+
+    /// Path to CA certificates file (PEM format) for client certificate verification.
+    #[arg(long)]
+    #[serde(default, alias = "ssl_ca_certs")]
+    pub ssl_ca_certs: Option<String>,
+
+    /// Client certificate requirement level: 0=CERT_NONE (no client auth), 2=CERT_REQUIRED (mandatory).
+    /// 
+    /// Note: CERT_OPTIONAL (value 1) is NOT SUPPORTED due to rustls v0.23 limitations.
+    /// If ssl_cert_reqs=1 is specified, the server will log a warning and fall back to CERT_NONE.
+    /// 
+    /// - 0 (CERT_NONE): Client certificates are not required. Server does not request or verify client certs.
+    /// - 2 (CERT_REQUIRED): Client certificates are mandatory. Clients must provide valid certificates
+    ///   signed by the CA specified in ssl_ca_certs. Connections without valid certs will be rejected.
+    /// - 1 (CERT_OPTIONAL): NOT SUPPORTED - will fallback to CERT_NONE with warning.
+    ///   Rustls v0.23 has no TLS-level support for optional client authentication.
+    #[arg(long, default_value = "0")]
+    #[serde(default)]
+    pub ssl_cert_reqs: u32,
+
+    /// SSL cipher suites (colon-separated). Rustls only supports modern secure cipher suites
+    /// and does not allow weak or legacy ciphers (by design).
+    /// 
+    /// IMPORTANT: This parameter is ACCEPTED FOR VALIDATION AND LOGGING ONLY.
+    /// It does NOT restrict which ciphers the server actually accepts - rustls always uses its
+    /// hardcoded secure defaults and provides no API to configure or restrict cipher suites.
+    /// The server will always offer all rustls default ciphers regardless of this setting.
+    /// 
+    /// This parameter exists purely for CLI compatibility with Python/Uvicorn.
+    /// Supported formats:
+    /// - OpenSSL names: 'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256'
+    /// - Rustls internal names: 'TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384'
+    #[arg(long)]
+    #[serde(default, alias = "ssl_ciphers")]
+    pub ssl_ciphers: Option<String>,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -218,7 +273,8 @@ impl SharedRuntimeArgs {
     /// Build the OpenAI-server config for the Python-bootstrap worker contract.
     ///
     /// The resulting config binds the Python-supplied transport addresses and
-    /// inherits an already open HTTP listener from the supervisor process.
+    /// inherits an already open HTTP listener from the supervisor process,
+    /// unless TLS is enabled in which case it binds its own socket.
     fn into_bootstrapped_config(
         self,
         listen_fd: i32,
@@ -229,6 +285,22 @@ impl SharedRuntimeArgs {
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
+
+        // Determine listener mode: use TLS if cert/key are provided, otherwise use inherited fd
+        let listener_mode = match (&self.ssl_cert_file, &self.ssl_key_file) {
+            (Some(cert), Some(key)) => HttpListenerMode::BindTcpTls {
+                host: self.frontend_host.clone(),
+                port: self.frontend_port,
+                cert_path: cert.clone(),
+                key_path: key.clone(),
+                ca_certs_path: self.ssl_ca_certs.clone(),
+                ssl_cert_reqs: self.ssl_cert_reqs,
+                ssl_ciphers: self.ssl_ciphers.clone(),
+            },
+            (Some(_), None) => panic!("ssl_cert_file specified but ssl_key_file is missing"),
+            (None, Some(_)) => panic!("ssl_key_file specified but ssl_cert_file is missing"),
+            (None, None) => HttpListenerMode::InheritedFd { fd: listen_fd },
+        };
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -243,7 +315,7 @@ impl SharedRuntimeArgs {
             },
             model: self.model,
             served_model_name: self.served_model_name,
-            listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
+            listener_mode,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             renderer: self.renderer,
@@ -304,6 +376,14 @@ impl SharedRuntimeArgs {
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
+}
+
+fn default_frontend_host() -> String {
+    "127.0.0.1".to_string()
+}
+
+fn default_frontend_port() -> u16 {
+    8000
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
@@ -385,7 +465,7 @@ pub struct ServeArgs {
     #[arg(long, hide = true, env = "VLLM_RS_DEBUG_CLI")]
     pub debug_cli: bool,
 
-    /// Shared frontend arguments.
+    /// Shared frontend arguments (includes TLS arguments: ssl_cert_file, ssl_key_file, ssl_ca_certs, ssl_cert_reqs, ssl_ciphers).
     #[command(flatten)]
     pub runtime: SharedRuntimeArgs,
 
@@ -403,10 +483,26 @@ impl ServeArgs {
             self.managed_engine.frontend_local_only().then(frontend_ipc_addresses).unzip();
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
-            None => HttpListenerMode::BindTcp {
-                host: self.host.clone(),
-                port: self.port,
-            },
+            None => {
+                // Check if TLS is requested
+                match (&self.runtime.ssl_cert_file, &self.runtime.ssl_key_file) {
+                    (Some(cert), Some(key)) => HttpListenerMode::BindTcpTls {
+                        host: self.host.clone(),
+                        port: self.port,
+                        cert_path: cert.clone(),
+                        key_path: key.clone(),
+                        ca_certs_path: self.runtime.ssl_ca_certs.clone(),
+                        ssl_cert_reqs: self.runtime.ssl_cert_reqs,
+                        ssl_ciphers: self.runtime.ssl_ciphers.clone(),
+                    },
+                    (Some(_), None) => panic!("ssl_cert_file specified but ssl_key_file is missing"),
+                    (None, Some(_)) => panic!("ssl_key_file specified but ssl_cert_file is missing"),
+                    (None, None) => HttpListenerMode::BindTcp {
+                        host: self.host.clone(),
+                        port: self.port,
+                    },
+                }
+            }
         };
 
         self.runtime.clone().into_managed_config(

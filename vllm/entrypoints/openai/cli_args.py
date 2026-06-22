@@ -276,8 +276,26 @@ class FrontendArgs(BaseFrontendArgs):
     ssl_cert_reqs: int = int(ssl.CERT_NONE)
     """Whether client certificate is required (see stdlib ssl module's)."""
     ssl_ciphers: str | None = None
-    """SSL cipher suites for HTTPS (TLS 1.2 and below only).
-    Example: 'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305'"""
+    """SSL cipher suites (colon-separated). For Rust frontend: rustls only
+    supports modern secure cipher suites (TLS 1.2+) and does not allow weak
+    or legacy ciphers.
+
+    IMPORTANT: This parameter is ACCEPTED FOR VALIDATION AND LOGGING ONLY.
+    It does NOT restrict which ciphers the server accepts - rustls always
+    uses its hardcoded secure defaults and provides no API to configure or
+    restrict cipher suites.
+
+    This argument exists purely for CLI compatibility with Python/Uvicorn.
+    Invalid ciphers are logged as warnings but do not cause errors. The
+    server will always offer all rustls default ciphers regardless of this
+    setting.
+
+    Valid formats: OpenSSL names (e.g.
+    'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256') or internal
+    rustls names (e.g. 'TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384').
+    Supported: ECDHE-RSA/ECDSA with AES-128/256-GCM, CHACHA20-POLY1305
+    (TLS 1.2); AES-128/256-GCM-SHA256/384, CHACHA20-POLY1305-SHA256
+    (TLS 1.3)."""
     root_path: str | None = None
     """FastAPI root_path when app is behind a path based routing proxy."""
     middleware: list[str] = field(default_factory=lambda: [])

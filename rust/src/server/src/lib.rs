@@ -19,7 +19,6 @@ pub use config::{Config, CoordinatorMode, HttpListenerMode};
 use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
 use tokio_stream::wrappers::TcpListenerStream;
-use tokio_util::either::Either;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
 use tracing::{info, trace, warn};
@@ -140,6 +139,7 @@ where
     let grpc_setup = if let Some(grpc_port) = config.grpc_port {
         let grpc_host = match &config.listener_mode {
             HttpListenerMode::BindTcp { host, .. } => host.as_str(),
+            HttpListenerMode::BindTcpTls { host, .. } => host.as_str(),
             HttpListenerMode::BindUnix { .. } | HttpListenerMode::InheritedFd { .. } => "0.0.0.0",
         };
         let grpc_listener = TcpListener::bind((grpc_host, grpc_port))
@@ -152,16 +152,26 @@ where
     } else {
         None
     };
-
+    
     info!(%bind_address, %model, "starting OpenAI server");
 
     // Set TCP_NODELAY on accepted connections to reduce latency.
     // By `tap_io` we will do this on every accepted connection.
     let listener = listener.tap_io(|io| {
-        if let Either::Left(tcp_stream) = io
-            && let Err(err) = tcp_stream.set_nodelay(true)
-        {
-            trace!(error = %err, "failed to enable TCP_NODELAY on accepted HTTP connection");
+        match io {
+            listener::ListenerIo::Tcp(tcp_stream) => {
+                if let Err(err) = tcp_stream.set_nodelay(true) {
+                    trace!(error = %err, "failed to enable TCP_NODELAY on accepted HTTP connection");
+                }
+            }
+            listener::ListenerIo::TcpTls(tls_stream) => {
+                if let Err(err) = tls_stream.get_ref().0.set_nodelay(true) {
+                    trace!(error = %err, "failed to enable TCP_NODELAY on TLS connection");
+                }
+            }
+            listener::ListenerIo::Unix(_) => {
+                // Unix sockets don't support TCP_NODELAY
+            }
         }
     });
 

@@ -12,6 +12,29 @@ use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, Tran
 pub enum HttpListenerMode {
     /// Bind a fresh TCP listener on the given host/port.
     BindTcp { host: String, port: u16 },
+    /// Bind a fresh TCP listener with TLS on the given host/port.
+    /// Requires paths to certificate and private key PEM files.
+    /// 
+    /// ssl_cert_reqs: 
+    ///   0=CERT_NONE - No client authentication required
+    ///   2=CERT_REQUIRED - Client certificates mandatory and verified
+    ///   1=CERT_OPTIONAL - NOT SUPPORTED (rustls v0.23 limitation); falls back to CERT_NONE
+    /// 
+    /// Note: Rustls v0.23 does not support optional client certificate verification
+    /// at the TLS layer. If ssl_cert_reqs=1 is specified, the server will log a warning
+    /// and fall back to CERT_NONE (client certificates not required).
+    /// 
+    /// ssl_ciphers: VALIDATION AND LOGGING ONLY. Rustls uses hardcoded secure defaults and
+    /// provides no API to restrict ciphers. Specified ciphers are validated/logged but NOT enforced.
+    BindTcpTls {
+        host: String,
+        port: u16,
+        cert_path: String,
+        key_path: String,
+        ca_certs_path: Option<String>,
+        ssl_cert_reqs: u32,
+        ssl_ciphers: Option<String>,
+    },
     /// Bind a fresh Unix domain listener on the given filesystem path.
     BindUnix { path: String },
     /// Adopt an already-open listening socket inherited from a supervisor
