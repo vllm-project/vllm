@@ -26,7 +26,11 @@ logger = init_logger(__name__)
 
 
 class HPCExperts(mk.FusedMoEExpertsModular):
-    """Moe implementation of [HPC](https://github.com/Tencent/hpc-ops)"""
+    """MoE implementation powered by [HPC](https://github.com/Tencent/hpc-ops).
+
+    Only supported on NVIDIA Hopper GPUs (e.g. H20, H200), and currently limited to
+    FP8 models such as Hy3-FP8, Qwen3-235B-A22B-FP8, etc.
+    """
 
     def __init__(
         self,

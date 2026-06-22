@@ -189,7 +189,7 @@ class KernelConfig:
     - "triton_unfused": Use Triton unfused MoE kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
-    - "hpc": Use HPC kernels (FP8 only)
+    - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.
     """
