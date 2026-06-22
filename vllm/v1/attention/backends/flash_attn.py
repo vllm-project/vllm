@@ -66,19 +66,6 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
-# PCP_DEBUG/PCP_DUMP step counter to cap log volume (only the first N
-# qualifying steps are logged).
-_PCP_DUMP_N = [0]
-_PCP_DUMP_BT = [0]
-_PCP_DUMP_MERGE = [0]
-_PCP_DUMP_WRITE = [0]
-# per-step firing for merge_out/bt_chk: track last seen seqused_k[0] so each
-# decode STEP logs once (first layer), across the first few steps -- needed to
-# see req0/req1 divergence develop over decode steps (e.g. decode-write bug).
-_PCP_DUMP_MERGE_STEP = [-1]
-_PCP_DUMP_MERGE_STEP_N = [0]
-_PCP_DUMP_DECSLOT = [0]
-
 
 class FlashAttentionBackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
@@ -392,6 +379,17 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.pcp_world_size = 1
             self.pcp_rank = 0
 
+        # PCP's _forward_with_pcp splits the batch into a leading decode region
+        # and a trailing prefill region (qsl[num_decodes:], query[:num_decode_tokens],
+        # block_table[:num_decodes]) -- it assumes decodes come first, like the
+        # backends that call split_decodes_and_prefills. Standard FA needs no such
+        # ordering (it runs one unified flash_attn_varlen over the whole batch), so
+        # by default FA leaves reorder_batch_threshold=None. With PCP we must opt
+        # into the runner's decodes-first reorder, otherwise a slot-order batch
+        # interleaves decodes and prefills and the split above mis-slices.
+        if self.pcp_world_size > 1:
+            self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+
         self.cp_kv_cache_interleave_size = (
             self.parallel_config.cp_kv_cache_interleave_size
         )
@@ -679,42 +677,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 attn_metadata.pcp_max_decode_context_kv_len = int(
                     decode_context_lens.max().item()
                 )
-                # PCP_DUMP: per-step (not per-layer) dump of the batched decode
-                # inputs. argmax showed decode index 0 correct, 1+ wrong -> one
-                # of these is misaligned for indices >0. Capped to first 20
-                # batched-decode steps to limit log volume.
-                import os as _os
-
-                if (
-                    _os.environ.get("PCP_DUMP")
-                    and pcp_num_decodes > 1
-                    and _PCP_DUMP_N[0] < 20
-                ):
-                    _PCP_DUMP_N[0] += 1
-                    # full_ctx = num_computed + decode query_len (~1) = the
-                    # FULL pre-split context per decode req. Compare to
-                    # seqused_k: if seqused_k≈full_ctx the per-rank cache holds
-                    # ~full C (seqused_k correct); if ≈full_ctx/pcp it's the
-                    # sharded half (seqused_k should be the half -- reading
-                    # full would go past the rank's owned cache into PAD).
-                    _full_ctx = (
-                        num_computed_tokens_cpu[:pcp_num_decodes].tolist()
-                        if num_computed_tokens_cpu is not None
-                        else None
-                    )
-                    logger.warning(
-                        "PCP_DUMP decode_in #%d num_dec=%d qsl=%s "
-                        "seqused_k=%s full_ctx=%s max_kv=%d rank=%d",
-                        _PCP_DUMP_N[0],
-                        pcp_num_decodes,
-                        attn_metadata.pcp_query_start_loc[
-                            : pcp_num_decodes + 1
-                        ].tolist(),
-                        decode_context_lens[:pcp_num_decodes].tolist(),
-                        _full_ctx,
-                        attn_metadata.pcp_max_decode_context_kv_len,
-                        self.pcp_rank,
-                    )
 
         # Compute mm_prefix range tensor if the batch contains
         # multimodal tokens with bidirectional ranges.
@@ -1107,70 +1069,6 @@ class FlashAttentionImpl(AttentionImpl):
                     layer._k_scale,
                     layer._v_scale,
                 )
-                # PCP_DUMP dec_slot: decode KV write check for >1 decode req.
-                # req0/req1 decode slots MUST be disjoint (different blocks).
-                # collision=True -> aliasing, one overwrites the other -> that
-                # req re-reads prefill cache next step ("<think><think>").
-                # readback_i must equal key_i; mismatch -> wrong slot/value.
-                import os as _os
-
-                if (
-                    _os.environ.get("PCP_DUMP")
-                    and num_decode_tokens > 1
-                    and _PCP_DUMP_DECSLOT[0] < 10
-                ):
-                    _PCP_DUMP_DECSLOT[0] += 1
-                    _sl = decode_slot_mapping.tolist()
-                    _bs = key_cache.shape[1]
-                    _collide = len(_sl) != len(set(_sl))
-                    _rb0 = (
-                        key_cache[_sl[0] // _bs, _sl[0] % _bs, 0, 0].item()
-                        if _sl[0] >= 0
-                        else -999.0
-                    )
-                    _rb1 = (
-                        key_cache[_sl[1] // _bs, _sl[1] % _bs, 0, 0].item()
-                        if _sl[1] >= 0
-                        else -999.0
-                    )
-                    _bt = pcp_attn_metadata.block_table
-                    _raw6 = slot_mapping[: min(6, slot_mapping.shape[0])].tolist()
-                    # Isolation: if req1's slot>=0 but readback1!=key1, the
-                    # batch decode write dropped index 1. Re-issue a SINGLE-token
-                    # reshape for req1 alone and read back -- if it lands, the
-                    # multi-token decode write is the bug.
-                    _rewrite = ""
-                    if _sl[1] >= 0 and abs(_rb1 - key[1, 0, 0].item()) > 1e-4:
-                        reshape_and_cache_flash(
-                            key[1:2],
-                            value[1:2],
-                            key_cache,
-                            value_cache,
-                            decode_slot_mapping[1:2],
-                            self.kv_cache_dtype,
-                            layer._k_scale,
-                            layer._v_scale,
-                        )
-                        _rb1b = key_cache[_sl[1] // _bs, _sl[1] % _bs, 0, 0].item()
-                        _rewrite = " single_rewrite=%.5f" % _rb1b
-                    logger.warning(
-                        "PCP_DUMP dec_slot n=%d rank=%d slot0=%d slot1=%d "
-                        "collision=%s key0=%.5f readback0=%.5f key1=%.5f "
-                        "readback1=%.5f raw_slotmap=%s bt[0,0]=%d bt[1,0]=%d%s",
-                        num_decode_tokens,
-                        self.pcp_rank,
-                        _sl[0],
-                        _sl[1],
-                        _collide,
-                        key[0, 0, 0].item(),
-                        _rb0,
-                        key[1, 0, 0].item(),
-                        _rb1,
-                        _raw6,
-                        int(_bt[0, 0]),
-                        int(_bt[1, 0]),
-                        _rewrite,
-                    )
             local_padded_tokens = (
                 pcp_metadata.num_actual_tokens_pcp_padded // self.pcp_world_size
             )
@@ -1187,10 +1085,6 @@ class FlashAttentionImpl(AttentionImpl):
             restore_idx = pcp_metadata.pcp_allgather_restore_idx
             assert restore_idx is not None
             _ri = restore_idx[: kv.shape[0]]
-            assert int(_ri.max()) < kv.shape[0], (
-                f"PCP_DEBUG: kv restore_idx OOB max={int(_ri.max())} "
-                f">= kv.shape[0]={kv.shape[0]}"
-            )
             kv = torch.index_select(kv, 0, _ri)
             key, value = kv.split([key.shape[-1], value.shape[-1]], dim=-1)
             # `key`/`value` are non-contiguous views into `kv` (which packs
@@ -1214,44 +1108,6 @@ class FlashAttentionImpl(AttentionImpl):
                     layer._k_scale,
                     layer._v_scale,
                 )
-                # PCP_DUMP write_chk (decisive): compare the cache AFTER the
-                # prefill write against the computed `key` for EVERY real
-                # prefill token (all heads/dims). maxdiff≈0 -> prefill write is
-                # correct, batched bug is in decode read. maxdiff large -> the
-                # restored (canonical) KV and the padded slot_mapping disagree
-                # on token<->slot order across requests -> cache corruption.
-                # Fire once on a batched prefill (>=2 requests => many tokens).
-                import os as _os
-
-                _umask = pcp_metadata.pcp_unpad_mask[:prefill_end].to(key_cache.device)
-                _canon = torch.nonzero(_umask[prefill_start:prefill_end]).flatten()
-                _n_real = int(_canon.shape[0])
-                if (
-                    _os.environ.get("PCP_DUMP")
-                    and self.pcp_rank == 0
-                    and _n_real > 800
-                    and _PCP_DUMP_WRITE[0] < 1
-                ):
-                    _PCP_DUMP_WRITE[0] = 1
-                    _canon = _canon + prefill_start
-                    _slots = slot_mapping[_canon]
-                    _ok = _slots >= 0
-                    _canon = _canon[_ok]
-                    _slots = _slots[_ok]
-                    _bs = key_cache.shape[1]
-                    _computed = key[_canon].to(torch.float32)
-                    _cached = key_cache[_slots // _bs, _slots % _bs].to(torch.float32)
-                    _diff = (_computed - _cached).abs()
-                    logger.warning(
-                        "PCP_DUMP write_chk n_real=%d n_checked=%d "
-                        "maxdiff=%.5f slot0=%d computed0=%s cached0=%s",
-                        _n_real,
-                        int(_canon.shape[0]),
-                        float(_diff.max()),
-                        int(_slots[0]),
-                        _computed[0, 0, :4].tolist(),
-                        _cached[0, 0, :4].tolist(),
-                    )
             return
 
         # Scatter write into the KV cache using slot_mapping indices.
@@ -1345,54 +1201,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         if num_decode_tokens > 0:
             assert attn_metadata.pcp_decode_context_kv_lens is not None
-            # PCP_DUMP (once): dump each decode req's first block_table IDs and
-            # read back the first-token K from req0 vs req1's first cache block.
-            #  - bt0[0]==bt0[1] or k0==k1  -> block_table aliasing (reqs share
-            #    blocks) -> block_table bug.
-            #  - distinct blocks, distinct K -> block_table fine; bug is cache
-            #    content (slot_mapping wrote wrong K/V for reqs 1+).
-            import os as _os
-
-            if _os.environ.get("PCP_DUMP") and num_decodes > 1 and _PCP_DUMP_BT[0] < 3:
-                _PCP_DUMP_BT[0] += 1
-                _bt = attn_metadata.block_table
-                _bs = key_cache.shape[1]
-                _kv = attn_metadata.pcp_decode_context_kv_lens
-                _nb = lambda i: (int(_kv[i]) + _bs - 1) // _bs
-                _lb0 = int(_bt[0, _nb(0) - 1])
-                _lb1 = int(_bt[1, _nb(1) - 1])
-                # block_table overlap: do req0 and req1 share physical blocks?
-                # For 2 IDENTICAL prompts the prefix may be shared, but the
-                # decode/generation blocks must be disjoint -- if req0 and req1
-                # alias the same blocks, their decode writes collide -> garbage.
-                _nb0 = _nb(0)
-                _nb1 = _nb(1)
-                _bt0 = set(int(x) for x in _bt[0, :_nb0].tolist())
-                _bt1 = set(int(x) for x in _bt[1, :_nb1].tolist())
-                _overlap = sorted(_bt0 & _bt1)
-                # cache diff req0 vs req1 first block (full, head 0). For
-                # IDENTICAL prompts this MUST be ~0; nonzero -> req1's cache
-                # content differs from req0's (write/ownership bug for req1+).
-                _cf0 = key_cache[int(_bt[0, 0]), :, 0, :8].to(torch.float32)
-                _cf1 = key_cache[int(_bt[1, 0]), :, 0, :8].to(torch.float32)
-                _cdot = (_cf0 - _cf1).abs().max()
-                _klast0 = key_cache[_lb0, 0, 0, :4].tolist()
-                _klast1 = key_cache[_lb1, 0, 0, :4].tolist()
-                logger.warning(
-                    "PCP_DUMP bt_chk bs=%d req0[blk0=%d,blkN=%d] req1[blk0=%d,"
-                    "blkN=%d] block_overlap=%s firstblk_diff=%.5f | "
-                    "k_last0=%s k_last1=%s rank=%d",
-                    _bs,
-                    int(_bt[0, 0]),
-                    _lb0,
-                    int(_bt[1, 0]),
-                    _lb1,
-                    _overlap[:8],
-                    float(_cdot),
-                    _klast0,
-                    _klast1,
-                    self.pcp_rank,
-                )
             decode_out = torch.empty_like(output[:num_decode_tokens])
             decode_attn_out, decode_lse = flash_attn_varlen_func(
                 q=query[:num_decode_tokens],
@@ -1420,37 +1228,6 @@ class FlashAttentionImpl(AttentionImpl):
                 decode_attn_out,
                 decode_lse.transpose(0, 1),
             )
-            # PCP_DUMP merge_out (per decode step): req0 vs req1 decode-attention
-            # output. For TWO IDENTICAL prompts in the same batch, o0 MUST equal
-            # o1 (same query, same KV). o0!=o1 -> req1's attention INPUTS differ
-            # (cache content or block_table/seqused_k). Fires once per step
-            # (first layer) across the first few steps so we can watch req0/req1
-            # diverge -- e.g. a decode-write bug for req1 makes o0==o1 at step1
-            # (identical prefill) but o0!=o1 at step2 (req1 re-reads without its
-            # own just-written token, e.g. the "<think><think>" symptom).
-            import os as _os
-
-            _sk0 = int(attn_metadata.pcp_decode_context_kv_lens[0])
-            if (
-                _os.environ.get("PCP_DUMP")
-                and num_decodes > 1
-                and _sk0 != _PCP_DUMP_MERGE_STEP[0]
-                and _PCP_DUMP_MERGE_STEP_N[0] < 5
-            ):
-                _PCP_DUMP_MERGE_STEP[0] = _sk0
-                _PCP_DUMP_MERGE_STEP_N[0] += 1
-                _o0 = output[0].to(torch.float32)
-                _o1 = output[1].to(torch.float32)
-                _odiff = (_o0 - _o1).abs().max()
-                logger.warning(
-                    "PCP_DUMP merge_out step_kv0=%d o0=%s o1=%s "
-                    "||o0-o1||max=%.5f rank=%d",
-                    _sk0,
-                    output[0, 0, :4].tolist(),
-                    output[1, 0, :4].tolist(),
-                    float(_odiff),
-                    self.pcp_rank,
-                )
 
         if num_decode_tokens == attn_metadata.num_actual_tokens:
             return output
@@ -1470,10 +1247,6 @@ class FlashAttentionImpl(AttentionImpl):
         restore_idx = pcp_metadata.pcp_allgather_restore_idx
         assert restore_idx is not None
         _ri = restore_idx[: qkv.shape[0]]
-        assert int(_ri.max()) < qkv.shape[0], (
-            f"PCP_DEBUG: qkv restore_idx OOB max={int(_ri.max())} "
-            f">= qkv.shape[0]={qkv.shape[0]}"
-        )
         qkv = torch.index_select(qkv, 0, _ri)
 
         q_flat, k_flat, v_flat = qkv.split(

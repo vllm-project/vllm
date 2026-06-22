@@ -4453,39 +4453,6 @@ class GPUModelRunner(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
 
-        # PCP_DEBUG: capture whether input_ids fed to the model contains any
-        # out-of-range token id. The async embedding-gather OOB we chase can
-        # only be a real input_ids OOB OR a downstream-gather poisoning that
-        # surfaces here -- this check disambiguates the two.
-        if self.pcp_world_size > 1 and input_ids is not None:
-            import os as _os
-
-            if _os.environ.get("PCP_DEBUG"):
-                torch.cuda.synchronize()
-                vocab = self.model_config.get_vocab_size()
-                n = num_tokens_padded
-                sub = input_ids[:n]
-                logger.warning(
-                    "PCP_DEBUG pre-forward input_ids: "
-                    "num_tokens_padded=%d local_total=%d vocab=%d dtype=%s "
-                    "min=%d max=%d ge_vocab=%d lt_zero=%d",
-                    n,
-                    getattr(self, "_local_num_scheduled_tokens", -1),
-                    vocab,
-                    input_ids.dtype,
-                    sub.min().item(),
-                    sub.max().item(),
-                    (sub >= vocab).sum().item(),
-                    (sub < 0).sum().item(),
-                )
-                assert sub.max().item() < vocab, (
-                    f"PCP_DEBUG: input_ids max ({sub.max().item()}) "
-                    f">= vocab_size ({vocab}) -- real input_ids OOB"
-                )
-                assert sub.min().item() >= 0, (
-                    f"PCP_DEBUG: input_ids min ({sub.min().item()}) < 0"
-                )
-
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
@@ -4559,48 +4526,9 @@ class GPUModelRunner(
                     )
 
                 if self.pcp_world_size > 1:
-                    # PCP_DUMP: dump req0/req1 hidden states BEFORE and AFTER
-                    # get_restore_hidden_states on a decode step. merge already
-                    # made every rank identical & correct, so if pre-restore
-                    # h[0]!=h[1] but the post-restore argmax is wrong for req1+,
-                    # get_restore's prefill-zigzag restore_idx is scrambling the
-                    # decode hidden states.
-                    import os as _os
-
-                    _pre_n = getattr(self, "_pcp_restore_n", 0)
-                    _do_dump = (
-                        _os.environ.get("PCP_DUMP")
-                        and self.pcp_rank == 0
-                        and hidden_states.shape[0] <= 8
-                        and _pre_n < 2
-                    )
-                    if _do_dump:
-                        self._pcp_restore_n = _pre_n + 1
-                        _h0_pre = hidden_states[0, :4].tolist()
-                        _h1_pre = (
-                            hidden_states[1, :4].tolist()
-                            if hidden_states.shape[0] > 1
-                            else None
-                        )
-                    else:
-                        _h0_pre = _h1_pre = None
                     hidden_states = self.pcp_manager.get_restore_hidden_states(
                         hidden_states
                     )
-                    if _do_dump:
-                        logger.warning(
-                            "PCP_DUMP restore_chk pre h0=%s h1=%s | post "
-                            "h0=%s h1=%s logits_idx=%s",
-                            _h0_pre,
-                            _h1_pre,
-                            hidden_states[0, :4].tolist(),
-                            hidden_states[1, :4].tolist()
-                            if hidden_states.shape[0] > 1
-                            else None,
-                            logits_indices[:4].tolist()
-                            if logits_indices is not None
-                            else None,
-                        )
                     if aux_hidden_states is not None:
                         aux_hidden_states = [
                             self.pcp_manager.get_restore_hidden_states(t)
@@ -4609,26 +4537,6 @@ class GPUModelRunner(
 
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states)
-                # PCP_DUMP: log greedy token (argmax) per sampled position to
-                # localize the batched correctness bug. Prefill logits are
-                # cache-independent, so pcp=1 (standard path) and pcp=2 (PCP
-                # path) must agree. Compare the two runs:
-                #  - prefill-step (large n_tok) argmax differs -> prefill
-                #    attention / restore_idx / scatter-back bug.
-                #  - only decode-step (small n_tok) differs -> decode/KV bug.
-                import os as _os
-
-                if _os.environ.get("PCP_DUMP") and self.pcp_rank == 0:
-                    _n = getattr(self, "_pcp_argmax_n", 0)
-                    if _n < 30:
-                        self._pcp_argmax_n = _n + 1
-                        logger.warning(
-                            "PCP_DUMP argmax #%d pcp=%d n_tok=%d %s",
-                            _n + 1,
-                            self.pcp_world_size,
-                            num_tokens_unpadded,
-                            logits.argmax(dim=-1).tolist()[:48],
-                        )
             else:
                 # Rare case.
                 assert not self.is_pooling_model
