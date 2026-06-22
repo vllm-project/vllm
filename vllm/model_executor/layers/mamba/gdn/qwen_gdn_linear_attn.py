@@ -554,6 +554,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
+        self._continuous_batching_update_kernel_warmed_up = False
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
@@ -1074,6 +1075,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_v_heads: int,
     ) -> None:
         """Warm the decode update variant that uses the bound SSM cache."""
+        if getattr(self, "_continuous_batching_update_kernel_warmed_up", False):
+            return
+
         kv_cache = getattr(self, "kv_cache", None)
         if not isinstance(kv_cache, (tuple, list)) or len(kv_cache) < 2:
             return
@@ -1124,6 +1128,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             ssm_state_indices=state_indices,
             use_qk_l2norm_in_kernel=True,
         )
+        self._continuous_batching_update_kernel_warmed_up = True
 
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
         """Warm up GDN prefill kernels during V1 profiling.
@@ -1149,15 +1154,21 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         The decode path can use the generic Triton conv-update and packed
         recurrent kernels on CUDA, so warm that path here as well.
         """
-        if self._prefill_kernels_warmed_up:
-            return
-        self._prefill_kernels_warmed_up = True
-
         device = qkv_or_qkvz.device
         dtype = qkv_or_qkvz.dtype
         qkv_dim = qkv_or_qkvz.shape[-1] - v_dim
         num_k_heads = self.num_k_heads // self.tp_size
         num_v_heads = self.num_v_heads // self.tp_size
+        if self._prefill_kernels_warmed_up:
+            self._warmup_continuous_batching_update_kernel(
+                device=device,
+                dtype=dtype,
+                num_k_heads=num_k_heads,
+                num_v_heads=num_v_heads,
+            )
+            return
+
+        self._prefill_kernels_warmed_up = True
         _, state_dtype = self.get_state_dtype()
 
         # All kernels use BT = chunk_size, so a single pass with T = chunk_size

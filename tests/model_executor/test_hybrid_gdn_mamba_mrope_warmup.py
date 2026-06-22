@@ -81,8 +81,10 @@ def test_kernel_warmup_runs_hybrid_warmup(monkeypatch) -> None:
 def test_qwen_gdn_update_warmup_uses_bound_ssm_cache(monkeypatch) -> None:
     qwen_gdn = _import_qwen_gdn_module(monkeypatch)
     captured: dict[str, Any] = {}
+    calls: list[str] = []
 
     def fake_update(**kwargs):
+        calls.append("update")
         captured.update(kwargs)
         return torch.empty(0), kwargs["initial_state"]
 
@@ -99,6 +101,7 @@ def test_qwen_gdn_update_warmup_uses_bound_ssm_cache(monkeypatch) -> None:
         dt_bias=torch.empty(3, dtype=torch.float32),
         head_k_dim=5,
         head_v_dim=4,
+        _continuous_batching_update_kernel_warmed_up=False,
     )
 
     qwen_gdn.QwenGatedDeltaNetAttention._warmup_continuous_batching_update_kernel(
@@ -121,6 +124,17 @@ def test_qwen_gdn_update_warmup_uses_bound_ssm_cache(monkeypatch) -> None:
     assert captured["b"].shape == (1, 3)
     assert captured["cu_seqlens"].tolist() == [0, 1]
     assert captured["ssm_state_indices"].tolist() == [0]
+    assert layer._continuous_batching_update_kernel_warmed_up is True
+
+    qwen_gdn.QwenGatedDeltaNetAttention._warmup_continuous_batching_update_kernel(
+        layer,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        num_k_heads=2,
+        num_v_heads=3,
+    )
+
+    assert calls == ["update"]
 
 
 def test_qwen_gdn_update_warmup_skips_without_bound_ssm_cache(
@@ -145,6 +159,7 @@ def test_qwen_gdn_update_warmup_skips_without_bound_ssm_cache(
         dt_bias=torch.empty(3, dtype=torch.float32),
         head_k_dim=5,
         head_v_dim=4,
+        _continuous_batching_update_kernel_warmed_up=False,
     )
 
     qwen_gdn.QwenGatedDeltaNetAttention._warmup_continuous_batching_update_kernel(
@@ -165,3 +180,16 @@ def test_qwen_gdn_update_warmup_skips_without_bound_ssm_cache(
     )
 
     assert calls == []
+    assert layer._continuous_batching_update_kernel_warmed_up is False
+
+    layer.kv_cache = (torch.empty(0), torch.empty((2, 3, 4, 5), dtype=torch.float32))
+    qwen_gdn.QwenGatedDeltaNetAttention._warmup_continuous_batching_update_kernel(
+        layer,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+        num_k_heads=2,
+        num_v_heads=3,
+    )
+
+    assert calls == ["update"]
+    assert layer._continuous_batching_update_kernel_warmed_up is True
