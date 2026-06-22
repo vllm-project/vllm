@@ -102,8 +102,8 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": AnthropicErrorResponse},
     },
 )
-@load_aware_call
 @with_cancellation
+@load_aware_call
 async def count_tokens(request: AnthropicCountTokensRequest, raw_request: Request):
     handler = messages(raw_request)
     if handler is None:

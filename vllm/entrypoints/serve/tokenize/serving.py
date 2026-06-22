@@ -7,8 +7,12 @@ from fastapi import Request
 
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.engine.serving import ServingMixin
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.models.serving import (
+    OpenAIModelRegistry,
+    OpenAIServingModels,
+)
+from vllm.entrypoints.serve.engine.serving import BaseServing
+from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
@@ -26,11 +30,11 @@ from vllm.tokenizers import TokenizerLike
 logger = init_logger(__name__)
 
 
-class ServingTokenization(ServingMixin):
+class ServingTokenization(BaseServing):
     def __init__(
         self,
-        models: OpenAIServingModels,
-        online_renderer: OnlineRenderer,
+        models: OpenAIServingModels | OpenAIModelRegistry,
+        openai_serving_render: OpenAIServingRender,
         *,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -38,11 +42,14 @@ class ServingTokenization(ServingMixin):
         trust_request_chat_template: bool = False,
         request_logger: RequestLogger | None = None,
     ) -> None:
-        self.models = models
-        self.model_config = online_renderer.model_config
-        self.renderer = online_renderer.renderer
-        self.online_renderer = online_renderer
-        self.request_logger = request_logger
+        super().__init__(
+            models=models,
+            model_config=openai_serving_render.model_config,
+            request_logger=request_logger,
+        )
+
+        self.renderer = openai_serving_render.renderer
+        self.openai_serving_render = openai_serving_render
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}

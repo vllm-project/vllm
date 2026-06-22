@@ -15,7 +15,9 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     GenerateResponse,
 )
-from vllm.entrypoints.serve.disagg.serving import ServingTokens
+from vllm.entrypoints.serve.disagg.serving import (
+    ServingTokens,
+)
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
     load_aware_call,

@@ -377,8 +377,6 @@ async def init_app_state(
         log_error_stack=args.log_error_stack,
     )
 
-    state.serving_render = ServingRender(state.online_renderer)
-
     state.serving_tokenization = ServingTokenization(
         state.openai_serving_models,
         state.online_renderer,
@@ -457,16 +455,15 @@ async def init_render_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
-        reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        reasoning_parser=args.reasoning_parser,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
 
-    state.serving_render = ServingRender(state.online_renderer)
-
+    state.openai_serving_models = model_registry
     state.serving_tokenization = ServingTokenization(
-        state.openai_serving_models,
-        state.online_renderer,
+        model_registry,
+        state.openai_serving_render,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
