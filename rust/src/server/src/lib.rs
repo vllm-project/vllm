@@ -98,6 +98,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
 
     Ok(Arc::new(
         AppState::new(served_model_names, chat)
+            .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
             .with_server_info(ServerInfoSnapshot::from_config(config))
             .with_api_keys(config.api_keys.clone())
