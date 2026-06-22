@@ -42,7 +42,7 @@ TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
 FUNC_PREFIX = "<function="
 FUNC_END = "</function>"
-PARAM_PREFIX = "<parameter="
+PARAM_START = "<parameter="
 PARAM_END = "</parameter>"
 
 _PARAM_RE = re.compile(
@@ -88,7 +88,7 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
             "TOOL_END": TOOL_CALL_END,
             "FUNC_PREFIX": FUNC_PREFIX,
             "FUNC_END": FUNC_END,
-            "PARAM_PREFIX": PARAM_PREFIX,
+            "PARAM_START": PARAM_START,
             "PARAM_END": PARAM_END,
             "CLOSE_ANGLE": ">",
         },
@@ -149,6 +149,10 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
             (ParserState.TOOL_ARGS, "FUNC_END"): Transition(
                 ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
+            ),
+            (ParserState.TOOL_ARGS, "PARAM_START"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.ARG_VALUE_CHUNK,),
             ),
             (ParserState.TOOL_ARGS, "PARAM_END"): Transition(
                 ParserState.TOOL_ARGS,
