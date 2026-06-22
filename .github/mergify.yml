@@ -388,9 +388,13 @@ pull_request_rules:
     - or:
       - files~=^tests/tool_use/
       - files~=^tests/tool_parsers/
+      - files~=^tests/parser/
+      - files~=^tests/reasoning/
       - files~=^tests/entrypoints/openai/.*tool.*
       - files~=^tests/entrypoints/anthropic/.*tool.*
       - files~=^vllm/tool_parsers/
+      - files~=^vllm/parser/
+      - files~=^vllm/reasoning/
       - files=docs/features/tool_calling.md
       - files~=^examples/tool_calling/
   actions:

@@ -615,6 +615,24 @@ class TestArgConverter:
         assert result["command"] == "ls -la"
         assert result["desc"] == "\npartial value"
 
+    def test_partial_value_with_angle_bracket(self):
+        from vllm.parser.qwen3 import (
+            _qwen3_arg_converter,
+        )
+
+        raw = "<parameter=expr>x<5"
+        result = json.loads(_qwen3_arg_converter(raw, partial=True))
+        assert result == {"expr": "x<5"}
+
+    def test_partial_value_with_angle_bracket_and_complete_param(self):
+        from vllm.parser.qwen3 import (
+            _qwen3_arg_converter,
+        )
+
+        raw = "<parameter=city>Tokyo</parameter>\n<parameter=expr>x<5"
+        result = json.loads(_qwen3_arg_converter(raw, partial=True))
+        assert result == {"city": "Tokyo", "expr": "x<5"}
+
 
 class TestSchemaAwareTypeCoercion:
     """Verify that _fix_arg_types corrects miscoerced values using the

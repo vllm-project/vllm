@@ -132,7 +132,9 @@ class WhisperModelState(ModelState):
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
         whisper_attn_metadata = WhisperAttnMetadata(
-            self._get_encoder_seq_lens(input_batch.req_ids, attn_groups, for_capture)
+            self._get_encoder_seq_lens(
+                input_batch.req_ids, attn_groups, for_capture, num_reqs
+            )
         )
 
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
@@ -166,9 +168,10 @@ class WhisperModelState(ModelState):
         req_ids: list[str],
         attn_groups: list[list[AttentionGroup]],
         for_capture: bool,
+        num_reqs: int,
     ) -> dict[int, tuple[torch.Tensor, np.ndarray]]:
-        num_reqs = len(req_ids)
-        encoder_seq_lens_np = np.zeros(num_reqs, dtype=np.int32)
+        encoder_seq_lens = torch.zeros(num_reqs, dtype=torch.int32, pin_memory=True)
+        encoder_seq_lens_np = encoder_seq_lens.numpy()
         if not for_capture:
             # During normal execution, use actual encoder lengths.
             for i, req_id in enumerate(req_ids):
@@ -181,9 +184,7 @@ class WhisperModelState(ModelState):
             # is captured with the correct value for cross-attention.
             encoder_seq_lens_np[:] = self.max_encoder_len
 
-        self.encoder_seq_lens_gpu[:num_reqs].copy_(
-            torch.from_numpy(encoder_seq_lens_np), non_blocking=True
-        )
+        self.encoder_seq_lens_gpu[:num_reqs].copy_(encoder_seq_lens, non_blocking=True)
         self.encoder_seq_lens_gpu[num_reqs:].fill_(0)
         encoder_seq_lens_gpu = self.encoder_seq_lens_gpu[:num_reqs]
 
