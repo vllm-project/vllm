@@ -633,9 +633,15 @@ class MambaSpec(KVCacheSpec):
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
+    # Number `N` of attention `block_size`-sized blocks that one mamba block
+    # spans in the shared backing tensor. 1 means mamba and attention share
+    # block IDs (legacy behaviour); N > 1 enables hierarchical allocation.
+    large_block_factor: int = 1
 
     @property
-    def page_size_bytes(self) -> int:
+    def state_page_size_bytes(self) -> int:
+        """Bytes per mamba state slot (one full state). Used as the stride
+        between consecutive state slots in the view tensor."""
         page_size = sum(
             prod(shape) * get_dtype_size(dtype)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
@@ -645,16 +651,30 @@ class MambaSpec(KVCacheSpec):
             return self.page_size_padded
         return page_size
 
+    @property
+    def page_size_bytes(self) -> int:
+        # In hierarchical mode the per-block byte budget equals attention's
+        # (one small-block share of a state). N consecutive small blocks
+        # together hold one full mamba state. In flat mode (``N == 1``) this
+        # equals ``state_page_size_bytes`` and matches the legacy behaviour.
+        state_page = self.state_page_size_bytes
+        assert state_page % self.large_block_factor == 0
+        return state_page // self.large_block_factor
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        # Memory budget accounts for full state slots, not per-small-block
+        # shares: every cached prefix needs one full state.
+        state_page = self.state_page_size_bytes
         if vllm_config.cache_config.mamba_cache_mode == "all":
             max_model_len = vllm_config.model_config.max_model_len
             return (
-                cdiv(max_model_len, self.block_size) + self.num_speculative_blocks
-            ) * self.page_size_bytes
+                cdiv(max_model_len, self.block_size * self.large_block_factor)
+                + self.num_speculative_blocks
+            ) * state_page
         elif vllm_config.cache_config.mamba_cache_mode == "align":
-            return self.page_size_bytes * (2 + self.num_speculative_blocks)
+            return state_page * (2 + self.num_speculative_blocks)
         else:
-            return self.page_size_bytes * (1 + self.num_speculative_blocks)
+            return state_page * (1 + self.num_speculative_blocks)
 
     def is_uniform_with_collection(
         self, kv_cache_specs: dict[str, KVCacheSpec]

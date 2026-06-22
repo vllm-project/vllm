@@ -57,6 +57,7 @@ class MambaBase(AttentionLayerBase):
                 if vllm_config.speculative_config
                 else 0
             ),
+            large_block_factor=vllm_config.cache_config.mamba_large_block_factor,
         )
 
     def get_attn_backend(self) -> type[AttentionBackend]:

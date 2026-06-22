@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    MambaSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
@@ -87,12 +88,23 @@ class KVCacheCoordinator(ABC):
         )
         self.scheduler_block_size = scheduler_block_size
 
+        # Pick up the hierarchical large-block factor from any mamba group
+        # in the config. For pure-attention models this stays 1 and the
+        # BlockPool runs in flat / legacy mode.
+        large_block_factor = 1
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
+            spec = kv_cache_group.kv_cache_spec
+            if isinstance(spec, MambaSpec) and spec.large_block_factor > 1:
+                large_block_factor = spec.large_block_factor
+                break
+
         self.block_pool = BlockPool(
             num_gpu_blocks=kv_cache_config.num_blocks,
             enable_caching=enable_caching,
             hash_block_size=hash_block_size,
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
+            large_block_factor=large_block_factor,
         )
 
         # KV cache group indices that get the EAGLE last-block drop.
