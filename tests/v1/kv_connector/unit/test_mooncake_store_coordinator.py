@@ -7,7 +7,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator imp
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashListWithBlockSize
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    chunk_hashes_for_block_size,
+)
+from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -182,7 +185,7 @@ def test_coordinator_group_block_size_double_hash():
     ]
     coord = _make_coord(groups, hash_block_size=16)
     hs = _hashes(4)
-    big_hashes = list(BlockHashListWithBlockSize(hs, 16, 32))
+    big_hashes = list(chunk_hashes_for_block_size(hs, 16, 32))
     exists = {(0, bytes(h)) for h in hs}
     exists |= {(1, bytes(bh)) for bh in big_hashes}
     cmap = ExternalCachedBlockPool(exists)
