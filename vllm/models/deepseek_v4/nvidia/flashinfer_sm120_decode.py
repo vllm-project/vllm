@@ -424,6 +424,18 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4FlashMLAAttention):
         # scratch (no-op in the common, unpadded case).
         if query.shape[0] > num_prefill_tokens:
             query = query[:num_prefill_tokens]
+        # The packed kernel hard-asserts output.size(0) == num_tokens (derived from
+        # the sliced query row count). The output buffer can still carry padded
+        # prefill rows (output[num_decode_tokens:] of a CUDA-graph / MTP-draft padded
+        # batch), so slice it the same way as the query/indices/scratch above. It is
+        # a view into the same storage and the padded tail rows are never read or
+        # written downstream, so this only narrows what the kernel writes; no-op in
+        # the common unpadded case. Without it the kernel aborts (84 vs 83).
+        out = (
+            output[:num_prefill_tokens]
+            if output.shape[0] > num_prefill_tokens
+            else output
+        )
         swa_cache = _as_sparse_sm120_cache(swa_k_cache)
         extra_cache = (
             _as_sparse_sm120_cache(compressed_k_cache)
@@ -445,7 +457,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4FlashMLAAttention):
             query,
             swa_cache,
             swa_indices,
-            output,
+            out,
             self.scale,
             topk_length=swa_lens,
             attn_sink=self.attn_sink,
