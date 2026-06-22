@@ -631,6 +631,103 @@ class TestFixArgTypes:
         original = '{"name": "Alice"}'
         assert engine._fix_arg_types(original, "f") == original
 
+    @pytest.mark.parametrize(
+        "properties, input_json, expected_substr",
+        [
+            ({"count": {"type": "integer"}}, '{"count": "42"}', '"count": 42'),
+            ({"score": {"type": "number"}}, '{"score": "3.14"}', '"score": 3.14'),
+            ({"flag": {"type": "boolean"}}, '{"flag": "true"}', '"flag": true'),
+            ({"flag": {"type": "boolean"}}, '{"flag": "false"}', '"flag": false'),
+            ({"val": {"type": "null"}}, '{"val": "null"}', '"val": null'),
+            ({"val": {"type": ["string", "null"]}}, '{"val": "null"}', '"val": null'),
+            ({"score": {"type": "number"}}, '{"score": "108."}', '"score": 108'),
+        ],
+        ids=[
+            "string_to_int",
+            "string_to_float",
+            "string_to_bool_true",
+            "string_to_bool_false",
+            "string_to_null",
+            "string_to_null_union",
+            "trailing_dot_float",
+        ],
+    )
+    def test_string_coerced_to_schema_type(
+        self,
+        properties,
+        input_json,
+        expected_substr,
+    ):
+        tool = _make_tool("f", properties)
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types(input_json, "f")
+        assert expected_substr in result
+
+    def test_mixed_types_coerced(self):
+        tool = _make_tool(
+            "f",
+            {
+                "count": {"type": "integer"},
+                "active": {"type": "boolean"},
+                "score": {"type": "number"},
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types(
+            '{"count": "42", "active": "true", "score": "3.14"}', "f"
+        )
+        parsed = json.loads(result)
+        assert parsed["count"] == 42
+        assert parsed["active"] is True
+        assert parsed["score"] == 3.14
+
+    def test_nested_object_coercion(self):
+        tool = _make_tool(
+            "f",
+            {
+                "inner": {
+                    "type": "object",
+                    "properties": {
+                        "count": {"type": "integer"},
+                    },
+                },
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"inner": {"count": "42"}}', "f")
+        parsed = json.loads(result)
+        assert parsed["inner"]["count"] == 42
+
+    def test_array_item_coercion(self):
+        tool = _make_tool(
+            "f",
+            {
+                "nums": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                },
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"nums": ["42", "5"]}', "f")
+        parsed = json.loads(result)
+        assert parsed["nums"] == [42, 5]
+
+    def test_array_mixed_item_types(self):
+        tool = _make_tool(
+            "f",
+            {
+                "vals": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                },
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"vals": ["42", "3.14"]}', "f")
+        parsed = json.loads(result)
+        assert parsed["vals"] == [42, 3.14]
+
 
 # ── TestBuildExtractedResult ─────────────────────────────────────────
 

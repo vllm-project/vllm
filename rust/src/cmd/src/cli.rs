@@ -23,8 +23,8 @@ use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
-    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode,
-    ParserSelection, RendererSelection,
+    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
+    HttpListenerMode, ParserSelection, RendererSelection,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
@@ -84,6 +84,13 @@ pub enum Command {
     Serve(ServeArgs),
 }
 
+/// A JSON-encoded list of strings, matching Python's `json.loads` CLI type for
+/// the CORS list arguments (e.g. `--allowed-origins '["*"]'`). Parsing the whole
+/// value as one item keeps clap from treating the field as a repeated flag.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct JsonStringList(pub Vec<String>);
+
 /// Runtime arguments shared by the external-engine and managed-engine paths.
 #[serde_as]
 #[derive(Educe, Clone, Args, PartialEq, Eq, Deserialize)]
@@ -127,6 +134,11 @@ pub struct SharedRuntimeArgs {
     /// `config.json`.
     #[arg(long)]
     pub max_model_len: Option<u32>,
+    /// Maximum number of log probabilities to return when `logprobs` is
+    /// specified in sampling parameters. `-1` means no cap.
+    #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
+    #[serde(default)]
+    pub max_logprobs: Option<i32>,
     /// TCP port for the gRPC Generate service. When not set, no gRPC server is
     /// started.
     #[arg(long)]
@@ -215,6 +227,30 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub served_model_name: Vec<String>,
 
+    /// CORS allowed origins as a JSON list. `["*"]` allows any origin.
+    #[arg(long, value_parser = parse_json::<JsonStringList>, value_name = "JSON", default_value = r#"["*"]"#)]
+    #[serde(default = "default_cors_wildcard")]
+    pub allowed_origins: JsonStringList,
+
+    /// CORS allowed methods as a JSON list. `["*"]` allows the standard set.
+    #[arg(long, value_parser = parse_json::<JsonStringList>, value_name = "JSON", default_value = r#"["*"]"#)]
+    #[serde(default = "default_cors_wildcard")]
+    pub allowed_methods: JsonStringList,
+
+    /// CORS allowed request headers as a JSON list. `["*"]` mirrors the request.
+    #[arg(long, value_parser = parse_json::<JsonStringList>, value_name = "JSON", default_value = r#"["*"]"#)]
+    #[serde(default = "default_cors_wildcard")]
+    pub allowed_headers: JsonStringList,
+
+    /// Allow CORS credentials (cookies, authorization headers).
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub allow_credentials: bool,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -254,16 +290,19 @@ impl SharedRuntimeArgs {
         input_address: String,
         output_address: String,
         coordinator_address: Option<String>,
+        engine_start_index: u32,
         engine_count: usize,
     ) -> Config {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
         let api_server_options = self.api_server_options();
+        let cors = self.cors_config();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
                 input_address,
                 output_address,
+                engine_start_index,
                 engine_count,
                 ready_timeout,
             },
@@ -281,7 +320,9 @@ impl SharedRuntimeArgs {
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
+            max_logprobs: self.max_logprobs,
             api_server_options,
+            cors,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
@@ -303,6 +344,7 @@ impl SharedRuntimeArgs {
         let ready_timeout = self.ready_timeout();
         let shutdown_timeout = self.shutdown_timeout();
         let api_server_options = self.api_server_options();
+        let cors = self.cors_config();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -324,7 +366,9 @@ impl SharedRuntimeArgs {
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
+            max_logprobs: self.max_logprobs,
             api_server_options,
+            cors,
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             grpc_port: self.grpc_port,
@@ -339,10 +383,23 @@ impl SharedRuntimeArgs {
             enable_request_id_headers: self.enable_request_id_headers,
         }
     }
+
+    fn cors_config(&self) -> CorsConfig {
+        CorsConfig {
+            allow_origins: self.allowed_origins.0.clone(),
+            allow_methods: self.allowed_methods.0.clone(),
+            allow_headers: self.allowed_headers.0.clone(),
+            allow_credentials: self.allow_credentials,
+        }
+    }
 }
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
+}
+
+fn default_cors_wildcard() -> JsonStringList {
+    JsonStringList(vec!["*".to_string()])
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
@@ -380,6 +437,10 @@ pub struct FrontendArgs {
     /// `stats_update_address`.
     #[arg(long)]
     pub coordinator_address: Option<String>,
+    /// First data-parallel engine rank expected to register with this
+    /// bootstrapped frontend.
+    #[arg(long, default_value_t = 0)]
+    pub engine_start_index: u32,
     /// Total number of data-parallel engines expected for this frontend.
     #[arg(long, default_value_t = 1)]
     pub engine_count: usize,
@@ -397,6 +458,7 @@ impl FrontendArgs {
             self.input_address,
             self.output_address,
             self.coordinator_address,
+            self.engine_start_index,
             self.engine_count,
         )
     }
@@ -467,6 +529,7 @@ impl ServeArgs {
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
             self.runtime.max_model_len,
+            self.runtime.max_logprobs,
             self.runtime.language_model_only,
             self.runtime.disable_log_stats,
             self.runtime.shutdown_timeout,

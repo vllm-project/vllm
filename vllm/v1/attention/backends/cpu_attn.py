@@ -112,6 +112,7 @@ class CPUAttentionMetadata:
     slot_mapping: torch.Tensor
     scheduler_metadata: torch.Tensor | None
     causal: bool = True
+    dynamic_causal: torch.Tensor | None = None
 
     # can be removed after deprecate sdpa
     use_sdpa_prefill: bool = False
@@ -172,7 +173,16 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
-        causal = False if self.is_cross_attention else common_attn_metadata.causal
+        is_dynamic_casual = isinstance(common_attn_metadata.causal, torch.Tensor)
+        dynamic_casual = None
+        if is_dynamic_casual:
+            dynamic_casual = common_attn_metadata.causal
+
+        causal = (
+            False
+            if self.is_cross_attention or is_dynamic_casual
+            else common_attn_metadata.causal
+        )
 
         encoder_cache_tensor = None
         if self.is_encoder_only_attention:
@@ -215,6 +225,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             sliding_window_size=self.window_size,
             isa=self.isa,
             enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
+            dynamic_causal=dynamic_casual,
         )
 
         attn_metadata = CPUAttentionMetadata(
@@ -228,6 +239,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             scheduler_metadata=scheduler_metadata,
             causal=causal,
             encoder_cache=encoder_cache_tensor,
+            dynamic_causal=dynamic_casual,
         )
 
         return attn_metadata
@@ -269,11 +281,9 @@ class CPUAttentionBackendImpl(AttentionImpl):
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
         if sliding_window is None:
-            self.sliding_window = (-1, -1)
-        elif attn_type == AttentionType.ENCODER_ONLY:
-            self.sliding_window = (sliding_window - 1, sliding_window - 1)
+            self.sliding_window = -1
         else:
-            self.sliding_window = (sliding_window - 1, 0)
+            self.sliding_window = sliding_window
         self.kv_cache_dtype = kv_cache_dtype
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
@@ -378,6 +388,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             softcap=self.logits_soft_cap,
             scheduler_metadata=attn_metadata.scheduler_metadata,
             s_aux=self.sinks,
+            dynamic_causal=attn_metadata.dynamic_causal,
             k_scale=layer._k_scale_float,
             v_scale=layer._v_scale_float,
             kv_cache_dtype=self.kv_cache_dtype,
@@ -427,9 +438,22 @@ def _riscv_supports_rvv() -> bool:
             cpuinfo = f.read()
     except OSError:
         return False
-    return any(f"zvl{n}b" in cpuinfo for n in (128, 256)) and all(
-        f"zvl{n}b" not in cpuinfo for n in (512, 1024)
-    )
+    # If VLEN >= 512 is detected, the RVV kernel was not compiled.
+    if any(f"zvl{n}b" in cpuinfo for n in (512, 1024)):
+        return False
+
+    # zvl128b or zvl256b explicitly advertised -> RVV kernel available.
+    if any(f"zvl{n}b" in cpuinfo for n in (128, 256)):
+        return True
+
+    # No zvl<N>b flag at all (e.g. some hardware reports zve* without
+    # a VLEN hint).  Delegate to the C++ compile-time check instead.
+    try:
+        import torch
+
+        return torch.ops._C.cpu_attn_has_isa("rvv")
+    except Exception:
+        return False
 
 
 def _get_attn_isa(

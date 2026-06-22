@@ -11,7 +11,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
-    FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
     FusedMoEQuantConfig,
     biased_moe_quant_config,
@@ -184,11 +183,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         if not is_weight_update:
             # Setup moe kernel only on the first call. For the unquantized
-            # method, moe_quant_config is either the constant
-            # FUSED_MOE_UNQUANTIZED_CONFIG or biased_moe_quant_config(...)
-            # which references layer.w{13,2}_bias; since weight updates
-            # mutate those bias tensors in place, the kernel does not need
-            # to be re-built.
+            # method, moe_quant_config carries no quantized scales -- only
+            # optional w{13,2}_bias references and SwiGLU gate params. Since
+            # weight updates mutate those bias tensors in place, the kernel
+            # does not need to be re-built.
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             assert self.moe_quant_config is not None
             assert self.experts_cls is not None
@@ -272,13 +270,27 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+        # SwiGLU/swigluoai gate params live on the layer; plumb them into the
+        # quant config so the fused activation (e.g. swigluoai_uninterleave on
+        # MiniMax-M3) receives gemm1_clamp_limit/alpha/beta.
+        gemm1_alpha = getattr(layer, "swiglu_alpha", None)
+        gemm1_beta = getattr(layer, "swiglu_beta", None)
+        gemm1_clamp_limit = getattr(layer, "swiglu_limit", None)
+
         if self.moe.has_bias:
             return biased_moe_quant_config(
                 layer.w13_bias,
                 layer.w2_bias,
+                gemm1_alpha=gemm1_alpha,
+                gemm1_beta=gemm1_beta,
+                gemm1_clamp_limit=gemm1_clamp_limit,
             )
-        else:
-            return FUSED_MOE_UNQUANTIZED_CONFIG
+
+        return FusedMoEQuantConfig.make(
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=gemm1_clamp_limit,
+        )
 
     def apply(
         self,
