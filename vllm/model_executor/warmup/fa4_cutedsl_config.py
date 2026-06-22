@@ -75,7 +75,7 @@ class FA4MLAPrefillCompileRequest:
     """One compile-only FA4 MLA prefill request."""
 
     key: Hashable
-    compile_spec: "FlashAttentionCuTeDSLCompileSpec"
+    compile_spec: FlashAttentionCuTeDSLCompileSpec
 
     # Compile this request.
     def compile(self) -> None:
@@ -90,16 +90,6 @@ class _FA4MLAPrefillProbe:
     max_seqlen_k: int
     causal: bool
     return_lse: bool
-
-
-# Yield request keys for audits/tests.
-def iter_fa4_mla_prefill_request_keys(
-    ctx: FA4MLAPrefillCompileContext,
-) -> Iterator[Hashable]:
-    """Yield request keys for FA4 MLA prefill warmup probes."""
-
-    for request in iter_fa4_mla_prefill_compile_requests(ctx):
-        yield request.key
 
 
 # Yield deduped compile requests.
@@ -125,7 +115,7 @@ def iter_fa4_mla_prefill_compile_requests(
 # Build compile specs for this setup.
 def iter_fa4_mla_prefill_compile_specs(
     ctx: FA4MLAPrefillCompileContext,
-) -> Iterator["FlashAttentionCuTeDSLCompileSpec"]:
+) -> Iterator[FlashAttentionCuTeDSLCompileSpec]:
     """Yield compile-only FA4 MLA prefill requests for this fixed setup."""
 
     if not _supports_fa4_mla_prefill(ctx):
@@ -178,13 +168,11 @@ def _supports_fa4_mla_prefill(ctx: FA4MLAPrefillCompileContext) -> bool:
     arch_family, _ = _fa4_architecture_from_compute_capability(
         *torch.cuda.get_device_capability()
     )
-    if ctx.dtype not in FA4_STANDARD_DTYPES:
-        return False
-    if ctx.num_heads <= 0:
-        return False
-    if arch_family == "sm120" and ctx.num_splits != 1:
-        return False
-    return True
+    return (
+        ctx.dtype in FA4_STANDARD_DTYPES
+        and ctx.num_heads > 0
+        and (arch_family != "sm120" or ctx.num_splits == 1)
+    )
 
 
 # Map CUDA capability to FA4 arch names.
@@ -201,7 +189,7 @@ def _fa4_architecture_from_compute_capability(
 
 
 # Import the compile spec lazily.
-def _flash_attention_compile_spec_cls() -> type["FlashAttentionCuTeDSLCompileSpec"]:
+def _flash_attention_compile_spec_cls() -> type[FlashAttentionCuTeDSLCompileSpec]:
     from vllm.v1.attention.backends.fa_utils import (
         FlashAttentionCuTeDSLCompileSpec,
     )

@@ -8,11 +8,15 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
-from vllm.platforms import current_platform
+from vllm.model_executor.warmup.cutedsl_warmup import (
+    CuTeDSLCompileUnit,
+    register_cutedsl_warmup_provider,
+)
 from vllm.model_executor.warmup.fa4_cutedsl_config import (
     FA4MLAPrefillCompileContext,
     iter_fa4_mla_prefill_compile_requests,
 )
+from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import (
     compile_flash_attn_varlen_func_from_specs,
     get_flash_attn_version,
@@ -91,17 +95,21 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
         # Track whether we're using vllm's FA or upstream (for ROCm)
         self._is_vllm_fa = current_platform.is_cuda() or current_platform.is_xpu()
+        if self.vllm_flash_attn_version == 4:
+            register_cutedsl_warmup_provider(self)
 
-    def get_cutedsl_warmup_plan(self, runner: object) -> object | None:
-        if self.vllm_flash_attn_version != 4:
-            return None
+    def get_cutedsl_warmup_compile_units(
+        self, vllm_config: "VllmConfig"
+    ) -> tuple[CuTeDSLCompileUnit, ...]:
+        if vllm_config is not self.vllm_config or self.vllm_flash_attn_version != 4:
+            return ()
         if compile_flash_attn_varlen_func_from_specs is None:
             raise RuntimeError(
                 "FA4 compile-only API is unavailable; CuTeDSL warmup does not "
                 "fall back to synthetic forward passes."
             )
 
-        dtype = getattr(runner, "dtype", torch.bfloat16)
+        dtype = vllm_config.model_config.dtype
         if dtype not in self.supported_dtypes:
             dtype = torch.bfloat16
 
@@ -119,23 +127,15 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         )
         compile_requests = tuple(iter_fa4_mla_prefill_compile_requests(ctx))
         if not compile_requests:
-            return None
+            return ()
 
-        from vllm.model_executor.warmup.cutedsl_warmup import (
-            CuTeDSLCompileUnit,
-            CuTeDSLWarmupPlan,
-        )
-
-        return CuTeDSLWarmupPlan(
-            provider="fa4_mla_prefill",
-            compile_units=tuple(
-                CuTeDSLCompileUnit(
-                    name="fa4_mla_prefill",
-                    key=request.key,
-                    compile=request.compile,
-                )
-                for request in compile_requests
-            ),
+        return tuple(
+            CuTeDSLCompileUnit(
+                name="fa4_mla_prefill",
+                key=request.key,
+                compile=request.compile,
+            )
+            for request in compile_requests
         )
 
     def _flash_attn_varlen_diff_headdims(

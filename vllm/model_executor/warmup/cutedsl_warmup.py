@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Orchestrate CuTeDSL warmup providers."""
+"""Run registered CuTeDSL warmup compile units."""
 
 from __future__ import annotations
 
+import time
+import weakref
 from collections.abc import Callable, Hashable, Iterable
 from dataclasses import dataclass
-import time
-from itertools import chain
 from typing import TYPE_CHECKING
 
 import torch
@@ -18,22 +18,11 @@ from vllm.tracing import instrument
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
 
 CuTeDSLCompileFn = Callable[[], None]
-
-# Attributes that commonly hold backend/kernel integration objects. The
-# orchestrator does not know which are CuTeDSL-backed; objects opt in by
-# defining get_cutedsl_warmup_plan(runner).
-_CUTEDSL_PROVIDER_CHILD_ATTRS = (
-    "impl",
-    "prefill_backend",
-    "_prefill_backend",
-    "quant_method",
-    "moe_kernel",
-    "fused_experts",
-)
 
 
 @dataclass(frozen=True)
@@ -43,94 +32,54 @@ class CuTeDSLCompileUnit:
     compile: CuTeDSLCompileFn
 
 
-@dataclass(frozen=True)
-class CuTeDSLWarmupPlan:
-    """Warmup work requested by one CuTeDSL integration."""
-
-    provider: str
-    compile_units: tuple[CuTeDSLCompileUnit, ...] = ()
+_CUTEDSL_WARMUP_PROVIDERS: weakref.WeakSet[object] = weakref.WeakSet()
 
 
-# Provider discovery.
+def register_cutedsl_warmup_provider(provider: object) -> None:
+    """Register an object that can expose CuTeDSL warmup compile units."""
+    _CUTEDSL_WARMUP_PROVIDERS.add(provider)
 
 
-# Walk likely integration objects looking for warmup providers.
-def _iter_cutedsl_provider_candidates(
-    runner: "GPUModelRunner",
-) -> Iterable[object]:
-    """Yield objects that may provide CuTeDSL warmup plans."""
-    static_context = runner.vllm_config.compilation_config.static_forward_context
-    roots = chain(static_context.values(), runner.get_model().modules())
-
-    seen: set[int] = set()
-    for root in roots:
-        candidates: list[object | None] = [root]
-        index = 0
-        while index < len(candidates):
-            candidate = candidates[index]
-            index += 1
-            if candidate is None:
-                continue
-
-            candidate_id = id(candidate)
-            if candidate_id in seen:
-                continue
-
-            seen.add(candidate_id)
-            yield candidate
-
-            for attr in _CUTEDSL_PROVIDER_CHILD_ATTRS:
-                candidates.append(getattr(candidate, attr, None))
-
-
-# Plan collection and execution.
-
-
-# Ask provider objects for their warmup plans.
-def _collect_cutedsl_warmup_plans(
-    runner: "GPUModelRunner",
-) -> list[CuTeDSLWarmupPlan]:
-    plans: list[CuTeDSLWarmupPlan] = []
-    for target in _iter_cutedsl_provider_candidates(runner):
-        get_plan = getattr(target, "get_cutedsl_warmup_plan", None)
-        if get_plan is None:
+def _iter_cutedsl_warmup_compile_units(
+    worker: Worker,
+) -> Iterable[CuTeDSLCompileUnit]:
+    for provider in tuple(_CUTEDSL_WARMUP_PROVIDERS):
+        get_units = getattr(provider, "get_cutedsl_warmup_compile_units", None)
+        if get_units is None:
             continue
 
-        plan = get_plan(runner)
-        if plan is None:
+        compile_units = get_units(worker.vllm_config)
+        if compile_units is None:
             continue
-        if not isinstance(plan, CuTeDSLWarmupPlan):
-            raise TypeError(
-                "get_cutedsl_warmup_plan must return CuTeDSLWarmupPlan "
-                "or None"
-            )
-        plans.append(plan)
-    return plans
+        for unit in compile_units:
+            if not isinstance(unit, CuTeDSLCompileUnit):
+                raise TypeError(
+                    "get_cutedsl_warmup_compile_units must return "
+                    "CuTeDSLCompileUnit objects"
+                )
+            yield unit
 
 
 # Drop duplicate compile units across providers.
 def _collect_unique_compile_units(
-    plans: Iterable[CuTeDSLWarmupPlan],
+    compile_units: Iterable[CuTeDSLCompileUnit],
 ) -> list[CuTeDSLCompileUnit]:
     seen: set[Hashable] = set()
-    compile_units: list[CuTeDSLCompileUnit] = []
+    unique_compile_units: list[CuTeDSLCompileUnit] = []
 
-    for plan in plans:
-        for unit in plan.compile_units:
-            if unit.key in seen:
-                logger.debug(
-                    "Skipping duplicate CuTeDSL compile unit provider=%s "
-                    "name=%s key=%r.",
-                    plan.provider,
-                    unit.name,
-                    unit.key,
-                )
-                continue
+    for unit in compile_units:
+        if unit.key in seen:
+            logger.debug(
+                "Skipping duplicate CuTeDSL compile unit name=%s key=%r.",
+                unit.name,
+                unit.key,
+            )
+            continue
 
-            seen.add(unit.key)
-            compile_units.append(unit)
+        seen.add(unit.key)
+        unique_compile_units.append(unit)
 
-    return compile_units
+    return unique_compile_units
 
 
 # Execute compile units under inference mode.
@@ -142,36 +91,35 @@ def _compile_cutedsl_warmup_units(
         for unit in compile_units:
             unit.compile()
             compiled += 1
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        torch.accelerator.synchronize()
     return compiled
 
 
 # Run all CuTeDSL warmup before serving.
 @instrument(span_name="CuTeDSL warmup")
-def cutedsl_warmup(runner: "GPUModelRunner") -> None:
+def cutedsl_warmup(worker: Worker) -> None:
     """Run CuTeDSL compile providers before serving."""
     if not current_platform.is_cuda():
         logger.info("Skipping CuTeDSL warmup on non-CUDA platform.")
         return
 
+    runner: GPUModelRunner = worker.model_runner
     if runner.is_pooling_model:
         logger.info("Skipping CuTeDSL warmup for pooling model.")
         return
 
-    plans = _collect_cutedsl_warmup_plans(runner)
-    if not plans:
-        logger.info(
-            "Skipping CuTeDSL warmup because no providers requested warmup."
-        )
+    compile_units = _collect_unique_compile_units(
+        _iter_cutedsl_warmup_compile_units(worker)
+    )
+    if not compile_units:
+        logger.info("Skipping CuTeDSL warmup because no compile units were requested.")
         return
 
-    provider_names = list(dict.fromkeys(plan.provider for plan in plans))
-    compile_units = _collect_unique_compile_units(plans)
+    unit_names = list(dict.fromkeys(unit.name for unit in compile_units))
     logger.info(
-        "Warming up CuTeDSL providers=%s with compile_units=%d.",
-        provider_names,
+        "Warming up CuTeDSL compile_units=%d names=%s.",
         len(compile_units),
+        unit_names,
     )
 
     start_time = time.perf_counter()

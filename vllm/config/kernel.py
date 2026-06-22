@@ -168,8 +168,8 @@ class KernelConfig:
     enable_flashinfer_autotune: bool = None  # type: ignore[assignment]
     """If True, run FlashInfer autotuning during kernel warmup."""
 
-    enable_cutedsl_warmup: bool = False
-    """If True, run CuTeDSL compile warmup providers during kernel warmup."""
+    enable_cutedsl_warmup: bool = True
+    """If True, run CuTeDSL compile warmup during kernel warmup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
