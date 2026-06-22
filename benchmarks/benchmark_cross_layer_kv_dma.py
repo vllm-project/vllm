@@ -162,6 +162,13 @@ def make_cross_layer_caches(
     return gpu_caches, cpu_caches
 
 
+def unpin_cpu_caches(cpu_caches: dict[str, torch.Tensor]) -> None:
+    for tensor in cpu_caches.values():
+        err = torch.cuda.cudart().cudaHostUnregister(tensor.data_ptr())
+        if err.value != 0:
+            raise RuntimeError(f"cudaHostUnregister failed: {err}")
+
+
 def percentile(values: list[float], pct: float) -> float:
     if not values:
         return 0.0
@@ -391,6 +398,8 @@ def main() -> int:
                         )
                     )
         finally:
+            if pin_memory:
+                unpin_cpu_caches(cpu_caches)
             del gpu_caches
             del cpu_caches
             torch.cuda.empty_cache()
