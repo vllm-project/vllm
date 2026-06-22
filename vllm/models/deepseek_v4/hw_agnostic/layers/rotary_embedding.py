@@ -3,7 +3,8 @@
 import math
 
 import torch
-import torch.nn as nn
+
+from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import CustomOp
 
 
 def _rotate_neox(x: torch.Tensor) -> torch.Tensor:
@@ -64,7 +65,8 @@ def _yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     return 0.1 * mscale * math.log(scale) + 1.0
 
 
-class DeepseekV4ScalingRotaryEmbedding(nn.Module):
+@CustomOp.register("deepseek_v4_scaling_rotary_embedding")
+class DeepseekV4ScalingRotaryEmbedding(CustomOp):
     """YaRN rotary embedding — V4 variant.
 
     Differs from V3: RoPE on the LAST ``rotary_dim`` (not first), fp32
@@ -145,7 +147,7 @@ class DeepseekV4ScalingRotaryEmbedding(nn.Module):
         sin = freqs.sin() * self.mscale
         return torch.cat((cos, sin), dim=-1)
 
-    def forward(
+    def forward_native(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,

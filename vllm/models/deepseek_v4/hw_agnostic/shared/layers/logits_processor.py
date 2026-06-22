@@ -14,6 +14,7 @@ from vllm.models.deepseek_v4.hw_agnostic.shared.layers.vocab_parallel_embedding 
 from vllm.platforms import current_platform
 
 
+@PluggableLayer.register("logits_processor")
 class LogitsProcessor(PluggableLayer):
     """Process logits and apply logits processors from sampling metadata.
 

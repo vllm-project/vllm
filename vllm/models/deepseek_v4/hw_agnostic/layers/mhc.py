@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
-import torch.nn as nn
+
+from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import CustomOp
 
 
 def _mhc_pre_torch(
@@ -128,7 +129,8 @@ def _hc_head_fused_torch(
     return out.to(out_dtype).view(*outer_shape, hidden_size)
 
 
-class MHCPreOp(nn.Module):
+@CustomOp.register("mhc_pre")
+class MHCPreOp(CustomOp):
     """mHC pre block.
 
     Computes mix logits from RMS-normalized HC residual streams, then
@@ -136,7 +138,7 @@ class MHCPreOp(nn.Module):
     ``layer_input = sum_i pre_mix_i * residual_i``.
     """
 
-    def forward(
+    def forward_native(
         self,
         residual: torch.Tensor,
         fn: torch.Tensor,
@@ -164,14 +166,15 @@ class MHCPreOp(nn.Module):
         )
 
 
-class MHCPostOp(nn.Module):
+@CustomOp.register("mhc_post")
+class MHCPostOp(CustomOp):
     """mHC post block.
 
     Combines the layer output with the HC residual streams:
     ``out_j = post_layer_mix_j * x + sum_i comb_res_mix_ij * residual_i``.
     """
 
-    def forward(
+    def forward_native(
         self,
         x: torch.Tensor,
         residual: torch.Tensor,
@@ -181,7 +184,8 @@ class MHCPostOp(nn.Module):
         return _mhc_post_torch(x, residual, post_layer_mix, comb_res_mix)
 
 
-class HCHeadOp(nn.Module):
+@CustomOp.register("hc_head")
+class HCHeadOp(CustomOp):
     """HC head reduction for DeepSeek V4.
 
     Computes gates from the RMS-normalized flattened HC residual and
@@ -189,7 +193,7 @@ class HCHeadOp(nn.Module):
     streams to one.
     """
 
-    def forward(
+    def forward_native(
         self,
         hidden_states: torch.Tensor,
         hc_fn: torch.Tensor,
@@ -203,7 +207,8 @@ class HCHeadOp(nn.Module):
         )
 
 
-class MHCFusedPostPreOp(nn.Module):
+@CustomOp.register("mhc_fused_post_pre")
+class MHCFusedPostPreOp(CustomOp):
     """Fused mHC post block followed by the next mHC pre block.
 
     Equivalent to applying ``MHCPostOp`` and then ``MHCPreOp`` to the
@@ -211,7 +216,7 @@ class MHCFusedPostPreOp(nn.Module):
     ``post_mix_cur``, ``comb_mix_cur``, and ``layer_input_cur``.
     """
 
-    def forward(
+    def forward_native(
         self,
         x: torch.Tensor,
         residual: torch.Tensor,

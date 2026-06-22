@@ -4,8 +4,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import CustomOp
 
-class RMSNorm(nn.Module):
+
+@CustomOp.register("rms_norm")
+class RMSNorm(CustomOp):
     """``x -> w * x / sqrt(E[x^2] + eps)``. With ``residual``, fuses
     ``residual += x`` then RMSNorm and returns ``(normalized, residual)``."""
 
@@ -45,7 +48,7 @@ class RMSNorm(nn.Module):
             out = out * self.weight
         return out
 
-    def forward(
+    def forward_native(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
