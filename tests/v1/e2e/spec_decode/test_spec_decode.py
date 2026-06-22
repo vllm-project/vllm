@@ -751,9 +751,12 @@ def test_medusa_acceptance_rate(
     torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
-    assert acceptance_rate > 0, (
-        f"Expected nonzero acceptance rate for trained Medusa checkpoint, "
-        f"got {acceptance_rate:.4f}"
+    min_acceptance_rate = 0.198
+    print(f"Medusa acceptance rate: {acceptance_rate:.4f} (min {min_acceptance_rate})")
+
+    # Regression guard at 90% of the measured baseline.
+    assert acceptance_rate >= min_acceptance_rate, (
+        f"Medusa acceptance rate {acceptance_rate:.4f} below min {min_acceptance_rate}"
     )
 
 
