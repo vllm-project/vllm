@@ -612,6 +612,8 @@ _SPECULATIVE_DECODING_MODELS = {
     "Gemma4DSparkModel": ("gemma4_dspark", "Gemma4DSparkForCausalLM"),
     "PEagleDraftModel": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "PeagleLlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
+    "Pard2LlamaForCausalLM": ("llama_pard2", "Pard2LlamaForCausalLM"),
+    "Pard2Qwen3ForCausalLM": ("qwen3_pard2", "Pard2Qwen3ForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3MiniMaxM2ForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),

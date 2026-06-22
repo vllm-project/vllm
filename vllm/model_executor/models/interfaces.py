@@ -1358,6 +1358,22 @@ class EagleModelMixin:
             aux_hidden_states.append(value)
         return aux_hidden_states
 
+    def _maybe_normalize_final_aux_hidden_state(
+        self,
+        aux_hidden_states: list[torch.Tensor],
+        normed_hidden_states: torch.Tensor,
+        num_hidden_layers: int,
+    ) -> None:
+        """Replace the final layer's aux entry with the POST-final-norm hidden state.
+
+        The in-loop capture records the PRE-norm residual for the last layer, but
+        drafters like PARD-2's ``-1`` layer expect HF's post-norm
+        ``hidden_states[-1]``. It is the max-index (last) aux entry; only PARD-2-style
+        drafters request the final layer, so others are unaffected.
+        """
+        if aux_hidden_states and num_hidden_layers in self.aux_hidden_state_layers:
+            aux_hidden_states[-1] = normed_hidden_states
+
 
 @runtime_checkable
 class SupportsEagle(SupportsEagleBase, Protocol):
