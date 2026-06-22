@@ -11,8 +11,14 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     generate_store_output,
     to_keys,
 )
-from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
+from tests.v1.kv_connector.unit.utils import (
+    EOS_TOKEN_ID,
+    create_model_runner_output,
+)
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingWorkerMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
@@ -2559,3 +2565,107 @@ def test_request_finished_mixed_full_attn_and_sliding_window(
     # Verify fence is empty after full lifecycle (cleanup happened).
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
     assert len(runner.connector_scheduler._jobs) == 0
+
+
+def test_preempt_reload_defers_with_inflight_store(request_runner):
+    """A preempted request with in-flight stores must defer re-admission.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/46014.
+    Under async scheduling, a flushed store's completion report may not be
+    consumed before the request is re-admitted with a prefix hit. Without
+    the fix, update_state_after_alloc crashes with AssertionError because
+    transfer_jobs is still non-empty.
+    """
+    block_size = 4
+    num_gpu_blocks = 60
+
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=num_gpu_blocks,
+        async_scheduling=True,
+    )
+
+    sched = runner.scheduler
+    cs = runner.connector_scheduler
+    spec = runner.offloading_spec
+    handler = spec.handler
+    wc = runner.worker_connector
+    fbq = sched.kv_cache_manager.block_pool.free_block_queue
+    num_free_full = fbq.num_free_blocks
+
+    runner.manager.prepare_store.side_effect = lambda keys, rc: generate_store_output(
+        keys
+    )
+
+    # Override wait() so flushed stores are NOT completed — real workers
+    # don't finish flushes instantly; the default mock does, hiding the bug.
+    handler.wait = lambda job_ids: handler.flushed_jobs.__ior__(set(job_ids))
+
+    runner.new_request(token_ids=[0] * block_size * 8)
+
+    prev_so = None
+    prev_mro = None
+
+    def step(token_id=0):
+        nonlocal prev_so, prev_mro
+        if prev_mro is not None:
+            sched.update_from_output(prev_so, prev_mro)
+            prev_so = prev_mro = None
+
+        so = sched.schedule()
+        runner._update_gpu_blocks()
+        meta = so.kv_connector_metadata
+        wc.handle_preemptions(meta)
+        wc.bind_connector_metadata(meta)
+        wc.start_load_kv(runner._dummy_ctx)
+        fs, fr = wc.get_finished(so.finished_req_ids)
+        wm = wc.build_connector_worker_meta() or OffloadingWorkerMetadata()
+        wc.clear_connector_metadata()
+        mro = create_model_runner_output(
+            reqs=sched.running,
+            finished_sending=fs,
+            finished_recving=fr,
+            token_id=token_id,
+            kv_connector_worker_meta=wm,
+        )
+        prev_so, prev_mro = so, mro
+        return so
+
+    # Run enough steps to accumulate in-flight stores.
+    for _ in range(50):
+        step()
+        rs = cs._req_status.get("0")
+        if rs and rs.transfer_jobs:
+            nc = rs.req.num_computed_tokens
+            if nc >= block_size * 2 and nc % block_size == 0:
+                break
+
+    assert rs is not None and rs.transfer_jobs, "Expected in-flight store jobs"
+
+    # Force preemption: next decode needs a new block but none are free.
+    fbq.num_free_blocks = 0
+    so = step()
+    assert so.preempted_req_ids, "Request should have been preempted"
+
+    # Consume the preemption step's output.
+    sched.update_from_output(prev_so, prev_mro)
+    prev_so = prev_mro = None
+
+    # transfer_jobs should still be non-empty because wait() didn't
+    # complete the stores.
+    rs = cs._req_status.get("0")
+    assert rs is not None and rs.transfer_jobs, (
+        "Stores should still be in-flight after flush without completion"
+    )
+
+    # Re-admit: restore free blocks and set up a prefix hit.
+    fbq.num_free_blocks = num_free_full
+    sched.reset_prefix_cache()
+    cs._maximal_prefix_lookup = lambda keys, req_context: len(keys)
+
+    # This step re-admits the request. Before the fix, it crashes with
+    # AssertionError at update_state_after_alloc line
+    # "assert not req_status.transfer_jobs".
+    # After the fix, get_num_new_matched_tokens returns (None, False)
+    # deferring re-admission until the stores drain.
+    step()
