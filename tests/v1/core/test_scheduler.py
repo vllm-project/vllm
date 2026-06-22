@@ -4177,7 +4177,7 @@ def test_aborted_request_both_kv_xfers_same_step():
     request = create_requests(num_requests=1)[0]
     scheduler.add_request(request)
 
-    # Aborted request with in-flight recv+send; blocks still held.
+    # Simulate abort mid-transfer: request still tracked with in-flight recv+send.
     request.status = RequestStatus.FINISHED_ABORTED
     assert request.request_id in scheduler.requests
 
