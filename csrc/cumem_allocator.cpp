@@ -691,15 +691,14 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
     CUDA_CHECK(cuMemAddressFree(d_mem_ptr, recv_size));
     if (error_code == no_error) {
       CUdeviceptr reserved = 0;
-      CUDA_CHECK(
-          reserve_rocm_address(&reserved, recv_size, /*alignment=*/0, d_mem_ptr));
+      CUDA_CHECK(reserve_rocm_address(&reserved, recv_size, /*alignment=*/0,
+                                      d_mem_ptr));
       if (error_code == no_error && reserved != d_mem_ptr) {
         (void)cuMemAddressFree(reserved, recv_size);
         snprintf(error_msg, sizeof(error_msg),
                  "failed to re-reserve placeholder address on sleep "
                  "(requested %#llx, got %#llx)",
-                 (unsigned long long)d_mem_ptr,
-                 (unsigned long long)reserved);
+                 (unsigned long long)d_mem_ptr, (unsigned long long)reserved);
         error_code = CUresult(1);
       }
     }
