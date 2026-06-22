@@ -220,6 +220,241 @@ def _patch_make_bitmatrix_metadata() -> None:
     _bm.make_bitmatrix_metadata = _make_bitmatrix_metadata_pow2_safe
 
 
+def _patch_legacy_routing_for_nonpow2_topk() -> None:
+    """Monkey-patch the legacy (v3.5.1) triton_kernels routing path to support
+    non-power-of-2 top_k (e.g. DeepSeek-V4 top_k=6).
+
+    The bundled ``_routing_compute_indx`` does ``tl.arange(0, N_EXPTS_ACT *
+    BLOCK_M)``, which fails to compile when ``N_EXPTS_ACT`` (top_k) is not a
+    power of 2 (6 * 32 = 192). This installs a pow2-safe variant that pads the
+    ``tl.arange`` to the next power of 2, strides by the real per-block size,
+    and masks the padded tail so it neither loads the next block's gates nor
+    writes any output. For power-of-2 top_k it is identical to the original.
+
+    A matching ``sort_tokens`` is installed that threads the padded size into
+    the patched kernel. Only needed on the legacy path; the v3.6+ SparseMatrix
+    path is handled by ``_patch_make_bitmatrix_metadata``.
+    """
+    import triton
+    import triton.language as tl
+
+    # Import via the `triton_kernels` alias (set up by has_triton_kernels) so
+    # we patch the SAME module object that `make_routing_data` consumes. The
+    # `vllm.third_party.triton_kernels.routing` path is a *different* module
+    # object under the import alias, so patching it would have no effect.
+    try:
+        import triton_kernels.routing as _routing
+        from triton_kernels.routing_details import _routing_compute as _rc
+    except ImportError:
+        return
+
+    _keyed_add = _rc._keyed_add
+    _expt_data_compute = _rc._expt_data_compute
+
+    @triton.jit
+    def _routing_compute_indx_pow2(
+        pid_m,
+        GatherIndx,
+        ScatterIndx,
+        GateScal,
+        ExptScal,
+        ExptIndx,
+        PartialOffs,
+        stride_pm,
+        stride_pn,
+        TokensStart,
+        n_tokens,
+        BLOCK_M: tl.constexpr,
+        N_EXPTS_ACT: tl.constexpr,
+        BLOCK_SIZE_PADDED: tl.constexpr,
+    ):
+        if isinstance(n_tokens, tl.tensor) and n_tokens.dtype.is_ptr():
+            n_tokens = tl.load(n_tokens)
+        n_gates = n_tokens * N_EXPTS_ACT
+        BLOCK_SIZE: tl.constexpr = N_EXPTS_ACT * BLOCK_M
+        tl.static_assert(BLOCK_SIZE_PADDED <= 32768)
+        local_offs = tl.arange(0, BLOCK_SIZE_PADDED)
+        offs = pid_m * BLOCK_SIZE + local_offs
+        expert = tl.load(
+            ExptIndx + offs,
+            mask=(local_offs < BLOCK_SIZE) & (offs < n_gates),
+            other=-1,
+        ).to(tl.uint32)
+        kv_pairs = ((expert << 16) | local_offs).to(tl.uint32)
+        kv_pairs = tl.sort(kv_pairs, 0)
+        expert = kv_pairs >> 16
+        offs = pid_m * BLOCK_SIZE + (kv_pairs & 0xFFFF)
+        mask = expert != 0xFFFF
+        gate_scal = tl.load(ExptScal + offs, mask=mask)
+        x = kv_pairs & 0xFFFF0000 | 0x00000001
+        run_lengths = tl.associative_scan(x, 0, _keyed_add)
+        exclusive_run_lengths = (run_lengths - 1) & 0xFFFF
+        gates = tl.load(PartialOffs + pid_m * stride_pm + expert * stride_pn, mask=mask)
+        gates += tl.load(TokensStart + expert, mask=mask)
+        gates += exclusive_run_lengths
+        tl.store(ScatterIndx + offs, gates, mask=mask)
+        tl.store(GatherIndx + gates, offs, mask=mask)
+        tl.store(GateScal + gates, gate_scal, mask=mask)
+
+    @triton.jit
+    def _combined_routing_compute_pow2(
+        GatherIndx,
+        ScatterIndx,
+        GateScal,
+        ExptScal,
+        ExptIndx,
+        PartialOffs,
+        stride_pm,
+        stride_pn,
+        TokensStart,
+        n_tokens,
+        BLOCK_M: tl.constexpr,
+        N_EXPTS_ACT: tl.constexpr,
+        Hist,
+        MDTileStarts,
+        tile_starts_stridem,
+        MDTileInfo,
+        tile_info_stridem,
+        first_tile_dim_log2,
+        SIZES: tl.constexpr,
+        BLOCK: tl.constexpr,
+        blocks2a,
+        BLOCK_SIZE_PADDED: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+        if pid < blocks2a:
+            _expt_data_compute(
+                Hist,
+                MDTileStarts,
+                tile_starts_stridem,
+                MDTileInfo,
+                tile_info_stridem,
+                first_tile_dim_log2,
+                SIZES,
+                BLOCK,
+            )
+        else:
+            pid -= blocks2a
+            _routing_compute_indx_pow2(
+                pid,
+                GatherIndx,
+                ScatterIndx,
+                GateScal,
+                ExptScal,
+                ExptIndx,
+                PartialOffs,
+                stride_pm,
+                stride_pn,
+                TokensStart,
+                n_tokens,
+                BLOCK_M,
+                N_EXPTS_ACT,
+                BLOCK_SIZE_PADDED,
+            )
+
+    def _sort_tokens_pow2(expt_scal, expt_indx, n_expts_tot, bitmatrix):
+        import torch
+
+        HIST_BLOCK_M = 32
+        INDX_OFFS_BLOCK_M = 512
+        MEMSET_BLOCK = 1024
+        cdiv = triton.cdiv
+        device = expt_scal.device
+        dtype = expt_scal.dtype
+        n_tokens_raw, _ = bitmatrix.shape
+        n_tokens_pad, n_expts_act = expt_scal.shape
+        n_gates_pad = n_tokens_pad * n_expts_act
+        # pad per-block gate count (HIST_BLOCK_M * top_k) up to a pow2.
+        block_size_padded = triton.next_power_of_2(HIST_BLOCK_M * n_expts_act)
+
+        hist, partial_hist = bitmatrix.sum(partials_block_size=HIST_BLOCK_M)
+        hist = hist[:n_expts_tot]
+        expt_offs = torch.empty(n_expts_tot, dtype=torch.int32, device=device)
+        combined_indx = torch.empty(n_gates_pad * 2, dtype=torch.int32, device=device)
+        topk_indx = combined_indx[:n_gates_pad]
+        gate_indx = combined_indx[n_gates_pad:]
+        gate_scal = torch.empty(n_gates_pad, dtype=dtype, device=device)
+
+        (
+            token_offs_combined,
+            token_offs_raw,
+            token_offs_pad,
+            block_pid_map,
+            blocks1a,
+            blocks2a,
+            MEMSET_BLOCK_A,
+            HIST2_BLOCK_M,
+            block_m_log2_start,
+            block_m_num,
+        ) = _routing._compute_expt_data_internal(hist, n_expts_tot, n_gates_pad)
+
+        blocks1b = cdiv(n_gates_pad * 2, MEMSET_BLOCK) + n_expts_tot + 1
+        blocks2b = cdiv(n_tokens_pad, HIST_BLOCK_M)
+
+        _rc._combined_routing_memset[(blocks1a + blocks1b,)](
+            combined_indx,
+            n_gates_pad * 2,
+            -1,
+            MEMSET_BLOCK,
+            hist,
+            expt_offs,
+            hist.shape[0],
+            n_expts_tot,
+            partial_hist,
+            partial_hist.shape[0],
+            partial_hist.stride(0),
+            partial_hist.stride(1),
+            token_offs_combined,
+            token_offs_combined.stride(0),
+            blocks1a,
+            block_pid_map,
+            block_m_log2_start,
+            SIZES=block_m_num,
+            BLOCK_A=MEMSET_BLOCK_A,
+            BLOCK_N=512,
+            BLOCK_M=INDX_OFFS_BLOCK_M,
+        )
+
+        indx_offs = partial_hist
+        _combined_routing_compute_pow2[(blocks2a + blocks2b,)](
+            topk_indx,
+            gate_indx,
+            gate_scal,
+            expt_scal,
+            expt_indx,
+            indx_offs,
+            indx_offs.stride(0),
+            indx_offs.stride(1),
+            expt_offs,
+            n_tokens_raw,
+            HIST_BLOCK_M,
+            n_expts_act,
+            hist,
+            token_offs_pad,
+            token_offs_pad.stride(0),
+            block_pid_map,
+            block_pid_map.stride(0),
+            block_m_log2_start,
+            block_m_num,
+            HIST2_BLOCK_M,
+            blocks2a,
+            block_size_padded,
+        )
+        return (
+            hist,
+            topk_indx,
+            gate_indx,
+            gate_scal,
+            token_offs_raw,
+            token_offs_pad,
+            block_pid_map,
+        )
+
+    # `routing_from_bitmatrix` looks up `sort_tokens` via the routing module
+    # global, so replacing it here redirects the legacy path to the pow2 kernel.
+    _routing.sort_tokens = _sort_tokens_pow2
+
+
 # Two API generations of triton_kernels are supported:
 #   - v3.5.1 (the version bundled with vLLM): exposes `routing()` and
 #     `routing_from_bitmatrix()` in triton_kernels.routing; the `Bitmatrix`
@@ -260,6 +495,9 @@ if has_triton_kernels():
             use_legacy_triton_kernels = True
         if not use_legacy_triton_kernels:
             _patch_make_bitmatrix_metadata()
+        else:
+            # Legacy routing fails to compile for non-pow2 top_k (DeepSeek-V4).
+            _patch_legacy_routing_for_nonpow2_topk()
     except (AttributeError, ImportError) as e:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
