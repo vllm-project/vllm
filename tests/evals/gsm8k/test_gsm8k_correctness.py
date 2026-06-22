@@ -115,17 +115,12 @@ def test_gsm8k_correctness(config_filename):
     print(f"Server args: {' '.join(server_args)}")
     print(f"Environment variables: {env_dict}")
 
-    max_wait_seconds = eval_config.get("startup_max_wait_seconds", 600)
-    # To increase the timeout for ROCm platforms due to slow startup times.
-    if current_platform.is_rocm():
-        max_wait_seconds += 600
-
     # Launch server and run evaluation
     with RemoteOpenAIServer(
         eval_config["model_name"],
         server_args,
         env_dict=env_dict,
-        max_wait_seconds=max_wait_seconds,
+        max_wait_seconds=eval_config.get("startup_max_wait_seconds", 600),
     ) as remote_server:
         server_url = remote_server.url_for("v1")
         print(f"Server started at: {server_url}")
