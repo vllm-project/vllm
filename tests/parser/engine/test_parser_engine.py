@@ -1339,6 +1339,42 @@ class TestArgDeltaWithConverter:
         assert parsed == {"count": 5, "name": "test"}
         assert isinstance(parsed["count"], int)
 
+    def test_streamable_string_keys_cached_after_name_delta(self, monkeypatch):
+        tool = _make_tool(
+            "f",
+            {
+                "name": {"type": "string"},
+                "count": {"type": "integer"},
+            },
+        )
+        engine = _make_engine(_converter_config(), tools=[tool])
+
+        original = ParserEngine._streamable_string_keys
+        calls: list[dict] = []
+
+        def wrapped(properties: dict) -> set[str] | None:
+            calls.append(properties)
+            return original(properties)
+
+        monkeypatch.setattr(
+            ParserEngine,
+            "_streamable_string_keys",
+            staticmethod(wrapped),
+        )
+
+        _run_streaming_tool(
+            engine,
+            "f",
+            ["name=alice ", "count=4", "2"],
+        )
+
+        assert calls == [
+            {
+                "name": {"type": "string"},
+                "count": {"type": "integer"},
+            }
+        ]
+
 
 # ── TestSafeArgPrefix ────────────────────────────────────────────
 

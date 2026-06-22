@@ -52,6 +52,7 @@ class ToolCallSlot:
         "_args_parts",
         "_args_joined",
         "name_sent",
+        "string_keys",
         "streamed_json",
     )
 
@@ -61,6 +62,7 @@ class ToolCallSlot:
         self._args_parts: list[str] = []
         self._args_joined: str | None = ""
         self.name_sent: bool = False
+        self.string_keys: set[str] | None = None
         self.streamed_json: str = ""
 
     @property
@@ -781,6 +783,9 @@ class ParserEngine(Parser):
         slot = self._tool_slots[idx]
         slot.name = name
         slot.name_sent = True
+        slot.string_keys = self._streamable_string_keys(
+            find_tool_properties(self._tools, name)
+        )
         self._ensure_tool_id(slot, name)
         deltas.append(
             DeltaToolCall(
@@ -836,6 +841,9 @@ class ParserEngine(Parser):
             if name and self._is_valid_tool_name(name):
                 slot.name = name
                 slot.name_sent = True
+                slot.string_keys = self._streamable_string_keys(
+                    find_tool_properties(self._tools, name)
+                )
                 self._ensure_tool_id(slot, name)
                 deltas.append(
                     DeltaToolCall(
@@ -914,15 +922,11 @@ class ParserEngine(Parser):
         if not current_json:
             return None
 
-        string_keys: set[str] | None = None
         if slot.name:
-            string_keys = self._streamable_string_keys(
-                find_tool_properties(self._tools, slot.name)
-            )
             current_json = self._fix_arg_types(current_json, slot.name)
 
         prev = slot.streamed_json
-        safe_json = self._safe_arg_prefix(current_json, string_keys)
+        safe_json = self._safe_arg_prefix(current_json, slot.string_keys)
 
         if not safe_json or safe_json == prev:
             return None
