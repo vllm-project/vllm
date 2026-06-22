@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+
 from vllm.platforms import current_platform
 
 
@@ -25,6 +26,10 @@ def test_mla_common_backend_rejects_cross_layer_kv_cache():
 
 @pytest.mark.parametrize(
     "backend_path",
+    # On ROCm only Triton MLA is supported and verified for the cross-layer
+    # layout; the FlashAttn/FlashInfer backends require CUDA-only extensions and
+    # AITER MLA is not yet verified for cross-layer (keeps the identity default).
+    # See: https://github.com/vllm-project/vllm/issues/46411
     [
         "vllm.v1.attention.backends.mla.triton_mla.TritonMLABackend",
     ]
