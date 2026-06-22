@@ -497,41 +497,7 @@ class TestTieringOffloadingManager:
 
         self.secondary_tier1.on_request_finished.assert_called_once_with(ctx)
         self.secondary_tier2.on_request_finished.assert_called_once_with(ctx)
-        assert self.manager._finished_req_contexts == {}
-        assert self.manager._pending_primary_store_counts == {}
-
-    def test_on_request_finished_flushes_only_matching_pending_promotions(
-        self, manager_setup
-    ):
-        """Finishing one request does not flush another request's promotions."""
-        block_a, block_b = to_keys([90, 91])
-        ctx_a = ReqContext(req_id="req_flush_a")
-        ctx_b = ReqContext(req_id="req_flush_b")
-        self.secondary_tier1.blocks[block_a] = True
-        self.secondary_tier1.blocks[block_b] = True
-
-        original_submit_load = self.secondary_tier1.submit_load
-        submitted_req_ids: list[str] = []
-        self.secondary_tier1.submit_load = MagicMock(
-            side_effect=lambda job_metadata: (
-                submitted_req_ids.append(job_metadata.req_context.req_id),
-                original_submit_load(job_metadata),
-            )
-        )
-
-        assert self.manager.lookup(block_a, ctx_a) is None
-        assert self.manager.lookup(block_b, ctx_b) is None
-        assert set(self.manager._pending_load_submissions[self.secondary_tier1]) == {
-            ctx_a.req_id,
-            ctx_b.req_id,
-        }
-
-        self.manager.on_request_finished(ctx_a)
-
-        assert submitted_req_ids == [ctx_a.req_id]
-        assert set(self.manager._pending_load_submissions[self.secondary_tier1]) == {
-            ctx_b.req_id,
-        }
+        assert self.manager._req_state == {}
 
     def test_on_new_request_lifecycle(self, manager_setup):
         """Policy defaults to BLOCK_LEVEL, escalates when a tier requests it,
