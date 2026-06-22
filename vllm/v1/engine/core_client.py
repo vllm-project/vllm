@@ -212,6 +212,16 @@ class EngineCoreClient(ABC):
     async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
+    def get_output_nowait(self) -> EngineCoreOutputs | None:
+        """Non-blocking variant of :meth:`get_output_async`.
+
+        Returns a ready ``EngineCoreOutputs`` immediately, or ``None`` when no
+        output is currently available, without blocking on an empty queue.
+        Lets callers drain already-ready outputs in a bounded pass instead of
+        consuming at most one item per round. See vllm-project/vllm-omni#4561.
+        """
+        raise NotImplementedError
+
     async def get_supported_tasks_async(self) -> tuple[SupportedTask, ...]:
         raise NotImplementedError
 
@@ -1057,6 +1067,17 @@ class AsyncMPClient(MPClient):
         # from this (run_output_handler) task to shut down the server.
         assert self.outputs_queue is not None
         outputs = await self.outputs_queue.get()
+        if isinstance(outputs, Exception):
+            raise self._format_exception(outputs) from None
+        return outputs
+
+    def get_output_nowait(self) -> EngineCoreOutputs | None:
+        self._ensure_output_queue_task()
+        assert self.outputs_queue is not None
+        try:
+            outputs = self.outputs_queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None
         return outputs
