@@ -43,12 +43,7 @@ if TYPE_CHECKING:
 
 
 class DeepseekV4FP8Config(Fp8Config):
-    """DSv4 FP8 config with expert-dtype-aware MoE dispatch.
-
-    Linear / attention layers are always FP8 block quant. ``expert_dtype``
-    is ``"fp4"`` (MXFP4 experts, ue8m0 FP8 linear scales) or ``"fp8"``
-    (FP8 block experts, float32 FP8 linear scales).
-    """
+    """DSv4 FP8 config with expert-dtype-aware MoE dispatch."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)

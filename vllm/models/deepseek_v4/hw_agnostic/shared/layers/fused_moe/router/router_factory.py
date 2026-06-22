@@ -106,14 +106,12 @@ def create_fused_moe_router(
 
     if zero_expert_type is not None:
         raise NotImplementedError(
-            "ZeroExpertRouter is not supported on the DSv4 hw-agnostic "
-            "FusedMoE path."
+            "ZeroExpertRouter is not supported on the DSv4 hw-agnostic FusedMoE path."
         )
 
     if use_grouped_topk:
         raise NotImplementedError(
-            "GroupedTopKRouter is not supported on the DSv4 hw-agnostic "
-            "FusedMoE path."
+            "GroupedTopKRouter is not supported on the DSv4 hw-agnostic FusedMoE path."
         )
 
     if custom_routing_function is not None:

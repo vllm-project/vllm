@@ -24,4 +24,3 @@ class DSv4OOTPlatform(NvmlCudaPlatform):
 
         if vllm_config.kernel_config.moe_backend == "auto":
             vllm_config.kernel_config.moe_backend = "triton"
-

@@ -4,7 +4,9 @@ import torch
 
 import vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_ep_group
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+)
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,

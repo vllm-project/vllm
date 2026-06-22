@@ -136,10 +136,7 @@ class CustomOp(nn.Module):
         return self._forward_method(*args, **kwargs)
 
     def forward_native(self, *args, **kwargs):
-        """PyTorch-native implementation of the forward method.
-        This is the in-tree implementation used on every platform; OOT
-        plugins override it via :meth:`forward_oot`.
-        """
+        """PyTorch-native implementation; OOT plugins override via :meth:`forward_oot`."""
         raise NotImplementedError
 
     def forward_oot(self, *args, **kwargs):

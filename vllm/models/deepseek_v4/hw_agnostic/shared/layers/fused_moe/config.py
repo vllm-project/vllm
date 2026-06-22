@@ -11,10 +11,13 @@ from vllm.config import ParallelConfig, SchedulerConfig
 from vllm.config.kernel import MoEBackend
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.activation import MoEActivation
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.activation import (
+    MoEActivation,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import cdiv
+
 
 class _GroupShape(namedtuple("_GroupShape", ["row", "col"])):
     pass

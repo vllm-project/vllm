@@ -13,9 +13,9 @@ from vllm.platforms import PlatformEnum, current_platform
 from .base import MMLinearKernel, MMLinearLayerConfig
 from .scaled_mm import (
     ChannelWiseTorchFP8ScaledMMLinearKernel,
+    Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
-    Fp8BlockScaledMMLinearKernel,
     ScaledMMLinearKernel,
     TritonFp8BlockScaledMMKernel,
 )
@@ -143,11 +143,7 @@ def init_fp8_linear_kernel(
     weight_shape: tuple[int, int],
     module_name: str | None = None,
 ) -> Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel:
-    """Select an FP8 block-scaled linear kernel.
-
-    DSv4 hw-agnostic only exercises block-scaled FP8 (`weight_block_size=[128, 128]`).
-    The non-block (per-tensor / per-token) path is not vendored.
-    """
+    """Select an FP8 block-scaled linear kernel."""
     if not activation_quant_key.scale.group_shape.is_per_group():
         raise NotImplementedError(
             "DSv4 hw-agnostic only supports block-scaled FP8 (per-group "

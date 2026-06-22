@@ -344,13 +344,7 @@ def build_c128a_topk_metadata(
     prefill_buffer: torch.Tensor,
     max_compressed_tokens: int = 8192,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Single kernel for all C128A tokens (decode + prefill).
-
-    Decode tokens: position → block_table lookup → global slot ids + topk_lens.
-    Prefill tokens: position → local indices [0, ..., n-1, -1, ...].
-
-    Writes into pre-allocated buffers for CUDA graph address stability.
-    """
+    """Build C128A topk metadata for both decode and prefill tokens."""
     num_tokens = positions.shape[0]
     num_prefill_tokens = num_tokens - num_decode_tokens
 

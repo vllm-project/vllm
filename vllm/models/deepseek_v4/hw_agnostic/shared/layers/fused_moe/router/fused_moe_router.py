@@ -6,7 +6,9 @@ from collections.abc import Callable
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import RoutingMethodType
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
+    RoutingMethodType,
+)
 
 
 class FusedMoERouter(ABC):

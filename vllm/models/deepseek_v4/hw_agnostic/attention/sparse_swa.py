@@ -166,17 +166,7 @@ class DeepseekSparseSWAMetadata:
 
 
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
-    """Builds metadata for DeepseekV4 SWA cache.
-
-    Similar to the indexer, this handles mixed batches by:
-    1. Using split_decodes_and_prefills() to determine the boundary
-    2. Building separate metadata for decode and prefill portions
-
-    Supports:
-    - Mixed decode/prefill batches
-    - MTP (Multi-Token Prediction) where decode has query_len > 1
-    - Chunked prefill (aligns with the indexer's chunking)
-    """
+    """Builds metadata for DeepseekV4 SWA cache."""
 
     # Base threshold: query_len <= 1 is decode
     reorder_batch_threshold: int = 1

@@ -306,7 +306,7 @@ def test_regex():
             False,
         ),
         # FP8 MoE oracle and supporting modules — carved out for the
-        # vendored ``Fp8MoEMethod`` (in ``hw_agnostic/quantization/fp8_quant.py``).
+        # vendored ``Fp8MoEMethod``.
         (
             "from vllm.model_executor.layers.quantization.kv_cache import "
             "BaseKVCacheMethod",

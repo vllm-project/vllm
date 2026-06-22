@@ -1,17 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""DSv4 hw-agnostic FP8 config / MoE method / KV-cache method.
-
-Trimmed from upstream ``vllm.model_executor.layers.quantization.fp8``.
-The upstream module imports ``vllm.model_executor.kernels.linear`` at the top
-level (used only by upstream ``Fp8LinearMethod``); loading any of its
-classes therefore drags the full kernel registry into ``sys.modules``,
-including the CUDA-binary FlashInfer / DeepGEMM / CUTLASS / Marlin kernels.
-This vendored copy carries only the MoE / KV-cache classes that DSv4
-hw-agnostic actually uses, with no top-level dependency on
-``model_executor.kernels``.
-"""
+"""DSv4 hw-agnostic FP8 config / MoE method / KV-cache method."""
 
 from __future__ import annotations
 
@@ -21,7 +11,6 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
-from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
@@ -76,13 +65,7 @@ logger = init_logger(__name__)
 
 
 class Fp8Config(QuantizationConfig):
-    """FP8 quantization config (hw-agnostic vendored copy).
-
-    Returns the local hw-agnostic ``Fp8LinearMethod`` for linear layers,
-    the upstream-compatible ``Fp8MoEMethod`` for routed experts, and
-    ``Fp8KVCacheMethod`` for attention layers — none of which transitively
-    load ``vllm.model_executor.kernels``.
-    """
+    """FP8 quantization config."""
 
     def __init__(
         self,
@@ -137,12 +120,12 @@ class Fp8Config(QuantizationConfig):
     def get_config_filenames(cls) -> list[str]:
         return []
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper):
         if self.ignored_layers is not None:
             self.ignored_layers = hf_to_vllm_mapper.apply_list(self.ignored_layers)
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "Fp8Config":
+    def from_config(cls, config: dict[str, Any]) -> Fp8Config:
         quant_method = cls.get_from_keys(config, ["quant_method"])
         is_checkpoint_fp8_serialized = "fp8" in quant_method
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
@@ -161,12 +144,10 @@ class Fp8Config(QuantizationConfig):
             store_dtype=store_dtype,
         )
 
-    # Layer-to-quant-method dispatch is implemented by ``DeepseekV4FP8Config``
-    # in ``quant_config.py``. This base class only carries config parsing.
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
-    """FP8 MoE method (hw-agnostic vendored copy).
+    """FP8 MoE method.
 
     Supports loading FP8 checkpoints with static weight scale and
     dynamic/static activation scale.

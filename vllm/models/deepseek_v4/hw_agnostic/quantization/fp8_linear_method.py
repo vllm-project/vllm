@@ -41,15 +41,7 @@ if TYPE_CHECKING:
 
 
 class Fp8LinearMethod(LinearMethodBase):
-    """FP8 linear method for the DSv4 hw-agnostic path.
-
-    Trimmed from upstream ``vllm.model_executor.layers.quantization.fp8.Fp8LinearMethod``.
-    The hw-agnostic path only exercises block-scaled FP8 (``weight_block_size``
-    is always set on DSv4), so the per-tensor / per-token branches are kept
-    only as far as is needed for parameter creation; the Marlin / CUTLASS
-    isinstance fast paths are dropped because the trimmed kernel selector
-    cannot return those classes.
-    """
+    """Block-scaled FP8 linear method for the DSv4 hw-agnostic path."""
 
     def __init__(self, quant_config: "DeepseekV4FP8Config"):
         self.quant_config = quant_config
@@ -213,8 +205,7 @@ class Fp8LinearMethod(LinearMethodBase):
             if weight_scale.numel() == 1:
                 weight_bf16 = weight_fp8 * weight_scale
             elif (
-                weight_scale.dim() == 1
-                and weight_scale.shape[0] == weight_fp8.shape[0]
+                weight_scale.dim() == 1 and weight_scale.shape[0] == weight_fp8.shape[0]
             ):
                 weight_bf16 = weight_fp8 * weight_scale.unsqueeze(1)
             else:
