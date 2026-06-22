@@ -1212,9 +1212,9 @@ class MLACommonBackend(AttentionBackend):
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         if include_num_layers_dimension:
-            # MLA kernels require contiguous per-layer KV cache views.
-            # Identity permutation keeps num_layers first in physical
-            # layout, signaling cross-layer allocation is unsupported.
+            # Default to identity permutation to signal cross-layer allocation
+            # is unsupported. Each MLA backend must opt in to support cross-layer
+            # allocation by overriding this method.
             return (0, 1, 2, 3)
         return (0, 1, 2)
 
@@ -1684,12 +1684,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 #  [[0, 0, 0, 0], [256, 256, 256, 256], [512, 512, 512, 512]]
                 # Note(simon): this is done in CPU because of downstream's
                 # of `to_list`.
-                chunk_starts = (
+                chunk_starts = torch.empty(
+                    num_chunks, num_prefills, dtype=torch.int32, pin_memory=True
+                ).copy_(
                     torch.arange(num_chunks, dtype=torch.int32)
+                    .multiply_(max_context_chunk)
                     .unsqueeze(1)
-                    .expand(-1, num_prefills)
-                    * max_context_chunk
-                ).pin_memory()
+                )
                 chunk_ends = torch.min(
                     context_lens_cpu.unsqueeze(0), chunk_starts + max_context_chunk
                 )
@@ -1746,12 +1747,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         )
                         * self.dcp_local_block_size
                     )
-                    local_chunk_starts = (
+                    local_chunk_starts = torch.empty(
+                        num_chunks, num_prefills, dtype=torch.int32, pin_memory=True
+                    ).copy_(
                         torch.arange(num_chunks, dtype=torch.int32)
+                        .multiply_(padded_local_max_context_chunk_across_ranks)
                         .unsqueeze(1)
-                        .expand(-1, num_prefills)
-                        * padded_local_max_context_chunk_across_ranks
-                    ).pin_memory()
+                    )
                     local_chunk_ends = torch.min(
                         padded_local_context_lens_cpu.unsqueeze(0),
                         local_chunk_starts
