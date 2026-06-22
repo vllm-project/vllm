@@ -70,13 +70,12 @@ class Sm100ChunkUWKernel:
 
         # we need to convert gmem layout to (T, H, (64, D/64)) for make_tiled_tma_atom()
         # to emit a single 4D TMA. otherwise, it will emit (D/64)x 3D TMA.
-        atom, tma_tensor = cpasync.make_tiled_tma_atom(
+        return cpasync.make_tiled_tma_atom(
             op,
             cute.logical_divide(tensor, (None, None, 64)),
             slayout,
             cta_tiler=(self.BT, 1, dim),
         )
-        return atom, tma_tensor, slayout
 
     @cute.jit
     def __call__(
@@ -97,18 +96,18 @@ class Sm100ChunkUWKernel:
         tma_g2s = cpasync.CopyBulkTensorTileG2SOp()
         tma_s2g = cpasync.CopyBulkTensorTileS2GOp()
 
-        K_args = self._make_tma_args(K, self.K_dim, self.num_stages, tma_g2s)
-        V_args = self._make_tma_args(V, self.V_dim, self.num_stages, tma_g2s)
-        U_args = self._make_tma_args(U, self.V_dim, 1, tma_s2g)
-        W_args = self._make_tma_args(W, self.K_dim, 1, tma_s2g)
+        K_tma = self._make_tma_args(K, self.K_dim, self.num_stages, tma_g2s)
+        V_tma = self._make_tma_args(V, self.V_dim, self.num_stages, tma_g2s)
+        U_tma = self._make_tma_args(U, self.V_dim, 1, tma_s2g)
+        W_tma = self._make_tma_args(W, self.K_dim, 1, tma_s2g)
 
         grid = (num_sms // self.Hv, self.Hv, 1)
         block = (self.num_warps * 32, 1, 1)
         self.kernel(
-            K_args,
-            V_args,
-            U_args,
-            W_args,
+            K_tma,
+            V_tma,
+            U_tma,
+            W_tma,
             g,
             beta,
             g_cu,
@@ -120,10 +119,10 @@ class Sm100ChunkUWKernel:
     @cute.kernel
     def kernel(
         self,
-        K_args: tuple[cute.CopyAtom, cute.Tensor, cute.ComposedLayout],
-        V_args: tuple[cute.CopyAtom, cute.Tensor, cute.ComposedLayout],
-        U_args: tuple[cute.CopyAtom, cute.Tensor, cute.ComposedLayout],
-        W_args: tuple[cute.CopyAtom, cute.Tensor, cute.ComposedLayout],
+        K_tma: cpasync.TmaInfo,
+        V_tma: cpasync.TmaInfo,
+        U_tma: cpasync.TmaInfo,
+        W_tma: cpasync.TmaInfo,
         g: cute.Tensor,
         beta: cute.Tensor,
         g_cu: cute.Tensor,
@@ -149,21 +148,16 @@ class Sm100ChunkUWKernel:
         SCAN_BAR = 3
         TMEM_ALLOC_BAR = 4
 
-        K_tma_atom, tmaK, sK_layout = K_args
-        V_tma_atom, tmaV, sV_layout = V_args
-        U_tma_atom, tmaU, sU_layout = U_args
-        W_tma_atom, tmaW, sW_layout = W_args
-
         def allocate_tensor(smem, dtype, layout):
             return smem.allocate_tensor(
                 dtype, layout.outer, byte_alignment=128, swizzle=layout.inner
             )
 
         smem = cutlass.utils.SmemAllocator()
-        sK = allocate_tensor(smem, BFloat16, sK_layout)[None, 0, None, None]
-        sV = allocate_tensor(smem, BFloat16, sV_layout)[None, 0, None, None]
-        sU = allocate_tensor(smem, BFloat16, sU_layout)[None, 0, None, 0]
-        sW = allocate_tensor(smem, BFloat16, sW_layout)[None, 0, None, 0]
+        sK = allocate_tensor(smem, BFloat16, K_tma.smem_layout)[None, 0, None, None]
+        sV = allocate_tensor(smem, BFloat16, V_tma.smem_layout)[None, 0, None, None]
+        sU = allocate_tensor(smem, BFloat16, U_tma.smem_layout)[None, 0, None, 0]
+        sW = allocate_tensor(smem, BFloat16, W_tma.smem_layout)[None, 0, None, 0]
 
         sA_ptr = smem.allocate_array(BFloat16, BT * BT, byte_alignment=16)
         sAi_ptr = smem.allocate_array(BFloat16, BT * BT, byte_alignment=16)
@@ -206,10 +200,10 @@ class Sm100ChunkUWKernel:
                     cute.arch.mbarrier_init(epi_mbar + i, 128)
                 cute.arch.mbarrier_init_fence()
         elif warp_id == 1:
-            cpasync.prefetch_descriptor(K_tma_atom)
-            cpasync.prefetch_descriptor(V_tma_atom)
-            cpasync.prefetch_descriptor(U_tma_atom)
-            cpasync.prefetch_descriptor(W_tma_atom)
+            cpasync.prefetch_descriptor(K_tma.atom)
+            cpasync.prefetch_descriptor(V_tma.atom)
+            cpasync.prefetch_descriptor(U_tma.atom)
+            cpasync.prefetch_descriptor(W_tma.atom)
         cute.arch.sync_threads()
 
         num_global_chunks = total_chunks[0]
@@ -227,12 +221,14 @@ class Sm100ChunkUWKernel:
                 # domain_offset() to shift the pointer first.
                 mbar = tma_mbar + stage_id
                 gK = cute.local_tile(
-                    cute.domain_offset((bos, 0), tmaK[None, k_head_id, None]),
+                    cute.domain_offset(
+                        (bos, 0), K_tma.tma_tensor[None, k_head_id, None]
+                    ),
                     tiler=(BT, K_dim),
                     coord=(chunk_id, 0),
                 )
                 gV = cute.local_tile(
-                    cute.domain_offset((bos, 0), tmaV[None, head_id, None]),
+                    cute.domain_offset((bos, 0), V_tma.tma_tensor[None, head_id, None]),
                     tiler=(BT, V_dim),
                     coord=(chunk_id, 0),
                 )
@@ -243,9 +239,9 @@ class Sm100ChunkUWKernel:
                 with cute.arch.elect_one():
                     STAGE_SIZE = BT * (K_dim + V_dim) * 2
                     cute.arch.mbarrier_arrive_and_expect_tx(mbar, STAGE_SIZE)
-                simple_tma_copy(K_tma_atom, gK, sK[None, None, stage_id], mbar)
+                simple_tma_copy(K_tma.atom, gK, sK[None, None, stage_id], mbar)
                 simple_tma_copy(
-                    V_tma_atom, gV, sV[None, None, stage_id], mbar, EVICT_FIRST
+                    V_tma.atom, gV, sV[None, None, stage_id], mbar, EVICT_FIRST
                 )
 
                 stage_id = (stage_id + 1) % num_stages
@@ -758,8 +754,12 @@ class Sm100ChunkUWKernel:
             parity = 0
 
             # ((BT, num_global_chunks), V_dim)
-            gU_tiles = cute.logical_divide(tmaU[None, head_id, None], (BT, None))
-            gW_tiles = cute.logical_divide(tmaW[None, head_id, None], (BT, None))
+            gU_tiles = cute.logical_divide(
+                U_tma.tma_tensor[None, head_id, None], (BT, None)
+            )
+            gW_tiles = cute.logical_divide(
+                W_tma.tma_tensor[None, head_id, None], (BT, None)
+            )
 
             # sW shape: [BT, (64, K_dim/64)]
             # sW_view shape: [(8, 2), (4, K_dim/64)]
@@ -802,7 +802,7 @@ class Sm100ChunkUWKernel:
                 elif warp_id == 1:
                     # don't need to commit
                     simple_tma_copy(
-                        W_tma_atom, sW, gW_tiles[(None, global_chunk_id), None]
+                        W_tma.atom, sW, gW_tiles[(None, global_chunk_id), None]
                     )
                 cute.arch.barrier(barrier_id=EPI_BAR, number_of_threads=128)
                 _tcgen05.fence_after_thread_sync()
@@ -819,7 +819,7 @@ class Sm100ChunkUWKernel:
                 fence_before_tma_store()
                 if warp_id == 1:
                     simple_tma_copy(
-                        U_tma_atom, sU, gU_tiles[(None, global_chunk_id), None]
+                        U_tma.atom, sU, gU_tiles[(None, global_chunk_id), None]
                     )
                     with cute.arch.elect_one():
                         cute.arch.cp_async_bulk_commit_group()
