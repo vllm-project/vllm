@@ -49,7 +49,7 @@ class Sm100ChunkUWKernel:
 
         # hard-code
         self.BT = 64
-        self.num_warps = 2 + 4 + 4
+        self.num_warps = 4 + 4 + 4
 
     @cute.jit
     def _make_tma_args(
@@ -148,8 +148,6 @@ class Sm100ChunkUWKernel:
         EPI_BAR = 2
         SCAN_BAR = 3
         TMEM_ALLOC_BAR = 4
-        OFF1_BAR = 5
-        OFF2_BAR = 6
 
         K_tma_atom, tmaK, sK_layout = K_args
         V_tma_atom, tmaV, sV_layout = V_args
@@ -171,10 +169,11 @@ class Sm100ChunkUWKernel:
         sAi_ptr = smem.allocate_array(BFloat16, BT * BT, byte_alignment=16)
 
         s_beta = smem.allocate_tensor(Float32, cute.make_layout((BT, num_stages)))
-        s_g_cu = smem.allocate_tensor(Float32, BT)
+        s_g_cu = smem.allocate_tensor(Float32, cute.make_layout((BT, num_stages)))
         s_beta_g = smem.allocate_tensor(Float32, cute.make_layout((BT, num_stages)))
 
         tma_mbar = smem.allocate_array(Int64, num_stages)
+        prep_mbar = smem.allocate_array(Int64, num_stages)
         mma_kkt_mbar = smem.allocate_array(Int64, num_stages)
         inv_mbar = smem.allocate_array(Int64, num_stages)
         mma_u_mbar = smem.allocate_array(Int64, num_stages)
@@ -199,6 +198,7 @@ class Sm100ChunkUWKernel:
             with cute.arch.elect_one():
                 for i in cutlass.range_constexpr(num_stages):
                     cute.arch.mbarrier_init(tma_mbar + i, 1)
+                    cute.arch.mbarrier_init(prep_mbar + i, 64)
                     cute.arch.mbarrier_init(mma_kkt_mbar + i, 1)
                     cute.arch.mbarrier_init(inv_mbar + i, 128)
                     cute.arch.mbarrier_init(mma_u_mbar + i, 1)
@@ -213,7 +213,7 @@ class Sm100ChunkUWKernel:
         cute.arch.sync_threads()
 
         num_global_chunks = total_chunks[0]
-        if warp_id == 9:
+        if warp_id == 11:
             # TMA warp
             stage_id = 0
             parity = 1
@@ -252,7 +252,7 @@ class Sm100ChunkUWKernel:
                 if stage_id == 0:
                     parity ^= 1
 
-        elif warp_id == 8:
+        elif warp_id == 10:
             # MMA warp
             _tcgen05.alloc(taddr)
             cute.arch.barrier(barrier_id=TMEM_ALLOC_BAR, number_of_threads=160)
@@ -316,6 +316,60 @@ class Sm100ChunkUWKernel:
 
             cute.arch.mbarrier_wait(epi_mbar + stage_id, parity ^ 1)
             _tcgen05.dealloc()
+
+        elif warp_id >= 8:
+            # dedicated prep warps for beta and gate, consumed by INV warps
+            stage_id = 0
+            parity = 0
+            tid_ = tid % 128
+            warp_id_ = warp_id % 4
+
+            for global_chunk_id in range(bid, num_global_chunks, grid_x):
+                seq_id = chunk_indices[global_chunk_id, 0]
+                chunk_id = chunk_indices[global_chunk_id, 1]
+                bos = cu_seqlens[seq_id]
+                eos = cu_seqlens[seq_id + 1]
+                off_t = bos + chunk_id * BT
+                t = off_t + tid_
+
+                in_bounds = t < eos
+                beta_val = beta[t, head_id] if in_bounds else Float32(0.0)
+                g_val = g[t, head_id] if in_bounds else Float32(0.0)
+
+                # warp-local prefix scan
+                for i in cutlass.range_constexpr(5):
+                    offset = cutlass.const_expr(1 << i)
+                    lower = cute.arch.shuffle_sync_up(g_val, offset, mask_and_clamp=0)
+                    if lane_id >= offset:
+                        g_val += lower
+
+                # Delay the stage-reuse wait until just before touching smem:
+                # global loads and the warp-local scan do not use staged buffers.
+                if warp_id_ == 0:
+                    cute.arch.mbarrier_wait(inv_mbar + stage_id, parity ^ 1)
+                cute.arch.barrier(barrier_id=SCAN_BAR, number_of_threads=BT)
+
+                # Store beta and the per-warp scan totals for the cross-warp fixup.
+                s_beta[tid_, stage_id] = beta_val
+                if lane_id == 31:
+                    s_g_cu[warp_id_, stage_id] = g_val
+                cute.arch.barrier(barrier_id=SCAN_BAR, number_of_threads=BT)
+
+                # Add the sum from the lower prep warp.
+                if warp_id_ == 1:
+                    g_val += s_g_cu[0, stage_id]
+                cute.arch.barrier(barrier_id=SCAN_BAR, number_of_threads=BT)
+
+                if in_bounds:
+                    g_cu[t, head_id] = g_val
+
+                s_g_cu[tid_, stage_id] = g_val
+                s_beta_g[tid_, stage_id] = beta_val * cute.math.exp(g_val)
+                cute.arch.mbarrier_arrive(prep_mbar + stage_id)
+
+                stage_id = (stage_id + 1) % num_stages
+                if stage_id == 0:
+                    parity ^= 1
 
         elif warp_id >= 4:
             # inv warps
@@ -402,53 +456,14 @@ class Sm100ChunkUWKernel:
                 eos = cu_seqlens[seq_id + 1]
                 off_t = bos + chunk_id * BT
 
-                t = off_t + tid_
-
-                ##### Phase 1: load g and beta #####
-                # we need to multi-buffer s_beta and s_beta_g_cu
-                # because other warps may still be using it for producing
-                # Ab/Abg in the previous iteration.
-                if tid_ < BT:
-                    in_bounds = t < eos
-                    beta_val = beta[t, head_id] if in_bounds else Float32(0.0)
-                    g_val = g[t, head_id] if in_bounds else Float32(0.0)
-                    s_beta[tid_, stage_id] = beta_val
-
-                    # compute cumsum(g)
-                    # parallel scan within a warp
-                    for i in cutlass.range_constexpr(5):
-                        offset = cutlass.const_expr(1 << i)
-                        lower = cute.arch.shuffle_sync_up(
-                            g_val, offset, mask_and_clamp=0
-                        )
-                        if lane_id >= offset:
-                            g_val += lower
-
-                    # store warp sum
-                    if lane_id == 31:
-                        s_g_cu[warp_id_] = g_val
-                    cute.arch.barrier(barrier_id=SCAN_BAR, number_of_threads=BT)
-
-                    # add warp sum from lower warps
-                    for i in cutlass.range_constexpr(1, BT // 32):
-                        if warp_id_ >= i:
-                            g_val += s_g_cu[i - 1]
-                    cute.arch.barrier(barrier_id=SCAN_BAR, number_of_threads=BT)
-
-                    # store g_cu to gmem for H and O kernels
-                    if in_bounds:
-                        g_cu[t, head_id] = g_val
-
-                    # store g and beta*g_cu to smem for later
-                    s_g_cu[tid_] = g_val
-                    s_beta_g[tid_, stage_id] = beta_val * cute.math.exp(g_val)
-
-                ##### Phase 2: A = strictLower(beta * kkt * Gamma) #####
+                ##### Phase 1: A = strictLower(beta * kkt * Gamma) #####
                 # Ab/Abg share one tmem slot across stages. The MMA warp commits
                 # tcgen05 groups in program order: KKT_i, W_i, U_i, KKT_{i+1}.
                 # Waiting for KKT_i means the previous W/U commits have completed,
                 # so the INV warps can safely overwrite Ab/Abg for this iteration.
+                # Wait for prep warps to publish beta/gate and for KKT MMA.
                 if warp_id_ == 0:
+                    cute.arch.mbarrier_wait(prep_mbar + stage_id, parity)
                     cute.arch.mbarrier_wait(mma_kkt_mbar + stage_id, parity)
                 cute.arch.barrier(barrier_id=INV_BAR, number_of_threads=128)
                 _tcgen05.fence_after_thread_sync()
@@ -459,7 +474,7 @@ class Sm100ChunkUWKernel:
                 for i in cutlass.range_constexpr(2):
                     idx = warp_id_ * 16 + i * 8 + (lane_id // 4)
                     beta_row[i] = s_beta[idx, stage_id]
-                    g_cu_row[i] = s_g_cu[idx]
+                    g_cu_row[i] = s_g_cu[idx, stage_id]
 
                 # mode0 is 8 rows together
                 # mode1 is top and bottom 8 rows
@@ -480,7 +495,9 @@ class Sm100ChunkUWKernel:
                     # mode2 is top and bottom 8 rows
                     # mode3 is next 16 columns
                     col_coord = (None, lane_id % 4, None, i)
-                    s_g_cu_view = cute.make_tensor(s_g_cu.iterator, (2, 4, 2, BT // 16))
+                    s_g_cu_view = cute.make_tensor(
+                        s_g_cu[None, stage_id].iterator, (2, 4, 2, BT // 16)
+                    )
                     g_cu_col = s_g_cu_view[col_coord].load().reshape((2, 1, 2))
 
                     Gamma = cute.math.exp(g_cu_row - g_cu_col, fastmath=True)
@@ -510,7 +527,7 @@ class Sm100ChunkUWKernel:
                 # each warp reads its own private smem memory.
                 cute.arch.sync_warp()
 
-                ##### Phase 3: matrix inverse #####
+                ##### Phase 2: matrix inverse #####
                 # we use Newton-Schulz iterations to compute the inverse
                 # of the four 16x16 diagonal blocks.
                 #   Ai_new = 2 Ai - Ai @ M @ Ai
@@ -632,7 +649,7 @@ class Sm100ChunkUWKernel:
                         Ai_bf16,
                         sAi_ldsm[None, (warp_id_, warp_id_ - 1)],
                     )
-                    cute.arch.barrier(barrier_id=OFF1_BAR, number_of_threads=3 * 32)
+                cute.arch.barrier(barrier_id=INV_BAR, number_of_threads=128)
 
                 # off-diagonal by 2
                 # warp2: Ai20 = -Ai22 @ (A20 @ Ai00 + A21 @ Ai10)
@@ -689,7 +706,7 @@ class Sm100ChunkUWKernel:
                         tile_col,
                         Ab_tmem_base,
                     )
-                    cute.arch.barrier(barrier_id=OFF2_BAR, number_of_threads=2 * 32)
+                cute.arch.barrier(barrier_id=INV_BAR, number_of_threads=128)
 
                 # off-diagonal by 3
                 # warp3: Ai30 = -Ai33 @ (A30 @ Ai00 + A31 @ Ai10 + A32 @ Ai20)
@@ -735,7 +752,7 @@ class Sm100ChunkUWKernel:
                 if stage_id == 0:
                     parity ^= 1
 
-        elif warp_id < 4:
+        else:
             # epi warps
             stage_id = 0
             parity = 0
