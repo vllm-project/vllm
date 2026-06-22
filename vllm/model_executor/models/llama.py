@@ -435,6 +435,11 @@ class LlamaModel(nn.Module, EagleModelMixin):
         hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:
+            # PARD-2's `-1` layer needs the post-final-norm value; see
+            # EagleModelMixin._maybe_normalize_final_aux_hidden_state.
+            self._maybe_normalize_final_aux_hidden_state(
+                aux_hidden_states, hidden_states, self.config.num_hidden_layers
+            )
             return hidden_states, aux_hidden_states
         return hidden_states
 
