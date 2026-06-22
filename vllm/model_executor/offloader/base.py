@@ -19,17 +19,57 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Tracks deprecated offload env vars we have already warned about, so the
+# deprecation warning is emitted at most once per process.
+_warned_deprecated_offload_envs: set[str] = set()
+
+
+def resolve_offload_flag(config_value: bool | None, env_name: str) -> bool:
+    """Resolve a weight-offloading boolean from config, with env-var fallback.
+
+    The config value takes precedence. When it is ``None`` (unset), fall back to
+    the deprecated environment variable, warning once if the user enabled it.
+
+    Args:
+        config_value: The value from ``OffloadConfig`` (``None`` if unset).
+        env_name: Name of the deprecated env var to fall back to.
+
+    Returns:
+        The resolved boolean flag.
+    """
+    if config_value is not None:
+        return config_value
+    env_value = bool(getattr(envs, env_name))
+    if env_value and env_name not in _warned_deprecated_offload_envs:
+        _warned_deprecated_offload_envs.add(env_name)
+        logger.warning(
+            "%s is deprecated and will be removed in a future release. Use the "
+            "offload config (e.g. `--offload-config`) instead.",
+            env_name,
+        )
+    return env_value
+
 
 def should_pin_memory() -> bool:
     """Check if pinned memory should be used for weight offloading.
 
-    Combines the platform capability check with the user override env var.
-    On unified-memory systems (e.g. GH200) pinned memory eats into GPU
-    memory, so users can disable it via VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY.
+    Combines the platform capability check with the user override from
+    ``OffloadConfig.disable_pin_memory`` (falling back to the deprecated
+    ``VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY`` env var). On unified-memory
+    systems (e.g. GH200) pinned memory eats into GPU memory.
     """
-    return (
-        is_pin_memory_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    config_value = (
+        vllm_config.offload_config.disable_pin_memory
+        if vllm_config is not None
+        else None
     )
+    disable_pin_memory = resolve_offload_flag(
+        config_value, "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY"
+    )
+    return is_pin_memory_available() and not disable_pin_memory
 
 
 """
