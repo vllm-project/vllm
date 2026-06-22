@@ -138,6 +138,16 @@ def start_service_discovery(hostname, port):
     return _listener_thread
 
 
+def make_request_headers(request_id, data_parallel_rank=None):
+    headers = {
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+        "X-Request-Id": request_id,
+    }
+    if data_parallel_rank is not None:
+        headers["X-data-parallel-rank"] = str(data_parallel_rank)
+    return headers
+
+
 async def send_request_to_prefill(
     endpoint, req_data, request_id, selected_prefill_dp_rank
 ):
@@ -160,12 +170,7 @@ async def send_request_to_prefill(
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=6 * 6000 * 6000)
     ) as session:
-        headers = {
-            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-            "X-Request-Id": request_id,
-        }
-        if selected_prefill_dp_rank is not None:
-            headers["X-data-parallel-rank"] = str(selected_prefill_dp_rank)
+        headers = make_request_headers(request_id, selected_prefill_dp_rank)
         async with session.post(
             url=endpoint, json=req_data_copy, headers=headers
         ) as response:
@@ -182,14 +187,11 @@ async def send_request_to_prefill(
                 raise RuntimeError(error_message)
 
 
-async def start_decode_request(endpoint, req_data, request_id):
+async def start_decode_request(endpoint, req_data, request_id, data_parallel_rank=None):
     session = aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=6 * 6000 * 6000)
     )
-    headers = {
-        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-        "X-Request-Id": request_id,
-    }
+    headers = make_request_headers(request_id, data_parallel_rank)
     response = await session.post(url=endpoint, json=req_data, headers=headers)
     return session, response
 
@@ -212,7 +214,54 @@ async def stream_decode_response(session, response, request_id):
 
 
 def example_round_robin_dp_loader(request_number, dp_size):
-    return request_nums % dp_size
+    if dp_size <= 1:
+        return None
+    return request_number % dp_size
+
+
+def select_request_dp_ranks(
+    request_number, prefill_instance_endpoint, decode_instance_endpoint
+):
+    return (
+        example_round_robin_dp_loader(
+            request_number,
+            prefill_instance_endpoint["dp_size"],
+        ),
+        example_round_robin_dp_loader(
+            request_number,
+            decode_instance_endpoint["dp_size"],
+        ),
+    )
+
+
+def add_remote_decode_kv_params(
+    kv_transfer_params, decode_instance_endpoint, selected_decode_dp_rank, transfer_id
+):
+    kv_transfer_params["remote_dp_size"] = decode_instance_endpoint["dp_size"]
+    kv_transfer_params["remote_tp_size"] = decode_instance_endpoint["tp_size"]
+    kv_transfer_params["transfer_id"] = transfer_id
+    kv_transfer_params["remote_zmq_address"] = decode_instance_endpoint["zmq_address"]
+    decode_hosts = decode_instance_endpoint.get("node_hosts") or []
+    if decode_hosts:
+        kv_transfer_params["remote_hosts"] = list(decode_hosts)
+    if selected_decode_dp_rank is not None:
+        kv_transfer_params["remote_dp_rank"] = selected_decode_dp_rank
+
+
+def add_remote_prefill_kv_params(
+    kv_transfer_params, prefill_instance_endpoint, selected_prefill_dp_rank
+):
+    prefill_hosts = prefill_instance_endpoint.get("node_hosts") or []
+    if prefill_hosts:
+        kv_transfer_params["remote_hosts"] = list(prefill_hosts)
+
+    kv_transfer_params["remote_dp_size"] = prefill_instance_endpoint["dp_size"]
+    kv_transfer_params["remote_tp_size"] = prefill_instance_endpoint["tp_size"]
+    kv_transfer_params["tp_size"] = prefill_instance_endpoint["tp_size"]
+    kv_transfer_params["remote_zmq_address"] = prefill_instance_endpoint["zmq_address"]
+
+    if selected_prefill_dp_rank is not None:
+        kv_transfer_params["remote_dp_rank"] = selected_prefill_dp_rank
 
 
 @app.route("/v1/completions", methods=["POST"])
@@ -250,12 +299,11 @@ async def handle_request(api: str, request: Request):
         prefill_instance_endpoint = prefill_instances[pid]
         decode_instance_endpoint = decode_instances[did]
 
-        selected_prefill_dp_rank = None
-        if prefill_instance_endpoint["dp_size"] > 1:
-            selected_prefill_dp_rank = example_round_robin_dp_loader(
-                request_nums // len(prefill_instance_endpoint),
-                prefill_instance_endpoint["dp_size"],
-            )
+        selected_prefill_dp_rank, selected_decode_dp_rank = select_request_dp_ranks(
+            request_nums,
+            prefill_instance_endpoint,
+            decode_instance_endpoint,
+        )
 
         # Embed both zmq_addresses in the request_id so the connector can parse
         # the peer's host/ports from it, similar to P2P-NCCL
@@ -271,18 +319,12 @@ async def handle_request(api: str, request: Request):
         req_data_to_prefill = copy.deepcopy(req_data)
         req_data_to_prefill["kv_transfer_params"] = {}
         req_data["kv_transfer_params"] = {}
-        req_data_to_prefill["kv_transfer_params"]["remote_dp_size"] = (
-            decode_instance_endpoint["dp_size"]
+        add_remote_decode_kv_params(
+            req_data_to_prefill["kv_transfer_params"],
+            decode_instance_endpoint,
+            selected_decode_dp_rank,
+            transfer_id,
         )
-        req_data_to_prefill["kv_transfer_params"]["remote_tp_size"] = (
-            decode_instance_endpoint["tp_size"]
-        )
-        req_data_to_prefill["kv_transfer_params"]["transfer_id"] = transfer_id
-        decode_hosts = decode_instance_endpoint.get("node_hosts") or []
-        if decode_hosts:
-            req_data_to_prefill["kv_transfer_params"]["remote_hosts"] = list(
-                decode_hosts
-            )
 
         prefill_request_url = prefill_instance_endpoint["request_address"] + api
         send_prefill_task = asyncio.create_task(
@@ -317,25 +359,20 @@ async def handle_request(api: str, request: Request):
             req_data["kv_transfer_params"]["remote_hosts"] = prefill_kv.get(
                 "remote_hosts"
             )
-
-        prefill_hosts = prefill_instance_endpoint.get("node_hosts") or []
-        if prefill_hosts:
-            req_data["kv_transfer_params"]["remote_hosts"] = list(prefill_hosts)
-
-        req_data["kv_transfer_params"]["remote_dp_size"] = prefill_instance_endpoint[
-            "dp_size"
-        ]
-        req_data["kv_transfer_params"]["remote_tp_size"] = prefill_instance_endpoint[
-            "tp_size"
-        ]
-        req_data["kv_transfer_params"]["tp_size"] = prefill_instance_endpoint["tp_size"]
-
-        if selected_prefill_dp_rank is not None:
-            req_data["kv_transfer_params"]["remote_dp_rank"] = selected_prefill_dp_rank
+        add_remote_prefill_kv_params(
+            req_data["kv_transfer_params"],
+            prefill_instance_endpoint,
+            selected_prefill_dp_rank,
+        )
 
         decode_request_url = decode_instance_endpoint["request_address"] + api
         decode_request_task = asyncio.create_task(
-            start_decode_request(decode_request_url, req_data, request_id)
+            start_decode_request(
+                decode_request_url,
+                req_data,
+                request_id,
+                selected_decode_dp_rank,
+            )
         )
 
         session, decode_response = await decode_request_task

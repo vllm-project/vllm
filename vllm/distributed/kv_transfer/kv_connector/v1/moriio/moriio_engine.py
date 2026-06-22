@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 import threading
 import time
 from collections import OrderedDict, defaultdict
+from contextlib import suppress
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
 from weakref import ref as weakref_ref
@@ -14,7 +16,6 @@ import zmq
 from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     make_zmq_path,
-    make_zmq_socket,
 )
 
 if TYPE_CHECKING:
@@ -32,6 +33,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     TransferError,
     TransferId,
     WriteTask,
+    _strip_vllm_request_suffix,
     get_port_offset,
     get_role,
     zmq_ctx,
@@ -98,6 +100,7 @@ class MoRIIOWriter:
         self._scheduled_layers: dict[TransferId, set[str]] = defaultdict(set)
         self._sealed_writes: dict[TransferId, int] = {}
         self._defer_timeout = worker.moriio_config.defer_timeout
+        self._remote_alloc_miss_log_count = 0
 
     @property
     def worker(self) -> "MoRIIOConnectorWorker":
@@ -194,12 +197,7 @@ class MoRIIOWriter:
 
             # Check if remote blocks are ready
             if not self._is_remote_ready(task):
-                # task.retry_count += 1
                 self._deferred_tasks.append(task)
-                # logger.debug(
-                #     "Deferred task for request %s (retry %d)",
-                #     task.request_id, task.retry_count
-                # )
                 continue
 
             # Execute the task
@@ -210,7 +208,7 @@ class MoRIIOWriter:
                     "Write task failed for request %s, marking done",
                     task.request_id,
                 )
-                self._mark_request_done(task.transfer_id)
+                self._mark_request_done(task.request_id, task.transfer_id)
 
     def _process_deferred_tasks(self) -> None:
         """Process tasks that were previously deferred."""
@@ -231,7 +229,7 @@ class MoRIIOWriter:
                     task.request_id,
                     now - task.enqueue_time,
                 )
-                self._mark_request_done(task.transfer_id)
+                self._mark_request_done(task.request_id, task.transfer_id)
                 continue
             if self._is_remote_ready(task):
                 try:
@@ -241,7 +239,7 @@ class MoRIIOWriter:
                         "Deferred write task failed for request %s, marking done",
                         task.request_id,
                     )
-                    self._mark_request_done(task.transfer_id)
+                    self._mark_request_done(task.request_id, task.transfer_id)
             else:
                 still_deferred.append(task)
 
@@ -258,17 +256,63 @@ class MoRIIOWriter:
         with wrapper.lock:
             return wrapper._is_transfer_terminal_locked(transfer_id)
 
-    def _mark_request_done(self, transfer_id: str) -> None:
-        """Mark a request done so its blocks are freed, even on transfer failure."""
+    def _mark_request_done(self, request_id: str, transfer_id: str) -> None:
+        """Mark a request done locally and drop its remote-allocation state."""
         wrapper = self.worker.moriio_wrapper
         with wrapper.lock:
             wrapper.done_req_ids.append(MoRIIOTransferAck(transfer_id))
             wrapper.done_remote_allocate_req_dict.pop(transfer_id, None)
+            wrapper.done_remote_allocate_req_dict.pop(request_id, None)
+            wrapper.done_remote_allocate_req_dict.pop(
+                _strip_vllm_request_suffix(request_id), None
+            )
             wrapper._mark_transfer_terminal_locked(transfer_id)
         self._clear_transfer_state(transfer_id)
 
+    def _remote_alloc_info_for_task(
+        self, task: WriteTask
+    ) -> RemoteAllocInfo | None:
+        wrapper = self.worker.moriio_wrapper
+        stripped_request_id = _strip_vllm_request_suffix(task.request_id)
+        key_sample: list[tuple[str, str]] | None = None
+        with wrapper.lock:
+            remote_allocations = wrapper.done_remote_allocate_req_dict
+            info = remote_allocations.get(task.transfer_id)
+            if info is None:
+                info = remote_allocations.get(task.request_id)
+            if info is None:
+                info = remote_allocations.get(stripped_request_id)
+            if info is None and self._remote_alloc_miss_log_count < 8:
+                self._remote_alloc_miss_log_count += 1
+                key_sample = []
+                for idx, key in enumerate(remote_allocations):
+                    if idx >= 8:
+                        break
+                    key_sample.append((repr(key), type(key).__name__))
+
+        if info is None and key_sample is not None:
+            logger.warning(
+                "MoRIIO remote alloc miss: transfer_id=%r transfer_id_type=%s "
+                "request_id=%r request_id_type=%s stripped_request_id=%r "
+                "stripped_request_id_type=%s key_sample=%s",
+                task.transfer_id,
+                type(task.transfer_id).__name__,
+                task.request_id,
+                type(task.request_id).__name__,
+                stripped_request_id,
+                type(stripped_request_id).__name__,
+                key_sample,
+            )
+        return info
+
     def _is_remote_ready(self, task: WriteTask) -> bool:
-        """Check if remote blocks are allocated for this task.
+        """Check if remote blocks are allocated and populated for this task.
+
+        Returns True only when the remote allocation entry exists *and*
+        carries a non-None ``block_ids`` mapping. The latter check ensures
+        that ``_execute_write_task`` is never invoked for a task whose
+        remote ``block_ids`` are still being filled in by the scheduler;
+        without it we would either drop the task or busy-loop on it.
 
         Args:
             task: The write task
@@ -276,15 +320,14 @@ class MoRIIOWriter:
         Returns:
             True if remote blocks are ready
         """
-        return (
-            task.transfer_id in self.worker.moriio_wrapper.done_remote_allocate_req_dict
-        )
+        info = self._remote_alloc_info_for_task(task)
+        return info is not None and info.block_ids is not None
 
-    def _get_remote_alloc_info(self, transfer_id: str) -> RemoteAllocInfo:
+    def _get_remote_alloc_info(self, task: WriteTask) -> RemoteAllocInfo:
         """Get remote allocation info for a request.
 
         Args:
-            transfer_id:TransferId The request ID
+            task: The write task
 
         Returns:
             Remote allocation information
@@ -292,36 +335,32 @@ class MoRIIOWriter:
         Raises:
             KeyError: If allocation info is missing
         """
-        try:
-            return self.worker.moriio_wrapper.done_remote_allocate_req_dict[transfer_id]
-        except KeyError as e:
+        info = self._remote_alloc_info_for_task(task)
+        if info is None:
             raise KeyError(
-                f"Remote allocation info missing for transfer {transfer_id}"
-            ) from e
+                f"Remote allocation info missing for transfer {task.transfer_id}"
+            )
+        return info
 
     def _execute_write_task(self, task: WriteTask) -> None:
         """Execute a single write task.
+
+        Callers must ensure ``_is_remote_ready(task)`` returned ``True``
+        before invoking this method; ``_is_remote_ready`` guarantees that
+        ``request_info.block_ids`` is non-None and the entry exists.
 
         Args:
             task: The write task to execute
 
         """
         # Get remote allocation info
-        request_info = self._get_remote_alloc_info(task.transfer_id)
+        request_info = self._get_remote_alloc_info(task)
         with self._write_state_lock:
             request_info.completion_request_id = task.request_id
             request_info.completion_remote_notify_port = task.remote_notify_port
             request_info.completion_remote_ip = task.remote_ip
             if task.transfer_id in self._sealed_writes:
                 request_info.writes_expected = self._sealed_writes[task.transfer_id]
-
-        if request_info.block_ids is None:
-            logger.debug(
-                "Request remote block IDs not ready:request_id = %s, transfer_id = %s",
-                task.request_id,
-                task.transfer_id,
-            )
-            return
 
         # Wait for CUDA event
         # The attention computation of the current layer cannot
@@ -465,16 +504,7 @@ class MoRIIOWriter:
         self.worker.moriio_wrapper.send_notify(
             transfer_id, remote_ip, remote_port, message_type="write_done"
         )
-        # mark request as done, then we can free the blocks
-        with self.worker.moriio_wrapper.lock:
-            self.worker.moriio_wrapper.done_req_ids.append(
-                MoRIIOTransferAck(transfer_id)
-            )
-            self.worker.moriio_wrapper.done_remote_allocate_req_dict.pop(
-                transfer_id, None
-            )
-            self.worker.moriio_wrapper._mark_transfer_terminal_locked(transfer_id)
-        self._clear_transfer_state(transfer_id)
+        self._mark_request_done(request_id, transfer_id)
         logger.debug(
             "Completed transfer for (request, transfer) %s, %s, notified port %d",
             request_id,
@@ -521,9 +551,7 @@ class MoRIIOWrapper:
         self.paths: dict[str, zmq.Socket] = {}
 
     def set_moriio_engine(self, moriio_engine):
-        assert moriio_engine is not None, (
-            "You Cannot pass None engine to MoRIIOWrapper!"
-        )
+        assert moriio_engine is not None, "MoRIIO engine must not be None"
         self.moriio_engine = moriio_engine
 
     def set_backend_type(
@@ -666,8 +694,7 @@ class MoRIIOWrapper:
                     continue
                 if timed_out:
                     errors.append(
-                        f"RDMA transfer timed out after {timeout:.0f}s. "
-                        f"Check NIC queue depth or reduce concurrency; "
+                        f"RDMA transfer timed out after {timeout:.0f}s; "
                         f"adjust with kv_connector_extra_config.transfer_timeout."
                     )
                 else:
@@ -706,6 +733,24 @@ class MoRIIOWrapper:
         )
         self.notify_thread.start()
 
+    @staticmethod
+    def _normalize_structured_message(data: object) -> dict | None:
+        if not isinstance(data, dict):
+            return None
+
+        normalized: dict = {}
+        for key, value in data.items():
+            if isinstance(key, bytes):
+                try:
+                    key = key.decode("utf-8")
+                except UnicodeDecodeError:
+                    continue
+            if isinstance(key, str) and isinstance(value, bytes):
+                with suppress(UnicodeDecodeError):
+                    value = value.decode("utf-8")
+            normalized[key] = value
+        return normalized
+
     def _handle_message(self, msg: bytes):
         """Handles incoming messages from remote nodes."""
         # Handles incoming remote messages:
@@ -717,8 +762,23 @@ class MoRIIOWrapper:
         msg_str = repr(msg)
         handled = False
         try:
-            data = msgpack.loads(msg)
-            if isinstance(data, dict):
+            data = self._normalize_structured_message(
+                msgpack.loads(msg, raw=False)
+            )
+            if data is not None and (
+                data.get("type") == "remote_blocks" or "transfer_id" in data
+            ):
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "MoRIIO notify received structured: type=%s "
+                        "transfer_id=%s req_id=%s blocks=%d keys=%s",
+                        data.get("type"),
+                        data.get("transfer_id"),
+                        data.get("req_id"),
+                        len(data.get("block_notify_list") or []),
+                        tuple(data.keys()),
+                    )
+
                 self._handle_structured_message(data)
                 return
         except (
@@ -731,13 +791,26 @@ class MoRIIOWrapper:
 
         try:
             msg_str = msg.decode("UTF-8")
-            if msg_str:
-                self._handle_completion_message(msg_str)
-                handled = True
+            # Completion notifications are UTF-8 identifiers. Worker-side mapping
+            # normalizes transfer_ids/request_ids before the scheduler sees
+            # finished requests. Treat UTF-8 payloads as completion IDs and drop
+            # malformed binary payloads below to keep the listener running.
+            logger.info(
+                "MoRIIO notify received completion: id=%s",
+                msg_str,
+            )
+            self._handle_completion_message(msg_str)
+            handled = True
         except UnicodeDecodeError:
-            logger.warning("Received non-UTF8 message: %r", msg)
+            # Non-UTF-8 payloads are not completion identifiers. Log and drop them
+            # instead of propagating an error through the listener loop.
+            logger.warning(
+                "Received non-UTF8 completion message of %d bytes; dropping",
+                len(msg),
+            )
+            return
         if not handled:
-            raise MoRIIOError(f"Unhandled message format: {msg_str}")
+            raise MoRIIOError(f"Unhandled message format ({len(msg)} bytes)")
 
     def _handle_structured_message(self, data: dict):
         message_type = data.get("type")
@@ -756,6 +829,7 @@ class MoRIIOWrapper:
     def _handle_remote_blocks_message(self, data: dict):
         assert get_role() == ROLE.PRODUCER, "Only prefill can get block messages"
         transfer_id = data["transfer_id"]
+        request_id = data.get("req_id")
         block_notify_list = data.get("block_notify_list", [])
         decode_dp_rank = data.get("decode_rank", 0)
         if not block_notify_list:
@@ -763,6 +837,9 @@ class MoRIIOWrapper:
                 "block_notify_list cannot be empty in remote allocate message"
             )
 
+        info = RemoteAllocInfo(
+            block_ids=block_notify_list, decode_dp_rank=decode_dp_rank
+        )
         with self.lock:
             if self._is_transfer_terminal_locked(transfer_id):
                 logger.debug(
@@ -770,8 +847,22 @@ class MoRIIOWrapper:
                     transfer_id,
                 )
                 return
-            self.done_remote_allocate_req_dict[transfer_id] = RemoteAllocInfo(
-                block_ids=block_notify_list, decode_dp_rank=decode_dp_rank
+            self.done_remote_allocate_req_dict[transfer_id] = info
+            if isinstance(request_id, str) and request_id != transfer_id:
+                self.done_remote_allocate_req_dict[request_id] = info
+                stripped_request_id = _strip_vllm_request_suffix(request_id)
+                if stripped_request_id != request_id:
+                    self.done_remote_allocate_req_dict[stripped_request_id] = info
+            remote_alloc_entries = len(self.done_remote_allocate_req_dict)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "MoRIIO remote_blocks registered: transfer_id=%s req_id=%s "
+                "blocks=%d decode_dp_rank=%s entries=%d",
+                transfer_id,
+                request_id,
+                len(block_notify_list),
+                decode_dp_rank,
+                remote_alloc_entries,
             )
 
     def _handle_write_done_message(self, data: dict):
@@ -831,9 +922,16 @@ class MoRIIOWrapper:
 
         if path not in self.paths:
             ctx = zmq.Context.instance()
-            sock = make_zmq_socket(
-                ctx=ctx, path=path, socket_type=zmq.DEALER, bind=False
-            )
+            sock = ctx.socket(zmq.DEALER)
+            # Notify uses a long-lived, sparse TCP stream. Keepalive bounds stale
+            # peer detection so ZMQ can reconnect and resend queued control traffic.
+            sock.setsockopt(zmq.TCP_KEEPALIVE, 1)
+            sock.setsockopt(zmq.TCP_KEEPALIVE_IDLE, 30)
+            sock.setsockopt(zmq.TCP_KEEPALIVE_INTVL, 10)
+            sock.setsockopt(zmq.TCP_KEEPALIVE_CNT, 3)
+            sock.setsockopt(zmq.SNDHWM, 0)
+            sock.setsockopt(zmq.LINGER, 0)
+            sock.connect(path)
             self.paths[path] = sock
 
         req_list = req_ids if isinstance(req_ids, list) else [req_ids]

@@ -2154,7 +2154,15 @@ class Scheduler(SchedulerInterface):
         num_in_queues = (
             len(self.waiting) + len(self.skipped_waiting) + len(self.running)
         )
-        return len(self.requests) > num_in_queues
+        if len(self.requests) > num_in_queues:
+            return True
+        # MoRIIO-style connectors may hold deferred KV sends for requests
+        # already evicted from self.requests; keep the engine stepping until
+        # the connector drains them.
+        has_pending_deferred_sends = getattr(
+            self.connector, "has_pending_deferred_sends", None
+        )
+        return bool(has_pending_deferred_sends and has_pending_deferred_sends())
 
     def has_requests(self) -> bool:
         # Override the interface default to also keep the engine alive while a
@@ -2461,17 +2469,30 @@ class Scheduler(SchedulerInterface):
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            req = self.requests[req_id]
+            req = self.requests.get(req_id)
+            if req is None:
+                logger.debug(
+                    "Ignoring KV recv completion for unknown request %s. "
+                    "The request may have already finished or been aborted.",
+                    req_id,
+                )
+                continue
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
             else:
                 assert RequestStatus.is_finished(req.status)
-                self._free_blocks(self.requests[req_id])
+                self._free_blocks(req)
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            self._free_blocks(self.requests[req_id])
+            req = self.requests.get(req_id)
+            if req is None:
+                logger.debug(
+                    "Ignoring KV send completion for unknown request %s. "
+                    "The request may have already finished or been aborted.",
+                    req_id,
+                )
+                continue
+            self._free_blocks(req)
 
     def _update_requests_with_invalid_blocks(
         self,
