@@ -28,7 +28,7 @@ class GateLinear(ReplicatedLinear):
     # Dimensions supported by the DSV3 specialized kernel.
     # Valid (hidden_size, num_experts) combinations:
     #   (7168, 256) -> DeepSeek-V3,  (7168, 384) -> Kimi-K2,
-    #   (6144, 256) -> GLM-5.2
+    #   (6144, 256) -> GLM-5
     DSV3_SUPPORTED_NUM_EXPERTS = [256, 384]
     DSV3_SUPPORTED_HIDDEN_SIZES = [7168, 6144]
     # num_experts=384 is only instantiated for hidden_size=7168.

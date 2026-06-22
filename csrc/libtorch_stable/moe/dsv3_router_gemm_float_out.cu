@@ -287,7 +287,7 @@ template void invokeRouterGemmFloatOutput<__nv_bfloat16, 15, 384, 7168>(
 template void invokeRouterGemmFloatOutput<__nv_bfloat16, 16, 384, 7168>(
     float*, __nv_bfloat16 const*, __nv_bfloat16 const*, cudaStream_t);
 
-// Template instantiations for GLM-5.2 (DEFAULT_NUM_EXPERTS, hidden_dim=6144)
+// Template instantiations for GLM-5 (DEFAULT_NUM_EXPERTS, hidden_dim=6144)
 template void invokeRouterGemmFloatOutput<__nv_bfloat16, 1, 256, 6144>(
     float*, __nv_bfloat16 const*, __nv_bfloat16 const*, cudaStream_t);
 
