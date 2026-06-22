@@ -898,6 +898,24 @@ class GPUModelRunner(
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
+        self.use_mamba_mtp_replay_temporal_slots = (
+            self.cache_config.mamba_cache_mode == "none"
+            and self.num_spec_tokens > 0
+            and self.model_config.is_hybrid
+            and envs.VLLM_MAMBA_MTP_REPLAY
+            and envs.VLLM_MAMBA_MTP_REPLAY_TEMPORAL_SLOT
+        )
+        self.mamba_mtp_replay_temporal_req_slots: dict[str, int] = {}
+        self.mamba_mtp_replay_temporal_free_slots: list[int] = []
+        self.mamba_mtp_replay_temporal_slot_indices: CpuGpuBuffer | None = None
+        if self.use_mamba_mtp_replay_temporal_slots:
+            # Slot 0 is reserved for NULL_BLOCK_ID/padded rows.
+            self.mamba_mtp_replay_temporal_free_slots = list(
+                range(self.max_num_reqs, 0, -1)
+            )
+            self.mamba_mtp_replay_temporal_slot_indices = self._make_buffer(
+                self.max_num_reqs, dtype=torch.int32
+            )
         if self.cache_config.mamba_cache_mode == "all" and self.num_spec_tokens > 0:
             self.mamba_prev_last_scheduled_idx = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
@@ -1019,12 +1037,78 @@ class GPUModelRunner(
             )
         return self._mamba_bufs
 
+    def _invalidate_mamba_mtp_replay_temporal_slots(
+        self,
+        slot_indices: Sequence[int],
+    ) -> None:
+        if not self.use_mamba_mtp_replay_temporal_slots or not slot_indices:
+            return
+
+        replay_slot_indices = torch.as_tensor(
+            slot_indices,
+            dtype=torch.long,
+            device=self.device,
+        )
+        mamba_group_ids, _ = mamba_utils.get_mamba_groups(self.kv_cache_config)
+        for kv_cache_group_id in mamba_group_ids:
+            for layer_name in self.kv_cache_config.kv_cache_groups[
+                kv_cache_group_id
+            ].layer_names:
+                layer = self.compilation_config.static_forward_context.get(layer_name)
+                invalidate_slots = getattr(
+                    layer, "invalidate_mtp_replay_temporal_slots", None
+                )
+                if invalidate_slots is not None:
+                    invalidate_slots(replay_slot_indices)
+
+    def _release_mamba_mtp_replay_temporal_slots(
+        self,
+        req_ids: Iterable[str],
+    ) -> None:
+        if not self.use_mamba_mtp_replay_temporal_slots:
+            return
+
+        released_slots: list[int] = []
+        for req_id in req_ids:
+            slot = self.mamba_mtp_replay_temporal_req_slots.pop(req_id, None)
+            if slot is None:
+                continue
+            released_slots.append(slot)
+            self.mamba_mtp_replay_temporal_free_slots.append(slot)
+        self._invalidate_mamba_mtp_replay_temporal_slots(released_slots)
+
+    def _prepare_mamba_mtp_replay_temporal_slot_indices(
+        self,
+        num_reqs: int,
+        num_reqs_padded: int,
+    ) -> torch.Tensor | None:
+        if not self.use_mamba_mtp_replay_temporal_slots:
+            return None
+
+        assert self.mamba_mtp_replay_temporal_slot_indices is not None
+        slot_indices = self.mamba_mtp_replay_temporal_slot_indices
+        new_slots: list[int] = []
+        for req_index, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            slot = self.mamba_mtp_replay_temporal_req_slots.get(req_id)
+            if slot is None:
+                if not self.mamba_mtp_replay_temporal_free_slots:
+                    raise RuntimeError("Ran out of Mamba MTP temporal slots.")
+                slot = self.mamba_mtp_replay_temporal_free_slots.pop()
+                self.mamba_mtp_replay_temporal_req_slots[req_id] = slot
+                new_slots.append(slot)
+            slot_indices.np[req_index] = slot
+        slot_indices.np[num_reqs:num_reqs_padded].fill(NULL_BLOCK_ID)
+        self._invalidate_mamba_mtp_replay_temporal_slots(new_slots)
+        slot_indices.copy_to_gpu(num_reqs_padded)
+        return slot_indices.gpu[:num_reqs_padded]
+
     def _preserve_mamba_mtp_replay_accepted_state(self, num_reqs: int) -> None:
         if (
             self.cache_config.mamba_cache_mode != "none"
             or self.speculative_config is None
             or not self.model_config.is_hybrid
             or not envs.VLLM_MAMBA_MTP_REPLAY
+            or self.use_mamba_mtp_replay_temporal_slots
         ):
             return
 
@@ -1206,6 +1290,9 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
+        self._release_mamba_mtp_replay_temporal_slots(
+            scheduler_output.finished_req_ids
+        )
         self.late_interaction_runner.on_requests_finished(
             scheduler_output.finished_req_ids
         )
@@ -2511,6 +2598,17 @@ class GPUModelRunner(
                     extra_attn_metadata_args["prev_last_scheduled_idx"] = (
                         self.mamba_prev_last_scheduled_idx.gpu[:num_reqs_padded]
                     )
+                if isinstance(builder, Mamba2AttentionMetadataBuilder):
+                    mtp_replay_temporal_slot_indices = (
+                        self._prepare_mamba_mtp_replay_temporal_slot_indices(
+                            num_reqs,
+                            num_reqs_padded,
+                        )
+                    )
+                    if mtp_replay_temporal_slot_indices is not None:
+                        extra_attn_metadata_args[
+                            "mtp_replay_temporal_slot_indices"
+                        ] = mtp_replay_temporal_slot_indices
 
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(

@@ -45,6 +45,7 @@ class BaseMambaAttentionMetadata:
     # speculative decoding compatibility, and will be None if the batch
     # has no decode requests.
     state_indices_tensor_d: torch.Tensor | None
+    mtp_replay_temporal_slot_indices_d: torch.Tensor | None
     query_start_loc_d: torch.Tensor | None  # shape: [num_decodes + 1,]
 
     # Number of accepted tokens for each spec sequence (for loading correct checkpoint)
@@ -158,6 +159,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int32,
                 device=device,
             )
+            self.decode_mtp_replay_temporal_slot_indices: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
 
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
@@ -183,8 +189,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         assert m.max_query_len == 1 + self.num_spec_tokens  # decode-only
 
         num_accepted_tokens = None
+        mtp_replay_temporal_slot_indices = None
         if self.num_spec_tokens > 0:
             num_accepted_tokens = torch.diff(m.query_start_loc)
+            mtp_replay_temporal_slot_indices = torch.arange(
+                1,
+                m.num_reqs + 1,
+                dtype=torch.int32,
+                device=m.query_start_loc.device,
+            )
 
         prev_last_scheduled_idx = None
         if (
@@ -201,6 +214,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             0,
             m,
             num_accepted_tokens=num_accepted_tokens,
+            mtp_replay_temporal_slot_indices=mtp_replay_temporal_slot_indices,
             prev_last_scheduled_idx=prev_last_scheduled_idx,
         )
 
@@ -211,6 +225,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         fast_build: bool = False,
         *,
         num_accepted_tokens: torch.Tensor | None = None,
+        mtp_replay_temporal_slot_indices: torch.Tensor | None = None,
         prev_last_scheduled_idx: torch.Tensor | None = None,
         **kwargs: Any,
     ) -> M:
@@ -221,6 +236,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         return self._compute_common_metadata(
             common_attn_metadata,
             num_accepted_tokens=num_accepted_tokens,
+            mtp_replay_temporal_slot_indices=mtp_replay_temporal_slot_indices,
             prev_last_scheduled_idx=prev_last_scheduled_idx,
         )
 
@@ -370,6 +386,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         common_attn_metadata: CommonAttentionMetadata,
         *,
         num_accepted_tokens: torch.Tensor | None = None,
+        mtp_replay_temporal_slot_indices: torch.Tensor | None = None,
         prev_last_scheduled_idx: torch.Tensor | None = None,
     ) -> M:
         """
@@ -485,6 +502,16 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             query_start_loc_d = common_attn_metadata.query_start_loc[: num_decodes + 1]
             num_accepted_tokens = num_accepted_tokens[:num_decodes]
 
+        mtp_replay_temporal_slot_indices_d = None
+        if (
+            num_decodes > 0
+            and self.use_spec_decode
+            and mtp_replay_temporal_slot_indices is not None
+        ):
+            mtp_replay_temporal_slot_indices_d = (
+                mtp_replay_temporal_slot_indices[:num_decodes]
+            )
+
         if num_prefills > 0:
             if num_computed_tokens is None:
                 num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
@@ -527,6 +554,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             has_initial_states_p=has_initial_states_p,
             state_indices_tensor_p=state_indices_tensor_p,
             state_indices_tensor_d=state_indices_tensor_d,
+            mtp_replay_temporal_slot_indices_d=(
+                mtp_replay_temporal_slot_indices_d
+            ),
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc_d=query_start_loc_d,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
@@ -554,6 +584,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         Currently, only decode is supported for full cudagraphs with Mamba.
         """
         state_indices_tensor_d = metadata.state_indices_tensor_d
+        mtp_replay_temporal_slot_indices_d = (
+            metadata.mtp_replay_temporal_slot_indices_d
+        )
         query_start_loc_d = metadata.query_start_loc_d
         num_accepted_tokens = metadata.num_accepted_tokens
         block_idx_last_scheduled_token = metadata.block_idx_last_scheduled_token
@@ -583,6 +616,19 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 num_accepted_tokens[metadata.num_decodes :] = (
                     1  # pad with 1st slot index
                 )
+                if mtp_replay_temporal_slot_indices_d is not None:
+                    self.decode_mtp_replay_temporal_slot_indices[
+                        : metadata.num_decodes
+                    ].copy_(
+                        mtp_replay_temporal_slot_indices_d,
+                        non_blocking=True,
+                    )
+                    mtp_replay_temporal_slot_indices_d = (
+                        self.decode_mtp_replay_temporal_slot_indices[:padded_bs]
+                    )
+                    mtp_replay_temporal_slot_indices_d[
+                        metadata.num_decodes :
+                    ] = NULL_BLOCK_ID
 
             if self.vllm_config.cache_config.mamba_cache_mode == "all":
                 assert block_idx_last_scheduled_token is not None
@@ -625,6 +671,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         return replace(
             metadata,
             state_indices_tensor_d=state_indices_tensor_d,
+            mtp_replay_temporal_slot_indices_d=(
+                mtp_replay_temporal_slot_indices_d
+            ),
             query_start_loc_d=query_start_loc_d,
             num_accepted_tokens=num_accepted_tokens,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
