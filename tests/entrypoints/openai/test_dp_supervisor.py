@@ -364,7 +364,7 @@ class MockVLLMServer:
         await self._serve_task
 
 
-def launch_mock_vllm(child_args: argparse.Namespace, env_updates: dict[str, str]):
+def launch_mock_vllm(child_args: argparse.Namespace):
     logger.info("Launching mock vLLM on port %s", child_args.port)
     mock_vllm = MockVLLMServer(
         port=child_args.port,
@@ -375,7 +375,7 @@ def launch_mock_vllm(child_args: argparse.Namespace, env_updates: dict[str, str]
 
 
 def launch_mock_vllm_with_drain(
-    child_args: argparse.Namespace, env_updates: dict[str, str]
+    child_args: argparse.Namespace,
 ):
     logger.info("Launching mock vLLM with 15s drain on port %s", child_args.port)
     mock_vllm = MockVLLMServer(
