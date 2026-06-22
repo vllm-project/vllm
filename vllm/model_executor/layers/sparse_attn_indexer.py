@@ -85,6 +85,7 @@ def _dcp_pack_local_candidates(
     local_valid: torch.Tensor,
     cp_rank: int,
     dcp_world_size: int,
+    row_start: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Pack this rank's local top-k into ``(global_pos, score)`` candidates.
 
@@ -93,15 +94,28 @@ def _dcp_pack_local_candidates(
     ``[..., 1]`` the local indexer score, with invalid slots set to
     ``(-1, -inf)``. Positions are < max_model_len (<< 2**24), so the float32
     packing of the position is lossless.
+
+    ``topk_indices`` are row-relative (relative to ``row_start``): the top-k
+    kernel returns 0-based indices into each row's window. For the score lookup
+    that must be turned back into an absolute column of ``logits`` -- in a
+    varlen-packed multi-request prefill chunk, row ``m``'s keys live at columns
+    ``[row_start[m], ...)``, so the score for relative index ``i`` is at column
+    ``row_start[m] + i``. ``row_start`` is the per-row ``cu_seqlen_ks``; pass
+    ``None`` (== 0) for the decode path, where each row's window starts at 0.
+    The ownership remap (``global_pos``) and the valid-count mask stay on the
+    row-relative index, which is the local shard position.
     """
     invalid = topk_indices < 0
     idx_safe = topk_indices.clamp(min=0)
     # A row whose shard holds fewer than K valid slots gets padded/OOB local
     # indices from the top-k kernel; mask them by the explicit valid count.
     invalid = invalid | (idx_safe >= local_valid.unsqueeze(1))
-    local_scores = torch.gather(
-        logits.float(), 1, idx_safe.to(torch.int64)
-    ).masked_fill(invalid, float("-inf"))
+    score_cols = idx_safe.to(torch.int64)
+    if row_start is not None:
+        score_cols = score_cols + row_start.unsqueeze(1).to(torch.int64)
+    local_scores = torch.gather(logits.float(), 1, score_cols).masked_fill(
+        invalid, float("-inf")
+    )
     global_pos = cp_rank + idx_safe.to(torch.int32) * dcp_world_size
     global_pos = torch.where(invalid, torch.full_like(global_pos, -1), global_pos)
     return torch.stack(
@@ -163,6 +177,7 @@ def _dcp_global_topk_merge(
     cp_rank: int,
     dcp_world_size: int,
     topk_tokens: int,
+    row_start: torch.Tensor | None = None,
 ) -> None:
     """Merge per-rank local top-k into the global top-k under DCP exact-merge.
 
@@ -183,7 +198,7 @@ def _dcp_global_topk_merge(
     global top-k. Writes ``topk_indices`` in place.
     """
     cand = _dcp_pack_local_candidates(
-        topk_indices, logits, local_valid, cp_rank, dcp_world_size
+        topk_indices, logits, local_valid, cp_rank, dcp_world_size, row_start
     )
     cand_all = get_dcp_group().all_gather(cand, dim=0)
     topk_indices.copy_(
@@ -382,6 +397,10 @@ def sparse_attn_indexer(
                 # Per-row valid local KV count = this rank's shard size for the
                 # row. Chunk boundaries are global (see the builder), so every
                 # rank reaches this chunk with the same num_rows for all_gather.
+                # top_k_per_row_prefill returns row-relative indices while the
+                # row's logits live at absolute columns [cu_seqlen_ks, ...), so
+                # pass cu_seqlen_ks as row_start for the score lookup.
+                row_start = chunk.cu_seqlen_ks[:num_rows]
                 local_valid = (chunk.cu_seqlen_ke - chunk.cu_seqlen_ks)[:num_rows].to(
                     torch.int32
                 )
@@ -392,6 +411,7 @@ def sparse_attn_indexer(
                     cp_rank,
                     dcp_world_size,
                     topk_tokens,
+                    row_start=row_start,
                 )
 
     if has_decode:

@@ -357,16 +357,41 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         if isinstance(self.kv_cache_spec, MLAAttentionSpec):
             self.compress_ratio = self.kv_cache_spec.compress_ratio
         # Fail-closed: DCP localization and the exact-merge remap both assume
-        # compress_ratio == 1 (and CP_INTERLEAVE == 1, enforced via
-        # supports_dcp_with_varlen in the FlashMLA sparse builder). Generalizing
-        # to compress_ratio > 1 (DeepSeek-V4) needs a per-rank compressed-shard
-        # seq-len map plus a DCP+compress integration test; tracked as a
-        # fast-follow rather than relaxed here without coverage.
+        # compress_ratio == 1. Generalizing to compress_ratio > 1 (DeepSeek-V4)
+        # needs a per-rank compressed-shard seq-len map plus a DCP+compress
+        # integration test; tracked as a fast-follow rather than relaxed here
+        # without coverage.
         if self.dcp_world_size > 1 and self.compress_ratio > 1:
             raise NotImplementedError(
                 "DCP is not supported with indexer KV compression "
                 f"(compress_ratio={self.compress_ratio} > 1)"
             )
+
+        # Fail-closed for the exact-merge global top-k. It runs in this shared
+        # indexer op for ANY sparse backend, so guard its assumptions here
+        # rather than relying on an attention-backend builder:
+        # - CP_INTERLEAVE == 1: the local->global remap is cp_rank + i*world
+        #   (rank r owns global positions {r, r+N, ...}); interleave > 1 uses a
+        #   different ownership and is NOT enforced anywhere else
+        #   (supports_dcp_with_varlen only gates the reorder threshold).
+        # - ag_rs comm backend: the merge encodes ag_rs ownership semantics.
+        # The scattered -1 indices the merge emits are only validated downstream
+        # on the FlashMLA sparse fp8 path; FlashInfer / ROCm sparse + exact is
+        # untested and should stay on union.
+        if self.dcp_world_size > 1 and self.sparse_indexer_mode == "exact":
+            if self.cp_kv_cache_interleave_size != 1:
+                raise NotImplementedError(
+                    "DCP sparse exact-merge requires cp_kv_cache_interleave_size "
+                    f"== 1 (got {self.cp_kv_cache_interleave_size}); the "
+                    "local->global top-k remap assumes token-interleaved KV. "
+                    "Use --dcp-sparse-indexer-mode union."
+                )
+            if parallel_config.dcp_comm_backend != "ag_rs":
+                raise NotImplementedError(
+                    "DCP sparse exact-merge is only validated with the 'ag_rs' "
+                    f"DCP comm backend (got '{parallel_config.dcp_comm_backend}'"
+                    "). Use --dcp-sparse-indexer-mode union."
+                )
 
         # Pre-allocate buffers for CUDA graph compatibility when
         if self.compress_ratio > 1:
