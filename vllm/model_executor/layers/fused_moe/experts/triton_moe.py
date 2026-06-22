@@ -245,7 +245,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             lora_unquantized_hidden_states = hidden_states
             hidden_states, a1q_scale = moe_kernel_quantize_input(
                 hidden_states,
-                self.a1_scale,
+                self.a1_scale or self.a1_gscale,
                 self.quant_dtype,
                 self.per_act_token_quant,
                 self.block_shape,
