@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, NewType, TypeAlias, cast, overload
+from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -126,7 +126,7 @@ class KVCacheBlock:
     # when the block is full and cached.
     _block_hash: BlockHashWithGroupId | None = None
     # Number of prefix tokens covered by _block_hash. For full blocks this is
-    # the full block boundary; partial aliases can end inside a cache block.
+    # the full block boundary; partial entries can end inside a cache block.
     _block_hash_num_tokens: int | None = None
 
     # Used to construct a doubly linked list for free blocks.
@@ -174,6 +174,45 @@ class KVCacheBlock:
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
+
+
+class KVCacheBlockListWithHitLength(list[KVCacheBlock]):
+    """A block list carrying the exact token length it represents."""
+
+    def __init__(
+        self,
+        blocks: Sequence[KVCacheBlock] = (),
+        hit_length: int | None = None,
+    ) -> None:
+        super().__init__(blocks)
+        self.hit_length = hit_length
+
+
+def get_cache_hit_length(
+    blocks: Sequence[KVCacheBlock],
+    block_size: int,
+) -> int:
+    hit_length = getattr(blocks, "hit_length", None)
+    if hit_length is not None:
+        return hit_length
+    return len(blocks) * block_size
+
+
+def has_partial_cache_hit(
+    blocks: Sequence[KVCacheBlock],
+    block_size: int,
+) -> bool:
+    hit_length = get_cache_hit_length(blocks, block_size)
+    return hit_length > 0 and hit_length % block_size != 0
+
+
+class KVCacheBlockCopy(NamedTuple):
+    """A pending copy between two KV cache blocks in one cache group."""
+
+    kv_cache_group_id: int
+    src_block_id: int
+    dst_block_id: int
+    num_tokens: int
 
 
 class FreeKVCacheBlockQueue:

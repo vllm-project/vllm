@@ -23,6 +23,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     MultipleOf,
 )
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -31,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -516,6 +518,116 @@ def bind_kv_cache(
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].kv_cache = kv_cache
+
+
+def copy_kv_cache_blocks_inplace(
+    kv_caches: dict[str, Any],
+    attn_groups: Iterable[AttentionGroup] | Iterable[Iterable[AttentionGroup]],
+    kernel_block_sizes: list[int],
+    cache_dtype: str,
+    kv_cache_block_copies: Iterable[KVCacheBlockCopy],
+) -> None:
+    copies_by_group: defaultdict[int, list[tuple[int, int, int]]] = defaultdict(list)
+    for copy in kv_cache_block_copies:
+        copies_by_group[copy.kv_cache_group_id].append(
+            (copy.src_block_id, copy.dst_block_id, copy.num_tokens)
+        )
+    if not copies_by_group:
+        return
+
+    flattened_groups: list[AttentionGroup] = []
+    for item in attn_groups:
+        if isinstance(item, AttentionGroup):
+            flattened_groups.append(item)
+        else:
+            flattened_groups.extend(item)
+
+    for group in flattened_groups:
+        group_id = group.kv_cache_group_id
+        group_copies = copies_by_group.get(group_id)
+        if not group_copies:
+            continue
+        kv_cache_spec = group.kv_cache_spec
+        if isinstance(kv_cache_spec, FullAttentionSpec):
+            kernel_block_size = kernel_block_sizes[group_id]
+            copy_full_blocks = isinstance(kv_cache_spec, MLAAttentionSpec) and (
+                kv_cache_spec.compress_ratio != 1
+                or kv_cache_spec.cache_dtype_str == "fp8_ds_mla"
+            )
+            block_dim = group.backend.get_kv_cache_block_dim(
+                kernel_block_size,
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+                cache_dtype_str=cache_dtype,
+            )
+            token_dim = _get_kv_cache_token_dim(
+                group.backend,
+                block_dim,
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+                cache_dtype,
+            )
+            blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
+            for layer_name in group.layer_names:
+                kv_cache = kv_caches.get(layer_name)
+                if kv_cache is None:
+                    continue
+                for src_block_id, dst_block_id, num_tokens in group_copies:
+                    if copy_full_blocks:
+                        num_tokens = kv_cache_spec.block_size
+                    num_tokens = min(num_tokens, kv_cache_spec.block_size)
+                    num_full_kernel_blocks, partial_tokens = divmod(
+                        num_tokens, kernel_block_size
+                    )
+                    src_start = src_block_id * blocks_per_kv_block
+                    dst_start = dst_block_id * blocks_per_kv_block
+                    if num_full_kernel_blocks > 0:
+                        src_blocks = kv_cache.narrow(
+                            block_dim, src_start, num_full_kernel_blocks
+                        )
+                        dst_blocks = kv_cache.narrow(
+                            block_dim, dst_start, num_full_kernel_blocks
+                        )
+                        dst_blocks.copy_(src_blocks, non_blocking=True)
+                    if partial_tokens > 0:
+                        offset = num_full_kernel_blocks
+                        src_block = kv_cache.select(block_dim, src_start + offset)
+                        dst_block = kv_cache.select(block_dim, dst_start + offset)
+                        dst_block.narrow(token_dim, 0, partial_tokens).copy_(
+                            src_block.narrow(token_dim, 0, partial_tokens),
+                            non_blocking=True,
+                        )
+        elif isinstance(kv_cache_spec, MambaSpec):
+            for layer_name in group.layer_names:
+                kv_cache = kv_caches.get(layer_name)
+                if kv_cache is None:
+                    continue
+                for state in kv_cache:
+                    for src_block_id, dst_block_id, _ in group_copies:
+                        state[dst_block_id].copy_(
+                            state[src_block_id], non_blocking=True
+                        )
+
+
+def _get_kv_cache_token_dim(
+    backend: type[AttentionBackend],
+    block_dim: int,
+    num_kv_heads: int,
+    head_size: int,
+    cache_dtype: str,
+) -> int:
+    token_sentinel = 1234560
+    shape = backend.get_kv_cache_shape(
+        1234567,
+        token_sentinel,
+        num_kv_heads,
+        head_size,
+        cache_dtype_str=cache_dtype,
+    )
+    token_dim = shape.index(token_sentinel)
+    if token_dim > block_dim:
+        token_dim -= 1
+    return token_dim
 
 
 def is_residual_scattered_for_sp(

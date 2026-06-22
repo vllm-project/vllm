@@ -10,7 +10,7 @@ from vllm.distributed.kv_events import BlockStored, KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     get_kv_cache_spec_kind,
@@ -608,6 +608,13 @@ class KVCacheManager:
         for mgr in self.coordinator.single_type_managers:
             ids.extend(mgr.take_new_block_ids())
         return ids
+
+    def take_kv_cache_block_copies(self) -> list[KVCacheBlockCopy]:
+        """Drain and return pending KV cache block copies."""
+        copies: list[KVCacheBlockCopy] = []
+        for mgr in self.coordinator.single_type_managers:
+            copies.extend(mgr.take_kv_cache_block_copies())
+        return copies
 
     def new_step_starts(self) -> None:
         """Called when a new step is started."""
