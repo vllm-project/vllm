@@ -1107,6 +1107,28 @@ def test_propose_stores_probabilistic_draft_probs(attn_backend, monkeypatch):
 
 def test_propose_parallel_drafting_syncs_runtime_k_with_dynamic_sd():
     """Dynamic SD may pass runtime K below init max; sync parallel-drafting slots."""
+    _assert_propose_parallel_drafting_syncs_runtime_k_with_dynamic_sd(
+        method="draft_model",
+        expected_net_num_new_slots=7,
+        expanded_total_tokens=8 + 2 * 7,
+    )
+
+
+def test_propose_eagle_parallel_drafting_syncs_runtime_k_with_dynamic_sd():
+    """P-Eagle path: net_num_new_slots_per_request is runtime K - 1."""
+    _assert_propose_parallel_drafting_syncs_runtime_k_with_dynamic_sd(
+        method="eagle",
+        expected_net_num_new_slots=6,
+        expanded_total_tokens=8 + 2 * 6,
+    )
+
+
+def _assert_propose_parallel_drafting_syncs_runtime_k_with_dynamic_sd(
+    *,
+    method: str,
+    expected_net_num_new_slots: int,
+    expanded_total_tokens: int,
+) -> None:
     device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]
@@ -1116,19 +1138,22 @@ def test_propose_parallel_drafting_syncs_runtime_k_with_dynamic_sd():
     vocab_size = 100
 
     proposer = _create_proposer(
-        "draft_model",
+        method,
         max_speculative_tokens,
         parallel_drafting=True,
     )
     assert proposer.extra_slots_per_request == max_speculative_tokens
 
     hidden_size = proposer.hidden_size
-    expanded_total_tokens = total_tokens + batch_size * runtime_speculative_tokens
 
     model_mock = mock.MagicMock()
-    model_mock.return_value = torch.zeros(
+    forward_hidden_states = torch.zeros(
         expanded_total_tokens, hidden_size, device=device
     )
+    if proposer.model_returns_tuple():
+        model_mock.return_value = (forward_hidden_states, forward_hidden_states)
+    else:
+        model_mock.return_value = forward_hidden_states
 
     logits = torch.full(
         (batch_size * runtime_speculative_tokens, vocab_size),
@@ -1190,7 +1215,7 @@ def test_propose_parallel_drafting_syncs_runtime_k_with_dynamic_sd():
     )
 
     assert proposer.extra_slots_per_request == runtime_speculative_tokens
-    assert proposer.net_num_new_slots_per_request == runtime_speculative_tokens
+    assert proposer.net_num_new_slots_per_request == expected_net_num_new_slots
     assert result.shape == (batch_size, runtime_speculative_tokens)
 
     expected_tokens = torch.zeros(
