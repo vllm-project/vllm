@@ -105,6 +105,32 @@ class Gemma4Config(VerifyAndUpdateConfig):
             )
 
 
+class UnlimitedOCRConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Use FA4 when available, otherwise Triton, for RefSlidingWindowAttention."""
+        from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attention_config = vllm_config.attention_config
+        if is_fa_version_supported(4):
+            if (
+                attention_config.flash_attn_version is None
+                and attention_config.backend in (None, AttentionBackendEnum.FLASH_ATTN)
+            ):
+                attention_config.flash_attn_version = 4
+                logger.info(
+                    "UnlimitedOCR uses RefSlidingWindowAttention. Using FA4 "
+                    "for mixed causal-prefill and sliding-window decode."
+                )
+        elif attention_config.backend is None:
+            attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "UnlimitedOCR uses RefSlidingWindowAttention. FA4 not "
+                "available, forcing TRITON_ATTN backend."
+            )
+
+
 class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -667,6 +693,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma4ForConditionalGeneration": Gemma4Config,
     "Gemma4UnifiedForConditionalGeneration": Gemma4Config,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
+    "UnlimitedOCRForCausalLM": UnlimitedOCRConfig,
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
