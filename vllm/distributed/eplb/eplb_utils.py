@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -31,7 +32,10 @@ class CpuGpuEvent:
     """
 
     def __init__(self):
-        self._event = torch.cuda.Event()
+        if current_platform.is_cuda_alike():
+            self._event = torch.cuda.Event()
+        elif current_platform.is_xpu():
+            self._event = torch.xpu.Event()
         self._recorded = threading.Event()
 
     def wait(self, stream: torch.cuda.Stream | None = None):
@@ -56,7 +60,10 @@ class CpuGpuEvent:
                 "CpuGpuEvent.record() called before the previous event was "
                 "consumed by wait()"
             )
-        self._event = torch.cuda.Event()
+        if current_platform.is_cuda_alike():
+            self._event = torch.cuda.Event()
+        elif current_platform.is_xpu():
+            self._event = torch.xpu.Event()
         self._event.record(stream)
         self._recorded.set()
 
