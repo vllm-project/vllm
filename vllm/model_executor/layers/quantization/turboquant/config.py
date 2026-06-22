@@ -90,6 +90,13 @@ class TurboQuantConfig:
     value_quant_bits: int = 4  # 3-4 = uniform quantized values
     seed: int = 42  # kept for backward compatibility; no longer used internally
     norm_correction: bool = False
+    # MLA-specific: k_pe (rope) compression. When k_pe_fp8=True, k_pe is
+    # stored as R fp8 e4m3 bytes + 2-byte fp16 per-token scale (vs the
+    # default 2*R raw bf16 bytes). This is the single source of truth for
+    # k_pe_bytes — mla_attention.py and the TQ MLA backend both read from
+    # here, avoiding divergent env-var reads.
+    rope_head_dim: int = 0  # qk_rope_head_dim for MLA models (0 = non-MLA)
+    k_pe_fp8: bool = False
 
     @property
     def key_fp8(self) -> bool:
@@ -164,6 +171,28 @@ class TurboQuantConfig:
         return self.key_packed_size + self.value_packed_size
 
     @property
+    def k_pe_bytes(self) -> int:
+        """Packed bytes for k_pe (rope positions) in MLA models.
+
+        Requires rope_head_dim > 0 (MLA models only). Two layouts:
+          - bf16 (default): 2 * rope_head_dim bytes
+          - fp8 (k_pe_fp8=True): rope_head_dim bytes + 2-byte fp16 scale
+        """
+        if self.rope_head_dim <= 0:
+            raise ValueError("k_pe_bytes requires rope_head_dim > 0")
+        if self.k_pe_fp8:
+            return self.rope_head_dim + 2  # R fp8 e4m3 + fp16 scale
+        return 2 * self.rope_head_dim  # raw bf16
+
+    @property
+    def mla_packed_bytes(self) -> int:
+        """Total packed bytes per MLA slot (kv_c + k_pe).
+
+        Layout: [kv_c_packed (key_packed_size bytes) | k_pe (k_pe_bytes)]
+        """
+        return self.key_packed_size + self.k_pe_bytes
+
+    @property
     def slot_size_aligned(self) -> int:
         """Slot size rounded up to next even number.
 
@@ -212,7 +241,12 @@ class TurboQuantConfig:
         return [str(i) for i in indices]
 
     @staticmethod
-    def from_cache_dtype(cache_dtype: str, head_dim: int) -> TurboQuantConfig:
+    def from_cache_dtype(
+        cache_dtype: str,
+        head_dim: int,
+        rope_head_dim: int = 0,
+        k_pe_fp8: bool = False,
+    ) -> TurboQuantConfig:
         """Create config from a named preset.
 
         Valid presets: turboquant_k8v4, turboquant_4bit_nc, etc.
@@ -229,6 +263,8 @@ class TurboQuantConfig:
             key_quant_bits=preset["key_quant_bits"],
             value_quant_bits=preset["value_quant_bits"],
             norm_correction=preset["norm_correction"],
+            rope_head_dim=rope_head_dim,
+            k_pe_fp8=k_pe_fp8,
         )
 
 

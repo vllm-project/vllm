@@ -128,6 +128,7 @@ def _get_backend_priorities(
             ]
         else:
             return [
+                AttentionBackendEnum.TRITON_MLA_TURBOQUANT,
                 AttentionBackendEnum.FLASH_ATTN_MLA,
                 AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.FLASHINFER_MLA,
