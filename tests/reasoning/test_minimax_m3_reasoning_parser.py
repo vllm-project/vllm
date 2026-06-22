@@ -189,14 +189,14 @@ def test_nonstreaming_drops_leading_end_tag():
     assert content == "answer"
 
 
-def test_nonstreaming_non_leading_end_tag_is_content():
+def test_nonstreaming_end_tag_in_content_state_is_dropped():
     parser, _ = make_parser()
     request = ChatCompletionRequest(messages=[], model="test-model")
 
     reasoning, content = parser.extract_reasoning("XXX</mm:think>YYY", request)
 
     assert reasoning is None
-    assert content == "XXX</mm:think>YYY"
+    assert content == "XXXYYY"
 
 
 def test_nonstreaming_enabled_mode_starts_in_reasoning():
@@ -261,7 +261,7 @@ def test_streaming_drops_leading_end_tag():
     assert end_states == [True, True]
 
 
-def test_streaming_non_leading_end_tag_is_content():
+def test_streaming_end_tag_in_content_state_is_dropped():
     parser, tokenizer = make_parser()
 
     reasoning, content, end_states = run_streaming(
@@ -271,7 +271,7 @@ def test_streaming_non_leading_end_tag_is_content():
     )
 
     assert reasoning is None
-    assert content == "XXX</mm:think>YYY"
+    assert content == "XXXYYY"
     assert end_states == [True]
 
 
