@@ -645,8 +645,8 @@ class OpenAIServingChat(OpenAIServing):
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
                     if parser is not None:
-                        previous_reasoning_tokens[i] = (
-                            parser.count_reasoning_tokens(output.token_ids)
+                        previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
+                            output.token_ids
                         )
 
                     # if the message delta is None (e.g. because it was a

@@ -130,7 +130,7 @@ class TokenIDScanner:
                 )
             return prefix_items or self._EMPTY
 
-        token_texts: Sequence[str] = [
+        decoded_token_texts: Sequence[str] = [
             self._decode_token(tid) for tid in delta_token_ids
         ]
 
@@ -155,10 +155,12 @@ class TokenIDScanner:
                         )
                     text_accum.clear()
                     token_text_accum.clear()
-                results.append(PreLexedTerminal(terminal, tid, token_texts[idx]))
+                results.append(
+                    PreLexedTerminal(terminal, tid, decoded_token_texts[idx])
+                )
             else:
-                text_accum.append(token_texts[idx])
-                token_text_accum.append(token_texts[idx])
+                text_accum.append(decoded_token_texts[idx])
+                token_text_accum.append(decoded_token_texts[idx])
 
         if text_accum:
             joined = "".join(text_accum)
@@ -176,7 +178,7 @@ class TokenIDScanner:
                 clean_delta = effective_text
                 for idx, tid in enumerate(delta_token_ids):
                     if tid in self._drop_token_ids:
-                        dropped = token_texts[idx]
+                        dropped = decoded_token_texts[idx]
                         pos = clean_delta.find(dropped)
                         if pos >= 0:
                             clean_delta = (

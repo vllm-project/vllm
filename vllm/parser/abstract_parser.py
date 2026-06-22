@@ -745,6 +745,10 @@ class DelegatingParser(Parser):
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        # Non-streaming engine-based parsers still need the streaming engine
+        # when token IDs are available, so reasoning token counts follow the
+        # same token-aware boundaries as streaming. Callers must provide a
+        # parser instance scoped to one output choice.
         if (
             self._reasoning_parser is not None
             and self._reasoning_parser.engine_based_streaming
