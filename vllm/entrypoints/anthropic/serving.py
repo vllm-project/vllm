@@ -402,6 +402,18 @@ class AnthropicServingMessages(OpenAIServingChat):
     ) -> None:
         """Convert tool_result block to OpenAI format"""
         if role == "user":
+            # Flush preceding text/image parts before the tool message, so the
+            # order stays user(pre) -> tool and the tool_use/result pairing holds.
+            if content_parts:
+                if len(content_parts) == 1 and content_parts[0]["type"] == "text":
+                    openai_messages.append(
+                        {"role": "user", "content": content_parts[0]["text"]}
+                    )
+                else:
+                    openai_messages.append(
+                        {"role": "user", "content": list(content_parts)}
+                    )
+                content_parts.clear()
             cls._convert_user_tool_result(block, openai_messages)
         else:
             tool_result_text = str(block.content) if block.content else ""

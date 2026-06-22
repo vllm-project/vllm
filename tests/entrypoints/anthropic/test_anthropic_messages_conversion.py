@@ -351,6 +351,44 @@ class TestToolResultContent:
         ]
         assert len(user_follow_ups) == 0
 
+    def test_text_before_tool_result_preserves_order(self):
+        """Text before a user tool_result is emitted before the tool message."""
+        request = _make_request(
+            [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "call_001",
+                            "name": "read_file",
+                            "input": {"path": "/tmp/f"},
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "here is some context"},
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call_001",
+                            "content": "file contents",
+                        },
+                    ],
+                },
+            ]
+        )
+        result = _convert(request)
+
+        roles = [m["role"] for m in result.messages]
+        assert roles == ["assistant", "user", "tool"]
+
+        assert result.messages[0]["tool_calls"][0]["id"] == "call_001"
+        assert result.messages[1]["content"] == "here is some context"
+        assert result.messages[2]["content"] == "file contents"
+        assert result.messages[2]["tool_call_id"] == "call_001"
+
 
 # ======================================================================
 # Attribution header stripping
