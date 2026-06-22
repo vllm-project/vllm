@@ -335,10 +335,10 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # TODO: The fallback to self.a1_scale was added for deferred static
         # activation quantization in https://github.com/vllm-project/vllm/pull/40857.
         # Activation emulation relies solely on `a1q_scale` output of
-        # `moe_kernel_quantize_input`, the fallback on `self.a1_scale`
-        # should be removed.
+        # `moe_kernel_quantize_input` - this should be adapted to
+        # always solely rely on `a1q_scale`.
         input_scale = (
-            None
+            a1q_scale
             if self.quantization_emulation
             else (a1q_scale if a1q_scale is not None else self.a1_scale)
         )
