@@ -48,6 +48,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA8O8Int,
     CompressedTensorsWNA16,
+    CompressedTensorsWNAMInt,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear import (  # noqa: E501
     CompressedTensorsLinearTransformMethod,
@@ -681,6 +682,35 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
         return is_intN_weight and (is_static_int8_in and is_static_int8_out)
 
+    @staticmethod
+    def _is_wNaM_int(
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
+        format: str | None,
+    ) -> bool:
+        """Weight N-bit INT with INT activation quant via Humming kernel.
+
+        Catches pack-quantized INT weights with any INT input activation quant
+        that is NOT already handled by WNA8O8Int (static per-tensor INT8).
+        """
+        if input_quant is None:
+            return False
+        is_pack_format = format == CompressionFormat.pack_quantized.value
+        is_channel_group = weight_quant.strategy in (
+            QuantizationStrategy.CHANNEL.value,
+            QuantizationStrategy.GROUP.value,
+        )
+        is_static_int_weight = (
+            weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
+        )
+        is_int_input = input_quant.type == QuantizationType.INT
+        return (
+            is_static_int_weight
+            and is_channel_group
+            and is_pack_format
+            and is_int_input
+        )
+
     def _get_scheme_from_parts(
         self,
         weight_quant: QuantizationArgs,
@@ -728,6 +758,17 @@ class CompressedTensorsConfig(QuantizationConfig):
                 group_size=weight_quant.group_size,
                 has_input_act=input_quant is not None,
                 has_output_act=output_quant is not None,
+                layer_name=layer_name,
+                quant_format=format,
+            )
+
+        if self._is_wNaM_int(weight_quant, input_quant, format):
+            return CompressedTensorsWNAMInt(
+                num_bits=weight_quant.num_bits,
+                strategy=weight_quant.strategy,
+                group_size=weight_quant.group_size,
+                input_quant=input_quant,
+                output_quant=output_quant,
                 layer_name=layer_name,
                 quant_format=format,
             )
