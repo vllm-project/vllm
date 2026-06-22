@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any, NamedTuple
 
-from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
+from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
@@ -13,6 +13,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingWorkerMetadata,
     ReqId,
     TransferJob,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
+    OffloadingEventGroupSpec,
+    OffloadingEventsTracker,
+    get_offloading_event_group_spec,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
@@ -36,7 +41,6 @@ from vllm.v1.kv_offload.base import (
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
-    get_offload_block_hash,
     make_offload_key,
 )
 from vllm.v1.outputs import KVConnectorOutput
@@ -69,6 +73,9 @@ class GroupOffloadConfig(NamedTuple):
     gpu_block_size: int
     offloaded_block_size: int
     hash_block_size_factor: int
+    # KV cache spec metadata propagated onto emitted BlockStored events so
+    # KV-aware consumers can classify and filter the group.
+    kv_event_group_spec: OffloadingEventGroupSpec
     # None below means full attention
     sliding_window_size_in_blocks: int | None
     # Number of this group's offloaded blocks per full-attention alignment
@@ -199,6 +206,9 @@ class SchedulerOffloadConfig(NamedTuple):
                     ),
                     alignment_block_count=_alignment_block_count(
                         gpu_block_size * spec.block_size_factor, sw
+                    ),
+                    kv_event_group_spec=get_offloading_event_group_spec(
+                        spec.kv_cache_config.kv_cache_groups[idx]
                     ),
                     is_eagle_group=idx in eagle_groups,
                 )
@@ -360,6 +370,8 @@ class OffloadingConnectorScheduler:
         # protected by their ref_cnt) and for sliding window blocks (which can
         # be freed before a request finishes).
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
+
+        self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -647,6 +659,13 @@ class OffloadingConnectorScheduler:
         for group_state in req_status.group_states:
             group_state.block_ids.clear()
 
+        if req_status.transfer_jobs:
+            logger.debug(
+                "Delaying request %s since it still has in-flight transfers",
+                request.request_id,
+            )
+            return None, False
+
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
 
@@ -927,6 +946,11 @@ class OffloadingConnectorScheduler:
                         continue
 
                     offloaded_block_idx = start_block_idx + idx
+
+                    self._events_tracker.record_store(
+                        req, group_config, offloaded_block_idx, offload_key
+                    )
+
                     gpu_block_idx = offloaded_block_idx * block_size_factor
                     for i in range(block_size_factor):
                         block_id = block_ids[gpu_block_idx + i]
@@ -1177,25 +1201,17 @@ class OffloadingConnectorScheduler:
         return False, None
 
     def take_events(self) -> Iterable[KVCacheEvent]:
-        """Take the KV cache events from the connector.
+        """Drain pending KV cache events.
 
-        Returns:
-            A list of KV cache events.
+        Complete metadata is available only when self-describing KV events
+        are enabled, and only for full-attention groups. Other shapes retain
+        the previous placeholder payload so consumers can ignore them.
+
+        Yields:
+            ``BlockStored`` or ``BlockRemoved`` events corresponding to
+            the underlying :class:`OffloadingEvent` stream.
         """
-        for event in self.manager.take_events():
-            block_hashes = [get_offload_block_hash(key) for key in event.keys]
-            if event.removed:
-                yield BlockRemoved(block_hashes=block_hashes, medium=event.medium)
-            else:
-                yield BlockStored(
-                    block_hashes=block_hashes,
-                    parent_block_hash=None,
-                    token_ids=[],
-                    lora_id=None,
-                    block_size=0,
-                    medium=event.medium,
-                    lora_name=None,
-                )
+        yield from self._events_tracker.take_events(self.manager.take_events())
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored blocks."""
@@ -1230,6 +1246,10 @@ class OffloadingConnectorScheduler:
         self._stale_job_threshold = self._job_counter
         self._jobs.clear()
         self._block_id_to_pending_jobs.clear()
+
+        # The manager pool is empty; pending event payloads and announced
+        # reference counts are stale.
+        self._events_tracker.reset()
 
         # Note: _current_batch_jobs_to_flush is intentionally NOT cleared.
         # The load flush IDs collected above must be delivered to workers.
