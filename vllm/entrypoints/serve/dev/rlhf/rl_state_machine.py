@@ -35,38 +35,48 @@ would corrupt the engine state.
 """
 from __future__ import annotations
 
-import threading
+import asyncio
 from http import HTTPStatus
 
 from fastapi import HTTPException, Request
 
 
 class RLStateMachineState:
-    """Thread-safe tracker for weight-update protocol state.
+    """Async-safe tracker for weight-update protocol state.
+
+    Uses asyncio.Lock so it does not block the event loop — all HTTP handlers
+    are async coroutines; a threading.Lock would suspend the loop while held.
 
     Attached to ``app.state.rl_state`` at router registration time.
     """
 
     def __init__(self) -> None:
-        self._lock = threading.Lock()
+        self._lock: asyncio.Lock | None = None  # created lazily on first use
         self._is_updating: bool = False
+
+    def _get_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     # ── Public queries ─────────────────────────────────────────────────────
 
     @property
     def is_updating(self) -> bool:
-        with self._lock:
-            return self._is_updating
+        return self._is_updating
 
-    # ── Transitions ────────────────────────────────────────────────────────
+    # ── Transitions (async — acquire event-loop lock) ──────────────────────
 
-    def on_start_weight_update(self) -> None:
+    async def on_start_weight_update(self) -> None:
         """Mark a weight update as in-progress.
+
+        Called AFTER the engine RPC succeeds so we don't leave the flag stuck
+        if the engine call raises.
 
         Raises:
             RuntimeError: If a weight update is already active.
         """
-        with self._lock:
+        async with self._get_lock():
             if self._is_updating:
                 raise RuntimeError(
                     "start_weight_update called while a weight update is already "
@@ -74,13 +84,15 @@ class RLStateMachineState:
                 )
             self._is_updating = True
 
-    def on_finish_weight_update(self) -> None:
+    async def on_finish_weight_update(self) -> None:
         """Mark a weight update as finished.
+
+        Called AFTER the engine RPC succeeds.
 
         Raises:
             RuntimeError: If no weight update is currently in progress.
         """
-        with self._lock:
+        async with self._get_lock():
             if not self._is_updating:
                 raise RuntimeError(
                     "finish_weight_update called without a preceding "
@@ -88,26 +100,25 @@ class RLStateMachineState:
                 )
             self._is_updating = False
 
-    def on_update_weights(self) -> None:
+    async def on_update_weights(self) -> None:
         """Assert that a weight update is in progress (update_weights ordering).
 
         Raises:
             RuntimeError: If start_weight_update has not been called.
         """
-        with self._lock:
+        async with self._get_lock():
             if not self._is_updating:
                 raise RuntimeError(
                     "update_weights called without a preceding start_weight_update."
                 )
 
-    def reset(self) -> None:
-        """Force-clear the updating flag (for crash recovery / test teardown)."""
-        with self._lock:
+    async def reset(self) -> None:
+        """Force-clear the updating flag (crash recovery / test teardown)."""
+        async with self._get_lock():
             self._is_updating = False
 
     def to_dict(self) -> dict:
-        with self._lock:
-            return {"weight_update_active": self._is_updating}
+        return {"weight_update_active": self._is_updating}
 
 
 # ── FastAPI dependencies ────────────────────────────────────────────────────

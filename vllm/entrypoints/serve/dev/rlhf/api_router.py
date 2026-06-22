@@ -217,17 +217,23 @@ async def start_weight_update(raw_request: Request):
         body = await raw_request.json()
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+    # State machine guard BEFORE engine call: check for double-start.
+    # We check-without-marking here; the mark happens after engine succeeds
+    # to avoid leaving _is_updating=True if the engine RPC throws.
+    sm: RLStateMachineState = raw_request.app.state.rl_state
+    if sm.is_updating:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT.value,
+            detail="start_weight_update called while a weight update is already "
+                   "in progress.  Call finish_weight_update first.",
+        )
+
     is_checkpoint_format = body.get("is_checkpoint_format", True)
     await engine_client(raw_request).start_weight_update(
         is_checkpoint_format=is_checkpoint_format
     )
-    # Enforce state machine: mark update in-progress (raises 409 on double-start).
-    sm: RLStateMachineState = raw_request.app.state.rl_state
-    try:
-        sm.on_start_weight_update()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=HTTPStatus.CONFLICT.value, detail=str(exc)) from exc
-    # Record start time for duration histogram; mark Prometheus metric active.
+    # Engine RPC succeeded → now mark the state machine and Prometheus metrics.
+    await sm.on_start_weight_update()
     wv: _WeightVersionState = raw_request.app.state.weight_version
     wv.mark_start()
     rl_weight_update_active.labels(engine=_ENGINE_IDX).set(1)
@@ -249,7 +255,7 @@ async def update_weights(raw_request: Request):
     # State machine: update_weights must follow start_weight_update.
     sm: RLStateMachineState = raw_request.app.state.rl_state
     try:
-        sm.on_update_weights()
+        await sm.on_update_weights()
     except RuntimeError as exc:
         raise HTTPException(status_code=HTTPStatus.CONFLICT.value, detail=str(exc)) from exc
     await engine_client(raw_request).update_weights(
@@ -272,26 +278,30 @@ async def finish_weight_update(raw_request: Request):
         # RuntimeError: Starlette raises this if the body was already consumed.
         body = {}
 
-    # State machine: finish requires preceding start.
+    # State machine guard BEFORE engine call: check without clearing flag yet.
     sm: RLStateMachineState = raw_request.app.state.rl_state
-    try:
-        sm.on_finish_weight_update()
-    except RuntimeError as exc:
-        raise HTTPException(status_code=HTTPStatus.CONFLICT.value, detail=str(exc)) from exc
+    if not sm.is_updating:
+        raise HTTPException(
+            status_code=HTTPStatus.CONFLICT.value,
+            detail="finish_weight_update called without a preceding start_weight_update.",
+        )
 
     await engine_client(raw_request).finish_weight_update()
 
-    # Bump version after engine confirms success; collect elapsed time.
+    # Engine RPC succeeded → now clear the state machine flag and update metrics.
+    # Use try/finally so rl_weight_update_active is always reset even if bump raises.
     wv: _WeightVersionState = raw_request.app.state.weight_version
     label = body.get("weight_label")
-    new_gen, elapsed_s = wv.bump(label=label)
-
-    # Update Prometheus metrics.
-    rl_weight_update_total.labels(engine=_ENGINE_IDX).inc()
-    rl_weight_gen.labels(engine=_ENGINE_IDX).set(new_gen)
-    rl_weight_update_active.labels(engine=_ENGINE_IDX).set(0)
-    if elapsed_s is not None:
-        rl_weight_update_duration_seconds.labels(engine=_ENGINE_IDX).observe(elapsed_s)
+    try:
+        await sm.on_finish_weight_update()
+        new_gen, elapsed_s = wv.bump(label=label)
+        rl_weight_update_total.labels(engine=_ENGINE_IDX).inc()
+        rl_weight_gen.labels(engine=_ENGINE_IDX).set(new_gen)
+        if elapsed_s is not None:
+            rl_weight_update_duration_seconds.labels(engine=_ENGINE_IDX).observe(elapsed_s)
+    finally:
+        # Always clear the active flag — engine confirmed finish, so we are done.
+        rl_weight_update_active.labels(engine=_ENGINE_IDX).set(0)
 
     return JSONResponse(content={
         "message": "Weight update finished",
@@ -368,16 +378,21 @@ class _WeightCheckerState:
         self.snapshot = checksums
 
     def compare(self, current: dict[str, str]) -> tuple[bool, list[str]]:
-        """Return (all_match, list_of_mismatched_names)."""
+        """Return (all_match, list_of_mismatched_or_missing_names).
+
+        ``mismatches`` covers two cases:
+        - digest changed (weight was overwritten with different values)
+        - tensor present in snapshot but absent from current (partial transfer)
+        Either case is a mismatch.
+        """
         if self.snapshot is None:
             raise RuntimeError("No snapshot taken yet; call action='snapshot' first")
-        mismatches = [
+        changed = [
             name for name, digest in current.items()
             if self.snapshot.get(name) != digest
         ]
-        # Also flag names present in snapshot but missing in current
         missing = [n for n in self.snapshot if n not in current]
-        all_bad = mismatches + missing
+        all_bad = changed + missing
         return len(all_bad) == 0, all_bad
 
     def reset(self) -> None:

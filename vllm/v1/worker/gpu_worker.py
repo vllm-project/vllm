@@ -200,17 +200,21 @@ class Worker(WorkerBase):
             self.model_runner.post_kv_cache_wake_up()
 
     def compute_weight_checksums(self) -> dict[str, str]:
-        """Return SHA-256 hex digests for every named parameter.
+        """Return SHA-256 hex digests for every named parameter AND buffer.
+
+        Both named_parameters() and named_buffers() are included because some
+        quantization schemes (e.g. custom quantizers, LoRA) register
+        weight-bearing tensors as buffers, not as parameters.
 
         Copies each tensor to CPU before hashing so the result is the same
         regardless of which GPU the worker is on.  Non-persistent buffers
-        (e.g. RoPE sin/cos caches recomputed from config) are skipped
-        because they vary across restarts even when weights are unchanged.
+        (RoPE sin/cos caches recomputed from config) are skipped because they
+        vary across restarts even when weights are unchanged.
         """
         import hashlib
 
-        # Patterns for non-persistent buffers that are recomputed from
-        # configuration, not from checkpoint data.
+        # Skip patterns for buffers that are recomputed from configuration,
+        # not from checkpoint data.
         _SKIP_PATTERNS = (
             "rotary_emb.cos_cached",
             "rotary_emb.sin_cached",
@@ -218,10 +222,16 @@ class Worker(WorkerBase):
         )
 
         checksums: dict[str, str] = {}
-        for name, param in self.model_runner.model.named_parameters():
+        model = self.model_runner.model
+        for name, tensor in list(model.named_parameters()) + list(model.named_buffers()):
             if any(pat in name for pat in _SKIP_PATTERNS):
                 continue
-            raw = param.data.contiguous().cpu().view(torch.uint8).numpy().tobytes()
+            if not tensor.is_floating_point() and not tensor.is_integer():
+                continue  # skip bool / object tensors that can't be byte-viewed
+            try:
+                raw = tensor.data.contiguous().cpu().view(torch.uint8).numpy().tobytes()
+            except Exception:  # pragma: no cover — exotic dtype
+                continue
             checksums[name] = hashlib.sha256(raw).hexdigest()
         return checksums
 
