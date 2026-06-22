@@ -12,6 +12,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import Range
 from vllm.logger import init_logger
@@ -245,7 +246,7 @@ class QkNormRopeKvCachePattern:
 
         q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
         # Match the quant-query op Attention.forward inserts (fp8 KV + UNIFIED).
-        q_rope_fp8 = torch.ops.vllm.rocm_aiter_per_tensor_quant(
+        q_rope_fp8 = rocm_aiter_ops.per_tensor_quant(
             q_rope, current_platform.fp8_dtype(), q_scale
         )[0]
         q_rope_fp8 = q_rope_fp8.view(-1, self.num_heads, self.head_size)
@@ -294,7 +295,7 @@ class QkNormRopeKvCachePattern:
             layer_name=self.layer_name,
         )
         # Re-apply the quant on the kernel's bf16 q_out; fused op does not quant q.
-        q_fp8 = torch.ops.vllm.rocm_aiter_per_tensor_quant(
+        q_fp8 = rocm_aiter_ops.per_tensor_quant(
             results[1].view(-1, self.q_size), current_platform.fp8_dtype(), q_scale
         )[0]
         q_fp8 = q_fp8.view(-1, self.num_heads, self.head_size)
