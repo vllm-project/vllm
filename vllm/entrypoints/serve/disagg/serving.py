@@ -400,6 +400,14 @@ class ServingTokens(OpenAIServing):
                     else:
                         logprobs = None
 
+                    routed_experts_b64 = None
+                    if output.routed_experts is not None:
+                        buf = io.BytesIO()
+                        np.save(buf, output.routed_experts)
+                        routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
+                            "ascii"
+                        )
+
                     chunk = GenerateStreamResponse(
                         request_id=request_id,
                         choices=[
@@ -408,6 +416,7 @@ class ServingTokens(OpenAIServing):
                                 logprobs=logprobs,
                                 finish_reason=finish_reason,
                                 token_ids=as_list(delta_token_ids),
+                                routed_experts=routed_experts_b64,
                             )
                         ],
                     )
