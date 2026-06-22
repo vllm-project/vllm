@@ -5,6 +5,10 @@ steps:
 - label: V1 Core + KV + Metrics
   timeout_in_minutes: 30
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -31,6 +35,10 @@ steps:
 - label: V1 Sample + Logits
   timeout_in_minutes: 30
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -71,6 +79,10 @@ steps:
 - label: XPU CPU Offload
   timeout_in_minutes: 60
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -95,6 +107,10 @@ steps:
   key: regression
   timeout_in_minutes: 30
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -126,6 +142,10 @@ steps:
   timeout_in_minutes: 30
   num_devices: 2
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -157,6 +177,10 @@ steps:
   key: async-engine-inputs-utils-worker
   timeout_in_minutes: 30
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
