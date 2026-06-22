@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """External-store cache-hit coordinator for MooncakeStoreConnector."""
 
+from collections.abc import Sequence
 from typing import cast
 
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
+    chunk_hashes_for_block_size,
+)
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
-    BlockHashList,
-    BlockHashListWithBlockSize,
     KVCacheBlock,
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -120,7 +122,7 @@ class MooncakeStoreCoordinator:
 
     def find_longest_cache_hit(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,
@@ -147,7 +149,7 @@ class MooncakeStoreCoordinator:
 
     def load_mask(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         token_len: int,
     ) -> tuple[list[bool], ...]:
         """Per-group load masks: ``mask[g][i]`` is True iff group ``g``'s
@@ -236,17 +238,15 @@ class MooncakeStoreCoordinator:
         return tuple(masks)
 
     def block_hashes_for_spec(
-        self, block_hashes: list[BlockHash], spec: KVCacheSpec
-    ) -> BlockHashList:
-        if spec.block_size == self.hash_block_size:
-            return block_hashes
-        return BlockHashListWithBlockSize(
+        self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec
+    ) -> Sequence[BlockHash]:
+        return chunk_hashes_for_block_size(
             block_hashes, self.hash_block_size, spec.block_size
         )
 
     def _find_hit_blocks(
         self,
-        block_hashes: list[BlockHash],
+        block_hashes: Sequence[BlockHash],
         max_length: int,
         cached_block_pool: ExternalCachedBlockPool,
         *,
@@ -264,7 +264,7 @@ class MooncakeStoreCoordinator:
             spec, group_ids, manager_cls = self.attention_groups[0]
             hashes = self.block_hashes_for_spec(block_hashes, spec)
             hit_blocks = manager_cls.find_longest_cache_hit(
-                block_hashes=hashes,
+                block_hashes=hashes,  # type: ignore[arg-type]
                 max_length=max_length,
                 kv_cache_group_ids=group_ids,
                 block_pool=cast(BlockPool, cached_block_pool),
@@ -304,7 +304,7 @@ class MooncakeStoreCoordinator:
                     _max_length = min(curr_hit_length + spec.block_size, max_length)
                 hashes = self.block_hashes_for_spec(block_hashes, spec)
                 hit_blocks = manager_cls.find_longest_cache_hit(
-                    block_hashes=hashes,
+                    block_hashes=hashes,  # type: ignore[arg-type]
                     max_length=_max_length,
                     kv_cache_group_ids=group_ids,
                     block_pool=cast(BlockPool, cached_block_pool),

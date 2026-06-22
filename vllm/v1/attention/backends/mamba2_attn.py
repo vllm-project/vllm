@@ -7,6 +7,7 @@ from typing import Any
 import torch
 
 from vllm.config import VllmConfig
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     CommonAttentionMetadata,
@@ -68,22 +69,22 @@ def compute_varlen_chunk_metadata(
 
     # Exclusive prefix sum over logical-chunk lengths
     if chunk_lens:
-        cu_chunk_seqlens = torch.tensor(
-            [0] + list(itertools.accumulate(chunk_lens)),
-            device=device,
-            dtype=torch.int32,
-        )
-        # Final boundary must equal total tokens
-        assert int(cu_chunk_seqlens[-1].item()) == total
+        cu_chunk_seqlens_list = [0] + list(itertools.accumulate(chunk_lens))
+        # Final boundary must equal total tokens (check on host to avoid a sync)
+        assert cu_chunk_seqlens_list[-1] == total
     else:
-        cu_chunk_seqlens = torch.tensor([0], device=device, dtype=torch.int32)
-
-    last_chunk_indices_t = (
-        torch.tensor(last_chunk_indices, device=device, dtype=torch.int32)
-        if len(starts) > 0
-        else torch.empty((0,), device=device, dtype=torch.int32)
+        cu_chunk_seqlens_list = [0]
+    cu_chunk_seqlens = async_tensor_h2d(
+        cu_chunk_seqlens_list, dtype=torch.int32, device=device
     )
-    seq_idx_chunks_t = torch.tensor(seq_idx_chunks, device=device, dtype=torch.int32)
+
+    # last_chunk_indices is empty when there are no sequences (len(starts) == 0).
+    last_chunk_indices_t = async_tensor_h2d(
+        last_chunk_indices, dtype=torch.int32, device=device
+    )
+    seq_idx_chunks_t = async_tensor_h2d(
+        seq_idx_chunks, dtype=torch.int32, device=device
+    )
     return cu_chunk_seqlens, last_chunk_indices_t, seq_idx_chunks_t
 
 

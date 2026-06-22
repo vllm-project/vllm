@@ -109,6 +109,7 @@ steps:
       - image-build-amd
       commands:
       - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+      - export PYTORCH_ROCM_ARCH=gfx942 # Limit Quark compilation to save time
       - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
 
 - label: MoE Refactor Integration Test (H100 - TEMPORARY)
