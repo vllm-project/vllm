@@ -276,7 +276,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
 
         self._ensure_wrapper()
 
-        result = self._wrapper.run(
+        self._wrapper.run(
             x=hidden_states,
             w1_weight=w1,
             w1_weight_sf=self.w1_sf_mma,
