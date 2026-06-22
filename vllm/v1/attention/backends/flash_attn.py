@@ -273,6 +273,9 @@ class FlashAttentionMetadata:
     # Shape: (num_seqs, max_ranges, 2) int32, [start, end] per range.
     mm_prefix_range_tensor: torch.Tensor | None = None
 
+    ref_sliding_window: int | None = None
+    ref_sliding_window_decode_mask: torch.Tensor | None = None
+
 
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
@@ -844,9 +847,9 @@ class FlashAttentionImpl(AttentionImpl):
                         sliding_window_size[0],
                     ]
 
+                mask_mod = None
+                aux_tensors = None
                 mm_prefix_ranges = attn_metadata.mm_prefix_range_tensor
-                mm_mask_mod = None
-                mm_aux = None
                 if (
                     mm_prefix_ranges is not None
                     and not is_dynamic_causal
@@ -854,8 +857,26 @@ class FlashAttentionImpl(AttentionImpl):
                     and self.vllm_flash_attn_version == 4
                 ):
                     max_ranges = mm_prefix_ranges.shape[1]
-                    mm_mask_mod = _make_mm_prefix_mask_mod(max_ranges)
-                    mm_aux = [mm_prefix_ranges]
+                    mask_mod = _make_mm_prefix_mask_mod(max_ranges)
+                    aux_tensors = [mm_prefix_ranges]
+
+                ref_decode_mask = attn_metadata.ref_sliding_window_decode_mask
+                if ref_decode_mask is not None:
+                    if self.vllm_flash_attn_version != 4:
+                        raise NotImplementedError(
+                            "RefSlidingWindowAttention requires FlashAttention v4 "
+                            "for mixed prefill/decode mask_mod support."
+                        )
+                    if mask_mod is not None:
+                        raise NotImplementedError(
+                            "RefSlidingWindowAttention cannot currently be "
+                            "combined with mm_prefix mask_mod."
+                        )
+                    assert attn_metadata.ref_sliding_window is not None
+                    mask_mod = _make_ref_sliding_window_mask_mod(
+                        attn_metadata.ref_sliding_window
+                    )
+                    aux_tensors = [ref_decode_mask]
 
                 dynamic_causal = None
                 if isinstance(causal, torch.Tensor):
@@ -890,8 +911,8 @@ class FlashAttentionImpl(AttentionImpl):
                     dynamic_causal=dynamic_causal,
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
-                    mask_mod=mm_mask_mod,
-                    aux_tensors=mm_aux,
+                    mask_mod=mask_mod,
+                    aux_tensors=aux_tensors,
                 )
                 return output
 
@@ -1167,6 +1188,36 @@ def _make_mm_prefix_mask_mod(max_ranges: int):
 
     mm_prefix_mask_mod.use_fast_sampling = True
     return mm_prefix_mask_mod
+
+
+def _make_ref_sliding_window_mask_mod(sliding_window: int):
+    import cutlass.cute as cute
+    from cutlass import Int32  # type: ignore[attr-defined]
+
+    from vllm.vllm_flash_attn.cute.utils import (  # type: ignore[import-untyped]
+        scalar_to_ssa,
+    )
+
+    left_window = sliding_window - 1
+
+    @cute.jit
+    def ref_sliding_window_mask_mod(
+        batch_idx: cute.TensorSSA,
+        head_idx: cute.TensorSSA,
+        q_idx: cute.TensorSSA,
+        kv_idx: cute.TensorSSA,
+        seqlen_info,
+        aux_tensors,
+    ):
+        decode_mask = aux_tensors[0]
+        b = batch_idx[0]
+        is_prefill = scalar_to_ssa(decode_mask[b], Int32) == 0
+        causal = kv_idx <= q_idx
+        in_window = kv_idx + left_window >= q_idx
+        return causal & (is_prefill | in_window)
+
+    ref_sliding_window_mask_mod.use_fast_sampling = True
+    return ref_sliding_window_mask_mod
 
 
 def use_cascade_attention(
