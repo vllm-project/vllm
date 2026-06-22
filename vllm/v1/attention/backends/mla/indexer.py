@@ -218,6 +218,13 @@ class DeepseekV32IndexerMetadata:
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
 
+    # DCP (Decode Context Parallelism). Populated only when DCP is active; the
+    # indexer op reads these to merge per-rank local top-k into a single global
+    # top-k under sparse_indexer_mode == "exact" (see sparse_attn_indexer).
+    dcp_world_size: int = 1
+    cp_rank: int = 0
+    sparse_indexer_mode: str = "union"
+
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     max_model_len = vllm_config.model_config.max_model_len
@@ -254,6 +261,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             self.dcp_world_size = 1
             self.dcp_rank = 0
         self.cp_kv_cache_interleave_size = parallel_config.cp_kv_cache_interleave_size
+        self.sparse_indexer_mode = parallel_config.dcp_sparse_indexer_mode
         # NOTE(Chen):an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
         self.num_speculative_tokens = (
@@ -582,6 +590,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 if self.compress_ratio > 1
                 else seq_lens_cpu
             )
+            # Global lengths (before DCP localization) drive chunk boundaries
+            # under exact-merge so every rank chunks identically (see below).
+            global_compressed_seq_lens_cpu = compressed_seq_lens_cpu
             if dcp_local_seq_lens is not None:
                 # The DCP split is monotonic in seq_len, so applying it to an
                 # upper bound of the global length yields a valid upper bound
@@ -592,6 +603,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.dcp_rank,
                     self.cp_kv_cache_interleave_size,
                 )
+            # Chunk boundaries default to this rank's local lengths. Under DCP
+            # exact-merge the boundaries MUST come from the GLOBAL lengths so
+            # every rank produces the same chunk count and row counts — the
+            # per-chunk all_gather in sparse_attn_indexer requires identical
+            # row counts across ranks. The per-chunk KV gather still uses the
+            # LOCAL compressed_seq_lens passed to build_prefill_chunk_metadata,
+            # so chunking on global lengths is conservative (it can only make
+            # more/smaller chunks, never overflow the local workspace).
+            if dcp_local_seq_lens is not None and self.sparse_indexer_mode == "exact":
+                chunk_seq_lens_cpu = global_compressed_seq_lens_cpu
+            else:
+                chunk_seq_lens_cpu = compressed_seq_lens_cpu
             prefill_query_lens_cpu = torch.diff(
                 query_start_loc_cpu[num_decodes : num_decodes + num_prefills + 1]
             )
@@ -601,7 +624,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
             seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
             chunk_specs = split_indexer_prefill_chunks(
-                compressed_seq_lens_cpu[num_decodes:],
+                chunk_seq_lens_cpu[num_decodes:],
                 prefill_query_lens_cpu,
                 self.max_prefill_buffer_size,
                 max_logits_bytes,
@@ -730,6 +753,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            dcp_world_size=self.dcp_world_size,
+            cp_rank=self.dcp_rank,
+            sparse_indexer_mode=self.sparse_indexer_mode,
         )
 
         return attn_metadata

@@ -7,6 +7,7 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -78,6 +79,82 @@ def kv_cache_as_quant_view(
     return kv_cache.unsqueeze(-2)
 
 
+def _dcp_global_topk_merge(
+    topk_indices: torch.Tensor,
+    logits: torch.Tensor,
+    local_valid: torch.Tensor,
+    cp_rank: int,
+    dcp_world_size: int,
+    topk_tokens: int,
+) -> None:
+    """Merge per-rank local top-k into the global top-k under DCP exact-merge.
+
+    Each DCP rank ran the local top-k over only its 1/N interleaved KV shard
+    (CP_INTERLEAVE=1, compress_ratio=1), producing request-relative LOCAL
+    indices into that shard. Local index ``i`` on rank ``r`` is the global
+    position ``g = r + i * dcp_world_size``. Ranks all-gather their
+    ``(global_pos, score)`` candidates and each independently recomputes the
+    same global top-k via a deterministic int64 total-order key: fp8 indexer
+    scores tie often, and a plain ``torch.topk`` breaks ties
+    per-rank-nondeterministically, so ranks could otherwise select different
+    tied tokens and their attention outputs would disagree (intermittent
+    garbled tokens). Each rank then keeps only the selected positions it owns,
+    mapped back to its LOCAL shard index (``g // dcp_world_size``, others
+    ``-1``). That is the same LOCAL-index representation the union path feeds
+    downstream, so the slot conversion, attention kernel and cross-rank LSE
+    merge are unchanged; the merge reconciles the per-rank owned subsets into
+    attention over exactly the global top-k. Writes ``topk_indices`` in place.
+    """
+    T = topk_indices.shape[0]
+    K = topk_tokens
+    invalid = topk_indices < 0
+    idx_safe = topk_indices.clamp(min=0)
+    # A row whose shard holds fewer than K valid slots gets padded/OOB local
+    # indices from the top-k kernel; mask them by the explicit valid count.
+    invalid = invalid | (idx_safe >= local_valid.unsqueeze(1))
+    local_scores = torch.gather(
+        logits.float(), 1, idx_safe.to(torch.int64)
+    ).masked_fill(invalid, float("-inf"))
+    global_pos = cp_rank + idx_safe.to(torch.int32) * dcp_world_size
+    global_pos = torch.where(invalid, torch.full_like(global_pos, -1), global_pos)
+
+    # [T, K, 2] -> all_gather over ranks -> [dcp_world_size, T, K, 2]. Positions
+    # are < max_model_len (<< 2**24) so the float32 packing is lossless.
+    cand = torch.stack(
+        [global_pos.to(torch.float32), local_scores.to(torch.float32)], dim=-1
+    )
+    cand_all = get_dcp_group().all_gather(cand, dim=0).view(dcp_world_size, T, K, 2)
+    # permute-before-reshape is load-bearing: a bare reshape would interleave
+    # rows across ranks instead of concatenating each rank's K candidates.
+    gp = cand_all[..., 0].permute(1, 0, 2).reshape(T, dcp_world_size * K)
+    sc = cand_all[..., 1].permute(1, 0, 2).reshape(T, dcp_world_size * K)
+
+    # Strict total order as an int64 key: the score's monotone uint32 bits in
+    # the high 32 bits (higher score -> larger key) and ~global_pos in the low
+    # 32 bits (lowest global position wins among equal scores); bias by 2**63 so
+    # the signed torch.topk compares unsigned. All ranks compute identical keys,
+    # so the selection is deterministic and rank-agnostic. Invalid candidates
+    # (score -inf, gp -1) map to the minimum key and sort last with no
+    # special-casing.
+    sc_bits = sc.view(torch.int32)
+    not_bits = sc_bits.bitwise_not()
+    ordered = torch.where(sc_bits < 0, not_bits, sc_bits ^ 0x80000000)
+    high = ordered.to(torch.uint32).to(torch.int64) << 32
+    low = (~gp.to(torch.int32)).to(torch.int64) & 0xFFFFFFFF
+    key = (high | low) + (1 << 63)
+    _, sel = torch.topk(key, K, dim=1)  # [T, K], deterministic
+    global_sel = torch.gather(gp, 1, sel.to(torch.int64)).to(torch.int32)
+
+    # Keep only the selected positions this rank owns, mapped to its LOCAL shard
+    # index; positions owned by other ranks become -1 (the attention kernel and
+    # LSE merge treat -1 as "skip", and the other ranks contribute them).
+    owned = (global_sel >= 0) & (global_sel % dcp_world_size == cp_rank)
+    local_sel = torch.where(
+        owned, global_sel // dcp_world_size, torch.full_like(global_sel, -1)
+    )
+    topk_indices.copy_(local_sel)
+
+
 @eager_break_during_capture
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -145,6 +222,16 @@ def sparse_attn_indexer(
     has_decode = attn_metadata_narrowed.num_decodes > 0
     has_prefill = attn_metadata_narrowed.num_prefills > 0
     num_decode_tokens = attn_metadata_narrowed.num_decode_tokens
+
+    # DCP exact-merge: when enabled, replace each rank's local top-k with the
+    # owned subset of the global top-k (see _dcp_global_topk_merge). When off
+    # (union, the default) or DCP is inactive, the top-k stays purely local and
+    # this path is byte-identical to the non-DCP behavior.
+    dcp_world_size = attn_metadata_narrowed.dcp_world_size
+    cp_rank = attn_metadata_narrowed.cp_rank
+    exact_merge = (
+        dcp_world_size > 1 and attn_metadata_narrowed.sparse_indexer_mode == "exact"
+    )
 
     # q_scale is required iff the FP4 cache path is enabled; the FP8 path
     # folds the Q scale into `weights` inside fused_indexer_q_rope_quant.
@@ -255,6 +342,22 @@ def sparse_attn_indexer(
                 topk_tokens,
             )
 
+            if exact_merge:
+                # Per-row valid local KV count = this rank's shard size for the
+                # row. Chunk boundaries are global (see the builder), so every
+                # rank reaches this chunk with the same num_rows for all_gather.
+                local_valid = (chunk.cu_seqlen_ke - chunk.cu_seqlen_ks)[:num_rows].to(
+                    torch.int32
+                )
+                _dcp_global_topk_merge(
+                    topk_indices,
+                    logits,
+                    local_valid,
+                    cp_rank,
+                    dcp_world_size,
+                    topk_tokens,
+                )
+
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode
         assert decode_metadata is not None
@@ -356,6 +459,20 @@ def sparse_attn_indexer(
                 num_rows,
                 logits.stride(0),
                 logits.stride(1),
+                topk_tokens,
+            )
+
+        if exact_merge:
+            # seq_lens here is this rank's LOCAL per-token shard count; T =
+            # num_padded_tokens is identical across ranks (the decode batch is
+            # replicated), so the all_gather aligns.
+            local_valid = seq_lens.reshape(-1)[: topk_indices.shape[0]].to(torch.int32)
+            _dcp_global_topk_merge(
+                topk_indices,
+                logits,
+                local_valid,
+                cp_rank,
+                dcp_world_size,
                 topk_tokens,
             )
 
