@@ -1155,6 +1155,7 @@ def dynamic_per_batched_tensor_quant(
     return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
 
+# --8<-- [start:mla_decode_concat_quant_fp8]
 @CustomOp.register(
     "mla_decode_concat_quant_fp8",
     dynamic_arg_dims={"decode_ql_nope": 0, "decode_q_pe": 0},
@@ -1165,6 +1166,8 @@ class _DecodeConcatQuantFP8(QuantFP8):
     quantization. When disabled, forward_native is compiled via torch.compile,
     fusing cat/reshape/quant/view together.
     """
+
+    # --8<-- [end:mla_decode_concat_quant_fp8]
 
     def _make_forward(quant_fn):  # noqa: N805
         """Factory to create forward methods that concat before quantization."""

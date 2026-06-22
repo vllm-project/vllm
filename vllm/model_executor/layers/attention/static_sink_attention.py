@@ -112,11 +112,14 @@ def create_static_sink_attention_backend(
     return attn_backend
 
 
+# --8<-- [start:static_sink_attention]
 @CustomOp.register("static_sink_attention")
 class StaticSinkAttention(Attention, CustomOp):
     """
     Attention with static sink tokens
     """
+
+    # --8<-- [end:static_sink_attention]
 
     def __init__(
         self,
