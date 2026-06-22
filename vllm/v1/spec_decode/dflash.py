@@ -255,6 +255,51 @@ class DFlashProposer(SpecDecodeBaseProposer):
                 inputs_embeds=None,
             )
 
+    @staticmethod
+    def _slice_mm_embeds_for_query(
+        mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor],
+        num_context: int,
+        num_query: int,
+    ) -> tuple[list[torch.Tensor], torch.Tensor] | None:
+        """Slice multimodal embeddings from full-token range to query range.
+
+        ``mm_embed_inputs`` covers all scheduled tokens (context + query).
+        DFlash only sees query tokens, so we extract the query portion.
+        Returns ``None`` when no multimodal tokens fall in the query range.
+        """
+        mm_embeds, is_mm_embed = mm_embed_inputs
+        is_mm_query = is_mm_embed[num_context : num_context + num_query]
+
+        if not is_mm_query.any():
+            return None
+
+        query_start = num_context
+        query_end = num_context + num_query
+
+        pos = 0
+        query_mm_embeds: list[torch.Tensor] = []
+        for item_embeds in mm_embeds:
+            n = item_embeds.shape[0]
+            item_start = pos
+            item_end = pos + n
+
+            overlap_start = max(item_start, query_start)
+            overlap_end = min(item_end, query_end)
+
+            if overlap_start < overlap_end:
+                local_start = overlap_start - item_start
+                local_end = overlap_end - item_start
+                query_mm_embeds.append(item_embeds[local_start:local_end])
+
+            pos = item_end
+            if pos >= query_end:
+                break
+
+        if not query_mm_embeds:
+            return None
+
+        return query_mm_embeds, is_mm_query
+
     @override
     def build_model_inputs_first_pass(
         self,
@@ -272,11 +317,27 @@ class DFlashProposer(SpecDecodeBaseProposer):
             self._context_positions_buffer[:num_context],
             self._context_slot_mapping_buffer[:num_context],
         )
+
+        input_ids = self.input_ids[:num_input_tokens]
+        inputs_embeds: torch.Tensor | None = None
+
+        if mm_embed_inputs is not None:
+            sliced = self._slice_mm_embeds_for_query(
+                mm_embed_inputs, num_context, num_input_tokens
+            )
+            if sliced is not None:
+                query_mm_embeds, is_mm_query = sliced
+                inputs_embeds = self.model.embed_input_ids(
+                    input_ids,
+                    multimodal_embeddings=query_mm_embeds,
+                    is_multimodal=is_mm_query,
+                )
+
         return (
             dict(
-                input_ids=self.input_ids[:num_input_tokens],
+                input_ids=input_ids,
                 positions=self._get_positions(num_input_tokens),
-                inputs_embeds=None,
+                inputs_embeds=inputs_embeds,
             ),
             num_input_tokens,
         )

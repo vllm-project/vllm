@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from collections.abc import Iterable
 
 import torch
@@ -41,6 +42,7 @@ from .utils import (
     AutoWeightsLoader,
     get_draft_quant_config,
     maybe_prefix,
+    _merge_multimodal_embeddings,
     process_eagle_weight,
 )
 
@@ -131,8 +133,20 @@ class DFlashQwen3Attention(nn.Module):
         with the context K/V from the target model's hidden states. This forward op
         computes attention for the query tokens only.
         See also: precompute_and_store_context_kv"""
+        
+        # Check if we should log intermediates
+        should_log = os.environ.get("VLLM_LOG_DRAFT_INTERMEDIATES", "0") == "1"
+        intermediates = {} if should_log else None
+        
         qkv = F.linear(hidden_states, self.qkv_proj.weight, self.qkv_proj.bias)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        if should_log:
+            # Skip bonus token (position 0) to match speculators comparison script
+            # The bonus token has architectural differences between implementations
+            intermediates["q_after_proj"] = q[1:].detach().cpu().clone()
+            intermediates["k_noise_after_proj"] = k[1:].detach().cpu().clone()
+            intermediates["v_noise_after_proj"] = v[1:].detach().cpu().clone()
 
         # Per-head RMSNorm
         q_shape, k_shape = q.shape, k.shape
@@ -143,10 +157,42 @@ class DFlashQwen3Attention(nn.Module):
             k.view(*k_shape[:-1], k_shape[-1] // self.head_dim, self.head_dim)
         ).view(k_shape)
 
+        if should_log:
+            # Skip bonus token (position 0) to match speculators comparison script
+            intermediates["q_after_norm"] = q[1:].detach().cpu().clone()
+            intermediates["k_after_norm"] = k[1:].detach().cpu().clone()
+
         q, k = self.rotary_emb(positions, q, k)
 
+        if should_log:
+            # Skip bonus token (position 0) to match speculators comparison script
+            intermediates["q_after_rope"] = q[1:].detach().cpu().clone()
+            intermediates["k_after_rope"] = k[1:].detach().cpu().clone()
+
         attn_output = self.attn(q, k, v)
+
+        if should_log:
+            # Skip bonus token (position 0) to match speculators comparison script
+            # The bonus token has architectural differences between implementations
+            intermediates["attn_output"] = attn_output[1:].detach().cpu().clone()
+
         output, _ = self.o_proj(attn_output)
+
+        if should_log:
+            # Skip bonus token (position 0) to match speculators comparison script
+            intermediates["attn_after_o_proj"] = output[1:].detach().cpu().clone()
+        
+        # Save intermediates if logging is enabled
+        if should_log and intermediates:
+            import tempfile
+            import torch
+            layer_name = self.layer_name
+            temp_file = os.path.join(
+                tempfile.gettempdir(),
+                f"vllm_attn_intermediates_{layer_name}.pt"
+            )
+            torch.save(intermediates, temp_file)
+        
         return output
 
 
@@ -380,6 +426,17 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
+
+        # Log hidden norm output if intermediate logging is enabled (skip warmup calls)
+        if os.environ.get("VLLM_LOG_DRAFT_INTERMEDIATES", "0") == "1":
+            # Skip warmup/CUDA graph capture (power-of-2 sizes like 128, 2048, 8192)
+            if normed_context_states.shape[0] not in (128, 256, 512, 1024, 2048, 4096, 8192):
+                output_dir = os.environ.get("VLLM_INTERMEDIATES_DIR", "/tmp/dflash_comparison")
+                os.makedirs(output_dir, exist_ok=True)
+                hn_path = os.path.join(output_dir, "vllm_hidden_norm_output.pt")
+                torch.save({"hidden_norm_output": normed_context_states.detach().cpu()}, hn_path)
+                logger.info(f"Saved hidden norm output to {hn_path}, shape: {normed_context_states.shape}")
+
         all_kv_flat = F.linear(
             normed_context_states, self._fused_kv_weight, self._fused_kv_bias
         )
@@ -441,19 +498,45 @@ class DFlashQwen3Model(nn.Module):
         positions: torch.Tensor,
         input_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Check if intermediate logging is enabled (skip warmup calls)
+        log_intermediates = os.environ.get("VLLM_LOG_DRAFT_INTERMEDIATES", "0") == "1"
+        # Skip warmup/CUDA graph capture (power-of-2 sizes like 128, 2048, 8192)
+        if log_intermediates and input_ids.shape[0] in (128, 256, 512, 1024, 2048, 4096, 8192):
+            log_intermediates = False
+        intermediates = {} if log_intermediates else None
+
         if input_embeds is None:
             input_embeds = self.embed_input_ids(input_ids)
 
         hidden_states = input_embeds
 
+        if log_intermediates:
+            # Skip bonus token (position 0) to match speculators comparison script
+            intermediates["embed_output"] = hidden_states[1:].detach().cpu()
+
         residual = None
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
             )
+            if log_intermediates:
+                # Skip bonus token (position 0) to match speculators comparison script
+                intermediates[f"layer_{i}_output"] = hidden_states[1:].detach().cpu()
+
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if log_intermediates:
+            # Skip bonus token (position 0) to match speculators comparison script
+            intermediates["final_norm_output"] = hidden_states[1:].detach().cpu()
+            # Save intermediates to file
+            output_dir = os.environ.get("VLLM_INTERMEDIATES_DIR", "/tmp/dflash_comparison")
+            os.makedirs(output_dir, exist_ok=True)
+            output_path = os.path.join(output_dir, "vllm_intermediates.pt")
+            torch.save(intermediates, output_path)
+            logger.info(f"Saved {len(intermediates)} intermediate tensors to {output_path}")
+
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -528,7 +611,23 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         multimodal_embeddings: NestedTensors | None = None,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
+        # Mask out-of-vocab multimodal placeholder tokens to avoid embedding
+        # index errors when the draft vocab is smaller than the target vocab.
+        if is_multimodal is not None and multimodal_embeddings is not None:
+            input_ids = input_ids.masked_fill(
+                is_multimodal.to(device=input_ids.device, non_blocking=True), 0
+            )
+
+        inputs_embeds = self.model.embed_input_ids(input_ids)
+
+        if multimodal_embeddings is not None and is_multimodal is not None:
+            inputs_embeds = _merge_multimodal_embeddings(
+                inputs_embeds=inputs_embeds,
+                multimodal_embeddings=multimodal_embeddings,
+                is_multimodal=is_multimodal,
+            )
+
+        return inputs_embeds
 
     def forward(
         self,
@@ -543,6 +642,15 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
+        # Log logits if intermediate logging is enabled (skip warmup calls)
+        if os.environ.get("VLLM_LOG_DRAFT_INTERMEDIATES", "0") == "1":
+            # Skip warmup/CUDA graph capture (power-of-2 sizes like 128, 2048, 8192)
+            if logits.shape[0] not in (128, 256, 512, 1024, 2048, 4096, 8192):
+                output_dir = os.environ.get("VLLM_INTERMEDIATES_DIR", "/tmp/dflash_comparison")
+                os.makedirs(output_dir, exist_ok=True)
+                logits_path = os.path.join(output_dir, "vllm_logits.pt")
+                torch.save({"logits": logits.detach().cpu()}, logits_path)
+                logger.info(f"Saved logits to {logits_path}, shape: {logits.shape}")
         if self.draft_id_to_target_id is None:
             return logits
 
@@ -575,7 +683,27 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         needs_squeeze = hidden_states.dim() == 1
         if needs_squeeze:
             hidden_states = hidden_states.unsqueeze(0)
+        
+        # Log hidden_states before FC if intermediate logging is enabled (skip warmup calls)
+        if os.environ.get("VLLM_LOG_DRAFT_INTERMEDIATES", "0") == "1":
+            # Skip warmup/CUDA graph capture (power-of-2 sizes like 128, 2048, 8192)
+            if hidden_states.shape[0] not in (128, 256, 512, 1024, 2048, 4096, 8192):
+                output_dir = os.environ.get("VLLM_INTERMEDIATES_DIR", "/tmp/dflash_comparison")
+                os.makedirs(output_dir, exist_ok=True)
+                hs_path = os.path.join(output_dir, "vllm_hidden_states.pt")
+                torch.save({"hidden_states": hidden_states.detach().cpu()}, hs_path)
+                logger.info(f"Saved hidden_states to {hs_path}, shape: {hidden_states.shape}")
+        
         result = self.model.fc(hidden_states)
+        # Log FC output if intermediate logging is enabled (skip warmup calls)
+        if os.environ.get("VLLM_LOG_DRAFT_INTERMEDIATES", "0") == "1":
+            # Skip warmup/CUDA graph capture (power-of-2 sizes like 128, 2048, 8192)
+            if result.shape[0] not in (128, 256, 512, 1024, 2048, 4096, 8192):
+                output_dir = os.environ.get("VLLM_INTERMEDIATES_DIR", "/tmp/dflash_comparison")
+                os.makedirs(output_dir, exist_ok=True)
+                fc_path = os.path.join(output_dir, "vllm_fc_output.pt")
+                torch.save({"fc_output": result.detach().cpu()}, fc_path)
+                logger.info(f"Saved FC output to {fc_path}, shape: {result.shape}")
         if needs_squeeze:
             result = result.squeeze(0)
         return result
