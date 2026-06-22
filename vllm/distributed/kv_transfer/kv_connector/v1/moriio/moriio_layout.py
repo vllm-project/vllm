@@ -130,8 +130,8 @@ def get_layer_transfer_geometry(
             num_kv_heads, block_size, head_dim = shape[2:]
         else:
             kernel_num_blocks = num_blocks
-            kernel_block_size, num_kv_heads, head_dim = (
-                _select_kernel_block_layout(layer_name, shape, spec)
+            kernel_block_size, num_kv_heads, head_dim = _select_kernel_block_layout(
+                layer_name, shape, spec
             )
             kernel_blocks_per_block = spec.block_size // kernel_block_size
             if kernel_num_blocks % kernel_blocks_per_block != 0:
@@ -152,9 +152,7 @@ def get_layer_transfer_geometry(
             block_stride=stride[1] * kernel_blocks_per_block,
             local_kv_stride=stride[0],
             remote_kv_stride=(
-                stride[1]
-                * kernel_blocks_per_block
-                * (remote_num_blocks or num_blocks)
+                stride[1] * kernel_blocks_per_block * (remote_num_blocks or num_blocks)
             ),
             transfers_per_block=2,
             regions_per_block=1,

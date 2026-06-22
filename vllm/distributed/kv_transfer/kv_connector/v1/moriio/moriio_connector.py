@@ -424,9 +424,7 @@ class MoRIIOConnectorScheduler:
         remote_notify_port = params.get("remote_notify_port")
         if remote_host is None or remote_notify_port is None:
             try:
-                peer_zmq = get_peer_zmq_from_request_id(
-                    request_id, is_producer=False
-                )
+                peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=False)
                 remote_host, _, remote_notify_port = parse_moriio_zmq_address(peer_zmq)
             except ValueError:
                 logger.warning(
@@ -438,9 +436,7 @@ class MoRIIOConnectorScheduler:
 
         remote_notify_port = int(remote_notify_port)
         for tp_index in range(self.tp_size):
-            target_port = remote_notify_port + get_port_offset(
-                remote_dp_rank, tp_index
-            )
+            target_port = remote_notify_port + get_port_offset(remote_dp_rank, tp_index)
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
     def update_state_after_alloc(
@@ -550,8 +546,7 @@ class MoRIIOConnectorScheduler:
                     updated_blocks = list(existing_blocks) + (block_ids)
                     self._reqs_need_pending_save[req_id] = (req, updated_blocks)
                     if (
-                        len(self._reqs_need_pending_save[req_id][1])
-                        * self.block_size
+                        len(self._reqs_need_pending_save[req_id][1]) * self.block_size
                         >= req.num_prompt_tokens
                     ):
                         meta.add_new_req(
@@ -1524,7 +1519,7 @@ class MoRIIOConnectorWorker:
         metadata: MoRIIOConnectorMetadata,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: "AttentionMetadata | None",
         **kwargs,
     ):
         if not self.is_producer:

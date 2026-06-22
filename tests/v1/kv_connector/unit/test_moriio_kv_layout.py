@@ -6,6 +6,7 @@ import threading
 from collections import OrderedDict, defaultdict
 from queue import Queue
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -79,7 +80,7 @@ def _remote_meta(num_blocks: int = 16) -> SimpleNamespace:
     return SimpleNamespace(num_blocks=num_blocks)
 
 
-def _writer_with_fake_worker(fake_worker) -> MoRIIOWriter:
+def _writer_with_fake_worker(fake_worker: Any) -> Any:
     writer = MoRIIOWriter.__new__(MoRIIOWriter)
     writer._worker_ref = lambda: fake_worker
     writer._write_task_q = Queue()
@@ -91,7 +92,7 @@ def _writer_with_fake_worker(fake_worker) -> MoRIIOWriter:
     return writer
 
 
-def _wrapper_for_messages() -> MoRIIOWrapper:
+def _wrapper_for_messages() -> Any:
     wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
     wrapper.lock = threading.Lock()
     wrapper.done_remote_allocate_req_dict = {}
@@ -101,7 +102,7 @@ def _wrapper_for_messages() -> MoRIIOWrapper:
     return wrapper
 
 
-def _write_task(layer_name: str, transfer_id: str = "xfer") -> WriteTask:
+def _write_task(layer_name: str, transfer_id: str = "xfer") -> Any:
     return WriteTask(
         request_id="req",
         transfer_id=transfer_id,
@@ -345,6 +346,9 @@ def test_write_transfer_plan_caches_offsets_per_geometry():
     calls: list[str] = []
 
     class FakeWorker:
+        kv_caches: dict[str, torch.Tensor]
+        layer_name_to_local_kv_cache_metadata: dict[str, list[Any]]
+
         def _compute_block_transfer_offsets(
             self, layer_name, local_block_ids, remote_block_ids, remote_moriio_meta
         ):
@@ -585,7 +589,7 @@ def test_late_remote_blocks_message_is_ignored_after_transfer_done():
 )
 def test_moriio_wrapper_routes_valid_messages(role, payload, expected):
     wrapper = _wrapper_for_messages()
-    completions = []
+    completions: list[str] = []
     if role is not None:
         set_role(role)
     if expected == "plain":
