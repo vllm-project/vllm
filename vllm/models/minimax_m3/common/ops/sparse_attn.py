@@ -24,11 +24,12 @@ from vllm.triton_utils import tl, triton
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
 
-_IS_ROCM_GFX942 = False
+_IS_ROCM_GFX942 = tl.constexpr(False)
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx942
 
-    _IS_ROCM_GFX942 = on_gfx942()
+    if on_gfx942():
+        _IS_ROCM_GFX942 = tl.constexpr(True)
 
 _FP8_DTYPES = (
     torch.float8_e4m3fn,
