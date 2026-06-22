@@ -8,17 +8,17 @@ import torch
 
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.fp8 import (
-    Fp8Config,
-    Fp8KVCacheMethod,
-    Fp8MoEMethod,
-    Fp8OnlineMoEMethod,
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped,
 )
 from vllm.models.deepseek_v4.hw_agnostic.quantization.fp8_linear_method import (
     Fp8LinearMethod,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    is_layer_skipped,
+from vllm.models.deepseek_v4.hw_agnostic.quantization.fp8_quant import (
+    Fp8Config,
+    Fp8KVCacheMethod,
+    Fp8MoEMethod,
+    Fp8OnlineMoEMethod,
 )
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.routed_experts import (
     RoutedExperts,
@@ -155,11 +155,9 @@ class DeepseekV4FP8Config(Fp8Config):
                 )
 
                 return Mxfp4MoEMethod(layer.moe_config)
-            # expert_dtype == "fp8": fp8 MoE method below.
             if self.is_checkpoint_fp8_serialized:
                 return Fp8MoEMethod(self, layer)
-            else:
-                return Fp8OnlineMoEMethod(self, layer)
+            return Fp8OnlineMoEMethod(self, layer)
 
         if isinstance(layer, LinearBase):
             if is_layer_skipped(
@@ -168,21 +166,16 @@ class DeepseekV4FP8Config(Fp8Config):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedLinearMethod()
-            from vllm.model_executor.layers.quantization.fp8 import (
-                get_marlin_input_dtype,
-            )
-
             if not self.is_checkpoint_fp8_serialized:
+                # BF16 → FP8 online quant uses the upstream per-tensor method.
+                # Lazy-imported to avoid pulling its module-level
+                # ``model_executor.kernels.linear`` dependency into hw_agnostic.
                 from vllm.model_executor.layers.quantization.online.fp8 import (
                     Fp8PerTensorOnlineLinearMethod,
                 )
 
-                online_method = Fp8PerTensorOnlineLinearMethod()
-                online_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-                return online_method
-            offline_method = Fp8LinearMethod(self)
-            offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
-            return offline_method
+                return Fp8PerTensorOnlineLinearMethod()
+            return Fp8LinearMethod(self)
 
         from vllm.model_executor.layers.attention import Attention
 

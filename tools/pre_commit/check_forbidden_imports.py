@@ -87,7 +87,7 @@ CHECK_IMPORTS = {
         pattern=(
             r"^\s*from\s+vllm\."
             r"(?:"
-            r"model_executor\.layers(?!\.utils\b)(?!\.quantization\.base_config\b)(?!\.quantization\.utils\.fp8_utils\b)(?!\.quantization\.utils\.quant_utils\b)(?!\.quantization\.utils\.w8a8_utils\b)(?!\.quantization\.utils\.layer_utils\b)(?!\.quantization\.input_quant_fp8\b)(?!\.quantization\.compressed_tensors\.triton_scaled_mm\b)(?!\.fusion\.quant_activation\b)(?!\.fused_moe\.activation\b)(?!\.fused_moe\.fused_moe_method_base\b)(?!\.fused_moe\.modular_kernel\b)(?!\.fused_moe\.runner\.moe_runner_interface\b)(?!\.sparse_attn_indexer\b)(?!\.attention_layer_base\b)"
+            r"model_executor\.layers(?!\.utils\b)(?!\.quantization\.base_config\b)(?!\.quantization\.utils\.fp8_utils\b)(?!\.quantization\.utils\.quant_utils\b)(?!\.quantization\.utils\.w8a8_utils\b)(?!\.quantization\.utils\.layer_utils\b)(?!\.quantization\.input_quant_fp8\b)(?!\.quantization\.kv_cache\b)(?!\.quantization\.compressed_tensors\.triton_scaled_mm\b)(?!\.fusion\.quant_activation\b)(?!\.fused_moe\.activation\b)(?!\.fused_moe\.config\b)(?!\.fused_moe\.fused_moe_method_base\b)(?!\.fused_moe\.modular_kernel\b)(?!\.fused_moe\.oracle\.fp8\b)(?!\.fused_moe\.routed_experts\b)(?!\.fused_moe\.runner\.moe_runner_interface\b)(?!\.fused_moe\.runner\.shared_experts\b)(?!\.sparse_attn_indexer\b)(?!\.attention_layer_base\b)"
             r"|model_executor\.kernels\b"
             r"|model_executor\.models(?!\.utils\b)"
             r"|models\.[^.]+(?!\.hw_agnostic\b)"
@@ -304,6 +304,39 @@ def test_regex():
             "from vllm.models.deepseek_v4.hw_agnostic.shared.kernels.linear "
             "import init_fp8_linear_kernel",
             False,
+        ),
+        # FP8 MoE oracle and supporting modules — carved out for the
+        # vendored ``Fp8MoEMethod`` (in ``hw_agnostic/quantization/fp8_quant.py``).
+        (
+            "from vllm.model_executor.layers.quantization.kv_cache import "
+            "BaseKVCacheMethod",
+            False,
+        ),
+        (
+            "from vllm.model_executor.layers.fused_moe.config import "
+            "FusedMoEQuantConfig",
+            False,
+        ),
+        (
+            "from vllm.model_executor.layers.fused_moe.oracle.fp8 import "
+            "select_fp8_moe_backend",
+            False,
+        ),
+        (
+            "from vllm.model_executor.layers.fused_moe.routed_experts import "
+            "RoutedExperts",
+            False,
+        ),
+        (
+            "from vllm.model_executor.layers.fused_moe.runner.shared_experts "
+            "import SharedExperts",
+            False,
+        ),
+        # Other fused_moe submodules remain forbidden.
+        (
+            "from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe "
+            "import X",
+            True,
         ),
         (
             "from vllm.model_executor.model_loader.weight_utils import "
