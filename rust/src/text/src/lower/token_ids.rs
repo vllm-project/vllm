@@ -16,6 +16,14 @@ pub struct OutOfVocabError {
     pub vocab_size: usize,
 }
 
+#[derive(Debug, Error)]
+pub enum TokenIdsError {
+    #[error("allowed_token_ids is not None and empty!")]
+    EmptyAllowedTokenIds,
+    #[error(transparent)]
+    OutOfVocab(#[from] OutOfVocabError),
+}
+
 fn validate_param(
     parameter: &'static str,
     token_ids: impl IntoIterator<Item = u32>,
@@ -54,7 +62,7 @@ pub(crate) fn validate_prompt_token_ids(
 pub(crate) fn validate_vocab_range(
     params: &EngineCoreSamplingParams,
     limits: &SamplingLimits,
-) -> Result<(), OutOfVocabError> {
+) -> Result<(), TokenIdsError> {
     validate_param(
         "stop_token_ids",
         params.stop_token_ids.iter().copied(),
@@ -62,6 +70,9 @@ pub(crate) fn validate_vocab_range(
     )?;
 
     if let Some(token_ids) = params.allowed_token_ids.as_deref() {
+        if token_ids.is_empty() {
+            return Err(TokenIdsError::EmptyAllowedTokenIds);
+        }
         validate_param(
             "allowed_token_ids",
             token_ids.iter().copied(),

@@ -854,6 +854,20 @@ mod tests {
     }
 
     #[test]
+    fn lower_sampling_params_rejects_empty_allowed_token_ids() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                allowed_token_ids: Some(vec![]),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, Error::EmptyAllowedTokenIds));
+    }
+
+    #[test]
     fn lower_sampling_params_rejects_out_of_vocab_bad_words() {
         let tokenizer = FixedTokenizer {
             token_ids: vec![1999, 2000],

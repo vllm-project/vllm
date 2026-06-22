@@ -3,7 +3,7 @@ use vllm_engine_core_client::Error as EngineCoreError;
 use vllm_llm::Error as LlmError;
 
 pub use crate::lower::logprobs::LogprobsError;
-pub use crate::lower::token_ids::OutOfVocabError;
+pub use crate::lower::token_ids::{OutOfVocabError, TokenIdsError};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -18,6 +18,8 @@ pub enum Error {
     PromptTooLong { max_model_len: u32, prompt_len: u32 },
     #[error(transparent)]
     Logprobs(#[from] LogprobsError),
+    #[error("allowed_token_ids is not None and empty!")]
+    EmptyAllowedTokenIds,
     #[error(transparent)]
     OutOfVocab(#[from] OutOfVocabError),
     #[error("text request stream `{request_id}` closed before terminal output")]
@@ -33,5 +35,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 impl From<vllm_tokenizer::TokenizerError> for Error {
     fn from(error: vllm_tokenizer::TokenizerError) -> Self {
         Self::Tokenizer(error.0)
+    }
+}
+
+impl From<TokenIdsError> for Error {
+    fn from(error: TokenIdsError) -> Self {
+        match error {
+            TokenIdsError::EmptyAllowedTokenIds => Self::EmptyAllowedTokenIds,
+            TokenIdsError::OutOfVocab(error) => Self::OutOfVocab(error),
+        }
     }
 }

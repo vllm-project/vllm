@@ -102,6 +102,7 @@ fn is_request_validation_error(error: &vllm_text::Error) -> bool {
         vllm_text::Error::PromptTooLong { .. }
             | vllm_text::Error::EmptyPromptTokenIds { .. }
             | vllm_text::Error::Logprobs(_)
+            | vllm_text::Error::EmptyAllowedTokenIds
             | vllm_text::Error::OutOfVocab(_)
             // An empty tokenized prompt detected later, at request prepare
             // time, surfaces through the transparent Llm wrapper.
@@ -182,6 +183,16 @@ mod tests {
         });
         let api_error = text_submit_error("failed to submit completion request", error);
         assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn empty_allowed_token_ids_maps_to_invalid_request() {
+        let error = vllm_text::Error::EmptyAllowedTokenIds;
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("allowed_token_ids"));
     }
 
     #[test]
