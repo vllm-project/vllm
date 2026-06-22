@@ -48,6 +48,7 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
     results = evaluate_gsm8k(
         num_questions=eval_config["num_questions"],
         num_shots=eval_config["num_fewshot"],
+        max_tokens=eval_config.get("max_tokens", 256),
         host=host,
         port=port,
         request_timeout_seconds=request_timeout_seconds,
