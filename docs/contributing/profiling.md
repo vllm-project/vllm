@@ -22,6 +22,7 @@ To use the `torch.profiler` module, set the `profiler` entry to `'torch'` and `t
 - `torch_profiler_with_flops` to enable recording FLOPs, off by default
 - `torch_profiler_use_gzip` to control gzip-compressing profiling files, on by default
 - `torch_profiler_dump_cuda_time_total` to control dumping and printing the aggregated CUDA self time table, on by default
+- `torch_profiler_execution_trace` to additionally capture a PyTorch execution trace (ET) per worker, saved as `execution_trace_<worker_name>.json` under `torch_profiler_dir`, off by default
 
 When using `vllm bench serve`, you can enable profiling by passing the `--profile` flag.
 

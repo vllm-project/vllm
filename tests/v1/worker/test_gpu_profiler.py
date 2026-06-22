@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import glob
+import json
+import os
+
 import pytest
+import torch
 
 from vllm.config import ProfilerConfig
 from vllm.config.profiler import _is_uri_path
-from vllm.profiler.wrapper import WorkerProfiler
+from vllm.profiler.wrapper import TorchProfilerWrapper, WorkerProfiler
 
 
 class ConcreteWorkerProfiler(WorkerProfiler):
@@ -236,3 +241,82 @@ class TestIsUriPath:
     def test_is_uri_path(self, path, expected):
         """Test that _is_uri_path correctly identifies URI vs local paths."""
         assert _is_uri_path(path) == expected
+
+
+class TestExecutionTraceConfig:
+    """Validation tests for the execution-trace profiler option."""
+
+    def test_execution_trace_requires_torch_profiler(self):
+        with pytest.raises(
+            ValueError, match="torch_profiler_execution_trace is only applicable"
+        ):
+            ProfilerConfig(profiler="cuda", torch_profiler_execution_trace=True)
+
+    def test_execution_trace_disabled_by_default(self):
+        config = ProfilerConfig(profiler="torch", torch_profiler_dir="/tmp/mock")
+        assert config.torch_profiler_execution_trace is False
+
+    def test_execution_trace_enabled(self):
+        config = ProfilerConfig(
+            profiler="torch",
+            torch_profiler_dir="/tmp/mock",
+            torch_profiler_execution_trace=True,
+        )
+        assert config.torch_profiler_execution_trace is True
+
+
+def test_execution_trace_observer_not_registered_when_disabled(tmp_path):
+    """When the flag is off, no ExecutionTraceObserver is created."""
+    config = ProfilerConfig(profiler="torch", torch_profiler_dir=str(tmp_path))
+    wrapper = TorchProfilerWrapper(
+        config, worker_name="rank0", local_rank=0, activities=["CPU"]
+    )
+    assert wrapper.execution_trace_observer is None
+
+
+def test_execution_trace_observer_skipped_for_uri_dir():
+    """ET capture is skipped (not registered) for non-local URI trace dirs."""
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir="gs://bucket/traces",
+        torch_profiler_execution_trace=True,
+    )
+    wrapper = TorchProfilerWrapper(
+        config, worker_name="rank0", local_rank=0, activities=["CPU"]
+    )
+    assert wrapper.execution_trace_observer is None
+
+
+def test_execution_trace_capture_end_to_end(tmp_path):
+    """The wrapper produces a valid execution-trace file containing aten ops,
+    alongside the Kineto trace, using CPU activities only (no GPU required)."""
+    config = ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir=str(tmp_path),
+        torch_profiler_execution_trace=True,
+        # Avoid emitting a CUDA-time table on machines without CUDA.
+        torch_profiler_dump_cuda_time_total=False,
+    )
+    wrapper = TorchProfilerWrapper(
+        config, worker_name="rank0", local_rank=0, activities=["CPU"]
+    )
+    assert wrapper.execution_trace_observer is not None
+
+    wrapper.start()
+    a = torch.randn(32, 32)
+    b = torch.randn(32, 32)
+    for _ in range(3):
+        (a @ b).relu()
+    wrapper.stop()
+
+    et_files = glob.glob(os.path.join(str(tmp_path), "execution_trace_*.json"))
+    assert et_files, "no execution trace file was produced"
+
+    with open(et_files[0]) as f:
+        et = json.load(f)
+    nodes = et["nodes"]
+    assert nodes, "execution trace has no nodes"
+    op_names = {n.get("name", "") for n in nodes}
+    assert any(name.startswith("aten::") for name in op_names), (
+        f"expected aten ops in execution trace, got {sorted(op_names)[:10]}"
+    )
