@@ -370,27 +370,29 @@ class BlockPool:
         boundary inside that block without allocating or copying a new
         ``KVCacheBlock``.
 
-        The alias is lookup metadata owned by ``block``. If ``block`` has no
-        primary hash, the key becomes its primary hash. If the block already
-        has a primary hash, the alias is tracked in
+        The partial entry is lookup metadata owned by ``block``. If ``block``
+        has no primary hash, the key becomes its primary hash. If the block
+        already has a primary hash, the partial entry is tracked in
         ``cached_block_hashes_by_block`` so eviction, reset, and promotion can
         remove every hash key that points to the block.
 
         Args:
-            request: Request whose token IDs and block hashes define the alias.
-            block: Existing cache block to make reachable by the alias.
-            num_tokens: Prefix length represented by the alias. It must be a
-                positive multiple of ``self.hash_block_size`` and cannot exceed
-                the request's computed block hashes.
-            kv_cache_group_id: KV cache group that owns the alias.
-            block_size: Cache block size for the owning group. The alias hash
-                itself is always the prefix-chain hash at ``num_tokens``;
-                ``block_size`` is used to describe the alias token range in
-                KV-cache events.
+            request: Request whose token IDs and block hashes define the
+                partial entry.
+            block: Existing cache block to make reachable from the partial
+                prefix boundary.
+            num_tokens: Prefix length represented by the partial entry. It
+                must be a positive multiple of ``self.hash_block_size`` and
+                cannot exceed the request's computed block hashes.
+            kv_cache_group_id: KV cache group that owns the partial entry.
+            block_size: Cache block size for the owning group. The partial
+                entry hash itself is always the prefix-chain hash at
+                ``num_tokens``; ``block_size`` is used to assert that the
+                entry is partial within the owning cache block.
 
         Returns:
-            The hash key with group ID if an alias can be registered; otherwise
-            ``None`` for null blocks.
+            The hash key with group ID if a partial entry can be registered;
+            otherwise ``None`` for null blocks.
         """
         if block.is_null:
             return None
@@ -463,8 +465,8 @@ class BlockPool:
         num_hash_blocks = num_tokens // self.hash_block_size
         assert 0 < num_hash_blocks <= len(request.block_hashes)
 
-        # Each hash_block_size hash chains over its full prefix, so the alias
-        # for any group block size is the hash at that prefix boundary.
+        # Each hash_block_size hash chains over its full prefix, so the partial
+        # entry for any group block size is the hash at that prefix boundary.
         return request.block_hashes[num_hash_blocks - 1]
 
     def _get_partial_block_parent_hash_and_start(

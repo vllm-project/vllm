@@ -51,7 +51,7 @@ def boundary_hash(req: Request, hash_block_size: int, num_tokens: int) -> BlockH
     return req.block_hashes[num_tokens // hash_block_size - 1]
 
 
-def cache_full_block_and_tail_alias(
+def cache_full_block_and_partial_tail(
     token_ids: list[int],
     *,
     enable_kv_cache_events: bool = False,
@@ -119,14 +119,14 @@ def test_cache_partial_block_kv_cache_events():
         enable_kv_cache_events=True,
     )
     req = make_request(
-        "req_alias_events",
+        "req_partial_events",
         prompt_token_ids=list(range(hash_block_size * 2)),
         hash_block_size=hash_block_size,
         hash_fn=sha256,
     )
 
     block = pool.get_new_blocks(1)[0]
-    alias_hash = pool.cache_partial_block(
+    partial_entry_hash = pool.cache_partial_block(
         request=req,
         block=block,
         num_tokens=hash_block_size * 2,
@@ -138,7 +138,7 @@ def test_cache_partial_block_kv_cache_events():
     assert len(events) == 1
     stored_event = events[0]
     assert isinstance(stored_event, BlockStored)
-    assert alias_hash is not None
+    assert partial_entry_hash is not None
     assert stored_event.block_hashes == [
         kv_cache_utils.maybe_convert_block_hash(req.block_hashes[1])
     ]
@@ -149,14 +149,14 @@ def test_cache_partial_block_kv_cache_events():
     assert stored_event.block_size == 4
     assert stored_event.group_idx == kv_cache_group_id
 
-    duplicate_alias_hash = pool.cache_partial_block(
+    duplicate_entry_hash = pool.cache_partial_block(
         request=req,
         block=block,
         num_tokens=hash_block_size * 2,
         kv_cache_group_id=kv_cache_group_id,
         block_size=block_size,
     )
-    assert duplicate_alias_hash == alias_hash
+    assert duplicate_entry_hash == partial_entry_hash
     assert pool.take_events() == []
 
     pool.free_blocks([block])
@@ -233,7 +233,7 @@ def test_partial_block_replacement_emits_remove_then_store_events():
     assert pool.get_cached_block(partial_hash_10, [kv_cache_group_id]) == [blocks[1]]
 
 
-def test_later_request_hits_cached_partial_tail_alias():
+def test_later_request_hits_cached_partial_tail():
     hash_block_size = 2
     block_size = 6
     kv_cache_group_id = 0
@@ -296,17 +296,17 @@ def test_cache_partial_block_uses_fine_grained_boundary_hash():
         kv_cache_group_id=kv_cache_group_id,
     )
 
-    alias_hash = pool.cache_partial_block(
+    partial_entry_hash = pool.cache_partial_block(
         request=req,
         block=blocks[1],
         num_tokens=10,
         kv_cache_group_id=kv_cache_group_id,
         block_size=block_size,
     )
-    # The alias is keyed by the fine-grained hash at the 10-token boundary,
-    # regardless of the owning group's block_size.
+    # The partial entry is keyed by the fine-grained hash at the 10-token
+    # boundary, regardless of the owning group's block_size.
     expected = boundary_hash(req, hash_block_size, 10)
-    assert alias_hash == kv_cache_utils.make_block_hash_with_group_id(
+    assert partial_entry_hash == kv_cache_utils.make_block_hash_with_group_id(
         expected, kv_cache_group_id
     )
     assert pool.get_cached_block(expected, [kv_cache_group_id]) == [blocks[1]]
@@ -345,35 +345,35 @@ def test_cache_partial_block_duplicate_checks_all_blocks_for_hash():
     )
     blocks = pool.get_new_blocks(2)
 
-    first_alias = pool.cache_partial_block(
+    first_entry_hash = pool.cache_partial_block(
         request=req,
         block=blocks[0],
         num_tokens=2,
         kv_cache_group_id=kv_cache_group_id,
         block_size=block_size,
     )
-    second_alias = pool.cache_partial_block(
+    second_entry_hash = pool.cache_partial_block(
         request=req,
         block=blocks[1],
         num_tokens=2,
         kv_cache_group_id=kv_cache_group_id,
         block_size=block_size,
     )
-    assert first_alias == second_alias
+    assert first_entry_hash == second_entry_hash
 
-    duplicate_alias = pool.cache_partial_block(
+    duplicate_entry_hash = pool.cache_partial_block(
         request=req,
         block=blocks[1],
         num_tokens=2,
         kv_cache_group_id=kv_cache_group_id,
         block_size=block_size,
     )
-    assert duplicate_alias == second_alias
+    assert duplicate_entry_hash == second_entry_hash
     assert pool.cached_block_hashes_by_block == {}
 
 
-def test_reset_prefix_cache_clears_partial_alias_metadata():
-    pool, req, blocks, partial_hash_10 = cache_full_block_and_tail_alias(
+def test_reset_prefix_cache_clears_partial_entry_metadata():
+    pool, req, blocks, partial_hash_10 = cache_full_block_and_partial_tail(
         [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
     )
     full_hash = BlockHashListWithBlockSize(req.block_hashes, 2, 6)[0]
@@ -389,8 +389,8 @@ def test_reset_prefix_cache_clears_partial_alias_metadata():
     assert pool.cached_block_hashes_by_block == {}
 
 
-def test_evict_cached_block_removes_full_hash_and_partial_alias():
-    pool, req, blocks, partial_hash_10 = cache_full_block_and_tail_alias(
+def test_evict_cached_block_removes_full_hash_and_partial_entry():
+    pool, req, blocks, partial_hash_10 = cache_full_block_and_partial_tail(
         [0, 0, 1, 1, 2, 2, 3, 3, 4, 4]
     )
     full_hash = BlockHashListWithBlockSize(req.block_hashes, 2, 6)[0]
