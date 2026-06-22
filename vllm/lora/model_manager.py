@@ -42,7 +42,7 @@ from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.utils.cache import LRUCache
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
@@ -801,7 +801,7 @@ class LoRAModelManager:
         # 2. The weight packing above (e.g., pack_moe) may invalidate the
         # pin_memory allocation, so we execute it after packing.
 
-        pin_memory = str(lora_device) == "cpu" and is_pin_memory_available()
+        pin_memory = str(lora_device) == "cpu" and PIN_MEMORY
         if pin_memory:
             for lora in lora_model.loras.values():
                 if isinstance(lora.lora_a, list):

@@ -7,6 +7,7 @@ from typing import Any, ClassVar, Literal, NamedTuple, cast
 
 import numpy as np
 import numpy.typing as npt
+import torch
 
 from vllm.logger import init_logger
 from vllm.utils.import_utils import PlaceholderModule
@@ -601,6 +602,134 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
             source=source,
             video_backend=f"{backend}{cls._sampling_suffix}",
             valid_frame_indices=valid,
+        )
+
+
+@VIDEO_LOADER_REGISTRY.register(
+    "qwen3_vl",
+    video_processor="Qwen3VLVideoProcessor",
+)
+class Qwen3VLVideoBackend(VideoBackend):
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        total_frames_num = source.total_frames_num
+        original_fps = source.original_fps
+        fps = target.fps
+        max_frame_idx = source.total_frames_num - 1
+        min_frames = kwargs.get("min_frames", 4)
+        max_frames = kwargs.get("max_frames", 768)
+
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/models/qwen3_vl/video_processing_qwen3_vl.py#L119-L125
+        num_frames = int(total_frames_num / original_fps * fps)
+        num_frames = min(max(num_frames, min_frames), max_frames, total_frames_num)
+        indices = np.linspace(0, max_frame_idx, num_frames).round().astype(int).tolist()
+        return indices
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 2,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal["opencv", "pyav"] = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+
+
+@VIDEO_LOADER_REGISTRY.register(
+    "qwen2_vl",
+    video_processor="Qwen2VLVideoProcessor",
+)
+class Qwen2VLVideoBackend(VideoBackend):
+    """Qwen2-VL / Qwen2.5-VL fps-based video backend.
+
+    Ports transformers' ``Qwen2VLVideoProcessor.sample_frames`` (fps mode),
+    shared by Qwen2-VL and Qwen2.5-VL (the latter has no video processor of its
+    own): sample ``total / original_fps * fps`` frames, clamp to
+    ``[min_frames, max_frames]`` (4 and 768), floor to a multiple of
+    ``temporal_patch_size`` (2), and take indices with the exact
+    ``torch.arange(0, total, total / n)`` call so they match HF byte-for-byte.
+
+    ``num_frames`` is ignored (fps-driven, like the Qwen3-VL loader). The
+    float32 step can emit an out-of-range tail index (e.g. 451 for a 451-frame
+    clip); it is clamped to the last valid frame.
+    """
+
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v5.7.0/src/transformers/models/qwen2_vl/video_processing_qwen2_vl.py#L122-L190
+        total_frames_num = source.total_frames_num
+        original_fps = source.original_fps
+        temporal_patch_size = kwargs.get("temporal_patch_size", 2)
+        min_frames = kwargs.get("min_frames", 4)
+        max_frames = kwargs.get("max_frames", 768)
+
+        # vLLM reports original_fps == 0 for clips with unknown/variable fps
+        # (VFR, malformed, streaming); fail loudly instead of dividing by zero.
+        if original_fps <= 0:
+            raise ValueError(
+                "Qwen2-VL video sampling needs a known source fps, but the "
+                "container reported 0 (variable or unknown frame rate)."
+            )
+
+        max_frames = (
+            math.floor(min(max_frames, total_frames_num) / temporal_patch_size)
+            * temporal_patch_size
+        )
+        n = total_frames_num / original_fps * target.fps
+        n = min(max(n, min_frames), max_frames, total_frames_num)
+        n = math.floor(n / temporal_patch_size) * temporal_patch_size
+
+        # ``torch.arange`` matches transformers' float32 index math exactly
+        # (numpy's float64 diverges by a frame on some inputs); clamp the tail
+        # because that step can emit an index == total_frames_num.
+        indices = torch.arange(0, total_frames_num, total_frames_num / n).int()
+        return torch.clamp(indices, max=total_frames_num - 1).tolist()
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 2,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal["opencv", "pyav"] = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
         )
 
 

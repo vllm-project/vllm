@@ -425,7 +425,7 @@ def _run_eagle_correctness(
             if "deepseek" in model_setup[1].lower():
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
                 m.delenv("VLLM_MLA_DISABLE", raising=False)
-                attention_config = {"backend": "TRITON_MLA"}
+                attention_config = {"backend": "ROCM_AITER_MLA"}
             else:
                 m.setenv("VLLM_ROCM_USE_AITER", "1")
 
@@ -1300,13 +1300,18 @@ def dflash_config():
     )
 
 
-def test_dflash_acceptance_rates(dflash_config):
+@pytest.mark.parametrize("use_mrv2", [False, True])
+def test_dflash_acceptance_rates(
+    monkeypatch: pytest.MonkeyPatch, use_mrv2: bool, dflash_config
+):
     """
     E2E test for DFlash (block diffusion) speculative decoding.
     Runs acceptance rate validation on GSM8k, MT-Bench, and HumanEval
     comparing against baseline results from the paper (Table 1).
     See https://github.com/z-lab/dflash/blob/main/benchmark_sglang.py for methodology.
     """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
+
     spec_llm = LLM(**dflash_config)
 
     max_prompts_per_dataset = 200  # mt-bench has 80, humaneval has 164, truncates gsm8k
@@ -1414,11 +1419,16 @@ def test_synthetic_acceptance_rate():
     cleanup_dist_env_and_memory()
 
 
-def test_dflash_correctness(dflash_config):
+@pytest.mark.parametrize("use_mrv2", [False, True])
+def test_dflash_correctness(
+    monkeypatch: pytest.MonkeyPatch, use_mrv2: bool, dflash_config
+):
     """
     E2E test for DFlash (block diffusion) speculative decoding.
     Ensures output correctness on GSM8k, with cudagraphs and batching on.
     """
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if use_mrv2 else "0")
+
     spec_llm = LLM(**dflash_config)
 
     # Evaluate GSM8k accuracy (Qwen3-8B ref: ~87-92% on GSM8k)

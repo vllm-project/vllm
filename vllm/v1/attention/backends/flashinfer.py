@@ -41,8 +41,8 @@ from vllm.utils.flashinfer import (
     use_trtllm_attention,
 )
 from vllm.utils.math_utils import cdiv
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import (
+    PIN_MEMORY,
     canonicalize_singleton_dim_strides,
     is_quantized_kv_cache,
     is_strictly_contiguous,
@@ -336,9 +336,24 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        # Note: Not sure for all platforms, but on Blackwell,
-        # only support a page size of 16, 32, 64.
-        return [16, 32, 64]
+        # Page sizes >= 128 only run on the trtllm-gen dynamic kernel (GQA/MQA
+        # on Blackwell); advertise them only when usable so selection never
+        # picks a large kernel block we cannot serve.
+        use_large_pages = False
+        vllm_config = get_current_vllm_config_or_none()
+        if vllm_config is not None and vllm_config.model_config is not None:
+            pc = vllm_config.parallel_config
+            mc = vllm_config.model_config
+            num_qo_heads = mc.get_num_attention_heads(pc)
+            num_kv_heads = mc.get_num_kv_heads(pc)
+            use_large_pages = (
+                num_kv_heads > 0
+                and num_qo_heads // num_kv_heads > 1
+                and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
+            )
+        if not use_large_pages:
+            return [16, 32, 64]
+        return [16, 32, 64, 128, 256, 512, 1024]
 
     @staticmethod
     def get_name() -> str:
@@ -647,6 +662,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # if TRTLLM attention kernel is not used when building attn metadata
         can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
 
+        # Page sizes >= 128 require the trtllm-gen GQA/MQA path (guaranteed by
+        # get_supported_kernel_block_sizes).
+        assert self.page_size <= 64 or (
+            can_use_trtllm and self.num_qo_heads // self.num_kv_heads > 1
+        ), f"Unexpected FlashInfer page size {self.page_size} without trtllm-gen GQA"
+
         if (
             can_use_trtllm
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
@@ -687,9 +708,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Since we do not have explicit synchronization in ModelRunnerV2, we do not pin
         # reused CPU buffers to avoid a race condition between step N async copies to
         # GPU and step N+1 buffer updates.
-        self.pin_memory = (
-            not vllm_config.use_v2_model_runner and is_pin_memory_available()
-        )
+        self.pin_memory = not vllm_config.use_v2_model_runner and PIN_MEMORY
         self.paged_kv_indptr = self._make_buffer(max_num_reqs + 1)
         self.paged_kv_indptr_cpu_buffer = torch.zeros_like(
             self.paged_kv_indptr.cpu, pin_memory=self.pin_memory
@@ -917,6 +936,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # - Decode (FI native or TRTLLM)
         use_cascade = common_prefix_len > 0
         uses_spec_reorder = self.reorder_batch_threshold > 1
+        # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
+        prefill_force_trtllm = (
+            True if page_size >= 128 else self.attention_config.use_trtllm_attention
+        )
         prefill_use_trtllm = use_trtllm_attention(
             self.num_qo_heads,
             self.num_kv_heads,
@@ -926,7 +949,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.cache_dtype,
             self.q_data_type,
             is_prefill=True,
-            force_use_trtllm=self.attention_config.use_trtllm_attention,
+            force_use_trtllm=prefill_force_trtllm,
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
