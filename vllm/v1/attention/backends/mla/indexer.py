@@ -637,8 +637,34 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 request_offset=num_decodes,
             )
 
+            # Exact-merge runs a per-chunk all_gather, so every rank must keep
+            # the SAME chunks. Chunk boundaries are already global, but a chunk
+            # is dropped below when its LOCAL token count is 0 -- and that drop
+            # is rank-dependent: if every request in a chunk is shorter than
+            # dcp_world_size, the least-loaded rank (world-1, local count
+            # sum(L // world)) owns nothing while lower ranks do, so it would
+            # drop the chunk and skip the collective -> hang. Detect this from
+            # the global lengths (identical on all ranks) and fail closed
+            # consistently instead. Rare short-prompt + high-DCP case.
+            exact_prefill = (
+                dcp_local_seq_lens is not None
+                and self.sparse_indexer_mode == "exact"
+            )
             chunks = []
             for req_slice, query_slice in chunk_specs:
+                if exact_prefill:
+                    g_chunk = global_compressed_seq_lens_cpu[
+                        req_slice.start : req_slice.stop
+                    ]
+                    least_loaded_local = (g_chunk // self.dcp_world_size).sum().item()
+                    if g_chunk.sum().item() > 0 and least_loaded_local == 0:
+                        raise NotImplementedError(
+                            "DCP sparse exact-merge prefill cannot handle a "
+                            "chunk whose requests are all shorter than "
+                            f"dcp_world_size (={self.dcp_world_size}): the chunk "
+                            "is empty on some ranks and desyncs the per-chunk "
+                            "all_gather. Use --dcp-sparse-indexer-mode union."
+                        )
                 metadata = build_prefill_chunk_metadata(
                     req_slice.start,
                     req_slice.stop,
