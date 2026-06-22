@@ -14,7 +14,7 @@ use self::format::{
 };
 use self::template::{CompiledChatTemplate, TemplateContext};
 use self::value::{TemplateValue, to_template_value};
-use super::{ChatRenderer, RenderedPrompt};
+use super::{ChatRenderer, RenderedPrompt, effective_template_kwargs};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatContentPart, ChatMessage, ChatRequest};
 use crate::{
@@ -169,8 +169,8 @@ impl HfChatRenderer {
             "applying chat template"
         );
 
-        let mut merged_template_kwargs = self.default_template_kwargs.clone();
-        merged_template_kwargs.extend(request.chat_options.template_kwargs.clone());
+        let effective_template_kwargs =
+            effective_template_kwargs(&self.default_template_kwargs, request);
         let prompt = effective_template
             .apply(TemplateContext {
                 messages: &messages,
@@ -178,9 +178,8 @@ impl HfChatRenderer {
                 continue_final_message: request.chat_options.continue_final_message(),
                 tools: tools.as_deref(),
                 documents: request.documents.as_deref(),
-                template_kwargs: Some(&merged_template_kwargs),
+                template_kwargs: Some(&effective_template_kwargs),
                 special_tokens: self.special_tokens.as_ref(),
-                reasoning_effort: request.chat_options.reasoning_effort,
             })
             .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
 
@@ -191,6 +190,7 @@ impl HfChatRenderer {
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            effective_template_kwargs,
         })
     }
 }
@@ -797,9 +797,46 @@ mod tests {
         )
         .unwrap();
 
-        let rendered = renderer.render(&request).unwrap().prompt;
+        let rendered = renderer.render(&request).unwrap();
 
-        assert_eq!(rendered, Prompt::Text("max".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("max".to_string()));
+        assert_eq!(
+            rendered.effective_template_kwargs.get("reasoning_effort"),
+            Some(&Value::String("max".to_string()))
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs.get("enable_thinking"),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn chat_template_reasoning_effort_preserves_request_enable_thinking() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request.chat_options.reasoning_effort = Some(ReasoningEffort::None);
+        request
+            .chat_options
+            .template_kwargs
+            .insert("enable_thinking".to_string(), Value::Bool(true));
+
+        let renderer = HfChatRenderer::new(
+            Some("{{ reasoning_effort }}|{{ enable_thinking }}".to_string()),
+            HashMap::new(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        let rendered = renderer.render(&request).unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("none|true".to_string()));
+        assert_eq!(
+            rendered.effective_template_kwargs.get("reasoning_effort"),
+            Some(&Value::String("none".to_string()))
+        );
+        assert_eq!(
+            rendered.effective_template_kwargs.get("enable_thinking"),
+            Some(&Value::Bool(true))
+        );
     }
 
     #[test]

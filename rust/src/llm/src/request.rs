@@ -4,7 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
-use vllm_engine_core_client::protocol::{EngineCoreRequest, EngineCoreSamplingParams};
+use vllm_engine_core_client::protocol::{
+    EngineCoreRequest, EngineCoreSamplingParams, ReasoningParserKwargs,
+};
 
 use crate::error::{Error, Result};
 
@@ -41,6 +43,9 @@ pub struct GenerateRequest {
     pub priority: i32,
     /// Optional data-parallel rank override for routing this request.
     pub data_parallel_rank: Option<u32>,
+    /// Optional reasoning-parser kwargs forwarded to engine-side structured
+    /// output logic.
+    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
     /// Optional LoRA adapter request applied to this generation.
     pub lora_request: Option<LoraRequest>,
 }
@@ -68,6 +73,7 @@ impl GenerateRequest {
             trace_headers,
             priority,
             data_parallel_rank,
+            reasoning_parser_kwargs,
             lora_request,
         } = self;
 
@@ -78,7 +84,6 @@ impl GenerateRequest {
         } else {
             external_request_id.clone()
         };
-
         Ok(PreparedGenerateRequest {
             engine_request: EngineCoreRequest {
                 request_id: engine_request_id,
@@ -101,7 +106,7 @@ impl GenerateRequest {
                 // Rust parser doesn't expose this information, leave it unset and let the
                 // reasoning logic in engine-sided structured output manager handle it.
                 reasoning_ended: None,
-                reasoning_parser_kwargs: None,
+                reasoning_parser_kwargs,
                 abort_immediately: false,
             },
         })
@@ -129,7 +134,7 @@ fn current_unix_timestamp_secs() -> f64 {
 mod tests {
     use std::collections::BTreeMap;
 
-    use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
+    use vllm_engine_core_client::protocol::{EngineCoreSamplingParams, ReasoningParserKwargs};
 
     use super::GenerateRequest;
     use crate::error::Error;
@@ -148,6 +153,15 @@ mod tests {
             )])),
             priority: 3,
             data_parallel_rank: Some(2),
+            reasoning_parser_kwargs: Some(ReasoningParserKwargs {
+                chat_template_kwargs: [(
+                    "chat_template_kwargs".to_string(),
+                    serde_json::json!({
+                        "enable_thinking": true,
+                    }),
+                )]
+                .into(),
+            }),
             lora_request: None,
         }
     }
@@ -174,6 +188,15 @@ mod tests {
             )]))
         );
         assert_eq!(request.reasoning_ended, None);
+        assert_eq!(
+            request
+                .reasoning_parser_kwargs
+                .as_ref()
+                .and_then(|kwargs| kwargs.chat_template_kwargs.get("chat_template_kwargs")),
+            Some(&serde_json::json!({
+                "enable_thinking": true
+            }))
+        );
     }
 
     #[test]

@@ -49,6 +49,7 @@ pub fn lower_text_request(
         cache_salt: request.cache_salt.clone(),
         priority: request.priority,
         data_parallel_rank: request.data_parallel_rank,
+        reasoning_parser_kwargs: request.reasoning_parser_kwargs.clone(),
         lora_request: request.lora_request.clone(),
         arrival_time: None,
         trace_headers: None,
