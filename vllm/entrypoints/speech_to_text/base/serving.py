@@ -280,7 +280,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         chunk_start_offsets: list[float] = [0.0]
 
         for chunk in chunks[:-1]:
-            chunk_start_offsets.append(chunk_start_offsets[-1] + chunk.shape[-1] / sr)
+            chunk_start_offsets.append(
+                chunk_start_offsets[-1] + chunk.shape[-1] / self.asr_config.sample_rate
+            )
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
@@ -596,6 +598,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 assert len(list_result_generator) == 1, (
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
                 )
+            assert len(chunk_start_offsets) == len(list_result_generator)
             result_generator = merge_async_iterators(*list_result_generator)
             async for idx, op in result_generator:
                 start_time = chunk_start_offsets[idx]

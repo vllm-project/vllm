@@ -53,7 +53,9 @@ async def test_non_streaming_cancel_aborts_engine_requests(
     server.asr_config = SimpleNamespace(max_audio_clip_s=30)
     server._check_model = AsyncMock(return_value=None)
     server._maybe_get_adapters = Mock(return_value=None)
-    server._preprocess_speech_to_text = AsyncMock(return_value=(engine_inputs, 40.0))
+    server._preprocess_speech_to_text = AsyncMock(
+        return_value=(engine_inputs, 40.0, [0.0, 29.5, 29.5 + 29.7])
+    )
     server._log_inputs = Mock()
 
     request = SimpleNamespace(
