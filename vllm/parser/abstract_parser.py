@@ -4,14 +4,17 @@
 import contextlib
 import json
 from abc import abstractmethod
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 
 from openai.types.responses import ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
 
-from vllm.entrypoints.chat_utils import get_tool_call_id_type, make_tool_call_id
+from vllm.entrypoints.chat_utils import (
+    get_tool_call_id_type,
+    make_tool_call_id,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
@@ -25,6 +28,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.parser.metrics import record_tool_parser_invocation
+from vllm.parser.utils import count_history_tool_calls
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
@@ -159,48 +163,6 @@ class Parser:
     def tool_parser(self, parser: ToolParser | None) -> None:
         self._tool_parser = parser
 
-    @staticmethod
-    def _count_tool_calls(tool_calls) -> int:
-        if tool_calls is None:
-            return 0
-        if isinstance(tool_calls, (str, bytes, dict)):
-            return 1
-        if isinstance(tool_calls, Iterable):
-            return len(list(tool_calls))
-        return 1
-
-    @classmethod
-    def _count_history_tool_calls(
-        cls,
-        request: ChatCompletionRequest | ResponsesRequest,
-    ) -> int:
-        messages = getattr(request, "messages", None)
-        if isinstance(messages, list):
-            return sum(
-                cls._count_tool_calls(msg.get("tool_calls"))
-                for msg in messages
-                if isinstance(msg, dict) and msg.get("role") == "assistant"
-            )
-
-        response_items = getattr(request, "input", None)
-        if not isinstance(response_items, list):
-            return 0
-
-        count = 0
-        for item in response_items:
-            if isinstance(item, dict):
-                item_type = item.get("type")
-                if item_type == "function_call":
-                    count += 1
-                elif item.get("role") == "assistant":
-                    count += cls._count_tool_calls(item.get("tool_calls"))
-                continue
-
-            if getattr(item, "type", None) == "function_call":
-                count += 1
-
-        return count
-
     def _initialize_history_tool_call_cnt(
         self,
         request: ChatCompletionRequest | ResponsesRequest,
@@ -211,7 +173,7 @@ class Parser:
         if state.tool_call_id_type != "kimi_k2":
             state.history_tool_call_cnt_initialized = True
             return
-        state.history_tool_call_cnt = self._count_history_tool_calls(request)
+        state.history_tool_call_cnt = count_history_tool_calls(request)
         state.history_tool_call_cnt_initialized = True
 
     # ========== Reasoning Parser Methods ==========

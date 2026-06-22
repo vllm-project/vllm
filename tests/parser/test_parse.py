@@ -14,7 +14,9 @@ os.environ[_STRICT_TOOL_CALLING_ENV] = "0"
 from vllm.entrypoints.openai.chat_completion.protocol import (  # noqa: E402
     ChatCompletionRequest,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest  # noqa: E402
 from vllm.parser.abstract_parser import DelegatingParser  # noqa: E402
+from vllm.parser.utils import count_history_tool_calls  # noqa: E402
 from vllm.reasoning.basic_parsers import (  # noqa: E402
     BaseThinkingReasoningParser,
 )
@@ -315,6 +317,30 @@ def test_parse_required_tool_choice_kimi_k2_ids_after_history(tokenizer):
 
     assert tool_calls is not None
     assert tool_calls[0].id == "functions.get_current_weather:2"
+
+
+def test_count_history_tool_calls_responses_request():
+    request = ResponsesRequest.model_validate(
+        {
+            "model": "test-model",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_0",
+                    "name": "get_current_weather",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "get_forecast",
+                    "arguments": "{}",
+                },
+            ],
+        }
+    )
+
+    assert count_history_tool_calls(request) == 2
 
 
 def test_parse_required_tool_choice_random_ids_ignore_history(tokenizer):
