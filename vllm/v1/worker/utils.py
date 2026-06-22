@@ -218,10 +218,6 @@ class KVBlockZeroer:
             BLOCK_SIZE=blk_size,
         )
 
-    def warmup(self) -> None:
-        """Compile the KV block zeroing kernel before the first request."""
-        self.zero_block_ids([0])
-
 
 @dataclass
 class AttentionGroup:

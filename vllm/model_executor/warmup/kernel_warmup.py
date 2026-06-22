@@ -77,10 +77,6 @@ def kernel_warmup(worker: "Worker"):
         model_dtype=worker.model_runner.dtype,
     )
 
-    kv_block_zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
-    if kv_block_zeroer is not None:
-        kv_block_zeroer.warmup()
-
     minimax_m3_msa_warmup(worker)
 
     enable_flashinfer_autotune = (

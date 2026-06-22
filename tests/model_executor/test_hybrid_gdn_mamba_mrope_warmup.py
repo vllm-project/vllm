@@ -8,7 +8,7 @@ import torch
 from vllm.model_executor.warmup import kernel_warmup
 
 
-def test_kernel_warmup_runs_hybrid_and_zeroer_warmups(monkeypatch) -> None:
+def test_kernel_warmup_runs_hybrid_warmup(monkeypatch) -> None:
     calls: list[str] = []
 
     model = object()
@@ -17,10 +17,6 @@ def test_kernel_warmup_runs_hybrid_and_zeroer_warmups(monkeypatch) -> None:
         assert args == (model,)
         assert kwargs == {"model_dtype": torch.bfloat16}
         calls.append("hybrid")
-
-    class FakeZeroer:
-        def warmup(self) -> None:
-            calls.append("zeroer")
 
     def fake_dummy_run(**kwargs) -> None:
         assert kwargs == {
@@ -52,7 +48,6 @@ def test_kernel_warmup_runs_hybrid_and_zeroer_warmups(monkeypatch) -> None:
         ),
         model_runner=SimpleNamespace(
             dtype=torch.bfloat16,
-            _kv_block_zeroer=FakeZeroer(),
             _dummy_run=fake_dummy_run,
             is_pooling_model=True,
             attn_groups=[],
@@ -61,4 +56,4 @@ def test_kernel_warmup_runs_hybrid_and_zeroer_warmups(monkeypatch) -> None:
 
     kernel_warmup.kernel_warmup(worker)
 
-    assert calls == ["hybrid", "zeroer"]
+    assert calls == ["hybrid"]
