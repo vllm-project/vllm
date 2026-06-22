@@ -145,7 +145,6 @@ class Fp8Config(QuantizationConfig):
         )
 
 
-
 class Fp8MoEMethod(FusedMoEMethodBase):
     """FP8 MoE method.
 

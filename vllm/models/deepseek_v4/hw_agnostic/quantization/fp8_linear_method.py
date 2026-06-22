@@ -34,7 +34,6 @@ from vllm.models.deepseek_v4.hw_agnostic.shared.kernels.linear import (
     init_fp8_linear_kernel,
 )
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import LinearMethodBase
-from vllm.utils.deep_gemm import is_deep_gemm_supported
 
 if TYPE_CHECKING:
     from .quant_config import DeepseekV4FP8Config
@@ -55,10 +54,13 @@ class Fp8LinearMethod(LinearMethodBase):
         self.marlin_input_dtype = None
         self.use_marlin = False
 
-        if self.quant_config.use_deep_gemm is not None:
-            self.use_deep_gemm = self.quant_config.use_deep_gemm
-        else:
-            self.use_deep_gemm = is_deep_gemm_supported()
+        # ``use_deep_gemm`` is intentionally not mirrored on this class. The
+        # hw-agnostic kernel selector ``init_fp8_linear_kernel`` chooses the
+        # impl directly, and the only external read of
+        # ``quant_method.use_deep_gemm`` (in
+        # ``vllm/model_executor/layers/quantization/utils/quant_utils.py``)
+        # gates on ``isinstance(layer.quant_method, upstream.Fp8LinearMethod)``,
+        # which never matches our class.
 
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None

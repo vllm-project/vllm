@@ -87,7 +87,6 @@ LAYER_NAME = "deepseek_v4_multi_head_latent_attention"
 
 @PluggableLayer.register(LAYER_NAME)
 class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
-
     def __init__(
         self,
         hidden_size: int,
