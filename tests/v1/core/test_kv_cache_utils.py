@@ -221,7 +221,7 @@ def test_kv_cache_block():
 
     # Test block hash setting and resetting
     block_hash = make_block_hash_with_group_id(BlockHash(b"abc"), 0)
-    block.block_hash = block_hash
+    block.set_block_hash(block_hash)
     assert block.block_hash == block_hash
 
     block.reset_hash()

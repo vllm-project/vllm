@@ -140,13 +140,6 @@ class KVCacheBlock:
     def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash
 
-    @block_hash.setter
-    def block_hash(self, block_hash: BlockHashWithGroupId):
-        assert self.block_hash is None, (
-            "The block already has a hash. This should not happen."
-        )
-        self._block_hash = block_hash
-
     @property
     def block_hash_num_tokens(self) -> int | None:
         return self._block_hash_num_tokens
@@ -156,7 +149,7 @@ class KVCacheBlock:
         block_hash: BlockHashWithGroupId,
         num_tokens: int | None = None,
     ) -> None:
-        assert self.block_hash is None, (
+        assert self.block_hash is None and self._block_hash_num_tokens is None, (
             "The block already has a hash. This should not happen."
         )
         self._block_hash = block_hash

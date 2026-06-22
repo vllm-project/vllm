@@ -72,6 +72,20 @@ class BlockHashToBlockMap:
             self._unexpected_blocks_type(blocks)
         return None
 
+    def contains(self, key: BlockHashWithGroupId, block_id: int) -> bool:
+        """
+        Checks whether the key maps to the given block ID.
+        """
+        blocks = self._cache.get(key)
+        if blocks is None:
+            return False
+        if isinstance(blocks, KVCacheBlock):
+            return blocks.block_id == block_id
+        if isinstance(blocks, dict):
+            return block_id in blocks
+        self._unexpected_blocks_type(blocks)
+        return False
+
     def insert(self, key: BlockHashWithGroupId, block: KVCacheBlock) -> None:
         """
         Inserts the KVCacheBlock to the cache
@@ -341,13 +355,13 @@ class BlockPool:
                 )
             )
 
-    def cache_block_alias(
+    def cache_partial_block(
         self,
         request: Request,
         block: KVCacheBlock,
         num_tokens: int,
         kv_cache_group_id: int,
-        block_size: int | None = None,
+        block_size: int,
     ) -> BlockHashWithGroupId | None:
         """Register a partial prefix-cache entry for an existing block.
 
@@ -376,24 +390,23 @@ class BlockPool:
 
         Returns:
             The hash key with group ID if an alias can be registered; otherwise
-            ``None`` for null blocks or unhashable prefix lengths.
+            ``None`` for null blocks.
         """
         if block.is_null:
             return None
 
-        block_hash = self.get_block_alias_hash(request, num_tokens)
-        if block_hash is None:
-            return None
-        block_size = block_size or self.hash_block_size
+        assert block_size > self.hash_block_size
+        assert block_size % self.hash_block_size == 0
+        assert num_tokens % block_size != 0
+        block_hash = self._get_partial_block_hash(request, num_tokens)
         num_hash_blocks = num_tokens // self.hash_block_size
         block_hash_with_group_id = make_block_hash_with_group_id(
             block_hash, kv_cache_group_id
         )
-        existing = self.cached_block_hash_to_block.get_one_block(
-            block_hash_with_group_id
-        )
         already_cached = block.block_hash == block_hash_with_group_id or (
-            existing is not None and existing.block_id == block.block_id
+            self.cached_block_hash_to_block.contains(
+                block_hash_with_group_id, block.block_id
+            )
         )
         if (
             not already_cached
@@ -409,8 +422,8 @@ class BlockPool:
             num_tokens=num_hash_blocks * self.hash_block_size,
         )
         if self.enable_kv_cache_events and not already_cached:
-            parent_hash, block_start = self.get_block_alias_parent_hash_and_start(
-                request, num_tokens, block_size
+            parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
+                request, num_tokens
             )
             parent_block_hash = (
                 maybe_convert_block_hash(parent_hash)
@@ -441,45 +454,30 @@ class BlockPool:
             )
         return block_hash_with_group_id
 
-    def get_block_alias_hash(
+    def _get_partial_block_hash(
         self,
         request: Request,
         num_tokens: int,
-    ) -> BlockHash | None:
-        if num_tokens % self.hash_block_size != 0:
-            return None
+    ) -> BlockHash:
+        assert num_tokens % self.hash_block_size == 0
         num_hash_blocks = num_tokens // self.hash_block_size
-        if num_hash_blocks == 0 or num_hash_blocks > len(request.block_hashes):
-            return None
+        assert 0 < num_hash_blocks <= len(request.block_hashes)
 
         # Each hash_block_size hash chains over its full prefix, so the alias
         # for any group block size is the hash at that prefix boundary.
         return request.block_hashes[num_hash_blocks - 1]
 
-    def get_block_alias_parent_hash_and_start(
+    def _get_partial_block_parent_hash_and_start(
         self,
         request: Request,
         num_tokens: int,
-        block_size: int,
     ) -> tuple[BlockHash | None, int]:
-        if block_size == self.hash_block_size:
-            num_hash_blocks = num_tokens // self.hash_block_size
-            parent_hash = (
-                request.block_hashes[num_hash_blocks - 2]
-                if num_hash_blocks > 1
-                else None
-            )
-            return parent_hash, (num_hash_blocks - 1) * self.hash_block_size
-
-        full_block_idx = num_tokens // block_size
-        block_start = full_block_idx * block_size
-        if full_block_idx == 0:
-            return None, block_start
-
-        full_block_hashes = BlockHashListWithBlockSize(
-            request.block_hashes, self.hash_block_size, block_size
+        num_hash_blocks = num_tokens // self.hash_block_size
+        parent_hash = (
+            request.block_hashes[num_hash_blocks - 2] if num_hash_blocks > 1 else None
         )
-        return full_block_hashes[full_block_idx - 1], block_start
+        block_start = (num_hash_blocks - 1) * self.hash_block_size
+        return parent_hash, block_start
 
     def _remove_cached_block_hashes(
         self,
@@ -526,10 +524,9 @@ class BlockPool:
         if block.block_hash == block_hash_with_group_id:
             return
 
-        existing = self.cached_block_hash_to_block.get_one_block(
-            block_hash_with_group_id
-        )
-        if existing is not None and existing.block_id == block.block_id:
+        if self.cached_block_hash_to_block.contains(
+            block_hash_with_group_id, block.block_id
+        ):
             return
 
         if block.block_hash is None:
