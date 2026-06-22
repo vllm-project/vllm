@@ -1760,32 +1760,84 @@ def test_replicated_lora_preserves_base_forward_for_subclasses(
 
 @torch.inference_mode()
 @pytest.mark.parametrize("device", DEVICES)
-def test_merged_column_lora_non_sharded_routes_to_apply_sync(
-    default_vllm_config, dist_init, device
+@pytest.mark.parametrize("fully_sharded", [True, False])
+def test_mcp_apply_all_gather_gated_by_fully_sharded_loras(
+    default_vllm_config, dist_init, device, fully_sharded
 ) -> None:
-    """Regression test for #45691: apply() must route to _apply_sync,
-    not _mcp_apply, when tp_size > 1 and fully_sharded_loras=False."""
-    from unittest.mock import patch
+    """Regression test for #45691: _mcp_apply must only all_gather the
+    shrink buffer when fully_sharded_loras=True. When False, LoRA A is
+    already replicated at full max_lora_rank per rank, so gathering would
+    incorrectly concatenate tp_size copies along the rank dim."""
+    from unittest.mock import MagicMock, patch
+
+    from vllm.lora.layers.column_parallel_linear import _mcp_apply
 
     if current_platform.is_cuda_alike() or current_platform.is_xpu():
         torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
 
-    layer = object.__new__(MergedColumnParallelLinearWithLoRA)
-    layer.tp_size = 2
+    tp_size = 2
+    max_lora_rank = 8
+    num_tokens = 4
+    n_slices = 2
+    output_size = 16
 
-    apply_sync_calls = []
-    layer._apply_sync = (
-        lambda x, bias: apply_sync_calls.append((x, bias)) or torch.zeros(4, 32)
+    # local_lora_rank mirrors create_lora_weights: full rank when not
+    # sharded, rank/tp_size when sharded.
+    local_lora_rank = (
+        max_lora_rank // tp_size if fully_sharded else max_lora_rank
     )
 
-    x = torch.zeros(4, 16)
+    layer = object.__new__(MergedColumnParallelLinearWithLoRA)
+    layer.tp_size = tp_size
+    layer.n_slices = n_slices
+    layer.lora_config = MagicMock(fully_sharded_loras=fully_sharded)
+    layer.lora_a_stacked = tuple(
+        torch.zeros(1, 1, local_lora_rank, 32) for _ in range(n_slices)
+    )
+    layer.lora_b_stacked = tuple(
+        torch.zeros(1, 1, output_size, max_lora_rank) for _ in range(n_slices)
+    )
+    layer.output_slices = (output_size, output_size)
+    layer.base_layer = MagicMock()
+    layer.base_layer.quant_method.apply.return_value = torch.zeros(
+        num_tokens, n_slices * output_size
+    )
+
+    captured_expand_buffers = {}
+
+    def fake_add_shrink(buffers, x, lora_a_stacked, scale):
+        return None  # mimic can_update_inplace() == True path
+
+    def fake_add_expand(output, buffers, lora_b_stacked, output_slices, **kwargs):
+        captured_expand_buffers["buffers"] = buffers
+        return None
+
+    layer.punica_wrapper = MagicMock()
+    layer.punica_wrapper.add_shrink.side_effect = fake_add_shrink
+    layer.punica_wrapper.add_expand.side_effect = fake_add_expand
+
+    x = torch.zeros(num_tokens, 32)
 
     with patch(
-        "vllm.lora.layers.column_parallel_linear._mcp_apply"
-    ) as mock_mcp:
-        layer.apply(x, bias=None)
+        "vllm.lora.layers.column_parallel_linear.tensor_model_parallel_all_gather"
+    ) as mock_all_gather:
+        # all_gather mock still needs to return a same-shaped-or-bloated
+        # tensor depending on the call, since the result is fed to add_expand.
+        mock_all_gather.side_effect = lambda buf: torch.cat([buf] * tp_size, dim=-1)
+        _mcp_apply(x, None, layer)
 
-    assert len(apply_sync_calls) == 1
-    assert apply_sync_calls[0][1] is None
-    mock_mcp.assert_not_called()
+    if fully_sharded:
+        mock_all_gather.assert_called_once()
+    else:
+        mock_all_gather.assert_not_called()
+
+    # Cross-check independent of the mock call count: whatever buffer
+    # actually reached add_expand must have rank dim == max_lora_rank,
+    # never max_lora_rank * tp_size.
+    expand_buffers = captured_expand_buffers["buffers"]
+    assert expand_buffers.shape[-1] == max_lora_rank, (
+        f"shrink buffer rank dim reaching add_expand was "
+        f"{expand_buffers.shape[-1]}, expected {max_lora_rank} "
+        f"(fully_sharded={fully_sharded})"
+    )

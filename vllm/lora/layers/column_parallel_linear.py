@@ -61,7 +61,8 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
     if not current_platform.can_update_inplace():
         buffers = shrunk_buffers
 
-    buffers = tensor_model_parallel_all_gather(buffers)
+    if layer.lora_config.fully_sharded_loras and layer.tp_size > 1:
+        buffers = tensor_model_parallel_all_gather(buffers)
 
     lora_output: torch.Tensor | None = layer.punica_wrapper.add_expand(
         output,
@@ -341,7 +342,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             and base_forward is not merged_forward
         ):
             return self._apply_base_forward(x)
-        return self._apply_sync(x, bias)
+        return _mcp_apply(x, bias, self)
 
     @classmethod
     def can_replace_layer(
