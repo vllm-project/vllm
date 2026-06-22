@@ -117,6 +117,7 @@ export GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 ########################################
 # Install Packages From Devpi
 ########################################
+uv pip install numpy==2.4.4 --extra-index-url "$IBM_DEVPI_URL"
 try_install_from_devpi "opencv-python-headless==${OPENCV_VERSION}"
 try_install_from_devpi "torch==${TORCH_VERSION}"
 try_install_from_devpi "torchvision==${TORCHVISION_VERSION}"
