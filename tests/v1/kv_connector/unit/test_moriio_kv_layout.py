@@ -7,21 +7,9 @@ from collections import OrderedDict, defaultdict
 from queue import Queue
 from types import SimpleNamespace
 
-import msgpack
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
-    ROLE,
-    MoRIIOError,
-    RemoteAllocInfo,
-    WriteTask,
-    set_role,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
-    MoRIIOWrapper,
-    MoRIIOWriter,
-)
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MLAAttentionSpec
 
@@ -34,9 +22,24 @@ if not (current_platform.is_rocm() and mori_available):
         allow_module_level=True,
     )
 
+moriio_common = importlib.import_module(
+    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common"
+)
+moriio_engine = importlib.import_module(
+    "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine"
+)
 moriio_layout = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout"
 )
+msgpack = importlib.import_module("msgpack")
+
+ROLE = moriio_common.ROLE
+MoRIIOError = moriio_common.MoRIIOError
+RemoteAllocInfo = moriio_common.RemoteAllocInfo
+WriteTask = moriio_common.WriteTask
+set_role = moriio_common.set_role
+MoRIIOWrapper = moriio_engine.MoRIIOWrapper
+MoRIIOWriter = moriio_engine.MoRIIOWriter
 
 
 def _full_spec(
@@ -112,162 +115,167 @@ def _write_task(layer_name: str, transfer_id: str = "xfer") -> WriteTask:
     )
 
 
-def test_separated_kv_layout_uses_kv_axis_zero_and_block_axis_one():
-    cache = torch.empty((2, 8, 4, 2, 3), dtype=torch.bfloat16)
-    worker = _worker({"layer": cache}, {"layer": _full_spec()})
+@pytest.mark.parametrize(
+    ("shape", "spec", "remote_num_blocks", "expected_geometry", "expected_offsets"),
+    [
+        pytest.param(
+            (2, 8, 4, 2, 3),
+            _full_spec(),
+            16,
+            {
+                "block_stride": 24,
+                "local_kv_stride": 192,
+                "remote_kv_stride": 384,
+                "split_kv_regions": True,
+            },
+            ([48, 144, 432, 528], [192, 240, 960, 1008], [48, 48, 48, 48]),
+            id="separated",
+        ),
+        pytest.param(
+            (8, 2, 4, 2, 3),
+            _full_spec(),
+            16,
+            {
+                "block_stride": 48,
+                "local_kv_stride": 24,
+                "remote_kv_stride": 24,
+                "split_kv_regions": False,
+            },
+            ([96, 288], [384, 480], [96, 96]),
+            id="interleaved",
+        ),
+        pytest.param(
+            (2, 8, 2, 4, 3),
+            _full_spec(),
+            16,
+            {
+                "block_size": 4,
+                "block_stride": 24,
+                "local_kv_stride": 192,
+                "remote_kv_stride": 384,
+                "split_kv_regions": True,
+            },
+            ([48, 144, 432, 528], [192, 240, 960, 1008], [48, 48, 48, 48]),
+            id="shuffled-separated",
+        ),
+        pytest.param(
+            (8, 2, 2, 4, 3),
+            _full_spec(),
+            16,
+            {
+                "block_size": 4,
+                "block_stride": 48,
+                "local_kv_stride": 24,
+                "remote_kv_stride": 24,
+                "split_kv_regions": False,
+            },
+            ([96, 288], [384, 480], [96, 96]),
+            id="shuffled-interleaved",
+        ),
+        pytest.param(
+            (2, 16, 2, 2, 3),
+            _full_spec(),
+            16,
+            {
+                "num_blocks": 8,
+                "block_size": 4,
+                "block_stride": 24,
+                "local_kv_stride": 192,
+                "remote_kv_stride": 384,
+                "split_kv_regions": True,
+            },
+            ([48, 144, 432, 528], [192, 240, 960, 1008], [48, 48, 48, 48]),
+            id="separated-kernel-blocks",
+        ),
+        pytest.param(
+            (16, 2, 2, 2, 3),
+            _full_spec(),
+            16,
+            {
+                "num_blocks": 8,
+                "block_size": 4,
+                "block_stride": 48,
+                "local_kv_stride": None,
+                "remote_kv_stride": None,
+                "transfers_per_block": 1,
+            },
+            ([96, 288], [384, 480], [96, 96]),
+            id="interleaved-kernel-blocks",
+        ),
+        pytest.param(
+            (2, 32, 8, 2, 3),
+            _full_spec(block_size=16, num_kv_heads=8),
+            8,
+            {
+                "num_blocks": 4,
+                "block_size": 16,
+                "block_len": 768,
+                "block_stride": 384,
+                "local_kv_stride": 1536,
+                "remote_kv_stride": 3072,
+                "split_kv_regions": True,
+            },
+            (
+                [768, 2304, 3840, 5376],
+                [3072, 3840, 9216, 9984],
+                [768, 768, 768, 768],
+            ),
+            id="separated-kernel-axis-from-spec",
+        ),
+        pytest.param(
+            (32, 2, 8, 2, 3),
+            _full_spec(block_size=16, num_kv_heads=8),
+            8,
+            {
+                "num_blocks": 4,
+                "block_size": 16,
+                "block_len": 1536,
+                "block_stride": 768,
+                "local_kv_stride": None,
+                "remote_kv_stride": None,
+                "transfers_per_block": 1,
+            },
+            ([1536, 4608], [6144, 7680], [1536, 1536]),
+            id="interleaved-kernel-axis-from-spec",
+        ),
+        pytest.param(
+            (8, 4, 3),
+            _mla_spec(),
+            16,
+            {
+                "block_stride": 12,
+                "local_kv_stride": None,
+                "remote_kv_stride": None,
+                "transfers_per_block": 1,
+            },
+            ([24, 72], [96, 120], [24, 24]),
+            id="mla-key-only",
+        ),
+    ],
+)
+def test_supported_layouts_compute_expected_geometry_and_offsets(
+    shape, spec, remote_num_blocks, expected_geometry, expected_offsets
+):
+    cache = torch.empty(shape, dtype=torch.bfloat16)
+    worker = _worker({"layer": cache}, {"layer": spec})
 
     geometry = moriio_layout.get_layer_transfer_geometry(
-        "layer", cache, worker.layer_to_spec, remote_num_blocks=16
+        "layer", cache, worker.layer_to_spec, remote_num_blocks=remote_num_blocks
     )
-    assert geometry.block_stride == 24
-    assert geometry.local_kv_stride == 192
-    assert geometry.remote_kv_stride == 384
-    assert geometry.split_kv_regions
+    for field, expected in expected_geometry.items():
+        assert getattr(geometry, field) == expected
 
-    assert moriio_layout.compute_block_transfer_offsets(
-        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], _remote_meta().num_blocks
-    ) == ([48, 144, 432, 528], [192, 240, 960, 1008], [48, 48, 48, 48])
-
-
-def test_interleaved_kv_layout_uses_block_axis_zero_and_kv_axis_one():
-    cache = torch.empty((8, 2, 4, 2, 3), dtype=torch.bfloat16)
-    worker = _worker({"layer": cache}, {"layer": _full_spec()})
-
-    geometry = moriio_layout.get_layer_transfer_geometry(
-        "layer", cache, worker.layer_to_spec, remote_num_blocks=16
+    assert (
+        moriio_layout.compute_block_transfer_offsets(
+            "layer",
+            cache,
+            worker.layer_to_spec,
+            [1, 3],
+            [4, 5],
+            remote_num_blocks,
+        )
+        == expected_offsets
     )
-    assert geometry.block_stride == 48
-    assert geometry.local_kv_stride == 24
-    assert geometry.remote_kv_stride == 24
-    assert not geometry.split_kv_regions
-
-    assert moriio_layout.compute_block_transfer_offsets(
-        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], _remote_meta().num_blocks
-    ) == ([96, 288], [384, 480], [96, 96])
-
-
-def test_shuffled_separated_kv_layout_uses_spec_block_axis():
-    cache = torch.empty((2, 8, 2, 4, 3), dtype=torch.bfloat16)
-    worker = _worker({"layer": cache}, {"layer": _full_spec()})
-
-    geometry = moriio_layout.get_layer_transfer_geometry(
-        "layer", cache, worker.layer_to_spec, remote_num_blocks=16
-    )
-    assert geometry.block_size == 4
-    assert geometry.block_stride == 24
-    assert geometry.local_kv_stride == 192
-    assert geometry.remote_kv_stride == 384
-    assert geometry.split_kv_regions
-
-    assert moriio_layout.compute_block_transfer_offsets(
-        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], _remote_meta().num_blocks
-    ) == ([48, 144, 432, 528], [192, 240, 960, 1008], [48, 48, 48, 48])
-
-
-def test_shuffled_interleaved_kv_layout_uses_spec_block_axis():
-    cache = torch.empty((8, 2, 2, 4, 3), dtype=torch.bfloat16)
-    worker = _worker({"layer": cache}, {"layer": _full_spec()})
-
-    geometry = moriio_layout.get_layer_transfer_geometry(
-        "layer", cache, worker.layer_to_spec, remote_num_blocks=16
-    )
-    assert geometry.block_size == 4
-    assert geometry.block_stride == 48
-    assert geometry.local_kv_stride == 24
-    assert geometry.remote_kv_stride == 24
-    assert not geometry.split_kv_regions
-
-    assert moriio_layout.compute_block_transfer_offsets(
-        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], _remote_meta().num_blocks
-    ) == ([96, 288], [384, 480], [96, 96])
-
-
-def test_separated_kernel_block_layout_groups_kernel_blocks():
-    cache = torch.empty((2, 16, 2, 2, 3), dtype=torch.bfloat16)
-    worker = _worker({"layer": cache}, {"layer": _full_spec()})
-
-    geometry = moriio_layout.get_layer_transfer_geometry(
-        "layer", cache, worker.layer_to_spec, remote_num_blocks=16
-    )
-    assert geometry.num_blocks == 8
-    assert geometry.block_size == 4
-    assert geometry.block_stride == 24
-    assert geometry.local_kv_stride == 192
-    assert geometry.remote_kv_stride == 384
-    assert geometry.split_kv_regions
-
-    assert moriio_layout.compute_block_transfer_offsets(
-        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], _remote_meta().num_blocks
-    ) == ([48, 144, 432, 528], [192, 240, 960, 1008], [48, 48, 48, 48])
-
-
-def test_interleaved_kernel_block_layout_transfers_full_logical_blocks():
-    cache = torch.empty((16, 2, 2, 2, 3), dtype=torch.bfloat16)
-    worker = _worker({"layer": cache}, {"layer": _full_spec()})
-
-    geometry = moriio_layout.get_layer_transfer_geometry(
-        "layer", cache, worker.layer_to_spec, remote_num_blocks=16
-    )
-    assert geometry.num_blocks == 8
-    assert geometry.block_size == 4
-    assert geometry.block_stride == 48
-    assert geometry.local_kv_stride is None
-    assert geometry.remote_kv_stride is None
-    assert geometry.transfers_per_block == 1
-
-    assert moriio_layout.compute_block_transfer_offsets(
-        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], _remote_meta().num_blocks
-    ) == ([96, 288], [384, 480], [96, 96])
-
-
-def test_separated_kernel_block_layout_uses_spec_to_find_kernel_axis():
-    cache = torch.empty((2, 32, 8, 2, 3), dtype=torch.bfloat16)
-    worker = _worker(
-        {"layer": cache},
-        {"layer": _full_spec(block_size=16, num_kv_heads=8)},
-    )
-
-    geometry = moriio_layout.get_layer_transfer_geometry(
-        "layer", cache, worker.layer_to_spec, remote_num_blocks=8
-    )
-    assert geometry.num_blocks == 4
-    assert geometry.block_size == 16
-    assert geometry.block_len == 768
-    assert geometry.block_stride == 384
-    assert geometry.local_kv_stride == 1536
-    assert geometry.remote_kv_stride == 3072
-    assert geometry.split_kv_regions
-
-    assert moriio_layout.compute_block_transfer_offsets(
-        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], 8
-    ) == (
-        [768, 2304, 3840, 5376],
-        [3072, 3840, 9216, 9984],
-        [768, 768, 768, 768],
-    )
-
-
-def test_interleaved_kernel_block_layout_uses_spec_to_find_kernel_axis():
-    cache = torch.empty((32, 2, 8, 2, 3), dtype=torch.bfloat16)
-    worker = _worker(
-        {"layer": cache},
-        {"layer": _full_spec(block_size=16, num_kv_heads=8)},
-    )
-
-    geometry = moriio_layout.get_layer_transfer_geometry(
-        "layer", cache, worker.layer_to_spec, remote_num_blocks=8
-    )
-    assert geometry.num_blocks == 4
-    assert geometry.block_size == 16
-    assert geometry.block_len == 1536
-    assert geometry.block_stride == 768
-    assert geometry.local_kv_stride is None
-    assert geometry.remote_kv_stride is None
-    assert geometry.transfers_per_block == 1
-
-    assert moriio_layout.compute_block_transfer_offsets(
-        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], 8
-    ) == ([1536, 4608], [6144, 7680], [1536, 1536])
 
 
 def test_kernel_block_layout_without_spec_dimensions_rejects_ambiguous_axes():
@@ -281,23 +289,6 @@ def test_kernel_block_layout_without_spec_dimensions_rejects_ambiguous_axes():
         moriio_layout.get_layer_transfer_geometry(
             "layer", cache, worker.layer_to_spec, remote_num_blocks=8
         )
-
-
-def test_mla_key_only_layout_transfers_one_slab_per_block():
-    cache = torch.empty((8, 4, 3), dtype=torch.bfloat16)
-    worker = _worker({"layer": cache}, {"layer": _mla_spec()})
-
-    geometry = moriio_layout.get_layer_transfer_geometry(
-        "layer", cache, worker.layer_to_spec, remote_num_blocks=16
-    )
-    assert geometry.block_stride == 12
-    assert geometry.local_kv_stride is None
-    assert geometry.remote_kv_stride is None
-    assert geometry.transfers_per_block == 1
-
-    assert moriio_layout.compute_block_transfer_offsets(
-        "layer", cache, worker.layer_to_spec, [1, 3], [4, 5], _remote_meta().num_blocks
-    ) == ([24, 72], [96, 120], [24, 24])
 
 
 def test_mixed_layers_compute_distinct_offsets_per_layer():
@@ -560,72 +551,72 @@ def test_late_remote_blocks_message_is_ignored_after_transfer_done():
     assert "xfer" not in wrapper.done_remote_allocate_req_dict
 
 
-def test_moriio_wrapper_handles_structured_remote_blocks_message():
-    set_role(ROLE.PRODUCER)
+@pytest.mark.parametrize(
+    ("role", "payload", "expected"),
+    [
+        pytest.param(
+            ROLE.PRODUCER,
+            msgpack.dumps(
+                {
+                    "type": "remote_blocks",
+                    "req_id": "req",
+                    "transfer_id": "xfer",
+                    "block_notify_list": [4, 5],
+                    "decode_rank": 3,
+                }
+            ),
+            "remote_blocks",
+            id="remote-blocks",
+        ),
+        pytest.param(
+            ROLE.CONSUMER,
+            msgpack.dumps({"type": "write_done", "transfer_id": "xfer"}),
+            "write_done",
+            id="write-done",
+        ),
+        pytest.param(
+            ROLE.PRODUCER,
+            msgpack.dumps({"type": "release", "transfer_id": "xfer"}),
+            "release",
+            id="release",
+        ),
+        pytest.param(None, b"xfer", "plain", id="plain-string"),
+    ],
+)
+def test_moriio_wrapper_routes_valid_messages(role, payload, expected):
     wrapper = _wrapper_for_messages()
-
-    wrapper._handle_message(
-        msgpack.dumps(
-            {
-                "type": "remote_blocks",
-                "req_id": "req",
-                "transfer_id": "xfer",
-                "block_notify_list": [4, 5],
-                "decode_rank": 3,
-            }
-        )
-    )
-
-    request_info = wrapper.done_remote_allocate_req_dict["xfer"]
-    assert request_info.block_ids == [4, 5]
-    assert request_info.decode_dp_rank == 3
-
-
-def test_moriio_wrapper_handles_structured_write_done_message():
-    set_role(ROLE.CONSUMER)
-    wrapper = _wrapper_for_messages()
-
-    wrapper._handle_message(
-        msgpack.dumps({"type": "write_done", "transfer_id": "xfer"})
-    )
-
-    assert wrapper.done_write_cache_req_ids == ["xfer"]
-
-
-def test_moriio_wrapper_handles_structured_release_message():
-    set_role(ROLE.PRODUCER)
-    wrapper = _wrapper_for_messages()
-
-    wrapper._handle_message(msgpack.dumps({"type": "release", "transfer_id": "xfer"}))
-
-    assert wrapper.done_req_ids == ["xfer"]
-
-
-def test_moriio_wrapper_accepts_plain_string_completion_message():
-    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
     completions = []
-    wrapper._handle_completion_message = completions.append
+    if role is not None:
+        set_role(role)
+    if expected == "plain":
+        wrapper._handle_completion_message = completions.append
 
-    wrapper._handle_message(b"xfer")
+    wrapper._handle_message(payload)
 
-    assert completions == ["xfer"]
+    if expected == "remote_blocks":
+        request_info = wrapper.done_remote_allocate_req_dict["xfer"]
+        assert request_info.block_ids == [4, 5]
+        assert request_info.decode_dp_rank == 3
+    elif expected == "write_done":
+        assert wrapper.done_write_cache_req_ids == ["xfer"]
+    elif expected == "release":
+        assert wrapper.done_req_ids == ["xfer"]
+        assert wrapper._is_transfer_terminal_locked("xfer")
+    else:
+        assert completions == ["xfer"]
 
 
-def test_moriio_wrapper_rejects_unknown_structured_message():
-    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
-
-    with pytest.raises(MoRIIOError, match="Unhandled structured message type"):
-        wrapper._handle_message(
-            msgpack.dumps({"type": "unknown", "transfer_id": "xfer"})
-        )
-
-
-def test_moriio_wrapper_rejects_empty_remote_blocks_message():
-    set_role(ROLE.PRODUCER)
-    wrapper = _wrapper_for_messages()
-
-    with pytest.raises(MoRIIOError, match="block_notify_list cannot be empty"):
-        wrapper._handle_message(
+@pytest.mark.parametrize(
+    ("role", "payload", "match"),
+    [
+        pytest.param(
+            None,
+            msgpack.dumps({"type": "unknown", "transfer_id": "xfer"}),
+            "Unhandled structured message type",
+            id="unknown-structured-type",
+        ),
+        pytest.param(
+            ROLE.PRODUCER,
             msgpack.dumps(
                 {
                     "type": "remote_blocks",
@@ -633,16 +624,26 @@ def test_moriio_wrapper_rejects_empty_remote_blocks_message():
                     "transfer_id": "xfer",
                     "block_notify_list": [],
                 }
-            )
-        )
-
-
-def test_moriio_wrapper_rejects_empty_completion_message():
-    wrapper = MoRIIOWrapper.__new__(MoRIIOWrapper)
+            ),
+            "block_notify_list cannot be empty",
+            id="empty-remote-blocks",
+        ),
+        pytest.param(
+            None,
+            b"",
+            "Unhandled message format",
+            id="empty-completion",
+        ),
+    ],
+)
+def test_moriio_wrapper_rejects_invalid_messages(role, payload, match):
+    wrapper = _wrapper_for_messages()
+    if role is not None:
+        set_role(role)
     wrapper._handle_completion_message = lambda msg: None
 
-    with pytest.raises(MoRIIOError, match="Unhandled message format"):
-        wrapper._handle_message(b"")
+    with pytest.raises(MoRIIOError, match=match):
+        wrapper._handle_message(payload)
 
 
 def test_block_id_length_mismatch_raises_value_error():

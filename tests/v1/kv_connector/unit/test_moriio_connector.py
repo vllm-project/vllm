@@ -452,23 +452,36 @@ def test_read_mode_loads_remote_block_ids():
         assert block_id == block.block_id, f"{block_id} != {block.block_id}"
 
 
-def test_write_mode_finished_before_alloc_notifies_prefill_without_recv_meta():
+@pytest.mark.parametrize(
+    ("transfer_id", "extra_params", "expected_notifications"),
+    [
+        pytest.param(
+            "xfer-7",
+            {"remote_host": "127.0.0.1", "remote_notify_port": 7000},
+            [
+                ("xfer-7", "127.0.0.1", 7000),
+                ("xfer-7", "127.0.0.1", 7001),
+            ],
+            id="address-available",
+        ),
+        pytest.param("xfer-8", {}, [], id="address-unavailable-plain-id"),
+    ],
+)
+def test_write_mode_finished_before_alloc_releases_prefill_blocks(
+    transfer_id, extra_params, expected_notifications
+):
     scheduler = _write_consumer_scheduler_for_finished_request(tp_size=2)
     notifications = []
-    scheduler._send_transfer_release = (
-        lambda transfer_id, host, port: notifications.append(
-            (transfer_id, host, port)
-        )
+    scheduler._send_transfer_release = lambda transfer_id, host, port: (
+        notifications.append((transfer_id, host, port))
     )
     request = create_request(request_id=7, do_remote_prefill=True)
     request.request_id = "plain-decode-id"
-    request.kv_transfer_params.update(
-        {
-            "transfer_id": "xfer-7",
-            "remote_host": "127.0.0.1",
-            "remote_notify_port": 7000,
-        }
-    )
+    request.kv_transfer_params = {
+        "do_remote_prefill": True,
+        "do_remote_decode": False,
+        "transfer_id": transfer_id,
+    } | extra_params
 
     delay_free, new_params = scheduler.request_finished(request, block_ids=[])
 
@@ -476,10 +489,7 @@ def test_write_mode_finished_before_alloc_notifies_prefill_without_recv_meta():
     assert new_params is None
     assert request.kv_transfer_params["do_remote_prefill"] is False
     assert scheduler._reqs_need_recv == {}
-    assert notifications == [
-        ("xfer-7", "127.0.0.1", 7000),
-        ("xfer-7", "127.0.0.1", 7001),
-    ]
+    assert notifications == expected_notifications
 
 
 def test_send_transfer_release_sends_structured_release_message():
@@ -495,26 +505,6 @@ def test_send_transfer_release_sends_structured_release_message():
         "type": "release",
         "transfer_id": "xfer-7",
     }
-
-
-def test_write_mode_finished_before_alloc_with_plain_id_does_not_parse_as_recv():
-    scheduler = _write_consumer_scheduler_for_finished_request()
-    scheduler._send_transfer_release = MagicMock()
-    request = create_request(request_id=8, do_remote_prefill=True)
-    request.request_id = "plain-decode-id"
-    request.kv_transfer_params = {
-        "do_remote_prefill": True,
-        "do_remote_decode": False,
-        "transfer_id": "xfer-8",
-    }
-
-    delay_free, new_params = scheduler.request_finished(request, block_ids=[])
-
-    assert not delay_free
-    assert new_params is None
-    assert request.kv_transfer_params["do_remote_prefill"] is False
-    assert scheduler._reqs_need_recv == {}
-    scheduler._send_transfer_release.assert_not_called()
 
 
 @pytest.mark.skipif(
