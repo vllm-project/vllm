@@ -123,7 +123,7 @@ vllm-text = { path = "src/text" }
 vllm-tokenizer = { path = "src/tokenizer" }
 vllm-tool-parser = { path = "src/tool-parser" }
 winnow = "1.0.2"
-xgrammar-structural-tag = { git = "https://github.com/Inferact/xgrammar-structural-tag.git", rev = "afffd968ecf3ec9ec0963953741dfdf6a00b4e10" }
+xgrammar-structural-tag = { git = "https://github.com/Inferact/xgrammar-structural-tag.git", rev = "8c74b8c415834170364f075bd04457955639744d" }
 zeromq = { version = "0.6.0", default-features = false, features = [
     "tokio-runtime",
     "all-transport",
