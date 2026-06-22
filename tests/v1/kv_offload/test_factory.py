@@ -187,6 +187,29 @@ def test_create_cpu_offloading_spec_end_to_end():
 
 
 # ---------------------------------------------------------------------------
+# Dynamic import via spec_module_path
+# ---------------------------------------------------------------------------
+
+
+def test_dynamic_load_via_spec_module_path():
+    """External spec loaded via spec_module_path.
+
+    This is how external projects (e.g., llm-d-kv-cache SharedStorageOffloadingSpec)
+    integrate with vLLM without being pre-registered in the factory.
+    The fallback path: registry miss → spec_module_path → importlib.import_module.
+    """
+    config = _make_vllm_config(spec_name="CPUOffloadingSpec")
+    # Delete from registry to force the dynamic import path
+    del OffloadingSpecFactory._registry["CPUOffloadingSpec"]
+    # spec_name not in registry → falls through to spec_module_path
+    config.kv_transfer_config.kv_connector_extra_config["spec_module_path"] = (
+        "vllm.v1.kv_offload.cpu.spec"
+    )
+    spec_cls = OffloadingSpecFactory.get_spec_cls(config)
+    assert spec_cls is CPUOffloadingSpec
+
+
+# ---------------------------------------------------------------------------
 # Error paths
 # ---------------------------------------------------------------------------
 

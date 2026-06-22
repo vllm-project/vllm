@@ -111,6 +111,30 @@ def test_create_multiple_tiers():
     assert all(isinstance(tier, ExampleSecondaryTierManager) for tier in tiers)
 
 
+def test_register_new_tier_type():
+    """Verify that new tier types can be registered and created.
+
+    This is how external projects add custom secondary tiers
+    (e.g., llm-d FS backend was upstreamed as "fs" tier via this mechanism).
+    """
+    # Register a new tier type (reuse example manager for simplicity)
+    SecondaryTierFactory.register_tier(
+        "custom_tier",
+        "vllm.v1.kv_offload.tiering.example.manager",
+        "ExampleSecondaryTierManager",
+    )
+
+    primary_kv_view, offloading_spec = _make_mock_args()
+    tier = SecondaryTierFactory.create_secondary_tier(
+        {"type": "custom_tier", "custom_param": 99},
+        primary_kv_view,
+        offloading_spec,
+    )
+
+    assert tier.tier_type == "custom_tier"
+    assert isinstance(tier, ExampleSecondaryTierManager)
+
+
 # ---------------------------------------------------------------------------
 # Error paths
 # ---------------------------------------------------------------------------
