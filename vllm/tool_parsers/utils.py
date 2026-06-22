@@ -3,6 +3,7 @@
 
 import ast
 import json
+import math
 import warnings
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
@@ -142,6 +143,20 @@ def is_complete_json(input_str: str) -> bool:
         json.loads(input_str)
         return True
     except JSONDecodeError:
+        return False
+
+
+def _is_json_finite(obj: Any) -> bool:
+    """Whether *obj* can be serialized to valid JSON.
+
+    ``json.dumps(..., allow_nan=False)`` raises ``ValueError`` on any
+    non-finite float (``inf``/``-inf``/``nan``) anywhere in the value, so this
+    detects non-finite floats nested inside parsed lists/dicts too.
+    """
+    try:
+        json.dumps(obj, allow_nan=False)
+        return True
+    except (ValueError, TypeError):
         return False
 
 
@@ -601,9 +616,15 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
         if candidate_type == "number":
             try:
                 val = float(value)
-                return val if val != int(val) else int(val)
             except (ValueError, TypeError):
                 continue
+            if not math.isfinite(val):
+                # inf/-inf/nan are not valid JSON numbers. Fall through so
+                # the value is preserved as a string instead of crashing
+                # (int(float("inf")) raises OverflowError) or emitting
+                # invalid JSON (json.dumps(inf) -> "Infinity").
+                continue
+            return val if val != int(val) else int(val)
         if candidate_type == "boolean":
             lower_val = value.lower().strip()
             if lower_val in ("true", "1"):
@@ -613,14 +634,25 @@ def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
             continue
         if candidate_type in ("object", "array"):
             try:
-                return json.loads(value)
+                parsed = json.loads(value)
             except (json.JSONDecodeError, ValueError, TypeError):
                 continue
+            if _is_json_finite(parsed):
+                return parsed
+            # Non-finite floats (e.g. "[1e999]" -> [inf]) cannot be
+            # serialized back to valid JSON; preserve the raw string.
+            continue
 
     try:
-        return json.loads(value)
+        parsed = json.loads(value)
     except (json.JSONDecodeError, ValueError):
         return value
+    # Reject non-finite results (e.g. json.loads("1e999") -> inf, or nested
+    # inf/nan inside a parsed list/dict) which json.dumps would render as
+    # invalid JSON (Infinity/NaN). Preserve the raw string instead.
+    if not _is_json_finite(parsed):
+        return value
+    return parsed
 
 
 def compute_tool_delta(
