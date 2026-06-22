@@ -46,7 +46,7 @@ CACHE = None
 
 def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
     """Run a regex compilation callable with a timeout.
-
+    
     Prevents ReDoS attacks where adversarial regex patterns (e.g. nested
     quantifiers like ``(a+)+b``) cause exponential DFA state-space explosion,
     hanging the inference worker indefinitely.
@@ -76,6 +76,47 @@ def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
             "The pattern may be too complex or contain constructs that "
             "cause exponential state-space explosion (e.g. nested "
             f"quantifiers). Pattern: {pattern[:200]}"
+        ) from None
+    else:
+        executor.shutdown(wait=False)
+        return result
+
+
+def compile_schema_with_timeout(
+    fn: Callable[[str], str], schema: str, timeout: float | None = None
+) -> str:
+    """Run a schema compilation callable with a timeout.
+
+    Prevents infinite loops from recursive JSON schemas that reference
+    themselves (directly or indirectly), which can cause the outlines_core
+    json_schema builder to recurse indefinitely.
+
+    Args:
+        fn: Single-argument callable that takes the schema string and
+            returns a regex pattern string.
+        schema: The JSON schema string.
+        timeout: Maximum time in seconds. Defaults to the value of
+            VLLM_REGEX_COMPILATION_TIMEOUT_S env var.
+
+    Raises:
+        ValueError: If compilation exceeds the configured timeout.
+    """
+    if timeout is None:
+        timeout = envs.VLLM_REGEX_COMPILATION_TIMEOUT_S
+    if timeout <= 0:
+        return fn(schema)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn, schema)
+    try:
+        result = future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise ValueError(
+            f"Schema compilation timed out after {timeout}s. "
+            "The schema may contain recursive/self-referencing definitions "
+            f"that cause infinite recursion. Schema: {schema[:200]}"
         ) from None
     else:
         executor.shutdown(wait=False)
