@@ -3,6 +3,7 @@ use std::sync::Arc;
 use axum::extract::{Request, State};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
+use tokio_util::task::AbortOnDropHandle;
 use tracing::error;
 
 use crate::error::{ApiError, server_error};
@@ -40,7 +41,8 @@ pub async fn offload_inference_routes(
     // For streaming requests, the SSE stream responses will still be polled on
     // the HTTP runtime. Benchmarking shows it's typically not worthwhile to poll
     // the stream on the request runtime and bridge it through a channel.
-    match state.request_runtime().spawn(next.run(req)).await {
+    let task = AbortOnDropHandle::new(state.request_runtime().spawn(next.run(req)));
+    match task.await {
         Ok(response) => response,
         Err(error) => {
             error!(%error, "request runtime task failed");
