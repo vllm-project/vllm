@@ -228,13 +228,6 @@ class Scheduler(SchedulerInterface):
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
-        self.enable_kv_transfer_spec_decode_padding = (
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "enable_speculative_padding", False
-            )
-            if vllm_config.kv_transfer_config is not None
-            else False
-        )
         self.num_lookahead_tokens = 0
         self.dynamic_sd_lookup: list[int] | None = None
         if speculative_config is not None:
@@ -333,56 +326,48 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
-        self._kv_transfer_spec_decode_padding_req_ids: set[str] = set()
 
-    def _is_kv_transfer_spec_decode_padding_candidate(
-        self,
-        request: Request,
-        num_computed_tokens: int,
-    ) -> bool:
-        params = request.kv_transfer_params
-        is_remote_prefill = (
-            request.request_id in self._kv_transfer_spec_decode_padding_req_ids
-            or bool(params and params.get("do_remote_prefill"))
+    def _pad_spec_decode(self, request: Request, num_computed_tokens: int) -> bool:
+        """Pad a single (first) decode step with placeholder spec tokens (-1),
+        to ensure uniform decode batches that use full cudagraphs.
+        """
+        pad_spec_decode = (
+            (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+            # Exactly one real token to compute this step. Use num_tokens
+            # rather than num_prompt_tokens to also cover preemption resumes.
+            and num_computed_tokens == request.num_tokens - 1
+            and request.num_tokens
+            + self.num_spec_tokens
+            + self.num_sampled_tokens_per_step
+            <= self.max_model_len
         )
-        speculative_config = self.vllm_config.speculative_config
-        if (
-            not self.enable_kv_transfer_spec_decode_padding
-            or self.num_spec_tokens <= 0
-            or self.dynamic_sd_lookup is not None
-            or (
-                speculative_config is not None
-                and speculative_config.draft_sample_method != "greedy"
-            )
-            or not is_remote_prefill
-            or request.num_output_tokens > 0
-            or num_computed_tokens < request.num_prompt_tokens - 1
-            or (
-                request.num_prompt_tokens
-                + self.num_spec_tokens
-                + self.num_sampled_tokens_per_step
-                > self.max_model_len
-            )
-            or self.structured_output_manager.should_advance(request)
-        ):
-            return False
-        return True
+        if pad_spec_decode and not request.spec_token_ids:
+            # Pad with the placeholder draft id (-1).
+            request.spec_token_ids = [-1] * self.num_spec_tokens
 
-    def _maybe_kv_transfer_spec_decode_padding(
-        self,
+        return pad_spec_decode
+
+    @staticmethod
+    def _schedule_spec_tokens(
         request: Request,
-        num_computed_tokens: int,
-    ) -> bool:
-        if not self._is_kv_transfer_spec_decode_padding_candidate(
-            request, num_computed_tokens
-        ):
-            return False
+        num_new_tokens: int,
+        scheduled_spec_decode_tokens: dict[str, list[int]],
+    ) -> None:
+        """Record this step's draft tokens for `request` and clear them."""
+        num_scheduled_spec_tokens = (
+            num_new_tokens
+            + request.num_computed_tokens
+            - (request.num_tokens + request.num_output_placeholders)
+        )
+        if num_scheduled_spec_tokens > 0:
+            spec_token_ids = request.spec_token_ids
+            if len(spec_token_ids) > num_scheduled_spec_tokens:
+                spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
+            scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
 
-        if request.spec_token_ids:
-            return True
-
-        request.spec_token_ids = [int(request.all_token_ids[0])] * self.num_spec_tokens
-        return True
+        # New spec tokens will be set in `update_draft_token_ids` before the
+        # next step when applicable.
+        request.spec_token_ids = []
 
     def _mamba_block_aligned_split(
         self,
@@ -472,6 +457,8 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        # Whether the running batch contains any prefill requests.
+        prefill_scheduled = False
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -630,6 +617,7 @@ class Scheduler(SchedulerInterface):
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
+            prefill_scheduled |= request.is_prefill_chunk
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
@@ -638,21 +626,9 @@ class Scheduler(SchedulerInterface):
 
             # Speculative decode related.
             if request.spec_token_ids:
-                num_scheduled_spec_tokens = (
-                    num_new_tokens
-                    + request.num_computed_tokens
-                    - request.num_tokens
-                    - request.num_output_placeholders
+                self._schedule_spec_tokens(
+                    request, num_new_tokens, scheduled_spec_decode_tokens
                 )
-                if num_scheduled_spec_tokens > 0:
-                    spec_token_ids = request.spec_token_ids
-                    if len(spec_token_ids) > num_scheduled_spec_tokens:
-                        spec_token_ids = spec_token_ids[:num_scheduled_spec_tokens]
-                    scheduled_spec_decode_tokens[request.request_id] = spec_token_ids
-
-                # New spec tokens will be set in `update_draft_token_ids` before the
-                # next step when applicable.
-                request.spec_token_ids = []
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
@@ -835,50 +811,33 @@ class Scheduler(SchedulerInterface):
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
                 new_encoder_compute_budget = encoder_compute_budget
-                should_kv_transfer_spec_decode_padding = (
-                    self._is_kv_transfer_spec_decode_padding_candidate(
-                        request, num_computed_tokens
-                    )
-                )
-                if (
-                    not load_kv_async
-                    and should_kv_transfer_spec_decode_padding
-                    and num_computed_tokens >= request.num_prompt_tokens
-                ):
-                    num_computed_tokens = max(request.num_prompt_tokens - 1, 0)
-                    request.num_computed_tokens = num_computed_tokens
-                is_kv_transfer_spec_decode_padding = (
-                    not load_kv_async
-                    and self._maybe_kv_transfer_spec_decode_padding(
-                        request, num_computed_tokens
-                    )
-                )
 
+                is_prefill = num_computed_tokens < request.num_tokens - 1
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
-                elif defer_prefills and request.num_computed_tokens == 0:
-                    # DP prefill balancing: async KV loads (the branch above) are
-                    # allowed to start even on throttled steps, but committing new
-                    # prefill compute is deferred to a cadence-aligned step.
+                elif defer_prefills and is_prefill:
+                    # DP prefill balancing: defer committing new prefill compute to
+                    # a cadence-aligned step (exclude full kv cache hits).
                     break
                 else:
                     # Number of tokens to be scheduled.
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
-                    num_tokens_to_schedule = (
-                        request.num_tokens_with_spec
-                        if is_kv_transfer_spec_decode_padding
-                        else request.num_tokens
-                    )
-                    num_new_tokens = num_tokens_to_schedule - num_computed_tokens
+                    num_new_tokens = request.num_tokens - num_computed_tokens
+
+                    if scheduled_running_reqs and not prefill_scheduled:  # noqa: SIM102
+                        # Pad new decode requests to uniform spec decoding size to
+                        # preserve full cudagraph for this step.
+                        if self._pad_spec_decode(request, num_computed_tokens):
+                            num_new_tokens += len(request.spec_token_ids)
+                            if num_new_tokens > token_budget:
+                                break
+
                     threshold = self.scheduler_config.long_prefill_token_threshold
-                    if (
-                        not is_kv_transfer_spec_decode_padding
-                        and 0 < threshold < num_new_tokens
-                    ):
+                    if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
 
                     # chunked prefill has to be enabled explicitly to allow
@@ -891,11 +850,6 @@ class Scheduler(SchedulerInterface):
                         # we can stop the scheduling here.
                         break
 
-                    if (
-                        is_kv_transfer_spec_decode_padding
-                        and num_new_tokens > token_budget
-                    ):
-                        break
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
 
@@ -1022,8 +976,6 @@ class Scheduler(SchedulerInterface):
                     # _update_waiting_for_remote_kv will then cache
                     # only the successfully loaded tokens.
                     request.num_computed_tokens = num_computed_tokens
-                    if should_kv_transfer_spec_decode_padding:
-                        self._kv_transfer_spec_decode_padding_req_ids.add(request_id)
                     self._inflight_prefills.add(request)
                     continue
 
@@ -1048,20 +1000,10 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if is_kv_transfer_spec_decode_padding and request.spec_token_ids:
-                    num_scheduled_spec_tokens = max(
-                        0,
-                        num_new_tokens
-                        + num_computed_tokens
-                        - request.num_tokens
-                        - request.num_output_placeholders,
+                if request.spec_token_ids:
+                    self._schedule_spec_tokens(
+                        request, num_new_tokens, scheduled_spec_decode_tokens
                     )
-                    if num_scheduled_spec_tokens:
-                        scheduled_spec_decode_tokens[request_id] = (
-                            request.spec_token_ids[:num_scheduled_spec_tokens]
-                        )
-                    request.spec_token_ids = []
-                    self._kv_transfer_spec_decode_padding_req_ids.discard(request_id)
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
@@ -2154,7 +2096,6 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)
-        self._kv_transfer_spec_decode_padding_req_ids.discard(request.request_id)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
@@ -2464,7 +2405,6 @@ class Scheduler(SchedulerInterface):
         assert self.connector is not None
 
         if request.request_id in self.failed_recving_kv_req_ids:
-            self._kv_transfer_spec_decode_padding_req_ids.discard(request.request_id)
             # Request had KV load failures; num_computed_tokens was already
             # updated in _update_requests_with_invalid_blocks
             if request.num_computed_tokens:

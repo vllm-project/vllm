@@ -245,7 +245,7 @@ def _rejection_kernel(
                     pos = tl.load(pos_ptr + logit_idx)
                     u = tl_rand64(seed, pos, includes_zero=False)
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
-                    accepted &= u < rate
+                    accepted &= (u < rate) & (draft_sampled >= 0)
                 else:
                     accepted &= target_argmax == draft_sampled
                 tl.store(
@@ -253,8 +253,13 @@ def _rejection_kernel(
                     draft_sampled if accepted else target_argmax,
                 )
             else:
+                is_valid_draft = draft_sampled >= 0
                 target_logit = tl.load(
-                    target_logits_ptr + logit_idx * target_logits_stride + draft_sampled
+                    target_logits_ptr
+                    + logit_idx * target_logits_stride
+                    + draft_sampled,
+                    mask=is_valid_draft,
+                    other=0.0,
                 ).to(tl.float32)
                 target_lse = _compute_global_lse(
                     target_local_max_ptr,
@@ -273,7 +278,9 @@ def _rejection_kernel(
                         draft_logits_ptr
                         + req_state_idx * draft_logits_stride_0
                         + i * draft_logits_stride_1
-                        + draft_sampled
+                        + draft_sampled,
+                        mask=is_valid_draft,
+                        other=0.0,
                     ).to(tl.float32)
                     draft_lse = _compute_global_lse(
                         draft_local_max_ptr,
@@ -296,6 +303,7 @@ def _rejection_kernel(
                     # Probability ratio test: p(x) > u * q(x)
                     # Equivalent log form: log_p(x) > log(u) + log_q(x)
                     accepted &= target_log_prob > tl.log(u) + draft_log_prob
+                accepted &= is_valid_draft
                 tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
             rejected_step += accepted
     tl.store(rejected_steps_ptr + req_idx, rejected_step)
