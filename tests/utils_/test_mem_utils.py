@@ -83,7 +83,7 @@ def test_memory_snapshot_uses_psutil_on_integrated_gpu():
         patch("vllm.utils.mem_utils.psutil") as mock_psutil,
         patch("torch.accelerator") as mock_accelerator,
     ):
-        mock_accelerator.mem_get_info.return_value = (
+        mock_accelerator.get_memory_info.return_value = (
             mock_cuda_free,
             mock_cuda_total,
         )
@@ -115,7 +115,7 @@ def test_memory_snapshot_uses_cuda_on_discrete_gpu():
         patch("vllm.utils.mem_utils.psutil") as mock_psutil,
         patch("torch.accelerator") as mock_accelerator,
     ):
-        mock_accelerator.mem_get_info.return_value = (
+        mock_accelerator.get_memory_info.return_value = (
             mock_cuda_free,
             mock_cuda_total,
         )
