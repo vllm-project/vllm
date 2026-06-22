@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
+use vllm_engine_core_client::protocol::LogprobsCount;
 use vllm_text::Prompt;
 
 use crate::routes::openai::utils::types::{
@@ -131,8 +132,8 @@ pub struct CompletionRequest {
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,
 
-    /// Number of prompt logprobs to return
-    pub prompt_logprobs: Option<i32>,
+    /// Number of prompt logprobs to return. `-1` means return full vocab.
+    pub prompt_logprobs: Option<LogprobsCount>,
 
     // -------- Extra vLLM Parameters --------
     /// Whether to add special tokens (e.g. BOS) to the prompt

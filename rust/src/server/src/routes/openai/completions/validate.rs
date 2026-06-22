@@ -1,3 +1,4 @@
+use vllm_engine_core_client::protocol::LogprobsCount;
 use vllm_text::Prompt;
 
 use super::types::CompletionRequest;
@@ -44,27 +45,16 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(param = "suffix", "suffix is not supported.");
     }
 
-    if let Some(logprobs) = request.logprobs
-        && logprobs > i32::MAX as u32
-    {
-        bail_invalid_request!(
-            param = "logprobs",
-            "`logprobs` must fit within a signed 32-bit integer."
-        );
-    }
-
     if let Some(prompt_logprobs) = request.prompt_logprobs {
-        if request.stream && (prompt_logprobs > 0 || prompt_logprobs == -1) {
+        if request.stream
+            && matches!(
+                prompt_logprobs,
+                LogprobsCount::All | LogprobsCount::Top(1..)
+            )
+        {
             bail_invalid_request!(
                 param = "prompt_logprobs",
                 "`prompt_logprobs` are not available when `stream=true`."
-            );
-        }
-
-        if prompt_logprobs < 0 && prompt_logprobs != -1 {
-            bail_invalid_request!(
-                param = "prompt_logprobs",
-                "`prompt_logprobs` must be a non-negative value or -1."
             );
         }
     }
@@ -101,6 +91,7 @@ pub(super) fn validate_request_compat(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use vllm_engine_core_client::protocol::LogprobsCount;
 
     use super::validate_request_compat;
     use crate::routes::openai::completions::types::CompletionRequest;
@@ -150,7 +141,7 @@ mod tests {
     #[test]
     fn validate_request_compat_rejects_streaming_prompt_logprobs() {
         let request = CompletionRequest {
-            prompt_logprobs: Some(1),
+            prompt_logprobs: Some(LogprobsCount::Top(1)),
             ..base_request()
         };
         assert!(
@@ -162,7 +153,7 @@ mod tests {
     fn validate_request_compat_accepts_non_stream_prompt_logprobs() {
         let request = CompletionRequest {
             stream: false,
-            prompt_logprobs: Some(-1),
+            prompt_logprobs: Some(LogprobsCount::All),
             ..base_request()
         };
         assert!(

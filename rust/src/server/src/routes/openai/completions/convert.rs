@@ -1,3 +1,4 @@
+use vllm_engine_core_client::protocol::LogprobsCount;
 use vllm_text::{SamplingParams, TextDecodeOptions, TextRequest};
 
 use super::types::CompletionRequest;
@@ -61,15 +62,7 @@ pub(super) fn prepare_completion_request(
         .map(|request| request.lora_name.clone())
         .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
 
-    let logprobs = match request.logprobs {
-        Some(logprobs) => Some(i32::try_from(logprobs).map_err(|_| {
-            ApiError::invalid_request(
-                "`logprobs` must fit within a signed 32-bit integer.".to_string(),
-                Some("logprobs"),
-            )
-        })?),
-        None => None,
-    };
+    let logprobs = request.logprobs.map(LogprobsCount::Top);
     let prompt_only = request.echo && request.max_tokens == Some(0);
     let prompt_logprobs =
         request.prompt_logprobs.or(if request.echo && (!request.stream || prompt_only) {
@@ -163,6 +156,7 @@ pub(super) fn prepare_completion_request(
 mod tests {
     use axum::http::HeaderMap;
     use serde_json::json;
+    use vllm_engine_core_client::protocol::LogprobsCount;
     use vllm_text::Prompt;
 
     use super::prepare_completion_request;
@@ -247,7 +241,10 @@ mod tests {
             Prompt::TokenIds(vec![11, 22, 33])
         );
         assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(2));
+        assert_eq!(
+            prepared.text_request.sampling_params.logprobs,
+            Some(LogprobsCount::Top(2))
+        );
         assert_eq!(prepared.text_request.sampling_params.top_p, Some(0.9));
         assert_eq!(prepared.text_request.sampling_params.top_k, Some(42));
         assert_eq!(prepared.text_request.sampling_params.min_p, Some(0.1));
@@ -410,10 +407,13 @@ mod tests {
         .expect("prepare");
 
         assert!(prepared.options.prompt_only);
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(3));
+        assert_eq!(
+            prepared.text_request.sampling_params.logprobs,
+            Some(LogprobsCount::Top(3))
+        );
         assert_eq!(
             prepared.text_request.sampling_params.prompt_logprobs,
-            Some(3)
+            Some(LogprobsCount::Top(3))
         );
     }
 
@@ -435,10 +435,13 @@ mod tests {
         )
         .expect("prepare");
 
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(3));
+        assert_eq!(
+            prepared.text_request.sampling_params.logprobs,
+            Some(LogprobsCount::Top(3))
+        );
         assert_eq!(
             prepared.text_request.sampling_params.prompt_logprobs,
-            Some(3)
+            Some(LogprobsCount::Top(3))
         );
     }
 
@@ -479,10 +482,13 @@ mod tests {
             ResolvedRequestContext::default(),
         )
         .expect("prepare");
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(1));
+        assert_eq!(
+            prepared.text_request.sampling_params.logprobs,
+            Some(LogprobsCount::Top(1))
+        );
         assert_eq!(
             prepared.text_request.sampling_params.prompt_logprobs,
-            Some(2)
+            Some(LogprobsCount::Top(2))
         );
     }
 

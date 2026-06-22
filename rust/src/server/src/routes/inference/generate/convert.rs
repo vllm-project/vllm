@@ -87,6 +87,7 @@ pub(super) fn prepare_generate_request(
 #[cfg(test)]
 mod tests {
     use serde_json::json;
+    use vllm_engine_core_client::protocol::LogprobsCount;
     use vllm_text::Prompt;
 
     use super::prepare_generate_request;
@@ -132,10 +133,13 @@ mod tests {
             Prompt::TokenIds(vec![11, 22, 33])
         );
         assert_eq!(prepared.text_request.sampling_params.max_tokens, Some(7));
-        assert_eq!(prepared.text_request.sampling_params.logprobs, Some(2));
+        assert_eq!(
+            prepared.text_request.sampling_params.logprobs,
+            Some(LogprobsCount::Top(2))
+        );
         assert_eq!(
             prepared.text_request.sampling_params.prompt_logprobs,
-            Some(1)
+            Some(LogprobsCount::Top(1))
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
         assert_eq!(prepared.text_request.priority, -3);

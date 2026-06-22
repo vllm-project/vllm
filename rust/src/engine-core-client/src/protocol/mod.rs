@@ -56,6 +56,7 @@ mod classified_outputs;
 pub mod dtype;
 pub mod handshake;
 pub mod logprobs;
+mod logprobs_count;
 pub mod lora;
 pub mod multimodal;
 pub mod stats;
@@ -66,6 +67,7 @@ pub use classified_outputs::{
 };
 pub use dtype::ModelDtype;
 pub use logprobs::decode_engine_core_outputs;
+pub use logprobs_count::LogprobsCount;
 
 /// Request types are encoded as single-byte protocol constants so they can be
 /// sent over the ZMQ socket without an extra encoding step.
@@ -285,12 +287,12 @@ pub struct EngineCoreSamplingParams {
     pub thinking_token_budget: Option<u64>,
     /// Number of log probabilities to return per generated token.
     ///
-    /// `None` disables sample logprobs. `-1` requests the full vocabulary.
-    pub logprobs: Option<i32>,
+    /// `None` disables sample logprobs.
+    pub logprobs: Option<LogprobsCount>,
     /// Number of log probabilities to return per prompt token.
     ///
-    /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
-    pub prompt_logprobs: Option<i32>,
+    /// `None` disables prompt logprobs.
+    pub prompt_logprobs: Option<LogprobsCount>,
     /// Minimum probability threshold for token sampling.
     pub min_p: f32,
     /// Frequency penalty applied by the sampler.

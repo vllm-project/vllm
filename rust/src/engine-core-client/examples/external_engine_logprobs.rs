@@ -6,7 +6,7 @@ use futures::StreamExt as _;
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::protocol::{
-    EngineCoreFinishReason, EngineCoreRequest, EngineCoreSamplingParams,
+    EngineCoreFinishReason, EngineCoreRequest, EngineCoreSamplingParams, LogprobsCount,
 };
 use vllm_engine_core_client::{
     EngineCoreClient, EngineCoreClientConfig, EngineCoreStreamOutput, TransportMode,
@@ -33,10 +33,10 @@ struct Args {
     output_timeout_secs: u64,
     #[arg(long, default_value_t = 1)]
     max_tokens: u32,
-    #[arg(long, default_value_t = 2)]
-    logprobs: i32,
-    #[arg(long, default_value_t = 1)]
-    prompt_logprobs: i32,
+    #[arg(long, default_value_t = LogprobsCount::Top(2), allow_negative_numbers = true)]
+    logprobs: LogprobsCount,
+    #[arg(long, default_value_t = LogprobsCount::Top(1), allow_negative_numbers = true)]
+    prompt_logprobs: LogprobsCount,
     #[arg(long, default_value_t = 96)]
     prompt_repeats: usize,
 }
@@ -64,8 +64,8 @@ fn build_request(
     request_id: String,
     prompt_token_ids: Vec<u32>,
     max_tokens: u32,
-    logprobs: i32,
-    prompt_logprobs: i32,
+    logprobs: LogprobsCount,
+    prompt_logprobs: LogprobsCount,
     client_index: u32,
 ) -> EngineCoreRequest {
     EngineCoreRequest {

@@ -2,6 +2,7 @@ pub mod hf;
 
 use std::sync::Arc;
 
+use vllm_engine_core_client::protocol::LogprobsCount;
 use vllm_tokenizer::DynTokenizer;
 
 use crate::error::Result;
@@ -26,9 +27,7 @@ pub struct SamplingLimits {
     /// Runtime context window size reported by the engine startup handshake.
     pub max_model_len: u32,
     /// Maximum number of top log probabilities accepted by this frontend.
-    ///
-    /// `-1` means allowing requests up to the model vocabulary size.
-    pub max_logprobs: i32,
+    pub max_logprobs: LogprobsCount,
 
     /// Model vocabulary size from the model config, used to bound generated
     /// token IDs and logits-domain sampling controls.
@@ -41,7 +40,7 @@ pub struct SamplingLimits {
 impl SamplingLimits {
     /// Original Python definition:
     /// <https://github.com/vllm-project/vllm/blob/b5adb027ad03c29b46181752ba3b1cb84eff1dd4/vllm/config/model.py#L216-L220>
-    pub const DEFAULT_MAX_LOGPROBS: i32 = 20;
+    pub const DEFAULT_MAX_LOGPROBS: LogprobsCount = LogprobsCount::Top(20);
     /// Original Python definition:
     /// <https://github.com/vllm-project/vllm/blob/b5adb027ad03c29b46181752ba3b1cb84eff1dd4/vllm/sampling_params.py#L30-L32>
     pub const MAX_LOGPROB_TOKEN_IDS: usize = 128;

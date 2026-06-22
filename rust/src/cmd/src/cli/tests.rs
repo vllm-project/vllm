@@ -1,5 +1,6 @@
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::LogprobsCount;
 use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
 
 use super::{Cli, Command};
@@ -165,10 +166,10 @@ fn serve_args_forward_max_logprobs_to_frontend_and_managed_engine() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.runtime.max_logprobs, Some(-1));
+    assert_eq!(args.runtime.max_logprobs, Some(LogprobsCount::All));
 
     let frontend_config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
-    assert_eq!(frontend_config.max_logprobs, Some(-1));
+    assert_eq!(frontend_config.max_logprobs, Some(LogprobsCount::All));
 
     let engine_config = args.to_managed_engine_config(5555);
     assert_eq!(engine_config.python_args, vec!["--max-logprobs", "-1"]);
@@ -529,7 +530,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
     assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
     assert!(args.runtime.language_model_only);
     assert_eq!(args.runtime.max_model_len, Some(8192));
-    assert_eq!(args.runtime.max_logprobs, Some(-1));
+    assert_eq!(args.runtime.max_logprobs, Some(LogprobsCount::All));
     assert_eq!(args.runtime.shutdown_timeout, 3);
 }
 

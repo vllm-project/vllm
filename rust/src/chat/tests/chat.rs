@@ -16,7 +16,8 @@ use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
 use vllm_engine_core_client::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, StopReason,
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, LogprobsCount,
+    StopReason,
 };
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
@@ -1387,8 +1388,8 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
     .await;
 
     let mut request = sample_request("chat-logprobs");
-    request.sampling_params.logprobs = Some(1);
-    request.sampling_params.prompt_logprobs = Some(1);
+    request.sampling_params.logprobs = Some(LogprobsCount::Top(1));
+    request.sampling_params.prompt_logprobs = Some(LogprobsCount::Top(1));
 
     let mut stream = chat.chat(request.clone()).await.unwrap();
     match next_semantic(&mut stream).await.unwrap().unwrap() {

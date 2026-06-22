@@ -4,6 +4,7 @@ use vllm_chat::{
     ChatMessage as VllmChatMessage, ChatOptions, ChatRequest, ChatTool, ChatToolChoice,
     GenerationPromptMode, SamplingParams,
 };
+use vllm_engine_core_client::protocol::LogprobsCount;
 
 use super::types::ChatCompletionRequest;
 use super::validate;
@@ -94,7 +95,7 @@ pub(super) fn prepare_chat_request(
 
     // Auto-enable prompt logprobs for non-streaming echo, matching Python vLLM's
     // behavior.
-    let top_logprobs = request.top_logprobs.unwrap_or(0);
+    let top_logprobs = request.top_logprobs.unwrap_or(LogprobsCount::Top(0));
     let prompt_logprobs = request
         .prompt_logprobs
         .or((request.echo && !request.stream).then_some(top_logprobs));
@@ -378,6 +379,7 @@ mod tests {
         ChatTool as VllmChatTool, ChatToolChoice, GenerationPromptMode,
         SamplingParams as VllmSamplingParams,
     };
+    use vllm_engine_core_client::protocol::LogprobsCount;
     use vllm_text::output::TextDecodeOptions;
 
     use super::prepare_chat_request;
@@ -967,7 +969,7 @@ mod tests {
         let request = ChatCompletionRequest {
             stream: false,
             logprobs: true,
-            prompt_logprobs: Some(2),
+            prompt_logprobs: Some(LogprobsCount::Top(2)),
             ..base_request()
         };
 
@@ -980,10 +982,13 @@ mod tests {
 
         assert!(prepared.options.requested_logprobs);
         assert!(prepared.options.include_prompt_logprobs);
-        assert_eq!(prepared.chat_request.sampling_params.logprobs, Some(0));
+        assert_eq!(
+            prepared.chat_request.sampling_params.logprobs,
+            Some(LogprobsCount::Top(0))
+        );
         assert_eq!(
             prepared.chat_request.sampling_params.prompt_logprobs,
-            Some(2)
+            Some(LogprobsCount::Top(2))
         );
     }
 
@@ -991,7 +996,7 @@ mod tests {
     fn prepare_chat_request_keeps_prompt_logprobs_independent_from_echo() {
         let request = ChatCompletionRequest {
             logprobs: true,
-            top_logprobs: Some(3),
+            top_logprobs: Some(LogprobsCount::Top(3)),
             echo: true,
             ..base_request()
         };
@@ -1003,7 +1008,10 @@ mod tests {
         )
         .expect("request is valid");
 
-        assert_eq!(prepared.chat_request.sampling_params.logprobs, Some(3));
+        assert_eq!(
+            prepared.chat_request.sampling_params.logprobs,
+            Some(LogprobsCount::Top(3))
+        );
         assert_eq!(prepared.chat_request.sampling_params.prompt_logprobs, None);
         assert!(!prepared.options.include_prompt_logprobs);
     }

@@ -1,6 +1,7 @@
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::routes::openai::utils::types::{ChatMessage, Tool, ToolChoice, ToolChoiceValue};
+use vllm_engine_core_client::protocol::LogprobsCount;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -30,14 +31,12 @@ pub(super) fn validate_request_compat(
     }
 
     if let Some(prompt_logprobs) = request.prompt_logprobs {
-        if prompt_logprobs < 0 && prompt_logprobs != -1 {
-            bail_invalid_request!(
-                param = "prompt_logprobs",
-                "prompt_logprobs must be a non-negative value or -1."
-            );
-        }
-
-        if request.stream && (prompt_logprobs > 0 || prompt_logprobs == -1) {
+        if request.stream
+            && matches!(
+                prompt_logprobs,
+                LogprobsCount::All | LogprobsCount::Top(1..)
+            )
+        {
             bail_invalid_request!(
                 param = "prompt_logprobs",
                 "prompt_logprobs are not available when stream=true."
@@ -154,6 +153,7 @@ mod tests {
 
     use serde_json::json;
     use vllm_chat::ReasoningEffort;
+    use vllm_engine_core_client::protocol::LogprobsCount;
 
     use super::validate_request_compat;
     use crate::routes::openai::chat_completions::types::ChatCompletionRequest;
@@ -299,7 +299,7 @@ mod tests {
     #[test]
     fn validate_request_compat_rejects_top_logprobs_without_logprobs() {
         let request = ChatCompletionRequest {
-            top_logprobs: Some(0),
+            top_logprobs: Some(LogprobsCount::Top(0)),
             ..base_request()
         };
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
@@ -308,26 +308,26 @@ mod tests {
     #[test]
     fn validate_request_compat_rejects_streaming_prompt_logprobs_requests() {
         let request = ChatCompletionRequest {
-            prompt_logprobs: Some(1),
+            prompt_logprobs: Some(LogprobsCount::Top(1)),
             ..base_request()
         };
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
 
         let request = ChatCompletionRequest {
-            prompt_logprobs: Some(-1),
+            prompt_logprobs: Some(LogprobsCount::All),
             ..base_request()
         };
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
     #[test]
-    fn validate_request_compat_rejects_invalid_prompt_logprobs_value() {
-        let request = ChatCompletionRequest {
-            stream: false,
-            prompt_logprobs: Some(-2),
-            ..base_request()
-        };
-        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    fn chat_request_deserialization_rejects_invalid_prompt_logprobs_value() {
+        let result = serde_json::from_value::<ChatCompletionRequest>(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "messages": [{"role": "user", "content": "hello"}],
+            "prompt_logprobs": -2
+        }));
+        assert!(result.is_err());
     }
 
     #[test]

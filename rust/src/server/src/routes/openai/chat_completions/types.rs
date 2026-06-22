@@ -6,6 +6,7 @@ use serde_json::Value;
 use serde_with::SerializeDisplay;
 use validator::Validate;
 use vllm_chat::ReasoningEffort;
+use vllm_engine_core_client::protocol::LogprobsCount;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
@@ -44,10 +45,8 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub logprobs: bool,
 
-    /// An integer specifying the number of most likely tokens to return
-    /// -1 means return all
-    #[validate(range(min = -1))]
-    pub top_logprobs: Option<i32>,
+    /// Number of most likely tokens to return. `-1` means return full vocab.
+    pub top_logprobs: Option<LogprobsCount>,
 
     /// Deprecated: Replaced by max_completion_tokens
     #[deprecated(note = "Use max_completion_tokens instead")]
@@ -155,8 +154,8 @@ pub struct ChatCompletionRequest {
     /// Truncate prompt tokens to this length
     pub truncate_prompt_tokens: Option<i64>,
 
-    /// Number of prompt logprobs to return
-    pub prompt_logprobs: Option<i32>,
+    /// Number of prompt logprobs to return. `-1` means return full vocab.
+    pub prompt_logprobs: Option<LogprobsCount>,
 
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,

@@ -3,7 +3,7 @@
 
 use tonic::Status;
 use uuid::Uuid;
-use vllm_engine_core_client::protocol::{StopReason, StructuredOutputsParams};
+use vllm_engine_core_client::protocol::{LogprobsCount, StopReason, StructuredOutputsParams};
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, SamplingParams,
     TextDecodeOptions, TextRequest,
@@ -202,18 +202,22 @@ fn build_sampling_params(
 /// Map the proto `CandidateTokens` selector to a `(logprobs_count,
 /// logprob_token_ids)` pair.
 ///
-/// - `top_n(k)` → `(k, None)` — return top-k candidates by probability
-/// - `all` → `(-1, None)` — return the full vocabulary
+/// - `top_n(k)` → `(Top(k), None)` — return top-k candidates by probability
+/// - `all` → `(All, None)` — return the full vocabulary
 /// - `token_ids(n)` → `(1, Some(vec of n token ids))` — return logprobs for specific tokens (the
 ///   count `n` is stored in the proto as the number of token IDs that follow, but the actual IDs
 ///   are carried via `logprob_token_ids` on `SamplingParams`)
-/// - absent → `(1, None)` — just the sampled/scored token
-fn candidate_logprob_spec(candidates: Option<&pb::CandidateTokens>) -> (i32, Option<Vec<u32>>) {
+/// - absent → `(Top(1), None)` — just the sampled/scored token
+fn candidate_logprob_spec(
+    candidates: Option<&pb::CandidateTokens>,
+) -> (LogprobsCount, Option<Vec<u32>>) {
     match candidates.and_then(|c| c.select.as_ref()) {
-        Some(pb::candidate_tokens::Select::TopN(n)) => (*n as i32, None),
-        Some(pb::candidate_tokens::Select::All(true)) => (-1, None),
-        Some(pb::candidate_tokens::Select::TokenIds(ids)) => (1, Some(ids.ids.clone())),
-        _ => (1, None),
+        Some(pb::candidate_tokens::Select::TopN(n)) => (LogprobsCount::Top(*n), None),
+        Some(pb::candidate_tokens::Select::All(true)) => (LogprobsCount::All, None),
+        Some(pb::candidate_tokens::Select::TokenIds(ids)) => {
+            (LogprobsCount::Top(1), Some(ids.ids.clone()))
+        }
+        _ => (LogprobsCount::Top(1), None),
     }
 }
 

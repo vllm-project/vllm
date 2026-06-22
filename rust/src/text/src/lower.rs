@@ -269,6 +269,7 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     use serial_test::file_serial;
+    use vllm_engine_core_client::protocol::LogprobsCount;
 
     use super::*;
     use crate::backend::hf::HfTextBackend;
@@ -774,8 +775,8 @@ mod tests {
     #[test]
     fn lower_sampling_params_passes_logprobs_fields_through() {
         let sampling_params = SamplingParams {
-            logprobs: Some(3),
-            prompt_logprobs: Some(-1),
+            logprobs: Some(LogprobsCount::Top(3)),
+            prompt_logprobs: Some(LogprobsCount::All),
             ..Default::default()
         };
 
@@ -792,7 +793,7 @@ mod tests {
                 default_max_tokens: None,
             },
             SamplingLimits {
-                max_logprobs: -1,
+                max_logprobs: LogprobsCount::All,
                 ..sample_sampling_limits()
             },
             3,
@@ -800,15 +801,15 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(params.logprobs, Some(3));
-        assert_eq!(params.prompt_logprobs, Some(-1));
+        assert_eq!(params.logprobs, Some(LogprobsCount::Top(3)));
+        assert_eq!(params.prompt_logprobs, Some(LogprobsCount::All));
     }
 
     #[test]
     fn lower_sampling_params_rejects_full_vocab_logprobs_over_default_cap() {
         let error = lower_sampling_params_with_limits(
             SamplingParams {
-                logprobs: Some(-1),
+                logprobs: Some(LogprobsCount::All),
                 ..Default::default()
             },
             sample_sampling_limits(),
@@ -829,24 +830,24 @@ mod tests {
     fn lower_sampling_params_expands_full_vocab_logprobs_from_model_vocab() {
         let params = lower_sampling_params_with_limits(
             SamplingParams {
-                logprobs: Some(-1),
+                logprobs: Some(LogprobsCount::All),
                 ..Default::default()
             },
             SamplingLimits {
-                max_logprobs: 1500,
+                max_logprobs: LogprobsCount::Top(1500),
                 ..sample_sampling_limits()
             },
         )
         .unwrap();
 
-        assert_eq!(params.logprobs, Some(-1));
+        assert_eq!(params.logprobs, Some(LogprobsCount::All));
     }
 
     #[test]
     fn lower_sampling_params_rejects_invalid_logprob_token_ids() {
         let error = lower_sampling_params_with_limits(
             SamplingParams {
-                logprobs: Some(1),
+                logprobs: Some(LogprobsCount::Top(1)),
                 logprob_token_ids: Some(vec![1000]),
                 ..Default::default()
             },

@@ -19,6 +19,7 @@ pub use output::{
 pub use request::{Prompt, SamplingParams, TextRequest};
 use trait_set::trait_set;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::protocol::LogprobsCount;
 pub use vllm_llm::FinishReason;
 use vllm_llm::{GenerateOutputStream, Llm};
 use vllm_tokenizer::DynTokenizer;
@@ -48,7 +49,7 @@ pub struct TextLlm {
     /// Runtime context window size reported by the engine startup handshake.
     max_model_len: u32,
     /// Maximum number of top log probabilities accepted by this text facade.
-    max_logprobs: i32,
+    max_logprobs: LogprobsCount,
 }
 
 impl TextLlm {
@@ -68,7 +69,7 @@ impl TextLlm {
     }
 
     /// Override the maximum accepted logprobs count.
-    pub fn with_max_logprobs(mut self, max_logprobs: Option<i32>) -> Self {
+    pub fn with_max_logprobs(mut self, max_logprobs: Option<LogprobsCount>) -> Self {
         if let Some(max_logprobs) = max_logprobs {
             self.max_logprobs = max_logprobs;
         }

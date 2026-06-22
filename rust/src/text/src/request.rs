@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use vllm_engine_core_client::protocol::StructuredOutputsParams;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
+use vllm_engine_core_client::protocol::{LogprobsCount, StructuredOutputsParams};
 
 use crate::error::{Error, Result};
 use crate::output::TextDecodeOptions;
@@ -64,12 +64,12 @@ pub struct SamplingParams {
     pub thinking_token_budget: Option<i64>,
     /// Number of log probabilities to return per generated token.
     ///
-    /// `None` disables sample logprobs. `-1` requests the full vocabulary.
-    pub logprobs: Option<i32>,
+    /// `None` disables sample logprobs.
+    pub logprobs: Option<LogprobsCount>,
     /// Number of log probabilities to return per prompt token.
     ///
-    /// `None` disables prompt logprobs. `-1` requests the full vocabulary.
-    pub prompt_logprobs: Option<i32>,
+    /// `None` disables prompt logprobs.
+    pub prompt_logprobs: Option<LogprobsCount>,
     /// Minimum probability threshold for token sampling. `None` means no
     /// explicit user override.
     pub min_p: Option<f32>,

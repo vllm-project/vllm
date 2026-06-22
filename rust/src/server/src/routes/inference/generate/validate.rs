@@ -34,16 +34,6 @@ pub(super) fn validate_request_compat(
         );
     }
 
-    if let Some(prompt_logprobs) = request.sampling_params.prompt_logprobs
-        && prompt_logprobs < 0
-        && prompt_logprobs != -1
-    {
-        bail_invalid_request!(
-            param = "sampling_params",
-            "`prompt_logprobs` must be a non-negative value or -1."
-        );
-    }
-
     Ok(())
 }
 

@@ -20,6 +20,7 @@ use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::LogprobsCount;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_server::{
@@ -136,9 +137,9 @@ pub struct SharedRuntimeArgs {
     pub max_model_len: Option<u32>,
     /// Maximum number of log probabilities to return when `logprobs` is
     /// specified in sampling parameters. `-1` means no cap.
-    #[arg(long, value_parser = clap::value_parser!(i32).range(-1..), allow_negative_numbers = true)]
+    #[arg(long, allow_negative_numbers = true)]
     #[serde(default)]
-    pub max_logprobs: Option<i32>,
+    pub max_logprobs: Option<LogprobsCount>,
     /// TCP port for the gRPC Generate service. When not set, no gRPC server is
     /// started.
     #[arg(long)]
@@ -529,7 +530,7 @@ impl ServeArgs {
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
             self.runtime.max_model_len,
-            self.runtime.max_logprobs,
+            self.runtime.max_logprobs.map(managed_max_logprobs_to_i32),
             self.runtime.language_model_only,
             self.runtime.disable_log_stats,
             self.runtime.shutdown_timeout,
@@ -553,6 +554,10 @@ fn frontend_ipc_addresses() -> (String, String) {
         format!("ipc://{}", input.to_string_lossy()),
         format!("ipc://{}", output.to_string_lossy()),
     )
+}
+
+fn managed_max_logprobs_to_i32(count: LogprobsCount) -> i32 {
+    i32::try_from(count).expect("max_logprobs is parsed through i32")
 }
 
 #[cfg(test)]
