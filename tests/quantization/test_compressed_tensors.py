@@ -372,12 +372,12 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
 
 @contextmanager
 def _nvfp4_marlin_error_context(model, capfd):
-    if (
-        model != "nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16"
-        or not current_platform.is_rocm()
-    ):
-        yield
-    else:
+    is_rocm_and_unsupported = (
+        model == "nm-testing/TinyLlama-1.1B-Chat-v1.0-NVFP4A16"
+        and current_platform.is_rocm()
+    )
+
+    if is_rocm_and_unsupported:
         expected_error = (
             "ValueError: Forced NVFP4 kernel MarlinNvFp4LinearKernel is not "
             "supported: Marlin FP4 not available"
@@ -387,6 +387,8 @@ def _nvfp4_marlin_error_context(model, capfd):
 
         captured = capfd.readouterr()
         assert expected_error in captured.out + captured.err
+    else:
+        yield
 
 
 @pytest.mark.parametrize(
