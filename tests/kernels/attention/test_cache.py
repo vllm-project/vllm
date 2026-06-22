@@ -428,6 +428,43 @@ def test_reshape_and_cache_flash(
         torch.testing.assert_close(value_cache_compact, cloned_value_cache)
 
 
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@pytest.mark.parametrize("kv_cache_layout", CACHE_LAYOUTS)
+@pytest.mark.parametrize("implementation", RESHAPE_FLASH_IMPLEMENTATIONS)
+@torch.inference_mode()
+def test_reshape_and_cache_flash_unaligned_rows(
+    kv_cache_factory_flashinfer,
+    dtype: torch.dtype,
+    kv_cache_dtype: str,
+    kv_cache_layout: str,
+    implementation: str,
+) -> None:
+    """Regression test for https://github.com/vllm-project/vllm/issues/41257.
+
+    head_size=46 with num_heads=13 places KV-cache rows at byte offsets
+    that are not a multiple of the vector width (NHD row pitch
+    13*46*itemsize, HND head pitch 46*itemsize), unlike HEAD_SIZES above
+    which are all 16-byte multiples. The CUDA kernel used to issue
+    vectorized stores to those rows -> CUDA misaligned address.
+    """
+    test_reshape_and_cache_flash(
+        kv_cache_factory_flashinfer,
+        num_tokens=42,
+        num_heads=13,
+        head_size=46,
+        block_size=16,
+        num_blocks=128,
+        dtype=dtype,
+        seed=0,
+        device=CUDA_DEVICES[0],
+        kv_cache_dtype=kv_cache_dtype,
+        kv_cache_layout=kv_cache_layout,
+        kv_scale_type="tensor",
+        implementation=implementation,
+    )
+
+
 @pytest.mark.parametrize("direction", COPYING_DIRECTION)
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)

@@ -80,7 +80,7 @@ class Gemma4UnifiedVisionEmbedder(nn.Module):
     Pipeline: raw patches → LN₁ → Dense → LN₂ → +factorized_posemb → LN₃.
     """
 
-    def __init__(self, config, quant_config=None):
+    def __init__(self, config, quant_config=None, prefix=""):
         super().__init__()
         patch_dim = config.model_patch_size**2 * 3
         mm_embed_dim = config.mm_embed_dim
@@ -91,6 +91,7 @@ class Gemma4UnifiedVisionEmbedder(nn.Module):
             mm_embed_dim,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.patch_dense",
             gather_output=True,
         )
         self.patch_ln2 = nn.LayerNorm(mm_embed_dim)
@@ -267,6 +268,7 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
             Gemma4UnifiedVisionEmbedder(
                 config.vision_config,
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_embedder"),
             )
             if config.vision_config is not None
             else None
@@ -307,12 +309,13 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
                 None,
             )
             if ple_dim is not None and ple_dim > 0:
+                embed = self.language_model.model.embed_tokens
                 self.per_layer_embeddings = torch.zeros(
                     vllm_config.scheduler_config.max_num_batched_tokens,
                     config.text_config.num_hidden_layers,
                     ple_dim,
-                    device=self.language_model.model.embed_tokens.weight.device,
-                    dtype=self.language_model.model.embed_tokens.weight.dtype,
+                    device=next(embed.parameters()).device,
+                    dtype=vllm_config.model_config.dtype,
                 )
             else:
                 self.per_layer_embeddings = None
