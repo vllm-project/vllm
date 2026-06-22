@@ -3,8 +3,10 @@
 """Tests for GPUModelRunner._gather_mm_embeddings (model runner V1).
 
 Mirrors tests/v1/worker/test_encoder_runner.py (the V2 runner): the EAGLE/MTP
-drafter reads one position ahead of the target (shift_computed_tokens=1), which
-must not select a not-yet-encoded next-chunk feature, nor crash on a cache miss.
+drafter reads one position ahead of the target (shift_computed_tokens=1). The
++1 look-ahead feature past the processed boundary is used when its encoder
+output is present and tolerated (token-embedding fallback) when it is not,
+while a miss within the processed range still fails loudly.
 
 `_gather_mm_embeddings` only uses CPU-side state, so it is exercised against a
 lightweight stub for `self` instead of a full (CUDA-only) runner.
@@ -56,26 +58,38 @@ def _gather(features, cached, *, num_scheduled, shift, num_computed=0):
     )
 
 
-def test_draft_shift_excludes_unprocessed_next_chunk_feature():
-    """The +1 drafter skew must not pull in the feature at offset ==
-    processed_end. Both features are cached so the assertion isolates feature
-    *selection* from the miss fallback."""
+def test_draft_shift_uses_boundary_feature_when_cached():
+    """The drafter's +1 look-ahead reaches the feature at offset ==
+    processed_end; when it is already cached it is used for the look-ahead
+    position rather than ignored."""
     f0 = _feature("h0", offset=0, length=8)
     f1 = _feature("h1", offset=8, length=8)  # starts exactly at processed_end
     mm_embeds, is_mm_embed = _gather([f0, f1], [f0, f1], num_scheduled=8, shift=1)
 
-    assert len(mm_embeds) == 1  # only f0; f1 excluded
-    assert not bool(is_mm_embed[7])  # f1's first token position stays unset
-    assert int(is_mm_embed.sum()) == 7  # f0 positions 0..6 (+1 skew)
+    # f0 covers positions 0..6 (+1 skew); f1's first embed covers position 7.
+    assert len(mm_embeds) == 2
+    assert bool(is_mm_embed[7])
+    assert int(is_mm_embed.sum()) == 8
 
 
-def test_draft_shift_tolerates_encoder_cache_miss():
-    """An evicted entry on the drafter path falls back to token embeddings."""
+def test_draft_shift_tolerates_missing_boundary_feature():
+    """When the +1 look-ahead feature past the processed boundary is not yet
+    encoded, fall back to the token embedding instead of raising."""
     f0 = _feature("h0", offset=0, length=8)
-    mm_embeds, is_mm_embed = _gather([f0], [], num_scheduled=8, shift=1)
+    f1 = _feature("h1", offset=8, length=8)  # boundary feature, not cached
+    mm_embeds, is_mm_embed = _gather([f0, f1], [f0], num_scheduled=8, shift=1)
 
-    assert mm_embeds == []
-    assert int(is_mm_embed.sum()) == 0
+    assert len(mm_embeds) == 1  # only f0; f1's boundary position falls back
+    assert not bool(is_mm_embed[7])
+    assert int(is_mm_embed.sum()) == 7
+
+
+def test_draft_shift_raises_on_interior_miss():
+    """A miss for a feature within the processed range (not the look-ahead
+    boundary) is a real invariant violation, even on the drafter path."""
+    f0 = _feature("h0", offset=0, length=8)  # interior, within processed range
+    with pytest.raises(RuntimeError, match="Encoder cache miss"):
+        _gather([f0], [], num_scheduled=8, shift=1)
 
 
 def test_target_path_raises_on_encoder_cache_miss():

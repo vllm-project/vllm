@@ -3,8 +3,10 @@
 """Tests for EncoderRunner.gather_mm_embeddings (model runner V2).
 
 Covers the speculative-drafter encoder-cache handling: the drafter reads one
-position ahead of the target model (``draft_lookahead``), which must not
-(1) select a not-yet-encoded next-chunk feature, nor (2) crash on a cache miss.
+position ahead of the target model (``draft_lookahead``). The +1 look-ahead
+feature past the processed boundary is used when its encoder output is present
+and tolerated (token-embedding fallback) when it is not, while a miss within
+the processed range still fails loudly.
 """
 
 import numpy as np
@@ -63,35 +65,48 @@ def _gather(runner: EncoderRunner, *, num_scheduled: int, draft_lookahead: int):
     )
 
 
-def test_draft_lookahead_excludes_unprocessed_next_chunk_feature():
-    """The +1 drafter skew must not pull in the feature at offset ==
-    processed_end (the next chunk, not yet encoded). Both features are cached
-    here so the assertion isolates feature *selection* from the miss fallback:
-    if the window clamp regressed, feature1 would be gathered and its position
-    in is_mm_embed marked."""
+def test_draft_lookahead_uses_boundary_feature_when_cached():
+    """The drafter's +1 look-ahead can reach the feature at offset ==
+    processed_end (the next chunk). When its encoder output is already cached
+    (the scheduler encoded it ahead), it is used for the look-ahead position
+    rather than ignored."""
     f0 = _feature("h0", offset=0, length=8)
     f1 = _feature("h1", offset=8, length=8)  # starts exactly at processed_end
     runner = _make_runner([f0, f1], cached=[f0, f1])
 
     mm_embeds, is_mm_embed = _gather(runner, num_scheduled=8, draft_lookahead=1)
 
-    # Only the in-window feature (f0) is gathered; f1 is excluded entirely.
-    assert len(mm_embeds) == 1
-    # f1's first token would map to batch position 7; it must stay unset.
-    assert not bool(is_mm_embed[7])
-    assert int(is_mm_embed.sum()) == 7  # f0 contributes positions 0..6 (+1 skew)
+    # f0 covers positions 0..6 (+1 skew); f1's first embed covers position 7.
+    assert len(mm_embeds) == 2
+    assert bool(is_mm_embed[7])
+    assert int(is_mm_embed.sum()) == 8
 
 
-def test_draft_lookahead_tolerates_encoder_cache_miss():
-    """An evicted entry on the drafter path falls back to token embeddings
-    (draft tokens are verified by the target), instead of raising."""
+def test_draft_lookahead_tolerates_missing_boundary_feature():
+    """When the +1 look-ahead feature past the processed boundary is not yet
+    encoded, fall back to the token embedding (the draft token is verified by
+    the target) instead of raising."""
     f0 = _feature("h0", offset=0, length=8)
-    runner = _make_runner([f0], cached=[])  # encoder output missing
+    f1 = _feature("h1", offset=8, length=8)  # boundary feature, not cached
+    runner = _make_runner([f0, f1], cached=[f0])
 
     mm_embeds, is_mm_embed = _gather(runner, num_scheduled=8, draft_lookahead=1)
 
-    assert mm_embeds == []
-    assert int(is_mm_embed.sum()) == 0
+    # Only f0 is gathered; f1's boundary position falls back silently.
+    assert len(mm_embeds) == 1
+    assert not bool(is_mm_embed[7])
+    assert int(is_mm_embed.sum()) == 7
+
+
+def test_draft_lookahead_raises_on_interior_miss():
+    """A miss for a feature within the processed range (not the look-ahead
+    boundary) is a real invariant violation and must fail loudly, even on the
+    drafter path."""
+    f0 = _feature("h0", offset=0, length=8)  # interior, within processed range
+    runner = _make_runner([f0], cached=[])
+
+    with pytest.raises(RuntimeError, match="Encoder cache miss"):
+        _gather(runner, num_scheduled=8, draft_lookahead=1)
 
 
 def test_target_path_raises_on_encoder_cache_miss():
