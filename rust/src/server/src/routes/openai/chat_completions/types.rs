@@ -165,8 +165,10 @@ pub struct ChatCompletionRequest {
     pub bad_words: Option<Vec<String>>,
 
     // -------- Extra vLLM Parameters --------
-    /// Token budget for reasoning/thinking
-    pub thinking_token_budget: Option<u32>,
+    /// Token budget for reasoning/thinking. Accepts a non-negative integer, or
+    /// `-1` for unlimited (mirroring the Python frontend, which normalizes `-1`
+    /// to "no budget").
+    pub thinking_token_budget: Option<i64>,
 
     /// Whether to include reasoning content in the response
     #[serde(default = "default_true")]
