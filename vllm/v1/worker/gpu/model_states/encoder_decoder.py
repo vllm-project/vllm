@@ -23,7 +23,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 
 @dataclass
-class WhisperAttnMetadata(ModelSpecificAttnMetadata):
+class EncoderDecoderAttnMetadata(ModelSpecificAttnMetadata):
     encoder_seq_lens: dict[int, tuple[torch.Tensor, np.ndarray]]
 
     def get_extra_common_attn_kwargs(
@@ -41,7 +41,11 @@ class WhisperAttnMetadata(ModelSpecificAttnMetadata):
         }
 
 
-class WhisperModelState(ModelState):
+class EncoderDecoderModelState(ModelState):
+    """ModelState for cross-attention encoder-decoder models
+    (Whisper, CohereASR, NemotronParse, FireRedLID, ...)
+    """
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -80,9 +84,6 @@ class WhisperModelState(ModelState):
 
         self.encoder_outputs: list[torch.Tensor] = []
 
-    def get_supported_generation_tasks(self):
-        return ("transcription",)
-
     def get_mm_embeddings(
         self, scheduled_encoder_inputs: dict[str, list[int]], input_batch: InputBatch
     ) -> None:
@@ -94,11 +95,11 @@ class WhisperModelState(ModelState):
                 encoder_inputs[req_id] = req_encoder_inputs
         _, mm_kwargs = self.encoder_runner.prepare_mm_inputs(encoder_inputs)
         if mm_kwargs:
-            # Whisper consumes encoder outputs through `encoder_outputs`, not
-            # `inputs_embeds`. Single modality (audio) so execute_mm_encoder
-            # preserves request order; use its return value directly.
-            # No need to store in encoder_cache: cross-attention K/V are written
-            # to the KV cache on the first step; decode steps use the cache.
+            # Encoder-decoder models consume encoder outputs through the
+            # `encoder_outputs` forward kwarg, not `inputs_embeds`. Single modality
+            # so execute_mm_encoder preserves request order; use its return value
+            # directly. No need to store in encoder_cache: cross-attention K/V are
+            # written to the KV cache on the first step; decode steps use the cache.
             self.encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
         else:
             # Decode steps: encoder K/V are in cross-attention KV cache.
@@ -131,7 +132,7 @@ class WhisperModelState(ModelState):
         else:
             num_reqs = input_batch.num_reqs
             num_tokens = input_batch.num_tokens
-        whisper_attn_metadata = WhisperAttnMetadata(
+        enc_dec_attn_metadata = EncoderDecoderAttnMetadata(
             self._get_encoder_seq_lens(
                 input_batch.req_ids, attn_groups, for_capture, num_reqs
             )
@@ -158,7 +159,7 @@ class WhisperModelState(ModelState):
             kv_cache_config=kv_cache_config,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
-            model_specific_attn_metadata=whisper_attn_metadata,
+            model_specific_attn_metadata=enc_dec_attn_metadata,
             for_cudagraph_capture=for_capture,
         )
         return attn_metadata
@@ -170,7 +171,8 @@ class WhisperModelState(ModelState):
         for_capture: bool,
         num_reqs: int,
     ) -> dict[int, tuple[torch.Tensor, np.ndarray]]:
-        encoder_seq_lens_np = np.zeros(num_reqs, dtype=np.int32)
+        encoder_seq_lens = torch.zeros(num_reqs, dtype=torch.int32, pin_memory=True)
+        encoder_seq_lens_np = encoder_seq_lens.numpy()
         if not for_capture:
             # During normal execution, use actual encoder lengths.
             for i, req_id in enumerate(req_ids):
@@ -183,9 +185,7 @@ class WhisperModelState(ModelState):
             # is captured with the correct value for cross-attention.
             encoder_seq_lens_np[:] = self.max_encoder_len
 
-        self.encoder_seq_lens_gpu[:num_reqs].copy_(
-            torch.from_numpy(encoder_seq_lens_np), non_blocking=True
-        )
+        self.encoder_seq_lens_gpu[:num_reqs].copy_(encoder_seq_lens, non_blocking=True)
         self.encoder_seq_lens_gpu[num_reqs:].fill_(0)
         encoder_seq_lens_gpu = self.encoder_seq_lens_gpu[:num_reqs]
 
