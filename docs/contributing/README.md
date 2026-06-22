@@ -306,15 +306,7 @@ review process:
 
 ### Escalating Stalled Contributions
 
-If you have an important contribution that has not yet received maintainer attention, please email us at:
-
-<pr-review-request@vllm.ai>
-
-Using a verifiable company or university email, include:
-
-- your production or research use case
-- the problem you encountered
-- how your contribution addresses it
+If you have an important contribution that has not yet received maintainer attention, please fill out the [PR Review Request Form](https://docs.google.com/forms/d/e/1FAIpQLScWsYlvWr5hq6g4fbewG_Yzgv8PhpTEs48WscvUSXpGqDqoXg/viewform?usp=dialog).
 
 ## Thank You
 
