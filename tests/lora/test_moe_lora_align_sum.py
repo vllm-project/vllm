@@ -175,9 +175,7 @@ def _build_and_run_align(
         SENTINEL_EXPERT,
         dtype=torch.int32,
     )
-    num_tokens_post_pad = torch.full(
-        (max_loras,), SENTINEL_NPAD, dtype=torch.int32
-    )
+    num_tokens_post_pad = torch.full((max_loras,), SENTINEL_NPAD, dtype=torch.int32)
 
     ops.moe_lora_align_block_size(
         topk_ids,
