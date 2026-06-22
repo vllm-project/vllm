@@ -64,8 +64,8 @@ class QuantConfig:
     quant_max: float
     quant_min: float
     kv_quant_mode: KVQuantMode
-    # INT8 Triton stores truncate; FP8 hardware casts round.
-    uses_trunc: bool
+    # INT8 rounds explicitly; FP8 relies on dtype cast rounding.
+    rounds_before_store: bool
 
 
 INT8_CONFIG = QuantConfig(
@@ -74,7 +74,7 @@ INT8_CONFIG = QuantConfig(
     quant_max=127.0,
     quant_min=-128.0,
     kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
-    uses_trunc=True,
+    rounds_before_store=True,
 )
 FP8_CONFIG = QuantConfig(
     cache_dtype=FP8_DTYPE,
@@ -82,7 +82,7 @@ FP8_CONFIG = QuantConfig(
     quant_max=FP8_MAX,
     quant_min=FP8_MIN,
     kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD,
-    uses_trunc=False,
+    rounds_before_store=False,
 )
 INT4_CONFIG = QuantConfig(
     cache_dtype=torch.uint8,
@@ -90,7 +90,8 @@ INT4_CONFIG = QuantConfig(
     quant_max=7.0,
     quant_min=-8.0,
     kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
-    uses_trunc=False,  # INT4 uses round-to-nearest via rint
+    # Unused for int4 (handled by its own rint path); kept for the dataclass.
+    rounds_before_store=False,
 )
 QUANT_CONFIGS = [INT4_CONFIG, INT8_CONFIG, FP8_CONFIG]
 
@@ -117,7 +118,7 @@ def _quantize_per_token_head_ref(
     absmax = data.float().abs().amax(dim=2)  # [num_tokens, num_heads]
     scales = (absmax / cfg.quant_max).clamp(min=1e-6)
     scaled = data.float() * (1.0 / scales[:, :, None])
-    if cfg.uses_trunc:
+    if cfg.rounds_before_store:
         q = scaled.round().clamp(cfg.quant_min, cfg.quant_max).to(cfg.cache_dtype)
     else:
         q = scaled.clamp(cfg.quant_min, cfg.quant_max).to(cfg.cache_dtype)
@@ -330,7 +331,7 @@ def test_per_token_head_round_trip_accuracy(
 ):
     """Verify per-token-head round-trip: kernel dequant matches reference.
 
-    INT8: Triton truncates on float->int8 store.
+    INT8: round-to-nearest before int8 store.
     FP8: hardware cast (clamp then cast).
     """
     from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -429,6 +430,52 @@ def test_per_token_head_round_trip_accuracy(
                     atol=rt_atol,
                     rtol=rt_atol,
                 )
+
+
+@torch.inference_mode()
+def test_int8_per_token_head_raw_cache_matches_round_reference():
+    """INT8 cache writes should match round-to-nearest quantization exactly."""
+    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+        triton_reshape_and_cache_flash_per_token_head_quant,
+    )
+
+    torch.set_default_device(DEVICE_TYPE)
+
+    head_size = 8
+    block_size = 4
+
+    key = torch.tensor(
+        [[[-127.0, -2.6, -2.4, -1.6, -1.4, -0.6, -0.4, 127.0]]],
+        dtype=torch.bfloat16,
+    )
+    value = -key
+
+    key_cache = torch.zeros(1, block_size, 1, head_size, dtype=torch.int8)
+    value_cache = torch.zeros_like(key_cache)
+    k_scale_cache = torch.ones(1, block_size, 1, dtype=torch.float32)
+    v_scale_cache = torch.ones_like(k_scale_cache)
+    slot_mapping = torch.tensor([2], dtype=torch.long)
+
+    triton_reshape_and_cache_flash_per_token_head_quant(
+        key,
+        value,
+        key_cache,
+        value_cache,
+        k_scale_cache,
+        v_scale_cache,
+        slot_mapping,
+    )
+
+    ref_k_quant, ref_k_scales = _quantize_per_token_head_ref(key, INT8_CONFIG)
+    ref_v_quant, ref_v_scales = _quantize_per_token_head_ref(value, INT8_CONFIG)
+
+    slot = slot_mapping.item()
+    blk = slot // block_size
+    off = slot % block_size
+    assert torch.equal(key_cache[blk, off], ref_k_quant[0])
+    assert torch.equal(value_cache[blk, off], ref_v_quant[0])
+    torch.testing.assert_close(k_scale_cache[blk, off], ref_k_scales[0])
+    torch.testing.assert_close(v_scale_cache[blk, off], ref_v_scales[0])
 
 
 # ===========================================================================
@@ -666,7 +713,7 @@ def test_triton_unified_attention_per_token_head_scale(
         key_cache_deq = key_cache_q_full * k_scale_cache[:, :, :, None]
         value_cache_deq = value_cache_q_full * v_scale_cache[:, :, :, None]
 
-    if not is_int4 and qcfg.uses_trunc:
+    if not is_int4 and qcfg.rounds_before_store:
         key_cache_q = key_cache_q_full.to(qcfg.cache_dtype)
         value_cache_q = value_cache_q_full.to(qcfg.cache_dtype)
     elif not is_int4:

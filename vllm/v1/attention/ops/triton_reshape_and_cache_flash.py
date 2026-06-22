@@ -215,6 +215,7 @@ def _reshape_cache_per_token_head(
 
     k_q = k_h * (1.0 / k_scale)
     if IS_INT_QUANT:
+        # Round half away from zero before the int8 store truncates.
         k_q = tl.where(k_q >= 0, k_q + 0.5, k_q - 0.5)
     k_q = tl.clamp(k_q, QUANT_MIN, QUANT_MAX)
     tl.store(
@@ -246,6 +247,7 @@ def _reshape_cache_per_token_head(
 
     v_q = v_h * (1.0 / v_scale)
     if IS_INT_QUANT:
+        # Round half away from zero before the int8 store truncates.
         v_q = tl.where(v_q >= 0, v_q + 0.5, v_q - 0.5)
     v_q = tl.clamp(v_q, QUANT_MIN, QUANT_MAX)
     tl.store(
