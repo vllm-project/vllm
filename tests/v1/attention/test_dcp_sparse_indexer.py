@@ -96,10 +96,42 @@ def test_exact_merge_tie_determinism(world):
 
 def test_exact_merge_tie_break_prefers_lowest_position():
     """Among equal scores the int64 key biases toward the lowest global
-    position (~global_pos in the low bits), giving a well-defined tie-break."""
+    position (~global_pos in the low bits), giving a well-defined tie-break.
+    L == world*topk so each shard's local_len == topk and EVERY shard position
+    becomes a candidate -- the assertion then depends only on the shipped key,
+    not on torch.topk's incidental tie order in the simulated local top-k."""
     world, topk = 2, 4
-    T, L = 1, 16
+    T, L = 1, world * topk
     full_logits = torch.zeros(T, L)  # all tied
     got = _run_merge(full_logits, world, topk)
     # All scores equal -> the topk lowest global positions win.
     assert got[0] == set(range(topk))
+
+
+def test_pack_candidates_offsets_score_by_row_start():
+    """Prefill packs each request's keys at absolute columns
+    [cu_seqlen_ks, cu_seqlen_ke); top_k_per_row_prefill returns row-relative
+    indices, so the score lookup must offset by row_start. Without the offset a
+    row with cu_seqlen_ks > 0 reads the wrong column (the prefill score-column
+    bug): this test fails if _dcp_pack_local_candidates drops the row_start."""
+    world, topk = 2, 3
+    total_kv = 9
+    logits = torch.full((2, total_kv), -100.0)
+    logits[0, 0:4] = torch.tensor([1.0, 5.0, 2.0, 4.0])  # row 0 window [0, 4)
+    logits[1, 4:9] = torch.tensor([9.0, 3.0, 8.0, 1.0, 7.0])  # row 1 window [4, 9)
+    row_start = torch.tensor([0, 4], dtype=torch.int32)
+    local_valid = torch.tensor([4, 5], dtype=torch.int32)
+    # Row-relative top-3 indices, as top_k_per_row_prefill emits them.
+    topk_idx = torch.tensor([[1, 3, 2], [0, 2, 4]], dtype=torch.int32)
+    cand = _dcp_pack_local_candidates(
+        topk_idx, logits, local_valid, cp_rank=0, dcp_world_size=world,
+        row_start=row_start,
+    )
+    scores = cand[..., 1]
+    # Row 0 (ks=0): logits[0, {1,3,2}] = {5,4,2}.
+    assert torch.allclose(scores[0], torch.tensor([5.0, 4.0, 2.0]))
+    # Row 1 (ks=4): logits[1, 4+{0,2,4}] = {9,8,7}, NOT logits[1, {0,2,4}]=-100.
+    assert torch.allclose(scores[1], torch.tensor([9.0, 8.0, 7.0]))
+    # global_pos stays row-relative: g = cp_rank + rel_idx*world.
+    gpos = cand[..., 0]
+    assert torch.equal(gpos[1], torch.tensor([0.0, 4.0, 8.0]))  # 0+{0,2,4}*2
