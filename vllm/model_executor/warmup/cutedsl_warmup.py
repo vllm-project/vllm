@@ -8,17 +8,12 @@ import time
 import weakref
 from collections.abc import Callable, Hashable, Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-    from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
 
@@ -68,11 +63,6 @@ def _collect_unique_compile_units(
 
     for unit in compile_units:
         if unit.key in seen:
-            logger.debug(
-                "Skipping duplicate CuTeDSL compile unit name=%s key=%r.",
-                unit.name,
-                unit.key,
-            )
             continue
 
         seen.add(unit.key)
@@ -96,15 +86,10 @@ def _compile_cutedsl_warmup_units(
 
 # Run all CuTeDSL warmup before serving.
 @instrument(span_name="CuTeDSL warmup")
-def cutedsl_warmup(worker: Worker) -> None:
+def cutedsl_warmup() -> None:
     """Run CuTeDSL compile providers before serving."""
     if not current_platform.is_cuda():
         logger.info("Skipping CuTeDSL warmup on non-CUDA platform.")
-        return
-
-    runner: GPUModelRunner = worker.model_runner
-    if runner.is_pooling_model:
-        logger.info("Skipping CuTeDSL warmup for pooling model.")
         return
 
     compile_units = _collect_unique_compile_units(_iter_cutedsl_warmup_compile_units())

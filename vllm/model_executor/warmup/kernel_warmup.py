@@ -107,7 +107,7 @@ def kernel_warmup(worker: "Worker"):
         )
 
     if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
-        cutedsl_warmup(worker)
+        cutedsl_warmup()
 
 
 # TODO: remove once FlashInfer upstream fixes the persistent file cache
