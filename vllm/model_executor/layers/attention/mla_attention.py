@@ -349,6 +349,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         attn_backend: type[AttentionBackend] | None = None,
         use_sparse: bool = False,
         indexer: object | None = None,
+        topk_indices_buffer: torch.Tensor | None = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -436,6 +437,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "with batch invariance, as it is not yet supported.",
             )
             cache_config.enable_prefix_caching = False
+
+        # Sparse MLA reads top-k indices from a shared buffer. Pass it
+        # explicitly so backbone "skip" layers (indexer=None) still find it.
+        if use_sparse:
+            extra_impl_args["topk_indices_buffer"] = topk_indices_buffer
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an MLAAttentionImpl subclass
@@ -1678,12 +1684,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 #  [[0, 0, 0, 0], [256, 256, 256, 256], [512, 512, 512, 512]]
                 # Note(simon): this is done in CPU because of downstream's
                 # of `to_list`.
-                chunk_starts = (
+                chunk_starts = torch.empty(
+                    num_chunks, num_prefills, dtype=torch.int32, pin_memory=True
+                ).copy_(
                     torch.arange(num_chunks, dtype=torch.int32)
+                    .multiply_(max_context_chunk)
                     .unsqueeze(1)
-                    .expand(-1, num_prefills)
-                    * max_context_chunk
-                ).pin_memory()
+                )
                 chunk_ends = torch.min(
                     context_lens_cpu.unsqueeze(0), chunk_starts + max_context_chunk
                 )
@@ -1740,12 +1747,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         )
                         * self.dcp_local_block_size
                     )
-                    local_chunk_starts = (
+                    local_chunk_starts = torch.empty(
+                        num_chunks, num_prefills, dtype=torch.int32, pin_memory=True
+                    ).copy_(
                         torch.arange(num_chunks, dtype=torch.int32)
+                        .multiply_(padded_local_max_context_chunk_across_ranks)
                         .unsqueeze(1)
-                        .expand(-1, num_prefills)
-                        * padded_local_max_context_chunk_across_ranks
-                    ).pin_memory()
+                    )
                     local_chunk_ends = torch.min(
                         padded_local_context_lens_cpu.unsqueeze(0),
                         local_chunk_starts
