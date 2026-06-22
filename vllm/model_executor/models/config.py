@@ -156,11 +156,25 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
 
         attention_config = vllm_config.attention_config
         if attention_config.backend == AttentionBackendEnum.FLASHINFER:
-            raise ValueError(
-                "FlashInfer does not support DiffusionGemma's mixed "
-                "causal/bidirectional attention. Use --attention-backend "
-                "FLASH_ATTN or TRITON_ATTN instead."
-            )
+            import vllm.envs as envs
+
+            if envs.VLLM_NVFP4_KV_VOSPLIT:
+                # The unified FlashInfer prefill grouping (FIPrefillGroup, keyed
+                # by ``(is_mm, causal)``) serves DiffusionGemma's mixed
+                # causal/bidirectional batches (encoder=causal, denoise=
+                # non-causal), including the D=512 NVFP4 VO-split path. Allowed
+                # when the NVFP4 VO-split path is enabled.
+                logger.info(
+                    "DiffusionGemma on FLASHINFER via unified per-request "
+                    "causal grouping (NVFP4 VO-split active)."
+                )
+            else:
+                raise ValueError(
+                    "FlashInfer does not support DiffusionGemma's mixed "
+                    "causal/bidirectional attention without the NVFP4 VO-split "
+                    "path. Use --attention-backend FLASH_ATTN or TRITON_ATTN "
+                    "instead."
+                )
         if attention_config.backend is None and not attention_config.use_non_causal:
             attention_config.use_non_causal = True
             logger.info(
