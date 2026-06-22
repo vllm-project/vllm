@@ -336,6 +336,27 @@ class SingleTypeKVCacheManager(ABC):
         """Drain and return pending KV cache block copies."""
         return []
 
+    def _retain_block(self, block: KVCacheBlock) -> None:
+        if block.is_null:
+            return
+        if block.ref_cnt == 0:
+            self.block_pool.free_block_queue.remove(block)
+        block.ref_cnt += 1
+
+    def _free_retained_blocks(self, blocks: Sequence[KVCacheBlock]) -> None:
+        block_ref_counts: dict[int, tuple[KVCacheBlock, int]] = {}
+        for block in blocks:
+            _, count = block_ref_counts.get(block.block_id, (block, 0))
+            block_ref_counts[block.block_id] = (block, count + 1)
+
+        freed_blocks: list[KVCacheBlock] = []
+        for block, count in block_ref_counts.values():
+            assert block.ref_cnt >= count
+            block.ref_cnt -= count
+            if block.ref_cnt == 0 and not block.is_null:
+                freed_blocks.append(block)
+        self.block_pool.free_block_queue.append_n(freed_blocks)
+
     def cache_blocks(
         self,
         request: Request,
@@ -806,7 +827,7 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                 )
             )
             if not release_source_ref:
-                self._retain_cow_source_block(source_block)
+                self._retain_block(source_block)
             self._pending_cow_source_blocks.append(source_block)
             new_blocks.append(cow_block)
 
@@ -814,16 +835,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             super().allocate_new_blocks(request_id, num_tokens, num_tokens_main_model)
         )
         return new_blocks
-
-    def _retain_cow_source_block(self, block: KVCacheBlock) -> None:
-        if (
-            block.ref_cnt == 0
-            and not block.is_null
-            and block.prev_free_block is not None
-            and block.next_free_block is not None
-        ):
-            self.block_pool.free_block_queue.remove(block)
-        block.ref_cnt += 1
 
     def cache_blocks(
         self,
@@ -880,22 +891,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
 
     def new_step_starts(self) -> None:
         if self._pending_cow_source_blocks:
-            self._free_pending_cow_source_blocks()
+            self._free_retained_blocks(self._pending_cow_source_blocks)
             self._pending_cow_source_blocks = []
-
-    def _free_pending_cow_source_blocks(self) -> None:
-        block_ref_counts: dict[int, tuple[KVCacheBlock, int]] = {}
-        for block in self._pending_cow_source_blocks:
-            _, count = block_ref_counts.get(block.block_id, (block, 0))
-            block_ref_counts[block.block_id] = (block, count + 1)
-
-        freed_blocks: list[KVCacheBlock] = []
-        for block, count in block_ref_counts.values():
-            assert block.ref_cnt >= count
-            block.ref_cnt -= count
-            if block.ref_cnt == 0 and not block.is_null:
-                freed_blocks.append(block)
-        self.block_pool.free_block_queue.append_n(freed_blocks)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         blocks = self.req_to_blocks[running_request_id]
@@ -1696,27 +1693,6 @@ class MambaManager(SingleTypeKVCacheManager):
         copies = self._kv_cache_block_copies
         self._kv_cache_block_copies = []
         return copies
-
-    def _free_retained_blocks(self, blocks: list[KVCacheBlock]) -> None:
-        block_ref_counts: dict[int, tuple[KVCacheBlock, int]] = {}
-        for block in blocks:
-            _, count = block_ref_counts.get(block.block_id, (block, 0))
-            block_ref_counts[block.block_id] = (block, count + 1)
-
-        freed_blocks: list[KVCacheBlock] = []
-        for block, count in block_ref_counts.values():
-            assert block.ref_cnt >= count
-            block.ref_cnt -= count
-            if block.ref_cnt == 0 and not block.is_null:
-                freed_blocks.append(block)
-        self.block_pool.free_block_queue.append_n(freed_blocks)
-
-    def _retain_block(self, block: KVCacheBlock) -> None:
-        if block.is_null:
-            return
-        if block.ref_cnt == 0:
-            self.block_pool.free_block_queue.remove(block)
-        block.ref_cnt += 1
 
     def add_local_computed_blocks(
         self,
