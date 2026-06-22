@@ -41,8 +41,8 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 )
 from vllm.model_executor.utils import replace_parameter
 
-# Symmetric FP8 (E4M3) quant args reused for the compressed-tensors quantize
-# arithmetic (only ``type``/``num_bits`` are consulted by ``ct_quantize``).
+# Symmetric FP8 (E4M3) quant args for ``ct_quantize`` (only ``type``/``num_bits``
+# are consulted).
 _MXFP8_QUANT_ARGS = QuantizationArgs(
     num_bits=8, type=QuantizationType.FLOAT, symmetric=True
 )
@@ -53,29 +53,15 @@ _MXFP8_E4M3_MAX = 448.0
 
 
 def _quantize_mxfp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """MXFP8 weight quantization that is *bit-identical* to llm-compressor's
-    compressed-tensors MXFP8 export, so the online quantize-at-load path
-    produces exactly the same fp8 codes and E8M0 scale bytes as the offline
-    pre-quantized checkpoint.
+    """MXFP8 weight quant *bit-identical* to compressed-tensors' MXFP8 export.
 
     FlashInfer's ``mxfp8_quantize`` picks the E8M0 exponent via
     ``ceil(log2(amax / 448))``, which disagrees with compressed-tensors on the
-    ``amax = 1.75 * 2**f`` boundary (~0.7% of weight blocks): the dequantized
-    product still matches to ~1e-6, but the stored bytes do not. To get an exact
-    byte-for-byte match we reuse compressed-tensors' own helpers rather than
-    re-deriving the math:
-
-    * **Scale (E8M0 byte).** ``generate_mx_scales`` (``round_to_power_2`` of the
-      per-32 bf16 amax, then ``127 + floor(log2(.)) - 8``) followed by
-      ``round_to_quantized_type_dtype`` to clamp/cast to the uint8 exponent.
-      Computed in bf16 to match the offline observer dtype.
-    * **Quantize arithmetic.** ``ct_quantize`` divides by the bf16 power-of-two
-      scale ``2**(byte - 127)`` (not reciprocal-multiply), clamps to the e4m3
-      range, then casts to fp8.
-
-    Returns ``(qweight[N, K] fp8_e4m3, scale[N, K // 32] uint8)`` in the same
-    non-swizzled layout as ``mxfp8_e4m3_quantize``; callers swizzle the scale
-    for the FlashInfer kernel exactly as before.
+    For exact bytes we reuse compressed-tensors:
+    ``generate_mx_scales`` + ``round_to_quantized_type_dtype`` for the E8M0 byte
+    (in bf16, matching the offline observer), then ``ct_quantize`` to scale/clamp/
+    cast. Returns ``(qweight[N, K] fp8_e4m3, scale[N, K // 32] uint8)`` in the
+    non-swizzled layout.
     """
     assert weight.dim() == 2
     weight = weight.to(torch.bfloat16)
@@ -84,7 +70,6 @@ def _quantize_mxfp8(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     groups = weight.view(n, k // MXFP8_BLOCK_SIZE, MXFP8_BLOCK_SIZE)
 
     amax = groups.abs().amax(dim=2)  # [N, K//32] bf16
-    # E8M0 exponent byte, exactly as compressed-tensors' MXFP8 export stores it.
     scale = generate_mx_scales(amax, num_bits=8)
     scale_byte = round_to_quantized_type_dtype(
         scale, torch.uint8, cast_to_original_dtype=False
@@ -146,9 +131,7 @@ class Mxfp8OnlineLinearMethod(_Fp8OnlineLinearBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        # Match the offline compressed-tensors MXFP8 export byte-for-byte so the
-        # online quantize-at-load path is bit-identical to a pre-quantized
-        # checkpoint. See _quantize_mxfp8 for the parity rationale.
+        # See _quantize_mxfp8 for offline byte-for-byte parity.
         weight_fp8, weight_scale = _quantize_mxfp8(layer.weight.contiguous())
 
         layer.input_scale = None

@@ -93,14 +93,12 @@ class OnlineQuantizationConfig(QuantizationConfig):
         self.ignored_layers: list[str] = args.ignore
 
     def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper") -> None:
-        """Translate ``ignored_layers`` from the checkpoint's (HF) module naming
-        into vLLM's module naming so ``should_ignore_layer`` matches the runtime
-        layer prefixes (e.g. ``model.language_model.layers.*`` ->
-        ``language_model.model.layers.*``). Without this the online path would
-        quantize layers the offline (compressed-tensors) checkpoint leaves in
-        bf16. Mirrors ``CompressedTensorsConfig.apply_vllm_mapper``: only true
-        layer paths are remapped; module-class names and ``re:`` patterns are
-        passed through unchanged.
+        """Remap ``ignored_layers`` from HF to vLLM module naming (e.g.
+        ``model.language_model.layers.*`` -> ``language_model.model.layers.*``)
+        so ``should_ignore_layer`` matches the runtime prefixes; otherwise the
+        online path quantizes layers the offline checkpoint leaves in bf16.
+        Mirrors ``CompressedTensorsConfig.apply_vllm_mapper``: only layer paths
+        are remapped; module-class names and ``re:`` patterns pass through.
         """
 
         def _map_target(target: str) -> str | None:
