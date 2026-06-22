@@ -1351,7 +1351,7 @@ class TestSafeArgPrefix:
         [
             ('{"a": 1}', '{"a": '),
             ('{"a": 1, "b": 2}', '{"a": 1, "b": '),
-            ('{"a": "hello", "b": "world"}', '{"a": "hello", "b": '),
+            ('{"a": "hello", "b": "world"}', '{"a": "hello", "b": "world'),
             ('{"obj": {"x": 1}, "b": 2}', '{"obj": {"x": 1}, "b": '),
             ('{"url": "http://x:80", "b": 1}', '{"url": "http://x:80", "b": '),
             ('{"a": 1', '{"a": '),
@@ -1360,6 +1360,9 @@ class TestSafeArgPrefix:
             ("", ""),
             ('{"k":1}', '{"k":'),
             ('{"k": 1, "v":2}', '{"k": 1, "v":'),
+            ('{"k":"value"}', '{"k":"value'),
+            ('{"k":"unterminated', '{"k":"unterminated'),
+            (r'{"k":"escaped \" quote"}', r'{"k":"escaped \" quote'),
         ],
     )
     def test_safe_arg_prefix(self, json_str, expected):
