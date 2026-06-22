@@ -275,6 +275,12 @@ class RoutedExperts(PluggableLayer):
     # Weight Loading Methods
     #
 
+    @staticmethod
+    def _to_scalar(loaded_weight: torch.Tensor) -> torch.Tensor:
+        # Per-tensor scales arrive 0-D or as shape-(1,) (llm-compressor NVFP4);
+        # reduce to a 0-D scalar. numel > 1 raises instead of broadcasting.
+        return loaded_weight.reshape(())
+
     def _load_per_tensor_weight_scale(
         self,
         shard_id: str,
@@ -288,10 +294,10 @@ class RoutedExperts(PluggableLayer):
             # We have to keep the weight scales of w1 and w3 because
             # we need to re-quantize w1/w3 weights after weight loading.
             idx = 0 if shard_id == "w1" else 1
-            param_data[expert_id][idx] = loaded_weight
+            param_data[expert_id][idx] = self._to_scalar(loaded_weight)
         # If we are in the row parallel case (down_proj)
         elif shard_id == "w2":
-            param_data[expert_id] = loaded_weight
+            param_data[expert_id] = self._to_scalar(loaded_weight)
 
     def _load_combined_w13_weight_scale(
         self,
@@ -525,7 +531,7 @@ class RoutedExperts(PluggableLayer):
         param_data = param.data
 
         # Input scales can be loaded directly and should be equal.
-        param_data[expert_id] = loaded_weight
+        param_data[expert_id] = self._to_scalar(loaded_weight)
 
     def _load_g_idx(
         self,
@@ -692,7 +698,9 @@ class RoutedExperts(PluggableLayer):
             ):
                 scale_expert_id = global_expert_id if use_global_sf else expert_id
                 scale_shard_id = 0 if shard_id == "w1" else 1
-                param.data[scale_expert_id][scale_shard_id] = loaded_weight.reshape(())
+                param.data[scale_expert_id][scale_shard_id] = self._to_scalar(
+                    loaded_weight
+                )
                 return True if return_success else None
 
             if (
