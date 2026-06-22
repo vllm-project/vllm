@@ -51,7 +51,8 @@ def _use_fp8_e4b15(device: int = 0) -> int:
         "stride_mid_b",
         "stride_mid_h",
         "stride_mid_s",
-    ]
+    ],
+    do_not_specialize_on_alignment=["Seq_lens_ptr"],
 )
 def _tq_decode_stage1(
     # Precomputed query projection

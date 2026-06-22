@@ -2219,6 +2219,7 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         slot_mappings: dict[int, torch.Tensor] | None = None,
+        profile_num_computed_tokens_cpu: torch.Tensor | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         Returns:
@@ -2281,19 +2282,23 @@ class GPUModelRunner(
                 slot_mapping_attn[:num_tokens]
             )
 
-        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
-            :num_reqs_padded
-        ]
-        num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
-            :num_reqs_padded
-        ]
         seq_lens_cpu = self.optimistic_seq_lens_cpu[:num_reqs_padded]
         seq_lens_cpu_upper_bound = seq_lens_cpu
 
         # is_prefilling: True if request is still in prefill phase.
         # Used by mamba backends to distinguish actual decodes from
         # short extends.
-        is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
+        if profile_num_computed_tokens_cpu is None:
+            num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+                :num_reqs_padded
+            ]
+            num_prompt_tokens_cpu = self.input_batch.num_prompt_tokens_cpu_tensor[
+                :num_reqs_padded
+            ]
+            is_prefilling = num_computed_tokens_cpu < num_prompt_tokens_cpu
+        else:
+            num_computed_tokens_cpu = profile_num_computed_tokens_cpu[:num_reqs_padded]
+            is_prefilling = num_computed_tokens_cpu < seq_lens_cpu
         # Zero out padded rows so stale data from condense() doesn't
         # misclassify padding as prefill in CUDA graph mode.
         is_prefilling[num_reqs:] = False
@@ -5665,6 +5670,7 @@ class GPUModelRunner(
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         num_reqs_override: int | None = None,
+        profile_as_cached_prefill: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -5696,6 +5702,10 @@ class GPUModelRunner(
                 requests. This is used by attention warmup to build
                 request-shaped long prefill variants without going through the
                 worker scheduler path.
+            profile_as_cached_prefill: If True with profile_seq_lens, build
+                attention metadata as cached prefill by deriving synthetic
+                num_computed_tokens from seq_len - query_len. This keeps warmup
+                on the normal dummy-run path without mutating the input batch.
         """
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
@@ -5732,6 +5742,10 @@ class GPUModelRunner(
             assert num_reqs_override > 0
             assert not uniform_decode
             assert not create_mixed_batch
+        if profile_as_cached_prefill:
+            assert force_attention
+            assert profile_seq_lens is not None
+            assert not uniform_decode
         if create_mixed_batch:
             assert not uniform_decode
             # Create mixed batch:
@@ -5817,6 +5831,7 @@ class GPUModelRunner(
         )
 
         attn_metadata: PerLayerAttnMetadata | None = None
+        profile_num_computed_tokens_cpu: torch.Tensor | None = None
 
         slot_mappings_by_group, slot_mappings = self._get_slot_mappings(
             num_tokens_padded=num_tokens_padded,
@@ -5870,6 +5885,17 @@ class GPUModelRunner(
                 # requests can corrupt Mamba state.
                 self.input_batch.block_table.commit_block_table(num_reqs_padded)
 
+                if profile_as_cached_prefill:
+                    profile_num_computed_tokens_cpu = torch.zeros(
+                        (num_reqs_padded,),
+                        dtype=self.input_batch.num_computed_tokens_cpu_tensor.dtype,
+                        device="cpu",
+                    )
+                    query_lens_cpu = torch.from_numpy(num_scheduled_tokens)
+                    profile_num_computed_tokens_cpu[:num_reqs] = torch.clamp(
+                        profile_seq_lens - query_lens_cpu, min=0
+                    )
+
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
                 attn_metadata, _ = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
@@ -5880,6 +5906,7 @@ class GPUModelRunner(
                     for_cudagraph_capture=is_graph_capturing,
                     slot_mappings=slot_mappings_by_group,
                     use_spec_decode=self.speculative_config is not None,
+                    profile_num_computed_tokens_cpu=profile_num_computed_tokens_cpu,
                 )
 
         with self.maybe_dummy_run_with_lora(

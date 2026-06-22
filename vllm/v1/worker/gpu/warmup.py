@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -15,8 +17,19 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheSpec,
+    TQFullAttentionSpec,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.request import Request
-from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+_TQ_CONTINUATION_DECODE_THRESHOLD = 128
+_TQ_WARMUP_PROMPT_CHUNK_LEN = 256
 
 
 @torch.inference_mode()
@@ -150,8 +163,136 @@ def warmup_kernels(
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
+    if not model_runner.is_pooling_model:
+        _warmup_turboquant_attention_kernels(model_runner, worker_execute_model)
     model_runner.kv_connector.set_disabled(False)
     torch.accelerator.synchronize()
+
+
+def _kv_cache_spec_uses_turboquant(kv_cache_spec: KVCacheSpec) -> bool:
+    if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+        return any(
+            _kv_cache_spec_uses_turboquant(spec)
+            for spec in kv_cache_spec.kv_cache_specs.values()
+        )
+    if isinstance(kv_cache_spec, AttentionSpec):
+        return isinstance(kv_cache_spec, TQFullAttentionSpec)
+    return False
+
+
+def _uses_turboquant_kv_cache(model_runner: GPUModelRunner) -> bool:
+    kv_cache_config = getattr(model_runner, "kv_cache_config", None)
+    if kv_cache_config is None:
+        return False
+    return any(
+        _kv_cache_spec_uses_turboquant(group.kv_cache_spec)
+        for group in kv_cache_config.kv_cache_groups
+    )
+
+
+def _get_max_model_len(model_runner: GPUModelRunner) -> int:
+    max_model_len = _get_positive_int(model_runner, "max_model_len", 0)
+    if max_model_len > 0:
+        return max_model_len
+    model_config = getattr(model_runner, "model_config", None)
+    return _get_positive_int(model_config, "max_model_len", 0)
+
+
+def _warmup_turboquant_attention_kernels(
+    model_runner: GPUModelRunner,
+    worker_execute_model: Callable[[SchedulerOutput], Any],
+) -> None:
+    """Warm TQ continuation-prefill through scheduler outputs.
+
+    Qwen TQ selector models mix ordinary and TQ attention layers. Run the same
+    request lifecycle used by the scheduler so the TQ backend sees the real
+    cached-prefill metadata without direct synthetic kernel calls.
+    """
+    if not _uses_turboquant_kv_cache(model_runner):
+        return
+
+    scheduler_config = getattr(model_runner, "scheduler_config", None)
+    if scheduler_config is None:
+        return
+
+    max_model_len = _get_max_model_len(model_runner)
+    max_num_batched_tokens = _get_positive_int(
+        scheduler_config,
+        "max_num_batched_tokens",
+        0,
+    )
+    decode_query_len = _get_positive_int(model_runner, "decode_query_len", 1)
+    if max_model_len <= 0 or max_num_batched_tokens <= 0:
+        return
+
+    continuation_len = min(_TQ_WARMUP_PROMPT_CHUNK_LEN, max_num_batched_tokens)
+    if continuation_len <= _TQ_CONTINUATION_DECODE_THRESHOLD:
+        return
+    prefix_len = min(
+        _TQ_WARMUP_PROMPT_CHUNK_LEN,
+        max_num_batched_tokens,
+        max_model_len - continuation_len - decode_query_len,
+    )
+    if prefix_len <= 0 or decode_query_len > max_num_batched_tokens:
+        return
+
+    prompt_len = prefix_len + continuation_len
+
+    kv_cache_groups = model_runner.kv_cache_config.kv_cache_groups
+    group_block_sizes = [g.kv_cache_spec.block_size for g in kv_cache_groups]
+    prefix_block_counts = [cdiv(prefix_len, bs) for bs in group_block_sizes]
+    continuation_block_counts = [cdiv(prompt_len, bs) for bs in group_block_sizes]
+    if sum(continuation_block_counts) > model_runner.kv_cache_config.num_blocks - 1:
+        return
+
+    continuation_block_deltas = [
+        c - p for c, p in zip(continuation_block_counts, prefix_block_counts)
+    ]
+
+    next_block_id = 1
+
+    def _alloc_blocks(num_blocks: int) -> list[int]:
+        nonlocal next_block_id
+        return list(range(next_block_id, next_block_id := next_block_id + num_blocks))
+
+    req_id = "_warmup_tq_"
+    prompt_token_ids = list(range(prompt_len))
+    sampling_params = SamplingParams.for_sampler_warmup()
+
+    new_req = NewRequestData.from_request(
+        Request(req_id, prompt_token_ids, sampling_params, None),
+        block_ids=tuple(_alloc_blocks(n) for n in prefix_block_counts),
+        prefill_token_ids=prompt_token_ids,
+    )
+
+    prefill_output = SchedulerOutput.make_empty()
+    prefill_output.scheduled_new_reqs = [new_req]
+    prefill_output.num_scheduled_tokens = {req_id: prefix_len}
+    prefill_output.total_num_scheduled_tokens = prefix_len
+    prefill_output.num_common_prefix_blocks = [0] * len(kv_cache_groups)
+    worker_execute_model(prefill_output)
+
+    cached_req_data = CachedRequestData.make_empty()
+    cached_req_data.req_ids = [req_id]
+    cached_req_data.num_computed_tokens = [prefix_len]
+    cached_req_data.num_output_tokens = [0]
+    new_block = any(continuation_block_deltas)
+    cached_req_data.new_block_ids = [
+        tuple(_alloc_blocks(n) for n in continuation_block_deltas)
+        if new_block
+        else None
+    ]
+
+    continuation_output = SchedulerOutput.make_empty()
+    continuation_output.scheduled_cached_reqs = cached_req_data
+    continuation_output.num_scheduled_tokens = {req_id: continuation_len}
+    continuation_output.total_num_scheduled_tokens = continuation_len
+    continuation_output.num_common_prefix_blocks = [0] * len(kv_cache_groups)
+    worker_execute_model(continuation_output)
+
+    cleanup_output = SchedulerOutput.make_empty()
+    cleanup_output.finished_req_ids = {req_id}
+    worker_execute_model(cleanup_output)
 
 
 def _get_positive_int(obj: Any, name: str, default: int) -> int:
@@ -210,10 +351,10 @@ def warmup_v1_attention_kernels(model_runner: Any) -> None:
             decode_kwargs["profile_seq_lens"] = decode_seq_len
         dummy_run(**decode_kwargs)
 
-    # Keep these representative prefill shapes intentionally small. The first
-    # one covers pure-prefill attention kernels, and the second covers
-    # cached-prefill attention metadata without turning warmup into a
-    # long-prompt benchmark.
+    # Keep pure prefill intentionally small. Cached prefill must use the
+    # scheduler chunk size because attention backends specialize on the maximum
+    # query length, and a small cached-prefill dummy run misses chunked-prefill
+    # kernels used by long prompts.
     prefill_tokens = min(max_num_tokens, max_num_batched_tokens, max_model_len, 64)
     if prefill_tokens > 1:
         dummy_run(
@@ -225,16 +366,37 @@ def warmup_v1_attention_kernels(model_runner: Any) -> None:
             num_reqs_override=1,
         )
 
-    prefill_seq_len = min(max_model_len, max(prefill_tokens + 1, 8192))
-    if prefill_tokens > 1 and prefill_seq_len > prefill_tokens:
+    cached_prefill_tokens = min(max_num_tokens, max_num_batched_tokens, max_model_len)
+    cached_prefill_seq_len = min(
+        max_model_len,
+        max(cached_prefill_tokens + 1, 8192),
+    )
+    if cached_prefill_tokens > 1 and cached_prefill_seq_len > cached_prefill_tokens:
         dummy_run(
-            num_tokens=prefill_tokens,
+            num_tokens=cached_prefill_tokens,
             skip_eplb=True,
             is_profile=True,
             force_attention=True,
             uniform_decode=False,
             num_reqs_override=1,
-            profile_seq_lens=prefill_seq_len,
+            profile_seq_lens=cached_prefill_seq_len,
+            profile_as_cached_prefill=True,
         )
+        cached_prefill_req_counts = [min(max_num_seqs, cached_prefill_tokens, 3)]
+        if max_num_seqs >= 16 and cached_prefill_tokens >= 16:
+            cached_prefill_req_counts.append(16)
+        for cached_prefill_reqs in dict.fromkeys(cached_prefill_req_counts):
+            if cached_prefill_reqs <= 1:
+                continue
+            dummy_run(
+                num_tokens=cached_prefill_tokens,
+                skip_eplb=True,
+                is_profile=True,
+                force_attention=True,
+                uniform_decode=False,
+                num_reqs_override=cached_prefill_reqs,
+                profile_seq_lens=cached_prefill_seq_len,
+                profile_as_cached_prefill=True,
+            )
 
     torch.accelerator.synchronize()
