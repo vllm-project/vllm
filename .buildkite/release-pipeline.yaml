@@ -118,6 +118,21 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+      - label: "Build wheel - x86_64 - XPU"
+        depends_on: ~
+        id: build-wheel-x86-xpu
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --tag vllm-ci:build-image --target vllm-build --progress plain -f docker/Dockerfile.xpu ."
+          - "mkdir artifacts"
+          - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+          - "bash .buildkite/scripts/upload-xpu-wheels.sh"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "s3://vllm-wheels/xpu/$$BUILDKITE_COMMIT/$(cd artifacts/dist && echo *.whl)"'
+        env:
+          DOCKER_BUILDKIT: "1"
+          S3_BUCKET: "vllm-wheels"
+
   - label: "Generate and upload wheel indices"
     depends_on: "build-wheels"
     allow_dependency_failure: true
@@ -839,6 +854,80 @@ steps:
       DOCKERHUB_USERNAME: "vllmbot"
 
   # =============================================================================
+  # XPU Release Pipeline (x86_64 only)
+  # =============================================================================
+  #
+  # vLLM version is determined by the Buildkite checkout (like CUDA pipeline).
+  # XPU release artifacts:
+  #   * wheels published under s3://vllm-wheels/xpu/<commit>/  (built in the
+  #     `build-wheels` group via Build wheel - x86_64 - XPU step)
+  #   * a single x86_64 release Docker image (no multi-arch -- XPU is x86 only)
+  #
+  # The image build depends on the manual block step block-build-release-images
+  # so it's gated identically to the CUDA images on release runs, but runs
+  # automatically on NIGHTLY=1 runs (the block step is omitted in that mode).
+  # =============================================================================
+
+  - label: ":xpu: Build release image - x86_64 - XPU"
+    id: build-xpu-release-image
+    depends_on:
+      - step: block-build-release-images
+        allow_failure: true
+    agents:
+      queue: cpu_queue_release
+    timeout_in_minutes: 180
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - |
+        DOCKER_BUILDKIT=1 docker build \
+          --build-arg max_jobs=16 \
+          --build-arg GIT_REPO_CHECK=1 \
+          --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$$BUILDKITE_COMMIT-xpu \
+          --target vllm-openai \
+          --progress plain \
+          -f docker/Dockerfile.xpu .
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-xpu"
+      - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$$BUILDKITE_COMMIT-xpu"'
+    env:
+      DOCKER_BUILDKIT: "1"
+
+  - label: "Publish nightly XPU image to DockerHub"
+    depends_on:
+      - build-xpu-release-image
+    if: build.env("NIGHTLY") == "1"
+    agents:
+      queue: small_cpu_queue_release
+    commands:
+      - "bash .buildkite/scripts/push-nightly-builds-xpu.sh"
+      # Clean up old nightly builds (keep only last 14)
+      - "bash .buildkite/scripts/cleanup-nightly-builds.sh nightly- vllm/vllm-openai-xpu"
+    plugins:
+      - docker-login#v3.0.0:
+          username: vllmbot
+          password-env: DOCKERHUB_TOKEN
+    env:
+      DOCKER_BUILDKIT: "1"
+      DOCKERHUB_USERNAME: "vllmbot"
+
+  # XPU Release Job: Generate Root Index for XPU Wheels (for release only).
+  # Creates https://wheels.vllm.ai/xpu/ allowing users to install with
+  # `uv pip install vllm --extra-index-url https://wheels.vllm.ai/xpu/`.
+  - block: "Generate Root Index for XPU Wheels for Release"
+    key: block-generate-root-index-xpu-wheels
+    depends_on: build-wheel-x86-xpu
+
+  - label: ":package: Generate Root Index for XPU Wheels for Release"
+    depends_on: block-generate-root-index-xpu-wheels
+    id: generate-root-index-xpu-wheels
+    agents:
+      queue: cpu_queue_release
+    commands:
+      - "bash tools/vllm-xpu/generate-xpu-wheels-root-index.sh"
+    env:
+      S3_BUCKET: "vllm-wheels"
+      VARIANT: "xpu"
+
+  # =============================================================================
   # Publish to DockerHub and PyPI (at the end so all builds complete first)
   # =============================================================================
 
@@ -850,6 +939,7 @@ steps:
       - create-multi-arch-manifest-ubuntu2404
       - create-multi-arch-manifest-cuda-12-9-ubuntu2404
       - build-rocm-release-image
+      - build-xpu-release-image
       - input-release-version
       # Wait for CPU builds if their block steps were unblocked, so publish
       # doesn't race the in-progress CPU build. allow_failure lets publish
