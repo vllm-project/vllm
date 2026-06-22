@@ -2,18 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 
 
-class SeedOSSReasoningParser(BaseThinkingReasoningParser):
+class SeedOSSReasoningParser(DeepSeekR1ReasoningParser):
     """
     Reasoning parser for SeedOSS model.
 
-    The SeedOSS model uses <seed:think>...</seed:think> tokens to
-    denote reasoning content text. This parser extracts
-    the reasoning content from the model output.
-    Similar to DeepSeek R1, it supports cases
-    where the model doesn't generate the start token.
+    The SeedOSS model uses <seed:think>...</seed:think> tokens to denote
+    reasoning content text.
+
+    Like DeepSeek R1, SeedOSS may omit the start token (the chat template can
+    open the reasoning block), so it reuses DeepSeek R1's streaming logic,
+    which treats leading text as reasoning. The base parser would emit that
+    text as content, disagreeing with non-streaming extraction.
     """
 
     @property

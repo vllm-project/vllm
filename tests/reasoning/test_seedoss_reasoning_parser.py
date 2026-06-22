@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, cast
+import re
+from typing import Any
 
 import pytest
 from transformers import AutoTokenizer
@@ -24,6 +25,17 @@ def seedoss_tokenizer():
     if start_token not in tokenizer.get_vocab():
         tokenizer.add_tokens([start_token, end_token])
     return tokenizer
+
+
+def _stream_deltas(output: str) -> list[str]:
+    """Split output into deltas at the reasoning markers, mirroring streaming.
+
+    The markers are single special tokens, so each arrives in its own delta.
+    Feeding the whole output as one delta would instead merge the
+    reasoning/content boundary into a single delta.
+    """
+    parts = re.split(rf"({re.escape(start_token)}|{re.escape(end_token)})", output)
+    return [part for part in parts if part]
 
 
 SIMPLE_REASONING: dict[str, Any] = {
@@ -92,7 +104,7 @@ def test_simple_reasoning(seedoss_tokenizer, streaming):
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, SIMPLE_REASONING["output"])], streaming=streaming
+        parser, _stream_deltas(SIMPLE_REASONING["output"]), streaming=streaming
     )
 
     assert reasoning == SIMPLE_REASONING["reasoning"]
@@ -106,7 +118,7 @@ def test_complete_reasoning(seedoss_tokenizer, streaming):
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, COMPLETE_REASONING["output"])], streaming=streaming
+        parser, _stream_deltas(COMPLETE_REASONING["output"]), streaming=streaming
     )
 
     assert reasoning == COMPLETE_REASONING["reasoning"]
@@ -120,7 +132,7 @@ def test_no_content(seedoss_tokenizer, streaming):
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, NO_CONTENT["output"])], streaming=streaming
+        parser, _stream_deltas(NO_CONTENT["output"]), streaming=streaming
     )
 
     assert reasoning == NO_CONTENT["reasoning"]
@@ -134,7 +146,7 @@ def test_multiple_lines(seedoss_tokenizer, streaming):
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, MULTIPLE_LINES["output"])], streaming=streaming
+        parser, _stream_deltas(MULTIPLE_LINES["output"]), streaming=streaming
     )
 
     assert reasoning == MULTIPLE_LINES["reasoning"]
@@ -148,7 +160,7 @@ def test_with_start_token(seedoss_tokenizer, streaming):
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, WITH_START_TOKEN["output"])], streaming=streaming
+        parser, _stream_deltas(WITH_START_TOKEN["output"]), streaming=streaming
     )
 
     assert reasoning == WITH_START_TOKEN["reasoning"]
@@ -165,7 +177,7 @@ def test_only_end_token(seedoss_tokenizer, streaming):
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, ONLY_END_TOKEN["output"])], streaming=streaming
+        parser, _stream_deltas(ONLY_END_TOKEN["output"]), streaming=streaming
     )
 
     assert reasoning == ONLY_END_TOKEN["reasoning"]
@@ -179,7 +191,7 @@ def test_no_tokens(seedoss_tokenizer, streaming):
     parser = parser_cls(seedoss_tokenizer)
 
     reasoning, content = run_reasoning_extraction(
-        parser, [cast(str, NO_TOKENS["output"])], streaming=streaming
+        parser, _stream_deltas(NO_TOKENS["output"]), streaming=streaming
     )
 
     assert reasoning == NO_TOKENS["reasoning"]
