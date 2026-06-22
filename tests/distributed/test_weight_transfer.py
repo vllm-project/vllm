@@ -291,7 +291,9 @@ def test_nccl_receive_sparse_weights_without_init_raises():
 
     config = WeightTransferConfig(backend="nccl")
     parallel_config = create_mock_parallel_config()
-    engine = NCCLWeightTransferEngine(config, parallel_config)
+    engine = NCCLWeightTransferEngine(
+        config, parallel_config, MagicMock(spec=torch.nn.Module)
+    )
 
     update_info = NCCLWeightTransferUpdateInfo(
         names=["w"],
@@ -526,7 +528,9 @@ def inference_receive_sparse_tensor(
     parallel_config.data_parallel_rank = 0
     parallel_config.data_parallel_index = 0
 
-    engine = NCCLWeightTransferEngine(config, parallel_config)
+    engine = NCCLWeightTransferEngine(
+        config, parallel_config, MagicMock(spec=torch.nn.Module)
+    )
     engine.init_transfer_engine(
         NCCLWeightTransferInitInfo(
             master_address=master_address,

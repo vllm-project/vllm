@@ -21,11 +21,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.utils import get_max_tokens
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
-from vllm.reasoning import ReasoningParser
+from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
@@ -74,7 +74,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             if error_check_ret is not None:
                 return error_check_ret
 
-        tool_parser = render.tool_parser
+        parser = render.parser
         tool_dicts: list[dict] | None = None
 
         all_conversations: list[list[ConversationMessage]] = []
@@ -94,7 +94,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     default_template_content_format=render.chat_template_content_format,
                     default_template_kwargs=render.default_chat_template_kwargs,
                     tool_dicts=tool_dicts,
-                    tool_parser=tool_parser,
+                    parser=parser,
                 )
             all_conversations.append(conversation)
             all_engine_prompts.append(engine_prompts[0])
@@ -119,14 +119,15 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             for messages in request.messages
         ]
 
-        reasoning_parser: ReasoningParser | None = None
-        if self.reasoning_parser_cls:
+        parser: Parser | None = None
+        if self.parser_cls is not None:
             chat_template_kwargs = self._effective_chat_template_kwargs(
                 single_requests[0]
             )
-            reasoning_parser = self.reasoning_parser_cls(
+            parser = self.parser_cls(
                 tokenizer,
-                chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
+                None,  # tools
+                chat_template_kwargs=chat_template_kwargs,
             )
 
         render_result = await self.render_batch_chat_request(request)
@@ -194,7 +195,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             all_conversations,
             tokenizer,
             request_metadata,
-            reasoning_parser,
+            parser,
         )
 
     async def chat_completion_full_generator_batch(
@@ -206,7 +207,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
         all_conversations: list[list[ConversationMessage]],
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
-        reasoning_parser: ReasoningParser | None = None,
+        parser: Parser | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         """Handle batched (non-streaming) chat completions.
 
@@ -262,12 +263,12 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                 else:
                     logprobs = None
 
-                if reasoning_parser:
-                    reasoning, content = reasoning_parser.extract_reasoning(
+                if parser is not None:
+                    reasoning, content, _ = parser.parse(
                         output.text,
                         request=request,  # type: ignore[arg-type]
                     )
-                    if not getattr(request, "include_reasoning", True):
+                    if not request.include_reasoning:
                         reasoning = None
                 else:
                     reasoning = None

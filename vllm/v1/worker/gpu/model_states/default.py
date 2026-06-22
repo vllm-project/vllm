@@ -102,7 +102,6 @@ class DefaultModelState(ModelState):
         self,
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
-        req_states: RequestState,
     ) -> torch.Tensor:
         mm_hashes, mm_kwargs = self.encoder_runner.prepare_mm_inputs(
             scheduled_encoder_inputs
@@ -118,8 +117,8 @@ class DefaultModelState(ModelState):
             input_batch.num_tokens,
             input_batch.num_scheduled_tokens,
             input_batch.query_start_loc_np,
-            req_states.prefill_len.np[input_batch.idx_mapping_np],
-            req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
+            input_batch.prefill_len_np,
+            input_batch.num_computed_prefill_tokens_np,
         )
         # Use unpadded input_ids to match is_mm_embed size (num_tokens).
         # input_batch.input_ids may be padded for CUDA graphs.

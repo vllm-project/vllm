@@ -38,10 +38,7 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.async_utils import (
-    AsyncMicrobatchTokenizer,
-    make_async,
-)
+from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -92,8 +89,9 @@ class BaseRenderer(ABC, Generic[_T]):
         # to keep the asyncio event loop responsive under concurrent load.
         self._mm_executor: Executor = self._executor
 
-        # Lazy initialization since offline LLM doesn't use async
-        self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
+        # Offloading tokenizer encode & decode to thread pool.
+        self._async_tokenizer_encode = make_async(self._encode, executor=self._executor)
+        self._async_tokenizer_decode = make_async(self._decode, executor=self._executor)
 
         self.mm_processor: BaseMultiModalProcessor | None = None
         self._readonly_mm_processor: BaseMultiModalProcessor | None = None
@@ -146,13 +144,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return tokenizer
 
-    def get_async_tokenizer(self) -> AsyncMicrobatchTokenizer:
-        if self._async_tokenizer is None:
-            self._async_tokenizer = AsyncMicrobatchTokenizer(
-                self.get_tokenizer(), executor=self._executor
-            )
+    def _decode(self, *args, **kwargs):
+        return self.get_tokenizer().decode(*args, **kwargs)
 
-        return self._async_tokenizer
+    def _encode(self, *args, **kwargs):
+        return self.get_tokenizer().encode(*args, **kwargs)
 
     def get_mm_processor(self) -> "BaseMultiModalProcessor":
         if self.mm_processor is None:
@@ -436,8 +432,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: TextPrompt,
         params: TokenizeParams,
     ) -> TokensPrompt:
-        tokenizer = self.get_async_tokenizer()
-        prompt_token_ids = await tokenizer.encode(
+        prompt_token_ids = await self._async_tokenizer_encode(
             prompt["prompt"],
             **params.get_encode_kwargs(),
         )
@@ -451,8 +446,9 @@ class BaseRenderer(ABC, Generic[_T]):
         return prompt
 
     async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
-        tokenizer = self.get_async_tokenizer()
-        prompt["prompt"] = await tokenizer.decode(prompt["prompt_token_ids"])
+        prompt["prompt"] = await self._async_tokenizer_decode(
+            prompt["prompt_token_ids"]
+        )
 
         return prompt
 

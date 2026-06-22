@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections.abc import Sequence
 from http import HTTPStatus
 from typing import Any, cast
@@ -11,30 +12,44 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
 )
-from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionLogProbs,
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    ChatCompletionResponseChoice,
+    ChatMessage,
+)
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionLogProbs,
+    CompletionRequest,
+    CompletionResponse,
+    CompletionResponseChoice,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
+    ToolCall,
+    UsageInfo,
 )
+from vllm.entrypoints.openai.engine.serving import resolve_token_id_placeholder
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
 from vllm.entrypoints.openai.parser.harmony_utils import (
-    get_developer_message,
-    get_system_message,
+    build_harmony_preamble,
+    extract_instructions_from_messages,
     parse_chat_inputs_to_harmony_messages,
     render_for_completion,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import (
+    DerenderChatRequest,
+    DerenderCompletionRequest,
     GenerateRequest,
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
-from vllm.entrypoints.utils import (
-    create_error_response,
-    get_max_tokens,
-)
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.error_response import create_error_response
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import (
     EngineInput,
     MultiModalHashes,
@@ -45,8 +60,7 @@ from vllm.inputs import (
     tokens_input,
 )
 from vllm.logger import init_logger
-from vllm.parser import ParserManager
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.parser import Parser, ParserManager
 from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
@@ -54,12 +68,138 @@ from vllm.renderers.inputs.preprocess import (
     parse_model_prompt,
     prompt_to_seq,
 )
-from vllm.tool_parsers import ToolParser
+from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
 from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
 logger = init_logger(__name__)
+
+
+def _parse_token_id_placeholder(token: str) -> int | None:
+    """Extract token ID from a 'token_id:N' placeholder string."""
+    if not token.startswith("token_id:"):
+        return None
+    try:
+        return int(token[len("token_id:") :])
+    except ValueError:
+        return None
+
+
+def _correct_decoded_token(
+    token_id: int, context_token_ids: list[int], tokenizer: TokenizerLike
+) -> str:
+    """Use preceding tokens as context to fix U+FFFD from byte-fallback.
+
+    Mirrors LogprobsProcessor._correct_decoded_token in v1/engine/logprobs.py.
+    """
+    max_ctx = min(len(context_token_ids), 4)
+
+    for num_ctx in range(1, max_ctx + 1):
+        context = context_token_ids[-num_ctx:]
+        full_decoded = tokenizer.decode(context + [token_id])
+
+        if full_decoded.endswith("�"):
+            continue
+
+        clean_end = len(context)
+        for j in range(len(context) - 1, -1, -1):
+            if tokenizer.decode([context[j]]).endswith("�"):
+                clean_end = j
+            else:
+                break
+
+        clean_prefix = tokenizer.decode(context[:clean_end]) if clean_end > 0 else ""
+
+        if full_decoded.startswith(clean_prefix):
+            return full_decoded[len(clean_prefix) :]
+
+        common_len = 0
+        for a, b in zip(clean_prefix, full_decoded):
+            if a != b:
+                break
+            common_len += 1
+        return full_decoded[common_len:]
+
+    return ""
+
+
+def _resolve_logprobs(
+    logprobs: ChatCompletionLogProbs, tokenizer: TokenizerLike
+) -> ChatCompletionLogProbs:
+    """Resolve token_id:N placeholders in a ChatCompletionLogProbs object."""
+    if logprobs.content is None:
+        return logprobs
+
+    context_token_ids: list[int] = []
+    resolved_content = []
+
+    for entry in logprobs.content:
+        token_str, token_bytes = resolve_token_id_placeholder(entry.token, tokenizer)
+        sampled_id = _parse_token_id_placeholder(entry.token)
+
+        if token_str.endswith("�") and sampled_id is not None:
+            token_str = _correct_decoded_token(sampled_id, context_token_ids, tokenizer)
+            token_bytes = list(token_str.encode("utf-8"))
+
+        resolved_top = []
+        for top in entry.top_logprobs:
+            top_str, top_bytes = resolve_token_id_placeholder(top.token, tokenizer)
+            top_id = _parse_token_id_placeholder(top.token)
+            if top_str.endswith("�") and top_id is not None:
+                top_str = _correct_decoded_token(top_id, context_token_ids, tokenizer)
+                top_bytes = list(top_str.encode("utf-8"))
+            resolved_top.append(
+                top.model_copy(update={"token": top_str, "bytes": top_bytes})
+            )
+
+        resolved_content.append(
+            entry.model_copy(
+                update={
+                    "token": token_str,
+                    "bytes": token_bytes,
+                    "top_logprobs": resolved_top,
+                }
+            )
+        )
+
+        if sampled_id is not None:
+            context_token_ids.append(sampled_id)
+
+    return ChatCompletionLogProbs(content=resolved_content)
+
+
+def _convert_chat_logprobs_to_completion_logprobs(
+    logprobs: ChatCompletionLogProbs,
+) -> CompletionLogProbs:
+    """Convert ChatCompletionLogProbs (per-token objects) to CompletionLogProbs
+    (parallel flat lists) as required by the /v1/completions response schema."""
+    if logprobs.content is None:
+        return CompletionLogProbs()
+
+    tokens: list[str] = []
+    token_logprobs: list[float | None] = []
+    top_logprobs_list: list[dict[str, float] | None] = []
+    text_offset: list[int] = []
+
+    offset = 0
+    for entry in logprobs.content:
+        text_offset.append(offset)
+        tokens.append(entry.token)
+        token_logprobs.append(entry.logprob)
+        top_logprobs_list.append(
+            {t.token: t.logprob for t in entry.top_logprobs}
+            if entry.top_logprobs
+            else None
+        )
+        offset += len(entry.token)
+
+    return CompletionLogProbs(
+        text_offset=text_offset,
+        token_logprobs=token_logprobs,
+        tokens=tokens,
+        top_logprobs=top_logprobs_list,
+    )
 
 
 class OpenAIServingRender:
@@ -91,21 +231,18 @@ class OpenAIServingRender:
         self.trust_request_chat_template = trust_request_chat_template
         self.enable_auto_tools = enable_auto_tools
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
-        self.tool_parser: type[ToolParser] | None = ParserManager.get_tool_parser(
+        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+        self.parser: type[Parser] | None = ParserManager.get_parser(
             tool_parser_name=tool_parser,
+            reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=model_config.model,
-        )
-        self.reasoning_parser: type[ReasoningParser] | None = (
-            ParserManager.get_reasoning_parser(
-                reasoning_parser_name=reasoning_parser,
-            )
+            is_harmony=self.use_harmony,
         )
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
         )
         self.log_error_stack = log_error_stack
-        self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
         self.supports_browsing = False
         self.supports_code_interpreter = False
 
@@ -195,7 +332,7 @@ class OpenAIServingRender:
         """
         tokenizer = self.renderer.tokenizer
 
-        tool_parser = self.tool_parser
+        tool_parser = self.parser.tool_parser_cls if self.parser is not None else None
 
         if is_mistral_tokenizer(tokenizer):
             # because of issues with pydantic we need to potentially
@@ -254,9 +391,8 @@ class OpenAIServingRender:
                 default_template_content_format=self.chat_template_content_format,
                 default_template_kwargs=self.default_chat_template_kwargs,
                 tool_dicts=tool_dicts,
-                tool_parser=tool_parser,
+                parser=self.parser,
                 skip_mm_cache=skip_mm_cache,
-                reasoning_parser=self.reasoning_parser,
             )
         else:
             # For GPT-OSS.
@@ -407,6 +543,9 @@ class OpenAIServingRender:
         # for more info: see comment in `maybe_serialize_tool_calls`
         _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
 
+        chat_messages = list(request.messages)
+        instructions, chat_messages = extract_instructions_from_messages(chat_messages)
+
         # Add system message.
         # NOTE: In Chat Completion API, browsing is enabled by default
         # if the model supports it. TODO: Support browsing.
@@ -414,29 +553,246 @@ class OpenAIServingRender:
         assert not self.supports_code_interpreter
         if (reasoning_effort := request.reasoning_effort) == "none":
             raise ValueError(f"Harmony does not support {reasoning_effort=}")
-        sys_msg = get_system_message(
-            reasoning_effort=reasoning_effort,
-            browser_description=None,
-            python_description=None,
-            with_custom_tools=should_include_tools,
-        )
-        messages.append(sys_msg)
-
-        # Add developer message.
-        if request.tools:
-            dev_msg = get_developer_message(
-                tools=request.tools if should_include_tools else None  # type: ignore[arg-type]
+        tools = request.tools if should_include_tools else None
+        messages.extend(
+            build_harmony_preamble(
+                instructions=instructions,
+                tools=tools,  # type: ignore[arg-type]
+                reasoning_effort=reasoning_effort,
+                with_custom_tools=should_include_tools,
             )
-            messages.append(dev_msg)
+        )
 
-        # Add user message.
-        messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
+        # Add remaining conversation messages.
+        messages.extend(parse_chat_inputs_to_harmony_messages(chat_messages))
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
         engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
 
         return messages, [engine_input]
+
+    async def derender_chat_response(
+        self,
+        request: DerenderChatRequest,
+    ) -> ChatCompletionResponse | ErrorResponse:
+        """Postprocess a GenerateResponse into a ChatCompletionResponse.
+
+        Non-streaming only: expects the complete GenerateResponse with all
+        token IDs present.  Uses ``parser.parse()`` for one-shot extraction.
+
+        When ``request.chat_request`` is provided, the parser splits the
+        output into (reasoning, content, tool_calls).  Otherwise falls
+        back to plain detokenization.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        tokenizer = self.renderer.get_tokenizer()
+        gen = request.generate_response
+        chat_request = request.chat_request
+        choices: list[ChatCompletionResponseChoice] = []
+
+        try:
+            for choice in gen.choices:
+                if not choice.token_ids:
+                    raise ValueError(
+                        f"choice {choice.index} has empty or null token_ids"
+                    )
+
+                resolved_logprobs = (
+                    _resolve_logprobs(choice.logprobs, tokenizer)
+                    if choice.logprobs is not None
+                    else None
+                )
+
+                if self.parser is not None and chat_request is not None:
+                    # Parser path: decode with special tokens preserved
+                    # so the parser can see markers like </think>,
+                    # <tool_call>, or Harmony channel tokens.
+                    decoded_text = tokenizer.decode(
+                        choice.token_ids, skip_special_tokens=False
+                    )
+
+                    chat_template_kwargs: dict[str, Any] = {}
+                    if not self.use_harmony:
+                        chat_template_kwargs = (
+                            chat_request.build_chat_params(
+                                self.chat_template,
+                                self.chat_template_content_format,
+                            )
+                            .with_defaults(self.default_chat_template_kwargs)
+                            .chat_template_kwargs
+                        )
+
+                    parser = self.parser(
+                        tokenizer,
+                        chat_request.tools,
+                        chat_template_kwargs=chat_template_kwargs,
+                    )
+                    reasoning, content, tool_calls = parser.parse(
+                        decoded_text,
+                        chat_request,
+                        enable_auto_tools=self.enable_auto_tools,
+                        model_output_token_ids=choice.token_ids,
+                    )
+
+                    if not getattr(chat_request, "include_reasoning", True):
+                        reasoning = None
+
+                    tc_items = (
+                        [
+                            ToolCall(
+                                id=random_uuid(),
+                                function=tc,
+                            )
+                            for tc in tool_calls
+                        ]
+                        if tool_calls
+                        else []
+                    )
+
+                    message = ChatMessage(
+                        role="assistant",
+                        reasoning=reasoning,
+                        content=content,
+                        tool_calls=tc_items,
+                    )
+                else:
+                    # No parser: plain detokenization.
+                    decoded_text = tokenizer.decode(
+                        choice.token_ids, skip_special_tokens=True
+                    )
+                    message = ChatMessage(role="assistant", content=decoded_text)
+
+                choices.append(
+                    ChatCompletionResponseChoice(
+                        index=choice.index,
+                        message=message,
+                        logprobs=resolved_logprobs,
+                        finish_reason=choice.finish_reason,
+                    )
+                )
+        except ValueError as exc:
+            return self.create_error_response(str(exc))
+
+        prompt_tokens = (
+            request.prompt_tokens if request.prompt_tokens is not None else 0
+        )
+        completion_tokens = sum(len(ch.token_ids) for ch in gen.choices if ch.token_ids)
+        usage = UsageInfo(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+        )
+
+        logger.debug(
+            "derender_chat request_id=%s model=%s choices=%d completion_tokens=%d",
+            gen.request_id,
+            request.model,
+            len(choices),
+            completion_tokens,
+        )
+        return ChatCompletionResponse(
+            id=gen.request_id,
+            model=request.model,
+            created=int(time.time()),
+            choices=choices,
+            usage=usage,
+            prompt_logprobs=gen.prompt_logprobs,
+            kv_transfer_params=gen.kv_transfer_params,
+        )
+
+    async def derender_completion_response(
+        self,
+        request: DerenderCompletionRequest,
+    ) -> CompletionResponse | ErrorResponse:
+        """Postprocess a list of GenerateResponses into a CompletionResponse.
+
+        Non-streaming only.  Mirrors the multi-prompt completions case: one
+        GenerateResponse per prompt, parallel to the list[GenerateRequest]
+        from /v1/completions/render.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        n = len(request.generate_responses)
+        prompt_tokens_list: list[int] = (
+            request.prompt_tokens if request.prompt_tokens is not None else [0] * n
+        )
+
+        tokenizer = self.renderer.get_tokenizer()
+        choices: list[CompletionResponseChoice] = []
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        index = 0
+
+        for gen, pt in zip(request.generate_responses, prompt_tokens_list):
+            for choice in gen.choices:
+                if not choice.token_ids:
+                    return self.create_error_response(
+                        f"choice {choice.index} in response {gen.request_id} "
+                        "has empty or null token_ids"
+                    )
+                decoded_text = tokenizer.decode(
+                    choice.token_ids, skip_special_tokens=True
+                )
+                completion_logprobs = None
+                if choice.logprobs is not None:
+                    resolved = _resolve_logprobs(choice.logprobs, tokenizer)
+                    completion_logprobs = _convert_chat_logprobs_to_completion_logprobs(
+                        resolved
+                    )
+                choices.append(
+                    CompletionResponseChoice(
+                        index=index,
+                        text=decoded_text,
+                        finish_reason=choice.finish_reason,
+                        logprobs=completion_logprobs,
+                    )
+                )
+                total_completion_tokens += len(choice.token_ids)
+                index += 1
+            total_prompt_tokens += pt
+
+        if not request.generate_responses:
+            return self.create_error_response("generate_responses must not be empty")
+
+        first = request.generate_responses[0]
+        kv_params = first.kv_transfer_params
+        if any(
+            r.kv_transfer_params != kv_params for r in request.generate_responses[1:]
+        ):
+            logger.warning(
+                "derender_completion: kv_transfer_params differ across responses; "
+                "setting to None on the aggregated response"
+            )
+            kv_params = None
+
+        usage = UsageInfo(
+            prompt_tokens=total_prompt_tokens,
+            completion_tokens=total_completion_tokens,
+            total_tokens=total_prompt_tokens + total_completion_tokens,
+        )
+
+        logger.debug(
+            "derender_completion request_id=%s model=%s choices=%d"
+            " completion_tokens=%d",
+            first.request_id,
+            request.model,
+            len(choices),
+            total_completion_tokens,
+        )
+        return CompletionResponse(
+            id=first.request_id,
+            model=request.model,
+            created=int(time.time()),
+            choices=choices,
+            usage=usage,
+            kv_transfer_params=kv_params,
+        )
 
     def create_error_response(
         self,
@@ -530,8 +886,7 @@ class OpenAIServingRender:
         default_template_content_format: ChatTemplateContentFormatOption,
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
-        tool_parser: type[ToolParser] | None = None,
-        reasoning_parser: type[ReasoningParser] | None = None,
+        parser: type[Parser] | None = None,
         *,
         skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
@@ -571,14 +926,6 @@ class OpenAIServingRender:
             skip_mm_cache=skip_mm_cache,
         )
 
-        if reasoning_parser is not None:
-            tokenizer = renderer.get_tokenizer()
-            request = reasoning_parser(
-                tokenizer,
-                model_config=self.model_config,
-                chat_template_kwargs=chat_params.chat_template_kwargs,
-            ).adjust_request(request=request)
-
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
         # is set, we want to prevent parsing a tool_call hallucinated by the LLM
@@ -586,15 +933,22 @@ class OpenAIServingRender:
         # Exception: Mistral grammar-capable tokenizers always call
         # adjust_request — even for tool_choice="none" — so that the grammar
         # factory can prevent special-token leakage.
-        if tool_parser is not None:
-            tool_choice = getattr(request, "tool_choice", "none")
+        if parser is not None:
             tokenizer = renderer.get_tokenizer()
+            tool_parser = parser.tool_parser_cls
+            tool_choice = getattr(request, "tool_choice", "none")
             is_mistral_grammar_eligible = (
-                is_mistral_tool_parser(tool_parser)
+                tool_parser is not None
+                and is_mistral_tool_parser(tool_parser)
                 and is_mistral_tokenizer(tokenizer)
                 and tokenizer.supports_grammar
             )
-            if tool_choice != "none" or is_mistral_grammar_eligible:
+            should_adjust_request = (
+                parser.reasoning_parser_cls is not None
+                or tool_choice != "none"
+                or is_mistral_grammar_eligible
+            )
+            if should_adjust_request:
                 if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
                     msg = (
                         "Tool usage is only supported "
@@ -602,8 +956,13 @@ class OpenAIServingRender:
                         f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
-                request = tool_parser(tokenizer, request.tools).adjust_request(
-                    request=request
+                request = parser(
+                    tokenizer,
+                    request.tools,
+                    model_config=self.model_config,
+                    chat_template_kwargs=chat_params.chat_template_kwargs,
+                ).adjust_request(
+                    request=request,
                 )
 
         return conversation, [engine_input]

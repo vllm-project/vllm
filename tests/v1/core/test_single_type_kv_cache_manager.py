@@ -86,7 +86,7 @@ def test_chunked_local_attention_possible_cached_prefix():
             kv_cache_group_ids=[0],
             block_pool=block_pool,
             kv_cache_spec=chunked_local_attention_spec,
-            use_eagle=False,
+            drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0]
         assert len(computed_blocks) == expect_length
@@ -157,7 +157,7 @@ def test_sliding_window_possible_cached_prefix():
             kv_cache_group_ids=[0],
             block_pool=block_pool,
             kv_cache_spec=sliding_window_spec,
-            use_eagle=False,
+            drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0]
         assert len(computed_blocks) == expect_length
@@ -390,7 +390,7 @@ def test_evictable_cached_blocks_not_double_allocated():
     # should only allocate the truly new block.
     assert num_blocks_to_allocate == 2
 
-    manager.allocate_new_computed_blocks(
+    manager.add_local_computed_blocks(
         request_id,
         [evictable_block],
         num_local_computed_tokens=block_size,
