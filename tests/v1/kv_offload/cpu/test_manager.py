@@ -299,7 +299,6 @@ def test_cpu_manager():
 
     # prepare store [6, 7, 8] -> evicts [4, 5, 2] (oldest)
     prepare_store_output = cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
-    print(f"{prepare_store_output=}")
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
