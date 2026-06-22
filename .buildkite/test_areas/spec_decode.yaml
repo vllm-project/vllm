@@ -153,8 +153,7 @@ steps:
     - vllm/model_executor/models/qwen3_dflash.py
     - tests/v1/spec_decode/test_speculators_correctness.py
   commands:
-    - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-    - pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
+    - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s v1/spec_decode/test_speculators_correctness.py -m slow_test
 
 - label: Spec Decode MTP hybrid (B200)
   timeout_in_minutes: 30

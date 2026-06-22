@@ -14,8 +14,7 @@ steps:
   - vllm/v1/cudagraph_dispatcher.py
   - tests/compile/correctness_e2e/test_sequence_parallel.py
   commands:
-  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
+  - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
 
 - label: Sequence Parallel Correctness Tests (2xH100)
   key: sequence-parallel-correctness-tests-2xh100
@@ -25,8 +24,7 @@ steps:
   optional: true
   num_devices: 2
   commands:
-  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
+  - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
 
 - label: AsyncTP Correctness Tests (2xH100)
   key: asynctp-correctness-tests-2xh100
@@ -36,8 +34,7 @@ steps:
   optional: true
   num_devices: 2
   commands:
-  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
+  - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
 
 - label: AsyncTP Correctness Tests (B200)
   key: asynctp-correctness-tests-b200
@@ -47,8 +44,7 @@ steps:
   optional: true
   num_devices: 2
   commands:
-  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
+  - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
 
 - label: Distributed Compile Unit Tests (2xH100)
   key: distributed-compile-unit-tests-2xh100
@@ -61,8 +57,7 @@ steps:
   - vllm/model_executor/layers
   - tests/compile/passes/distributed/
   commands:
-  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -s -v tests/compile/passes/distributed
+  - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -s -v tests/compile/passes/distributed
 
 - label: Fusion and Compile Unit Tests (2xB200)
   key: fusion-and-compile-unit-tests-2xb200

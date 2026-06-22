@@ -50,8 +50,7 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-    - export VLLM_USE_DEEP_GEMM=0  # We found Triton is faster than DeepGEMM for H100
-    - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
+    - VLLM_USE_DEEP_GEMM=0 pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4  # Triton is faster than DeepGEMM for H100
 
 - label: LM Eval Small Models (B200)
   key: lm-eval-small-models-b200
@@ -108,9 +107,7 @@ steps:
       depends_on:
       - image-build-amd
       commands:
-      - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-      - export PYTORCH_ROCM_ARCH=gfx942 # Limit Quark compilation to save time
-      - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
+      - VLLM_WORKER_MULTIPROC_METHOD=spawn PYTORCH_ROCM_ARCH=gfx942 pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt  # Limit Quark compilation to save time
 
 - label: MoE Refactor Integration Test (H100 - TEMPORARY)
   key: moe-refactor-integration-test-h100-temporary

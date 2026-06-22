@@ -22,10 +22,9 @@ steps:
   - vllm/
   - tests/entrypoints/llm
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode
-  - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py --ignore=entrypoints/llm/offline_mode
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s entrypoints/llm/offline_mode # Needs to avoid interference with other tests
   mirror:
     amd:
       device: mi325_1
@@ -41,9 +40,8 @@ steps:
   - vllm/
   - tests/entrypoints/serve
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
-  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s entrypoints/serve --ignore=entrypoints/serve/dev/rpc
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc
   mirror:
     amd:
       device: mi325_1
@@ -59,8 +57,7 @@ steps:
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s entrypoints/openai --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/correctness
   mirror:
     amd:
       device: mi325_1
@@ -77,9 +74,8 @@ steps:
   - tests/entrypoints/openai
   - tests/entrypoints/test_chat_utils
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai/chat_completion
-  - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s entrypoints/openai/chat_completion
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
   mirror:
     amd:
       device: mi325_1
@@ -128,8 +124,7 @@ steps:
   - vllm/
   - tests/entrypoints/speech_to_text
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/speech_to_text
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s entrypoints/speech_to_text
 
 - label: Entrypoints Integration (Multimodal)
   device: h200_35gb
@@ -140,8 +135,7 @@ steps:
   - vllm/
   - tests/entrypoints/multimodal
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/multimodal
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s entrypoints/multimodal
 
 - label: Entrypoints Integration (Pooling)
   key: entrypoints-integration-pooling
@@ -151,8 +145,7 @@ steps:
   - vllm/
   - tests/entrypoints/pooling
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/pooling
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s entrypoints/pooling
 
 - label: OpenAI API Correctness
   key: openai-api-correctness

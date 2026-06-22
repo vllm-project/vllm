@@ -32,11 +32,10 @@ steps:
   - tests/entrypoints/openai/test_multi_api_servers.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
-  - export NCCL_CUMEM_HOST_ENABLE=0
-  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
-  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
-  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
-  - DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
+  - NCCL_CUMEM_HOST_ENABLE=0 TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+  - NCCL_CUMEM_HOST_ENABLE=0 TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+  - NCCL_CUMEM_HOST_ENABLE=0 TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
+  - NCCL_CUMEM_HOST_ENABLE=0 DP_SIZE=2 pytest -v -s entrypoints/openai/test_multi_api_servers.py
 
 - label: Distributed Compile + RPC Tests (2 GPUs)
   key: distributed-compile-rpc-tests-2-gpus
@@ -56,10 +55,9 @@ steps:
   - tests/entrypoints/llm/test_collective_rpc.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
-  - export NCCL_CUMEM_HOST_ENABLE=0
-  - pytest -v -s entrypoints/llm/test_collective_rpc.py
-  - pytest -v -s ./compile/fullgraph/test_basic_correctness.py
-  - pytest -v -s ./compile/test_wrapper.py
+  - NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s entrypoints/llm/test_collective_rpc.py
+  - NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s ./compile/fullgraph/test_basic_correctness.py
+  - NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s ./compile/test_wrapper.py
 
 - label: Distributed Torchrun + Shutdown Tests (2 GPUs)
   key: distributed-torchrun-shutdown-tests-2-gpus
@@ -78,11 +76,10 @@ steps:
   - tests/v1/worker/test_worker_memory_snapshot.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
-  - export NCCL_CUMEM_HOST_ENABLE=0
-  - VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
-  - VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
-  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
-  - pytest -v -s v1/worker/test_worker_memory_snapshot.py
+  - NCCL_CUMEM_HOST_ENABLE=0 VLLM_TEST_SAME_HOST=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
+  - NCCL_CUMEM_HOST_ENABLE=0 VLLM_TEST_SAME_HOST=1 VLLM_TEST_WITH_DEFAULT_DEVICE_SET=1 torchrun --nproc-per-node=4 distributed/test_same_node.py | grep 'Same node test passed'
+  - NCCL_CUMEM_HOST_ENABLE=0 CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
+  - NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
 - label: Distributed Torchrun + Examples (4 GPUs)
   key: distributed-torchrun-examples-4-gpus
@@ -97,24 +94,23 @@ steps:
   - tests/examples/features/data_parallel/data_parallel_offline.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
-  - export NCCL_CUMEM_HOST_ENABLE=0
   # test with torchrun tp=2 and external_dp=2
-  - torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
+  - NCCL_CUMEM_HOST_ENABLE=0 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
   # test with torchrun tp=2 and pp=2
-  - PP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
+  - NCCL_CUMEM_HOST_ENABLE=0 PP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example.py
   # test with torchrun tp=4 and dp=1
-  - TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+  - NCCL_CUMEM_HOST_ENABLE=0 TP_SIZE=4 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
   # test with torchrun tp=2, pp=2 and dp=1
-  - PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+  - NCCL_CUMEM_HOST_ENABLE=0 PP_SIZE=2 TP_SIZE=2 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
   # test with torchrun tp=1 and dp=4 with ep
-  - DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+  - NCCL_CUMEM_HOST_ENABLE=0 DP_SIZE=4 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
   # test with torchrun tp=2 and dp=2 with ep
-  - TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
+  - NCCL_CUMEM_HOST_ENABLE=0 TP_SIZE=2 DP_SIZE=2 ENABLE_EP=1 torchrun --nproc-per-node=4 tests/distributed/test_torchrun_example_moe.py
   # test with internal dp
-  - python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager
+  - NCCL_CUMEM_HOST_ENABLE=0 python3 examples/features/data_parallel/data_parallel_offline.py --enforce-eager
   # rlhf examples
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_nccl.py
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_ipc.py
+  - NCCL_CUMEM_HOST_ENABLE=0 VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_nccl.py
+  - NCCL_CUMEM_HOST_ENABLE=0 VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_ipc.py
 
 - label: Distributed DP Tests (4 GPUs)
   key: distributed-dp-tests-4-gpus
@@ -128,14 +124,13 @@ steps:
   - tests/distributed/test_utils
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
-  - export NCCL_CUMEM_HOST_ENABLE=0
-  - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
-  - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
-  - TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
-  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py
-  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
-  - pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
-  - pytest -v -s distributed/test_utils.py
+  - NCCL_CUMEM_HOST_ENABLE=0 TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py
+  - NCCL_CUMEM_HOST_ENABLE=0 TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+  - NCCL_CUMEM_HOST_ENABLE=0 TP_SIZE=2 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py
+  - NCCL_CUMEM_HOST_ENABLE=0 TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py
+  - NCCL_CUMEM_HOST_ENABLE=0 TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py
+  - NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s v1/engine/test_engine_core_client.py::test_kv_cache_events_dp
+  - NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s distributed/test_utils.py
 
 - label: Distributed Compile + Comm (4 GPUs)
   key: distributed-compile-comm-4-gpus
@@ -151,13 +146,12 @@ steps:
   - tests/distributed/test_multiproc_executor.py
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
-  - export NCCL_CUMEM_HOST_ENABLE=0
-  - pytest -v -s compile/fullgraph/test_basic_correctness.py
-  - pytest -v -s distributed/test_pynccl.py
-  - pytest -v -s distributed/test_events.py
-  - pytest -v -s distributed/test_symm_mem_allreduce.py
+  - NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s compile/fullgraph/test_basic_correctness.py
+  - NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s distributed/test_pynccl.py
+  - NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s distributed/test_events.py
+  - NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s distributed/test_symm_mem_allreduce.py
   # test multi-node TP with multiproc executor (simulated on single node)
-  - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
+  - NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
 
 - label: Distributed Tests (8 GPUs)(H100)
   key: distributed-tests-8-gpus-h100
@@ -176,9 +170,8 @@ steps:
 
   commands:
   # https://github.com/NVIDIA/nccl/issues/1838
-  - export NCCL_CUMEM_HOST_ENABLE=0
   # test with torchrun tp=2 and dp=4 with ep
-  - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
+  - NCCL_CUMEM_HOST_ENABLE=0 torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
 - label: Distributed Tests (4 GPUs)(A100)
   key: distributed-tests-4-gpus-a100
@@ -271,9 +264,7 @@ steps:
   - tests/distributed/test_pipeline_parallel.py
   - tests/basic_correctness/test_basic_correctness.py
   commands:
-  - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
-  - export NCCL_CUMEM_HOST_ENABLE=0
-  - pytest -v -s distributed/test_ray_v2_executor.py
-  - pytest -v -s distributed/test_ray_v2_executor_e2e.py
-  - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
-  - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"
+  - VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1 NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s distributed/test_ray_v2_executor.py
+  - VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1 NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s distributed/test_ray_v2_executor_e2e.py
+  - VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1 NCCL_CUMEM_HOST_ENABLE=0 pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
+  - VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1 NCCL_CUMEM_HOST_ENABLE=0 TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"
