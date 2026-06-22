@@ -8,6 +8,9 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
+)
 from vllm.model_executor.warmup.cutedsl_warmup import (
     CuTeDSLCompileUnit,
     register_cutedsl_warmup_provider,
@@ -15,8 +18,6 @@ from vllm.model_executor.warmup.cutedsl_warmup import (
 from vllm.model_executor.warmup.fa4_cutedsl_config import (
     FA4MLAPrefillCompileContext,
     iter_fa4_mla_prefill_compile_requests,
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import (
