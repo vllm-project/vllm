@@ -19,6 +19,7 @@ use serde_json::Value;
 use serde_with::{DefaultOnNull, OneOrMany, serde_as};
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
+use vllm_chat::ReasoningParserFactory;
 use vllm_engine_core_client::TransportMode;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
@@ -535,15 +536,29 @@ impl ServeArgs {
     /// Build the managed Python-engine spawn configuration with the given
     /// handshake port.
     pub fn to_managed_engine_config(&self, handshake_port: u16) -> ManagedEngineConfig {
+        let reasoning_parser =
+            effective_engine_reasoning_parser(&self.runtime.reasoning_parser, &self.runtime.model);
+
         self.managed_engine.clone().into_config(
             self.runtime.model.clone(),
             self.runtime.max_model_len,
             self.runtime.max_logprobs,
+            reasoning_parser.as_deref(),
             self.runtime.language_model_only,
             self.runtime.disable_log_stats,
             self.runtime.shutdown_timeout,
             handshake_port,
         )
+    }
+}
+
+fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
+    match selection {
+        ParserSelection::Auto => ReasoningParserFactory::global()
+            .resolve_name_for_model(model)
+            .map(str::to_string),
+        ParserSelection::None => None,
+        ParserSelection::Explicit(name) => Some(name.clone()),
     }
 }
 
