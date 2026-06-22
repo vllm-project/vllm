@@ -75,7 +75,7 @@ import ctypes
 import hashlib
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Literal, NamedTuple
 
 CancelMode = Literal["immediate", "wait"]
@@ -89,8 +89,8 @@ class PollResult(NamedTuple):
         failed: Transfer IDs that failed (error, timeout, etc.).
     """
 
-    done: list[int]
-    failed: list[int]
+    done: Sequence[int]
+    failed: Sequence[int]
 
 
 class DataTransport(ABC):

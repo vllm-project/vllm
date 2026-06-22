@@ -22,9 +22,9 @@ from vllm.v1.kv_offload.tiering.p2p.data.base import (
 logger = init_logger(__name__)
 
 # Shared sentinel returned by poll() in the steady state (no inflight, or
-# no transfer changed state since the last poll). Callers must not mutate
-# its lists — current callers only iterate / membership-test / equality-check.
-_EMPTY_POLL_RESULT: PollResult = PollResult(done=[], failed=[])
+# no transfer changed state since the last poll). Tuples make it immutable;
+# callers only iterate / membership-test / equality-check.
+_EMPTY_POLL_RESULT: PollResult = PollResult(done=(), failed=())
 
 
 class NixlTransport(DataTransport):

@@ -135,7 +135,7 @@ class TestNixlTransportWithMockedAgent:
         """poll returns empty when nothing is inflight."""
         transport = self._make_transport()
         result = transport.poll()
-        assert result == PollResult(done=[], failed=[])
+        assert result == PollResult(done=(), failed=())
 
     def test_poll_returns_done_when_transfer_completes(self):
         """Completed transfer appears in poll().done."""
@@ -149,7 +149,7 @@ class TestNixlTransportWithMockedAgent:
         result = transport.poll()
 
         assert tid in result.done
-        assert result.failed == []
+        assert result.failed == ()
         # Handle released
         transport._agent.release_xfer_handle.assert_called()
 
@@ -163,7 +163,7 @@ class TestNixlTransportWithMockedAgent:
         transport._agent.check_xfer_state.return_value = "ERR"
         result = transport.poll()
 
-        assert result.done == []
+        assert result.done == ()
         assert tid in result.failed
 
     def test_poll_ignores_in_progress(self):
@@ -175,13 +175,13 @@ class TestNixlTransportWithMockedAgent:
 
         transport._agent.check_xfer_state.return_value = "PROC"
         result = transport.poll()
-        assert result.done == []
-        assert result.failed == []
+        assert result.done == ()
+        assert result.failed == ()
 
         transport._agent.check_xfer_state.return_value = "PEND"
         result = transport.poll()
-        assert result.done == []
-        assert result.failed == []
+        assert result.done == ()
+        assert result.failed == ()
 
     def test_cancel_removes_inflight(self):
         """cancel removes transfers and releases handles."""
