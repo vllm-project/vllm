@@ -61,6 +61,11 @@ class BeamSearchOnlineMixin(ABC):
             logprobs=logprobs_num,
             max_tokens=1,
             temperature=temperature,
+            # Beam search ranks candidates by logprob and detokenizes the final
+            # sequences itself (see ``tokenizer.decode`` below), so the engine's
+            # per-step detokenization of all ``2 * beam_width`` logprob token ids
+            # is pure overhead -- O(beam_width) wasted decodes every step. Skip it.
+            detokenize=False,
         )
         all_beams = [
             BeamSearchSequence(
