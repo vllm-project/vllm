@@ -435,6 +435,8 @@ async def init_render_app_state(
         ],
     )
 
+    state.openai_serving_models = model_registry
+
     if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
     else:

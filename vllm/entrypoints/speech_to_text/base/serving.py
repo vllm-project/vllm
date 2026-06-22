@@ -40,7 +40,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.async_utils import make_async_with_semaphore, merge_async_iterators
 
-from ...serve.engine.typing import SpeechToTextRequest
+from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from ..transcription.protocol import (
     TranscriptionResponse,
     TranscriptionResponseStreamChoice,

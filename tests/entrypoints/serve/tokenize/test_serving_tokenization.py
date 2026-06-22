@@ -72,7 +72,6 @@ def _build_serving_tokenization(engine: AsyncLLM) -> ServingTokenization:
         chat_template_content_format="auto",
     )
     return ServingTokenization(
-        engine,
         models,
         openai_serving_render=serving_render,
         request_logger=None,
