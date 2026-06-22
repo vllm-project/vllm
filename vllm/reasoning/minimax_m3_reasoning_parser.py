@@ -44,13 +44,42 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         self._reasoning_ended_streaming = False
         self._reasoning_active_streaming = self._initial_in_reasoning
         self._pending_marker_streaming = False
+        self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
+        self._last_streaming_content_token_ids: list[int] | None = None
+
+    def _encode_text(self, text: str) -> list[int]:
+        try:
+            return list(self.model_tokenizer.encode(text, add_special_tokens=False))
+        except TypeError:
+            return list(self.model_tokenizer.encode(text))
 
     def _encode_marker(self, marker: str) -> tuple[int, ...]:
+        return tuple(self._encode_text(marker))
+
+    def _decode_text(self, token_ids: Sequence[int]) -> str:
         try:
-            token_ids = self.model_tokenizer.encode(marker, add_special_tokens=False)
+            return self.model_tokenizer.decode(
+                list(token_ids), skip_special_tokens=False
+            )
         except TypeError:
-            token_ids = self.model_tokenizer.encode(marker)
-        return tuple(token_ids)
+            return self.model_tokenizer.decode(list(token_ids))
+
+    def _content_suffix_token_ids(
+        self,
+        delta_text: str,
+        delta_token_ids: Sequence[int],
+        content: str | None,
+    ) -> list[int]:
+        if content is None:
+            return []
+        if content == delta_text:
+            return list(delta_token_ids)
+        if delta_text.endswith(content):
+            prefix_text = delta_text[: len(delta_text) - len(content)]
+            for index in range(len(delta_token_ids) + 1):
+                if self._decode_text(delta_token_ids[:index]) == prefix_text:
+                    return list(delta_token_ids[index:])
+        return self._encode_text(content)
 
     @staticmethod
     def _contains_token_sequence(
@@ -190,6 +219,15 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         return False
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
+        if (
+            self._last_streaming_delta_token_ids == tuple(input_ids)
+            and self._last_streaming_content_token_ids is not None
+        ):
+            content_ids = self._last_streaming_content_token_ids
+            self._last_streaming_delta_token_ids = None
+            self._last_streaming_content_token_ids = None
+            return list(content_ids)
+
         end_index = self._rfind_token_sequence(input_ids, self._end_token_ids)
         if end_index >= 0:
             return input_ids[end_index + len(self._end_token_ids) :]
@@ -218,6 +256,8 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
             self._reasoning_ended_streaming = False
             self._reasoning_active_streaming = self._initial_in_reasoning
             self._pending_marker_streaming = False
+            self._last_streaming_delta_token_ids = None
+            self._last_streaming_content_token_ids = None
         previous_reasoning, previous_content = self._visible_segments(previous_text)
         current_reasoning, current_content = self._visible_segments(current_text)
         if self.end_token in current_text or current_content is not None:
@@ -225,6 +265,8 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
             self._reasoning_active_streaming = False
             self._pending_marker_streaming = False
         else:
+            self._last_streaming_delta_token_ids = None
+            self._last_streaming_content_token_ids = None
             self._reasoning_active_streaming = (
                 self._initial_in_reasoning
                 or self.start_token in current_text
@@ -236,6 +278,11 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
             )
         reasoning = self._visible_delta(previous_reasoning, current_reasoning)
         content = self._visible_delta(previous_content, current_content)
+        if self._reasoning_ended_streaming:
+            self._last_streaming_delta_token_ids = tuple(delta_token_ids)
+            self._last_streaming_content_token_ids = self._content_suffix_token_ids(
+                delta_text, delta_token_ids, content
+            )
         if reasoning is None and content is None:
             return None
         return DeltaMessage(reasoning=reasoning, content=content)

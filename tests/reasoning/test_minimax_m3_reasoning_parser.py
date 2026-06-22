@@ -342,6 +342,28 @@ def test_streaming_split_marker_text_drives_end_state():
     assert parser.is_reasoning_end_streaming(previous_token_ids, []) is True
 
 
+def test_streaming_split_end_marker_content_ids_are_stripped():
+    tokenizer = RuntimeSplitMiniMaxM3Tokenizer()
+    parser = MiniMaxM3ReasoningParser(tokenizer)
+    previous_text = "<mm:think>Reasoning"
+    previous_token_ids = tokenizer.encode_runtime(previous_text)
+    delta_text = "</mm:think>content"
+    delta_token_ids = tokenizer.encode_runtime(delta_text)
+    current_token_ids = previous_token_ids + delta_token_ids
+
+    parser.extract_reasoning_streaming(
+        previous_text=previous_text,
+        current_text=previous_text + delta_text,
+        delta_text=delta_text,
+        previous_token_ids=previous_token_ids,
+        current_token_ids=current_token_ids,
+        delta_token_ids=delta_token_ids,
+    )
+
+    assert parser.is_reasoning_end_streaming(current_token_ids, delta_token_ids)
+    assert tokenizer.decode(parser.extract_content_ids(delta_token_ids)) == "content"
+
+
 def test_streaming_split_marker_tokens_enabled_mode():
     tokenizer = RuntimeSplitMiniMaxM3Tokenizer()
     parser = MiniMaxM3ReasoningParser(
