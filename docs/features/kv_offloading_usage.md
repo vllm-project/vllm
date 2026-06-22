@@ -119,7 +119,7 @@ To enable KV cache sharing between multiple vLLM instances using the same `root_
 PYTHONHASHSEED=0 vllm serve ...
 ```
 
-### P2P Connector
+### P2P (Including P/D)
 
 The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances over RDMA via NIXL. Each instance binds a control socket on `host:port` and exchanges blocks directly with peers — no shared filesystem required.
 
