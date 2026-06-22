@@ -158,6 +158,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "pythonic_tool_parser",
         "PythonicToolParser",
     ),
+    "qwen2_5_coder": (
+        "qwen2_5_coder_tool_parser",
+        "Qwen25CoderToolParser",
+    ),
     "qwen3_coder": (
         "qwen3_engine_tool_parser",
         "Qwen3EngineToolParser",
