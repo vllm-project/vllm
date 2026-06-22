@@ -271,6 +271,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
         num_decodes = attn_metadata.num_decodes
         q = reshape_query_for_spec_decode(q, num_decodes)
+        seq_len = q.shape[1]
+        q_num_heads = q.shape[2]
 
         scheduler_metadata = attn_metadata.decode.scheduler_metadata
         if envs.VLLM_BATCH_INVARIANT and not is_quantized_kv_cache(self.kv_cache_dtype):
@@ -331,5 +333,16 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             )
 
         o = reshape_attn_output_for_spec_decode(o)
+
+        # FlashMLA returns LSE as [batch, heads, seq_len]. The DCP reducer
+        # (cp_lse_ag_out_rs) consumes [tokens, heads], and the head count may
+        # already include DCP-gathered heads. With seq_len == 1 (non-spec) this
+        # is a no-op modulo contiguity; under DCP + spec-decode (seq_len > 1)
+        # the per-token flattening is required for the reducer.
+        lse = (
+            lse.permute(0, 2, 1)
+            .reshape(num_decodes * seq_len, q_num_heads)
+            .contiguous()
+        )
 
         return o, lse
