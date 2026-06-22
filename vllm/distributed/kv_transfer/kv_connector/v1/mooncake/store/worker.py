@@ -551,11 +551,19 @@ class KVCacheStoreSendingThread(KVTransferThread):
             put_step_rank = self.tp_rank % self.put_step
             for g_idx, db in enumerate(self.token_databases):
                 mask_range = store_mask_ranges[g_idx]
+
+                # Randomize the put_step start index using suffix windows/groups to
+                # balance load across TP ranks.
+                span = max(1, mask_range.end_chunk - mask_range.start_chunk)
+                put_step_start_idx = (
+                    mask_range.start_chunk + mask_range.start_chunk // span + g_idx
+                ) % self.put_step
                 for start, end, block_hash in db.process_tokens(
                     token_len,
                     req_meta.block_hashes,
                     mask_num=req_meta.save_start_token,
                     chunk_mask=mask_range.mask,
+                    put_step_start_idx=put_step_start_idx,
                     put_step=self.put_step,
                     put_step_rank=put_step_rank,
                 ):
