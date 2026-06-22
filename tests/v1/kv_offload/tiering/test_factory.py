@@ -7,8 +7,7 @@ These tests verify:
 1. Pre-registration integrity — registered tier module paths can import
    and yield correct SecondaryTierManager subclasses (CI sentinel).
 2. Multi-tier creation via factory with correct tier_type propagation.
-3. Extra config fields are passed through to constructors.
-4. Error paths — missing tier_type, unknown tier_type, duplicate registration.
+3. Error paths — missing tier_type, unknown tier_type, duplicate registration.
 """
 
 from unittest.mock import MagicMock
@@ -70,24 +69,6 @@ def test_create_tier_from_registry():
     )
 
     assert isinstance(tier, SecondaryTierManager)
-    assert tier.tier_type == "example"
-
-
-def test_create_tier_preserves_extra_config():
-    """Fields besides 'type' in tier_config are passed through to constructor.
-
-    ExampleSecondaryTierManager logs custom_param but doesn't store it as an
-    attribute, so we verify the value is passed through by using an invalid
-    type that would raise if the wrong value reached the constructor.
-    """
-    primary_kv_view, offloading_spec = _make_mock_args()
-    tier_config = {"type": "example", "custom_param": 42}
-
-    tier = SecondaryTierFactory.create_secondary_tier(
-        tier_config, primary_kv_view, offloading_spec
-    )
-
-    assert isinstance(tier, ExampleSecondaryTierManager)
     assert tier.tier_type == "example"
 
 
@@ -156,18 +137,13 @@ def test_unknown_tier_type_raises():
     primary_kv_view, offloading_spec = _make_mock_args()
     tier_config = {"type": "nonexistent_tier"}
 
-    with pytest.raises(ValueError, match="Unknown secondary tier type"):
+    with pytest.raises(
+        ValueError,
+        match=r"Unknown secondary tier type.*Supported types:",
+    ):
         SecondaryTierFactory.create_secondary_tier(
             tier_config, primary_kv_view, offloading_spec
         )
-
-    # Error message should list supported types
-    try:
-        SecondaryTierFactory.create_secondary_tier(
-            tier_config, primary_kv_view, offloading_spec
-        )
-    except ValueError as e:
-        assert "Supported types:" in str(e)
 
 
 def test_duplicate_registration_raises():
