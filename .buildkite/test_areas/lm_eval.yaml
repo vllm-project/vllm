@@ -153,9 +153,11 @@ steps:
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
 
 - label: GPQA Eval (GPT-OSS) (DGX Spark)
+  key: gpqa-eval-gpt-oss-spark
   timeout_in_minutes: 120
   device: dgx-spark
   optional: true
+  num_devices: 1
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
