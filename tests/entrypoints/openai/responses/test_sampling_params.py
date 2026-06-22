@@ -154,3 +154,60 @@ class TestResponsesRequestSamplingParams:
         assert "Cannot specify both structured_outputs and text.format" in str(
             exc_info.value
         )
+
+
+class TestResponsesRequestTruncation:
+    """Test that ResponsesRequest.build_tok_params correctly handles
+    the truncation parameter for the Responses API."""
+
+    def _make_model_config(self, max_model_len: int = 131072):
+        """Create a mock model config with the given max_model_len."""
+        from unittest.mock import MagicMock
+        model_config = MagicMock()
+        model_config.max_model_len = max_model_len
+        return model_config
+
+    def test_truncation_disabled_sets_none(self):
+        """When truncation='disabled', truncate_prompt_tokens is None."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test",
+            truncation="disabled",
+        )
+        tok_params = request.build_tok_params(self._make_model_config())
+        assert tok_params.truncate_prompt_tokens is None
+
+    def test_truncation_auto_sets_minus_one(self):
+        """When truncation='auto', truncate_prompt_tokens is -1,
+        which maps to max_input_tokens during post-tokenization."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test",
+            truncation="auto",
+        )
+        tok_params = request.build_tok_params(self._make_model_config())
+        assert tok_params.truncate_prompt_tokens == -1
+
+    def test_truncation_auto_max_input_tokens(self):
+        """Verify max_input_tokens is correctly computed when
+        truncation='auto' with max_output_tokens."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test",
+            truncation="auto",
+            max_output_tokens=1024,
+        )
+        model_config = self._make_model_config(max_model_len=131072)
+        tok_params = request.build_tok_params(model_config)
+        assert tok_params.truncate_prompt_tokens == -1
+        assert tok_params.max_input_tokens == 131072 - 1024
+
+    def test_truncation_default_is_disabled(self):
+        """The default truncation value should be 'disabled'."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test",
+        )
+        assert request.truncation == "disabled"
+        tok_params = request.build_tok_params(self._make_model_config())
+        assert tok_params.truncate_prompt_tokens is None

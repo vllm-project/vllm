@@ -260,6 +260,42 @@ class OpenAIServingResponses(OpenAIServing):
             .chat_template_kwargs
         )
 
+    def _apply_harmony_truncation(
+        self,
+        prompt_token_ids: list[int],
+        request: ResponsesRequest,
+    ) -> list[int]:
+        """Apply truncation to prompt token IDs for the Harmony path.
+
+        Per the OpenAI Responses API spec, when truncation is "auto",
+        the input should be truncated from the beginning to fit within
+        the model's context window. This drops items from the beginning
+        of the conversation to make room for output tokens.
+
+        Args:
+            prompt_token_ids: The full tokenized prompt.
+            request: The Responses API request with truncation settings.
+
+        Returns:
+            The (possibly truncated) prompt token IDs.
+        """
+        if request.truncation == "disabled":
+            return prompt_token_ids
+
+        max_model_len = self.model_config.max_model_len
+        max_output_tokens = (request.max_output_tokens
+                             if request.max_output_tokens is not None else
+                             self.model_config.max_tokens)
+        max_input_tokens = max_model_len - max_output_tokens
+
+        if max_input_tokens <= 0:
+            return prompt_token_ids
+
+        if len(prompt_token_ids) > max_input_tokens:
+            prompt_token_ids = prompt_token_ids[-max_input_tokens:]
+
+        return prompt_token_ids
+
     def _validate_generator_input(
         self,
         engine_input: EngineInput,
@@ -499,6 +535,7 @@ class OpenAIServingResponses(OpenAIServing):
                 engine_input=engine_input,
                 sampling_params=sampling_params,
                 context=context,
+                request=request,
                 lora_request=lora_request,
                 priority=request.priority,
                 trace_headers=trace_headers,
@@ -646,6 +683,7 @@ class OpenAIServingResponses(OpenAIServing):
         engine_input: EngineInput,
         sampling_params: SamplingParams,
         context: ConversationContext,
+        request: ResponsesRequest,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
@@ -696,6 +734,13 @@ class OpenAIServingResponses(OpenAIServing):
             # Render the next prompt token ids and update sampling_params.
             if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
                 token_ids = context.render_for_completion()
+
+                # Apply truncation for multi-turn Harmony requests,
+                # consistent with initial request handling.
+                token_ids = self._apply_harmony_truncation(
+                    token_ids, request
+                )
+
                 engine_input = tokens_input(token_ids)
 
                 sampling_params.max_tokens = max_model_len - len(token_ids)
@@ -738,6 +783,14 @@ class OpenAIServingResponses(OpenAIServing):
         arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
+
+        # Apply truncation for the Harmony path. The non-Harmony path
+        # handles this through build_tok_params / TokenizeParams, but
+        # the Harmony path bypasses the renderer and must truncate here.
+        prompt_token_ids = self._apply_harmony_truncation(
+            prompt_token_ids, request
+        )
+
         engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
         engine_input["arrival_time"] = arrival_time
 

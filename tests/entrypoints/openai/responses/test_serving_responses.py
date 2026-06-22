@@ -1187,3 +1187,150 @@ class TestAutoToolStreaming:
         assert len(function_done) == 1
         assert function_done[0].item.name == "get_weather"
         assert function_done[0].item.arguments == tool_args
+
+class TestApplyHarmonyTruncation:
+    """Test class for _apply_harmony_truncation method"""
+
+    @pytest_asyncio.fixture
+    async def serving_responses_instance(self):
+        """Create a real OpenAIServingResponses instance for testing"""
+        engine_client = MagicMock()
+
+        model_config = MagicMock()
+        model_config.max_model_len = 100
+        model_config.max_tokens = 20
+        model_config.hf_config.model_type = "test"
+        model_config.get_diff_sampling_param.return_value = {}
+        engine_client.model_config = model_config
+
+        engine_client.input_processor = MagicMock()
+        engine_client.renderer = MagicMock()
+
+        models = MagicMock()
+
+        instance = OpenAIServingResponses(
+            engine_client=engine_client,
+            models=models,
+            openai_serving_render=MagicMock(),
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+
+        return instance
+
+    def test_truncation_disabled_returns_original(
+        self, serving_responses_instance
+    ):
+        """When truncation is 'disabled', input is returned unchanged."""
+        request = ResponsesRequest(
+            input="test input",
+            truncation="disabled",
+        )
+        token_ids = list(range(200))  # exceeds max_model_len of 100
+
+        result = serving_responses_instance._apply_harmony_truncation(
+            token_ids, request
+        )
+
+        assert result == token_ids
+        assert len(result) == 200
+
+    def test_truncation_auto_truncates_from_left(
+        self, serving_responses_instance
+    ):
+        """When truncation is 'auto', input is truncated from the left
+        (beginning of conversation is dropped)."""
+        request = ResponsesRequest(
+            input="test input",
+            truncation="auto",
+            max_output_tokens=10,
+        )
+        # max_model_len=100, max_output_tokens=10, so max_input_tokens=90
+        token_ids = list(range(200))
+
+        result = serving_responses_instance._apply_harmony_truncation(
+            token_ids, request
+        )
+
+        # Should keep the last 90 tokens
+        assert len(result) == 90
+        assert result == list(range(110, 200))
+
+    def test_truncation_auto_no_truncation_needed(
+        self, serving_responses_instance
+    ):
+        """When truncation is 'auto' but input fits, return unchanged."""
+        request = ResponsesRequest(
+            input="test input",
+            truncation="auto",
+            max_output_tokens=10,
+        )
+        # max_model_len=100, max_output_tokens=10, max_input_tokens=90
+        token_ids = list(range(50))  # fits within 90
+
+        result = serving_responses_instance._apply_harmony_truncation(
+            token_ids, request
+        )
+
+        assert result == token_ids
+        assert len(result) == 50
+
+    def test_truncation_auto_with_no_max_output_tokens(
+        self, serving_responses_instance
+    ):
+        """When max_output_tokens is None, it should use the model's default."""
+        request = ResponsesRequest(
+            input="test input",
+            truncation="auto",
+            max_output_tokens=None,
+        )
+        # max_model_len=100, max_output_tokens=20 (from model_config.max_tokens), so max_input_tokens=80
+        token_ids = list(range(150))
+
+        result = serving_responses_instance._apply_harmony_truncation(
+            token_ids, request
+        )
+
+        # Should keep the last 80 tokens
+        assert len(result) == 80
+        assert result == list(range(70, 150))
+
+    def test_truncation_auto_exact_boundary(
+        self, serving_responses_instance
+    ):
+        """When input exactly matches max_input_tokens, no truncation."""
+        request = ResponsesRequest(
+            input="test input",
+            truncation="auto",
+            max_output_tokens=10,
+        )
+        # max_input_tokens = 90
+        token_ids = list(range(90))
+
+        result = serving_responses_instance._apply_harmony_truncation(
+            token_ids, request
+        )
+
+        assert result == token_ids
+        assert len(result) == 90
+
+    def test_truncation_auto_one_over_boundary(
+        self, serving_responses_instance
+    ):
+        """When input is one token over, exactly one token is dropped."""
+        request = ResponsesRequest(
+            input="test input",
+            truncation="auto",
+            max_output_tokens=10,
+        )
+        # max_input_tokens = 90
+        token_ids = list(range(91))
+
+        result = serving_responses_instance._apply_harmony_truncation(
+            token_ids, request
+        )
+
+        assert len(result) == 90
+        # First token (0) should be dropped
+        assert result[0] == 1
