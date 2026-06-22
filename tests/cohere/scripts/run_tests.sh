@@ -69,6 +69,22 @@ sanitize_model_label() {
     echo "$model_name" | sed 's#[/:]#_#g'
 }
 
+# ── Pytest defaults ──────────────────────────────────────────────────────────
+# All pytest invocations share these flags.  Individual calls may append more.
+#  • --tb=short   – concise tracebacks so the failure context is clear
+#  • -v           – one line per test (PASSED / FAILED / SKIPPED)
+#  • stdout is captured by default (no -s) and only printed for failing tests
+PYTEST_DEFAULTS="-v --tb=short"
+
+_junit_counter=0
+# Produce a JUnit XML path unique to each pytest invocation.
+# $OUTPUT_DIR is volume-mounted as ${{ runner.temp }} in CI, so the
+# test-reporter action picks these up automatically.
+next_junitxml() {
+    _junit_counter=$((_junit_counter + 1))
+    echo "--junitxml=${OUTPUT_DIR}/pytest_${TEST_GROUP:-unknown}_${_junit_counter}.xml"
+}
+
 run_cpu_tests() {
     echo "Running CPU tests (no GPU required)..."
 
@@ -530,10 +546,11 @@ run_guided_generation() {
     echo "Running guided generation tests..."
     local errors=0
 
-    cd cohere
-    python3 test_handle_token_thinking.py || errors=1
+    cd "${VLLM_WORKSPACE}"
 
-    cd ../..
+    # Unit test: handle_token_thinking (CPU-only, no model needed)
+    pytest ${PYTEST_DEFAULTS} $(next_junitxml) tests/cohere/test_handle_token_thinking.py || errors=1
+
     BLS_MODEL_DIR=${ENGINES_DIR}/c5-3a30t_fp8
 
     cd tests/cohere
