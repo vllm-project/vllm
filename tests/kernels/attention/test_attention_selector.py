@@ -435,7 +435,7 @@ def test_per_head_quant_scales_backend_selection(
     ]
     + (
         [
-            ("FLASHINFER", True, False),  # FlashInfer does not support non-causal
+            ("FLASHINFER", True, True),  # FlashInfer supports non-causal
             ("FLASHINFER", False, True),  # FlashInfer works with causal
         ]
         if CudaPlatform is not None
