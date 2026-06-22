@@ -45,10 +45,8 @@ class DmaCopyBackend:
         self._load_stream = load_stream
         self._store_stream = store_stream
 
-        # Store (GPU->CPU): source is the live GPU KV cache, still written by
-        # the compute stream -> STREAM ordering (paired with a wait on the
-        # compute-done event in launch_copy). Load (CPU->GPU): source is stable
-        # pinned host memory -> ANY is safe and lets the driver pipeline reads.
+        # Stores read the live KV cache -> STREAM (paired with the compute-done
+        # wait in get_finished); loads read stable pinned host memory -> ANY.
         self._store_params = build_params(
             gpu_caches,
             cpu_caches,
@@ -124,10 +122,6 @@ class DmaCopyBackend:
                 wait_event,
             ) = item
             stream = store_stream if is_store else load_stream
-            # Gate the copy on the compute-done event so the GPU->CPU store
-            # cannot read KV blocks before the kernels that wrote them have
-            # retired on the compute stream. The wait is enqueued on the
-            # transfer stream before the copy, so the two are ordered on-device.
             if wait_event is not None:
                 stream.wait_event(wait_event)
             copy_blocks(src_blocks, dst_blocks, params)

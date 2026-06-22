@@ -13,11 +13,9 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
-# CUmemcpySrcAccessOrder values (CUDA driver API).
-#   STREAM (1): source reads are ordered after prior writes on the stream the
-#       copy runs on -> safe when the source may still be written.
-#   ANY (3): driver may read the source before prior writes complete -> only
-#       safe when the source is guaranteed stable (e.g. pinned host memory).
+# CUmemcpySrcAccessOrder values (CUDA driver API). STREAM(1): source read in
+# stream order, safe when the source may still be written. ANY(3): source may
+# be read early, only safe for a stable source (e.g. pinned host memory).
 CU_MEMCPY_SRC_ACCESS_ORDER_STREAM = 1
 CU_MEMCPY_SRC_ACCESS_ORDER_ANY = 3
 
@@ -147,13 +145,7 @@ def build_params(
         dst_bases.append(d.data_ptr())
         bpb.append(s_bpb)
 
-    # srcAccessOrder controls whether the DMA may read the source out of stream
-    # order. ANY lets the engine prefetch the source before stream barriers
-    # (wait_event) fire, so it is only safe when the source is stable: STREAM(1)
-    # for GPU->CPU stores (live KV cache, still written by the compute stream),
-    # ANY(3) for CPU->GPU loads (stable pinned host memory). Same split as the
-    # OffloadingConnector landed in #39306. See
-    # https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__MEM.html#group__CUDA__MEM_1g6f1ff58e3065df3eb4b573dba77ad31f  # noqa: E501
+    # STREAM for stores, ANY for loads; see #39306 and the enum above.
     attrs = _CUmemcpyAttributes(srcAccessOrder=src_access_order)
 
     return BatchMemcpyParams(

@@ -57,9 +57,8 @@ class SimpleCPUOffloadWorker:
         # Metadata for the current step
         self._connector_metadata: SimpleCPUOffloadMetadata | None = None
 
-        # Compute-done event recorded before each store, reused across steps.
-        # Safe to reuse: get_finished runs once per step and the copy queue is
-        # FIFO, so each store's wait_event is enqueued before the next record.
+        # Compute-done event recorded before each store; reused across steps
+        # (get_finished runs once per step, copy queue is FIFO).
         self._store_compute_done: torch.Event | None = None
 
         # Pending event index sets, populated in bind_connector_metadata
