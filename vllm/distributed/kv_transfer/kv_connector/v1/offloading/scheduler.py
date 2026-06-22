@@ -395,7 +395,7 @@ class OffloadingConnectorScheduler:
         defer_lookup = False
         for key in keys:
             result = self.manager.lookup(key, req_context)
-            if result is LookupResult.HIT_PENDING or result is LookupResult.RETRY:
+            if result in (LookupResult.HIT_PENDING, LookupResult.RETRY):
                 defer_lookup = True
                 # continue lookup to allow manager to kick-off async lookups
                 # for all blocks (until a miss is detected)
@@ -417,13 +417,13 @@ class OffloadingConnectorScheduler:
         consecutive_hits = 0
         for idx in range(len(keys) - 1, -1, -1):
             result = self.manager.lookup(keys[idx], req_context)
-            if result is LookupResult.HIT_PENDING or result is LookupResult.RETRY:
+            if result in (LookupResult.HIT_PENDING, LookupResult.RETRY):
                 defer_lookup = True
                 # continue lookup to allow manager to kick-off async lookups
                 # for all blocks (until a hit is detected)
             # HIT_PENDING counts as hit (block is in cache, just not
             # readable yet); RETRY does not (block location uncertain).
-            is_hit = result is LookupResult.HIT or result is LookupResult.HIT_PENDING
+            is_hit = result in (LookupResult.HIT, LookupResult.HIT_PENDING)
             if not is_hit:
                 consecutive_hits = 0
             else:
