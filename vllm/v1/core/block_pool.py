@@ -166,6 +166,7 @@ class BlockPool:
         hash_block_size: int,
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
+        medium: str = MEDIUM_GPU,
     ):
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
         self.num_gpu_blocks = num_gpu_blocks
@@ -193,6 +194,8 @@ class BlockPool:
         self.enable_kv_cache_events = enable_kv_cache_events
         self.kv_event_queue: list[KVCacheEvent] = []
 
+        # Used by SimpleCPUOffloadConnector's CPU BlockPool.
+        self.medium = medium
         self.metrics_collector = metrics_collector
 
     def get_cached_block(
@@ -364,7 +367,7 @@ class BlockPool:
             token_ids=request.all_token_ids[start_token_idx:end_token_idx],
             block_size=block_size,
             lora_id=request.lora_request.adapter_id if request.lora_request else None,
-            medium=MEDIUM_GPU,
+            medium=self.medium,
             lora_name=request.lora_request.name if request.lora_request else None,
             extra_keys=extra_keys_list if extra_keys_list else None,
             group_idx=kv_cache_group_id,
@@ -533,7 +536,7 @@ class BlockPool:
                     lora_id=request.lora_request.adapter_id
                     if request.lora_request
                     else None,
-                    medium=MEDIUM_GPU,
+                    medium=self.medium,
                     lora_name=request.lora_request.name
                     if request.lora_request
                     else None,
@@ -599,7 +602,7 @@ class BlockPool:
             self.kv_event_queue.append(
                 BlockRemoved(
                     block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
-                    medium=MEDIUM_GPU,
+                    medium=self.medium,
                     group_idx=get_group_id(block_hash),
                 )
             )
