@@ -22,7 +22,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.lora.utils import is_moe_model
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
     MergedColumnParallelLinear,
@@ -140,8 +140,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 download_safetensors_index_file_from_hf(
                     model_name_or_path,
                     index_file,
-                    self.load_config.download_dir,
-                    revision,
+                    cache_dir=self.load_config.download_dir,
+                    revision=revision,
                 )
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files, hf_folder, index_file
@@ -464,13 +464,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 self.target_modules.append(name)
                 if module.disable_tp:
                     self.tp_disabled_modules.append(name)
-            elif isinstance(module, FusedMoE) and hasattr(
+            elif isinstance(module, RoutedExperts) and hasattr(
                 module.quant_method, "quant_config"
             ):
                 # TODO: support FusedMoE with prequant and 8bit.
                 if self.pre_quant and self.load_8bit:
                     raise ValueError(
-                        "Prequant BitsAndBytes 8bit models with FusedMoE "
+                        "Prequant BitsAndBytes 8bit models with RoutedExperts "
                         "is not supported yet."
                     )
                 # Get the corresponding weight name using module name and
@@ -508,7 +508,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             # dimension (dim=-1)
             elif isinstance(module, (RowParallelLinear,)):
                 self.column_sharded_weights_modules.append(name)
-            elif isinstance(module, FusedMoE):
+            elif isinstance(module, RoutedExperts):
                 expert_mapping = self.expert_params_mapping
                 for exp in expert_mapping:
                     if exp[-1] == "w2":
@@ -629,7 +629,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         expert_mapping = self.expert_params_mapping
         expert_qs_dict = {}
         for name, module in model.named_modules():
-            if not isinstance(module, FusedMoE):
+            if not isinstance(module, RoutedExperts):
                 continue
             w1_states_lst = []
             w2_states_lst = []

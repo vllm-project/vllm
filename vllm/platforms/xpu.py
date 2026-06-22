@@ -14,7 +14,6 @@ import vllm_xpu_kernels._xpu_C  # noqa
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import supports_xpu_graph
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -110,6 +109,13 @@ class XPUPlatform(Platform):
         dtype: torch.dtype,
         backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
+        if dtype == torch.float32:
+            logger.warning_once(
+                "Flash Attention on XPU does not support float32 dtype. "
+                "Falling back to Triton Attention backend for vit attention."
+            )
+            return AttentionBackendEnum.TRITON_ATTN
+
         if backend is not None:
             assert backend in cls.get_supported_vit_attn_backends(), (
                 f"Backend {backend} is not supported for vit attention. "
@@ -171,8 +177,6 @@ class XPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        parallel_config = vllm_config.parallel_config
-
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
 
@@ -183,6 +187,10 @@ class XPUPlatform(Platform):
         attention_config = vllm_config.attention_config
         if attention_config.backend is None:
             attention_config.backend = AttentionBackendEnum.FLASH_ATTN
+
+        # lazy import to avoid circular import
+        from vllm.utils.torch_utils import supports_xpu_graph
+
         if not supports_xpu_graph():
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
             logger.warning(
@@ -201,7 +209,6 @@ class XPUPlatform(Platform):
 
         pass_config = compilation_config.pass_config
         fusion_passes_to_disable = {
-            "enable_sp": "Sequence parallelism",
             "fuse_gemm_comms": "Async TP",
             "fuse_allreduce_rms": "AllReduce + RMSNorm fusion",
             "fuse_attn_quant": "Attention + quant fusion",
@@ -318,9 +325,8 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        from vllm.utils.torch_utils import supports_xccl
-
-        if not supports_xccl():
+        if not torch.distributed.is_xccl_available():
+            # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
             logger.warning(
                 "xccl is not enabled in this torch build, communication"
                 " is not available."
