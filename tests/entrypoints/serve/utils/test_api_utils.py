@@ -118,3 +118,49 @@ class TestGetMaxTokens:
                 input_length=150,
                 default_sampling_params={"max_tokens": 2048},
             )
+
+
+class TestSanitizeMessageFilePaths:
+    """sanitize_message should also strip file paths and traceback
+    frames, not just memory addresses - see #31683."""
+
+    def test_strips_traceback_style_frame(self):
+        msg = (
+            "1 validation error:\n"
+            "  {'type': 'list_type', 'loc': ('body', 'messages')}\n"
+            '\n  File "/usr/local/lib/python3.12/dist-packages/vllm/'
+            'entrypoints/serve/utils/api_utils.py", line 40, '
+            "in create_chat_completion\n"
+            "    POST /v1/chat/completions"
+        )
+        result = sanitize_message(msg)
+        assert "/usr/local/" not in result
+        assert "api_utils.py" not in result
+        assert "list_type" in result
+
+    def test_strips_arbitrary_absolute_path(self):
+        result = sanitize_message("Error in /home/user/project/vllm/server.py")
+        assert "/home/user" not in result
+
+    def test_strips_single_parent_container_path(self):
+        """Regression: /app/server.py and /workspace/server.py (common in
+        container deployments) were missed by the original {2,} quantifier."""
+        assert "/app/" not in sanitize_message("Error in /app/server.py")
+        assert "/workspace/" not in sanitize_message("Error in /workspace/server.py")
+
+    def test_preserves_api_endpoint_paths(self):
+        msg = "POST /v1/chat/completions failed"
+        assert "/v1/chat/completions" in sanitize_message(msg)
+
+    def test_preserves_short_field_references(self):
+        msg = "Invalid value for field 'body.messages'"
+        assert sanitize_message(msg) == msg
+
+    def test_strips_both_address_and_path(self):
+        msg = (
+            "<Request at 0x7f123> failed at "
+            "/usr/local/lib/python3.12/dist-packages/vllm/server.py"
+        )
+        result = sanitize_message(msg)
+        assert "0x" not in result
+        assert "/usr/local/" not in result
