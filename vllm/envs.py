@@ -98,7 +98,7 @@ if TYPE_CHECKING:
     VLLM_BUILD_COMMIT: str = "unknown"
     VLLM_BUILD_PIPELINE: str = "local"
     VLLM_BUILD_URL: str = ""
-    VLLM_IMAGE_TAG: str = "local/vllm-openai:dev"
+    VLLM_IMAGE_TAG: str = ""
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Literal["Debug", "Release", "RelWithDebInfo"] | None = None
     VERBOSE: bool = False
@@ -628,9 +628,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_BUILD_COMMIT": lambda: os.environ.get("VLLM_BUILD_COMMIT", "unknown"),
     "VLLM_BUILD_PIPELINE": lambda: os.environ.get("VLLM_BUILD_PIPELINE", "local"),
     "VLLM_BUILD_URL": lambda: os.environ.get("VLLM_BUILD_URL", ""),
-    "VLLM_IMAGE_TAG": lambda: os.environ.get(
-        "VLLM_IMAGE_TAG", "local/vllm-openai:dev"
-    ),
+    "VLLM_IMAGE_TAG": lambda: os.environ.get("VLLM_IMAGE_TAG", ""),
     # CMake build type
     # If not set, defaults to "Debug" or "RelWithDebInfo"
     # Available options: "Debug", "Release", "RelWithDebInfo"
