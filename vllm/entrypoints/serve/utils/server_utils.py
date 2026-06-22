@@ -427,6 +427,12 @@ async def validation_exception_handler(req: Request, exc: RequestValidationError
                 param = ctx_error.parameter
                 break
 
+    if param is None and errors:
+        first_error = errors[0]
+        loc = first_error.get("loc") if isinstance(first_error, dict) else None
+        if loc:
+            param = ".".join(str(part) for part in loc)
+
     exc_str = str(exc)
     errors_str = str(errors)
 
@@ -474,6 +480,13 @@ async def lifespan(app: FastAPI):
         finally:
             if task is not None:
                 task.cancel()
+            for attr_name in (
+                "openai_serving_transcription",
+                "openai_serving_translation",
+            ):
+                serving = getattr(app.state, attr_name, None)
+                if serving is not None and hasattr(serving, "shutdown"):
+                    serving.shutdown()
     finally:
         # Ensure app state including engine ref is gc'd
         del app.state

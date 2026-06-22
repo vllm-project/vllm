@@ -16,7 +16,7 @@ use std::sync::{Arc, OnceLock};
 use anyhow::{Context as _, Result};
 use axum::Router;
 use axum::serve::ListenerExt as _;
-pub use config::{ApiServerOptions, Config, CoordinatorMode, HttpListenerMode};
+pub use config::{ApiServerOptions, Config, CoordinatorMode, CorsConfig, HttpListenerMode};
 use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
 use tokio_stream::wrappers::TcpListenerStream;
@@ -35,9 +35,24 @@ use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
 use crate::state::AppState;
 
+/// Resolve the public model names accepted by the frontend.
+fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Vec<String> {
+    if served_model_name.is_empty() {
+        vec![model.to_string()]
+    } else {
+        served_model_name.to_vec()
+    }
+}
+
 /// Build the shared application state for one configured model and one engine
 /// client.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
+    // If no served names are specified, fall back to the backend model path so
+    // that the API always has at least one valid model ID. Use the same primary
+    // public name for frontend-side metrics labels.
+    let served_model_names = effective_served_model_names(&config.model, &config.served_model_name);
+    let metrics_model_name = served_model_names[0].clone();
+
     // Load both backends from the same model metadata so they stay in sync.
     let loaded = load_model_backends(
         &config.model,
@@ -68,32 +83,26 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         transport_mode: config.transport_mode.clone(),
         coordinator_mode,
-        model_name: config.model.clone(),
+        model_name: metrics_model_name,
         client_index: 0,
     })
     .await
     .context("failed to connect to engine core")?;
 
     let llm = Llm::new(client).with_log_stats(!config.disable_log_stats);
-    let text = TextLlm::new(llm, text_backend);
+    let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
 
     let chat = ChatLlm::new(text, chat_backend)
         .with_tool_call_parser(config.tool_call_parser.clone())
         .with_reasoning_parser(config.reasoning_parser.clone());
 
-    // If no served names are specified, fall back to the backend model path so
-    // that the API always has at least one valid model ID.
-    let served_model_names = if config.served_model_name.is_empty() {
-        vec![config.model.clone()]
-    } else {
-        config.served_model_name.clone()
-    };
-
     Ok(Arc::new(
         AppState::new(served_model_names, chat)
+            .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
             .with_server_info(ServerInfoSnapshot::from_config(config))
-            .with_api_keys(config.api_keys.clone()),
+            .with_api_keys(config.api_keys.clone())
+            .with_cors(config.cors.clone()),
     ))
 }
 
@@ -257,4 +266,27 @@ where
         .copied()
         .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
     state.shutdown(shutdown_deadline).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_served_model_names_falls_back_to_backend_model() {
+        assert_eq!(
+            effective_served_model_names("backend-model", &[]),
+            vec!["backend-model"]
+        );
+    }
+
+    #[test]
+    fn effective_served_model_names_preserves_public_names() {
+        let served_names = vec!["public-model".to_string(), "public-alias".to_string()];
+
+        assert_eq!(
+            effective_served_model_names("backend-model", &served_names),
+            served_names
+        );
+    }
 }

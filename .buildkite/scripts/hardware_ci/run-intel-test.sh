@@ -243,8 +243,10 @@ container_name="xpu_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head
 
 # ---- Command source selection ----
 commands=""
+commands_source=""
 if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
   commands="${VLLM_TEST_COMMANDS}"
+  commands_source="env"
   echo "Commands sourced from VLLM_TEST_COMMANDS (quoting preserved)"
 elif [[ $# -gt 0 ]]; then
   all_yaml=true
@@ -303,8 +305,12 @@ if [[ -z "$commands" ]]; then
 fi
 
 echo "Raw commands: $commands"
-commands=$(re_quote_pytest_markers "$commands")
-echo "After re-quoting: $commands"
+if [[ "$commands_source" != "env" ]]; then
+  commands=$(re_quote_pytest_markers "$commands")
+  echo "After re-quoting: $commands"
+else
+  echo "Skipping re-quoting for VLLM_TEST_COMMANDS input"
+fi
 commands=$(apply_intel_test_overrides "$commands")
 echo "Final commands: $commands"
 

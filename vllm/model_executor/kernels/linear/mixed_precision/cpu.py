@@ -175,7 +175,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             and torch.cpu._is_amx_tile_supported()
         )
         # layer.use_w4a8 = False
-        # AWQ format will be converted to GPTQ format in `AWQMarlinLinearMethod`
+        # AWQ format will be converted to GPTQ format in `AutoAWQMarlinLinearMethod`
         if layer.use_w4a8:
             self._process_gptq_weights_w4a8(layer)
         else:

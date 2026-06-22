@@ -75,13 +75,13 @@ RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRO
 # Install UMD
 RUN mkdir neo && \
     cd neo && \
-    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.24.8/intel-igc-core-2_2.24.8+20344_amd64.deb && \
-    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.24.8/intel-igc-opencl-2_2.24.8+20344_amd64.deb && \
-    wget https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/intel-ocloc_25.48.36300.8-0_amd64.deb && \
-    wget https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/intel-opencl-icd_25.48.36300.8-0_amd64.deb && \
-    wget https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/libigdgmm12_22.8.2_amd64.deb && \
-    wget https://github.com/intel/compute-runtime/releases/download/25.48.36300.8/libze-intel-gpu1_25.48.36300.8-0_amd64.deb && \
-    wget https://github.com/oneapi-src/level-zero/releases/download/v1.26.0/level-zero_1.26.0+u24.04_amd64.deb && \
+    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.34.4/intel-igc-core-2_2.34.4+21428_amd64.deb && \
+    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.34.4/intel-igc-opencl-2_2.34.4+21428_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/26.18.38308.1/intel-ocloc_26.18.38308.1-0_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/26.18.38308.1/intel-opencl-icd_26.18.38308.1-0_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/26.18.38308.1/libigdgmm12_22.10.0_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/26.18.38308.1/libze-intel-gpu1_26.18.38308.1-0_amd64.deb && \
+    wget https://github.com/oneapi-src/level-zero/releases/download/v1.28.2/level-zero_1.28.2+u24.04_amd64.deb && \
     dpkg -i *.deb && \
     cd .. && \
     rm -rf neo
@@ -131,8 +131,8 @@ CMD ["/bin/bash"]
 # never included in the final runtime image (mirrors ROCm's build_rixl stage).
 FROM vllm-base AS ucx-nixl-build
 
-ARG UCX_VERSION=e5d98879705239d254ede40b4a52891850cb5349
-ARG NIXL_VERSION=0.7.0
+ARG UCX_VERSION=v1.21.0-rc2
+ARG NIXL_VERSION=0.10.1
 
 # Build-time only: compiler, autotools, and verbs dev headers
 RUN apt-get update -y && apt-get install -y --no-install-recommends \
@@ -167,8 +167,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM vllm-base AS vllm-openai
 
-ARG UCX_VERSION=e5d98879705239d254ede40b4a52891850cb5349
-ARG NIXL_VERSION=0.7.0
+ARG NIXL_VERSION=0.10.1
 
 # Copy compiled UCX runtime libraries and the pre-built NIXL wheel.
 # No compiler or autotools are installed in this stage.
@@ -192,7 +191,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     ibverbs-providers \
     librdmacm1t64 \
     && rm -rf /var/lib/apt/lists/* \
-    && uv pip install --no-deps /tmp/nixl_wheels/nixl-*.whl \
+    && uv pip install --no-deps /tmp/nixl_wheels/nixl*.whl \
+    && uv pip install nixl==${NIXL_VERSION} \
     && rm -rf /tmp/nixl_wheels
 
 RUN --mount=type=cache,target=/root/.cache/uv \
