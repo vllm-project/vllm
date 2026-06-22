@@ -160,7 +160,7 @@ steps:
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
 
 - label: Distributed Tests (8xH100)
-  key: distributed-tests-8-gpus-h100
+  key: distributed-tests-8xh100
   timeout_in_minutes: 10
   device: h100
   num_devices: 8
@@ -181,7 +181,7 @@ steps:
   - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
 - label: Distributed Tests (4xA100)
-  key: distributed-tests-4-gpus-a100
+  key: distributed-tests-4xa100
   device: a100
   optional: true
   num_devices: 4
@@ -196,7 +196,7 @@ steps:
   - pytest -v -s -x lora/test_mixtral.py
 
 - label: Distributed Tests (2xH100)
-  key: distributed-tests-2-gpus-h100
+  key: distributed-tests-2xh100
   timeout_in_minutes: 15
   device: h100
   optional: true
@@ -211,7 +211,7 @@ steps:
     - pytest -v -s tests/distributed/test_packed_tensor.py
 
 - label: Distributed Tests (2xB200)
-  key: distributed-tests-2-gpus-b200
+  key: distributed-tests-2xb200
   device: b200-k8s
   optional: true
   working_dir: "/vllm-workspace/"

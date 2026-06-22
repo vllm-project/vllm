@@ -243,7 +243,7 @@ steps:
 
  
 - label: Kernels FP8 MoE Test (1xH100)
-  key: kernels-fp8-moe-test-1-h100
+  key: kernels-fp8-moe-test-1xh100
   timeout_in_minutes: 90
   device: h100
   num_devices: 1
@@ -260,7 +260,7 @@ steps:
     - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
 - label: Kernels FP8 MoE Test (2xH100)
-  key: kernels-fp8-moe-test-2-h100s
+  key: kernels-fp8-moe-test-2xh100
   timeout_in_minutes: 90
   device: h100
   num_devices: 2
