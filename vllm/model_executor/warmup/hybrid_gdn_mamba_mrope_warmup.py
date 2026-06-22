@@ -42,13 +42,6 @@ def _iter_mrope_attention_modules(
             yield module, rotary_emb
 
 
-def has_hybrid_gdn_mamba_mrope(model: torch.nn.Module) -> bool:
-    """Return whether the model has kernels covered by this warmup helper."""
-    return any(_iter_qwen_gdn_layers(model)) or any(
-        _iter_mrope_attention_modules(model)
-    )
-
-
 def _warmup_qwen_gdn_layer(
     layer: QwenGatedDeltaNetAttention,
     *,
