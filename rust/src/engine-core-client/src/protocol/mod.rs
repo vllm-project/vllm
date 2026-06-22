@@ -282,9 +282,6 @@ pub struct EngineCoreSamplingParams {
     /// user-facing `-1` sentinel is normalized to `None` by the frontend before
     /// reaching this DTO, so only non-negative values are sent. Enforced
     /// engine-side (and only when a reasoning parser is configured).
-    ///
-    /// Mirrors Python's `SamplingParams.thinking_token_budget` (`int | None`):
-    /// <https://github.com/vllm-project/vllm/blob/ecf9d83520eb217401b47d8a5451a27c5231b8c2/vllm/sampling_params.py#L344>
     pub thinking_token_budget: Option<u64>,
     /// Number of log probabilities to return per generated token.
     ///
