@@ -124,7 +124,7 @@ def test_pack_candidates_offsets_score_by_row_start():
     # Row-relative top-3 indices, as top_k_per_row_prefill emits them.
     topk_idx = torch.tensor([[1, 3, 2], [0, 2, 4]], dtype=torch.int32)
     cand = _dcp_pack_local_candidates(
-        topk_idx, logits, local_valid, cp_rank=0, dcp_world_size=world,
+        topk_idx, logits, local_valid, dcp_rank=0, dcp_world_size=world,
         row_start=row_start,
     )
     scores = cand[..., 1]
@@ -132,6 +132,6 @@ def test_pack_candidates_offsets_score_by_row_start():
     assert torch.allclose(scores[0], torch.tensor([5.0, 4.0, 2.0]))
     # Row 1 (ks=4): logits[1, 4+{0,2,4}] = {9,8,7}, NOT logits[1, {0,2,4}]=-100.
     assert torch.allclose(scores[1], torch.tensor([9.0, 8.0, 7.0]))
-    # global_pos stays row-relative: g = cp_rank + rel_idx*world.
+    # global_pos stays row-relative: g = dcp_rank + rel_idx*world.
     gpos = cand[..., 0]
     assert torch.equal(gpos[1], torch.tensor([0.0, 4.0, 8.0]))  # 0+{0,2,4}*2

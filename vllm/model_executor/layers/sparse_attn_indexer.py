@@ -83,14 +83,14 @@ def _dcp_pack_local_candidates(
     topk_indices: torch.Tensor,
     logits: torch.Tensor,
     local_valid: torch.Tensor,
-    cp_rank: int,
+    dcp_rank: int,
     dcp_world_size: int,
     row_start: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Pack this rank's local top-k into ``(global_pos, score)`` candidates.
 
     Returns a ``[T, K, 2]`` float32 tensor: ``[..., 0]`` is the global position
-    ``g = cp_rank + local_idx * dcp_world_size`` (CP_INTERLEAVE=1) and
+    ``g = dcp_rank + local_idx * dcp_world_size`` (CP_INTERLEAVE=1) and
     ``[..., 1]`` the local indexer score, with invalid slots set to
     ``(-1, -inf)``. Positions are < max_model_len (<< 2**24), so the float32
     packing of the position is lossless.
@@ -116,7 +116,7 @@ def _dcp_pack_local_candidates(
     local_scores = torch.gather(logits.float(), 1, score_cols).masked_fill(
         invalid, float("-inf")
     )
-    global_pos = cp_rank + idx_safe.to(torch.int32) * dcp_world_size
+    global_pos = dcp_rank + idx_safe.to(torch.int32) * dcp_world_size
     global_pos = torch.where(invalid, torch.full_like(global_pos, -1), global_pos)
     return torch.stack(
         [global_pos.to(torch.float32), local_scores.to(torch.float32)], dim=-1
@@ -127,7 +127,7 @@ def _dcp_select_owned_global_topk(
     cand_all: torch.Tensor,
     dcp_world_size: int,
     topk_tokens: int,
-    cp_rank: int,
+    dcp_rank: int,
 ) -> torch.Tensor:
     """Select the global top-k from all-gathered candidates and return this
     rank's owned positions as LOCAL shard indices.
@@ -164,7 +164,7 @@ def _dcp_select_owned_global_topk(
     # Keep only the selected positions this rank owns, mapped to its LOCAL shard
     # index; positions owned by other ranks become -1 (the attention kernel and
     # LSE merge treat -1 as "skip", and the other ranks contribute them).
-    owned = (global_sel >= 0) & (global_sel % dcp_world_size == cp_rank)
+    owned = (global_sel >= 0) & (global_sel % dcp_world_size == dcp_rank)
     return torch.where(
         owned, global_sel // dcp_world_size, torch.full_like(global_sel, -1)
     )
@@ -174,7 +174,7 @@ def _dcp_global_topk_merge(
     topk_indices: torch.Tensor,
     logits: torch.Tensor,
     local_valid: torch.Tensor,
-    cp_rank: int,
+    dcp_rank: int,
     dcp_world_size: int,
     topk_tokens: int,
     row_start: torch.Tensor | None = None,
@@ -198,7 +198,7 @@ def _dcp_global_topk_merge(
     global top-k. Writes ``topk_indices`` in place.
     """
     cand = _dcp_pack_local_candidates(
-        topk_indices, logits, local_valid, cp_rank, dcp_world_size, row_start
+        topk_indices, logits, local_valid, dcp_rank, dcp_world_size, row_start
     )
     # This is an extra in-graph collective: under FULL cudagraph the indexer op
     # is captured (the @eager_break_during_capture break is bypassed), so this
@@ -208,7 +208,7 @@ def _dcp_global_topk_merge(
     # and replay at C2 before enabling exact by default.
     cand_all = get_dcp_group().all_gather(cand, dim=0)
     topk_indices.copy_(
-        _dcp_select_owned_global_topk(cand_all, dcp_world_size, topk_tokens, cp_rank)
+        _dcp_select_owned_global_topk(cand_all, dcp_world_size, topk_tokens, dcp_rank)
     )
 
 
@@ -285,7 +285,7 @@ def sparse_attn_indexer(
     # (union, the default) or DCP is inactive, the top-k stays purely local and
     # this path is byte-identical to the non-DCP behavior.
     dcp_world_size = attn_metadata_narrowed.dcp_world_size
-    cp_rank = attn_metadata_narrowed.cp_rank
+    dcp_rank = attn_metadata_narrowed.dcp_rank
     exact_merge = (
         dcp_world_size > 1 and attn_metadata_narrowed.sparse_indexer_mode == "exact"
     )
@@ -414,7 +414,7 @@ def sparse_attn_indexer(
                     topk_indices,
                     logits,
                     local_valid,
-                    cp_rank,
+                    dcp_rank,
                     dcp_world_size,
                     topk_tokens,
                     row_start=row_start,
@@ -533,7 +533,7 @@ def sparse_attn_indexer(
                 topk_indices,
                 logits,
                 local_valid,
-                cp_rank,
+                dcp_rank,
                 dcp_world_size,
                 topk_tokens,
             )

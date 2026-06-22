@@ -222,7 +222,7 @@ class DeepseekV32IndexerMetadata:
     # indexer op reads these to merge per-rank local top-k into a single global
     # top-k under sparse_indexer_mode == "exact" (see sparse_attn_indexer).
     dcp_world_size: int = 1
-    cp_rank: int = 0
+    dcp_rank: int = 0
     sparse_indexer_mode: str = "union"
 
 
@@ -370,7 +370,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # Fail-closed for the exact-merge global top-k. It runs in this shared
         # indexer op for ANY sparse backend, so guard its assumptions here
         # rather than relying on an attention-backend builder:
-        # - CP_INTERLEAVE == 1: the local->global remap is cp_rank + i*world
+        # - CP_INTERLEAVE == 1: the local->global remap is dcp_rank + i*world
         #   (rank r owns global positions {r, r+N, ...}); interleave > 1 uses a
         #   different ownership and is NOT enforced anywhere else
         #   (supports_dcp_with_varlen only gates the reorder threshold).
@@ -821,7 +821,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             prefill=prefill_metadata,
             decode=decode_metadata,
             dcp_world_size=self.dcp_world_size,
-            cp_rank=self.dcp_rank,
+            dcp_rank=self.dcp_rank,
             sparse_indexer_mode=self.sparse_indexer_mode,
         )
 
