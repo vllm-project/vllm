@@ -98,10 +98,8 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         if self.vllm_flash_attn_version == 4:
             register_cutedsl_warmup_provider(self)
 
-    def get_cutedsl_warmup_compile_units(
-        self, vllm_config: "VllmConfig"
-    ) -> tuple[CuTeDSLCompileUnit, ...]:
-        if vllm_config is not self.vllm_config or self.vllm_flash_attn_version != 4:
+    def get_cutedsl_warmup_compile_units(self) -> tuple[CuTeDSLCompileUnit, ...]:
+        if self.vllm_flash_attn_version != 4:
             return ()
         if compile_flash_attn_varlen_func_from_specs is None:
             raise RuntimeError(
@@ -109,7 +107,7 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
                 "fall back to synthetic forward passes."
             )
 
-        dtype = vllm_config.model_config.dtype
+        dtype = self.vllm_config.model_config.dtype
         if dtype not in self.supported_dtypes:
             dtype = torch.bfloat16
 

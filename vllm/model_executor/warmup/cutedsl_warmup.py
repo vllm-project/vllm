@@ -40,15 +40,14 @@ def register_cutedsl_warmup_provider(provider: object) -> None:
     _CUTEDSL_WARMUP_PROVIDERS.add(provider)
 
 
-def _iter_cutedsl_warmup_compile_units(
-    worker: Worker,
-) -> Iterable[CuTeDSLCompileUnit]:
+# Yield compile units from registered providers.
+def _iter_cutedsl_warmup_compile_units() -> Iterable[CuTeDSLCompileUnit]:
     for provider in tuple(_CUTEDSL_WARMUP_PROVIDERS):
         get_units = getattr(provider, "get_cutedsl_warmup_compile_units", None)
-        if get_units is None:
+        if not callable(get_units):
             continue
 
-        compile_units = get_units(worker.vllm_config)
+        compile_units = get_units()
         if compile_units is None:
             continue
         for unit in compile_units:
@@ -108,9 +107,7 @@ def cutedsl_warmup(worker: Worker) -> None:
         logger.info("Skipping CuTeDSL warmup for pooling model.")
         return
 
-    compile_units = _collect_unique_compile_units(
-        _iter_cutedsl_warmup_compile_units(worker)
-    )
+    compile_units = _collect_unique_compile_units(_iter_cutedsl_warmup_compile_units())
     if not compile_units:
         logger.info("Skipping CuTeDSL warmup because no compile units were requested.")
         return
