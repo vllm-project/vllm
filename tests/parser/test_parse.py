@@ -3,6 +3,7 @@
 
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -82,12 +83,55 @@ TOOLS = [
 ]
 
 
-def make_parser(tokenizer, reasoning=False, tool=False):
+KIMI_K2_MODEL_CONFIG = SimpleNamespace(
+    hf_text_config=SimpleNamespace(model_type="kimi_k2"),
+    hf_overrides=None,
+)
+
+HISTORY_MESSAGES = [
+    {"role": "user", "content": "first"},
+    {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "functions.get_current_weather:0",
+                "type": "function",
+                "function": {
+                    "name": "get_current_weather",
+                    "arguments": "{}",
+                },
+            },
+            {
+                "id": "functions.get_forecast:1",
+                "type": "function",
+                "function": {
+                    "name": "get_forecast",
+                    "arguments": "{}",
+                },
+            },
+        ],
+    },
+    {
+        "role": "tool",
+        "tool_call_id": "functions.get_current_weather:0",
+        "content": "{}",
+    },
+    {
+        "role": "tool",
+        "tool_call_id": "functions.get_forecast:1",
+        "content": "{}",
+    },
+    {"role": "user", "content": "again"},
+]
+
+
+def make_parser(tokenizer, reasoning=False, tool=False, **kwargs):
     class TestParser(DelegatingParser):
         reasoning_parser_cls = ThinkReasoningParser if reasoning else None
         tool_parser_cls = Hermes2ProToolParser if tool else None
 
-    return TestParser(tokenizer)
+    return TestParser(tokenizer, **kwargs)
 
 
 @pytest.mark.parametrize(
@@ -230,6 +274,84 @@ def test_parse_required_tool_choice(tokenizer):
     assert json.loads(tool_calls[0].arguments) == {"city": "Dallas"}
     assert tool_calls[1].name == "get_time"
     assert json.loads(tool_calls[1].arguments) == {"timezone": "UTC"}
+
+
+def test_parse_required_tool_choice_kimi_k2_ids(tokenizer):
+    parser = make_parser(
+        tokenizer, reasoning=False, tool=True, model_config=KIMI_K2_MODEL_CONFIG
+    )
+    functions_json = json.dumps(
+        [
+            {"name": "get_current_weather", "parameters": {"city": "Dallas"}},
+            {"name": "get_forecast", "parameters": {"city": "Dallas", "days": 2}},
+        ]
+    )
+    request = make_request(tools=TOOLS, tool_choice="required")
+    _, content, tool_calls = parser.parse(
+        functions_json, request, enable_auto_tools=True
+    )
+
+    assert content is None
+    assert tool_calls is not None
+    assert [tc.id for tc in tool_calls] == [
+        "functions.get_current_weather:0",
+        "functions.get_forecast:1",
+    ]
+
+
+def test_parse_required_tool_choice_kimi_k2_ids_after_history(tokenizer):
+    parser = make_parser(
+        tokenizer, reasoning=False, tool=True, model_config=KIMI_K2_MODEL_CONFIG
+    )
+    functions_json = json.dumps(
+        [{"name": "get_current_weather", "parameters": {"city": "Dallas"}}]
+    )
+    request = make_request(
+        messages=HISTORY_MESSAGES,
+        tools=TOOLS,
+        tool_choice="required",
+    )
+    _, _, tool_calls = parser.parse(functions_json, request, enable_auto_tools=True)
+
+    assert tool_calls is not None
+    assert tool_calls[0].id == "functions.get_current_weather:2"
+
+
+def test_parse_required_tool_choice_random_ids_ignore_history(tokenizer):
+    parser = make_parser(tokenizer, reasoning=False, tool=True)
+    functions_json = json.dumps(
+        [{"name": "get_current_weather", "parameters": {"city": "Dallas"}}]
+    )
+    request = make_request(
+        messages=HISTORY_MESSAGES,
+        tools=TOOLS,
+        tool_choice="required",
+    )
+    _, _, tool_calls = parser.parse(functions_json, request, enable_auto_tools=True)
+
+    assert tool_calls is not None
+    assert tool_calls[0].id is not None
+    assert tool_calls[0].id.startswith("chatcmpl-tool-")
+
+
+def test_parse_named_tool_choice_kimi_k2_id(tokenizer):
+    parser = make_parser(
+        tokenizer, reasoning=False, tool=True, model_config=KIMI_K2_MODEL_CONFIG
+    )
+    request = make_request(
+        tools=TOOLS,
+        tool_choice={
+            "type": "function",
+            "function": {"name": "get_weather"},
+        },
+    )
+    _, content, tool_calls = parser.parse(
+        TOOL_ARGUMENTS, request, enable_auto_tools=True
+    )
+
+    assert content is None
+    assert tool_calls is not None
+    assert tool_calls[0].id == "functions.get_weather:0"
 
 
 def test_parse_named_tool_choice_content_none(tokenizer):

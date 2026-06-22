@@ -4,13 +4,14 @@
 import contextlib
 import json
 from abc import abstractmethod
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 
 from openai.types.responses import ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
 
+from vllm.entrypoints.chat_utils import get_tool_call_id_type, make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
@@ -46,6 +47,7 @@ class StreamState:
     previous_text: str = ""
     previous_token_ids: list[int] = field(default_factory=list)
     history_tool_call_cnt: int = 0
+    history_tool_call_cnt_initialized: bool = False
     tool_call_id_type: str = "random"
     # only used for "required" and "named tool" choices,
     # tracks whether function name has been fully returned in the stream yet
@@ -108,6 +110,7 @@ class Parser:
         tokenizer: TokenizerLike,
         tools: list[Tool] | None = None,
         *args,
+        model_config=None,
         **kwargs,
     ):
         self.model_tokenizer = tokenizer
@@ -124,7 +127,14 @@ class Parser:
             self._reasoning_parser is None
             or self._reasoning_parser.engine_based_streaming
         ) and (self._tool_parser is None or self._tool_parser.engine_based_streaming)
-        self._stream_state = StreamState(engine_based=self._engine_based)
+        self._stream_state = StreamState(
+            tool_call_id_type=(
+                get_tool_call_id_type(model_config)
+                if model_config is not None
+                else "random"
+            ),
+            engine_based=self._engine_based,
+        )
 
     @cached_property
     def vocab(self) -> dict[str, int]:
@@ -148,6 +158,61 @@ class Parser:
     @tool_parser.setter
     def tool_parser(self, parser: ToolParser | None) -> None:
         self._tool_parser = parser
+
+    @staticmethod
+    def _count_tool_calls(tool_calls) -> int:
+        if tool_calls is None:
+            return 0
+        if isinstance(tool_calls, (str, bytes, dict)):
+            return 1
+        if isinstance(tool_calls, Iterable):
+            return len(list(tool_calls))
+        return 1
+
+    @classmethod
+    def _count_history_tool_calls(
+        cls,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> int:
+        messages = getattr(request, "messages", None)
+        if isinstance(messages, list):
+            return sum(
+                cls._count_tool_calls(msg.get("tool_calls"))
+                for msg in messages
+                if isinstance(msg, dict) and msg.get("role") == "assistant"
+            )
+
+        response_items = getattr(request, "input", None)
+        if not isinstance(response_items, list):
+            return 0
+
+        count = 0
+        for item in response_items:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type == "function_call":
+                    count += 1
+                elif item.get("role") == "assistant":
+                    count += cls._count_tool_calls(item.get("tool_calls"))
+                continue
+
+            if getattr(item, "type", None) == "function_call":
+                count += 1
+
+        return count
+
+    def _initialize_history_tool_call_cnt(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> None:
+        state = self._stream_state
+        if state.history_tool_call_cnt_initialized:
+            return
+        if state.tool_call_id_type != "kimi_k2":
+            state.history_tool_call_cnt_initialized = True
+            return
+        state.history_tool_call_cnt = self._count_history_tool_calls(request)
+        state.history_tool_call_cnt_initialized = True
 
     # ========== Reasoning Parser Methods ==========
 
@@ -375,6 +440,16 @@ class DelegatingParser(Parser):
             return request.tool_choice.function.name
         raise ValueError("Invalid tool_choice for function name extraction.")
 
+    def _make_tool_call_id(self, function_name: str) -> str:
+        state = self._stream_state
+        tool_call_id = make_tool_call_id(
+            id_type=state.tool_call_id_type,
+            func_name=function_name,
+            idx=state.history_tool_call_cnt,
+        )
+        state.history_tool_call_cnt += 1
+        return tool_call_id
+
     def _extract_tool_calls(
         self,
         content: str | None,
@@ -404,9 +479,11 @@ class DelegatingParser(Parser):
         if is_named_tool_choice and supports_required_and_named:
             if content is None:
                 return [], None
+            function_name = self._get_function_name(request)
             tool_calls.append(
                 FunctionCall(
-                    name=self._get_function_name(request),
+                    id=self._make_tool_call_id(function_name),
+                    name=function_name,
                     arguments=content,
                 )
             )
@@ -422,6 +499,7 @@ class DelegatingParser(Parser):
             for tc in parsed_calls:
                 tool_calls.append(
                     FunctionCall(
+                        id=self._make_tool_call_id(tc.name),
                         name=tc.name,
                         arguments=json.dumps(tc.parameters, ensure_ascii=False),
                     )
@@ -733,6 +811,7 @@ class DelegatingParser(Parser):
         enable_auto_tools: bool = False,
         model_output_token_ids: Sequence[int] = (),
     ) -> tuple[str | None, str | None, list[FunctionCall] | None]:
+        self._initialize_history_tool_call_cnt(request)
         reasoning, content = self.extract_reasoning(model_output, request)
         tool_calls, content = self._extract_tool_calls(
             content=content,
@@ -750,6 +829,7 @@ class DelegatingParser(Parser):
         *,
         finished: bool,
     ) -> DeltaMessage | None:
+        self._initialize_history_tool_call_cnt(request)
         state = self._stream_state
 
         if not state.prompt_reasoning_checked and prompt_token_ids is not None:

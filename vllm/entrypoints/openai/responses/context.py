@@ -302,6 +302,7 @@ class ParsableContext(ConversationContext):
         response_parser: Parser | None = None,
         enable_auto_tools: bool = False,
         tool_call_id_type: str = "random",
+        model_config=None,
     ):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -326,6 +327,7 @@ class ParsableContext(ConversationContext):
                 tokenizer,
                 tools=request.tools,
                 chat_template_kwargs=chat_template_kwargs,
+                model_config=model_config,
             )
 
         self.parser_cls = parser_cls

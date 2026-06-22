@@ -494,6 +494,7 @@ class OpenAIServingResponses(OpenAIServing):
                         chat_template_content_format=self.chat_template_content_format,
                         enable_auto_tools=self.enable_auto_tools,
                         tool_call_id_type=self.tool_call_id_type,
+                        model_config=self.model_config,
                     )
                 else:
                     context = SimpleContext(
@@ -1062,7 +1063,14 @@ class OpenAIServingResponses(OpenAIServing):
             )
 
         # Use parser to extract reasoning, content, and tool calls
-        if parser:
+        if self.parser:
+            chat_template_kwargs = self._effective_chat_template_kwargs(request)
+            parser = self.parser(
+                tokenizer,
+                request.tools,
+                chat_template_kwargs=chat_template_kwargs,
+                model_config=self.model_config,
+            )
             reasoning, content, tool_calls = parser.parse(
                 final_output.text,
                 request,
@@ -1380,6 +1388,16 @@ class OpenAIServingResponses(OpenAIServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor()
+        parser = (
+            self.parser(
+                tokenizer,
+                request.tools,
+                chat_template_kwargs=self._effective_chat_template_kwargs(request),
+                model_config=self.model_config,
+            )
+            if self.parser
+            else None
+        )
 
         def _get_logprobs(
             output: CompletionOutput,

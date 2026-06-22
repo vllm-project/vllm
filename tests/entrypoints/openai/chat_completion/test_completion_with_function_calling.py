@@ -250,7 +250,6 @@ async def k2_client(k2_server):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="Skipping Kimi K2 tool ID test")
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("stream", [True, False])
 @pytest.mark.parametrize("tool_choice", ["required"])
