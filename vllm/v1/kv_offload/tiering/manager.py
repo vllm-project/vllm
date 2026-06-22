@@ -59,7 +59,7 @@ class PendingPromotion:
     block_ids: list[int] = field(default_factory=list)
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestState:
     pending_primary_stores: int = 0
     finished_req_context: ReqContext | None = None
@@ -549,8 +549,8 @@ class TieringOffloadingManager(OffloadingManager):
         req_id = req_context.req_id
         state = self._req_state.get(req_id)
         if state is not None:
-            if state.pending_primary_stores > 0:
-                state.pending_primary_stores -= 1
+            assert state.pending_primary_stores > 0
+            state.pending_primary_stores -= 1
             self._maybe_finish_secondary_tiers(req_id)
 
     @override
