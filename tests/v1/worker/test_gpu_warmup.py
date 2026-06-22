@@ -48,6 +48,14 @@ def test_v1_attention_warmup_uses_forced_attention_dummy_runs(
             "force_attention": True,
             "uniform_decode": False,
             "num_reqs_override": 1,
+        },
+        {
+            "num_tokens": 64,
+            "skip_eplb": True,
+            "is_profile": True,
+            "force_attention": True,
+            "uniform_decode": False,
+            "num_reqs_override": 1,
             "profile_seq_lens": 4096,
         },
     ]

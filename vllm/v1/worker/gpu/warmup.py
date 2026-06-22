@@ -210,10 +210,21 @@ def warmup_v1_attention_kernels(model_runner: Any) -> None:
             decode_kwargs["profile_seq_lens"] = decode_seq_len
         dummy_run(**decode_kwargs)
 
-    # Keep this representative cached-prefill shape intentionally small. It
-    # covers request-shaped attention metadata without turning warmup into a
+    # Keep these representative prefill shapes intentionally small. The first
+    # one covers pure-prefill attention kernels, and the second covers
+    # cached-prefill attention metadata without turning warmup into a
     # long-prompt benchmark.
     prefill_tokens = min(max_num_tokens, max_num_batched_tokens, max_model_len, 64)
+    if prefill_tokens > 1:
+        dummy_run(
+            num_tokens=prefill_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
+            uniform_decode=False,
+            num_reqs_override=1,
+        )
+
     prefill_seq_len = min(max_model_len, max(prefill_tokens + 1, 8192))
     if prefill_tokens > 1 and prefill_seq_len > prefill_tokens:
         dummy_run(
