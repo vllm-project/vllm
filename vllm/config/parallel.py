@@ -94,13 +94,20 @@ class EPLBConfig:
     - "torch_gloo": Use torch.distributed gloo with CPU staging
     - "nixl": Use NIXL/ RIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
-    - None: Auto-select backend ("torch_gloo" for async, "torch_nccl" for sync)
+    - None: Auto-select backend (prefers "nixl", falls back to "torch_gloo")
     """
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.use_async and self.policy != "default":
             raise ValueError("Async EPLB is only supported with the default policy.")
+        if self.use_async and self.communicator in ("torch_nccl", "pynccl"):
+            raise ValueError(
+                f"{self.communicator} communicator is incompatible with "
+                "async EPLB due to NCCL multi-stream conflicts. Use "
+                "'torch_gloo' or 'nixl' instead, or leave communicator "
+                "unset for automatic selection."
+            )
         if self.log_balancedness and self.log_balancedness_interval <= 0:
             raise ValueError("log_balancedness_interval must be greater than 0.")
         return self
@@ -295,6 +302,14 @@ class ParallelConfig:
     Each entry must use `numactl --physcpubind` CPU-list syntax, for example
     `"0-3"` or `"0,2,4-7"`.
     """
+    assigned_physical_gpu_ids: list[int] | None = None
+    """Mapping from vLLM-local logical GPU IDs to physical GPU IDs.
+
+    For example, ``[2, 3]`` means logical GPU 0 maps to physical GPU 2,
+    and logical GPU 1 maps to physical GPU 3. Physical IDs are used only
+    at platform/topology boundaries such as NVML, NIC affinity, P2P
+    checks, and final CUDA device selection when needed. When None,
+    logical IDs map to visible device IDs in order."""
 
     distributed_timeout_seconds: int | None = None
     """Timeout in seconds for distributed operations (e.g., init_process_group).
@@ -765,6 +780,7 @@ class ParallelConfig:
             "numa_bind",
             "numa_bind_nodes",
             "numa_bind_cpus",
+            "assigned_physical_gpu_ids",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -787,6 +803,13 @@ class ParallelConfig:
         if self.enable_elastic_ep:
             if not self.enable_eplb:
                 raise ValueError("Elastic EP is only supported with enable_eplb=True.")
+            if self.eplb_config.use_async:
+                raise ValueError(
+                    "Elastic EP requires the pynccl communicator, which is "
+                    "incompatible with async EPLB due to NCCL multi-stream "
+                    "conflicts. Disable async EPLB (eplb_config.use_async=False) "
+                    "to use elastic EP."
+                )
             if self.pipeline_parallel_size > 1:
                 raise ValueError(
                     "Elastic EP is not supported with pipeline parallelism "

@@ -307,7 +307,10 @@ class ServingTokens(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
+        if (
+            self.enable_prompt_tokens_details
+            and final_res.num_cached_tokens is not None
+        ):
             # This info is not available at the /coordinator level
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens
@@ -397,6 +400,14 @@ class ServingTokens(OpenAIServing):
                     else:
                         logprobs = None
 
+                    routed_experts_b64 = None
+                    if output.routed_experts is not None:
+                        buf = io.BytesIO()
+                        np.save(buf, output.routed_experts)
+                        routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
+                            "ascii"
+                        )
+
                     chunk = GenerateStreamResponse(
                         request_id=request_id,
                         choices=[
@@ -405,6 +416,7 @@ class ServingTokens(OpenAIServing):
                                 logprobs=logprobs,
                                 finish_reason=finish_reason,
                                 token_ids=as_list(delta_token_ids),
+                                routed_experts=routed_experts_b64,
                             )
                         ],
                     )
@@ -424,7 +436,7 @@ class ServingTokens(OpenAIServing):
                 total_tokens=num_prompt_tokens + total_completion_tokens,
             )
 
-            if self.enable_prompt_tokens_details and num_cached_tokens:
+            if self.enable_prompt_tokens_details and num_cached_tokens is not None:
                 final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
                     cached_tokens=num_cached_tokens
                 )
