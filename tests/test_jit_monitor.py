@@ -4,6 +4,7 @@ import os
 import sys
 from contextlib import contextmanager
 from types import ModuleType, SimpleNamespace
+from typing import Any, cast
 from unittest import mock
 
 import pytest
@@ -39,26 +40,26 @@ def _make_fake_knobs(*, autotuning_print=False, jit_hook=None):
 
 def _fake_cute_import_modules(compile_fn):
     """Fake Python's parent package + submodule for ``import cutlass.cute``."""
-    fake_cute = ModuleType("cutlass.cute")
-    setattr(fake_cute, "compile", compile_fn)
-    fake_parent_package = ModuleType("cutlass")
+    fake_cute = cast(Any, ModuleType("cutlass.cute"))
+    fake_cute.compile = compile_fn
+    fake_parent_package = cast(Any, ModuleType("cutlass"))
     fake_parent_package.__path__ = []
-    setattr(fake_parent_package, "cute", fake_cute)
+    fake_parent_package.cute = fake_cute
     return {
         "cutlass": fake_parent_package,
         "cutlass.cute": fake_cute,
     }
 
 
-def _default_cute_compile(*args, **kwargs):
+def _fake_cute_compile(*args, **kwargs):
     return "compiled"
 
 
 @contextmanager
-def _patch_jit_modules(fake_knobs, *, cute_compile=_default_cute_compile):
+def _patch_jit_modules(fake_knobs, *, cute_compile=_fake_cute_compile):
     """Patch the Triton and CuTeDSL imports touched by ``jit_monitor.activate``."""
-    fake_triton = ModuleType("triton")
-    setattr(fake_triton, "knobs", fake_knobs)
+    fake_triton = cast(Any, ModuleType("triton"))
+    fake_triton.knobs = fake_knobs
     with (
         mock.patch.dict(
             sys.modules,
@@ -231,7 +232,7 @@ class TestNoTritonFallback:
 
 
 class TestCuTeDSLHook:
-    def test_cutedsl_compile_wrapper_logs_warning_once_by_default(self):
+    def test_compile_logs_warning(self):
         def compile_fn(*args, **kwargs):
             return "compiled"
 
@@ -247,7 +248,7 @@ class TestCuTeDSLHook:
         msg = warning_once.call_args[0][0] % warning_once.call_args[0][1:]
         assert "CuTeDSL JIT compilation during inference" in msg
 
-    def test_cutedsl_compile_wrapper_logs_verbose_warning(self):
+    def test_compile_logs_verbose_warning(self):
         def compile_fn(*args, **kwargs):
             return "compiled"
 
@@ -263,7 +264,7 @@ class TestCuTeDSLHook:
         msg = warning.call_args[0][0] % warning.call_args[0][1:]
         assert "CuTeDSL JIT compilation during inference" in msg
 
-    def test_cutedsl_error_mode_raises(self):
+    def test_error_mode_raises(self):
         def compile_fn(*args, **kwargs):
             return "compiled"
 

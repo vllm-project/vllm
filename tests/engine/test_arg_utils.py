@@ -214,14 +214,15 @@ def test_jit_monitor_verbose_arg():
     assert EngineArgs(model="test", jit_monitor_verbose=True).jit_monitor_verbose
 
 
-def test_jit_monitor_mode_arg():
+@pytest.mark.parametrize("mode", ["warn", "error"])
+def test_jit_monitor_mode_arg(mode):
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args(["--jit-monitor-mode", "error"])
+    args = parser.parse_args(["--jit-monitor-mode", mode])
 
-    assert args.jit_monitor_mode == "error"
-    engine_args = EngineArgs(model="test", jit_monitor_mode="error")
-    assert engine_args.jit_monitor_mode == "error"
-    assert engine_args.create_observability_config().jit_monitor_mode == "error"
+    assert args.jit_monitor_mode == mode
+    engine_args = EngineArgs(model="test", jit_monitor_mode=mode)
+    assert engine_args.jit_monitor_mode == mode
+    assert engine_args.create_observability_config().jit_monitor_mode == mode
 
 
 def test_hf_token_get_kwargs():
