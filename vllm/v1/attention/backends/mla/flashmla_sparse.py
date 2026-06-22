@@ -985,8 +985,8 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
 
         use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
 
-        # lse stays None except on the mixed-batch fp8 path under DCP
-        # (the only path that supports returning LSE for all tokens).
+        # lse stays None unless the DCP decode merge needs it; both the bf16 and
+        # the mixed-batch fp8 paths below produce a [tokens, heads] LSE.
         lse: torch.Tensor | None = None
 
         if not use_fp8_cache:
@@ -994,7 +994,8 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
             )
             # The bf16 path runs the whole (decode) batch through one kernel, so
-            # its LSE feeds the DCP merge directly; skip the overhead off DCP.
+            # its LSE feeds the DCP merge directly; keep it only when DCP needs
+            # it, otherwise leave lse None.
             if self.need_to_return_lse_for_decode:
                 lse = bf16_lse
         elif attn_metadata.fp8_use_mixed_batch:

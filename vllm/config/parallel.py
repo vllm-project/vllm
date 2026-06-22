@@ -365,9 +365,8 @@ class ParallelConfig:
     - "exact": ranks all-gather their local top-k candidates and recompute a
       single global top-k, so the selected token set is identical to the
       non-DCP case (independent of dcp_world_size).
-    Only takes effect when decode_context_parallel_size > 1. The default is a
-    placeholder; the empirically-chosen default is decided from accuracy/perf
-    data (see the DCP rollout plan).
+    Only takes effect when decode_context_parallel_size > 1. Defaults to
+    "union" to preserve existing behavior; "exact" is opt-in.
     """
 
     cp_kv_cache_interleave_size: int = 1

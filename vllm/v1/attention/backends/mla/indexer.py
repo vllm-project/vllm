@@ -392,6 +392,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     f"DCP comm backend (got '{parallel_config.dcp_comm_backend}'"
                     "). Use --dcp-sparse-indexer-mode union."
                 )
+            # The merge packs global positions into float32 candidates, which is
+            # lossless only below 2**24. max_model_len is ~1M today, far below,
+            # but enforce the invariant rather than only documenting it.
+            if self.vllm_config.model_config.max_model_len >= (1 << 24):
+                raise NotImplementedError(
+                    "DCP sparse exact-merge packs global positions into float32 "
+                    "(lossless below 2**24); max_model_len="
+                    f"{self.vllm_config.model_config.max_model_len} is too "
+                    "large. Use --dcp-sparse-indexer-mode union."
+                )
 
         # Pre-allocate buffers for CUDA graph compatibility when
         if self.compress_ratio > 1:

@@ -7,8 +7,8 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.distributed.parallel_state import get_dcp_group
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -200,6 +200,12 @@ def _dcp_global_topk_merge(
     cand = _dcp_pack_local_candidates(
         topk_indices, logits, local_valid, cp_rank, dcp_world_size, row_start
     )
+    # This is an extra in-graph collective: under FULL cudagraph the indexer op
+    # is captured (the @eager_break_during_capture break is bypassed), so this
+    # all_gather is captured like the dense DCP all_gather/reduce_scatter in
+    # mla_attention. It uses the same get_dcp_group().all_gather, but exact mode
+    # under FULL cudagraph is not yet validated on hardware -- verify capture
+    # and replay at C2 before enabling exact by default.
     cand_all = get_dcp_group().all_gather(cand, dim=0)
     topk_indices.copy_(
         _dcp_select_owned_global_topk(cand_all, dcp_world_size, topk_tokens, cp_rank)
