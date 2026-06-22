@@ -9,8 +9,7 @@ from typing import Any, ClassVar, Literal
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import BatchFeature
-from transformers import WhisperConfig as HFWhisperConfig
+from transformers import BatchFeature, WhisperConfig
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -84,16 +83,33 @@ class KimiAudioWhisperEncoder(WhisperEncoder):
     def __init__(
         self, *, vllm_config: VllmConfig, prefix: str = "", init_in_fp32: bool = False
     ):
-        # Load Whisper config from subfolder (authoritative source)
-        # Kimi-Audio stores Whisper config in whisper-large-v3/config.json
-        model_path = vllm_config.model_config.model
+        # Get Kimi-Audio config which contains Whisper encoder params
+        config = vllm_config.model_config.hf_config
 
-        # Load WhisperConfig from the subfolder
-        whisper_config = HFWhisperConfig.from_pretrained(
-            model_path,
-            subfolder=KIMIA_WHISPER_SUBFOLDER,
-            revision=vllm_config.model_config.revision,
+        # Kimi-Audio HF config uses kimia_adaptor_input_dim for Whisper d_model (5120)
+        # vLLM config file adds explicit Whisper encoder params
+        # Use vLLM config values if available, otherwise derive from Kimi-Audio params
+        d_model = getattr(config, "d_model", None)
+        if d_model is None or d_model == 1280:
+            # HF config has wrong d_model (1280), use kimia_adaptor_input_dim (5120)
+            d_model = getattr(config, "kimia_adaptor_input_dim", 5120)
+
+        # Create WhisperConfig with Kimi-Audio specific values from config
+        whisper_config = WhisperConfig(
+            d_model=d_model,
+            encoder_layers=getattr(config, "encoder_layers", 32),
+            encoder_attention_heads=getattr(config, "encoder_attention_heads", 20),
+            encoder_ffn_dim=getattr(config, "encoder_ffn_dim", 5120),
+            num_mel_bins=128,
+            max_source_positions=getattr(config, "max_source_positions", 3000),
+            scale_embedding=getattr(config, "scale_embedding", False),
+            activation_function=getattr(config, "activation_function", "gelu"),
+            dropout=getattr(config, "dropout", 0.0),
+            attention_dropout=getattr(config, "attention_dropout", 0.0),
+            activation_dropout=getattr(config, "activation_dropout", 0.0),
         )
+        # Temporarily replace HF config with Whisper config for encoder initialization
+        vllm_config.model_config.hf_config = whisper_config
 
         super().__init__(
             vllm_config=vllm_config.with_hf_config(whisper_config),
