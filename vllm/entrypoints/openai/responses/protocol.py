@@ -372,8 +372,6 @@ class ResponsesRequest(OpenAIBaseModel):
         if (frequency_penalty := self.frequency_penalty) is None:
             frequency_penalty = default_sampling_params.get("frequency_penalty", 0.0)
 
-        stop_token_ids = default_sampling_params.get("stop_token_ids")
-
         # Structured output
         structured_outputs = self.structured_outputs
 
@@ -409,7 +407,6 @@ class ResponsesRequest(OpenAIBaseModel):
             top_k=top_k,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
-            stop_token_ids=stop_token_ids,
             stop=stop,
             frequency_penalty=frequency_penalty,
             presence_penalty=presence_penalty,

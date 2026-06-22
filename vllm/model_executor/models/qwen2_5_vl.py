@@ -83,9 +83,8 @@ from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
@@ -825,7 +824,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
     @staticmethod
     def invert_permutation(perm: torch.Tensor) -> torch.Tensor:
         # building the inverse permutation in O(n) time
-        inv = torch.empty_like(perm, pin_memory=is_pin_memory_available())
+        inv = torch.empty_like(perm, pin_memory=PIN_MEMORY)
         inv[perm] = torch.arange(perm.numel(), device=perm.device, dtype=perm.dtype)
         return inv
 
@@ -1057,7 +1056,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        grid_thw: list[list[int]],
+        grid_thw: list[list[int]] | None,
         *,
         encoder_metadata: dict[str, torch.Tensor] | None = None,
     ) -> torch.Tensor:
@@ -1712,11 +1711,8 @@ class Qwen2_5_VLForConditionalGeneration(
         )
         return EncoderCudaGraphConfig(
             modalities=modalities,
-            input_key_by_modality={
-                "image": "pixel_values",
-                "video": "pixel_values_videos",
-            },
             buffer_keys=[
+                "pixel_values",
                 "rotary_pos_emb_cos",
                 "rotary_pos_emb_sin",
                 "window_index",
@@ -1859,6 +1855,7 @@ class Qwen2_5_VLForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -1930,7 +1927,7 @@ class Qwen2_5_VLForConditionalGeneration(
             // self.visual.patch_size
         )
         max_seqlen_window_override = vit_merger_window_size**2 * (spatial_merge_size**2)
-        buffers = self.visual.prepare_encoder_metadata(
+        metadata = self.visual.prepare_encoder_metadata(
             grid_config,
             max_batch_size=max_batch_size,
             max_frames_per_batch=max_frames_per_batch,
@@ -1942,14 +1939,12 @@ class Qwen2_5_VLForConditionalGeneration(
 
         # Just use image-modality dummy input_buffer for capturing, since it's also
         # compatible for video inputs (has the same shape: [num_patches, C*T*P*P]).
-        mm_kwargs = {
+        values = metadata | {
             "pixel_values": dummy_pixel_values,
-            "image_grid_thw": grid_config,
         }
 
         return EncoderCudaGraphCaptureInputs(
-            mm_kwargs=mm_kwargs,
-            buffers=buffers,
+            values=values,
         )
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -1957,6 +1952,7 @@ class Qwen2_5_VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         modality = self.get_input_modality(mm_kwargs)
         grid_thw_list = self._get_grid_thw_by_modality(mm_kwargs)
@@ -1968,32 +1964,36 @@ class Qwen2_5_VLForConditionalGeneration(
         # bound and can over-pad window attention into many empty FlashAttention
         # CTAs.
         if modality == "image":
-            buffers = self.visual.prepare_encoder_metadata(
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_batch_size=max_batch_size,
             )
         elif modality == "video":
-            buffers = self.visual.prepare_encoder_metadata(
+            metadata = self.visual.prepare_encoder_metadata(
                 grid_thw_list,
                 max_frames_per_batch=max_frames_per_batch,
             )
         else:
             raise AssertionError("This line should be unreachable.")
 
-        return EncoderCudaGraphReplayBuffers(buffers=buffers)
+        values = metadata | {
+            "pixel_values": self._get_pixel_values_by_modality(mm_kwargs),
+        }
+        return EncoderCudaGraphReplayBuffers(values=values)
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
-        pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
-        grid_thw = self._get_grid_thw_by_modality(mm_kwargs)
-        return self.visual(pixel_values, grid_thw, encoder_metadata=buffers)
+        pixel_values = values.pop("pixel_values")
+        metadata = values
+        return self.visual(pixel_values, None, encoder_metadata=metadata)
 
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         pixel_values = self._get_pixel_values_by_modality(mm_kwargs)
         grid_thw = self._get_grid_thw_by_modality(mm_kwargs)

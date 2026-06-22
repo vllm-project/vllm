@@ -5,12 +5,16 @@
 Run `pytest tests/quantization/test_bitsandbytes.py`.
 """
 
+import types
+from unittest.mock import MagicMock, patch
+
 import pytest
 from packaging.version import Version
 from transformers import BitsAndBytesConfig
 from transformers import __version__ as TRANSFORMERS_VERSION
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.model_executor.model_loader import bitsandbytes_loader as bnb
 from vllm.platforms import current_platform
 
 from ...utils import compare_two_settings, multi_gpu_test
@@ -300,3 +304,27 @@ def validate_generated_texts(
             f"HF Output: '{hf_str}'\n"
             f"vLLM Output: '{vllm_str}'"
         )
+
+
+def test_bitsandbytes_passes_revision_by_name():
+    # revision must reach download_safetensors_index_file_from_hf as the
+    # ``revision`` keyword, not a positional slot.
+    fake_self = types.SimpleNamespace(
+        load_config=types.SimpleNamespace(download_dir="/cache"),
+        _get_weight_files=MagicMock(
+            return_value=("/folder", ["/folder/model.safetensors"], "*.safetensors")
+        ),
+    )
+    with (
+        patch.object(bnb, "download_safetensors_index_file_from_hf") as mock_idx,
+        patch.object(
+            bnb,
+            "filter_duplicate_safetensors_files",
+            return_value=["/folder/model.safetensors"],
+        ),
+    ):
+        bnb.BitsAndBytesModelLoader._prepare_weights(fake_self, "org/model", "myrev")
+
+    mock_idx.assert_called_once()
+    assert mock_idx.call_args.kwargs.get("revision") == "myrev"
+    assert "myrev" not in mock_idx.call_args.args

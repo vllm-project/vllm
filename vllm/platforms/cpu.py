@@ -93,6 +93,11 @@ class CpuPlatform(Platform):
         return meminfo.total_memory
 
     @classmethod
+    def mem_get_info(cls) -> tuple[int, int]:
+        meminfo = get_memory_node_info()
+        return meminfo.available_memory, meminfo.total_memory
+
+    @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
         Set the device for the current platform.
@@ -407,6 +412,10 @@ class CpuPlatform(Platform):
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
+
+    @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        return torch.get_num_threads()
 
     @classmethod
     def import_kernels(cls) -> None:

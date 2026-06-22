@@ -185,8 +185,11 @@ def test_deepseek_nvfp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_gptoss_mxfp4bf16_moe_flashinfer(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "1")
-    can_initialize("openai/gpt-oss-20b", hf_overrides=HF_OVERRIDE_TEXT)
+    can_initialize(
+        "openai/gpt-oss-20b",
+        hf_overrides=HF_OVERRIDE_TEXT,
+        extra_args=["--moe-backend=flashinfer_trtllm"],
+    )
 
 
 def test_gptoss_mxfp4mxfp8_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
@@ -280,7 +283,7 @@ def test_nemotron_fp8_moe_vllm_triton(monkeypatch: pytest.MonkeyPatch):
     )
 
 
-def test_nemotron_fp4_moe_flashinfer_throughput(monkeypatch: pytest.MonkeyPatch):
+def test_nemotron_fp4_moe_flashinfer_cutlass(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
         hf_overrides=HF_OVERRIDE_TEXT,
@@ -288,14 +291,7 @@ def test_nemotron_fp4_moe_flashinfer_throughput(monkeypatch: pytest.MonkeyPatch)
     )
 
 
-@pytest.mark.skip(
-    reason=(
-        "FP4 MoE backend FLASHINFER_TRTLLM does not support the "
-        "deployment configuration since kernel does not support "
-        "hidden_dim % 512 != 0."
-    )
-)
-def test_nemotron_fp4_moe_flashinfer_latency(monkeypatch: pytest.MonkeyPatch):
+def test_nemotron_fp4_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
         hf_overrides=HF_OVERRIDE_TEXT,
