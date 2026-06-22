@@ -21,7 +21,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
 )
@@ -133,14 +132,6 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
             dtype=hidden_states.dtype,
             block_size=16,
             swizzle=False,
-        )
-
-        hidden_states, _ = moe_kernel_quantize_input(
-            A=hidden_states,
-            A_scale=self.quant_config.a1_gscale,
-            quant_dtype="nvfp4",
-            per_act_token_quant=False,
-            quantization_emulation=True,
         )
 
         # Activation quantization/dequantization is deferred to

@@ -163,6 +163,7 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
+    indexes_kv_by_block_stride: bool = False
 
     @property
     def page_size_bytes(self) -> int:
@@ -283,6 +284,7 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             # If any layer in the group is non-causal, treat the group as
@@ -403,13 +405,16 @@ class MLAAttentionSpec(FullAttentionSpec):
         cache_dtype_str_set = set(spec.cache_dtype_str for spec in specs)
         compress_ratio_set = set(spec.compress_ratio for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
+        block_stride_set = set(spec.indexes_kv_by_block_stride for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(compress_ratio_set) == 1
             and len(model_version_set) == 1
+            and len(block_stride_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, compress ratio, and model version."
+            "quantization method, compress ratio, model version, and KV block "
+            "stride indexing."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -418,6 +423,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            indexes_kv_by_block_stride=block_stride_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
             model_version=model_version_set.pop(),
@@ -584,15 +590,17 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         compress_ratio_set = set(spec.compress_ratio for spec in specs)
         model_version_set = set(spec.model_version for spec in specs)
         sliding_window_set = set(spec.sliding_window for spec in specs)
+        block_stride_set = set(spec.indexes_kv_by_block_stride for spec in specs)
         assert (
             len(cache_dtype_str_set) == 1
             and len(compress_ratio_set) == 1
             and len(model_version_set) == 1
             and len(sliding_window_set) == 1
+            and len(block_stride_set) == 1
         ), (
             "All attention layers in the same KV cache group must use the same "
-            "quantization method, compress ratio, model version and sliding "
-            "window size."
+            "quantization method, compress ratio, model version, sliding "
+            "window size, and KV block stride indexing."
         )
         return cls(
             block_size=specs[0].block_size,
@@ -600,6 +608,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             page_size_padded=specs[0].page_size_padded,
+            indexes_kv_by_block_stride=block_stride_set.pop(),
             sliding_window=sliding_window_set.pop(),
             cache_dtype_str=cache_dtype_str_set.pop(),
             compress_ratio=compress_ratio_set.pop(),
@@ -711,6 +720,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
             non_causal=any(spec.non_causal for spec in specs),
