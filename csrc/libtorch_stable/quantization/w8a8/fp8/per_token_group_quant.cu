@@ -301,8 +301,9 @@ __global__ void per_token_group_quant_8bit_packed_register_kernel(
 
   const int sf_k_local = local_group_id % kGroupsPerBlockX;
   const int row_local = local_group_id / kGroupsPerBlockX;
-  const int sf_k_idx = blockIdx.x * kGroupsPerBlockX + sf_k_local;
-  const int mn_idx = blockIdx.y * kRowsPerBlock + row_local;
+  // Rows on grid.x: mn scales with tokens and can exceed the 65535 grid.y cap.
+  const int sf_k_idx = blockIdx.y * kGroupsPerBlockX + sf_k_local;
+  const int mn_idx = blockIdx.x * kRowsPerBlock + row_local;
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   asm volatile("griddepcontrol.wait;");
@@ -496,14 +497,15 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
                   " is not a multiple of 4.");
   const int kx = GetGroupsPerBlockX(padded_groups_per_row);
   const int ry = 16 / kx;
-  const int64_t blocks_x = padded_groups_per_row / kx;
-  const int64_t blocks_y = (tma_aligned_mn + ry - 1) / ry;
+  const int64_t row_blocks = (tma_aligned_mn + ry - 1) / ry;
+  const int64_t sf_k_blocks = padded_groups_per_row / kx;
   const int num_threads = (kx * ry) * THREADS_PER_GROUP;
-  // CUDA caps grid.x and grid.y at 2^31 - 1; guard against pathological inputs.
-  STD_TORCH_CHECK(blocks_x <= static_cast<int64_t>(INT32_MAX) &&
-                      blocks_y <= static_cast<int64_t>(INT32_MAX),
+  // CUDA caps grid.x at 2^31 - 1 and grid.y at 2^16 - 1 (65535).
+  constexpr int64_t kMaxGridDimYZ = 65535;
+  STD_TORCH_CHECK(row_blocks <= static_cast<int64_t>(INT32_MAX) &&
+                      sf_k_blocks <= kMaxGridDimYZ,
                   "per_token_group_quant_8bit_packed grid too large: (",
-                  blocks_x, ", ", blocks_y, ").");
+                  row_blocks, ", ", sf_k_blocks, ").");
 
   auto dst_type = output_q.scalar_type();
 
@@ -513,8 +515,8 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
   #define LAUNCH_REG_KERNEL_INST(T, DST_DTYPE, KX, RY)                         \
     do {                                                                       \
       cudaLaunchConfig_t config = {};                                          \
-      config.gridDim = dim3(static_cast<unsigned int>(blocks_x),               \
-                            static_cast<unsigned int>(blocks_y));              \
+      config.gridDim = dim3(static_cast<unsigned int>(row_blocks),             \
+                            static_cast<unsigned int>(sf_k_blocks));           \
       config.blockDim = dim3(num_threads);                                     \
       config.dynamicSmemBytes = 0;                                             \
       config.stream = stream;                                                  \
@@ -539,8 +541,8 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
 #else
   #define LAUNCH_REG_KERNEL_INST(T, DST_DTYPE, KX, RY)                         \
     do {                                                                       \
-      dim3 grid(static_cast<unsigned int>(blocks_x),                           \
-                static_cast<unsigned int>(blocks_y));                          \
+      dim3 grid(static_cast<unsigned int>(row_blocks),                         \
+                static_cast<unsigned int>(sf_k_blocks));                       \
       dim3 block(num_threads);                                                 \
       per_token_group_quant_8bit_packed_register_kernel<T, DST_DTYPE, 128, KX, \
                                                         RY>                    \
