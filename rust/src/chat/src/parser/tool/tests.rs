@@ -214,3 +214,15 @@ fn factory_new_registers_phi4_mini_json_by_name() {
     assert!(factory.contains(names::PHI4_MINI_JSON));
     factory.create(names::PHI4_MINI_JSON, &[]).unwrap();
 }
+
+#[test]
+fn factory_new_registers_step3_by_name() {
+    // Keep step3 exact-name only until the separate step3p5 parser exists, so
+    // substring matching does not accidentally route step3p5 models here.
+    let factory = ToolParserFactory::new();
+
+    assert!(factory.contains(names::STEP3));
+    assert_eq!(factory.resolve_name_for_model("stepfun-ai/step3"), None);
+    assert_eq!(factory.resolve_name_for_model("stepfun-ai/step3p5"), None);
+    factory.create(names::STEP3, &[]).unwrap();
+}
