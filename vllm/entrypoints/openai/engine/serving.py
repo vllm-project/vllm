@@ -25,7 +25,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.serve.engine.serving import Serving
+from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput
@@ -57,7 +57,7 @@ class ServeContext(Generic[RequestT]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
-class OpenAIServing(Serving, BeamSearchOnlineMixin):
+class OpenAIServing(BaseServing, BeamSearchOnlineMixin):
     request_id_prefix: ClassVar[str] = """
     A short string prepended to every request’s ID.
     """
@@ -70,7 +70,11 @@ class OpenAIServing(Serving, BeamSearchOnlineMixin):
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
     ):
-        super().__init__(models, engine_client.model_config, request_logger)
+        super().__init__(
+            models=models,
+            model_config=engine_client.model_config,
+            request_logger=request_logger,
+        )
 
         self.engine_client = engine_client
         self.return_tokens_as_token_ids = return_tokens_as_token_ids

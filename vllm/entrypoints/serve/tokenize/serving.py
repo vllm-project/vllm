@@ -11,7 +11,7 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
-from vllm.entrypoints.serve.engine.serving import Serving
+from vllm.entrypoints.serve.engine.serving import BaseServing
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
@@ -29,7 +29,7 @@ from vllm.tokenizers import TokenizerLike
 logger = init_logger(__name__)
 
 
-class ServingTokenization(Serving):
+class ServingTokenization(BaseServing):
     def __init__(
         self,
         models: OpenAIServingModels | OpenAIModelRegistry,
@@ -41,7 +41,11 @@ class ServingTokenization(Serving):
         default_chat_template_kwargs: dict[str, Any] | None = None,
         trust_request_chat_template: bool = False,
     ) -> None:
-        super().__init__(models, openai_serving_render.model_config, request_logger)
+        super().__init__(
+            models=models,
+            model_config=openai_serving_render.model_config,
+            request_logger=request_logger,
+        )
 
         self.renderer = openai_serving_render.renderer
         self.openai_serving_render = openai_serving_render

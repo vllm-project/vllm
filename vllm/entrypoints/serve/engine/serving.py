@@ -24,7 +24,7 @@ from vllm.sampling_params import BeamSearchParams
 from vllm.utils import random_uuid
 
 
-class Serving:
+class BaseServing:
     def __init__(
         self,
         models: OpenAIServingModels | OpenAIModelRegistry,
