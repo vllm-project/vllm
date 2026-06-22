@@ -71,42 +71,9 @@ fn structural_tag_tool_choice(request: &ChatRequest) -> Option<StructuralTagTool
 mod tests {
     use serde_json::{Value, json};
     use vllm_engine_core_client::protocol::StructuredOutputBackend;
-    use vllm_tool_parser::{
-        Result as ToolParserResult, StructuralTagModel, Tool, ToolParserOutput,
-    };
+    use vllm_tool_parser::{Qwen3CoderToolParser, Tool};
 
     use super::*;
-
-    struct StructuralTagParser;
-
-    impl ToolParser for StructuralTagParser {
-        fn create(_tools: &[Tool]) -> ToolParserResult<Box<dyn ToolParser>>
-        where
-            Self: Sized + 'static,
-        {
-            Ok(Box::new(Self))
-        }
-
-        fn structural_tag_model(&self) -> Option<StructuralTagModel> {
-            Some(StructuralTagModel::Qwen3Coder)
-        }
-
-        fn parse_into(
-            &mut self,
-            _chunk: &str,
-            _output: &mut ToolParserOutput,
-        ) -> ToolParserResult<()> {
-            Ok(())
-        }
-
-        fn finish(&mut self) -> ToolParserResult<ToolParserOutput> {
-            Ok(ToolParserOutput::default())
-        }
-
-        fn reset(&mut self) -> String {
-            String::new()
-        }
-    }
 
     fn chat_tool(name: &str, strict: Option<bool>) -> Tool {
         Tool {
@@ -121,6 +88,10 @@ mod tests {
             }),
             strict,
         }
+    }
+
+    fn qwen3_coder_parser(tools: &[Tool]) -> Box<dyn ToolParser> {
+        Qwen3CoderToolParser::create(tools).expect("Qwen3 Coder parser should build")
     }
 
     fn request(tool_choice: ChatToolChoice, tools: Vec<Tool>) -> ChatRequest {
@@ -147,8 +118,9 @@ mod tests {
     #[test]
     fn auto_strict_tool_choice_builds_structural_tag() {
         let mut request = request(ChatToolChoice::Auto, vec![chat_tool("search", Some(true))]);
+        let parser = qwen3_coder_parser(&request.tools);
 
-        apply_structural_tag_constraint(&mut request, &StructuralTagParser)
+        apply_structural_tag_constraint(&mut request, parser.as_ref())
             .expect("structural tag should build");
 
         let tag = structural_tag_value(&request);
@@ -159,8 +131,9 @@ mod tests {
     #[test]
     fn auto_non_strict_tool_choice_skips_structural_tag() {
         let mut request = request(ChatToolChoice::Auto, vec![chat_tool("search", None)]);
+        let parser = qwen3_coder_parser(&request.tools);
 
-        apply_structural_tag_constraint(&mut request, &StructuralTagParser)
+        apply_structural_tag_constraint(&mut request, parser.as_ref())
             .expect("structural tag decision should succeed");
 
         assert!(request.sampling_params.structured_outputs.is_none());
@@ -169,8 +142,9 @@ mod tests {
     #[test]
     fn required_tool_choice_builds_structural_tag_without_strict_tools() {
         let mut request = request(ChatToolChoice::Required, vec![chat_tool("search", None)]);
+        let parser = qwen3_coder_parser(&request.tools);
 
-        apply_structural_tag_constraint(&mut request, &StructuralTagParser)
+        apply_structural_tag_constraint(&mut request, parser.as_ref())
             .expect("structural tag should build");
 
         let tag = structural_tag_value(&request);
@@ -186,8 +160,9 @@ mod tests {
             },
             vec![chat_tool("search", None), chat_tool("lookup", None)],
         );
+        let parser = qwen3_coder_parser(&request.tools);
 
-        apply_structural_tag_constraint(&mut request, &StructuralTagParser)
+        apply_structural_tag_constraint(&mut request, parser.as_ref())
             .expect("structural tag should build");
 
         let tag = structural_tag_value(&request).to_string();
@@ -198,8 +173,9 @@ mod tests {
     #[test]
     fn none_tool_choice_skips_structural_tag() {
         let mut request = request(ChatToolChoice::None, vec![chat_tool("search", Some(true))]);
+        let parser = qwen3_coder_parser(&request.tools);
 
-        apply_structural_tag_constraint(&mut request, &StructuralTagParser)
+        apply_structural_tag_constraint(&mut request, parser.as_ref())
             .expect("structural tag decision should succeed");
 
         assert!(request.sampling_params.structured_outputs.is_none());
