@@ -103,3 +103,13 @@ def test_per_tensor_quant_matches_native(dynamic):
         assert torch.equal(scale, scale_in)
         ref_deq = ref_out.to(torch.float32) * ref_scale
         torch.testing.assert_close(deq, ref_deq, rtol=2e-2, atol=2e-2)
+
+
+# A test_per_tensor_quant_torch_compile test previously lived here to validate
+# the per-tensor aliasing contract. It existed because opcheck's test_schema
+# could not check this op directly: test_schema compares the op's outputs with
+# torch.allclose, but on fp8 outputs that comparison runs arithmetic fp8 does not
+# support and raises "mul_cuda" is unimplemented for fp8. The fp8-safe opcheck
+# helper fixes that by casting to double before the comparison, so the per-tensor
+# schema tests above can now run test_schema directly. That makes this test
+# redundant, so it has been removed.
