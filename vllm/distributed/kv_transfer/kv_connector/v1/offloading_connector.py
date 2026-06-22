@@ -71,6 +71,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         if self.connector_scheduler is not None:
             self.connector_scheduler.shutdown()
 
+    def bind_gpu_block_pool(self, gpu_block_pool) -> None:
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.bind_gpu_block_pool(gpu_block_pool)
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
