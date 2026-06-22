@@ -351,3 +351,81 @@ def test_fused_moe_batched_experts(
     torch.testing.assert_close(batched_output, baseline_output, atol=3e-2, rtol=2e-2)
 
     torch.testing.assert_close(triton_output, batched_output, atol=2e-2, rtol=2e-2)
+
+# USE_TD in moe_mmk
+
+# K % 8 == 0 (bf16, 16-byte alignment)
+_TD_SHAPES = [
+    (4, 1, 128, 256),
+    (8, 64, 512, 512),
+    (4, 256, 1024, 2048),
+]
+
+_TD_CONFIG = {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64}
+
+
+def _run_td(A, B, num_expert_tokens, use_td: bool):
+    out = torch.zeros(
+        A.shape[0], A.shape[1], B.shape[1],
+        dtype=torch.bfloat16, device=A.device,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
+        batched_triton_kernel,
+    )
+    import triton
+    E = A.shape[0]
+    max_tokens = A.shape[1]
+    K = A.shape[2]
+    N = B.shape[1]
+    BM = BN = BK = 64
+    grid = (E, triton.cdiv(max_tokens, BM) * triton.cdiv(N, BN))
+    batched_triton_kernel[grid](
+        A, B, out, num_expert_tokens, tl.bfloat16,
+        max_tokens, K, N,
+        None, None, None,
+        A.stride(0), A.stride(1), A.stride(2),
+        B.stride(0), B.stride(2), B.stride(1),
+        out.stride(0), out.stride(1), out.stride(2),
+        0, 0, 0, 0, 0, 0,
+        0, 0,
+        False, False, False,
+        BLOCK_M=BM, BLOCK_N=BN, BLOCK_K=BK, USE_TD=use_td,
+    )
+    return out
+
+
+@pytest.mark.parametrize("num_experts,max_tokens_per_expert,K,N", _TD_SHAPES)
+def test_batched_mm_td_matches_plain(num_experts, max_tokens_per_expert, K, N):
+    set_random_seed(42)
+    device = "xpu" if current_platform.is_xpu() else "cuda"
+    A = torch.randn(num_experts, max_tokens_per_expert, K,
+                    device=device, dtype=torch.bfloat16) / 10
+    B = torch.randn(num_experts, N, K, device=device, dtype=torch.bfloat16)
+    num_expert_tokens = torch.randint(
+        1, max_tokens_per_expert + 1,
+        size=(num_experts,), device=device, dtype=torch.int32)
+
+    out_plain = _run_td(A, B, num_expert_tokens, False)
+    out_td = _run_td(A, B, num_expert_tokens, True)
+
+    torch.testing.assert_close(out_td, out_plain, atol=6e-2, rtol=6e-2)
+
+
+def test_batched_mm_td_zero_expert_tokens():
+    set_random_seed(42)
+    device = "xpu" if current_platform.is_xpu() else "cuda"
+    E, M, K, N = 8, 32, 256, 256
+    A = torch.randn(E, M, K, device=device, dtype=torch.bfloat16) / 10
+    B = torch.randn(E, N, K, device=device, dtype=torch.bfloat16)
+    num_expert_tokens = torch.zeros(E, device=device, dtype=torch.int32)
+    num_expert_tokens[::2] = M
+
+    out_plain = _run_td(A, B, num_expert_tokens, False)
+    out_td = _run_td(A, B, num_expert_tokens, True)
+
+    for e in range(E):
+        if num_expert_tokens[e].item() == 0:
+            assert out_plain[e].abs().max().item() == 0.0
+            assert out_td[e].abs().max().item() == 0.0
+
+    torch.testing.assert_close(out_td, out_plain, atol=6e-2, rtol=6e-2)
