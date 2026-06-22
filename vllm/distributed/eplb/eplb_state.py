@@ -718,8 +718,13 @@ class EplbState:
 
             global_expert_load_window = logical_expert_load_window.sum(dim=0)
             global_expert_load_windows.append(global_expert_load_window)
-        # Perform all-reduce to get the expert load across all ranks for each model
-        global_expert_load_windows = self._allreduce_list(global_expert_load_windows)
+        # In sync/profile mode the allreduce runs on the main thread here. In
+        # async mode it is deferred to the async worker so the D2H stays off
+        # the inference hot path.
+        if not self.is_async or is_profile:
+            global_expert_load_windows = self._allreduce_list(
+                global_expert_load_windows
+            )
 
         # TODO(bowen): Treat differently for prefill and decode nodes
         eplb_model_state = next(iter(self.model_states.values()))
@@ -758,7 +763,7 @@ class EplbState:
             if not self.is_async or is_profile:
                 # Get new expert mappings for the model
                 new_physical_to_logical_map = self.policy.rebalance_experts(
-                    global_expert_load_window.cpu(),
+                    global_expert_load_window,
                     num_replicas,
                     num_groups,
                     num_nodes,
@@ -850,21 +855,19 @@ class EplbState:
         """
         All-reduce a list of tensors.
         """
-        if len(tensor_list) == 1:
-            all_reduce(tensor_list[0], group=get_ep_group().device_group)
-            return tensor_list
-        assert all(t.dim() == 2 for t in tensor_list), "All tensors must be 2D."
-        assert all(t.shape[1] == tensor_list[0].shape[1] for t in tensor_list), (
+        cpu_list = [t.cpu() for t in tensor_list]
+        cpu_group = get_ep_group().cpu_group
+        if len(cpu_list) == 1:
+            all_reduce(cpu_list[0], group=cpu_group)
+            return cpu_list
+        assert all(t.dim() == 2 for t in cpu_list), "All tensors must be 2D."
+        assert all(t.shape[1] == cpu_list[0].shape[1] for t in cpu_list), (
             "All tensors must have the same shape[1]."
         )
-        # Concatenate, all_reduce, then unpack to original shapes.
-        # We assume all tensors are 2D and shape[1] (num_physical_experts)
-        # is the same across all models.
-        shapes = [t.shape for t in tensor_list]
-        concat_tensor = torch.cat(tensor_list, dim=0)
+        shapes = [t.shape for t in cpu_list]
+        concat_tensor = torch.cat(cpu_list, dim=0)
 
-        ep_group = get_ep_group().device_group
-        all_reduce(concat_tensor, group=ep_group)
+        all_reduce(concat_tensor, group=cpu_group)
 
         all_reduce_list = []
         offset = 0
