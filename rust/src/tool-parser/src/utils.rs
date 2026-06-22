@@ -1,7 +1,6 @@
 //! Shared helpers for tool parsers.
 
-use std::borrow::Cow;
-
+use winnow::Parser;
 use winnow::error::{ContextError, ErrMode, ModalResult, Needed, StrContext, StrContextValue};
 use winnow::stream::{Offset, Partial, Stream};
 
@@ -68,71 +67,72 @@ pub(super) fn safe_text_len(input: &mut Partial<&str>, marker: &str) -> ModalRes
     Ok(emit_len)
 }
 
-/// Decode XML/HTML entities in XML-style parameter values.
-pub(super) fn xml_unescape(value: &str) -> Cow<'_, str> {
-    if !value.as_bytes().contains(&b'&') {
-        return Cow::Borrowed(value);
-    }
+/// Streaming scan state for a buffered marker search [`take_until_marker`],
+/// so that we don't have to rescan the whole buffered prefix when resuming.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct MarkerScanState {
+    scan_start: usize,
+}
 
-    let mut output: Option<String> = None;
-    let mut copied_len = 0;
-    let mut rest = value;
-
-    while let Some(ampersand) = rest.find('&') {
-        let before_ampersand = &rest[..ampersand];
-        let after_ampersand = &rest[ampersand + '&'.len_utf8()..];
-        if let Some(semicolon) = after_ampersand.find(';') {
-            let entity = &after_ampersand[..semicolon];
-            if let Some(decoded) = decode_xml_entity(entity) {
-                match &mut output {
-                    Some(output) => output.push_str(before_ampersand),
-                    None => {
-                        let mut new_output = String::with_capacity(value.len());
-                        new_output.push_str(&value[..copied_len + ampersand]);
-                        output = Some(new_output);
-                    }
-                }
-                let output = output.as_mut().expect("output is initialized above");
-                output.push(decoded);
-                let consumed_len = ampersand + '&'.len_utf8() + semicolon + ';'.len_utf8();
-                copied_len += consumed_len;
-                rest = &rest[consumed_len..];
-                continue;
-            }
-        }
-
-        if let Some(output) = &mut output {
-            output.push_str(before_ampersand);
-            output.push('&');
-        }
-        let consumed_len = ampersand + '&'.len_utf8();
-        copied_len += consumed_len;
-        rest = after_ampersand;
-    }
-
-    if let Some(mut output) = output {
-        output.push_str(rest);
-        Cow::Owned(output)
-    } else {
-        Cow::Borrowed(value)
+impl MarkerScanState {
+    pub(super) fn reset(&mut self) {
+        self.scan_start = 0;
     }
 }
 
-fn decode_xml_entity(entity: &str) -> Option<char> {
-    match entity {
-        "amp" => Some('&'),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "quot" => Some('"'),
-        "apos" => Some('\''),
-        entity if entity.starts_with("#x") || entity.starts_with("#X") => {
-            u32::from_str_radix(&entity[2..], 16).ok().and_then(char::from_u32)
-        }
-        entity if entity.starts_with('#') => {
-            entity[1..].parse::<u32>().ok().and_then(char::from_u32)
-        }
-        _ => None,
+/// Parse text until `marker`, resuming from the last safe scan checkpoint.
+///
+/// This is the streaming-buffered variant of `winnow::token::take_until(0..,
+/// marker)`: it returns the slice before `marker` and leaves `marker` for the
+/// caller to consume. On incomplete input, it stores the earliest byte offset
+/// that can still match `marker` and returns `Incomplete` without consuming
+/// input, so the next parse can avoid rescanning the whole buffered prefix.
+///
+/// Use this for outer parser states that keep the full buffered input across
+/// chunks while waiting for a closing marker. Plain `take_until` is still a
+/// better fit for one-shot parsers over a complete body, and for `1..` cases
+/// where an empty slice before the marker should be rejected.
+pub(super) fn take_until_marker<'i, 'a>(
+    marker: &'a str,
+    state: &'a mut MarkerScanState,
+) -> impl Parser<Partial<&'i str>, &'i str, ErrMode<ContextError>> + 'a {
+    move |input: &mut Partial<&'i str>| take_until_marker_(input, marker, state)
+}
+
+fn take_until_marker_<'i>(
+    input: &mut Partial<&'i str>,
+    marker: &str,
+    state: &mut MarkerScanState,
+) -> ModalResult<&'i str> {
+    debug_assert!(!marker.is_empty());
+
+    let text = **input;
+    if text.is_empty() {
+        return incomplete();
     }
+
+    // Normal updates store a char boundary; this keeps stale or misused state from panicking.
+    let scan_start = floor_char_boundary(text, state.scan_start);
+
+    if let Some(offset) = text[scan_start..].find(marker) {
+        let marker_start = scan_start + offset;
+        let body = &text[..marker_start];
+        input.next_slice(marker_start);
+        state.reset();
+        return Ok(body);
+    }
+
+    let keep_len = partial_prefix_len(text, marker);
+    state.scan_start = text.len() - keep_len;
+    incomplete()
+}
+
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
 }
 
 /// Streaming lexical state for a top-level JSON object.
@@ -340,15 +340,15 @@ pub(super) fn incomplete<T>() -> ModalResult<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
 
     use expect_test::expect;
+    use winnow::Parser;
     use winnow::error::ErrMode;
     use winnow::stream::{Offset, Partial, Stream};
 
     use super::{
-        JsonObjectScanState, json_str, partial_prefix_len, safe_text_len, take_json_object,
-        xml_unescape,
+        JsonObjectScanState, MarkerScanState, json_str, partial_prefix_len, safe_text_len,
+        take_json_object, take_until_marker,
     };
 
     #[test]
@@ -407,33 +407,100 @@ mod tests {
     }
 
     #[test]
-    fn xml_unescape_decodes_common_entities() {
-        assert_eq!(
-            xml_unescape("&lt;tag attr=&quot;value&quot;&gt;Tom &amp; Jerry&apos;s&lt;/tag&gt;"),
-            r#"<tag attr="value">Tom & Jerry's</tag>"#
-        );
+    fn take_until_marker_stops_before_marker() {
+        let mut state = MarkerScanState::default();
+        let mut input = Partial::new("body</end>tail");
+        let checkpoint = input.checkpoint();
+
+        let body = take_until_marker("</end>", &mut state).parse_next(&mut input).unwrap();
+
+        assert_eq!(body, "body");
+        assert_eq!(input.offset_from(&checkpoint), "body".len());
+        assert_eq!(*input, "</end>tail");
+        assert_eq!(state, MarkerScanState::default());
     }
 
     #[test]
-    fn xml_unescape_decodes_numeric_entities() {
-        assert_eq!(xml_unescape("&#60;tag&#x3E;&#x1F600;"), "<tag>😀");
+    fn take_until_marker_resumes_after_split_marker() {
+        let mut state = MarkerScanState::default();
+        let mut input = Partial::new("body</to");
+
+        let error = take_until_marker("</tool_call>", &mut state)
+            .parse_next(&mut input)
+            .unwrap_err();
+
+        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_eq!(state.scan_start, "body".len());
+
+        let mut input = Partial::new("body</tool_call>tail");
+        let body = take_until_marker("</tool_call>", &mut state).parse_next(&mut input).unwrap();
+
+        assert_eq!(body, "body");
+        assert_eq!(*input, "</tool_call>tail");
+        assert_eq!(state, MarkerScanState::default());
     }
 
     #[test]
-    fn xml_unescape_preserves_unknown_and_incomplete_entities() {
-        let output = xml_unescape("Tom & Jerry &unknown; &amp");
+    fn take_until_marker_advances_checkpoint_for_long_prefix() {
+        let mut state = MarkerScanState::default();
+        let text = format!("{}{}", "x".repeat(1024), "</too");
+        let mut input = Partial::new(text.as_str());
 
-        assert!(matches!(output, Cow::Borrowed(_)));
-        assert_eq!(output, "Tom & Jerry &unknown; &amp");
+        let error = take_until_marker("</tool_call>", &mut state)
+            .parse_next(&mut input)
+            .unwrap_err();
+
+        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_eq!(state.scan_start, 1024);
     }
 
     #[test]
-    fn xml_unescape_borrows_when_no_entity_is_present() {
-        let input = "plain text";
-        let output = xml_unescape(input);
+    fn take_until_marker_keeps_unicode_marker_boundaries() {
+        let marker = "<｜DSML｜function_calls>";
+        let mut state = MarkerScanState::default();
+        let mut input = Partial::new("prefix <｜DSML｜fun");
 
-        assert!(matches!(output, Cow::Borrowed(_)));
-        assert_eq!(output, input);
+        let error = take_until_marker(marker, &mut state).parse_next(&mut input).unwrap_err();
+
+        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_eq!(state.scan_start, "prefix ".len());
+        assert!("prefix <｜DSML｜fun".is_char_boundary(state.scan_start));
+
+        let mut input = Partial::new("prefix <｜DSML｜function_calls>tail");
+        let body = take_until_marker(marker, &mut state).parse_next(&mut input).unwrap();
+
+        assert_eq!(body, "prefix ");
+        assert_eq!(*input, "<｜DSML｜function_calls>tail");
+        assert_eq!(state, MarkerScanState::default());
+    }
+
+    #[test]
+    fn take_until_marker_floors_stale_checkpoint_to_char_boundary() {
+        let mut state = MarkerScanState { scan_start: 1 };
+        let mut input = Partial::new("é</end>");
+
+        let body = take_until_marker("</end>", &mut state).parse_next(&mut input).unwrap();
+
+        assert_eq!(body, "é");
+        assert_eq!(*input, "</end>");
+        assert_eq!(state, MarkerScanState::default());
+    }
+
+    #[test]
+    fn take_until_marker_handles_overlapping_prefixes() {
+        let mut state = MarkerScanState::default();
+        let mut input = Partial::new("xxaba");
+
+        let error = take_until_marker("ababa", &mut state).parse_next(&mut input).unwrap_err();
+
+        assert!(matches!(error, ErrMode::Incomplete(_)));
+        assert_eq!(state.scan_start, 2);
+
+        let mut input = Partial::new("xxababa!");
+        let body = take_until_marker("ababa", &mut state).parse_next(&mut input).unwrap();
+
+        assert_eq!(body, "xx");
+        assert_eq!(*input, "ababa!");
     }
 
     #[test]

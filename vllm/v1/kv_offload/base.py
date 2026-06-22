@@ -19,6 +19,9 @@ from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+        OffloadingConnectorStats,
+    )
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.kv_offload.worker.worker import OffloadingHandler
 
@@ -121,6 +124,37 @@ The class provides the following primitives:
     complete_store() - marks a previous store as completed.
         Following this call, the given blocks will become loadable.
 """
+
+
+@dataclass(frozen=True)
+class OffloadingMetricMetadata:
+    documentation: str
+    labelnames: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class OffloadingCounterMetadata(OffloadingMetricMetadata):
+    pass
+
+
+@dataclass(frozen=True)
+class OffloadingGaugeMetadata(OffloadingMetricMetadata):
+    pass
+
+
+@dataclass(frozen=True)
+class OffloadingHistogramMetadata(OffloadingMetricMetadata):
+    buckets: tuple[float, ...] | None = None
+
+
+@dataclass(frozen=True)
+class OffloadingKVEventsConfig:
+    # Global vLLM KV event publishing flag. When false, connector-specific
+    # event capture must stay inert because take_events() is not drained.
+    enable_kv_cache_events: bool
+    # OffloadingConnector opt-in for self-describing BlockStored payloads.
+    # Effective only when enable_kv_cache_events is true.
+    self_describing_kv_events: bool
 
 
 class OffloadingManager(ABC):
@@ -243,6 +277,17 @@ class OffloadingManager(ABC):
         """
         Called when a request has finished.
 
+        By the time this is called, all per-request offload calls for this
+        request (prepare_store/complete_store, prepare_load/complete_load,
+        touch, lookup) have already been issued, and none will follow. The
+        scheduler defers this call until the request is finished and has no
+        in-flight transfer jobs.
+
+        Note this signals only that no further calls will be made; it does NOT
+        imply the data has been persisted. Asynchronous transfers already
+        submitted for this request (e.g. CPU->secondary cascades) may still be
+        in flight. This is the right place to release per-request bookkeeping.
+
         Args:
             req_context: per-request context.
         """
@@ -265,9 +310,21 @@ class OffloadingManager(ABC):
         """
         return
 
+    def has_pending_work(self) -> bool:
+        """Whether this manager needs the engine to keep stepping.
+
+        While True, on_schedule_end() and get_finished_jobs() continue
+        to be called even when no requests are scheduled.
+        """
+        return False
+
     def reset_cache(self) -> None:
         """Evict all tracked blocks and reset internal state."""
         return
+
+    def get_stats(self) -> "OffloadingConnectorStats | None":
+        """Return collected metrics since last call, or None if disabled."""
+        return None
 
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""
@@ -378,6 +435,13 @@ class CanonicalKVCaches:
 class OffloadingSpec(ABC):
     """Spec for an offloading connector"""
 
+    @classmethod
+    def build_metric_definitions(
+        cls, extra_config: dict[str, Any]
+    ) -> dict[str, "OffloadingMetricMetadata"]:
+        """Return Prometheus metric definitions emitted by this spec."""
+        return {}
+
     def __init__(self, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"):
         logger.warning(
             "Initializing OffloadingSpec. This API is experimental and "
@@ -389,6 +453,15 @@ class OffloadingSpec(ABC):
         kv_transfer_config = vllm_config.kv_transfer_config
         assert kv_transfer_config is not None
         self.extra_config = kv_transfer_config.kv_connector_extra_config
+        kv_events_config = vllm_config.kv_events_config
+        self.kv_events_config = OffloadingKVEventsConfig(
+            enable_kv_cache_events=(
+                kv_events_config is not None and kv_events_config.enable_kv_cache_events
+            ),
+            self_describing_kv_events=bool(
+                self.extra_config.get("self_describing_kv_events", False)
+            ),
+        )
 
         # When True, only prompt (prefill) blocks are offloaded; decode-phase
         # blocks (KV generated after the prompt) are skipped. Useful when prior
