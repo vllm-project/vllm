@@ -121,6 +121,11 @@ void dispose(fptr_t _fa) {
 
 int64_t meta_size() { return sizeof(vllm::Signal); }
 
+void close_graph_ipc_handles(fptr_t _fa) {
+  auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
+  fa->close_graph_ipc_handles();
+}
+
 void register_buffer(fptr_t _fa, const std::vector<fptr_t>& fake_ipc_ptrs) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
   STD_TORCH_CHECK(fake_ipc_ptrs.size() == fa->world_size_);
