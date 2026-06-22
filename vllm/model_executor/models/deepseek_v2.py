@@ -998,8 +998,35 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.is_v32 = hasattr(config, "index_topk")
 
+        # IndexCache config
+        # Refer: https://arxiv.org/abs/2603.12201 for more details.
         _skip_topk = False
+        is_mtp_layer = False
         if self.is_v32:
+            _index_topk_freq = getattr(config, "index_topk_freq", 1)
+            _index_topk_pattern = getattr(config, "index_topk_pattern", None)
+            _index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
+            layer_id = extract_layer_index(prefix)
+
+            if _index_topk_pattern is None:
+                _skip_topk = (
+                    max(layer_id - _index_skip_topk_offset + 1, 0) % _index_topk_freq
+                    != 0
+                )
+            elif 0 <= layer_id < len(_index_topk_pattern):
+                _skip_topk = _index_topk_pattern[layer_id] == "S"
+
+            # The skip pattern only governs backbone layers. MTP/nextn
+            # layers (layer_id >= num_hidden_layers) always build a full
+            # indexer: they compute indices at draft step 0 and toggle
+            # at runtime via set_skip_topk
+            # (index_share_for_mtp_iteration).
+            _num_hidden_layers = getattr(config, "num_hidden_layers", None)
+            is_mtp_layer = (
+                _num_hidden_layers is not None and layer_id >= _num_hidden_layers
+            )
+
+        if self.is_v32 and (not _skip_topk or is_mtp_layer):
             self.indexer_rope_emb = get_rope(
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
@@ -1017,22 +1044,6 @@ class DeepseekV2MLAAttention(nn.Module):
                 f"{prefix}.indexer",
                 is_inplace_rope=self.indexer_rope_emb.enabled(),
             )
-
-            # IndexCache config
-            # Refer: https://arxiv.org/abs/2603.12201 for more details.
-            _index_topk_freq = getattr(config, "index_topk_freq", 1)
-            _index_topk_pattern = getattr(config, "index_topk_pattern", None)
-            _index_skip_topk_offset = getattr(config, "index_skip_topk_offset", 2)
-            layer_id = extract_layer_index(prefix)
-
-            if _index_topk_pattern is None:
-                _skip_topk = (
-                    max(layer_id - _index_skip_topk_offset + 1, 0) % _index_topk_freq
-                    != 0
-                )
-            elif 0 <= layer_id < len(_index_topk_pattern):
-                _skip_topk = _index_topk_pattern[layer_id] == "S"
-
         else:
             self.indexer_rope_emb = None
             self.indexer = None

@@ -90,7 +90,9 @@ def _ref_sparse_prefill_ragged(
     return out.to(torch.bfloat16)
 
 
-def _pack_fp8_ds_mla_cache(kv: torch.Tensor, block_size: int) -> torch.Tensor:
+def _pack_fp8_ds_mla_cache(
+    kv: torch.Tensor, block_size: int, is_extra: bool = False
+) -> torch.Tensor:
     assert kv.shape[-1] == HEAD_DIM
     num_tokens = kv.shape[0]
     num_blocks = (num_tokens + block_size - 1) // block_size
@@ -101,7 +103,9 @@ def _pack_fp8_ds_mla_cache(kv: torch.Tensor, block_size: int) -> torch.Tensor:
     )
     cache_flat = cache.view(torch.uint8).flatten()
     kv_nope_fp8 = (
-        kv[:, :NOPE_HEAD_DIM].to(current_platform.fp8_dtype()).view(torch.uint8)
+        kv[:, :NOPE_HEAD_DIM]
+        .to(torch.float8_e4m3fn if is_extra else current_platform.fp8_dtype())
+        .view(torch.uint8)
     )
     kv_rope_u8 = kv[:, NOPE_HEAD_DIM:].contiguous().view(torch.uint8)
 
@@ -120,7 +124,7 @@ def _pack_fp8_ds_mla_cache(kv: torch.Tensor, block_size: int) -> torch.Tensor:
 
 
 def _read_fp8_ds_mla_cache(
-    cache: torch.Tensor, slot: int, block_size: int
+    cache: torch.Tensor, slot: int, block_size: int, is_extra: bool = False
 ) -> torch.Tensor:
     cache_flat = cache.view(torch.uint8).flatten()
     block_idx = slot // block_size
@@ -129,7 +133,9 @@ def _read_fp8_ds_mla_cache(
     token_base = block_base + pos * 576
 
     nope_u8 = cache_flat[token_base : token_base + NOPE_HEAD_DIM]
-    nope = nope_u8.view(current_platform.fp8_dtype()).to(torch.float32)
+    nope = nope_u8.view(
+        torch.float8_e4m3fn if is_extra else current_platform.fp8_dtype()
+    ).to(torch.float32)
     rope_u8 = cache_flat[
         token_base + NOPE_HEAD_DIM : token_base + NOPE_HEAD_DIM + ROPE_HEAD_DIM * 2
     ]
@@ -157,7 +163,9 @@ def _ref_sparse_decode_ragged(
         ]
         if extra_cache is not None and extra_rows is not None:
             row_kv.extend(
-                _read_fp8_ds_mla_cache(extra_cache, int(slot), block_size)
+                _read_fp8_ds_mla_cache(
+                    extra_cache, int(slot), block_size, is_extra=True
+                )
                 for slot in extra_rows[query_idx]
             )
 
@@ -326,7 +334,7 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
     main_kv = torch.randn(6, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
     extra_kv = torch.randn(5, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
     main_cache = _pack_fp8_ds_mla_cache(main_kv, block_size)
-    extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size)
+    extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, is_extra=True)
     main_indices = torch.tensor([0, 2, 4, 1], dtype=torch.int32, device=device)
     main_indptr = torch.tensor([0, 2, 4], dtype=torch.int32, device=device)
     extra_indices = torch.tensor([1, 3, 0], dtype=torch.int32, device=device)
@@ -477,7 +485,7 @@ def test_sparse_attn_decode_split_k_kernel(
         rows = [[1, 3, 0, 5, 2, 4], [3, 0, 6]]
         extra_kv = torch.randn(7, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
         extra_rows = rows
-        extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size)
+        extra_cache = _pack_fp8_ds_mla_cache(extra_kv, block_size, is_extra=True)
         extra_indices, extra_indptr = _ragged_from_rows(rows, device)
 
     attn_sink = (
