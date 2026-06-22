@@ -66,25 +66,46 @@ class TrtLlmNvFp4ExpertsBase:
         else:
             self.g1_scale_c = self.quant_config.a2_gscale.clone()
 
+        # Fall back to moe_config.swiglu_* when quant_config doesn't carry them
+        # (ModelOpt NVFP4 checkpoints store these on moe_config, not quant_config).
         device = torch.accelerator.current_device_index()
 
-        def _per_expert(value: float | None) -> torch.Tensor | None:
-            if not moe_config.is_act_and_mul or value is None:
+        def _per_expert(val: float | None) -> torch.Tensor | None:
+            if val is None:
                 return None
             return torch.full(
-                (self.local_num_experts,), value, dtype=torch.float32, device=device
+                (self.local_num_experts,),
+                float(val),
+                dtype=torch.float32,
+                device=device,
             )
 
-        self.gemm1_clamp_limit = _per_expert(quant_config.gemm1_clamp_limit)
-        self.gemm1_alpha = _per_expert(quant_config.gemm1_alpha)
-        self.gemm1_beta = _per_expert(quant_config.gemm1_beta)
+        clamp = quant_config.gemm1_clamp_limit
+        if clamp is None:
+            clamp = getattr(moe_config, "swiglu_limit", None)
+        alpha = quant_config.gemm1_alpha
+        if alpha is None:
+            alpha = getattr(moe_config, "swiglu_alpha", None)
+        beta = quant_config.gemm1_beta
+        if beta is None:
+            beta = getattr(moe_config, "swiglu_beta", None)
+
+
+        if moe_config.is_act_and_mul:
+            self.gemm1_clamp_limit = _per_expert(clamp)
+            self.gemm1_alpha = _per_expert(alpha)
+            self.gemm1_beta = _per_expert(beta)
+        else:
+            self.gemm1_clamp_limit = None
+            self.gemm1_alpha = None
+            self.gemm1_beta = None
 
         logger.info_once(
             "activation=%s, gemm1_alpha=%s, gemm1_beta=%s, gemm1_clamp_limit=%s",
             moe_config.activation,
-            quant_config.gemm1_alpha,
-            quant_config.gemm1_beta,
-            quant_config.gemm1_clamp_limit,
+            alpha,
+            beta,
+            clamp,
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
