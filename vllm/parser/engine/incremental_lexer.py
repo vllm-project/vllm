@@ -235,11 +235,15 @@ class IncrementalLexer:
                             longer_match = True
                             break
                     if not longer_match:
+                        match_len = best_match[2]
                         tokens.append(
-                            LexToken(best_match[0], best_match[1]),
-                            self._pop_token_count(match_len),
+                            LexToken(
+                                best_match[0],
+                                best_match[1],
+                                self._pop_token_count(match_len),
+                            )
                         )
-                        self.buffer = self.buffer[best_match[2] :]
+                        self.buffer = self.buffer[match_len:]
                         continue
                     break
                 else:

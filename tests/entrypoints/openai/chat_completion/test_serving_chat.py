@@ -32,6 +32,7 @@ from vllm.entrypoints.openai.chat_completion.serving import (
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     RequestResponseMetadata,
+    StreamOptions,
 )
 from vllm.entrypoints.openai.models.serving import (
     BaseModelPath,
@@ -676,6 +677,157 @@ def test_completion_tokens_details():
     details = _make_completion_tokens_details(reasoning_tokens=7)
 
     assert details.reasoning_tokens == 7
+
+
+@pytest.mark.asyncio
+async def test_full_generator_uses_independent_parser_per_choice():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    class FakeParser:
+        tool_parser_cls = None
+        seen_instances: list["FakeParser"] = []
+
+        def __init__(self, *args, **kwargs):
+            self.token_count = 0
+            self.seen_instances.append(self)
+
+        def parse(
+            self,
+            model_output,
+            request,
+            enable_auto_tools=False,
+            model_output_token_ids=(),
+        ):
+            self.token_count = len(model_output_token_ids)
+            return model_output, model_output, []
+
+        def count_reasoning_tokens(self, token_ids):
+            return self.token_count
+
+    serving_chat.parser_cls = FakeParser
+
+    async def result_generator():
+        yield RequestOutput(
+            request_id="request-id",
+            prompt="prompt",
+            prompt_token_ids=[1, 2],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="a",
+                    token_ids=[10],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="stop",
+                ),
+                CompletionOutput(
+                    index=1,
+                    text="bc",
+                    token_ids=[20, 21],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="stop",
+                ),
+            ],
+            finished=True,
+        )
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+        n=2,
+    )
+    metadata = RequestResponseMetadata(request_id="request-id")
+
+    response = await serving_chat.chat_completion_full_generator(
+        request=request,
+        result_generator=result_generator(),
+        request_id="request-id",
+        model_name=MODEL_NAME,
+        conversation=[{"role": "user", "content": "what is 1+1?"}],
+        tokenizer=mock_engine.renderer.tokenizer,
+        request_metadata=metadata,
+    )
+
+    assert isinstance(response, ChatCompletionResponse)
+    assert len(FakeParser.seen_instances) == 2
+    assert response.usage is not None
+    assert response.usage.completion_tokens_details is not None
+    assert response.usage.completion_tokens_details.reasoning_tokens == 3
+
+
+@pytest.mark.asyncio
+async def test_stream_generator_without_parser_reports_zero_reasoning_tokens():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+    serving_chat.parser_cls = None
+
+    async def result_generator():
+        yield RequestOutput(
+            request_id="request-id",
+            prompt="prompt",
+            prompt_token_ids=[1, 2],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="hi",
+                    token_ids=[10],
+                    cumulative_logprob=None,
+                    logprobs=None,
+                    finish_reason="stop",
+                )
+            ],
+            finished=True,
+        )
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+        stream=True,
+        stream_options=StreamOptions(
+            include_usage=True,
+            continuous_usage_stats=True,
+        ),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in serving_chat.chat_completion_stream_generator(
+            request=request,
+            result_generator=result_generator(),
+            request_id="request-id",
+            model_name=MODEL_NAME,
+            conversation=[{"role": "user", "content": "what is 1+1?"}],
+            tokenizer=mock_engine.renderer.tokenizer,
+            request_metadata=RequestResponseMetadata(request_id="request-id"),
+        )
+    ]
+
+    payloads = [
+        json.loads(chunk.removeprefix("data: ").strip())
+        for chunk in chunks
+        if chunk != "data: [DONE]\n\n"
+    ]
+    assert not any("error" in payload for payload in payloads)
+    usage_payloads = [payload["usage"] for payload in payloads if payload.get("usage")]
+    assert usage_payloads
+    assert all(
+        usage["completion_tokens_details"]["reasoning_tokens"] == 0
+        for usage in usage_payloads
+    )
 
 
 @pytest.mark.asyncio

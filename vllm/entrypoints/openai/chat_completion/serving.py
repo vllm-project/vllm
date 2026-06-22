@@ -404,7 +404,7 @@ class OpenAIServingChat(OpenAIServing):
             conversation,
             tokenizer,
             request_metadata,
-            parser=parser,
+            chat_template_kwargs=chat_template_kwargs,
             mm_token_counts=mm_token_counts,
         )
 
@@ -644,9 +644,10 @@ class OpenAIServingChat(OpenAIServing):
 
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
-                    previous_reasoning_tokens[i] = parser.count_reasoning_tokens(
-                        output.token_ids
-                    )
+                    if parser is not None:
+                        previous_reasoning_tokens[i] = (
+                            parser.count_reasoning_tokens(output.token_ids)
+                        )
 
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
@@ -852,7 +853,7 @@ class OpenAIServingChat(OpenAIServing):
         conversation: list[ConversationMessage],
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
-        parser: Parser | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
         mm_token_counts: dict[str, int] | None = None,
     ) -> ErrorResponse | ChatCompletionResponse:
         created_time = int(time.time())
@@ -901,7 +902,13 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 logprobs = None
 
-            if parser is not None:
+            parser: Parser | None = None
+            if self.parser_cls is not None:
+                parser = self.parser_cls(
+                    tokenizer,
+                    request.tools,
+                    chat_template_kwargs=chat_template_kwargs,
+                )
                 reasoning, content, tool_calls = parser.parse(
                     output.text,
                     request,

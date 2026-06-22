@@ -463,6 +463,31 @@ class TestEventTokenCounts:
         assert "".join(event.value for event in content_chunks) == "tok3"
         assert sum(event.token_count for event in content_chunks) == 1
 
+    def test_deferred_terminal_preserves_prefix_token_count(self):
+        config = ParserEngineConfig(
+            name="token_id_think_end_test",
+            terminals={"THINK_END": "</think>"},
+            token_id_terminals={"THINK_END": "</think>"},
+            transitions={
+                (ParserState.REASONING, "THINK_END"): Transition(
+                    ParserState.CONTENT,
+                    (EventType.REASONING_END,),
+                ),
+            },
+            initial_state=ParserState.REASONING,
+        )
+        engine = StreamingParserEngine(config, _make_think_tokenizer())
+
+        assert engine.feed("", [1, _END_ID]) == []
+        events = engine.feed("tok1</think>tok2", [2])
+        events.extend(engine.finish())
+
+        reasoning_chunks = [
+            event for event in events if event.type == EventType.REASONING_CHUNK
+        ]
+        assert "".join(event.value for event in reasoning_chunks) == "tok1"
+        assert sum(event.token_count for event in reasoning_chunks) == 1
+
 
 def _func_prefix_config() -> ParserEngineConfig:
     """Config mixing token-ID terminals (TOOL_START/END) with
