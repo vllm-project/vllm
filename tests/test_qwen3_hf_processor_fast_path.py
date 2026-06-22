@@ -171,6 +171,31 @@ def _compact_reference_pixel_values(
     patches = patches.permute(0, 2, 5, 3, 6, 1, 4, 7).contiguous()
     return patches.reshape(batch_size * grid_h * grid_w, channel * patch_size**2)
 
+def _assert_compact_pixel_values_match_temporal_duplication(
+    processor: Qwen3VLMultiModalProcessor,
+    compact_pixel_values: torch.Tensor,
+    duplicated_pixel_values: torch.Tensor,
+) -> None:
+    patch_size = processor.info.get_image_processor().patch_size
+    temporal_patch_size = processor.info.get_image_processor().temporal_patch_size
+
+    assert compact_pixel_values.shape[0] == duplicated_pixel_values.shape[0]
+    assert compact_pixel_values.shape[1] * temporal_patch_size == (
+        duplicated_pixel_values.shape[1]
+    )
+    expanded_compact = (
+        compact_pixel_values.view(
+            compact_pixel_values.shape[0],
+            3,
+            patch_size,
+            patch_size,
+        )
+        .unsqueeze(2)
+        .expand(-1, -1, temporal_patch_size, -1, -1)
+        .reshape_as(duplicated_pixel_values)
+    )
+    assert torch.equal(expanded_compact, duplicated_pixel_values)
+
 
 def test_qwen3_fused_compact_preprocess_matches_reference() -> None:
     processor = _make_processor()
@@ -242,26 +267,76 @@ def test_qwen3_image_only_mm_only_matches_dummy_text_path() -> None:
     assert "attention_mask" not in optimized
     assert torch.equal(optimized["image_grid_thw"], baseline["image_grid_thw"])
 
-    patch_size = processor.info.get_image_processor().patch_size
-    temporal_patch_size = processor.info.get_image_processor().temporal_patch_size
-    baseline_pixel_values = baseline["pixel_values"]
-    compact_pixel_values = optimized["pixel_values"]
-    assert compact_pixel_values.shape[0] == baseline_pixel_values.shape[0]
-    assert compact_pixel_values.shape[1] * temporal_patch_size == (
-        baseline_pixel_values.shape[1]
+    _assert_compact_pixel_values_match_temporal_duplication(
+        processor,
+        optimized["pixel_values"],
+        baseline["pixel_values"],
     )
-    expanded_compact = (
-        compact_pixel_values.view(
-            compact_pixel_values.shape[0],
-            3,
-            patch_size,
-            patch_size,
-        )
-        .unsqueeze(2)
-        .expand(-1, -1, temporal_patch_size, -1, -1)
-        .reshape_as(baseline_pixel_values)
+
+
+def test_qwen3_still_image_mm_only_uses_fast_preprocess(
+    monkeypatch: Any,
+) -> None:
+    processor = _make_processor()
+    mm_items = processor.data_parser.parse_mm_data({"image": _make_images()})
+    hf_kwargs = {"return_mm_token_type_ids": False}
+    original = Qwen3VLMultiModalProcessor._fast_preprocess_batched_images
+    fast_path_called = False
+
+    def wrapped_fast_preprocess(*args: Any, **kwargs: Any) -> Any:
+        nonlocal fast_path_called
+        fast_path_called = True
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        Qwen3VLMultiModalProcessor,
+        "_fast_preprocess_batched_images",
+        staticmethod(wrapped_fast_preprocess),
     )
-    assert torch.equal(expanded_compact, baseline_pixel_values)
+
+    baseline = BaseMultiModalProcessor._apply_hf_processor_mm_only(
+        processor,
+        mm_items,
+        hf_kwargs,
+        {},
+    )
+    optimized = processor._apply_hf_processor_mm_only(mm_items, hf_kwargs, {})
+
+    assert fast_path_called
+    assert torch.equal(optimized["image_grid_thw"], baseline["image_grid_thw"])
+    _assert_compact_pixel_values_match_temporal_duplication(
+        processor,
+        optimized["pixel_values"],
+        baseline["pixel_values"],
+    )
+
+
+def test_qwen3_mm_only_processor_kwarg_falls_back_without_diverging(
+    monkeypatch: Any,
+) -> None:
+    processor = _make_processor()
+    mm_items = processor.data_parser.parse_mm_data({"image": _make_images()})
+    hf_kwargs = {"return_mm_token_type_ids": False, "do_resize": False}
+
+    def fail_fast_preprocess(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("fast path should not run with do_resize override")
+
+    monkeypatch.setattr(
+        Qwen3VLMultiModalProcessor,
+        "_fast_preprocess_batched_images",
+        staticmethod(fail_fast_preprocess),
+    )
+
+    baseline = BaseMultiModalProcessor._apply_hf_processor_mm_only(
+        processor,
+        mm_items,
+        hf_kwargs,
+        {},
+    )
+    optimized = processor._apply_hf_processor_mm_only(mm_items, hf_kwargs, {})
+
+    assert torch.equal(optimized["image_grid_thw"], baseline["image_grid_thw"])
+    assert torch.equal(optimized["pixel_values"], baseline["pixel_values"])
 
 
 def test_qwen3_mm_only_fallback_ignores_tokenization_kwargs() -> None:
