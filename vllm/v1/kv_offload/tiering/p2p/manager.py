@@ -9,7 +9,7 @@ Owns transports and a single bidirectional P2PSession per remote peer.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 from typing_extensions import override
@@ -32,6 +32,7 @@ from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
+    from vllm.v1.kv_offload.tiering.p2p.control.base import ControlConnection
 
 logger = init_logger(__name__)
 
@@ -405,7 +406,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         self._sessions[peer_id] = session
         return session
 
-    def _accept_new_peers(self, new_connections: list) -> None:
+    def _accept_new_peers(self, new_connections: Sequence[ControlConnection]) -> None:
         for conn in new_connections:
             logger.info(
                 "P2P %s: accepting incoming connection from %s",

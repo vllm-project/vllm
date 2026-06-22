@@ -136,6 +136,14 @@ class TestLookup:
         ctx = _req_context(kv_params=_kv_params(kv_request_id="req-2"))
         assert mgr.lookup(b"key", ctx) is True
 
+    def test_lookup_returns_false_without_do_remote_prefill(self):
+        """do_remote_prefill=False means the request was not routed for
+        remote prefill — local prefill should run instead, so lookup()
+        returns False even though host/port/kv_request_id are present."""
+        mgr = _make_manager()
+        ctx = _req_context(kv_params=_kv_params(do_remote_prefill=False))
+        assert mgr.lookup(b"key", ctx) is False
+
 
 # ---------------------------------------------------------------------------
 # Tests for submit_store
@@ -181,6 +189,37 @@ class TestSubmitStore:
         # The job is buffered, not completed yet.
         assert mgr._finished_jobs == []
 
+    def test_routes_to_existing_session(self):
+        """submit_store on a peer with an existing session forwards to
+        session.add_stored_blocks and does NOT create a pending session."""
+        mgr = _make_manager()
+        peer_id = "10.0.0.1:8000"
+        existing = _FakeSession(peer_id=peer_id, connected=True)
+        mgr._sessions[peer_id] = existing  # type: ignore[assignment]
+        job = _job_metadata(
+            job_id=7, keys=[b"k1", b"k2"], block_ids=[3, 4], kv_params=_kv_params()
+        )
+        mgr.submit_store(job)
+
+        assert len(existing.stores_added) == 1
+        kv_req_id, keys, _, job_id = existing.stores_added[0]
+        assert (kv_req_id, keys, job_id) == ("req-1", [b"k1", b"k2"], 7)
+        # Existing session means no fresh pending stamp.
+        assert peer_id not in mgr._pending_session_created_at
+        # Routed to session, not finalized here.
+        assert mgr._finished_jobs == []
+
+    def test_remote_host_missing_fails(self):
+        """do_remote_decode=True but no remote_host: cannot derive peer_id,
+        so the job is failed immediately rather than silently dropped."""
+        mgr = _make_manager()
+        params = _kv_params()
+        del params["remote_host"]
+        job = _job_metadata(job_id=1, kv_params=params)
+        mgr.submit_store(job)
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+        assert mgr._sessions == {}
+
 
 # ---------------------------------------------------------------------------
 # Tests for submit_load
@@ -209,6 +248,25 @@ class TestSubmitLoad:
         mgr.submit_load(job)
         assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
         assert "req-1" in mgr._failed_req_ids
+
+    def test_happy_path_with_active_session(self):
+        """When the peer's session exists, submit_load forwards to
+        session.request_blocks and does NOT add a finished result yet."""
+        mgr = _make_manager()
+        peer_id = "10.0.0.1:8000"
+        existing = _FakeSession(peer_id=peer_id, connected=True)
+        mgr._sessions[peer_id] = existing  # type: ignore[assignment]
+        job = _job_metadata(
+            job_id=42,
+            keys=[b"k1", b"k2"],
+            block_ids=[5, 6],
+            kv_params=_kv_params(kv_request_id="req-42"),
+        )
+        mgr.submit_load(job)
+
+        assert existing.requests == [(42, "req-42")]
+        assert mgr._finished_jobs == []
+        assert "req-42" not in mgr._failed_req_ids
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +347,8 @@ class _FakeSession:
         self._close_loads = close_loads or []
         self._close_stores = close_stores or []
         self.requests: list[tuple[int, str]] = []
+        self.stores_added: list[tuple[str, list, object, int]] = []
+        self.attached: list[object] = []
         self.finishes: list[str] = []
         # Mirror P2PSession._server._inflight (transfer_id → handle) and
         # P2PSession._client._inbound for the shutdown-drain and drain_jobs
@@ -305,6 +365,13 @@ class _FakeSession:
 
     def request_blocks(self, job_id, kv_request_id, keys, block_ids):
         self.requests.append((job_id, kv_request_id))
+
+    def add_stored_blocks(self, kv_request_id, keys, block_ids, job_id):
+        self.stores_added.append((kv_request_id, list(keys), block_ids, job_id))
+
+    def attach_connection(self, conn):
+        self.attached.append(conn)
+        self.connected = True
 
     def finish_request(self, kv_request_id):
         self.finishes.append(kv_request_id)
@@ -434,11 +501,16 @@ class TestHasPendingWork:
     _control.poll() (incoming peer connects) and session.poll()
     (incoming fetch messages on existing sessions)."""
 
-    def test_returns_true_with_no_state(self):
+    def test_returns_true_unconditionally_to_keep_engine_ticking(self):
+        """Even with no sessions and no jobs, has_pending_work() returns
+        True so the engine keeps calling get_finished_jobs(), which is
+        what drives _control.poll() for inbound peer connects."""
         mgr = _make_manager()
         assert mgr.has_pending_work() is True
 
-    def test_returns_true_with_active_sessions(self):
+    def test_returns_true_even_when_sessions_present(self):
+        """The result is the same regardless of session state — there is
+        no 'idle' branch."""
         mgr = _make_manager()
         mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")  # type: ignore[assignment]
         assert mgr.has_pending_work() is True
@@ -534,7 +606,16 @@ class TestShutdownDrain:
 
     def test_shutdown_force_cancels_after_timeout(self, monkeypatch):
         # Drain never completes — wait-cancel keeps returning the inflight set.
+        # Use a synthetic clock so the test does not depend on real wallclock
+        # being able to advance in <50ms on a loaded CI node:
+        #   call 1 (deadline calc): 100.0  -> deadline = 100.05
+        #   call 2 (loop predicate): 100.0 -> enters loop, one wait-cancel
+        #   call 3 (loop predicate): 100.06 -> exits, force-cancel runs
         monkeypatch.setattr(manager_module, "_SHUTDOWN_DRAIN_TIMEOUT_S", 0.05)
+        monkeypatch.setattr(manager_module, "_DRAIN_SLEEP_S", 0.0)
+        times = iter([100.0, 100.0, 100.06])
+        monkeypatch.setattr(manager_module.time, "monotonic", lambda: next(times))
+
         mgr, data, control = self._prep(
             still_queue=[[42]],
             inflight_ids=[42],
@@ -543,7 +624,8 @@ class TestShutdownDrain:
 
         wait_calls = [c for c in data.cancel_calls if c[1] == "wait"]
         immediate_calls = [c for c in data.cancel_calls if c[1] == "immediate"]
-        assert len(wait_calls) >= 1
+        assert len(wait_calls) == 1
+        assert wait_calls[0][0] == [42]
         assert immediate_calls == [([42], "immediate")]
         assert data.close_calls == 1
         assert control.close_calls == 1
@@ -822,3 +904,331 @@ class TestBidirectionalManager:
         # B: load job 201 + store job 200
         assert 201 in b_ok, f"B loads succeeded: {b_ok}"
         assert 200 in b_ok, f"B stores succeeded: {b_ok}"
+
+
+# ---------------------------------------------------------------------------
+# _accept_new_peers — duplicate connection rejection
+# ---------------------------------------------------------------------------
+
+
+class _RecordingConn:
+    """Inbound connection stub that records close()/peer_id only."""
+
+    def __init__(self, peer_id: str) -> None:
+        self.peer_id = peer_id
+        self.close_calls: int = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class TestAcceptNewPeers:
+    """A second inbound from an already-connected peer is rejected and the
+    new conn is closed; the existing session is left untouched."""
+
+    def test_duplicate_connection_is_closed_and_existing_session_untouched(self):
+        mgr = _make_manager()
+        peer_id = "10.0.0.1:8000"
+        existing = _FakeSession(peer_id=peer_id, connected=True)
+        mgr._sessions[peer_id] = existing  # type: ignore[assignment]
+
+        new_conn = _RecordingConn(peer_id)
+        mgr._accept_new_peers([new_conn])
+
+        # Manager swallowed the ValueError and closed the duplicate conn.
+        assert new_conn.close_calls == 1
+        # Existing session was NOT re-attached.
+        assert existing.attached == []
+        # Session map unchanged.
+        assert mgr._sessions[peer_id] is existing
+
+    def test_attaches_to_pending_session(self):
+        """Inbound conn for an existing PENDING session promotes it via
+        attach_connection — this is the prefiller-side rendezvous."""
+        mgr = _make_manager()
+        peer_id = "10.0.0.1:8000"
+        pending = _FakeSession(peer_id=peer_id, connected=False)
+        mgr._sessions[peer_id] = pending  # type: ignore[assignment]
+        mgr._pending_session_created_at[peer_id] = time.monotonic()
+
+        new_conn = _RecordingConn(peer_id)
+        mgr._accept_new_peers([new_conn])
+
+        assert pending.attached == [new_conn]
+        assert pending.connected is True
+        # Pending stamp is cleared once promoted.
+        assert peer_id not in mgr._pending_session_created_at
+        assert new_conn.close_calls == 0
+
+
+# ---------------------------------------------------------------------------
+# _poll_once orchestration
+# ---------------------------------------------------------------------------
+
+
+class TestPollOnce:
+    """_poll_once must drain control, accept new peers, poll every session,
+    surface results, and reap dead sessions — in that order."""
+
+    def test_orchestrates_accept_poll_and_reap(self):
+        mgr = _make_manager()
+
+        # Pending session waiting for an inbound conn.
+        peer_pending = "10.0.0.1:8000"
+        pending = _FakeSession(peer_id=peer_pending, connected=False)
+        mgr._sessions[peer_pending] = pending  # type: ignore[assignment]
+        mgr._pending_session_created_at[peer_pending] = time.monotonic()
+
+        # Alive session whose poll() returns one load + one store.
+        peer_alive = "10.0.0.2:9000"
+        alive = _FakeSession(
+            peer_id=peer_alive,
+            alive=True,
+            connected=True,
+            loads=[LoadResult(job_id=11, kv_request_id="req-11", success=True)],
+            stores=[StoreResult(job_id=22, success=True)],
+        )
+        mgr._sessions[peer_alive] = alive  # type: ignore[assignment]
+
+        # Dead session whose pending close() jobs surface as failures.
+        peer_dead = "10.0.0.3:9999"
+        dead = _FakeSession(
+            peer_id=peer_dead,
+            alive=False,
+            connected=True,
+            close_loads=[(33, "req-33")],
+            close_stores=[44],
+        )
+        mgr._sessions[peer_dead] = dead  # type: ignore[assignment]
+
+        # Control transport delivers the inbound conn for the pending peer.
+        new_conn = _RecordingConn(peer_pending)
+
+        class _Ctrl:
+            def poll(self_inner):
+                return [new_conn]
+
+        class _Data:
+            def remove_remote_peer(self_inner, pid):
+                pass
+
+        mgr._control = _Ctrl()  # type: ignore[assignment]
+        mgr._data = _Data()  # type: ignore[assignment]
+
+        mgr._poll_once()
+
+        # Phase 1: accept_new_peers attached the inbound to the pending session.
+        assert pending.attached == [new_conn]
+        assert pending.connected is True
+        # Phase 2: every session was polled — alive's results landed.
+        # Phase 3: dead session was reaped — its close() failures landed.
+        finished = mgr._finished_jobs
+        ok = {(r.job_id, r.success) for r in finished}
+        assert (11, True) in ok  # alive load result
+        assert (22, True) in ok  # alive store result
+        assert (33, False) in ok  # dead session's pending load
+        assert (44, False) in ok  # dead session's pending store
+        assert "req-33" in mgr._failed_req_ids
+        assert peer_dead not in mgr._sessions
+        assert peer_pending in mgr._sessions  # pending was just promoted
+        assert peer_alive in mgr._sessions
+
+    def test_failed_load_records_kv_request_id(self):
+        """A LoadResult(success=False) from session.poll() must add its
+        kv_request_id to _failed_req_ids so future lookups return False."""
+        mgr = _make_manager()
+        peer = "10.0.0.1:8000"
+        sess = _FakeSession(
+            peer_id=peer,
+            alive=True,
+            connected=True,
+            loads=[LoadResult(job_id=5, kv_request_id="req-5", success=False)],
+        )
+        mgr._sessions[peer] = sess  # type: ignore[assignment]
+
+        class _Ctrl:
+            def poll(self_inner):
+                return []
+
+        mgr._control = _Ctrl()  # type: ignore[assignment]
+
+        mgr._poll_once()
+
+        assert mgr._finished_jobs == [JobResult(job_id=5, success=False)]
+        assert "req-5" in mgr._failed_req_ids
+
+
+# ---------------------------------------------------------------------------
+# drain_jobs
+# ---------------------------------------------------------------------------
+
+
+class _DrainCtrl:
+    """Trivial control fake whose poll() returns an empty list."""
+
+    def poll(self):
+        return []
+
+
+class TestDrainJobs:
+    def test_returns_immediately_when_quiescent(self):
+        """No sessions and no inflight: drain_jobs returns without sleeping."""
+        mgr = _make_manager()
+        mgr._control = _DrainCtrl()  # type: ignore[assignment]
+
+        sleeps: list[float] = []
+        # If drain_jobs sleeps when nothing is pending, that's a regression.
+        import vllm.v1.kv_offload.tiering.p2p.manager as m
+
+        original_sleep = m.time.sleep
+        m.time.sleep = lambda s: sleeps.append(s)  # type: ignore[assignment]
+        try:
+            mgr.drain_jobs()
+        finally:
+            m.time.sleep = original_sleep  # type: ignore[assignment]
+
+        assert sleeps == []
+
+    def test_returns_when_session_has_no_inflight_or_inbound(self):
+        """A session with empty _inbound and _inflight does not block drain."""
+        mgr = _make_manager()
+        mgr._control = _DrainCtrl()  # type: ignore[assignment]
+        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")  # type: ignore[assignment]
+        # Should return on the first iteration.
+        mgr.drain_jobs()
+
+    def test_logs_warning_after_5s_then_completes(self, monkeypatch):
+        """A session that stays inflight past 5s triggers the warning, and
+        once it clears the loop returns."""
+        mgr = _make_manager()
+        mgr._control = _DrainCtrl()  # type: ignore[assignment]
+        sess = _FakeSession(peer_id="peer:1")
+        sess._server._inflight = {1: object()}  # non-empty
+        mgr._sessions["peer:1"] = sess  # type: ignore[assignment]
+
+        # Synthetic monotonic clock: returns 100.0 for the start stamp and
+        # the first elapsed-check, then 106.0 to push us past the 5s warning
+        # threshold, then steady at 106.0 for any later checks.
+        clock = iter([100.0, 100.0, 106.0])
+
+        def fake_monotonic() -> float:
+            try:
+                return next(clock)
+            except StopIteration:
+                return 106.0
+
+        monkeypatch.setattr(manager_module, "_DRAIN_SLEEP_S", 0.0)
+        monkeypatch.setattr(manager_module.time, "monotonic", fake_monotonic)
+
+        # Spy on the warning logger directly — vllm's logger does not
+        # propagate to root, so caplog can't see it.
+        warnings: list[str] = []
+
+        def record_warning(msg, *args, **_kwargs):
+            warnings.append(msg % args if args else msg)
+
+        monkeypatch.setattr(manager_module.logger, "warning", record_warning)
+
+        # Clear inflight after the first sleep so drain can exit on the
+        # next iteration's `pending` check.
+        n_sleeps = 0
+
+        def clearing_sleep(_s):
+            nonlocal n_sleeps
+            n_sleeps += 1
+            sess._server._inflight = {}
+
+        monkeypatch.setattr(manager_module.time, "sleep", clearing_sleep)
+
+        mgr.drain_jobs()
+
+        assert any("still draining after 5s" in w for w in warnings), warnings
+
+
+# ---------------------------------------------------------------------------
+# on_schedule_end
+# ---------------------------------------------------------------------------
+
+
+class TestOnScheduleEnd:
+    def test_is_noop(self):
+        """on_schedule_end is a documented no-op; just confirm it doesn't
+        raise and doesn't mutate state."""
+        mgr = _make_manager()
+        before_sessions = dict(mgr._sessions)
+        before_jobs = list(mgr._finished_jobs)
+        assert mgr.on_schedule_end() is None
+        assert mgr._sessions == before_sessions
+        assert mgr._finished_jobs == before_jobs
+
+
+# ---------------------------------------------------------------------------
+# Connection death mid-transfer (real P2PSession via paired managers)
+# ---------------------------------------------------------------------------
+
+
+class TestConnectionDeathMidTransfer:
+    """When a peer's control connection dies while transfers are in flight,
+    pending stores AND pending loads must surface as failed JobResults and
+    the kv_request_ids must be recorded in _failed_req_ids so future
+    lookups route to local prefill."""
+
+    def test_dead_connection_with_pending_work_surfaces_failures(self):
+        mgr_a, mgr_b = _build_paired_managers()
+
+        a_decoder_params = {
+            "remote_host": "B",
+            "remote_port": 2,
+            "kv_request_id": "req-load",
+            "do_remote_decode": False,
+            "do_remote_prefill": True,
+        }
+        a_prefiller_params = {
+            "remote_host": "B",
+            "remote_port": 2,
+            "kv_request_id": "req-store",
+            "do_remote_decode": True,
+            "do_remote_prefill": False,
+        }
+
+        # Open the outbound session A->B and submit one load + one store.
+        mgr_a.on_new_request(_req_context(a_decoder_params))
+        mgr_a.submit_store(
+            _job_metadata(
+                job_id=900,
+                keys=[b"a-block"],
+                block_ids=[0],
+                kv_params=a_prefiller_params,
+            )
+        )
+        mgr_a.submit_load(
+            _job_metadata(
+                job_id=901,
+                keys=[b"b-block"],
+                block_ids=[0],
+                kv_params=a_decoder_params,
+            )
+        )
+
+        # Drain anything the loopback can deliver synchronously, but stop
+        # before the remote side has had time to complete the transfers.
+        list(mgr_a.get_finished_jobs())
+
+        # Kill the control connection out from under the session.
+        peer_id = "B:2"
+        sess = mgr_a._sessions[peer_id]
+        assert sess._conn is not None
+        sess._conn.mark_dead()
+
+        # Next poll must reap the session and surface both pending jobs as
+        # failures.
+        results: list[JobResult] = []
+        for _ in range(3):
+            results.extend(list(mgr_a.get_finished_jobs()))
+
+        outcomes = {(r.job_id, r.success) for r in results}
+        assert (900, False) in outcomes, f"store should fail: {outcomes}"
+        assert (901, False) in outcomes, f"load should fail: {outcomes}"
+        assert "req-load" in mgr_a._failed_req_ids
+        # Session removed.
+        assert peer_id not in mgr_a._sessions

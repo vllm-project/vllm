@@ -39,7 +39,6 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
 from vllm.v1.kv_offload.tiering.p2p.session.server import (
     ServerRole,
     StoreResult,
-    _InflightXfer,
 )
 
 if TYPE_CHECKING:
@@ -54,14 +53,6 @@ logger = init_logger(__name__)
 # bugs that may indicate a peer-induced bad state. Reset on any
 # successful dispatch.
 _MAX_CONSECUTIVE_DISPATCH_ERRORS = 5
-
-__all__ = [
-    "LoadResult",
-    "P2PSession",
-    "StoreResult",
-    "_InflightXfer",
-    "_MAX_CONSECUTIVE_DISPATCH_ERRORS",
-]
 
 
 class P2PSession:

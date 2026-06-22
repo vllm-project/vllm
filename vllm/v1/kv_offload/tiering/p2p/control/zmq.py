@@ -9,6 +9,7 @@ management). Message-content agnostic.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import msgspec
@@ -27,10 +28,9 @@ _HEARTBEAT_IVL_MS = 2000
 _HEARTBEAT_TIMEOUT_MS = 10000
 _HEARTBEAT_TTL_MS = 10000
 
-# Shared sentinels returned when there is nothing to report. Callers must
-# not mutate them (all current callers only iterate / index / len / compare).
-_EMPTY_INBOX: list[dict] = []
-_EMPTY_NEW_CONNECTIONS: list[ControlConnection] = []
+# Shared sentinels returned when there is nothing to report.
+_EMPTY_INBOX: tuple[dict, ...] = ()
+_EMPTY_NEW_CONNECTIONS: tuple[ControlConnection, ...] = ()
 
 
 def _tcp_addr(host: str, port: int | str) -> str:
@@ -67,7 +67,7 @@ class ZmqConnection(ControlConnection):
         data = msgspec.msgpack.encode(msg)
         self._sockets.dealer.send(data)
 
-    def recv(self) -> list[dict]:
+    def recv(self) -> Sequence[dict]:
         """Drain and return all buffered incoming messages."""
         if not self._inbox:
             return _EMPTY_INBOX
@@ -138,7 +138,7 @@ class ZmqTransport(ControlTransport):
         )
         return self._open_connection(peer_id, direction="outbound")
 
-    def poll(self) -> list[ControlConnection]:
+    def poll(self) -> Sequence[ControlConnection]:
         """Process all pending I/O. Returns newly accepted connections.
 
         - Receives messages (buffered in each connection's inbox)

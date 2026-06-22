@@ -21,6 +21,10 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
     P2PSession,
     StoreResult,
 )
+from vllm.v1.kv_offload.tiering.p2p.session.client import (
+    _ABORT_ACK_TIMEOUT_S,
+    _LOAD_TIMEOUT_S,
+)
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
     AbortAckMsg,
@@ -368,6 +372,66 @@ class TestClientFlows:
         session.poll()
         abort = conn._sent[-1]
         assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
+
+    def test_load_abort_ack_timeout_surfaces_failure(self):
+        """After load timeout sends AbortFetch, if no AbortAck arrives within
+        _ABORT_ACK_TIMEOUT_S the request is surfaced as failed and removed
+        from _inbound — the engine cannot wait forever on a peer that won't
+        ack.
+        """
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=7, kv_request_id="req-7", keys=[b"k"], block_ids=[0]
+        )
+        # 1) Trip the load timeout to send AbortFetch and stamp aborted_at.
+        session._client._inbound["req-7"].submitted_at = (
+            time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+        )
+        loads, _ = session.poll()
+        assert loads == []
+        assert any(
+            m.get(TYPE_KEY) == AbortFetchMsg.TYPE
+            and m[AbortFetchMsg.KV_REQUEST_ID] == "req-7"
+            for m in conn._sent
+        )
+        assert session._client._inbound["req-7"].aborted_at is not None
+
+        # 2) Now backdate aborted_at past the abort-ack timeout. No ack ever
+        # arrived from the peer.
+        session._client._inbound["req-7"].aborted_at = (
+            time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
+        )
+        loads, _ = session.poll()
+        assert loads == [LoadResult(job_id=7, kv_request_id="req-7", success=False)]
+        assert "req-7" not in session._client._inbound
+
+    def test_load_abort_ack_clears_request(self):
+        """After load timeout sends AbortFetch, an arriving AbortAckMsg from
+        the peer surfaces the failure cleanly and removes the request from
+        _inbound — covers the on_abort_ack arrival path."""
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=8, kv_request_id="req-8", keys=[b"k"], block_ids=[0]
+        )
+        session._client._inbound["req-8"].submitted_at = (
+            time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+        )
+        # First poll: AbortFetch goes out.
+        session.poll()
+        assert session._client._inbound["req-8"].aborted_at is not None
+
+        # Peer acks the abort.
+        conn.enqueue(
+            {
+                TYPE_KEY: AbortAckMsg.TYPE,
+                AbortAckMsg.KV_REQUEST_ID: "req-8",
+            }
+        )
+        loads, _ = session.poll()
+        assert loads == [LoadResult(job_id=8, kv_request_id="req-8", success=False)]
+        assert "req-8" not in session._client._inbound
 
 
 # ---------------------------------------------------------------------------
@@ -918,6 +982,122 @@ class TestFinishRequestServerSide:
         _, stores = session.poll()
         assert StoreResult(job_id=42, success=False) in stores
         assert 42 not in session._server._store_jobs
+
+    def test_partial_match_completes_in_two_rounds(self):
+        """Peer demand for [k1, k2, k3]; first round only k1 is available,
+        second round adds k2 and k3. Each round transfers what's matched
+        and the request finalizes with success once remaining hits zero.
+        """
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+
+        # Peer fetches three blocks.
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1", b"k2", b"k3"],
+                FetchMsg.BLOCK_INDEXES: [10, 11, 12],
+            }
+        )
+        session.poll()
+        # Demand registered, no matches yet.
+        assert session._server._inflight == {}
+        outbound = session._server._outbound["req-1"]
+        assert outbound.remaining == 3
+        assert set(outbound.demanded.keys()) == {b"k1", b"k2", b"k3"}
+
+        # Round 1: only k1 is stored locally.
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=100)
+        # One inflight transfer for k1.
+        assert len(session._server._inflight) == 1
+        tid_1 = next(iter(session._server._inflight))
+        assert transport._transfers[tid_1][1] == [0]
+        assert transport._transfers[tid_1][2] == [10]
+        # k2 and k3 still demanded.
+        assert set(outbound.demanded.keys()) == {b"k2", b"k3"}
+
+        # Transfer 1 completes.
+        transport._poll_done.append(tid_1)
+        _, stores = session.poll()
+        assert StoreResult(job_id=100, success=True) in stores
+        assert session._server._inflight == {}
+        assert outbound.remaining == 2
+        # Not yet finalized — still 2 blocks demanded.
+        assert "req-1" in session._server._outbound
+
+        # Round 2: k2 and k3 arrive together.
+        session.add_stored_blocks("req-1", [b"k2", b"k3"], [1, 2], job_id=200)
+        assert len(session._server._inflight) == 1
+        tid_2 = next(iter(session._server._inflight))
+        assert tid_2 != tid_1
+        assert sorted(transport._transfers[tid_2][1]) == [1, 2]
+
+        # Transfer 2 completes — request now fully satisfied.
+        transport._poll_done.append(tid_2)
+        _, stores = session.poll()
+        assert StoreResult(job_id=200, success=True) in stores
+        # _finalize_outbound fired — request gone, peer notified with success.
+        assert "req-1" not in session._server._outbound
+        done = next(m for m in conn._sent if m.get(TYPE_KEY) == TransferDoneMsg.TYPE)
+        assert done[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
+        assert done[TransferDoneMsg.SUCCESS] is True
+
+    def test_write_blocks_failure_finalizes_after_last_inflight_completes(self):
+        """write_blocks returns None on a SECOND match while a first transfer
+        is still inflight. The request should NOT finalize until the inflight
+        completes, then the elif branch in collect_results
+        (``finishing and not _has_inflight_for(...)``) finalizes it as failure.
+        """
+        session, conn, transport = _make_session()
+        _activate(session, conn)
+
+        # Peer demands two blocks.
+        conn.enqueue(
+            {
+                TYPE_KEY: FetchMsg.TYPE,
+                FetchMsg.KV_REQUEST_ID: "req-1",
+                FetchMsg.BLOCK_HASHES: [b"k1", b"k2"],
+                FetchMsg.BLOCK_INDEXES: [10, 11],
+            }
+        )
+        session.poll()
+
+        # Round 1: k1 transfers cleanly.
+        session.add_stored_blocks("req-1", [b"k1"], [0], job_id=100)
+        assert len(session._server._inflight) == 1
+        tid_1 = next(iter(session._server._inflight))
+        outbound = session._server._outbound["req-1"]
+        assert outbound.remaining == 2  # decrement happens on completion
+        assert outbound.finishing is False
+
+        # Round 2: write_blocks fails for k2 while transfer_1 is still inflight.
+        transport.write_blocks = lambda *a, **kw: None  # type: ignore[assignment]
+        session.add_stored_blocks("req-1", [b"k2"], [1], job_id=200)
+        # No new transfer was registered.
+        assert list(session._server._inflight.keys()) == [tid_1]
+        # Marked finishing, but NOT finalized yet (transfer_1 still inflight).
+        assert outbound.finishing is True
+        assert "req-1" in session._server._outbound
+        done_msgs = [m for m in conn._sent if m.get(TYPE_KEY) == TransferDoneMsg.TYPE]
+        assert done_msgs == []
+
+        # Transfer 1 completes — now ``_has_inflight_for("req-1")`` is False
+        # and the elif branch in collect_results fires _finalize(success=False).
+        # The k1 success result is direct; the k2 failure result is queued
+        # in _pending_store_results and surfaces on the NEXT poll.
+        transport._poll_done.append(tid_1)
+        _, stores_first = session.poll()
+        assert StoreResult(job_id=100, success=True) in stores_first
+        # Outbound state cleaned up; peer notified with success=False.
+        assert "req-1" not in session._server._outbound
+        done = next(m for m in conn._sent if m.get(TYPE_KEY) == TransferDoneMsg.TYPE)
+        assert done[TransferDoneMsg.KV_REQUEST_ID] == "req-1"
+        assert done[TransferDoneMsg.SUCCESS] is False
+
+        # Next poll drains the queued failure.
+        _, stores_second = session.poll()
+        assert StoreResult(job_id=200, success=False) in stores_second
 
 
 # ---------------------------------------------------------------------------

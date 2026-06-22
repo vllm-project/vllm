@@ -46,6 +46,7 @@ Implementor contracts
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 
 
 class ControlConnection(ABC):
@@ -81,10 +82,11 @@ class ControlConnection(ABC):
         ...
 
     @abstractmethod
-    def recv(self) -> list[dict]:
+    def recv(self) -> Sequence[dict]:
         """Drain and return all messages received since the last call.
 
-        Returns an empty list if no messages are pending.
+        Returns an empty sequence if no messages are pending.
+        The returned sequence is read-only — callers must not mutate it.
         Messages are dicts deserialized from the wire format.
         """
         ...
@@ -136,7 +138,7 @@ class ControlTransport(ABC):
         ...
 
     @abstractmethod
-    def poll(self) -> list[ControlConnection]:
+    def poll(self) -> Sequence[ControlConnection]:
         """Process all pending I/O and return newly accepted connections.
 
         This is the main I/O driver. Each call:
@@ -147,9 +149,10 @@ class ControlTransport(ABC):
           - Detects disconnections and marks connections dead
 
         Returns:
-            List of newly accepted inbound connections (not previously
-            returned). The caller is responsible for creating sessions
-            for these connections.
+            Newly accepted inbound connections (not previously returned).
+            The returned sequence is read-only — callers must not mutate
+            it. The caller is responsible for creating sessions for
+            these connections.
         """
         ...
 
