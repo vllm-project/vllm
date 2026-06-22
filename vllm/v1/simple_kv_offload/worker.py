@@ -8,7 +8,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
 from vllm.v1.simple_kv_offload.metadata import (
@@ -149,7 +149,7 @@ class SimpleCPUOffloadWorker:
             (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
         )
 
-        pin_memory = is_pin_memory_available()
+        pin_memory = PIN_MEMORY
         if not pin_memory:
             logger.warning(
                 "Pinned memory not available. CPU offload performance may be degraded."
