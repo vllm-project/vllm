@@ -76,6 +76,27 @@ def _decode_params(kv_params: dict | None) -> dict | None:
     return kv_params.get("decode")
 
 
+def _p2p_params(kv_params: dict | None) -> dict | None:
+    """Return the ``p2p`` sub-dict, or None if absent.
+
+    Set on symmetric-P2P consumer requests; carries kv_request_id,
+    remote_host, remote_port.
+    """
+    if not kv_params:
+        return None
+    return kv_params.get("p2p")
+
+
+def _consumer_params(kv_params: dict | None) -> dict | None:
+    """Return the consumer sub-dict for either PD or symmetric-P2P.
+
+    Decoder (PD) requests carry ``prefill``; symmetric-P2P consumers
+    carry ``p2p``. Both have the same shape (kv_request_id, remote_host,
+    remote_port) so callers can use whichever is set.
+    """
+    return _prefill_params(kv_params) or _p2p_params(kv_params)
+
+
 @dataclass
 class _UnboundStoreBatch:
     """A submit_store batch parked at the manager before any peer has fetched.
@@ -186,16 +207,16 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        prefill = _prefill_params(req_context.kv_transfer_params)
+        consumer = _consumer_params(req_context.kv_transfer_params)
         if (
-            not prefill
-            or not prefill.get("remote_host")
-            or not prefill.get("remote_port")
-            or not prefill.get("kv_request_id")
+            not consumer
+            or not consumer.get("remote_host")
+            or not consumer.get("remote_port")
+            or not consumer.get("kv_request_id")
         ):
             return LookupResult.MISS
 
-        kv_request_id = prefill["kv_request_id"]
+        kv_request_id = consumer["kv_request_id"]
         if kv_request_id in self._failed_req_ids:
             return LookupResult.MISS
         return LookupResult.HIT
@@ -204,15 +225,16 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
         """Open the outbound session toward the producer if needed.
 
-        On the decoder side (``prefill`` set), open a session toward the
-        producer at remote_host:remote_port so submit_load can issue
-        FetchMsg as soon as it fires. On the prefiller side, sessions
-        are created when the consumer's inbound connection arrives in
-        _accept_new_peers — submit_store no longer pre-creates anything.
+        On the consumer side (``prefill`` for PD or ``p2p`` for symmetric
+        P2P), open a session toward the producer at remote_host:remote_port
+        so submit_load can issue FetchMsg as soon as it fires. On the
+        prefiller side, sessions are created when the consumer's inbound
+        connection arrives in _accept_new_peers — submit_store no longer
+        pre-creates anything.
         """
-        prefill = _prefill_params(req_context.kv_transfer_params)
-        if prefill:
-            peer_id = self._remote_id_from_params(prefill)
+        consumer = _consumer_params(req_context.kv_transfer_params)
+        if consumer:
+            peer_id = self._remote_id_from_params(consumer)
             if peer_id:
                 self._get_or_create_session(peer_id)
         return RequestOffloadingContext()
@@ -445,11 +467,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def _get_or_create_session(self, peer_id: str) -> P2PSession:
         """Return the existing session for peer_id, or open one outbound.
 
-        Decoder-side helper for on_new_request: when ``prefill`` is set,
-        the consumer must reach the producer at peer_id. If we already
-        have a session toward that peer (from a prior load or a
-        peer-initiated inbound), reuse it; otherwise open an outbound
-        ControlConnection and build a connected session.
+        Consumer-side helper for on_new_request: when ``prefill`` (PD)
+        or ``p2p`` (symmetric P2P) is set, the consumer must reach the
+        producer at peer_id. If we already have a session toward that
+        peer (from a prior load or a peer-initiated inbound), reuse it;
+        otherwise open an outbound ControlConnection and build a
+        connected session.
         """
         session = self._sessions.get(peer_id)
         if session is not None:
