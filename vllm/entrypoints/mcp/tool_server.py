@@ -219,11 +219,24 @@ class DemoToolServer(ToolServer):
         if tool_name not in self.tools:
             return None
         if tool_name == "browser":
-            return ToolNamespaceConfig.browser()
+            cfg = ToolNamespaceConfig.browser()
         elif tool_name == "python":
-            return ToolNamespaceConfig.python()
+            cfg = ToolNamespaceConfig.python()
         else:
             raise ValueError(f"Unknown tool {tool_name}")
+
+        if allowed_tools is None:
+            return cfg
+
+        filtered = [t for t in cfg.tools if t.name in allowed_tools]
+        if not filtered:
+            return None
+
+        return ToolNamespaceConfig(
+            name=cfg.name,
+            description=cfg.description,
+            tools=filtered,
+        )
 
     @asynccontextmanager
     async def new_session(
