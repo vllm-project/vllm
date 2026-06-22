@@ -152,3 +152,78 @@ def warmup_kernels(
     worker_execute_model(cleanup_output)
     model_runner.kv_connector.set_disabled(False)
     torch.accelerator.synchronize()
+
+
+def _get_positive_int(obj: Any, name: str, default: int) -> int:
+    value = getattr(obj, name, default)
+    return value if isinstance(value, int) and value > 0 else default
+
+
+@torch.inference_mode()
+def warmup_v1_attention_kernels(model_runner: Any) -> None:
+    """Warm old V1 attention kernels through the existing dummy-run path.
+
+    V1 profiling does not always build attention metadata, and CUDA graph
+    capture locks the workspace after capture. Run small forced-attention dummy
+    batches before capture so attention backends can size workspace without
+    backend-specific synthetic calls.
+    """
+    dummy_run = getattr(model_runner, "_dummy_run", None)
+    if dummy_run is None:
+        return
+    if getattr(model_runner, "is_pooling_model", False):
+        return
+    if not getattr(model_runner, "attn_groups", None):
+        return
+
+    scheduler_config = getattr(model_runner, "scheduler_config", None)
+    if scheduler_config is None:
+        return
+
+    max_num_tokens = _get_positive_int(model_runner, "max_num_tokens", 0)
+    max_model_len = _get_positive_int(model_runner, "max_model_len", 0)
+    max_num_seqs = _get_positive_int(scheduler_config, "max_num_seqs", 1)
+    max_num_batched_tokens = _get_positive_int(
+        scheduler_config,
+        "max_num_batched_tokens",
+        max_num_tokens,
+    )
+    if max_num_tokens <= 0 or max_model_len <= 0 or max_num_batched_tokens <= 0:
+        return
+
+    decode_query_len = _get_positive_int(model_runner, "uniform_decode_query_len", 1)
+    max_decode_tokens = min(
+        max_num_tokens,
+        max_num_batched_tokens,
+        max_num_seqs * decode_query_len,
+    )
+    if max_decode_tokens >= decode_query_len:
+        decode_seq_len = min(max_model_len, max(decode_query_len + 1, 8192))
+        decode_kwargs = {
+            "num_tokens": max_decode_tokens,
+            "skip_eplb": True,
+            "is_profile": True,
+            "force_attention": True,
+            "uniform_decode": True,
+        }
+        if decode_seq_len > decode_query_len:
+            decode_kwargs["profile_seq_lens"] = decode_seq_len
+        dummy_run(**decode_kwargs)
+
+    # Keep this representative cached-prefill shape intentionally small. It
+    # covers request-shaped attention metadata without turning warmup into a
+    # long-prompt benchmark.
+    prefill_tokens = min(max_num_tokens, max_num_batched_tokens, max_model_len, 64)
+    prefill_seq_len = min(max_model_len, max(prefill_tokens + 1, 8192))
+    if prefill_tokens > 1 and prefill_seq_len > prefill_tokens:
+        dummy_run(
+            num_tokens=prefill_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,
+            uniform_decode=False,
+            num_reqs_override=1,
+            profile_seq_lens=prefill_seq_len,
+        )
+
+    torch.accelerator.synchronize()

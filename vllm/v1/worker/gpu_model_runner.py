@@ -5670,6 +5670,7 @@ class GPUModelRunner(
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        num_reqs_override: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -5697,6 +5698,10 @@ class GPUModelRunner(
             profile_seq_lens: If provided, use this value for seq_lens instead
                 of max_query_len. Used to profile attention workspace that
                 scales with context length.
+            num_reqs_override: If provided, cap the number of synthetic
+                requests. This is used by attention warmup to build
+                request-shaped long prefill variants without going through the
+                worker scheduler path.
         """
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
@@ -5729,6 +5734,10 @@ class GPUModelRunner(
         # has num_tokens in total.
         assert num_tokens <= self.max_num_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
+        if num_reqs_override is not None:
+            assert num_reqs_override > 0
+            assert not uniform_decode
+            assert not create_mixed_batch
         if create_mixed_batch:
             assert not uniform_decode
             # Create mixed batch:
@@ -5748,7 +5757,10 @@ class GPUModelRunner(
             if num_tokens % max_query_len != 0:
                 num_scheduled_tokens_list[-1] = num_tokens % max_query_len
         else:
-            num_reqs = min(num_tokens, max_num_reqs)
+            if num_reqs_override is None:
+                num_reqs = min(num_tokens, max_num_reqs)
+            else:
+                num_reqs = min(num_tokens, max_num_reqs, num_reqs_override)
             min_tokens_per_req = num_tokens // num_reqs
             num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
             num_scheduled_tokens_list[-1] += num_tokens % num_reqs

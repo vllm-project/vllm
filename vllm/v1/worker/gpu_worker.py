@@ -72,7 +72,7 @@ from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
-from .gpu.warmup import warmup_kernels
+from .gpu.warmup import warmup_kernels, warmup_v1_attention_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
@@ -624,6 +624,8 @@ class Worker(WorkerBase):
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
         kernel_warmup(self)
+        if not self.use_v2_model_runner:
+            warmup_v1_attention_kernels(self.model_runner)
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
