@@ -8,24 +8,20 @@ import csv
 import json
 import statistics
 import sys
-import time
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import numpy as np
 import torch
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from vllm import _custom_ops as ops  # noqa: E402
 from vllm.platforms import current_platform  # noqa: E402
-from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend  # noqa: E402
-from vllm.v1.simple_kv_offload.cuda_mem_ops import (  # noqa: E402
-    build_params,
-    copy_blocks,
-    pin_tensor,
-)
+from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor  # noqa: E402
 
 DTYPES = {
     "float16": torch.float16,
@@ -84,12 +80,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--copy-path",
-        choices=["backend", "direct"],
-        default="backend",
+        choices=["ops"],
+        default="ops",
         help=(
-            "backend uses DmaCopyBackend.launch_copy(), matching the "
-            "SimpleCPUOffloadWorker copy path. direct calls copy_blocks() "
-            "directly for the raw DMA microbenchmark."
+            "ops uses vLLM's C++ swap_blocks_batch path for batched "
+            "GPU<->CPU copies."
         ),
     )
     parser.add_argument(
@@ -176,45 +171,62 @@ def percentile(values: list[float], pct: float) -> float:
     return sorted(values)[idx]
 
 
-def timed_copy_ms(
+def build_descriptor_tensors(
     *,
+    src_caches: dict[str, torch.Tensor],
+    dst_caches: dict[str, torch.Tensor],
     src_blocks: list[int],
     dst_blocks: list[int],
-    params,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    assert list(src_caches.keys()) == list(dst_caches.keys())
+    src_tensors = list(src_caches.values())
+    dst_tensors = list(dst_caches.values())
+
+    src_bases, dst_bases, bpb = [], [], []
+    for src_tensor, dst_tensor in zip(src_tensors, dst_tensors):
+        bytes_per_block = src_tensor.stride(0) * src_tensor.element_size()
+        assert bytes_per_block == dst_tensor.stride(0) * dst_tensor.element_size()
+        src_bases.append(src_tensor.data_ptr())
+        dst_bases.append(dst_tensor.data_ptr())
+        bpb.append(bytes_per_block)
+
+    src_ids = np.array(src_blocks, dtype=np.int64)
+    dst_ids = np.array(dst_blocks, dtype=np.int64)
+    src_base_arr = np.array(src_bases, dtype=np.int64)
+    dst_base_arr = np.array(dst_bases, dtype=np.int64)
+    bpb_arr = np.array(bpb, dtype=np.int64)
+
+    src_ptrs = (src_base_arr[:, None] + src_ids[None, :] * bpb_arr[:, None]).ravel()
+    dst_ptrs = (dst_base_arr[:, None] + dst_ids[None, :] * bpb_arr[:, None]).ravel()
+    sizes = np.repeat(bpb_arr, len(src_blocks))
+    return (
+        torch.from_numpy(src_ptrs),
+        torch.from_numpy(dst_ptrs),
+        torch.from_numpy(sizes),
+    )
+
+
+def timed_ops_copy_ms(
+    *,
+    src_ptrs: torch.Tensor,
+    dst_ptrs: torch.Tensor,
+    sizes: torch.Tensor,
+    is_store: bool,
     stream: torch.cuda.Stream,
 ) -> float:
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     with torch.cuda.stream(stream):
         start.record(stream)
-        copy_blocks(src_blocks, dst_blocks, params)
+        ops.swap_blocks_batch(
+            src_ptrs,
+            dst_ptrs,
+            sizes,
+            is_src_access_order_any=not is_store,
+        )
         end.record(stream)
     end.synchronize()
     return start.elapsed_time(end)
-
-
-def timed_backend_copy_ms(
-    *,
-    src_blocks: list[int],
-    dst_blocks: list[int],
-    backend: DmaCopyBackend,
-    is_store: bool,
-    event_idx: int,
-    events_list: list[tuple[int, torch.Event]],
-) -> float:
-    start = time.perf_counter()
-    backend.launch_copy(
-        src_blocks,
-        dst_blocks,
-        is_store=is_store,
-        event_idx=event_idx,
-        events_list=events_list,
-    )
-
-    while not events_list or events_list[-1][0] != event_idx:
-        time.sleep(0)
-    events_list[-1][1].synchronize()
-    return (time.perf_counter() - start) * 1000.0
 
 
 def run_one(
@@ -223,7 +235,6 @@ def run_one(
     direction: str,
     gpu_caches: dict[str, torch.Tensor],
     cpu_caches: dict[str, torch.Tensor],
-    backend: DmaCopyBackend | None,
     stream: torch.cuda.Stream,
     args: argparse.Namespace,
     page_size_bytes: int,
@@ -233,34 +244,22 @@ def run_one(
         src_caches, dst_caches = gpu_caches, cpu_caches
     else:
         src_caches, dst_caches = cpu_caches, gpu_caches
-    params = None
-    if args.copy_path == "direct":
-        params = build_params(src_caches, dst_caches, stream)
 
     src_blocks = list(range(transfer_blocks))
     dst_blocks = list(range(transfer_blocks))
-    events_list: list[tuple[int, torch.Event]] = []
-    event_idx = 0
+    src_ptrs, dst_ptrs, sizes = build_descriptor_tensors(
+        src_caches=src_caches,
+        dst_caches=dst_caches,
+        src_blocks=src_blocks,
+        dst_blocks=dst_blocks,
+    )
 
     def copy_once() -> float:
-        nonlocal event_idx
-        if args.copy_path == "backend":
-            assert backend is not None
-            event_idx += 1
-            return timed_backend_copy_ms(
-                src_blocks=src_blocks,
-                dst_blocks=dst_blocks,
-                backend=backend,
-                is_store=direction == "store",
-                event_idx=event_idx,
-                events_list=events_list,
-            )
-
-        assert params is not None
-        return timed_copy_ms(
-            src_blocks=src_blocks,
-            dst_blocks=dst_blocks,
-            params=params,
+        return timed_ops_copy_ms(
+            src_ptrs=src_ptrs,
+            dst_ptrs=dst_ptrs,
+            sizes=sizes,
+            is_store=direction == "store",
             stream=stream,
         )
 
@@ -377,16 +376,6 @@ def main() -> int:
             pin_memory=pin_memory,
         )
         try:
-            backend = None
-            if args.copy_path == "backend":
-                backend = DmaCopyBackend()
-                backend.init(
-                    gpu_caches,
-                    cpu_caches,
-                    device,
-                    torch.cuda.Stream(),
-                    torch.cuda.Stream(),
-                )
             for direction in args.directions:
                 for transfer_blocks in args.transfer_blocks:
                     results.append(
@@ -395,7 +384,6 @@ def main() -> int:
                             direction=direction,
                             gpu_caches=gpu_caches,
                             cpu_caches=cpu_caches,
-                            backend=backend,
                             stream=stream,
                             args=args,
                             page_size_bytes=page_size,
@@ -403,8 +391,6 @@ def main() -> int:
                         )
                     )
         finally:
-            if backend is not None:
-                backend.shutdown()
             del gpu_caches
             del cpu_caches
             torch.cuda.empty_cache()
