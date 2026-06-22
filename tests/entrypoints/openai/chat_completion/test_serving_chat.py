@@ -1432,15 +1432,23 @@ class TestServingChatWithHarmony:
         input_messages_2, _ = (
             serving_chat.openai_serving_render._make_request_with_harmony(req_2)
         )
+        expected_input_messages_2 = [
+            {"role": "system"},
+            {"role": "user"},
+        ]
+        if include_reasoning:
+            expected_input_messages_2.append(
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                }
+            )
+        expected_input_messages_2.append(
+            {"role": "assistant", "channel": "final", "content": final_str}
+        )
         verify_harmony_messages(
             input_messages_2,
-            [
-                {"role": "system"},
-                {"role": "user"},
-                # The analysis message should be dropped on subsequent inputs because
-                # of the subsequent assistant message to the final channel.
-                {"role": "assistant", "channel": "final", "content": final_str},
-            ],
+            expected_input_messages_2,
         )
 
     @pytest.mark.asyncio
@@ -1646,7 +1654,6 @@ class TestServingChatWithHarmony:
                 {
                     "role": "assistant",
                     "channel": "analysis",
-                    "content": reasoning_str,
                 },
                 {
                     "role": "assistant",
@@ -1695,6 +1702,11 @@ class TestServingChatWithHarmony:
                 {"role": "system"},
                 {"role": "developer"},
                 {"role": "user"},
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                    "content": reasoning_str,
+                },
                 {
                     "role": "assistant",
                     "channel": "commentary",
@@ -1760,6 +1772,10 @@ class TestServingChatWithHarmony:
                 {"role": "system"},
                 {"role": "developer"},
                 {"role": "user"},
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                },
                 {"role": "assistant"},
                 {"role": "tool"},
                 {
@@ -1811,8 +1827,10 @@ class TestServingChatWithHarmony:
             [
                 {"role": "system"},
                 {"role": "user", "content": messages[0]["content"]},
-                # The reasoning that would have resulted in an analysis message is
-                # dropped because of a later assistant message to the final channel.
+                {
+                    "role": "assistant",
+                    "channel": "analysis",
+                },
                 {
                     "role": "assistant",
                     "channel": "final",
