@@ -373,6 +373,31 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         return True
 
     @staticmethod
+    def supports_lora() -> bool:
+        return False
+
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if moe_config.is_lora_enabled:
+            return False, "kernel does not support LoRA"
+        if moe_config.has_bias:
+            return False, "kernel does not support bias"
+
+        return TritonExperts.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
+
+    @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
@@ -403,17 +428,6 @@ class Nvfp4QuantizationEmulationTritonExperts(TritonExperts):
         This dequantizes the weights on the fly and calls fused_experts_impl
         with activation quantization support.
         """
-        if self._lora_context is not None:
-            raise NotImplementedError(
-                "LoRA is not supported with fused NVFP4 emulation MoE."
-            )
-        if self.quant_config.w1_bias is not None or (
-            self.quant_config.w2_bias is not None
-        ):
-            raise NotImplementedError(
-                "Bias is not supported with fused NVFP4 emulation MoE."
-            )
-
         # Dequantize weights if they are quantized
         # For NVFP4, weights are packed in uint8 format
         # w1 shape: [num_experts, 2*intermediate_size, hidden_size//2]

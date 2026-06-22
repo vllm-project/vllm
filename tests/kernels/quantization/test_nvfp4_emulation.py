@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.experts.nvfp4_emulation_moe import (
     Nvfp4QuantizationEmulationTritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils import (
     nvfp4_emulation_utils,
 )
@@ -65,6 +64,10 @@ class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
         return "nvfp4"
+
+    @property
+    def a1_scale(self) -> torch.Tensor | None:
+        return self.quant_config.a1_gscale
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -122,14 +125,6 @@ class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
             swizzle=False,
         )
 
-        hidden_states, _ = moe_kernel_quantize_input(
-            A=hidden_states,
-            A_scale=self.quant_config.a1_gscale,
-            quant_dtype="nvfp4",
-            per_act_token_quant=False,
-            quantization_emulation=True,
-        )
-
         super().apply(
             output=output,
             hidden_states=hidden_states,
@@ -147,6 +142,44 @@ class Nvfp4QuantizationEmulationTritonExpertsReference(TritonExperts):
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
+
+
+@pytest.mark.parametrize(
+    ("config_kwargs", "expected_reason"),
+    [
+        ({"has_bias": True}, "kernel does not support bias"),
+        ({"is_lora_enabled": True}, "kernel does not support LoRA"),
+    ],
+)
+def test_nvfp4_emulation_support_check_rejects_bias_and_lora(
+    config_kwargs: dict[str, bool],
+    expected_reason: str,
+) -> None:
+    moe_config = FusedMoEConfig(
+        num_experts=2,
+        experts_per_token=1,
+        hidden_dim=16,
+        intermediate_size_per_partition=16,
+        num_local_experts=2,
+        num_logical_experts=2,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=torch.bfloat16,
+        device="cuda",
+        routing_method=RoutingMethodType.TopK,
+        **config_kwargs,
+    )
+
+    supported, reason = Nvfp4QuantizationEmulationTritonExperts.is_supported_config(
+        Nvfp4QuantizationEmulationTritonExperts,
+        moe_config,
+        kNvfp4Static,
+        kNvfp4Dynamic,
+        mk.FusedMoEActivationFormat.Standard,
+    )
+
+    assert not supported
+    assert reason == expected_reason
 
 
 @pytest.mark.skipif(
@@ -616,7 +649,7 @@ def test_nvfp4_moe_correctness(
         num_experts=num_experts,
         experts_per_token=top_k,
         hidden_dim=hidden_dim,
-        intermediate_size_per_partition=intermediate_size,
+        intermediate_size=intermediate_size,
         num_local_experts=num_experts,
         num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
@@ -704,49 +737,3 @@ def test_nvfp4_moe_correctness(
     )
 
     torch.testing.assert_close(output_fused, output_ref, atol=0, rtol=0)
-
-    # Benchmark.
-    quantiles = [0.5, 0.001, 0.999]
-    model_short = model_id.split("/")[-1]
-
-    def _ref_bench():
-        workspace13_ref.zero_()
-        workspace2_ref.zero_()
-        output_ref.zero_()
-        ref_experts.apply(
-            output=output_ref,
-            workspace13=workspace13_ref,
-            workspace2=workspace2_ref,
-            **apply_kwargs,
-        )
-
-    def _fused_bench():
-        workspace13_fused.zero_()
-        workspace2_fused.zero_()
-        output_fused.zero_()
-        fused_experts.apply(
-            output=output_fused,
-            workspace13=workspace13_fused,
-            workspace2=workspace2_fused,
-            **apply_kwargs,
-        )
-
-    ref_ms, ref_min, ref_max = triton.testing.do_bench(_ref_bench, quantiles=quantiles)
-    fused_ms, fused_min, fused_max = triton.testing.do_bench(
-        _fused_bench, quantiles=quantiles
-    )
-
-    speedup = ref_ms / fused_ms if fused_ms > 0 else float("inf")
-    print(
-        f"  MoE [{model_short}, tp={tensor_parallel_size},"
-        f" tokens={num_tokens}, top_k={top_k}]:"
-    )
-    print(
-        f"    unfused:   median={ref_ms:.3f}ms, "
-        f"min={ref_min:.3f}ms, max={ref_max:.3f}ms"
-    )
-    print(
-        f"    fused:     median={fused_ms:.3f}ms, "
-        f"min={fused_min:.3f}ms, max={fused_max:.3f}ms"
-    )
-    print(f"    speedup:   {speedup:.2f}x")
