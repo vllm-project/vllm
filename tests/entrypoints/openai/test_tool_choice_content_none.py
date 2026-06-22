@@ -123,8 +123,10 @@ def test_chat_completion_response_omits_empty_tool_calls_payload():
     response = _chat_response(ChatMessage(role="assistant", content="done"))
 
     payload = response.model_dump()
+    payload_exclude_unset = response.model_dump(exclude_unset=True)
 
     assert "tool_calls" not in payload["choices"][0]["message"]
+    assert "tool_calls" not in payload_exclude_unset["choices"][0]["message"]
     parsed = OpenAIChatCompletion.model_validate(payload)
     assert parsed.choices[0].message.tool_calls is None
 
@@ -168,7 +170,7 @@ def _stream_response(delta: DeltaMessage) -> ChatCompletionStreamResponse:
 
 
 def test_chat_completion_stream_response_omits_empty_tool_calls_payload():
-    response = _stream_response(DeltaMessage(content="done", tool_calls=[]))
+    response = _stream_response(DeltaMessage(content="done"))
 
     payload = response.model_dump(exclude_unset=True)
     payload_json = response.model_dump_json(exclude_unset=True)

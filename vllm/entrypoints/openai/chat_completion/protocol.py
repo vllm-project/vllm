@@ -70,7 +70,7 @@ class ChatMessage(OpenAIBaseModel):
     def _serialize(self, handler):
         data = handler(self)
         if len(data.get("tool_calls", [])) == 0:
-            data.pop("tool_calls")
+            data.pop("tool_calls", None)
         return data
 
 
