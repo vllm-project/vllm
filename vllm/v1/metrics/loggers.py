@@ -526,11 +526,33 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_kv_cache_usage, per_engine_labelvalues
         )
 
-        # Cumulative count of tokens routed per (model, layer, rank).
-        self.counter_eplb_tokens_per_rank = self._counter_cls(
-            name="vllm:eplb_tokens_per_rank_total",
-            documentation="Cumulative tokens routed per (model, layer, rank).",
-            labelnames=labelnames + ["model", "layer", "rank"],
+        self.histogram_eplb_balancedness = self._histogram_cls(
+            name="vllm:eplb_balancedness",
+            documentation=("Per-(layer, EP-rank) routed-token load ratio"),
+            buckets=[
+                0.5,
+                0.55,
+                0.6,
+                0.65,
+                0.7,
+                0.75,
+                0.8,
+                0.85,
+                0.9,
+                0.95,
+                1.0,
+                1.05,
+                1.1,
+                1.15,
+                1.2,
+                1.25,
+                1.3,
+                1.35,
+                1.4,
+                1.45,
+                1.5,
+            ],
+            labelnames=labelnames + ["model"],
         )
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
@@ -1117,19 +1139,17 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
             if scheduler_stats.eplb_metrics is not None:
                 model_name, engine = self.per_engine_labelvalues[engine_idx]
-                rank = str(scheduler_stats.eplb_metrics.ep_rank)
                 for (
                     model,
-                    delta,
-                ) in scheduler_stats.eplb_metrics.num_routed_tokens.items():
-                    for layer_idx, value in enumerate(delta):
-                        self.counter_eplb_tokens_per_rank.labels(
-                            model_name=model_name,
-                            engine=engine,
-                            model=model,
-                            layer=str(layer_idx),
-                            rank=rank,
-                        ).inc(value)
+                    ratios,
+                ) in scheduler_stats.eplb_metrics.balancedness.items():
+                    hist = self.histogram_eplb_balancedness.labels(
+                        model_name=model_name,
+                        engine=engine,
+                        model=model,
+                    )
+                    for ratio in ratios:
+                        hist.observe(ratio)
 
             if (
                 self.kv_cache_metrics_enabled

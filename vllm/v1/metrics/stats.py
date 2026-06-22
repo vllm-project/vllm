@@ -170,16 +170,14 @@ class KVCacheEvictionEvent:
 @dataclass
 class EplbMetrics:
     """
-    Stores EPLB metrics.
+    Stores EPLB
 
     - `ep_rank`: The EP rank of the worker that produced this sample.
-    - `num_routed_tokens`: For each model, a list of per-layer token
-      counts. Each count is the number of tokens routed to this rank's
-      experts in that layer since the previous sample.
+    - `balancedness`
     """
 
     ep_rank: int = 0
-    num_routed_tokens: dict[str, list[int]] = field(default_factory=dict)
+    balancedness: dict[str, list[float]] = field(default_factory=dict)
 
 
 @dataclass
