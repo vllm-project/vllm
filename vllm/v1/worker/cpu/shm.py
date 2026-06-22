@@ -7,6 +7,8 @@
 
 from typing import Any
 
+import numpy as np
+
 # Patch torch APIs
 import torch
 
@@ -45,11 +47,14 @@ import vllm.utils.torch_utils as torch_utils
 
 
 def async_tensor_h2d(
-    data: list,
-    dtype: torch.dtype,
+    data: list | np.ndarray | torch.Tensor,
     device: str | torch.device,
-    pin_memory: bool = False,
+    dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
+    if isinstance(data, np.ndarray):
+        data = torch.from_numpy(data)
+    if isinstance(data, torch.Tensor):
+        return data.to(dtype=dtype)
     return torch.tensor(data, dtype=dtype, device="cpu")
 
 
