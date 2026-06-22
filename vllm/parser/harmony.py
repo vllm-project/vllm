@@ -28,8 +28,7 @@ from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 
 if TYPE_CHECKING:
-    from openai_harmony import Message, Role
-    from openai_harmony import StreamState as HarmonyStreamState
+    from openai_harmony import Message
 
 
 class _SegmentType(Enum):
@@ -86,29 +85,36 @@ class HarmonyParser(DelegatingParser):
         self._next_tool_call_index = 0
         self._num_processed_messages = 0
 
-    @property
-    def state(self) -> HarmonyStreamState:
-        return self._harmony_parser.state
+    def _poll_completed_message(self) -> Message | None:
+        messages = self._harmony_parser.messages
+        if len(messages) <= self._num_processed_messages:
+            return None
+        msg = messages[self._num_processed_messages]
+        self._num_processed_messages += 1
+        return msg
 
-    @property
-    def current_role(self) -> Role | None:
-        return self._harmony_parser.current_role
+    def flush(self) -> Segment | None:
+        msg = None
+        try:
+            self._harmony_parser.process_eos()
+            msg = self._poll_completed_message()
+        except Exception:
+            # TODO: Consider reraising
+            pass
 
-    @property
-    def current_channel(self) -> str | None:
-        return self._harmony_parser.current_channel
+        # Reset to the initial assistant-parser state for the next turn.
+        self._harmony_parser = get_streamable_parser_for_assistant()
+        self._num_processed_messages = 0
 
-    @property
-    def current_recipient(self) -> str | None:
-        return self._harmony_parser.current_recipient
+        if msg is None:
+            return None
 
-    @property
-    def current_content(self) -> str:
-        return self._harmony_parser.current_content
-
-    @property
-    def current_content_type(self) -> str | None:
-        return self._harmony_parser.current_content_type
+        return Segment(
+            channel=msg.channel,
+            recipient=msg.recipient,
+            delta="",
+            completed_message=msg,
+        )
 
     def parse(
         self,
@@ -123,24 +129,32 @@ class HarmonyParser(DelegatingParser):
         Callers must decide whether to surface them.
         """
         result = self.process_chunk(model_output_token_ids)
+        flushed_segment = self.flush()
+        if flushed_segment is not None:
+            result.segments.append(flushed_segment)
 
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
         tool_calls: list[FunctionCall] = []
 
-        def _append_parsed_message(
-            channel: str | None,
-            recipient: str | None,
-            text: str,
-            content_type: str | None = None,
-        ) -> None:
-            segment_type = _SegmentType.from_channel_and_recipient(channel, recipient)
+        for segment in result.segments:
+            msg = segment.completed_message
+            if msg is None:
+                continue
+            if msg.author.role != "assistant" or not msg.content:
+                continue
+            text = msg.content[0].text
+            segment_type = _SegmentType.from_channel_and_recipient(
+                msg.channel, msg.recipient
+            )
             match segment_type:
                 case _SegmentType.REASONING if self.reasoning_parser and text:
                     reasoning_parts.append(text)
                 case _SegmentType.CONTENT if text:
                     content_parts.append(text)
                 case _SegmentType.TOOL if self.tool_parser:
+                    recipient = msg.recipient
+                    content_type = msg.content_type
                     assert recipient is not None
                     if content_type is not None and "json" not in content_type:
                         arguments = text
@@ -156,31 +170,6 @@ class HarmonyParser(DelegatingParser):
                         )
                     )
 
-        for segment in result.segments:
-            msg = segment.completed_message
-            if msg is None:
-                continue
-            if msg.author.role != "assistant" or not msg.content:
-                continue
-            _append_parsed_message(
-                channel=msg.channel,
-                recipient=msg.recipient,
-                text=msg.content[0].text,
-                content_type=msg.content_type,
-            )
-
-        if (
-            self.current_channel is not None
-            or self.current_recipient is not None
-            or self.current_content
-        ):
-            _append_parsed_message(
-                channel=self.current_channel,
-                recipient=self.current_recipient,
-                text=self.current_content,
-                content_type=self.current_content_type,
-            )
-
         reasoning = "\n".join(reasoning_parts) or None
         content = "\n".join(content_parts) or None
         return reasoning, content, tool_calls or None
@@ -194,8 +183,12 @@ class HarmonyParser(DelegatingParser):
         *,
         finished: bool,
     ) -> DeltaMessage | None:
-        prev_recipient = self.current_recipient
+        prev_recipient = self._harmony_parser.current_recipient
         result = self.process_chunk(delta_token_ids)
+        if finished:
+            flushed_segment = self.flush()
+            if flushed_segment is not None:
+                result.segments.append(flushed_segment)
         combined_content = ""
         combined_reasoning = ""
         tool_messages: list[DeltaToolCall] = []
@@ -248,6 +241,9 @@ class HarmonyParser(DelegatingParser):
                                 )
                             )
 
+        if finished:
+            self._next_tool_call_index = 0
+
         if not combined_content and not combined_reasoning and not tool_messages:
             return None
 
@@ -268,14 +264,10 @@ class HarmonyParser(DelegatingParser):
         reasoning_token_count = 0
         for token_id in token_ids:
             self._harmony_parser.process(token_id)
-            channel = self.current_channel
-            recipient = self.current_recipient
+            channel = self._harmony_parser.current_channel
+            recipient = self._harmony_parser.current_recipient
             delta = self._harmony_parser.last_content_delta or ""
-            completed_message = None
-            _messages = self._harmony_parser.messages
-            if len(_messages) > self._num_processed_messages:
-                completed_message = _messages[self._num_processed_messages]
-                self._num_processed_messages += 1
+            completed_message = self._poll_completed_message()
 
             if channel == "analysis" or (
                 channel == "commentary" and recipient is not None
