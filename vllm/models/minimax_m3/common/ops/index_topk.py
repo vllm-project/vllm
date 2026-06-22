@@ -23,6 +23,12 @@ from vllm.utils.math_utils import round_up
 # One sparse block == one KV page.
 SPARSE_BLOCK_SIZE = 128
 
+_IS_ROCM_GFX942 = False
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx942
+
+    _IS_ROCM_GFX942 = on_gfx942()
+
 
 # ---------------------------------------------------------------------------
 # Bitonic top-k helpers (layout-agnostic).
@@ -373,14 +379,12 @@ def _decode_index_score_kernel(
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
         )  # [N,D]
-        if BLOCK_SIZE_HQ == 1:
-            # Single index head + single query token (the common M3 decode case):
-            # tl.dot here is a degenerate [N,D] x [D,1] GEMV that produces one
-            # useful output column out of the >=16-wide MFMA tile (>90% wasted)
-            # and bloats accumulator VGPRs. Replace it with a vectorized fp32
-            # multiply + reduce over the head dim (numerically equivalent).
-            q_vec = tl.sum(q, axis=1).to(tl.float32)  # [D] (HQ==1 -> single column)
-            kq = tl.sum(k.to(tl.float32) * q_vec[None, :], axis=1)[:, None]  # [N,1]
+        if _IS_ROCM_GFX942 and BLOCK_SIZE_HQ == 1:
+            # gfx942 (CDNA3): tl.dot([N,D] x [D,1]) is a degenerate GEMV that
+            # wastes >90% of the MFMA tile. Replace with vectorized fp32
+            # multiply + reduce (numerically equivalent).
+            q_vec = tl.sum(q, axis=1).to(tl.float32)
+            kq = tl.sum(k.to(tl.float32) * q_vec[None, :], axis=1)[:, None]
         else:
             kq = tl.dot(k, q)  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
