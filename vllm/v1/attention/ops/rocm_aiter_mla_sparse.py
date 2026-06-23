@@ -58,7 +58,9 @@ def _indexer_k_quant_and_cache_kernel(
     slot_id = tl.load(slot_mapping_ptr + tid)
     if slot_id < 0:
         return
-    block_id = slot_id // block_size
+    # The packed KV layout makes per-block strides large
+    # enough that block_id * stride can exceed 32-bit range.
+    block_id = (slot_id // block_size).to(tl.int64)
     block_offset = slot_id % block_size
     tile_block_id = block_offset // BLOCK_TILE_SIZE
     tile_block_offset = block_offset % BLOCK_TILE_SIZE
@@ -179,7 +181,9 @@ def _cp_gather_indexer_quant_cache_kernel(
         block_table_ptr + block_table_offset, mask=valid_block_table, other=-1
     )
     valid_block = valid_block_table & (block_id >= 0) & (block_id < NUM_BLOCKS)
-    safe_block_id = tl.where(valid_block, block_id, 0)
+    # The packed KV layout makes per-block strides large
+    # enough that block_id * stride can exceed 32-bit range.
+    safe_block_id = tl.where(valid_block, block_id, 0).to(tl.int64)
     safe_block_offset = tl.where(valid_block, block_offset, 0)
     tiled_block_offset = safe_block_offset % BLOCK_TILE_SIZE
     if LAYOUT == "SHUFFLE":
@@ -504,7 +508,13 @@ def fp8_mqa_logits_torch(
     )
     mask = mask_lo & mask_hi
 
-    score = torch.einsum("mhd,nd->hmn", q, k).float() * scale
+    # ``score`` is [H, M, N]; ``scale`` is the per-KV-token scale, which
+    # vLLM callers hand us as ``[N, 1]`` (a ``[N, 4]`` uint8 buffer cast
+    # to fp32). PyTorch right-aligns dimensions for broadcasting, so a
+    # naked ``score * scale`` would align ``scale``'s leading dim with
+    # ``score``'s M dim and raise a shape mismatch. Flatten to ``[N]`` so
+    # broadcasting lines up with the last dim of ``score``.
+    score = torch.einsum("mhd,nd->hmn", q, k).float() * scale.reshape(-1)
     logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
     logits = logits.masked_fill(~mask, float("-inf"))
 
@@ -557,13 +567,26 @@ def rocm_fp8_mqa_logits(
     # path after aiter merge this kernel into main
     from vllm._aiter_ops import rocm_aiter_ops
 
+    k_fp8, scale = kv
+
+    # Temporarily route gfx942 to the vendored ROCm/aiter#3257 workaround.
+    # Remove this branch once vLLM bumps AITER to a version that includes
+    # ROCm/aiter#3257.
+    if _ON_GFX942 and rocm_aiter_ops.is_enabled():
+        from vllm.v1.attention.ops.triton_fp8_mqa_logits import (
+            fp8_mqa_logits_gfx942,
+        )
+
+        return fp8_mqa_logits_gfx942(
+            q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke
+        )
+
     aiter_mqa_logits_module = None
     if rocm_aiter_ops.is_enabled():
         aiter_mqa_logits_module = mqa_logits_module()
 
     if aiter_mqa_logits_module is not None:
         fp8_mqa_logits = aiter_mqa_logits_module.fp8_mqa_logits
-        k_fp8, scale = kv
         return fp8_mqa_logits(q, k_fp8, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
     else:
         return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
@@ -639,7 +662,6 @@ def rocm_aiter_sparse_attn_indexer(
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
-    from vllm import _custom_ops as ops
     from vllm.utils.torch_utils import _resolve_layer_name
 
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
@@ -716,22 +738,13 @@ def rocm_aiter_sparse_attn_indexer(
         raise ValueError("k must be provided when skip_k_cache_insert is False")
 
     if not skip_k_cache_insert:
-        if _ON_GFX942:
-            ops.indexer_k_quant_and_cache(
-                k,
-                kv_cache,
-                slot_mapping,
-                quant_block_size,
-                scale_fmt,
-            )
-        else:
-            indexer_k_quant_and_cache_triton(
-                k,
-                kv_cache,
-                slot_mapping,
-                quant_block_size,
-                scale_fmt,
-            )
+        indexer_k_quant_and_cache_triton(
+            k,
+            kv_cache,
+            slot_mapping,
+            quant_block_size,
+            scale_fmt,
+        )
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
@@ -746,23 +759,14 @@ def rocm_aiter_sparse_attn_indexer(
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
-            if _ON_GFX942:
-                ops.cp_gather_indexer_k_quant_cache(
-                    kv_cache,
-                    k_fp8,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.cu_seq_lens,
-                )
-            else:
-                cp_gather_indexer_k_quant_cache_triton(
-                    kv_cache,
-                    k_fp8,
-                    k_scale,
-                    chunk.block_table,
-                    chunk.cu_seq_lens,
-                    token_to_seq=chunk.token_to_seq,
-                )
+            cp_gather_indexer_k_quant_cache_triton(
+                kv_cache,
+                k_fp8,
+                k_scale,
+                chunk.block_table,
+                chunk.cu_seq_lens,
+                token_to_seq=chunk.token_to_seq,
+            )
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
@@ -1268,7 +1272,10 @@ def _sparse_attn_decode_ragged_kernel(
     NOPE_DIM: tl.constexpr,
     NOPE_BLOCK: tl.constexpr,
     ROPE_DIM: tl.constexpr,
-    IS_FNUZ: tl.constexpr,
+    # SWA K-cache (main): C++ encoder writes FNUZ on gfx942, OCP on gfx950.
+    # Compressed K-cache (extra): Triton encoder writes OCP everywhere.
+    IS_FNUZ_MAIN: tl.constexpr,
+    IS_FNUZ_EXTRA: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
@@ -1325,8 +1332,8 @@ def _sparse_attn_decode_ragged_kernel(
             mask=valid[:, None] & nope_mask[None, :],
             other=0,
         )
-        if IS_FNUZ:
-            x_fp8 = x_uint8.to(tl.float8e4b15, bitcast=True)
+        if IS_FNUZ_MAIN:
+            x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
         else:
             x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
         encoded_scales = tl.load(
@@ -1393,8 +1400,8 @@ def _sparse_attn_decode_ragged_kernel(
                 mask=valid[:, None] & nope_mask[None, :],
                 other=0,
             )
-            if IS_FNUZ:
-                x_fp8 = x_uint8.to(tl.float8e4b15, bitcast=True)
+            if IS_FNUZ_EXTRA:
+                x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
             else:
                 x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
             encoded_scales = tl.load(
@@ -1504,7 +1511,12 @@ def _sparse_attn_decode_partial_kernel(
     NOPE_DIM: tl.constexpr,
     NOPE_BLOCK: tl.constexpr,
     ROPE_DIM: tl.constexpr,
-    IS_FNUZ: tl.constexpr,
+    # `main_cache` is the SWA K-cache (written by the C++ encoder, FNUZ on
+    # gfx942 / OCP on gfx950). `extra_cache` is the compressed K-cache
+    # (Triton encoder, OCP on every platform). Reading both with the same
+    # `IS_FNUZ` would decode one of them with the wrong FNUZ/OCP scale ratio.
+    IS_FNUZ_MAIN: tl.constexpr,
+    IS_FNUZ_EXTRA: tl.constexpr,
     BLOCK_H: tl.constexpr,
     BLOCK_K: tl.constexpr,
     NUM_SPLITS: tl.constexpr,
@@ -1570,8 +1582,8 @@ def _sparse_attn_decode_partial_kernel(
             mask=valid[:, None] & nope_mask[None, :],
             other=0,
         )
-        if IS_FNUZ:
-            x_fp8 = x_uint8.to(tl.float8e4b15, bitcast=True)
+        if IS_FNUZ_MAIN:
+            x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
         else:
             x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
         encoded_scales = tl.load(
@@ -1641,8 +1653,8 @@ def _sparse_attn_decode_partial_kernel(
                 mask=valid[:, None] & nope_mask[None, :],
                 other=0,
             )
-            if IS_FNUZ:
-                x_fp8 = x_uint8.to(tl.float8e4b15, bitcast=True)
+            if IS_FNUZ_EXTRA:
+                x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
             else:
                 x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
             encoded_scales = tl.load(
@@ -2114,7 +2126,8 @@ def _rocm_sparse_attn_decode_ragged_triton(
             NOPE_DIM=nope_head_dim,
             NOPE_BLOCK=nope_block,
             ROPE_DIM=rope_head_dim,
-            IS_FNUZ=is_fnuz,
+            IS_FNUZ_MAIN=is_fnuz,
+            IS_FNUZ_EXTRA=False,
             BLOCK_H=block_h,
             BLOCK_K=block_k,
             num_warps=8,
@@ -2172,7 +2185,12 @@ def _rocm_sparse_attn_decode_ragged_triton(
         NOPE_DIM=nope_head_dim,
         NOPE_BLOCK=nope_block,
         ROPE_DIM=rope_head_dim,
-        IS_FNUZ=is_fnuz,
+        # main_cache = swa_k_cache (C++ encoder, FNUZ on gfx942 / OCP on gfx950).
+        # extra_cache = compressed kv_cache (Triton encoder, OCP everywhere).
+        # Reading both with a single IS_FNUZ would decode one of them with the
+        # wrong FNUZ/OCP scale ratio (~1.87×).
+        IS_FNUZ_MAIN=is_fnuz,
+        IS_FNUZ_EXTRA=False,
         BLOCK_H=block_h,
         BLOCK_K=block_k,
         NUM_SPLITS=num_splits,

@@ -442,7 +442,8 @@ class SparseAttnIndexer(CustomOp):
         self.use_fp4_cache = use_fp4_cache
         if current_platform.is_cuda() and not has_deep_gemm():
             raise RuntimeError(
-                "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
+                "Sparse Attention Indexer CUDA op requires DeepGEMM support in "
+                "the current vLLM environment."
             )
 
     def forward_native(
