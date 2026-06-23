@@ -308,26 +308,39 @@ def set_ulimit(target_soft_limit: int = 65535):
 
 def find_loaded_library(lib_name: str) -> str | None:
     """
-    According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
-    the file `/proc/self/maps` contains the memory maps of the process, which includes the
-    shared libraries loaded by the process. We can use this file to find the path of the
-    loaded library.
-    """  # noqa
-    found_line = None
+    According to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
+    the file `/proc/self/maps` contains the memory maps of the process,
+    which includes the shared libraries loaded by the process. We can use
+    this file to find the path of a loaded library by substring match.
+
+    Stub libraries (those whose filename contains ``_stub``, e.g.
+    ``libcudart_stub.so`` shipped by ``tilelang`` on aarch64) are skipped
+    so the iteration can continue past them: such stubs typically export
+    zero runtime symbols and would cause ``AttributeError`` at the first
+    callsite that does ``getattr(lib, <symbol>)``. Returning the next
+    real-library match (or ``None`` if there is none) lets callers fall
+    through to their existing fallback paths (e.g. ``VLLM_CUDART_SO_PATH``).
+    """
+    seen_paths: list[str] = []
     with open("/proc/self/maps") as f:
         for line in f:
-            if lib_name in line:
-                found_line = line
-                break
-    if found_line is None:
-        # the library is not loaded in the current process
-        return None
-    # if lib_name is libcudart, we need to match a line with:
-    # address /path/to/libcudart-hash.so.11.0
-    start = found_line.index("/")
-    path = found_line[start:].strip()
-    filename = path.split("/")[-1]
-    assert filename.rpartition(".so")[0].startswith(lib_name), (
-        f"Unexpected filename: {filename} for library {lib_name}"
-    )
-    return path
+            if lib_name not in line:
+                continue
+            # if lib_name is libcudart, the line looks like:
+            #   address /path/to/libcudart-hash.so.11.0
+            start = line.index("/")
+            path = line[start:].strip()
+            if path in seen_paths:
+                continue
+            seen_paths.append(path)
+            filename = path.split("/")[-1]
+            # Skip known-broken stubs and keep iterating; some packages
+            # ship lib<name>_stub.so with no runtime symbols.
+            if "_stub" in filename:
+                continue
+            assert filename.rpartition(".so")[0].startswith(lib_name), (
+                f"Unexpected filename: {filename} for library {lib_name}"
+            )
+            return path
+    # The library (or any non-stub version of it) is not loaded.
+    return None
