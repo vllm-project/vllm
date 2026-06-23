@@ -110,6 +110,12 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         **kwargs,
     ):
         output_size_per_partition = sum(output_partition_sizes)
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.output_partition_sizes = output_partition_sizes
+        layer.params_dtype = params_dtype
+        if not hasattr(layer, "has_bias"):
+            layer.has_bias = False
 
         mp_linear_kernel_config = MPLinearLayerConfig(
             full_weight_shape=(input_size, output_size),
