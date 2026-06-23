@@ -8,6 +8,7 @@
 #ifndef USE_ROCM
   #include "cooperative_topk.cuh"
 namespace ct = vllm::cooperative;
+namespace hist4096 = vllm::topk_histogram_4096;
 #endif
 
 #ifndef USE_ROCM
@@ -16,13 +17,7 @@ void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK>& params,
                                 size_t smem, cudaStream_t stream) {
   auto kernel = []() {
     if constexpr (CS == 16) {
-  #ifndef VLLM_COOPERATIVE_TOPK_PORTABLE_CLUSTER_ONLY
       return &ct::cooperative_topk_cs16<TopK>;
-  #else
-      static_assert(CS != 16,
-                    "CS=16 cooperative_topk requires non-portable cluster "
-                    "support");
-  #endif
     } else if constexpr (CS == 8) {
       return &ct::cooperative_topk_cs8<TopK>;
     } else {
@@ -30,18 +25,16 @@ void launch_cooperative_cluster(ct::CooperativeTopKParams<TopK>& params,
       return &ct::cooperative_topk_cs4<TopK>;
     }
   }();
-  #ifndef VLLM_COOPERATIVE_TOPK_PORTABLE_CLUSTER_ONLY
   if constexpr (CS > 8) {
     cudaFuncSetAttribute(kernel, cudaFuncAttributeNonPortableClusterSizeAllowed,
                          1);
   }
-  #endif
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                        smem);
 
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = dim3(params.num_rows, CS);
-  cfg.blockDim = dim3(ct::kBlockSize);
+  cfg.blockDim = dim3(hist4096::kBlockSize);
   cfg.dynamicSmemBytes = smem;
   cfg.stream = stream;
   cudaLaunchAttribute attrs[1];
@@ -60,6 +53,7 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
                                   torch::stable::Tensor& output,
                                   torch::stable::Tensor& workspace,
                                   int64_t max_seq_len) {
+  (void)max_seq_len;  // Kept for signature parity with persistent_topk.
   const int64_t num_rows = logits.size(0);
   const cudaStream_t stream = get_current_cuda_stream();
 
@@ -88,22 +82,19 @@ void launch_cooperative_topk_impl(const torch::stable::Tensor& logits,
   params.num_rows = static_cast<uint32_t>(num_rows);
   params.stride = stride;
   params.tie_ws =
-      reinterpret_cast<ct::Tie*>(workspace.mutable_data_ptr<uint8_t>());
+      reinterpret_cast<hist4096::Tie*>(workspace.mutable_data_ptr<uint8_t>());
 
   constexpr uint32_t kTieWsPerRow =
-      TopK <= ct::kBlockSize ? ct::kMaxTies : TopK;
+      TopK <= hist4096::kBlockSize ? hist4096::kMaxTies : TopK;
   STD_TORCH_CHECK(
       workspace.size(0) >=
-          static_cast<int64_t>(num_rows * kTieWsPerRow * sizeof(ct::Tie)),
+          static_cast<int64_t>(num_rows * kTieWsPerRow * sizeof(hist4096::Tie)),
       "workspace too small");
 
-  #ifndef VLLM_COOPERATIVE_TOPK_PORTABLE_CLUSTER_ONLY
-  if (num_rows <= 4) {
+  const bool supports_cluster16 = get_device_prop()->major >= 10;
+  if (num_rows <= 4 && supports_cluster16) {
     launch_cooperative_cluster<TopK, 16>(params, ct::kSmemSize8, stream);
   } else if (num_rows <= 8) {
-  #else
-  if (num_rows <= 8) {
-  #endif
     launch_cooperative_cluster<TopK, 8>(params, ct::kSmemSize8, stream);
   } else {
     launch_cooperative_cluster<TopK, 4>(params, ct::kSmemSize4, stream);
