@@ -1256,6 +1256,7 @@ class RandomMultiModalDataset(RandomDataset):
             # We want to exclude placeholder tokens and all
             # tokens that indicate start/end of image as it
             # may break prompt replacement logic.
+            assert hasattr(tokenizer, "added_tokens_decoder")
             prohibited_tokens = list(
                 tok_id
                 for tok_id, token in tokenizer.added_tokens_decoder.items()
