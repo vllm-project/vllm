@@ -107,10 +107,6 @@ class All2AllManagerBase:
     def query_active_mask(self) -> torch.Tensor:
         raise NotImplementedError
 
-    def clean_buffers(self) -> None:
-        """Clean RDMA buffers and mask state during FT recovery."""
-        raise NotImplementedError
-
     def query_fault(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (has_fault scalar, current_active_mask)."""
         raise NotImplementedError
