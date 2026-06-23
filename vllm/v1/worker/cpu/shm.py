@@ -17,6 +17,10 @@ def noop(*args: Any, **kwargs: Any) -> None:
     pass
 
 
+def fake_pin_memory(self: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
+    return self
+
+
 class _EventPlaceholder:
     def __init__(self, *args, **kwargs) -> None:
         self.record = noop
@@ -41,6 +45,7 @@ torch.cuda.set_stream = noop
 torch.cuda.current_stream = lambda *args, **kwargs: _StreamPlaceholder()
 torch.accelerator.synchronize = noop
 torch.accelerator.empty_cache = noop
+torch.Tensor.pin_memory = fake_pin_memory
 
 # Patch vLLM torch utils
 import vllm.utils.torch_utils as torch_utils
