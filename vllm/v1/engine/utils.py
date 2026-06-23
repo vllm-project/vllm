@@ -4,6 +4,7 @@
 import contextlib
 import os
 import threading
+import time
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
@@ -1250,9 +1251,30 @@ def wait_for_engine_startup(
             poller.register(sentinel, zmq.POLLIN)
     if coord_process is not None:
         poller.register(coord_process.sentinel, zmq.POLLIN)
+
+    # Bound the wait so an engine that is alive but wedged during startup
+    # (e.g. a worker stuck in a native EP all-to-all after a cross-node RDMA
+    # failure) surfaces as a clean error instead of hanging the handshake
+    # forever. A wedged engine never sends READY and never trips its sentinel,
+    # so without this the loop below would poll indefinitely. Reuses the
+    # existing readiness budget already honored by the ZMQ handshake path.
+    ready_timeout = envs.VLLM_ENGINE_READY_TIMEOUT_S
+    deadline = time.monotonic() + ready_timeout if ready_timeout > 0 else None
     while any(conn_pending) or any(start_pending):
         events = poller.poll(STARTUP_POLL_PERIOD_MS)
         if not events:
+            if deadline is not None and time.monotonic() >= deadline:
+                finished = proc_manager.finished_procs() if proc_manager else {}
+                raise TimeoutError(
+                    "Engine core initialization timed out after "
+                    f"{ready_timeout}s waiting for {conn_pending[0]} local, "
+                    f"{conn_pending[1]} remote proc(s) to connect and "
+                    f"{start_pending[0]} local, {start_pending[1]} remote "
+                    "proc(s) to start. An engine may be hung during startup "
+                    "(e.g. a stalled distributed/EP collective). Increase the "
+                    "budget with VLLM_ENGINE_READY_TIMEOUT_S=<seconds> if "
+                    f"startup is merely slow. Exited proc(s): {finished}"
+                )
             if any(conn_pending):
                 logger.debug(
                     "Waiting for %d local, %d remote core engine proc(s) to connect.",
