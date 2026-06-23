@@ -10,7 +10,7 @@ import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import jinja2
 from fastapi import Request
@@ -48,9 +48,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import sanitize_message
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
-
-if TYPE_CHECKING:
-    from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.online_renderer import OnlineRenderer
 
 logger = logging.getLogger(__name__)
 
