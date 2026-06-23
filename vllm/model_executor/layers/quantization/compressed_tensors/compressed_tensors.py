@@ -46,9 +46,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA4Int,
+    CompressedTensorsWNA8Int,
     CompressedTensorsWNA8O8Int,
     CompressedTensorsWNA16,
-    CompressedTensorsWNAMInt,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear import (  # noqa: E501
     CompressedTensorsLinearTransformMethod,
@@ -683,16 +684,12 @@ class CompressedTensorsConfig(QuantizationConfig):
         return is_intN_weight and (is_static_int8_in and is_static_int8_out)
 
     @staticmethod
-    def _is_wNaM_int(
+    def _is_wNa8_int(
         weight_quant: QuantizationArgs,
         input_quant: QuantizationArgs | None,
         format: str | None,
     ) -> bool:
-        """Weight N-bit INT with INT activation quant via Humming kernel.
-
-        Catches pack-quantized INT weights with any INT input activation quant
-        that is NOT already handled by WNA8O8Int (static per-tensor INT8).
-        """
+        """Weight N-bit INT with INT8 activation quant via Humming kernel."""
         if input_quant is None:
             return False
         is_pack_format = format == CompressionFormat.pack_quantized.value
@@ -703,12 +700,41 @@ class CompressedTensorsConfig(QuantizationConfig):
         is_static_int_weight = (
             weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
         )
-        is_int_input = input_quant.type == QuantizationType.INT
+        is_int8_input = (
+            input_quant.type == QuantizationType.INT and input_quant.num_bits == 8
+        )
         return (
             is_static_int_weight
             and is_channel_group
             and is_pack_format
-            and is_int_input
+            and is_int8_input
+        )
+
+    @staticmethod
+    def _is_wNa4_int(
+        weight_quant: QuantizationArgs,
+        input_quant: QuantizationArgs | None,
+        format: str | None,
+    ) -> bool:
+        """Weight N-bit INT with INT4 activation quant via Humming kernel."""
+        if input_quant is None:
+            return False
+        is_pack_format = format == CompressionFormat.pack_quantized.value
+        is_channel_group = weight_quant.strategy in (
+            QuantizationStrategy.CHANNEL.value,
+            QuantizationStrategy.GROUP.value,
+        )
+        is_static_int_weight = (
+            weight_quant.type == QuantizationType.INT and not weight_quant.dynamic
+        )
+        is_int4_input = (
+            input_quant.type == QuantizationType.INT and input_quant.num_bits == 4
+        )
+        return (
+            is_static_int_weight
+            and is_channel_group
+            and is_pack_format
+            and is_int4_input
         )
 
     def _get_scheme_from_parts(
@@ -762,8 +788,19 @@ class CompressedTensorsConfig(QuantizationConfig):
                 quant_format=format,
             )
 
-        if self._is_wNaM_int(weight_quant, input_quant, format):
-            return CompressedTensorsWNAMInt(
+        if self._is_wNa8_int(weight_quant, input_quant, format):
+            return CompressedTensorsWNA8Int(
+                num_bits=weight_quant.num_bits,
+                strategy=weight_quant.strategy,
+                group_size=weight_quant.group_size,
+                input_quant=input_quant,
+                output_quant=output_quant,
+                layer_name=layer_name,
+                quant_format=format,
+            )
+
+        if self._is_wNa4_int(weight_quant, input_quant, format):
+            return CompressedTensorsWNA4Int(
                 num_bits=weight_quant.num_bits,
                 strategy=weight_quant.strategy,
                 group_size=weight_quant.group_size,

@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Weight N-bit INT scheme with INT activation quant via Humming kernel.
+"""Weight N-bit INT scheme with INT4 activation quant via Humming kernel.
 
-Handles compressed-tensors INT weight checkpoints with INT input activation
-quantization (e.g. dynamic token quant at arbitrary bit widths). The activation
-quant config is passed to the Humming kernel which applies it natively, rather
-than using a float fake-quant wrapper.
+Handles compressed-tensors INT weight checkpoints with INT4 input activation
+quantization. The activation quant config is passed to the Humming kernel
+which applies it natively.
 """
 
 import math
@@ -38,10 +37,10 @@ from vllm.model_executor.parameter import (
 
 logger = init_logger(__name__)
 
-__all__ = ["CompressedTensorsWNAMInt"]
+__all__ = ["CompressedTensorsWNA4Int"]
 
 
-class CompressedTensorsWNAMInt(CompressedTensorsScheme):
+class CompressedTensorsWNA4Int(CompressedTensorsScheme):
     _kernel_backends_being_used: set[str] = set()
 
     def __init__(
@@ -65,7 +64,7 @@ class CompressedTensorsWNAMInt(CompressedTensorsScheme):
 
         if num_bits not in WNA16_SUPPORTED_TYPES_MAP:
             raise ValueError(
-                f"Unsupported num_bits = {num_bits} for WNAMInt; "
+                f"Unsupported num_bits = {num_bits} for WNA4Int; "
                 f"supported = {sorted(WNA16_SUPPORTED_TYPES_MAP)}"
             )
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[num_bits]
@@ -128,7 +127,7 @@ class CompressedTensorsWNAMInt(CompressedTensorsScheme):
 
         kernel_type = choose_mp_linear_kernel(mp_config)
         if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for CompressedTensorsWNAMInt", kernel_type.__name__)
+            logger.info("Using %s for CompressedTensorsWNA4Int", kernel_type.__name__)
             self._kernel_backends_being_used.add(kernel_type.__name__)
 
         self.kernel = kernel_type(
