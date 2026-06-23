@@ -1078,7 +1078,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         head_start = tp_rank * heads_per_rank
 
         ep_size = get_ep_group().world_size
-        ep_rank = get_ep_group().rank
+        ep_rank = get_ep_group().rank_in_group
         num_experts = self.config.num_local_experts
         experts_per_rank = num_experts // ep_size
         ep_rank_start = ep_rank * experts_per_rank
