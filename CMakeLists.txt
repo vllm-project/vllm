@@ -70,7 +70,11 @@ endif()
 #
 set(TORCH_SUPPORTED_VERSION_CUDA "2.11.0")
 set(TORCH_SUPPORTED_VERSION_ROCM "2.11.0")
-set(TORCH_NIGHTLY_BUILD FALSE)
+if (DEFINED ENV{TORCH_NIGHTLY})
+  set(TORCH_NIGHTLY_BUILD TRUE)
+else()
+  set(TORCH_NIGHTLY_BUILD FALSE)
+endif()
 
 #
 # Try to find python package with an executable that exactly matches
