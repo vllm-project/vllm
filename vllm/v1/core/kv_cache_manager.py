@@ -480,6 +480,19 @@ class KVCacheManager:
         """
         self.coordinator.remove_skipped_blocks(request_id, total_computed_tokens)
 
+    def pop_blocks_for_free(self, request: Request) -> list[KVCacheBlock]:
+        """Pop the request's bookkeeping and return its blocks without
+        returning them to the block pool. The caller must eventually free
+        them in reverse order (so that tail blocks are evicted first).
+
+        Args:
+            request: The request to pop the blocks for.
+
+        Returns:
+            The request's blocks in allocation order.
+        """
+        return self.coordinator.pop_blocks_for_free(request.request_id)
+
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
 

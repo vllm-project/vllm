@@ -631,6 +631,103 @@ class TestFixArgTypes:
         original = '{"name": "Alice"}'
         assert engine._fix_arg_types(original, "f") == original
 
+    @pytest.mark.parametrize(
+        "properties, input_json, expected_substr",
+        [
+            ({"count": {"type": "integer"}}, '{"count": "42"}', '"count": 42'),
+            ({"score": {"type": "number"}}, '{"score": "3.14"}', '"score": 3.14'),
+            ({"flag": {"type": "boolean"}}, '{"flag": "true"}', '"flag": true'),
+            ({"flag": {"type": "boolean"}}, '{"flag": "false"}', '"flag": false'),
+            ({"val": {"type": "null"}}, '{"val": "null"}', '"val": null'),
+            ({"val": {"type": ["string", "null"]}}, '{"val": "null"}', '"val": null'),
+            ({"score": {"type": "number"}}, '{"score": "108."}', '"score": 108'),
+        ],
+        ids=[
+            "string_to_int",
+            "string_to_float",
+            "string_to_bool_true",
+            "string_to_bool_false",
+            "string_to_null",
+            "string_to_null_union",
+            "trailing_dot_float",
+        ],
+    )
+    def test_string_coerced_to_schema_type(
+        self,
+        properties,
+        input_json,
+        expected_substr,
+    ):
+        tool = _make_tool("f", properties)
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types(input_json, "f")
+        assert expected_substr in result
+
+    def test_mixed_types_coerced(self):
+        tool = _make_tool(
+            "f",
+            {
+                "count": {"type": "integer"},
+                "active": {"type": "boolean"},
+                "score": {"type": "number"},
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types(
+            '{"count": "42", "active": "true", "score": "3.14"}', "f"
+        )
+        parsed = json.loads(result)
+        assert parsed["count"] == 42
+        assert parsed["active"] is True
+        assert parsed["score"] == 3.14
+
+    def test_nested_object_coercion(self):
+        tool = _make_tool(
+            "f",
+            {
+                "inner": {
+                    "type": "object",
+                    "properties": {
+                        "count": {"type": "integer"},
+                    },
+                },
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"inner": {"count": "42"}}', "f")
+        parsed = json.loads(result)
+        assert parsed["inner"]["count"] == 42
+
+    def test_array_item_coercion(self):
+        tool = _make_tool(
+            "f",
+            {
+                "nums": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                },
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"nums": ["42", "5"]}', "f")
+        parsed = json.loads(result)
+        assert parsed["nums"] == [42, 5]
+
+    def test_array_mixed_item_types(self):
+        tool = _make_tool(
+            "f",
+            {
+                "vals": {
+                    "type": "array",
+                    "items": {"type": "number"},
+                },
+            },
+        )
+        engine = _make_engine(tools=[tool])
+        result = engine._fix_arg_types('{"vals": ["42", "3.14"]}', "f")
+        parsed = json.loads(result)
+        assert parsed["vals"] == [42, 3.14]
+
 
 # ── TestBuildExtractedResult ─────────────────────────────────────────
 
@@ -1242,6 +1339,42 @@ class TestArgDeltaWithConverter:
         assert parsed == {"count": 5, "name": "test"}
         assert isinstance(parsed["count"], int)
 
+    def test_streamable_string_keys_cached_after_name_delta(self, monkeypatch):
+        tool = _make_tool(
+            "f",
+            {
+                "name": {"type": "string"},
+                "count": {"type": "integer"},
+            },
+        )
+        engine = _make_engine(_converter_config(), tools=[tool])
+
+        original = ParserEngine._streamable_string_keys
+        calls: list[dict] = []
+
+        def wrapped(properties: dict) -> set[str] | None:
+            calls.append(properties)
+            return original(properties)
+
+        monkeypatch.setattr(
+            ParserEngine,
+            "_streamable_string_keys",
+            staticmethod(wrapped),
+        )
+
+        _run_streaming_tool(
+            engine,
+            "f",
+            ["name=alice ", "count=4", "2"],
+        )
+
+        assert calls == [
+            {
+                "name": {"type": "string"},
+                "count": {"type": "integer"},
+            }
+        ]
+
 
 # ── TestSafeArgPrefix ────────────────────────────────────────────
 
@@ -1254,7 +1387,7 @@ class TestSafeArgPrefix:
         [
             ('{"a": 1}', '{"a": '),
             ('{"a": 1, "b": 2}', '{"a": 1, "b": '),
-            ('{"a": "hello", "b": "world"}', '{"a": "hello", "b": '),
+            ('{"a": "hello", "b": "world"}', '{"a": "hello", "b": "world'),
             ('{"obj": {"x": 1}, "b": 2}', '{"obj": {"x": 1}, "b": '),
             ('{"url": "http://x:80", "b": 1}', '{"url": "http://x:80", "b": '),
             ('{"a": 1', '{"a": '),
@@ -1263,6 +1396,9 @@ class TestSafeArgPrefix:
             ("", ""),
             ('{"k":1}', '{"k":'),
             ('{"k": 1, "v":2}', '{"k": 1, "v":'),
+            ('{"k":"value"}', '{"k":"value'),
+            ('{"k":"unterminated', '{"k":"unterminated'),
+            (r'{"k":"escaped \" quote"}', r'{"k":"escaped \" quote'),
         ],
     )
     def test_safe_arg_prefix(self, json_str, expected):

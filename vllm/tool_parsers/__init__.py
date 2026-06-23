@@ -15,7 +15,7 @@ Register a lazy module mapping.
 Example:
     ToolParserManager.register_lazy_module(
         name="kimi_k2",
-        module_path="vllm.tool_parsers.kimi_k2_parser",
+        module_path="vllm.tool_parsers.kimi_k2_tool_parser",
         class_name="KimiK2ToolParser",
     )
 """
@@ -51,8 +51,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Ernie45ToolParser",
     ),
     "glm45": (
-        "glm4_moe_tool_parser",
-        "Glm4MoeModelToolParser",
+        "glm47_moe_tool_parser",
+        "Glm47MoeModelToolParser",
     ),
     "glm47": (
         "glm47_moe_tool_parser",
@@ -130,10 +130,6 @@ _TOOL_PARSERS_TO_REGISTER = {
         "minimax_m3_tool_parser",
         "MinimaxM3ToolParser",
     ),
-    "minimax": (
-        "minimax_tool_parser",
-        "MinimaxToolParser",
-    ),
     "minicpm5": (
         "minicpm5xml_tool_parser",
         "MiniCPM5XMLToolParser",
@@ -191,8 +187,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "FunctionGemmaToolParser",
     ),
     "gemma4": (
-        "gemma4_tool_parser",
-        "Gemma4ToolParser",
+        "gemma4_engine_tool_parser",
+        "Gemma4EngineToolParser",
     ),
     "apertus": (
         "apertus_tool_parser",

@@ -202,6 +202,38 @@ class AttentionBackend(ABC):
         return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
 
     @classmethod
+    def indexes_kv_by_block_stride(cls) -> bool:
+        """Whether the backend reads KV pages by the runtime block stride.
+
+        True when ``num_blocks`` is the outermost physical dimension of the KV
+        cache, so the backend tolerates a non-contiguous block dim. This gates
+        page size padding and cross-layer uniform KV layout.
+
+        Returns:
+            True if the backend's physical KV layout is num-blocks-first. False
+            otherwise, including when the backend does not define a layered
+            stride order.
+        """
+        try:
+            kv_cache_stride_order = cls.get_kv_cache_stride_order(
+                include_num_layers_dimension=False
+            )
+            layered_kv_cache_stride_order = cls.get_kv_cache_stride_order(
+                include_num_layers_dimension=True
+            )
+        except (AttributeError, NotImplementedError):
+            return False
+
+        # Check that attention backend includes a layers dimension.
+        if len(layered_kv_cache_stride_order) != len(kv_cache_stride_order) + 1:
+            return False
+
+        # stride_order[0] == 0 means num_layers stays first in physical
+        # layout (identity permutation), so indexing by block stride is
+        # not supported.
+        return layered_kv_cache_stride_order[0] != 0
+
+    @classmethod
     def is_mla(cls) -> bool:
         return False
 
@@ -404,7 +436,7 @@ class CommonAttentionMetadata:
     positions: torch.Tensor | None = None
     """(num_actual_tokens,) token positions.  Optional; set when the caller
     has positions available so that builders can pre-compute position-dependent
-    metadata (e.g. C128A topk indices for DeepSeek V4)."""
+    sparse metadata for DeepSeek V4 C128A layers."""
 
     is_prefilling: torch.Tensor | None = None
     """(batch_size,) bool tensor: True if request is still in prefill phase
@@ -899,6 +931,7 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         attn_metadata: T,
         k_scale: torch.Tensor,
         output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
     ) -> None:
         """MHA-style prefill forward pass."""
         raise NotImplementedError

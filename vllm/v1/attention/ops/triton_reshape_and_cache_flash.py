@@ -23,9 +23,9 @@ def _is_supported_kv_cache_dtype(kv_cache_dtype: str) -> bool:
     ):
         return False
     if kv_cache_dtype.startswith("fp8"):
-        return current_platform.has_device_capability(89)
+        return current_platform.has_device_capability(89) or current_platform.is_xpu()
     if kv_cache_dtype == "bfloat16":
-        return current_platform.has_device_capability(80)
+        return current_platform.has_device_capability(80) or current_platform.is_xpu()
     return True
 
 
@@ -181,6 +181,7 @@ def _reshape_cache_per_token_head(
     HEAD_SIZE_PADDED: tl.constexpr,  # next_power_of_2(max(head_size, head_size_v))
     QUANT_MAX: tl.constexpr = 127.0,
     QUANT_MIN: tl.constexpr = -128.0,
+    IS_INT_QUANT: tl.constexpr = False,
 ):
     tok = tl.program_id(0)
     head = tl.program_id(1)
@@ -211,7 +212,11 @@ def _reshape_cache_per_token_head(
         k_scale,
     )
 
-    k_q = tl.clamp(k_h * (1.0 / k_scale), QUANT_MIN, QUANT_MAX)
+    k_q = k_h * (1.0 / k_scale)
+    if IS_INT_QUANT:
+        # Round half away from zero before the int8 store truncates.
+        k_q = tl.where(k_q >= 0, k_q + 0.5, k_q - 0.5)
+    k_q = tl.clamp(k_q, QUANT_MIN, QUANT_MAX)
     tl.store(
         key_cache_ptr
         + blk * stride_kc_blk
@@ -239,7 +244,11 @@ def _reshape_cache_per_token_head(
         v_scale,
     )
 
-    v_q = tl.clamp(v_h * (1.0 / v_scale), QUANT_MIN, QUANT_MAX)
+    v_q = v_h * (1.0 / v_scale)
+    if IS_INT_QUANT:
+        # Round half away from zero before the int8 store truncates.
+        v_q = tl.where(v_q >= 0, v_q + 0.5, v_q - 0.5)
+    v_q = tl.clamp(v_q, QUANT_MIN, QUANT_MAX)
     tl.store(
         value_cache_ptr
         + blk * stride_vc_blk
@@ -327,6 +336,7 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
         HEAD_SIZE_PADDED=head_size_padded,
         QUANT_MAX=quant_max,
         QUANT_MIN=quant_min,
+        IS_INT_QUANT=cache_dtype == torch.int8,
         num_warps=num_warps,
     )
 

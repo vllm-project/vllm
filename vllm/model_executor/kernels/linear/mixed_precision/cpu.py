@@ -9,7 +9,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_quantized_values_into_int32,
     unpack_quantized_values_into_int32,
 )
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
@@ -175,7 +175,7 @@ class CPUWNA16LinearKernel(MPLinearKernel):
             and torch.cpu._is_amx_tile_supported()
         )
         # layer.use_w4a8 = False
-        # AWQ format will be converted to GPTQ format in `AWQMarlinLinearMethod`
+        # AWQ format will be converted to GPTQ format in `AutoAWQMarlinLinearMethod`
         if layer.use_w4a8:
             self._process_gptq_weights_w4a8(layer)
         else:
@@ -214,5 +214,7 @@ def _get_isa_hint(dtype: torch.dtype) -> str:
     supports_amx = torch.cpu._is_amx_tile_supported()
     if supports_amx and dtype in (torch.bfloat16,):
         return "amx"
+    elif current_platform.get_cpu_architecture() == CpuArchEnum.RISCV:
+        return "rvv"
     else:
         return "vec"
