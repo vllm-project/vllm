@@ -1261,7 +1261,12 @@ def wait_for_engine_startup(
     ready_timeout = envs.VLLM_ENGINE_READY_TIMEOUT_S
     deadline = time.monotonic() + ready_timeout if ready_timeout > 0 else None
     while any(conn_pending) or any(start_pending):
-        events = poller.poll(STARTUP_POLL_PERIOD_MS)
+        poll_timeout_ms = STARTUP_POLL_PERIOD_MS
+        if deadline is not None:
+            # Don't poll past the deadline, so the timeout fires promptly.
+            remaining_ms = int((deadline - time.monotonic()) * 1000)
+            poll_timeout_ms = max(0, min(STARTUP_POLL_PERIOD_MS, remaining_ms))
+        events = poller.poll(poll_timeout_ms)
         if not events:
             if deadline is not None and time.monotonic() >= deadline:
                 finished = proc_manager.finished_procs() if proc_manager else {}
