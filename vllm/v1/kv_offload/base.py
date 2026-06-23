@@ -68,6 +68,14 @@ class RequestOffloadingContext:
     policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
 
 
+@dataclass
+class ScheduleEndContext:
+    """Per-step scheduling info passed to on_schedule_end()."""
+
+    new_req_ids: Iterable[str]
+    preempted_req_ids: Iterable[str]
+
+
 class LoadStoreSpec(ABC):
     """
     Abstract metadata that encapsulates information allowing a worker
@@ -302,7 +310,7 @@ class OffloadingManager(ABC):
         """
         return ()
 
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """Called once at the end of each scheduler step.
 
         Managers may override this to flush deferred work accumulated

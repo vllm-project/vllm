@@ -26,6 +26,7 @@ from vllm.v1.kv_offload.base import (
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
+    ScheduleEndContext,
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.base import (
@@ -232,7 +233,8 @@ class TestTieringOffloadingManager:
 
     def _simulate_on_schedule_end(self):
         """Simulate end of scheduler step: lifecycle flush + drain events."""
-        self.manager.on_schedule_end()
+        ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
+        self.manager.on_schedule_end(ctx)
         list(self.manager.take_events())
 
     def test_basic_store_to_primary(self, manager_setup):

@@ -17,7 +17,12 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext, make_offload_key
+from vllm.v1.kv_offload.base import (
+    OffloadKey,
+    ReqContext,
+    ScheduleEndContext,
+    make_offload_key,
+)
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
 from vllm.v1.kv_offload.tiering.obj.manager import ObjectStoreSecondaryTierManager
 
@@ -217,7 +222,7 @@ def lookup_and_wait(
     """Perform a full async lookup cycle and return resolved results."""
     for k in keys:
         tier.lookup(k, ctx)
-    tier.on_schedule_end()
+    tier.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=()))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if not tier._lookup_manager._pending_results.empty():

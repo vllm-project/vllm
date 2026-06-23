@@ -31,6 +31,7 @@ from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
     RequestOffloadingContext,
+    ScheduleEndContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
@@ -187,7 +188,7 @@ class FileSystemTierManager(SecondaryTierManager):
         self._lookup_manager.cleanup(req_context.req_id)
 
     @override
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         self._lookup_manager.flush()
 
     @override
