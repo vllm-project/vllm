@@ -36,7 +36,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
-    ToolCall,
     UsageInfo,
 )
 from vllm.entrypoints.openai.engine.serving import (
@@ -49,6 +48,7 @@ from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
+    make_tool_call_items,
     maybe_filter_parallel_tool_calls,
 )
 from vllm.inputs import EngineInput, MultiModalPlaceholders
@@ -870,40 +870,23 @@ class OpenAIServingChat(OpenAIServing):
                 tool_calls = []
 
             auto_tools_called = False
+            is_named_tool_choice = (
+                request.tool_choice is not None
+                and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
+            )
+            is_required_tool_choice = request.tool_choice == "required"
 
             if (not self.enable_auto_tools or not tool_parser_cls) and (
-                not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
-                and request.tool_choice != "required"
+                not is_named_tool_choice and not is_required_tool_choice
             ):
                 message = ChatMessage(role=role, reasoning=reasoning, content=content)
 
-            elif (
-                request.tool_choice
-                and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
-            ):
-                tool_call_items: list[ToolCall] = []
-                tool_calls = tool_calls or []
-                for tc in tool_calls:
-                    tool_call_items.append(ToolCall(id=tc.id, function=tc))
+            elif is_named_tool_choice or is_required_tool_choice:
                 message = ChatMessage(
                     role=role,
                     reasoning=reasoning,
                     content=content or "",
-                    tool_calls=tool_call_items,
-                )
-
-            elif request.tool_choice and request.tool_choice == "required":
-                tool_call_items = []
-                tool_calls = tool_calls or []
-                for tool_call in tool_calls:
-                    tool_call_items.append(
-                        ToolCall(id=tool_call.id, function=tool_call)
-                    )
-                message = ChatMessage(
-                    role=role,
-                    content=content or "",
-                    tool_calls=tool_call_items,
-                    reasoning=reasoning,
+                    tool_calls=make_tool_call_items(tool_calls),
                 )
 
             # if the request doesn't use tool choice
@@ -920,14 +903,11 @@ class OpenAIServingChat(OpenAIServing):
             ):
                 auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
-                    tool_call_items = []
-                    for tc in tool_calls:
-                        tool_call_items.append(ToolCall(id=tc.id, function=tc))
                     message = ChatMessage(
                         role=role,
                         reasoning=reasoning,
                         content=content,
-                        tool_calls=tool_call_items,
+                        tool_calls=make_tool_call_items(tool_calls),
                     )
 
                 else:
