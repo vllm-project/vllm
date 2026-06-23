@@ -18,6 +18,7 @@ from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
+from vllm.entrypoints.openai.engine.protocol import CompletionTokenUsageInfo
 from vllm.sampling_params import SamplingParams
 
 # any model with a chat template should work here
@@ -274,7 +275,10 @@ async def test_single_chat_session(client: openai.AsyncOpenAI, model_name: str):
 
     assert choice.finish_reason == "length"
     assert chat_completion.usage == openai.types.CompletionUsage(
-        completion_tokens=5, prompt_tokens=37, total_tokens=42
+        completion_tokens=5,
+        prompt_tokens=37,
+        total_tokens=42,
+        completion_tokens_details=CompletionTokenUsageInfo(reasoning_tokens=0),
     )
 
     message = choice.message

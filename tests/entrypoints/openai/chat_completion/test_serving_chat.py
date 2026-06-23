@@ -1510,19 +1510,9 @@ class TestServingChatWithHarmony:
         )
 
         chat_template_kwargs = serving_chat._effective_chat_template_kwargs(req)
-        if stream:
-            extra_kwargs: dict[str, Any] = {
-                "chat_template_kwargs": chat_template_kwargs,
-            }
-        else:
-            parser = None
-            if serving_chat.parser_cls is not None:
-                parser = serving_chat.parser_cls(
-                    tokenizer,
-                    req.tools,
-                    chat_template_kwargs=chat_template_kwargs,
-                )
-            extra_kwargs = {"parser": parser}
+        extra_kwargs: dict[str, Any] = {
+            "chat_template_kwargs": chat_template_kwargs,
+        }
 
         result = generator_func(
             request=req,
