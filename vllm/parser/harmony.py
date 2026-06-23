@@ -26,12 +26,25 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.logger import init_logger
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 
 if TYPE_CHECKING:
     from openai_harmony import Message, StreamableParser
+
+logger = init_logger(__name__)
+
+
+class HarmonyParserError(Exception):
+    """Raised when the model generates tokens that violate the Harmony protocol.
+
+    The serving layer handles this gracefully by returning finish_reason="stop"
+    with the error details in stop_reason (both streaming and non-streaming).
+    """
+
+    pass
 
 
 class _SegmentType(Enum):
@@ -266,15 +279,38 @@ class HarmonyParser(DelegatingParser):
         return delta_message
 
     def process_chunk(self, token_ids: Sequence[int]) -> ChunkResult:
+        """Process tokens. Raises HarmonyParserError on invalid sequences."""
         if not token_ids:
             return ChunkResult(segments=[], reasoning_token_count=0)
 
         segments: list[Segment] = []
         reasoning_token_count = 0
-        for token_id in token_ids:
-            self._harmony_parser.process(token_id)
-            channel = self._harmony_parser.current_channel
-            recipient = self._harmony_parser.current_recipient
+
+        for i, token_id in enumerate(token_ids):
+            try:
+                self._harmony_parser.process(token_id)
+            except HarmonyError as e:
+                # Log the error with full context for debugging
+                logger.error(
+                    "Harmony parser error: %s. Parser state: %s, "
+                    "token_id: %d, position: %d/%d, "
+                    "current_channel: %s, current_recipient: %s",
+                    str(e),
+                    self.state,
+                    token_id,
+                    i,
+                    len(token_ids),
+                    self.current_channel,
+                    self.current_recipient,
+                )
+                # Wrap in HarmonyParserError to provide a stable exception
+                # type that the serving layer can catch
+                raise HarmonyParserError(
+                    f"Harmony parser failed at token {i}/{len(token_ids)}: {e}"
+                ) from e
+
+            channel = self.current_channel
+            recipient = self.current_recipient
             delta = self._harmony_parser.last_content_delta or ""
             completed_message = self._poll_completed_message()
 

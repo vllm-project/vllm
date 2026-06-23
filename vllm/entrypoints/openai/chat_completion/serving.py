@@ -58,6 +58,7 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
+from vllm.parser.harmony import HarmonyParserError
 from vllm.renderers import ChatParams
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -585,28 +586,44 @@ class OpenAIServingChat(OpenAIServing):
                         continue
 
                     delta_message: DeltaMessage | None
+                    parser_finish_reason: str | None = None
 
                     if parser is not None:
-                        delta_message = parser.parse_delta(
-                            delta_text=delta_text,
-                            delta_token_ids=as_list(output.token_ids),
-                            request=request,
-                            prompt_token_ids=res.prompt_token_ids,
-                            finished=output.finish_reason is not None,
-                        )
-                        if delta_message is not None:
-                            if delta_message.tool_calls:
-                                tools_streamed[i] = True
+                        try:
+                            delta_message = parser.parse_delta(
+                                delta_text=delta_text,
+                                delta_token_ids=as_list(output.token_ids),
+                                request=request,
+                                prompt_token_ids=res.prompt_token_ids,
+                                finished=output.finish_reason is not None,
+                            )
+                            if delta_message is not None:
+                                if delta_message.tool_calls:
+                                    tools_streamed[i] = True
 
-                            if (
-                                delta_message.reasoning
-                                and not request.include_reasoning
-                            ):
-                                delta_message.reasoning = None
-                                if not (
-                                    delta_message.content or delta_message.tool_calls
+                                if (
+                                    delta_message.reasoning
+                                    and not request.include_reasoning
                                 ):
-                                    delta_message = None
+                                    delta_message.reasoning = None
+                                    if not (
+                                        delta_message.content
+                                        or delta_message.tool_calls
+                                    ):
+                                        delta_message = None
+                        except HarmonyParserError as e:
+                            # Harmony parser encountered an error (e.g., unexpected
+                            # token sequence). Log the error and set finish_reason
+                            # to "error" so we can terminate the stream gracefully.
+                            logger.error(
+                                "Request %s: Harmony parser failed: %s",
+                                request_id,
+                                str(e),
+                            )
+                            parser_finish_reason = "error"
+                            # Return any content that was successfully parsed
+                            # before the error occurred
+                            delta_message = DeltaMessage()
 
                     # handle streaming just a content delta (no parsers)
                     else:
@@ -660,7 +677,23 @@ class OpenAIServingChat(OpenAIServing):
                                 delta=True,
                             )
 
-                    if output.finish_reason is None:
+                    # if parser set an error finish_reason, treat it as finished
+                    if parser_finish_reason is not None:
+                        choice_data = ChatCompletionResponseStreamChoice(
+                            index=i,
+                            delta=delta_message,
+                            logprobs=logprobs,
+                            finish_reason=parser_finish_reason,
+                            stop_reason=None,
+                            token_ids=(
+                                as_list(output.token_ids)
+                                if request.return_token_ids
+                                else None
+                            ),
+                        )
+                        finish_reason_sent[i] = True
+
+                    elif output.finish_reason is None:
                         # Send token-by-token response for each request.n
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
@@ -855,14 +888,28 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = None
 
             if parser is not None:
-                reasoning, content, tool_calls = parser.parse(
-                    output.text,
-                    request,
-                    enable_auto_tools=self.enable_auto_tools,
-                    model_output_token_ids=token_ids,
-                )
-                if not request.include_reasoning:
-                    reasoning = None
+                try:
+                    reasoning, content, tool_calls = parser.parse(
+                        output.text,
+                        request,
+                        enable_auto_tools=self.enable_auto_tools,
+                        model_output_token_ids=token_ids,
+                    )
+                    if not request.include_reasoning:
+                        reasoning = None
+                except HarmonyParserError as e:
+                    # Harmony parser encountered an error. Log and return
+                    # an error response with status 500.
+                    logger.error(
+                        "Request %s: Harmony parser failed: %s",
+                        request_id,
+                        str(e),
+                    )
+                    return self.create_error_response(
+                        f"Parser error: {str(e)}",
+                        err_type="InternalServerError",
+                        status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                    )
             else:
                 reasoning = None
                 content = output.text

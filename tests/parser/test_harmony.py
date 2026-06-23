@@ -18,7 +18,7 @@ from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
 )
-from vllm.parser.harmony import HarmonyParser
+from vllm.parser.harmony import HarmonyParser, HarmonyParserError
 from vllm.parser.parser_manager import ParserManager
 
 REASONING_MODEL_NAME = "openai/gpt-oss-20b"
@@ -763,3 +763,26 @@ class TestProcessChunk:
             ("analysis", "One"),
             ("final", "Two"),
         ]
+
+    def test_invalid_token_sequence_raises_harmony_parser_error(self, harmony_parser):
+        """
+        Test that HarmonyParserError is raised when the parser encounters
+        an unexpected token sequence (e.g., consecutive stop tokens).
+        """
+        # Simulate the error case from issue #46464:
+        # After a message ends with <|return|> (200002), the parser expects
+        # <|start|> (200006) to begin the next message, but receives another
+        # <|return|> instead.
+        invalid_sequence = encode_output(
+            "<|channel|>final<|message|>Some content<|return|>"
+            # Missing <|start|> here - sending <|return|> again instead
+            "<|return|>"
+        )
+
+        with pytest.raises(HarmonyParserError) as exc_info:
+            harmony_parser.process_chunk(invalid_sequence)
+
+        # Verify the error message contains useful debugging info
+        error_msg = str(exc_info.value)
+        assert "Harmony parser failed" in error_msg
+        assert "token" in error_msg.lower()
