@@ -32,7 +32,6 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     get_tool_call_id_type,
 )
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -45,8 +44,8 @@ from vllm.entrypoints.openai.engine.serving import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
-    get_developer_message,
-    get_system_message,
+    build_harmony_preamble,
+    extract_instructions_from_messages,
     get_user_message,
     has_custom_tools,
     render_for_completion,
@@ -87,13 +86,15 @@ from vllm.entrypoints.openai.responses.streaming_events import (
     split_delta,
 )
 from vllm.entrypoints.openai.responses.utils import (
+    build_response_output_items,
     construct_input_messages,
     construct_tool_dicts,
     extract_function_tool_names,
     extract_tool_types,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.utils import get_max_tokens
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
@@ -101,10 +102,9 @@ from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
-from vllm.parser import ParserManager
+from vllm.parser import Parser, ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers import ToolParser
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
@@ -190,6 +190,7 @@ class OpenAIServingResponses(OpenAIServing):
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
+            is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
@@ -257,6 +258,20 @@ class OpenAIServingResponses(OpenAIServing):
             )
             .with_defaults(self.chat_template_kwargs)
             .chat_template_kwargs
+        )
+
+    def _make_response_parser(
+        self,
+        request: ResponsesRequest,
+        tokenizer: TokenizerLike,
+        chat_template_kwargs: dict[str, Any],
+    ) -> Parser | None:
+        if self.parser is None:
+            return None
+        return self.parser(
+            tokenizer,
+            request.tools,
+            chat_template_kwargs=chat_template_kwargs,
         )
 
     def _validate_generator_input(
@@ -442,16 +457,27 @@ class OpenAIServingResponses(OpenAIServing):
                 else await self._get_trace_headers(raw_request.headers)
             )
 
+            chat_template_kwargs = self._effective_chat_template_kwargs(request)
+            response_parser = self._make_response_parser(
+                request, tokenizer, chat_template_kwargs
+            )
+
             context: ConversationContext
             function_tool_names = extract_function_tool_names(request.tools)
             if self.use_harmony:
                 if request.stream:
                     context = StreamingHarmonyContext(
-                        messages, available_tools, function_tool_names
+                        messages,
+                        available_tools,
+                        function_tool_names,
+                        response_parser=response_parser,
                     )
                 else:
                     context = HarmonyContext(
-                        messages, available_tools, function_tool_names
+                        messages,
+                        available_tools,
+                        function_tool_names,
+                        response_parser=response_parser,
                     )
             else:
                 if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
@@ -460,29 +486,27 @@ class OpenAIServingResponses(OpenAIServing):
                     context = ParsableContext(
                         response_messages=messages,
                         tokenizer=tokenizer,
-                        reasoning_parser_cls=self.parser.reasoning_parser_cls
-                        if self.parser
-                        else None,
+                        parser_cls=self.parser,
                         request=request,
-                        tool_parser_cls=self.parser.tool_parser_cls
-                        if self.parser
-                        else None,
+                        response_parser=response_parser,
                         available_tools=available_tools,
                         chat_template=self.chat_template,
                         chat_template_content_format=self.chat_template_content_format,
+                        enable_auto_tools=self.enable_auto_tools,
+                        tool_call_id_type=self.tool_call_id_type,
                     )
                 else:
-                    context = SimpleContext()
+                    context = SimpleContext(
+                        response_parser=response_parser,
+                    )
 
-            if self.parser and self.parser.reasoning_parser_cls is not None:
-                chat_template_kwargs = self._effective_chat_template_kwargs(request)
+            if (
+                context.response_parser is not None
+                and context.response_parser.reasoning_parser is not None
+            ):
                 reasoning_parser_kwargs = {
                     "chat_template_kwargs": chat_template_kwargs,
                 }
-                reasoning_parser = self.parser.reasoning_parser_cls(
-                    tokenizer,
-                    chat_template_kwargs=chat_template_kwargs,
-                )
                 if (
                     isinstance(
                         struct_out := sampling_params.structured_outputs,
@@ -492,8 +516,10 @@ class OpenAIServingResponses(OpenAIServing):
                 ):
                     sampling_params.structured_outputs = replace(
                         struct_out,
-                        structural_tag=reasoning_parser.prepare_structured_tag(
-                            struct_out.structural_tag, self.tool_server
+                        structural_tag=(
+                            context.response_parser.reasoning_parser.prepare_structured_tag(
+                                struct_out.structural_tag, self.tool_server
+                            )
                         ),
                     )
             generator = self._generate_with_builtin_tools(
@@ -614,8 +640,7 @@ class OpenAIServingResponses(OpenAIServing):
             default_template_content_format=self.chat_template_content_format,
             default_template_kwargs=chat_template_kwargs,
             tool_dicts=tool_dicts,
-            tool_parser=self.parser.tool_parser_cls if self.parser else None,
-            reasoning_parser=self.parser.reasoning_parser_cls if self.parser else None,
+            parser=self.parser,
         )
         return messages, engine_inputs
 
@@ -624,7 +649,7 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         messages: list[ResponseInputOutputItem],
         tool_dicts: list[dict[str, Any]] | None,
-        tool_parser: type[ToolParser] | None,
+        parser: type[Parser] | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
     ):
@@ -639,8 +664,7 @@ class OpenAIServingResponses(OpenAIServing):
             default_template_content_format=chat_template_content_format,
             default_template_kwargs=chat_template_kwargs,
             tool_dicts=tool_dicts,
-            tool_parser=tool_parser,
-            reasoning_parser=self.parser.reasoning_parser_cls if self.parser else None,
+            parser=parser,
         )
         return engine_inputs
 
@@ -706,9 +730,9 @@ class OpenAIServingResponses(OpenAIServing):
             elif isinstance(context, ParsableContext):
                 (engine_input,) = await self._render_next_turn(
                     context.request,
-                    context.parser.response_messages,
+                    context.response_messages,
                     context.tool_dicts,
-                    context.tool_parser_cls,
+                    context.parser_cls,
                     context.chat_template,
                     context.chat_template_content_format,
                 )
@@ -809,7 +833,7 @@ class OpenAIServingResponses(OpenAIServing):
             else:
                 status = "incomplete"
         elif isinstance(context, ParsableContext):
-            output = context.parser.make_response_output_items_from_parsable_context()
+            output = context.make_response_output_items()
 
             if request.enable_response_messages:
                 input_messages = context.input_messages
@@ -820,7 +844,7 @@ class OpenAIServingResponses(OpenAIServing):
             num_tool_output_tokens = 0
 
             # Check finish reason from the parser
-            if context.parser.finish_reason == "length":
+            if context.finish_reason == "length":
                 status = "incomplete"
         else:
             assert isinstance(context, SimpleContext)
@@ -837,7 +861,12 @@ class OpenAIServingResponses(OpenAIServing):
             if final_output.finish_reason == "length":
                 status = "incomplete"
 
-            output = self._make_response_output_items(request, final_output, tokenizer)
+            output = self._make_response_output_items(
+                request,
+                final_output,
+                tokenizer,
+                parser=context.response_parser,
+            )
 
             if request.enable_response_messages:
                 input_messages = context.input_messages
@@ -858,16 +887,16 @@ class OpenAIServingResponses(OpenAIServing):
         # accumulated output token IDs using the parser if not already set.
         if (
             num_reasoning_tokens == 0
-            and self.parser is not None
-            and self.parser.reasoning_parser_cls is not None
             and isinstance(context, (SimpleContext, ParsableContext))
+            and context.response_parser is not None
+            and context.response_parser.reasoning_parser is not None
         ):
-            reasoning_parser = self.parser.reasoning_parser_cls(
-                tokenizer,
-                chat_template_kwargs=self._effective_chat_template_kwargs(request),
-            )
             accumulated = getattr(context, "_accumulated_token_ids", []) or []
-            num_reasoning_tokens = reasoning_parser.count_reasoning_tokens(accumulated)
+            num_reasoning_tokens = (
+                context.response_parser.reasoning_parser.count_reasoning_tokens(
+                    accumulated
+                )
+            )
 
         usage = ResponseUsage(
             input_tokens=num_prompt_tokens,
@@ -1009,6 +1038,7 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesRequest,
         final_output: CompletionOutput,
         tokenizer: TokenizerLike,
+        parser: Parser | None = None,
     ) -> list[ResponseOutputItem]:
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
@@ -1031,19 +1061,19 @@ class OpenAIServingResponses(OpenAIServing):
                 top_logprobs=request.top_logprobs,
             )
 
-        # Use parser to extract and create response output items
-        if self.parser:
-            chat_template_kwargs = self._effective_chat_template_kwargs(request)
-            parser = self.parser(
-                tokenizer, request.tools, chat_template_kwargs=chat_template_kwargs
-            )
-            return parser.extract_response_outputs(
-                model_output=final_output.text,
-                model_output_token_ids=final_output.token_ids,
-                request=request,
+        # Use parser to extract reasoning, content, and tool calls
+        if parser:
+            reasoning, content, tool_calls = parser.parse(
+                final_output.text,
+                request,
                 enable_auto_tools=self.enable_auto_tools,
-                tool_call_id_type=self.tool_call_id_type,
+            )
+            return build_response_output_items(
+                reasoning=reasoning,
+                content=content,
+                tool_calls=tool_calls,
                 logprobs=logprobs,
+                tool_call_id_type=self.tool_call_id_type,
             )
 
         # Fallback when no parser is configured
@@ -1081,37 +1111,9 @@ class OpenAIServingResponses(OpenAIServing):
             output_items.extend(last_items)
         return output_items
 
-    def _extract_system_message_from_request(
-        self, request: ResponsesRequest
-    ) -> str | None:
-        system_msg = None
-        if not isinstance(request.input, str):
-            for response_msg in request.input:
-                if (
-                    isinstance(response_msg, dict)
-                    and response_msg.get("role") == "system"
-                ):
-                    content = response_msg.get("content")
-                    if isinstance(content, str):
-                        system_msg = content
-                    elif isinstance(content, list):
-                        for param in content:
-                            if (
-                                isinstance(param, dict)
-                                and param.get("type") == "input_text"
-                            ):
-                                system_msg = param.get("text")
-                                break
-                    break
-        return system_msg
-
-    def _construct_harmony_system_input_message(
-        self, request: ResponsesRequest, with_custom_tools: bool, tool_types: set[str]
-    ) -> OpenAIHarmonyMessage:
-        model_identity = self._extract_system_message_from_request(request)
-
-        reasoning_effort = request.reasoning.effort if request.reasoning else None
-
+    def _get_harmony_builtin_tool_descriptions(
+        self, request: ResponsesRequest, tool_types: set[str]
+    ) -> dict[str, str | None]:
         # Extract allowed_tools from MCP tool requests
         allowed_tools_map = _extract_allowed_tools_from_mcp_requests(request.tools)
 
@@ -1144,17 +1146,11 @@ class OpenAIServingResponses(OpenAIServing):
             and self.tool_server.has_tool("container")
             else None
         )
-
-        sys_msg = get_system_message(
-            model_identity=model_identity,
-            reasoning_effort=reasoning_effort,
-            browser_description=browser_description,
-            python_description=python_description,
-            container_description=container_description,
-            instructions=request.instructions,
-            with_custom_tools=with_custom_tools,
-        )
-        return sys_msg
+        return {
+            "browser_description": browser_description,
+            "python_description": python_description,
+            "container_description": container_description,
+        }
 
     def _construct_input_messages_with_harmony(
         self,
@@ -1162,20 +1158,31 @@ class OpenAIServingResponses(OpenAIServing):
         prev_response: ResponsesResponse | None,
     ) -> list[OpenAIHarmonyMessage]:
         messages: list[OpenAIHarmonyMessage] = []
+        request_input = request.input
         if prev_response is None:
             # New conversation.
             tool_types = extract_tool_types(request.tools)
             with_custom_tools = has_custom_tools(tool_types)
-
-            sys_msg = self._construct_harmony_system_input_message(
-                request, with_custom_tools, tool_types
-            )
-            messages.append(sys_msg)
-            if with_custom_tools:
-                dev_msg = get_developer_message(
-                    instructions=request.instructions, tools=request.tools
+            instructions = request.instructions
+            if instructions is None and isinstance(request_input, list):
+                instructions, request_input = extract_instructions_from_messages(
+                    request_input
                 )
-                messages.append(dev_msg)
+            tool_descriptions = self._get_harmony_builtin_tool_descriptions(
+                request, tool_types
+            )
+            tools = request.tools if with_custom_tools else None
+            messages.extend(
+                build_harmony_preamble(
+                    instructions=instructions,
+                    tools=tools,
+                    reasoning_effort=(
+                        request.reasoning.effort if request.reasoning else None
+                    ),
+                    with_custom_tools=with_custom_tools,
+                    **tool_descriptions,
+                )
+            )
             messages += construct_harmony_previous_input_messages(request)
 
         else:
@@ -1211,20 +1218,20 @@ class OpenAIServingResponses(OpenAIServing):
             messages.extend(prev_msgs)
         # Append the new input.
         # Responses API supports simple text inputs without chat format.
-        if isinstance(request.input, str):
+        if isinstance(request_input, str):
             # Skip empty string input when previous_input_messages supplies
             # the full conversation history --- an empty trailing user message
             # confuses the model into thinking nothing was sent.
-            if request.input or not request.previous_input_messages:
-                messages.append(get_user_message(request.input))
+            if request_input or not request.previous_input_messages:
+                messages.append(get_user_message(request_input))
         else:
             if prev_response is not None:
                 prev_outputs = copy(prev_response.output)
             else:
                 prev_outputs = []
-            for response_msg in request.input:
+            for response_msg in request_input:
                 new_msg = response_input_to_harmony(response_msg, prev_outputs)
-                if new_msg is not None and new_msg.author.role != "system":
+                if new_msg is not None:
                     messages.append(new_msg)
 
                 # User passes in a tool call request and its output. We need
@@ -1373,15 +1380,6 @@ class OpenAIServingResponses(OpenAIServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor()
-        parser = (
-            self.parser(
-                tokenizer,
-                request.tools,
-                chat_template_kwargs=self._effective_chat_template_kwargs(request),
-            )
-            if self.parser
-            else None
-        )
 
         def _get_logprobs(
             output: CompletionOutput,
@@ -1405,12 +1403,13 @@ class OpenAIServingResponses(OpenAIServing):
             delta_text = output.text
             delta_token_ids = as_list(output.token_ids)
 
-            if parser:
-                delta_message = parser.parse_delta(
+            if ctx.response_parser:
+                delta_message = ctx.response_parser.parse_delta(
                     delta_text=delta_text,
                     delta_token_ids=delta_token_ids,
                     request=request,
                     prompt_token_ids=ctx.last_output.prompt_token_ids,
+                    finished=output.finish_reason is not None,
                 )
             else:
                 delta_message = DeltaMessage(content=output.text)

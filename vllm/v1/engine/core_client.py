@@ -20,6 +20,7 @@ import msgspec.msgpack
 import zmq
 import zmq.asyncio
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
@@ -391,9 +392,12 @@ class BackgroundResources:
     def __call__(self):
         """Clean up background resources."""
 
+        logger.debug_once("[shutdown] MPClient: background resource cleanup start")
         self.engine_dead = True
         if self.engine_manager is not None:
-            self.engine_manager.shutdown()
+            self.engine_manager.shutdown(
+                timeout=envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+            )
         if self.coordinator is not None:
             self.coordinator.shutdown()
 
@@ -444,6 +448,8 @@ class BackgroundResources:
                     shutdown_sender.connect(self.shutdown_path)
                     # Send shutdown signal.
                     shutdown_sender.send(b"")
+
+        logger.debug_once("[shutdown] MPClient: background resource cleanup complete")
 
     def validate_alive(self, frames: Sequence[zmq.Frame]):
         if len(frames) == 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):
@@ -645,9 +651,15 @@ class MPClient(EngineCoreClient):
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine manager under timeout and clean up resources."""
         if self._finalizer.detach() is not None:
+            timeout_str = "default" if timeout is None else f"{timeout}s"
+            logger.info("[shutdown] MPClient: start timeout=%s", timeout_str)
             if self.resources.engine_manager is not None:
+                logger.info_once("[shutdown] MPClient: stopping engine manager")
                 self.resources.engine_manager.shutdown(timeout=timeout)
+                logger.info_once("[shutdown] MPClient: engine manager stopped")
+            logger.info_once("[shutdown] MPClient: cleaning up background resources")
             self.resources()
+            logger.info_once("[shutdown] MPClient: complete")
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
@@ -687,6 +699,9 @@ class MPClient(EngineCoreClient):
             if not _self or not _self._finalizer.alive or _self.resources.engine_dead:
                 return
             _self.resources.engine_dead = True
+            logger.warning_once(
+                "[shutdown] MPClient: engine core exited unexpectedly; starting cleanup"
+            )
             _self.shutdown()
             # Note: For MPClient, we don't have a failure callback mechanism
             # like MultiprocExecutor, but we set engine_dead flag which will
@@ -708,10 +723,26 @@ class MPClient(EngineCoreClient):
         )
 
         # Setup KV cache config with initialization state from
-        # engine core process. Sum values from all engines in DP case.
+        # engine core process. Sum num_gpu_blocks from all engines in DP case.
         num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks or 0
         num_gpu_blocks += response.num_gpu_blocks
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+
+        # Sync block_size: may be enlarged by _align_hybrid_block_size in the
+        # worker for hybrid Mamba models.
+        cache_config = vllm_config.cache_config
+        cache_config.block_size = response.block_size
+        # Keep these as per-engine cache_config_info values; do not sum across DP.
+        cache_config.kv_cache_size_tokens = (
+            getattr(cache_config, "kv_cache_size_tokens", None)
+            if getattr(cache_config, "kv_cache_size_tokens", None) is not None
+            else response.kv_cache_size_tokens
+        )
+        cache_config.kv_cache_max_concurrency = (
+            getattr(cache_config, "kv_cache_max_concurrency", None)
+            if getattr(cache_config, "kv_cache_max_concurrency", None) is not None
+            else response.kv_cache_max_concurrency
+        )
 
         # In external DP LB mode, the coordinator address that the
         # front-end procs connect to is obtained by each engine via it's

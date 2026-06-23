@@ -14,7 +14,6 @@ import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -38,7 +37,8 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateStreamResponse,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-from vllm.entrypoints.utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import EngineInput, mm_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -307,7 +307,10 @@ class ServingTokens(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
+        if (
+            self.enable_prompt_tokens_details
+            and final_res.num_cached_tokens is not None
+        ):
             # This info is not available at the /coordinator level
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens
@@ -397,6 +400,14 @@ class ServingTokens(OpenAIServing):
                     else:
                         logprobs = None
 
+                    routed_experts_b64 = None
+                    if output.routed_experts is not None:
+                        buf = io.BytesIO()
+                        np.save(buf, output.routed_experts)
+                        routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
+                            "ascii"
+                        )
+
                     chunk = GenerateStreamResponse(
                         request_id=request_id,
                         choices=[
@@ -405,6 +416,7 @@ class ServingTokens(OpenAIServing):
                                 logprobs=logprobs,
                                 finish_reason=finish_reason,
                                 token_ids=as_list(delta_token_ids),
+                                routed_experts=routed_experts_b64,
                             )
                         ],
                     )
@@ -424,7 +436,7 @@ class ServingTokens(OpenAIServing):
                 total_tokens=num_prompt_tokens + total_completion_tokens,
             )
 
-            if self.enable_prompt_tokens_details and num_cached_tokens:
+            if self.enable_prompt_tokens_details and num_cached_tokens is not None:
                 final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
                     cached_tokens=num_cached_tokens
                 )
