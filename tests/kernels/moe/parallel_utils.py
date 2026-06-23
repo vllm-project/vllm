@@ -15,7 +15,7 @@ from torch.distributed import ProcessGroup
 from torch.multiprocessing import spawn  # pyright: ignore[reportPrivateImportUsage]
 from typing_extensions import ParamSpec
 
-from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2
+from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, import_deep_ep
 from vllm.utils.network_utils import get_open_port
 
 if has_deep_ep():
@@ -135,7 +135,7 @@ def make_deepep_ht_a2a(
     q_dtype: torch.dtype | None = None,
     block_shape: list[int] | None = None,
 ):
-    import deep_ep
+    deep_ep = import_deep_ep()
 
     # high throughput a2a
     num_nvl_bytes = 1024 * 1024 * 1024  # 1GB
@@ -162,7 +162,7 @@ def make_deepep_ll_a2a(
     q_dtype: torch.dtype | None = None,
     block_shape: list[int] | None = None,
 ):
-    import deep_ep
+    deep_ep = import_deep_ep()
 
     # low-latency a2a
     num_rdma_bytes = deep_ep.Buffer.get_low_latency_rdma_size_hint(

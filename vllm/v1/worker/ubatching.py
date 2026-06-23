@@ -196,7 +196,8 @@ def dbo_get_previous_event(func, *args, **kwargs):
         ctx = _CURRENT_CONTEXTS[ctx_idx]
         # execute callable on the ubatch compute stream to record/wait events there
         with torch.cuda.stream(ctx.compute_stream):
-            return func(*args, **kwargs)
+            event = func(*args, **kwargs)
+            return event
 
 
 def make_ubatch_contexts(

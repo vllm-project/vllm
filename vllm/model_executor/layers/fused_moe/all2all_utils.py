@@ -38,8 +38,9 @@ from vllm.utils.import_utils import (
 
 logger = init_logger(__name__)
 
-if current_platform.is_cuda_alike():
+if current_platform.is_cuda_alike() or current_platform.is_xpu():
     if has_deep_ep():
+        print("!!!!!!!has deep ep, will import")
         from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
         from .prepare_finalize.deepep_ll import (
             DEEPEP_QUANT_BLOCK_SHAPE,

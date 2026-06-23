@@ -30,6 +30,15 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
                 logger.info("Using AgRs manager on XPU device.")
 
+            elif self.all2all_backend == "deepep_high_throughput":
+                from .all2all import DeepEPHTAll2AllManager
+
+                self.all2all_manager = DeepEPHTAll2AllManager(self.cpu_group)
+
+            elif self.all2all_backend == "deepep_low_latency":
+                from .all2all import DeepEPLLAll2AllManager
+
+                self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
             else:  # type: ignore[has-type]
                 logger.warning(
                     "`%s` all2all manager is not supported on XPU. "

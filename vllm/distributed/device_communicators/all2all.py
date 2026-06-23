@@ -12,11 +12,17 @@ from vllm.distributed import get_dp_group, get_ep_group
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
-from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, has_mori
+from vllm.utils.import_utils import (
+    has_deep_ep,
+    has_deep_ep_v2,
+    has_mori,
+    import_deep_ep,
+)
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -194,6 +200,34 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
                 handle.destroy()
             self.handle_cache._cache.clear()
 
+    def _adapt_buffer_kwargs_for_platform(
+        self, deep_ep: Any, buffer_kwargs: dict[Any, Any]
+    ) -> dict[Any, Any]:
+        if not current_platform.is_xpu():
+            return buffer_kwargs
+
+        if self.internode:
+            raise RuntimeError(
+                "deep_ep_xpu only supports intranode expert parallel communication. "
+                "The current EP group spans multiple nodes."
+            )
+
+        adapted_kwargs = dict(buffer_kwargs)
+
+        # XPU DeepEP exposes an IPC-only constructor and does not accept the
+        # CUDA-specific buffer sizing and transport tuning kwargs.
+        adapted_kwargs["num_ipc_bytes"] = adapted_kwargs.pop("num_nvl_bytes", 0)
+        adapted_kwargs.pop("num_qps_per_rank", None)
+        adapted_kwargs.pop("allow_nvlink_for_low_latency_mode", None)
+        adapted_kwargs.pop("allow_mnnvl", None)
+
+        if adapted_kwargs.get("low_latency_mode"):
+            raise NotImplementedError(
+                "deep_ep_xpu does not support the deepep_low_latency backend yet."
+            )
+
+        return adapted_kwargs
+
 
 class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
     """
@@ -236,9 +270,10 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
             "args are computed in the Manager itself."
         )
 
-        import deep_ep  # type: ignore[import-not-found]
+        deep_ep = import_deep_ep()
 
         buffer_kwargs = self._make_all2all_kwargs()
+        buffer_kwargs = self._adapt_buffer_kwargs_for_platform(deep_ep, buffer_kwargs)
         logger.debug("DeepEP all2all args %s", buffer_kwargs)
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer
@@ -246,14 +281,17 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
         return handle
 
     def set_num_sms(self, num_sms: int):
-        import deep_ep  # type: ignore[import-not-found]
+        deep_ep = import_deep_ep()
 
         # Right now the buffers are sized for only what the kernels were
         # created with. So we can only reduce the number of SMS used
         # but not increase it.
         if num_sms > self.num_sms:
             num_sms = self.num_sms
-        deep_ep.Buffer.set_num_sms(num_sms)
+        if hasattr(deep_ep.Buffer, "set_num_sms"):
+            deep_ep.Buffer.set_num_sms(num_sms)
+        elif hasattr(deep_ep.Buffer, "set_num_eus"):
+            deep_ep.Buffer.set_num_eus(num_sms)
 
 
 class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
@@ -280,7 +318,12 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         num_global_experts: Number of experts in the model.
         num_local_experts: Number of experts in an EP rank.
         """
-        import deep_ep  # type: ignore[import-not-found]
+        deep_ep = import_deep_ep()
+
+        if current_platform.is_xpu():
+            raise NotImplementedError(
+                "deep_ep_xpu does not support the deepep_low_latency backend yet."
+            )
 
         # Defaults for internode and intranode are taken from DeepEP tests.
         num_nvl_bytes = envs.VLLM_DEEPEP_BUFFER_SIZE_MB * 1024 * 1024
@@ -312,10 +355,11 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         The kwargs for DeepEPLLAll2AllManager is dictated by
         _make_all2all_kwargs.
         """
-        import deep_ep  # type: ignore[import-not-found]
+        deep_ep = import_deep_ep()
 
         buffer_kwargs = self._make_all2all_kwargs(**kwargs)
-        logger.debug("DeepEP all2all args %s", buffer_kwargs)
+        buffer_kwargs = self._adapt_buffer_kwargs_for_platform(deep_ep, buffer_kwargs)
+        print("!!!!!DeepEP all2all args %s", buffer_kwargs)
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer
         )

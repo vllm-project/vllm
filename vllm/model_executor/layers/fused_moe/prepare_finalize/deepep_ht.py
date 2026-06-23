@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
 
-import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -12,6 +11,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.utils.import_utils import import_deep_ep
 from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
@@ -23,6 +23,12 @@ from vllm.v1.worker.ubatching import (
     dbo_yield_and_switch_from_comm_to_compute,
     dbo_yield_and_switch_from_compute_to_comm,
 )
+
+deep_ep = import_deep_ep()
+
+
+def _has_overlap_event(event) -> bool:
+    return getattr(event, "event", None) is not None
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
@@ -193,7 +199,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool,
     ) -> mk.PrepareResultType:
-        if event.event is not None:
+        if _has_overlap_event(event):
             event.current_stream_wait()
 
         if has_scales:
@@ -374,13 +380,12 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             async_finish=do_async and not dbo_enabled(),
             allocate_on_comm_stream=False,
         )
-
         dbo_switch_to_compute()
 
         if do_async:
 
             def _receiver():
-                if event.event is not None:
+                if _has_overlap_event(event):
                     event.current_stream_wait()
                 dbo_switch_to_comm()
                 output.copy_(combined_x, non_blocking=True)
