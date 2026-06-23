@@ -175,11 +175,82 @@ def test_cached_request_data_resumed_all_token_ids_mrv1_only():
     assert req.request_id in cached.resumed_req_ids
     assert cached.all_token_ids[req.request_id] == list(req.all_token_ids)
 
-    # V2 model runner: all_token_ids is skipped entirely.
+    # V2 model runner: all_token_ids is skipped entirely; resumed_req_ids is
+    # still populated (consumed by scheduler-side KV connectors).
     scheduler.use_v2_model_runner = True
     cached = make_cached()
     assert req.request_id in cached.resumed_req_ids
     assert cached.all_token_ids == {}
+
+
+@pytest.mark.parametrize(
+    ("use_v2", "enable_logging", "profiler", "expected"),
+    [
+        (False, False, None, False),  # V1 runner always reads it
+        (True, False, None, True),  # V2, no consumer -> skip
+        (True, True, None, False),  # V2 + iteration-detail logging -> keep
+        (True, False, "torch", False),  # V2 + profiler -> keep
+    ],
+)
+def test_should_skip_num_output_tokens(use_v2, enable_logging, profiler, expected):
+    """The skip predicate fires only on V2 when neither consumer of
+    `num_output_tokens` (iteration-detail logging or a profiler) is active.
+
+    A V2 scheduler cannot be constructed without Triton, so the derivation is
+    covered here directly rather than through `create_scheduler`.
+    """
+    from vllm.v1.core.sched.scheduler import Scheduler
+
+    assert (
+        Scheduler._should_skip_num_output_tokens(use_v2, enable_logging, profiler)
+        is expected
+    )
+
+
+def test_cached_request_data_skips_num_output_tokens_when_guarded():
+    """`_make_cached_request_data` populates `num_output_tokens` in req order,
+    unless the skip guard is set, in which case it leaves the empty default
+    without disturbing the other per-request fields.
+    """
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+
+    scheduler = create_scheduler()
+    running, resumed = create_requests(num_requests=2, num_tokens=8)
+    running.append_output_token_ids([11, 12])
+    resumed.append_output_token_ids([21])
+
+    empty_blocks = KVCacheBlocks(blocks=((),))
+
+    def make_cached():
+        return scheduler._make_cached_request_data(
+            running_reqs=[running],
+            resumed_reqs=[resumed],
+            num_scheduled_tokens={running.request_id: 1, resumed.request_id: 1},
+            spec_decode_tokens={},
+            req_to_new_blocks={
+                running.request_id: empty_blocks,
+                resumed.request_id: empty_blocks,
+            },
+        )
+
+    # Guard off (the default): populated in req order.
+    assert not scheduler._skip_num_output_tokens
+    cached = make_cached()
+    assert cached.req_ids == [running.request_id, resumed.request_id]
+    assert cached.num_output_tokens == [
+        running.num_output_tokens + running.num_output_placeholders,
+        resumed.num_output_tokens + resumed.num_output_placeholders,
+    ]
+
+    # Guard on: empty default, other per-request fields unaffected.
+    scheduler._skip_num_output_tokens = True
+    cached = make_cached()
+    assert cached.num_output_tokens == []
+    assert cached.req_ids == [running.request_id, resumed.request_id]
+    assert cached.num_computed_tokens == [
+        running.num_computed_tokens,
+        resumed.num_computed_tokens,
+    ]
 
 
 def test_schedule_partial_requests():
@@ -5208,3 +5279,69 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.num_preemptions == 0
     assert b.request_id not in req_to_blocks
+
+
+def _advance_one_decode_step(scheduler, requests):
+    """Schedule once and feed back a sampled token for every request."""
+    output = scheduler.schedule()
+    req_ids = [r.request_id for r in requests]
+    model_runner_output = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
+        sampled_token_ids=[[0]] * len(requests),
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_runner_output)
+    return output
+
+
+def test_num_common_prefix_blocks_skipped_when_cascade_disabled():
+    """When cascade attention is disabled (the default), the scheduler must
+    not walk the shared prefix and must emit the zero-filled default, even
+    when running requests share a long prefix with real shared blocks."""
+    scheduler = create_scheduler(enable_prefix_caching=True, block_size=16)
+    assert scheduler.cascade_attn_enabled is False
+    num_groups = len(scheduler.kv_cache_config.kv_cache_groups)
+
+    # 4 identical 128-token prompts -> 8 fully-shared blocks once allocated.
+    requests = create_requests(num_requests=4, num_tokens=128, same_prompt=True)
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = _advance_one_decode_step(scheduler, requests)
+    assert output.num_common_prefix_blocks == [0] * num_groups
+
+    output = scheduler.schedule()
+    assert output.num_common_prefix_blocks == [0] * num_groups
+    # Sanity: a direct manager call proves shared blocks really exist, so the
+    # zero result above is the guard short-circuiting, not an empty cache.
+    direct = scheduler.kv_cache_manager.get_num_common_prefix_blocks(
+        scheduler.running[0].request_id
+    )
+    assert any(v > 0 for v in direct)
+
+
+def test_num_common_prefix_blocks_computed_when_cascade_enabled():
+    """When cascade attention is enabled, the field must still be computed and
+    match the KV cache manager's value."""
+    scheduler = create_scheduler(enable_prefix_caching=True, block_size=16)
+    # Platforms such as CPU force-disable cascade attention in config; set the
+    # guard flag directly to exercise the computed path independent of platform.
+    scheduler.cascade_attn_enabled = True
+    num_groups = len(scheduler.kv_cache_config.kv_cache_groups)
+
+    requests = create_requests(num_requests=4, num_tokens=128, same_prompt=True)
+    for request in requests:
+        scheduler.add_request(request)
+
+    _advance_one_decode_step(scheduler, requests)
+    output = scheduler.schedule()
+
+    expected = scheduler.kv_cache_manager.get_num_common_prefix_blocks(
+        scheduler.running[0].request_id
+    )
+    assert len(output.num_common_prefix_blocks) == num_groups
+    assert output.num_common_prefix_blocks == expected
+    assert any(v > 0 for v in output.num_common_prefix_blocks)

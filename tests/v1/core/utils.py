@@ -60,6 +60,7 @@ def create_scheduler(
     use_ec_connector: bool = False,
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
+    disable_cascade_attn: bool = True,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -80,6 +81,7 @@ def create_scheduler(
         dtype="float16",
         seed=42,
         skip_tokenizer_init=skip_tokenizer_init,
+        disable_cascade_attn=disable_cascade_attn,
     )
     if max_model_len is None:
         max_model_len = max_num_batched_tokens

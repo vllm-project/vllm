@@ -93,6 +93,11 @@ class Scheduler(SchedulerInterface):
             )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
+        # Cascade attention is the only consumer of num_common_prefix_blocks
+        # (see GPUModelRunner._compute_cascade_attn_prefix_lens). When it is
+        # disabled, skip the per-step common-prefix walk entirely. Mirrors the
+        # consumer's gate: cascade_attn_enabled = not disable_cascade_attn.
+        self.cascade_attn_enabled = not vllm_config.model_config.disable_cascade_attn
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -273,6 +278,11 @@ class Scheduler(SchedulerInterface):
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        self._skip_num_output_tokens = self._should_skip_num_output_tokens(
+            self.use_v2_model_runner,
+            self.observability_config.enable_logging_iteration_details,
+            vllm_config.profiler_config.profiler,
+        )
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
         self.current_step = 0
@@ -1026,8 +1036,11 @@ class Scheduler(SchedulerInterface):
         # Get the longest common prefix among all requests in the running queue.
         # This can be potentially used for cascade attention.
         num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
-        with record_function_or_nullcontext("schedule: get_num_common_prefix_blocks"):
-            if self.running:
+        # Only consumed by cascade attention; skip the walk when disabled.
+        if self.cascade_attn_enabled and self.running:
+            with record_function_or_nullcontext(
+                "schedule: get_num_common_prefix_blocks"
+            ):
                 any_request_id = self.running[0].request_id
                 num_common_prefix_blocks = (
                     self.kv_cache_manager.get_num_common_prefix_blocks(any_request_id)
@@ -1242,6 +1255,24 @@ class Scheduler(SchedulerInterface):
         if self.log_stats:
             session.record_event(EngineCoreEventType.QUEUED)
 
+    @staticmethod
+    def _should_skip_num_output_tokens(
+        use_v2_model_runner: bool,
+        enable_logging_iteration_details: bool,
+        profiler: str | None,
+    ) -> bool:
+        """Whether to skip building `CachedRequestData.num_output_tokens`.
+
+        It is read directly by the V1 model runner; on V2 it is read only by
+        `compute_iteration_details`, which runs under iteration-detail logging
+        or a profiler. Skip building it when no consumer is active.
+        """
+        return (
+            use_v2_model_runner
+            and not enable_logging_iteration_details
+            and profiler is None
+        )
+
     def _make_cached_request_data(
         self,
         running_reqs: list[Request],
@@ -1287,9 +1318,10 @@ class Scheduler(SchedulerInterface):
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
             num_computed_tokens.append(req.num_computed_tokens)
-            num_output_tokens.append(
-                req.num_output_tokens + req.num_output_placeholders
-            )
+            if not self._skip_num_output_tokens:
+                num_output_tokens.append(
+                    req.num_output_tokens + req.num_output_placeholders
+                )
 
         return CachedRequestData(
             req_ids=req_ids,
