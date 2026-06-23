@@ -19,6 +19,7 @@ const OFFLOADED_PATHS: &[&str] = &[
     "/v1/chat/completions",
     "/v1/completions",
     "/tokenize",
+    "/detokenize",
     "/inference/v1/generate",
 ];
 
@@ -64,6 +65,7 @@ mod tests {
         assert!(should_offload("/v1/chat/completions"));
         assert!(should_offload("/v1/completions"));
         assert!(should_offload("/tokenize"));
+        assert!(should_offload("/detokenize"));
         assert!(should_offload("/inference/v1/generate"));
     }
 
@@ -72,6 +74,5 @@ mod tests {
         assert!(!should_offload("/health"));
         assert!(!should_offload("/metrics"));
         assert!(!should_offload("/v1/models"));
-        assert!(!should_offload("/detokenize"));
     }
 }
