@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import re
 import secrets
 import uuid
 from argparse import Namespace
@@ -409,6 +410,66 @@ async def http_exception_handler(req: Request, exc: HTTPException):
     return JSONResponse(err.model_dump(), status_code=exc.status_code)
 
 
+_BRACKETED_INTERNAL_RE = re.compile(r"[\[\]{}()]")
+
+_INTERNAL_LOC_MARKERS = frozenset(
+    {
+        "function-wrap",
+        "function-after",
+        "function-before",
+        "function-plain",
+        "json-or-python",
+        "lax-or-strict",
+        "chain",
+        "default",
+        "nullable",
+        "tagged-union",
+        "union",
+        "call",
+        "arguments",
+        "is-instance",
+        "is-subclass",
+        "callable",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "bytes",
+        "bytearray",
+        "list",
+        "tuple",
+        "dict",
+        "set",
+        "frozenset",
+        "complex",
+        "none",
+        "nonetype",
+    }
+)
+
+
+def _is_internal_loc_segment(segment: str) -> bool:
+    """True if `segment` is a Pydantic-internal wrapper/union-branch
+    marker rather than a user-meaningful field name or list index."""
+    if _BRACKETED_INTERNAL_RE.search(segment):
+        return True
+    return segment.lower() in _INTERNAL_LOC_MARKERS
+
+
+def clean_loc_for_param(loc: tuple) -> str:
+    """Join a Pydantic error `loc` tuple into a clean dotted `param`
+    path, dropping internal wrapper/union-branch markers that don't
+    correspond to a real field name an API consumer would recognize.
+
+    E.g. ('body', 'function-wrap[__log_extra_fields__()]', 'prompt')
+    -> "body.prompt", not "body.function-wrap[__log_extra_fields__()].prompt".
+    """
+    parts = [str(p) for p in loc if not _is_internal_loc_segment(str(p))]
+    if not parts:
+        return ".".join(str(p) for p in loc)
+    return ".".join(parts)
+
+
 async def validation_exception_handler(req: Request, exc: RequestValidationError):
     if req.app.state.args.log_error_stack:
         logger.exception(
@@ -431,7 +492,7 @@ async def validation_exception_handler(req: Request, exc: RequestValidationError
         first_error = errors[0]
         loc = first_error.get("loc") if isinstance(first_error, dict) else None
         if loc:
-            param = ".".join(str(part) for part in loc)
+            param = clean_loc_for_param(loc)
 
     exc_str = str(exc)
     errors_str = str(errors)
