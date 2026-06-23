@@ -343,7 +343,7 @@ def test_count_history_tool_calls_responses_request():
     assert count_history_tool_calls(request) == 2
 
 
-def test_parse_required_tool_choice_random_ids_ignore_history(tokenizer):
+def test_parse_required_tool_choice_random_ids_deferred(tokenizer):
     parser = make_parser(tokenizer, reasoning=False, tool=True)
     functions_json = json.dumps(
         [{"name": "get_current_weather", "parameters": {"city": "Dallas"}}]
@@ -356,8 +356,7 @@ def test_parse_required_tool_choice_random_ids_ignore_history(tokenizer):
     _, _, tool_calls = parser.parse(functions_json, request, enable_auto_tools=True)
 
     assert tool_calls is not None
-    assert tool_calls[0].id is not None
-    assert tool_calls[0].id.startswith("chatcmpl-tool-")
+    assert tool_calls[0].id is None
 
 
 def test_parse_named_tool_choice_kimi_k2_id(tokenizer):

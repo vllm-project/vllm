@@ -402,8 +402,10 @@ class DelegatingParser(Parser):
             return request.tool_choice.function.name
         raise ValueError("Invalid tool_choice for function name extraction.")
 
-    def _make_tool_call_id(self, function_name: str) -> str:
+    def _make_tool_call_id(self, function_name: str) -> str | None:
         state = self._stream_state
+        if state.tool_call_id_type != "kimi_k2":
+            return None
         tool_call_id = make_tool_call_id(
             id_type=state.tool_call_id_type,
             func_name=function_name,
