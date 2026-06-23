@@ -5,8 +5,9 @@
 # (vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/).
 """Data classes for MooncakeStoreConnector."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 
@@ -23,6 +24,77 @@ from vllm.v1.core.kv_cache_utils import (
 logger = init_logger(__name__)
 
 
+class BlobBlockHashes(Sequence[BlockHash]):
+    """Lazy view over a flat buffer of fixed-size block hashes to avoid the overhead
+    of materializing all hashes upfront.
+    """
+
+    def __init__(self, blob: memoryview, hash_len: int):
+        self._blob = blob
+        self._hash_len = hash_len
+        self._n = len(blob) // hash_len if hash_len else 0
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            return [self[i] for i in range(*idx.indices(self._n))]
+        if idx < 0:
+            idx += self._n
+        if not 0 <= idx < self._n:
+            raise IndexError(idx)
+        off = idx * self._hash_len
+        return BlockHash(self._blob[off : off + self._hash_len])
+
+
+class _CompactChunkHashList(BlockHashListWithBlockSize):
+    """View that keys each ``block_size`` chunk by the last constituent
+    ``hash_block_size`` hash instead of concatenating all of them.
+
+    The engine chains block hashes (each hash folds in the previous one), so the
+    final sub-block hash of a chunk already uniquely identifies the whole chunk
+    and its prefix. Using it keeps a Mooncake key at a single hash digest
+    regardless of the ``block_size`` / ``hash_block_size`` ratio, instead of
+    growing the key linearly with it (e.g. 64x for ``block_size=256``,
+    ``hash_block_size=4``).
+    """
+
+    def __init__(
+        self,
+        block_hashes: Sequence[BlockHash],
+        hash_block_size: int,
+        target_block_size: int,
+    ):
+        # Accept any indexable sequence (e.g. the lazy ``BlobBlockHashes``), not
+        # just ``list``; the base only indexes/sizes it.
+        assert target_block_size % hash_block_size == 0
+        self.block_hashes = block_hashes  # type: ignore[assignment]
+        self.scale_factor = target_block_size // hash_block_size
+
+    def _get_value_at(self, idx: int) -> BlockHash:
+        return self.block_hashes[idx * self.scale_factor + self.scale_factor - 1]
+
+
+def chunk_hashes_for_block_size(
+    block_hashes: Sequence[BlockHash],
+    hash_block_size: int,
+    block_size: int,
+) -> Sequence[BlockHash]:
+    """Map ``hash_block_size``-granular block hashes to one compact hash per
+    ``block_size`` chunk (the chunk's last sub-hash). Returns ``block_hashes``
+    unchanged when the two sizes are equal.
+    """
+    if block_size == hash_block_size:
+        return block_hashes
+    # Structurally a Sequence[BlockHash] (indexable + sized); the base class
+    # just isn't declared as one.
+    return cast(
+        "Sequence[BlockHash]",
+        _CompactChunkHashList(block_hashes, hash_block_size, block_size),
+    )
+
+
 @dataclass
 class KeyMetadata:
     """Metadata for constructing pool keys."""
@@ -33,6 +105,10 @@ class KeyMetadata:
     dcp_rank: int
     pp_rank: int
     group_id: int = 0
+    # Optional namespace prepended to every key. Lets separate deployments
+    # share one Mooncake master without colliding on identical block hashes.
+    # Empty (the default) keeps keys byte-identical to the unprefixed format.
+    cache_prefix: str = ""
 
 
 @dataclass(order=True)
@@ -45,6 +121,7 @@ class PoolKey:
     def __hash__(self):
         return hash(
             (
+                self.key_metadata.cache_prefix,
                 self.key_metadata.model_name,
                 self.key_metadata.tp_rank,
                 self.key_metadata.pcp_rank,
@@ -56,7 +133,13 @@ class PoolKey:
         )
 
     def to_string(self) -> str:
+        prefix = (
+            f"{self.key_metadata.cache_prefix}@"
+            if self.key_metadata.cache_prefix
+            else ""
+        )
         return (
+            f"{prefix}"
             f"{self.key_metadata.model_name}"
             f"@tp_rank:{self.key_metadata.tp_rank}"
             f"@pcp{self.key_metadata.pcp_rank}"
@@ -127,18 +210,15 @@ class ChunkedTokenDatabase:
         Args:
             token_len: Total number of tokens.
             block_hashes: Block hashes computed at ``hash_block_size`` granularity.
-                When ``block_size > hash_block_size`` consecutive hashes are merged
-                up to the group's ``block_size`` via ``BlockHashListWithBlockSize``.
+                When ``block_size > hash_block_size`` each group's ``block_size`` chunk
+                is keyed by its last sub-hash via ``chunk_hashes_for_block_size``.
             mask_num: Number of tokens to skip from the beginning.
         """
         if not block_hashes:
             return
-        if self.block_size == self.hash_block_size:
-            chunk_hashes: Iterable[BlockHash] = block_hashes
-        else:
-            chunk_hashes = BlockHashListWithBlockSize(
-                block_hashes, self.hash_block_size, self.block_size
-            )
+        chunk_hashes: Iterable[BlockHash] = chunk_hashes_for_block_size(
+            block_hashes, self.hash_block_size, self.block_size
+        )
         for chunk_id, h in enumerate(chunk_hashes):
             start_idx = chunk_id * self.block_size
             if start_idx >= token_len:

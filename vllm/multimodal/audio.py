@@ -21,6 +21,11 @@ try:
 except ImportError:
     scipy_signal = PlaceholderModule("scipy").placeholder_attr("signal")  # type: ignore[assignment]
 
+try:
+    import soxr as soxr
+except ImportError:
+    soxr = PlaceholderModule("soxr")  # type: ignore[assignment]
+
 
 # ============================================================
 # Aligned with `librosa.get_duration` function
@@ -245,13 +250,37 @@ def resample_audio_scipy(
     )
 
 
+def resample_audio_soxr(
+    audio: npt.NDArray[np.floating],
+    *,
+    orig_sr: float,
+    target_sr: float,
+) -> npt.NDArray[np.floating]:
+    orig_sr_int = int(round(orig_sr))
+    target_sr_int = int(round(target_sr))
+
+    if orig_sr_int == target_sr_int:
+        return audio
+
+    if audio.ndim == 2:
+        return np.stack(
+            [
+                resample_audio_soxr(ch, orig_sr=orig_sr, target_sr=target_sr)
+                for ch in audio
+            ],
+            axis=0,
+        )
+
+    return soxr.resample(audio, orig_sr_int, target_sr_int)
+
+
 class AudioResampler:
     """Resample audio data to a target sample rate."""
 
     def __init__(
         self,
         target_sr: float | None = None,
-        method: Literal["pyav", "scipy"] = "pyav",
+        method: Literal["pyav", "scipy", "soxr"] = "pyav",
     ):
         self.target_sr = target_sr
         self.method = method
@@ -279,10 +308,12 @@ class AudioResampler:
             return resample_audio_scipy(
                 audio, orig_sr=orig_sr, target_sr=self.target_sr
             )
+        elif self.method == "soxr":
+            return resample_audio_soxr(audio, orig_sr=orig_sr, target_sr=self.target_sr)
         else:
             raise ValueError(
                 f"Invalid resampling method: {self.method}. "
-                "Supported methods are 'pyav' and 'scipy'."
+                "Supported methods are 'pyav', 'scipy', and 'soxr'."
             )
 
 
@@ -347,6 +378,11 @@ def split_audio(
             audio_data, search_start, search_end, min_energy_window_size
         )
 
+        # Guarantee forward progress: if split_point didn't advance,
+        # fall back to the hard chunk boundary.
+        if split_point <= i:
+            split_point = min(i + chunk_size, audio_data.shape[-1])
+
         # Extract chunk up to the split point
         chunks.append(audio_data[..., i:split_point])
         i = split_point
@@ -392,12 +428,12 @@ def find_split_point(
 
     # Calculate RMS energy in small windows
     min_energy = math.inf
-    quietest_idx = 0
+    quietest_idx = start_idx
 
     for i in range(0, len(segment) - min_energy_window, min_energy_window):
         window = segment[i : i + min_energy_window]
         energy = (window**2).mean() ** 0.5
-        if energy < min_energy:
+        if not math.isnan(energy) and energy < min_energy:
             quietest_idx = i + start_idx
             min_energy = energy
 

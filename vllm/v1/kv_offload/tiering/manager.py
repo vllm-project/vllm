@@ -27,6 +27,9 @@ from dataclasses import dataclass, field
 import numpy as np
 from typing_extensions import override
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+)
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
@@ -578,6 +581,15 @@ class TieringOffloadingManager(OffloadingManager):
             tier.on_schedule_end()
 
     @override
+    def has_pending_work(self) -> bool:
+        # In-flight primary<->secondary transfers (pending promotions are
+        # translated to transfer jobs in on_schedule_end), plus any work the
+        # secondary tiers themselves still have outstanding.
+        return bool(self._transfer_jobs) or any(
+            tier.has_pending_work() for tier in self.secondary_tiers
+        )
+
+    @override
     def take_events(self) -> Iterable[OffloadingEvent]:
         """Yield offloading events collected since the last call.
 
@@ -618,6 +630,24 @@ class TieringOffloadingManager(OffloadingManager):
 
         self._request_level_tiers.clear()
         self._processed_jobs_this_step = False
+
+    @override
+    def get_stats(self) -> OffloadingConnectorStats | None:
+        stats = self.primary_tier.get_stats()
+
+        if stats is not None and stats.is_empty():
+            stats = None
+
+        for tier in self.secondary_tiers:
+            tier_stats = tier.get_stats()
+            if tier_stats is None or tier_stats.is_empty():
+                continue
+            if stats is None:
+                stats = tier_stats
+            else:
+                stats.aggregate(tier_stats)
+
+        return stats
 
     @override
     def shutdown(self) -> None:

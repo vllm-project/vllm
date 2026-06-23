@@ -1,3 +1,4 @@
+mod abort_requests;
 mod cache;
 mod collective_rpc;
 mod health;
@@ -11,6 +12,7 @@ mod server_info;
 mod sleep;
 mod tokenize;
 mod version;
+mod world_size;
 
 use std::sync::Arc;
 
@@ -91,6 +93,7 @@ fn build_router_with_options(
             .route("/reset_mm_cache", post(cache::reset_mm_cache))
             .route("/reset_encoder_cache", post(cache::reset_encoder_cache))
             .route("/collective_rpc", post(collective_rpc::collective_rpc))
+            .route("/abort_requests", post(abort_requests::abort_requests))
             .route("/sleep", post(sleep::sleep))
             .route("/wake_up", post(sleep::wake_up))
             .route("/is_sleeping", get(sleep::is_sleeping))
@@ -98,17 +101,21 @@ fn build_router_with_options(
             .route("/resume", post(pause::resume))
             .route("/is_paused", get(pause::is_paused))
             .route("/server_info", get(server_info::server_info))
+            .route("/get_world_size", get(world_size::get_world_size))
     }
 
     let enable_request_id_headers = state.api_server_options.enable_request_id_headers;
     let enable_api_key_auth = state.has_api_keys();
     let mut router = router
         .with_state(state.clone())
+        .layer(middleware::request_runtime_layer(state.clone()))
         .layer(from_fn_with_state(
             state.clone(),
             middleware::track_server_load,
         ))
-        .layer(from_fn(middleware::track_http_metrics));
+        .layer(from_fn(middleware::track_http_metrics))
+        .layer(middleware::cors_layer(&state.cors))
+        .layer(from_fn(middleware::strip_cors_on_no_origin));
 
     if enable_api_key_auth {
         router = router.layer(from_fn_with_state(
