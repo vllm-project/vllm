@@ -25,6 +25,7 @@ FROM ubuntu:22.04 AS base-common
 WORKDIR /workspace
 
 ARG PYTHON_VERSION=3.12
+ARG PYTORCH_NIGHTLY
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 
 ARG max_jobs=32
@@ -147,9 +148,21 @@ RUN if [ "$TARGETARCH" = "arm64" ] && [ "$VLLM_CPU_X86" != "0" ]; then \
 
 # Copy build requirements
 COPY requirements/build/cpu.txt requirements/build/cpu.txt
+COPY use_existing_torch.py use_existing_torch.py
 
+ARG PYTORCH_NIGHTLY
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -r requirements/build/cpu.txt
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        echo "Installing torch nightly..." \
+        && uv pip install torch torchaudio torchvision --pre \
+        --index-url https://download.pytorch.org/whl/nightly/cpu \
+        && echo "Stripping torch pins from build requirements..." \
+        && python3 use_existing_torch.py --prefix \
+        && uv pip install -r requirements/build/cpu.txt \
+        --extra-index-url https://download.pytorch.org/whl/nightly/cpu; \
+    else \
+        uv pip install -r requirements/build/cpu.txt; \
+    fi
 
 COPY . .
 
@@ -196,6 +209,7 @@ WORKDIR /vllm-workspace
 # Copy test requirements
 COPY requirements/test/cuda.in requirements/test/cpu.in
 
+ARG PYTORCH_NIGHTLY
 RUN \
     sed -i '/mamba_ssm/d' requirements/test/cpu.in && \
     remove_packages_not_supported_on_aarch64() { \
@@ -207,12 +221,21 @@ RUN \
     esac; \
     }; \
     remove_packages_not_supported_on_aarch64 && \
-    sed -i 's/^torch==.*/torch==2.11.0/g' requirements/test/cpu.in && \
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        sed -i 's/^torch==.*/torch/g' requirements/test/cpu.in; \
+    else \
+        sed -i 's/^torch==.*/torch==2.11.0/g' requirements/test/cpu.in; \
+    fi && \
     sed -i 's/torchaudio.*/torchaudio/g' requirements/test/cpu.in && \
     sed -i 's/torchvision.*/torchvision/g' requirements/test/cpu.in && \
     # Related issue: https://github.com/vllm-project/vllm/pull/38800#issuecomment-4228314305
     sed -i 's/^sentence-transformers.*/sentence-transformers==5.3.0/g' requirements/test/cpu.in && \
-    uv pip compile requirements/test/cpu.in -o requirements/test/cpu.txt --index-strategy unsafe-best-match --torch-backend cpu
+    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        sed -i 's|download.pytorch.org/whl/cpu|download.pytorch.org/whl/nightly/cpu|g' requirements/test/cpu.in && \
+        uv pip compile requirements/test/cpu.in -o requirements/test/cpu.txt --index-strategy unsafe-best-match --prerelease=allow; \
+    else \
+        uv pip compile requirements/test/cpu.in -o requirements/test/cpu.txt --index-strategy unsafe-best-match --torch-backend cpu; \
+    fi
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/test/cpu.txt
