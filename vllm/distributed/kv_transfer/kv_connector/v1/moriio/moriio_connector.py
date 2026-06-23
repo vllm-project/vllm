@@ -509,21 +509,11 @@ class MoRIIOConnectorScheduler:
             "req_id": req_id,
             "transfer_id": transfer_id,
             "block_notify_list": block_notify_list or [],
-            # GLOBAL decode dp rank (0..dp_size-1), NOT the per-pod local
-            # rank. The producer engine derives BOTH the per-pod LOCAL
-            # offset (``decode_dp_rank % remote_dp_size_local``, for the
-            # notify port) AND the owning pod index
-            # (``decode_dp_rank // remote_dp_size_local``, to pick
-            # multi_pod_hosts[pod_idx]) from this value, and resolves the
-            # write-target session via get_engine_name_with_dp(global).
-            # Sending the LOCAL rank here (the old ``self.dp_rank``, which
-            # is folded to per-pod) made every child-pod consumer look
-            # like local-rank-0 of the MASTER pod: the producer then wrote
-            # KV to the master rank 0 and sent the completion notify to
-            # the master pod, so the real child-pod consumer (e.g. DP8)
-            # never received its completion and hung in
-            # WAITING_FOR_REMOTE_KVS. Master ranks and single-pod are
-            # unaffected because local == global there.
+            # GLOBAL decode dp rank: the producer derives the per-pod local
+            # notify offset (% dp_local), the owning pod index (// dp_local),
+            # and the write-target session from it. Sending the local rank
+            # made child-pod consumers look like master rank 0 and hang in
+            # WAITING_FOR_REMOTE_KVS. Single-pod is unaffected (local==global).
             "decode_rank": self._global_dp_rank,
             "type": "remote_blocks",
         }
@@ -539,8 +529,19 @@ class MoRIIOConnectorScheduler:
             )
             self.paths[path] = sock
 
+        # Align with the upstream READ-mode release (see _pop_done_transfers):
+        # advertise the consumer (decode) TP size so the prefill side counts
+        # the right number of ACKs via get_moriio_expected_ack_count(). For the
+        # homogeneous-TP configs we run (1P1D/2P2D, TP=1) this resolves to 1
+        # ACK exactly as before; it only matters under heterogeneous-TP fan-in.
         self.paths[path].send(
-            msgpack.dumps({"type": "release", "transfer_id": transfer_id})
+            msgpack.dumps(
+                {
+                    "type": "release",
+                    "transfer_id": transfer_id,
+                    "consumer_tp_size": self.tp_size,
+                }
+            )
         )
 
     def _release_write_prefill_blocks(self, request_id: ReqId, params: dict[str, Any]):
@@ -559,6 +560,8 @@ class MoRIIOConnectorScheduler:
         if remote_host is None or remote_notify_port is None:
             try:
                 peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=False)
+                if peer_zmq is None:
+                    raise ValueError("no peer zmq address for request")
                 remote_host, _, remote_notify_port = parse_moriio_zmq_address(peer_zmq)
             except ValueError:
                 logger.warning(
@@ -678,13 +681,10 @@ class MoRIIOConnectorScheduler:
                 remote_dp_rank = request.kv_transfer_params.get("remote_dp_rank", 0)
 
                 # Hash-route to prefill DP rank (vLLM native router fallback).
-                _dp_size = int(
-                    request.kv_transfer_params.get("remote_dp_size", 1) or 1
-                )
+                _dp_size = int(request.kv_transfer_params.get("remote_dp_size", 1) or 1)
                 try:
                     _dp_local = int(
-                        request.kv_transfer_params.get("remote_dp_size_local", 0)
-                        or 0
+                        request.kv_transfer_params.get("remote_dp_size_local", 0) or 0
                     )
                     if _dp_local > 0:
                         _dp_size = min(_dp_size, _dp_local)
@@ -717,13 +717,13 @@ class MoRIIOConnectorScheduler:
                         request.request_id, is_producer=False
                     )
                     if peer_zmq is not None:
-                        remote_host, _, remote_notify_port = (
-                            parse_moriio_zmq_address(peer_zmq)
+                        remote_host, _, remote_notify_port = parse_moriio_zmq_address(
+                            peer_zmq
                         )
                     else:
                         # Sidecar fallback: use explicit params fields.
                         params = request.kv_transfer_params or {}
-                        remote_host = params.get("remote_host")
+                        remote_host = params.get("remote_host") or ""
                         try:
                             remote_notify_port = int(
                                 params.get("remote_notify_port") or 0
@@ -746,39 +746,17 @@ class MoRIIOConnectorScheduler:
                         blocks.get_block_ids()[0] if num_external_tokens > 0 else []
                     )
 
-                    # Wide-EP multi-pod port offset: ``remote_host`` (set
-                    # by the sidecar on the decode leg) addresses ONE
-                    # specific remote pod, and that pod only binds notify
-                    # sockets on ``notify_port .. notify_port + dp_local
-                    # - 1`` (one per LOCAL DP rank in that pod), so the
-                    # offset added to ``remote_notify_port`` must use the
-                    # per-pod LOCAL rank, not the GLOBAL rank
-                    # ``remote_dp_rank``.  Same rationale as
-                    # ``_background_moriio_handshake`` and
-                    # ``MoRIIOEngine._finalize_if_complete``.  Single-pod
-                    # (``_dp_local == 0`` or ``_dp_local == _dp_size``)
-                    # is bit-identical because modulus equals the global
-                    # rank in that case.
+                    # Wide-EP multi-pod: a pod binds notify sockets only for
+                    # its LOCAL ranks, so the port offset must use the per-pod
+                    # local rank (% dp_local), not the global rank. Single-pod
+                    # is bit-identical (modulus is a no-op).
                     _remote_dp_rank_for_port = remote_dp_rank
                     if _dp_local > 0:
-                        _remote_dp_rank_for_port = (
-                            remote_dp_rank % _dp_local
-                        )
-                    # Wide-EP multi-pod HOST selection: the sidecar
-                    # fallback ``remote_host`` addresses only ONE remote
-                    # pod (typically pod 0, the master). With DP split
-                    # across pods the target producer rank
-                    # ``remote_dp_rank`` may live on a CHILD pod bound to
-                    # a DIFFERENT IP, so resolve the per-pod host from
-                    # ``multi_pod_hosts[pod_idx]`` exactly as
-                    # ``_background_moriio_handshake`` does. Without this,
-                    # a notify for ranks dp_local..2*dp_local-1 (8..15)
-                    # lands on the MASTER pod's rank-0 notify socket
-                    # (``remote_host`` + offset(remote_dp_rank % dp_local
-                    # == 0)), is silently dropped, and the request hangs
-                    # in WAITING_FOR_REMOTE_KVS until the deferred-write
-                    # timeout. Master ranks 0..7 are unaffected because
-                    # pod_idx == 0 and multi_pod_hosts[0] == remote_host.
+                        _remote_dp_rank_for_port = remote_dp_rank % _dp_local
+                    # The target rank may live on a child pod at a different IP,
+                    # so resolve the per-pod host (pod_idx = global // dp_local).
+                    # Otherwise a notify for child ranks lands on the master
+                    # pod and the request hangs in WAITING_FOR_REMOTE_KVS.
                     _notify_host = remote_host
                     _kvp = request.kv_transfer_params or {}
                     _remote_hosts = _kvp.get("remote_hosts") or []
@@ -821,13 +799,10 @@ class MoRIIOConnectorScheduler:
                 if new_block_ids is not None:
                     block_ids = new_block_ids[0]
                     # TODO : hybrid attn, etc
-                    # A request that arrived without ``kv_transfer_params``
-                    # (smoke test, mis-routed gateway request, ...) is
-                    # scheduled normally but is never registered in
-                    # ``_reqs_need_pending_save``. The unconditional dict
-                    # access below would raise ``KeyError`` and crash the
-                    # EngineCore, taking the whole replica down. Skip
-                    # silently for non-disagg requests on a producer pod.
+                    # A non-disagg request (no kv_transfer_params, e.g. smoke
+                    # test) is never registered in _reqs_need_pending_save;
+                    # indexing it unconditionally would KeyError and crash the
+                    # EngineCore. Skip it silently.
                     if req_id not in self._reqs_need_pending_save:
                         continue
                     req, existing_blocks = self._reqs_need_pending_save[req_id]
@@ -837,10 +812,8 @@ class MoRIIOConnectorScheduler:
                         len(self._reqs_need_pending_save[req_id][1]) * self.block_size
                         >= req.num_prompt_tokens
                     ):
-                        # Final chunk: req.kv_transfer_params may already
-                        # have been cleared. Prefer the snapshot taken in
-                        # update_state_after_alloc, falling back to live
-                        # params for backward compatibility.
+                        # Final chunk: live kv_transfer_params may be cleared,
+                        # so prefer the snapshot from update_state_after_alloc.
                         kv_params = self._req_kv_params.pop(
                             req_id, req.kv_transfer_params or {}
                         )
@@ -1597,17 +1570,11 @@ class MoRIIOConnectorWorker:
             port = int(meta.remote_handshake_port)
             tp_size = int(meta.tp_size)
             remote_dp_size = int(meta.remote_dp_size)
-            # Wide-EP multi-pod support: previously a single ``host`` was
-            # used for every remote DP rank 0..remote_dp_size-1. In a
-            # multi-pod deployment (e.g. Wide-EP-16 with master+child
-            # decode pods), ranks 0..dp_local-1 live on multi_pod_hosts[0]
-            # at one IP and ranks dp_local..2*dp_local-1 live on
-            # multi_pod_hosts[1] at a different IP. Resolve the host per
-            # ``cur_dp_rank`` below.
+            # Wide-EP multi-pod: remote DP ranks span pods at different IPs
+            # (ranks per pod = dp_local), so resolve the host per cur_dp_rank
+            # below instead of using a single host for all ranks.
             pod_hosts = list(meta.multi_pod_hosts) if meta.multi_pod_hosts else [host]
-            remote_dp_size_local = (
-                int(meta.remote_dp_size_local) or remote_dp_size
-            )
+            remote_dp_size_local = int(meta.remote_dp_size_local) or remote_dp_size
 
         def request_ready(_f: Future[Any], entry=(req_id, meta)):
             logger.info("MoRIIO handshake done for request %s", req_id)
@@ -1627,16 +1594,10 @@ class MoRIIOConnectorWorker:
             if _pod_idx >= len(pod_hosts):
                 _pod_idx = 0
             _per_rank_host = pod_hosts[_pod_idx]
-            # Wide-EP multi-pod port offset: each remote pod only binds
-            # handshake sockets on ``handshake_port .. handshake_port +
-            # remote_dp_size_local - 1`` (one per LOCAL DP rank in that
-            # pod), so the offset passed to ``_moriio_handshake`` -> ZMQ
-            # ``port + get_port_offset(...)`` must use the per-pod LOCAL
-            # rank, not the GLOBAL rank.  When ``remote_dp_size_local``
-            # is unset (single-pod) modulus is identical to the global
-            # rank so the wire is bit-identical to the pre-Wide-EP path.
-            # ``dp_engine_id`` continues to use the GLOBAL rank for
-            # uniqueness in ``_remote_agents`` / ``_handshake_futures``.
+            # The handshake port offset must use the per-pod local rank
+            # (% remote_dp_size_local), since each pod binds sockets only for
+            # its local ranks; dp_engine_id keeps the global rank for
+            # uniqueness. Single-pod is bit-identical (modulus is a no-op).
             _per_rank_local_dp = (
                 cur_dp_rank % remote_dp_size_local
                 if remote_dp_size_local > 0
@@ -2138,12 +2099,10 @@ class MoRIIOConnectorWorker:
         )
 
     def _write_blocks_for_req(self, req_id: ReqId, meta: ReqMeta, layer_name, kv_layer):
-        # Wide-EP multi-pod support: stash the multi_pod_hosts list + local
-        # DP size on the worker so MoRIIOEngine._finalize_if_complete
-        # (which only sees the WriteTask, not ReqMeta) can pick the
-        # correct per-rank pod IP when sending the completion notify.
-        # Last-writer-wins is fine here: all in-flight requests share
-        # the same remote topology in a given replica deployment.
+        # Stash multi_pod_hosts + local DP size on the worker so
+        # MoRIIOEngine._finalize_if_complete (which sees only the WriteTask,
+        # not ReqMeta) can pick the per-rank pod IP for the completion notify.
+        # Last-writer-wins is safe: all requests share the same topology.
         if meta.multi_pod_hosts:
             self.multi_pod_hosts = list(meta.multi_pod_hosts)
         else:
@@ -2353,9 +2312,7 @@ class MoRIIOConnectorWorker:
                 _backoff = min(_backoff * 2, 0.05)
             with self.moriio_wrapper.lock:
                 self._recving_transfers[request_id].append(transfer_status)
-                self._recving_transfers_start.setdefault(
-                    request_id, time.monotonic()
-                )
+                self._recving_transfers_start.setdefault(request_id, time.monotonic())
                 self._recving_transfers_callback_addr[request_id] = (
                     remote_host,
                     str(remote_notify_port + self._remote_tp_rank(remote_tp_size)),
