@@ -127,7 +127,12 @@ void swap_blocks_batch(const torch::stable::Tensor& src_ptrs,
     return reinterpret_cast<BatchFn>(fn_ptr);
   }();
 
-  if (batch_fn != nullptr) {
+  // cuMemcpyBatchAsync rejects the legacy default stream (handle 0 /
+  // cudaStreamLegacy) with CUDA_ERROR_INVALID_VALUE; route it to the per-copy
+  // fallback below, which is correct on any stream. Real and per-thread-default
+  // streams take the batch fast path.
+  const bool usable_stream = stream != nullptr && stream != cudaStreamLegacy;
+  if (batch_fn != nullptr && usable_stream) {
     CUmemcpyAttributes attr = {};
     // ANY lets the DMA engine prefetch source bytes out of stream order,
     // which is only safe when no GPU stream is concurrently writing the
