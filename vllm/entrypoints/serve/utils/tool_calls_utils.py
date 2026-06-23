@@ -7,10 +7,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
 )
-from vllm.entrypoints.openai.engine.protocol import (
-    FunctionCall,
-    ToolCall,
-)
 
 # Used internally
 _ChatCompletionResponseChoiceT = TypeVar(
@@ -39,12 +35,3 @@ def maybe_filter_parallel_tool_calls(
         ]
 
     return choice
-
-
-def make_tool_call_items(
-    tool_calls: list[FunctionCall] | None,
-) -> list[ToolCall]:
-    return [
-        ToolCall(id=tc.id, function=tc) if tc.id else ToolCall(function=tc)
-        for tc in (tool_calls or [])
-    ]
