@@ -18,7 +18,7 @@ from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.prepare_finalize import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.prepare_finalize import (  # noqa: E501
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
 )

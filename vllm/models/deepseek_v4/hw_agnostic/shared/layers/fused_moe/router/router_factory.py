@@ -6,13 +6,13 @@ import torch
 
 import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.router.fused_moe_router import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.router.fused_moe_router import (  # noqa: E501
     FusedMoERouter,
 )
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.router.fused_topk_bias_router import (  # noqa: E501
     FusedTopKBiasRouter,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.router.fused_topk_router import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.router.fused_topk_router import (  # noqa: E501
     FusedTopKRouter,
 )
 

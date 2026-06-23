@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Vendored DeepSeek V3.2 indexer metadata builder for the hw_agnostic path.
+"""DeepSeek V3.2 indexer metadata builder for the hw_agnostic path.
 
-The dataclasses (``DeepseekV32IndexerMetadata``,
+The four metadata dataclasses (``DeepseekV32IndexerMetadata``,
 ``DeepseekV32IndexerPrefillMetadata``,
 ``DeepseekV32IndexerPrefillChunkMetadata``,
-``DeepSeekV32IndexerDecodeMetadata``) are intentionally kept upstream and
-re-imported here so external ``isinstance(..., DeepseekV32IndexerMetadata)``
+``DeepSeekV32IndexerDecodeMetadata``) are intentionally kept upstream
+and re-imported here so external ``isinstance(..., DeepseekV32IndexerMetadata)``
 sites (sparse_attn_indexer, rocm_aiter_mla_sparse, llm_base_proposer)
-continue to identity-match.
+continue to identity-match. This is the only carve-out the lint rule
+keeps for ``vllm.v1.attention.backends.mla.indexer``.
 
 The hw_agnostic path consumes the indexer's decode result through the
 torch fallback in ``sparse_attn_indexer.py`` (the ``current_platform.
-is_out_of_tree()`` branch in ``sparse_attn_indexer``), which:
+is_out_of_tree()`` branch), which:
 
 - does not consume ``DeepSeekV32IndexerDecodeMetadata.schedule_metadata``
   (only the DeepGEMM/XPU/ROCm-aiter kernels read that field), and
@@ -20,7 +21,7 @@ is_out_of_tree()`` branch in ``sparse_attn_indexer``), which:
   flatten path (which existed to work around the FP8 paged MQA logits
   kernel's ``next_n in (1, 2)`` ceiling) is dead weight here.
 
-Accordingly this vendored copy strips:
+Accordingly this builder strips, relative to the upstream V3.2 builder:
 
 - ``get_paged_mqa_logits_metadata`` and ``scheduler_metadata_buffer``
   (DeepGEMM scheduling apparatus),

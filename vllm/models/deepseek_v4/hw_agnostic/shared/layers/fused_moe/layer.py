@@ -25,19 +25,19 @@ from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.expert_map_manager import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.expert_map_manager import (  # noqa: E501
     ExpertMapManager,
 )
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.router.fused_moe_router import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.router.fused_moe_router import (  # noqa: E501
     FusedMoERouter,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.router.router_factory import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.router.router_factory import (  # noqa: E501
     create_fused_moe_router,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.runner.moe_runner import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.runner.moe_runner import (  # noqa: E501
     MoERunner,
 )
 

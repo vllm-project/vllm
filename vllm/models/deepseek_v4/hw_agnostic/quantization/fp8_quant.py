@@ -57,6 +57,7 @@ from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.models.utils import WeightsMapper
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -105,7 +106,7 @@ class Fp8Config(QuantizationConfig):
         self.use_deep_gemm: bool | None = None
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "fp8"
 
     @classmethod

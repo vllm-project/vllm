@@ -750,10 +750,10 @@ class DeepseekV4Model(nn.Module):
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
                     for mapping in expert_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
-                        if weight_name not in name:
+                        e_param_name, e_weight_name, expert_id, e_shard_id = mapping
+                        if e_weight_name not in name:
                             continue
-                        name_mapped = name.replace(weight_name, param_name)
+                        name_mapped = name.replace(e_weight_name, e_param_name)
                         if is_pp_missing_parameter(name_mapped, self):
                             continue
                         param = params_dict[name_mapped]
@@ -767,7 +767,7 @@ class DeepseekV4Model(nn.Module):
                             param,
                             loaded_weight,
                             name_mapped,
-                            shard_id=shard_id,
+                            shard_id=e_shard_id,
                             expert_id=expert_id,
                             return_success=True,
                         )
@@ -879,7 +879,7 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
+        self.make_empty_intermediate_tensors = (  # type: ignore[method-assign]
             self.model.make_empty_intermediate_tensors
         )
 

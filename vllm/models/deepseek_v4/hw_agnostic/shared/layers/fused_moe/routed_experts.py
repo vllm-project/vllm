@@ -16,10 +16,10 @@ from vllm.models.deepseek_v4.hw_agnostic.shared.custom_op import PluggableLayer
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
     FusedMoEConfig,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.expert_map_manager import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.expert_map_manager import (  # noqa: E501
     ExpertMapManager,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.fused_moe_method_base import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.fused_moe_method_base import (  # noqa: E501
     FusedMoEMethodBase,
 )
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.unquantized_fused_moe_method import (  # noqa: E501

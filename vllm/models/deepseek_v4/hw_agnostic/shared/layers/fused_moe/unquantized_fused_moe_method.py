@@ -16,26 +16,26 @@ from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     biased_moe_quant_config,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.fused_moe_method_base import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.fused_moe_method_base import (  # noqa: E501
     FusedMoEMethodBase,
 )
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.modular_kernel import (
     FusedMoEExpertsModular,
     FusedMoEPrepareAndFinalizeModular,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.oracle.unquantized import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.oracle.unquantized import (  # noqa: E501
     UnquantizedMoeBackend,
     convert_to_unquantized_kernel_format,
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.runner.shared_experts import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.runner.shared_experts import (  # noqa: E501
     SharedExperts,
 )
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.routed_experts import (
+    from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.routed_experts import (  # noqa: E501
         RoutedExperts,
     )
 

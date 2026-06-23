@@ -13,7 +13,7 @@ from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
 )
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.router.base_router import (
+from vllm.models.deepseek_v4.hw_agnostic.shared.layers.fused_moe.router.base_router import (  # noqa: E501
     BaseRouter,
 )
 

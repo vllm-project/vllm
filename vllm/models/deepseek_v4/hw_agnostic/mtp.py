@@ -91,6 +91,7 @@ class DeepSeekV4MultiTokenPredictorLayer(nn.Module):
     ) -> None:
         super().__init__()
 
+        assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
         quant_config = vllm_config.quant_config
@@ -398,10 +399,10 @@ class DeepSeekV4MTP(nn.Module):
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
                     for mapping in expert_mapping:
-                        param_name, weight_name, expert_id, shard_id = mapping
-                        if weight_name not in name:
+                        e_param_name, e_weight_name, expert_id, e_shard_id = mapping
+                        if e_weight_name not in name:
                             continue
-                        name_mapped = name.replace(weight_name, param_name)
+                        name_mapped = name.replace(e_weight_name, e_param_name)
                         param = params_dict[name_mapped]
                         # We should ask the weight loader to return success or not
                         # here since otherwise we may skip experts with other
@@ -413,7 +414,7 @@ class DeepSeekV4MTP(nn.Module):
                             param,
                             loaded_weight,
                             name_mapped,
-                            shard_id=shard_id,
+                            shard_id=e_shard_id,
                             expert_id=expert_id,
                             return_success=True,
                         )

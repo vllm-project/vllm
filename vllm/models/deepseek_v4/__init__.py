@@ -5,11 +5,9 @@ from typing import TYPE_CHECKING
 from vllm.platforms import current_platform
 
 if current_platform.is_out_of_tree():
-    from .hw_agnostic.quantization.quant_config import (  # type: ignore[assignment]
-        DeepseekV4FP8Config,
-    )
+    from .hw_agnostic.quantization.quant_config import DeepseekV4FP8Config
 else:
-    from .quant_config import DeepseekV4FP8Config
+    from .quant_config import DeepseekV4FP8Config  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from .nvidia.model import DeepseekV4ForCausalLM
