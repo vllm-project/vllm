@@ -5,8 +5,11 @@
 import torch
 
 from vllm.distributed import (
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
     tensor_model_parallel_gather,
 )
 from vllm.model_executor.custom_op import PluggableLayer
@@ -50,6 +53,11 @@ class LogitsProcessor(PluggableLayer):
         self.soft_cap = soft_cap
         # Whether to use gather or all-gather to gather the logits.
         self.use_all_gather = current_platform.use_all_gather()
+        # Use allreduce-based gather only for cross-node (RDMA) distributed
+        # inference where Gloo gather is slow. Single-node SHM is fast.
+        if (get_tensor_model_parallel_world_size() > 1
+                and self._is_cross_node_tp()):
+            self._gather_logits = self._gather_logits_allreduce
 
     def forward(
         self,
@@ -84,6 +92,35 @@ class LogitsProcessor(PluggableLayer):
         else:
             # None may be returned for rank > 0
             logits = tensor_model_parallel_gather(logits)
+        return logits
+
+    @staticmethod
+    def _is_cross_node_tp() -> bool:
+        """Check if TP group spans multiple nodes (uses RDMA)."""
+        tp_group = get_tp_group()
+        comm = tp_group.device_communicator
+        if comm is not None and hasattr(comm, '_is_internode'):
+            return comm._is_internode
+        return False
+
+    def _gather_logits_allreduce(self, logits: torch.Tensor) -> torch.Tensor:
+        """Allreduce-based gather for cross-node (RDMA) configurations.
+
+        Replaces Gloo gather (which is slow over RDMA) with a pad-and-sum
+        approach using the fast hierarchical allreduce path.
+        Only used when TP > 1 and the TP group spans multiple nodes.
+        """
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        shard_size = logits.shape[-1]
+        full = logits.new_zeros(*logits.shape[:-1],
+                               tp_size * shard_size)
+        full[..., tp_rank * shard_size:
+             (tp_rank + 1) * shard_size] = logits
+        tensor_model_parallel_all_reduce(full)
+        logits = full
+        if not self.use_all_gather and tp_rank != 0:
+            return None
         return logits
 
     def _get_logits(

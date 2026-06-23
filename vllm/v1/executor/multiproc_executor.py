@@ -571,6 +571,7 @@ class WorkerProc:
             self.worker_response_mq = MessageQueue(1, 1)
             self.peer_response_handles = []
         else:
+            local_ws = vllm_config.parallel_config.local_world_size
             # Initialize remote MessageQueue for receiving SchedulerOutput across nodes
             self.rpc_broadcast_mq = get_inner_dp_world_group().create_mq_broadcaster(
                 external_writer_handle=input_shm_handle,
@@ -580,13 +581,15 @@ class WorkerProc:
                 # non blocking. The handshake will be triggered when
                 # worker.rpc_broadcast_mq.wait_until_ready() is called
                 blocking=False,
+                local_world_size=local_ws,
             )
             # Initializes remote message queue for sending the model output to the
             # driver worker, exposing peer_response_handles for driver worker
             # that include handles for all ranks
             self.worker_response_mq, self.peer_response_handles = (
                 get_inner_dp_world_group().create_single_reader_mq_broadcasters(
-                    reader_rank_in_group=0
+                    reader_rank_in_group=0,
+                    local_world_size=local_ws,
                 )
             )
 

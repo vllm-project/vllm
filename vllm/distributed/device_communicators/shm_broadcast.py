@@ -29,7 +29,7 @@ from zmq import (  # type: ignore
 import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
+
 from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
@@ -817,6 +817,7 @@ class MessageQueue:
         max_chunks,
         reader_rank: int = 0,
         blocking: bool = False,
+        local_world_size: int | None = None,
     ) -> tuple["MessageQueue", list[Handle]]:
         """
         Creates a MessageQueue for a process group with a single reader.
@@ -834,19 +835,26 @@ class MessageQueue:
                 Defaults to 0.
             blocking (bool, optional): If True, blocks until all processes are ready.
                 Defaults to False.
+            local_world_size (int, optional): Number of ranks per node. If None,
+                falls back to device_count().
 
         Returns:
             tuple[MessageQueue, list[Handle]]:
             The MessageQueue instance for the calling process,
             and a list of handles (only non-empty for the reader process).
         """
-        from vllm.platforms.interface import get_assigned_physical_gpu_ids
-
-        assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
-        if assigned_physical_gpu_ids is not None:
-            local_size = len(assigned_physical_gpu_ids)
+        if local_world_size is not None:
+            local_size = local_world_size
         else:
-            local_size = current_platform.device_count()
+            from vllm.platforms.interface import get_assigned_physical_gpu_ids
+
+            assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
+            if assigned_physical_gpu_ids is not None:
+                local_size = len(assigned_physical_gpu_ids)
+            else:
+                from vllm.platforms import current_platform
+
+                local_size = current_platform.device_count()
         rank = dist.get_rank()
         same_node = rank // local_size == reader_rank // local_size
         buffer_io = MessageQueue(
@@ -870,6 +878,7 @@ class MessageQueue:
         writer_rank: int = 0,
         external_writer_handle=None,
         blocking: bool = True,
+        local_world_size: int | None = None,
     ) -> "MessageQueue":
         """
         Creates a MessageQueue for a distributed process group with one writer and
@@ -905,9 +914,15 @@ class MessageQueue:
             group_rank = pg.rank
             group_world_size = pg.world_size
             global_ranks = list(range(pg.world_size))
-        from vllm.distributed.parallel_state import in_the_same_node_as
-
-        status = in_the_same_node_as(pg, source_rank=writer_rank)
+        if local_world_size is not None:
+            local_size = local_world_size
+        else:
+            from vllm.platforms import current_platform
+            local_size = current_platform.device_count()
+        status = [
+            i // local_size == writer_rank // local_size
+            for i in range(group_world_size)
+        ]
         if group_rank == writer_rank:
             if external_writer_handle is not None:
                 buffer_io = MessageQueue.create_from_handle(
