@@ -290,21 +290,19 @@ class RejectionSampler(nn.Module):
         any_penalties_or_bad_words = (
             sampling_metadata.bad_words_token_ids or has_penalties
         )
-        holder = sampling_metadata.thinking_budget_state_holder
-        needs_thinking = holder is not None and holder.has_tracked_requests()
         output_token_ids = sampling_metadata.output_token_ids
-        if any_penalties_or_bad_words or needs_thinking:
+        if any_penalties_or_bad_words:
             output_token_ids = self._combine_outputs_with_spec_tokens(
                 output_token_ids,
                 sampling_metadata.spec_token_ids,
             )
 
+        holder = sampling_metadata.thinking_budget_state_holder
         # Calculate indices of target logits.
         repeat_indices: torch.Tensor | None = None
         need_repeat_indices = (
             sampling_metadata.allowed_token_ids_mask is not None
             or has_penalties
-            or needs_thinking
         )
         if need_repeat_indices:
             num_requests = len(metadata.num_draft_tokens)
