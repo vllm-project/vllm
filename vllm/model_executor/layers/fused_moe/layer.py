@@ -74,26 +74,28 @@ def determine_expert_counts(
     num_redundant_experts: int,
     n_shared_experts: int | None,
     is_act_and_mul: bool,
+    force_fuse_shared: bool = False,
 ) -> tuple[int, int, int]:
     global_num_experts = num_experts + num_redundant_experts
     logical_num_experts = num_experts
-    # ROCm aiter shared experts fusion
-    # AITER only supports gated activations (silu/gelu), so disable it
-    # for non-gated MoE (is_act_and_mul=False)
-    # rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled() and is_act_and_mul
-    aiter_fmoe_shared_expert_enabled = (
-        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() and is_act_and_mul
-    )
+    # Shared-expert fusion: append the shared expert(s) as routed-expert slots
+    # so they run in the same grouped GEMM. Enabled either by the ROCm aiter
+    # fused-MoE path (VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS + master switch)
+    # or by a model passing ``fuse_shared_experts=True`` (the router appends the
+    # shared slot; works on any gated grouped-MoE backend, independent of the
+    # aiter master switch). Gated activations (silu/gelu/swiglu) only.
+    fuse_shared_enabled = (
+        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() or force_fuse_shared
+    ) and is_act_and_mul
 
     num_fused_shared_experts = (
-        n_shared_experts
-        if n_shared_experts is not None and aiter_fmoe_shared_expert_enabled
-        else 0
+        n_shared_experts if n_shared_experts is not None and fuse_shared_enabled else 0
     )
-    if not aiter_fmoe_shared_expert_enabled and num_fused_shared_experts != 0:
+    if not fuse_shared_enabled and num_fused_shared_experts != 0:
         raise ValueError(
-            "n_shared_experts is only supported on ROCm aiter when "
-            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled"
+            "n_shared_experts fusion requires either "
+            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS (ROCm aiter fused MoE) or "
+            "fuse_shared_experts=True on a gated-activation MoE."
         )
 
     return global_num_experts, logical_num_experts, num_fused_shared_experts
@@ -131,6 +133,7 @@ def FusedMoE(
     is_sequence_parallel: bool = False,
     expert_mapping: list[tuple[str, str, int, str]] | None = None,
     n_shared_experts: int | None = None,
+    fuse_shared_experts: bool = False,
     router_logits_dtype: torch.dtype | None = None,
     gate: torch.nn.Module | None = None,
     shared_experts: torch.nn.Module | None = None,
@@ -227,6 +230,7 @@ def FusedMoE(
             num_redundant_experts,
             n_shared_experts,
             is_act_and_mul,
+            force_fuse_shared=fuse_shared_experts,
         )
     )
 
@@ -288,6 +292,19 @@ def FusedMoE(
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=num_fused_shared_experts,
+            # Fused shared-expert slot weight. With apply_routed_scale_to_output
+            # the runner scales the combined output by routed_scaling_factor, so
+            # the shared slot weight must be 1/routed_scaling_factor for its net
+            # contribution to be 1.0 (matching the un-scaled separate-MLP add).
+            shared_expert_weight=(
+                (1.0 / routed_scaling_factor)
+                if (
+                    apply_routed_scale_to_output
+                    and num_fused_shared_experts > 0
+                    and routed_scaling_factor
+                )
+                else 1.0
+            ),
             zero_expert_type=zero_expert_type,
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,
