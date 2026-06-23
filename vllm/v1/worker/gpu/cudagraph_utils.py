@@ -59,8 +59,9 @@ class BatchExecutionDescriptor:
 
 class CreateForwardFn(Protocol):
     """Factory that prepares inputs (OUTSIDE the graph) and returns a
-    forward_fn. Called with warmup=True for the warmup pass and warmup=False
-    for the captured pass."""
+    forward_fn. For FULL graphs, it is called once with warmup=True for the
+    general warmup, then twice with warmup=False: once for a disposable eager
+    prewarm of the capture-compatible path, and once for the actual capture."""
 
     def __call__(
         self,
@@ -305,7 +306,8 @@ class CudaGraphManager:
                 returns a forward_fn. For FULL and breakable PIECEWISE modes,
                 it is invoked once with warmup=True and again with warmup=False
                 because attention backends may mutate or lazily initialize
-                metadata during warmup.
+                metadata during warmup. FULL mode gets a second warmup=False
+                invocation so the actual capture still starts with fresh metadata.
         """
         with graph_capture(device=self.device):
             # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
@@ -343,10 +345,20 @@ class CudaGraphManager:
                         assert desc not in self.graphs, (
                             f"Graph already captured for {desc}"
                         )
+                        # Prewarm the capture-compatible path with disposable
+                        # attention state. This keeps Inductor/Triton first-call
+                        # work outside torch.cuda.graph().
+                        offloader = get_offloader()
+                        offloader.sync_prev_onload()
+                        forward_fn(CUDAGraphMode.NONE)
+                        offloader.join_after_forward()
+
+                        # Rebuild fresh attention state for capture. Some backends
+                        # lazily initialize metadata on first use, and that work
+                        # must remain inside the captured graph.
+                        forward_fn = create_forward_fn(desc, warmup=False)
+                        offloader.sync_prev_onload()
                         graph = torch.cuda.CUDAGraph()
-                        # Sync offloader's copy stream before capture.
-                        # Ensure any pre-capture prefetches from offloader are complete.
-                        get_offloader().sync_prev_onload()
                         if self.pool is not None:
                             set_graph_pool_id(self.pool)
                         else:
@@ -357,7 +369,7 @@ class CudaGraphManager:
                             # unjoined stream error. The last layer's start_prefetch
                             # forks copy_stream, but wait_prefetch only happens in
                             # the next forward pass.
-                            get_offloader().join_after_forward()
+                            offloader.join_after_forward()
                         self.graphs[desc] = graph
                         compilation_counter.num_cudagraph_captured += 1
         self._graphs_captured = True
