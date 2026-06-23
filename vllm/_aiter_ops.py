@@ -1798,7 +1798,6 @@ class rocm_aiter_ops:
         used by GatedDeltaNetAttention's decode fast-path.  They may be absent
         in older aiter builds.
         """
-        return False
         if not cls._AITER_ENABLED:
             return False
         try:
