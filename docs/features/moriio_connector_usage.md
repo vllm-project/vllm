@@ -326,7 +326,7 @@ vllm serve MiniMaxAI/MiniMax-M3-MXFP8 \
 
 Run each vLLM command in a separate terminal or process. The two prefill instances share node 1, so they use different GPU sets and non-overlapping `handshake_port` / `notify_port` ranges.
 
-This topology uses heterogeneous TP sizes. 
+This topology uses heterogeneous TP sizes.
 
 Start the first TP4 prefill instance on node 1:
 
