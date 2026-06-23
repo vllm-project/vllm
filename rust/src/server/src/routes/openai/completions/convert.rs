@@ -339,6 +339,7 @@ mod tests {
                 request,
                 &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
                 ResolvedRequestContext::default(),
+                &TestTokenizer,
             )
             .expect("prepare")
             .text_request
