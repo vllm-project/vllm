@@ -30,6 +30,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
+
+
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
 # Minimum amd-quark version for MXFP4/OCP_MX tests (single source of truth).
@@ -212,6 +220,10 @@ class AccuracyTestConfig:
         }
         if model_max_len is not None:
             model_args["max_model_len"] = model_max_len
+
+        # Emulation backend on MI300, MI250 is opt-in following https://github.com/vllm-project/vllm/pull/45896
+        if not on_gfx950():
+            model_args["moe_backend"] = "emulation"
 
         return model_args
 
