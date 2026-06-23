@@ -190,7 +190,10 @@ class DeepseekOCRProcessor(ProcessorMixin):
             self.tokenizer.add_special_tokens({"pad_token": pad_token})
 
         # add image token
-        self.image_token_id = self.tokenizer.vocab.get(image_token)
+        self.image_token_id = self.tokenizer.convert_tokens_to_ids(image_token)
+        unk_token_id = getattr(self.tokenizer, "unk_token_id", None)
+        if self.image_token_id is None or self.image_token_id == unk_token_id:
+            raise ValueError(f"Image token {image_token!r} is not in the tokenizer.")
         self.image_token = image_token
         self.pad_token = pad_token
         self.add_special_token = add_special_token

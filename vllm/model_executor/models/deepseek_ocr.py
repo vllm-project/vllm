@@ -391,7 +391,7 @@ class DeepseekOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Supports
 
         model_config = vllm_config.model_config
         tokenizer = cached_tokenizer_from_config(model_config)
-        self.image_token_id = tokenizer.vocab[_IMAGE_TOKEN]
+        self.image_token_id = tokenizer.convert_tokens_to_ids(_IMAGE_TOKEN)
 
         with self._mark_tower_model(vllm_config, "image"):
             self.sam_model = build_sam_vit_b()

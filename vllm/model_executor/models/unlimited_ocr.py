@@ -14,6 +14,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.transformers_utils.processors.unlimited_ocr import UnlimitedOCRHFProcessor
 
 from .deepseek_ocr import (
     DeepseekOCRDummyInputsBuilder,
@@ -22,6 +23,11 @@ from .deepseek_ocr import (
     DeepseekOCRProcessingInfo,
 )
 from .deepseek_v2 import DeepseekV2DecoderLayer, DeepseekV2ForCausalLM, DeepseekV2Model
+
+
+class UnlimitedOCRProcessingInfo(DeepseekOCRProcessingInfo):
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(UnlimitedOCRHFProcessor, **kwargs)
 
 
 class UnlimitedOCRAttention(nn.Module):
@@ -120,7 +126,7 @@ class UnlimitedOCRLanguageForCausalLM(DeepseekV2ForCausalLM):
 
 @MULTIMODAL_REGISTRY.register_processor(
     DeepseekOCRMultiModalProcessor,
-    info=DeepseekOCRProcessingInfo,
+    info=UnlimitedOCRProcessingInfo,
     dummy_inputs=DeepseekOCRDummyInputsBuilder,
 )
 class UnlimitedOCRForCausalLM(DeepseekOCRForCausalLM):
