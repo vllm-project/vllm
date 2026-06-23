@@ -403,6 +403,7 @@ def _prepare_dflash_inputs_kernel(
     max_num_tokens,
     PAD_SLOT_ID: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
+    SAMPLE_BONUS_TOKEN: tl.constexpr = False,
 ):
     req_idx = tl.program_id(0)
     block_idx = tl.program_id(1)
@@ -464,9 +465,16 @@ def _prepare_dflash_inputs_kernel(
     tl.store(out_query_positions_ptr + query_idx, query_pos, mask=is_query)
     tl.store(out_query_slot_mapping_ptr + query_idx, q_slot, mask=is_query)
 
-    # --- Sample indices / positions / idx_mapping (mask tokens only) ---
-    is_sample = is_query & (query_off > 0)
-    sample_idx = req_idx * num_speculative_steps + (query_off - 1)
+    # --- Sample indices / positions / idx_mapping ---
+    if SAMPLE_BONUS_TOKEN:
+        # Orthrus samples diffusion logits[:, :-1], i.e. query offsets
+        # [0, num_speculative_steps).
+        is_sample = is_query & (query_off < num_speculative_steps)
+        sample_idx = req_idx * num_speculative_steps + query_off
+    else:
+        # DFlash samples mask tokens only, skipping the bonus token.
+        is_sample = is_query & (query_off > 0)
+        sample_idx = req_idx * num_speculative_steps + (query_off - 1)
     tl.store(out_sample_indices_ptr + sample_idx, query_idx, mask=is_sample)
     tl.store(out_sample_pos_ptr + sample_idx, query_pos, mask=is_sample)
     tl.store(out_sample_idx_mapping_ptr + sample_idx, req_state_idx, mask=is_sample)
@@ -533,6 +541,7 @@ def prepare_dflash_inputs(
     num_speculative_steps: int,
     max_num_reqs: int,
     max_num_tokens: int,
+    sample_bonus_token: bool = False,
 ) -> None:
     num_reqs = input_batch.num_reqs
     assert num_reqs > 0
@@ -570,4 +579,5 @@ def prepare_dflash_inputs(
         max_num_tokens,
         PAD_SLOT_ID=PAD_SLOT_ID,
         BLOCK_SIZE=BLOCK_SIZE,
+        SAMPLE_BONUS_TOKEN=sample_bonus_token,
     )
