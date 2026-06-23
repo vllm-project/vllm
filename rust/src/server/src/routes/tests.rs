@@ -2269,7 +2269,7 @@ async fn chat_completions_empty_allowed_token_ids_returns_openai_error() {
         json["error"]["message"]
             .as_str()
             .expect("message string")
-            .contains("allowed_token_ids is not None and empty!")
+            .contains("allowed_token_ids should not be empty")
     );
 }
 
@@ -3040,7 +3040,7 @@ async fn completions_empty_allowed_token_ids_returns_openai_error() {
         json["error"]["message"]
             .as_str()
             .expect("message string")
-            .contains("allowed_token_ids is not None and empty!")
+            .contains("allowed_token_ids should not be empty")
     );
 }
 
