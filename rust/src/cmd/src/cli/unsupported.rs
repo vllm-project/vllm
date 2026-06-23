@@ -202,14 +202,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub tokenizer_revision: Option<Unsupported>,
 
-    /// Maximum number of log probabilities to return when `logprobs` is
-    /// specified in `SamplingParams`. The default value comes the default for
-    /// the OpenAI Chat Completions API. -1 means no cap, i.e. all
-    /// (output_length * vocab_size) logprobs are allowed to be returned and
-    /// it may cause OOM.
-    #[arg(long)]
-    pub max_logprobs: Option<Unsupported>,
-
     /// Skip initialization of tokenizer and detokenizer. Expects valid
     /// `prompt_token_ids` and `None` for prompt from the input. The generated
     /// output will contain token ids.
@@ -533,27 +525,6 @@ pub struct ServerUnsupportedArgs {
     /// while keeping logs for other endpoints.
     #[arg(long)]
     pub disable_access_log_for_endpoints: Option<Noop>,
-
-    /// Allow credentials.
-    #[arg(
-        long,
-        visible_alias = "no-allow-credentials",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub allow_credentials: Option<Unsupported>,
-
-    /// Allowed origins.
-    #[arg(long)]
-    pub allowed_origins: Option<Unsupported>,
-
-    /// Allowed methods.
-    #[arg(long)]
-    pub allowed_methods: Option<Unsupported>,
-
-    /// Allowed headers.
-    #[arg(long)]
-    pub allowed_headers: Option<Unsupported>,
 
     /// The file path to the SSL key file.
     #[arg(long)]

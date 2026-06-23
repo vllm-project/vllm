@@ -60,6 +60,9 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self._parser_engine.is_reasoning_end(list(input_ids))
 
+    def adjust_initial_state_from_prompt(self, prompt_token_ids: Sequence[int]) -> None:
+        self._parser_engine.adjust_initial_state_from_prompt(prompt_token_ids)
+
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return self._parser_engine.extract_content_ids(input_ids)
 
@@ -109,6 +112,13 @@ class ParserEngineReasoningAdapter(ReasoningParser):
 
     def finish_streaming(self) -> DeltaMessage | None:
         return self._parser_engine.finish_streaming()
+
+    def get_streaming_fallback_content(
+        self,
+        text: str,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> str | None:
+        return self._parser_engine.get_streaming_fallback_content(text, request)
 
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         return self._parser_engine.count_reasoning_tokens(token_ids)

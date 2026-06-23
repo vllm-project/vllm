@@ -175,7 +175,7 @@ MULTIMODAL_MODELS = {
     "facebook/chameleon-7b": PPTestSettings.fast(),
     "adept/fuyu-8b": PPTestSettings.fast(),
     "zai-org/glm-4v-9b": PPTestSettings.fast(),
-    "OpenGVLab/InternVL2-1B": PPTestSettings.fast(),
+    "OpenGVLab/InternVL3-1B": PPTestSettings.fast(),
     "llava-hf/llava-1.5-7b-hf": PPTestSettings.fast(),
     "llava-hf/llava-v1.6-mistral-7b-hf": PPTestSettings.fast(),
     "llava-hf/LLaVA-NeXT-Video-7B-hf": PPTestSettings.fast(),
@@ -203,7 +203,7 @@ TEST_MODELS = [
     "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
     # [MULTIMODAL GENERATION]
-    "OpenGVLab/InternVL2-1B",
+    "OpenGVLab/InternVL3-1B",
     "microsoft/Phi-3.5-vision-instruct",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     # [LANGUAGE GENERATION - HYBRID ARCH]

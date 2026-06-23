@@ -15,11 +15,13 @@ from vllm.models.minimax_m3.common.ops.index_topk import (
     minimax_m3_index_topk,
 )
 from vllm.models.minimax_m3.common.ops.sparse_attn import (
+    _FP8_DTYPES,
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
 )
 from vllm.models.minimax_m3.common.sparse_attention import (
     MiniMaxM3SparseBackend,
+    MiniMaxM3SparseTritonImpl,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import set_kv_cache_layout
@@ -79,6 +81,48 @@ SM_SCALE = HEAD_DIM**-0.5
 TOPK = 16
 
 
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "expected_dtype"),
+    [
+        ("fp8", current_platform.fp8_dtype()),
+        ("fp8_e4m3", current_platform.fp8_dtype()),
+        (
+            "fp8_e5m2",
+            torch.float8_e5m2fnuz
+            if current_platform.is_fp8_fnuz()
+            else torch.float8_e5m2,
+        ),
+    ],
+)
+def test_sparse_impl_uses_platform_fp8_dtype(
+    kv_cache_dtype: str,
+    expected_dtype: torch.dtype,
+):
+    impl = MiniMaxM3SparseTritonImpl(
+        num_heads=NUM_Q_HEADS,
+        head_size=HEAD_DIM,
+        scale=SM_SCALE,
+        num_kv_heads=NUM_KV_HEADS,
+        kv_cache_dtype=kv_cache_dtype,
+        topk_blocks=TOPK,
+        sparse_block_size=BLOCK_SIZE,
+    )
+    assert impl.kv_cache_fp8_dtype == expected_dtype
+
+
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        torch.float8_e4m3fn,
+        torch.float8_e4m3fnuz,
+        torch.float8_e5m2,
+        torch.float8_e5m2fnuz,
+    ],
+)
+def test_sparse_kernels_recognize_fp8_dtypes(dtype: torch.dtype):
+    assert dtype in _FP8_DTYPES
+
+
 # Index top-k kernels.
 def _reference_index_topk(
     idx_q: torch.Tensor,
@@ -90,7 +134,6 @@ def _reference_index_topk(
     topk: int,
     init_blocks: int,
     local_blocks: int,
-    sm_scale: float,
 ) -> torch.Tensor:
     total_q, num_idx_heads, _ = idx_q.shape
     out = torch.full(
@@ -106,7 +149,7 @@ def _reference_index_topk(
         num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
         pages = block_table[req_id, :num_blocks]
         k = index_kv_cache[pages].reshape(num_blocks * BLOCK_SIZE, -1)
-        score = torch.einsum("qhd,kd->hqk", q.float(), k.float()) * sm_scale
+        score = torch.einsum("qhd,kd->hqk", q.float(), k.float())
 
         q_pos = prefix_len + torch.arange(q_len, device=idx_q.device)
         k_pos = torch.arange(k.shape[0], device=idx_q.device)
@@ -177,7 +220,6 @@ def test_prefill_index_topk_correctness():
         max_query_len=q_lens.max().item(),
         max_seq_len=max_seq_len,
         num_kv_heads=num_idx_heads,
-        sm_scale=head_dim**-0.5,
     )
     actual = minimax_m3_index_topk(
         score,
@@ -198,15 +240,22 @@ def test_prefill_index_topk_correctness():
         topk,
         init_blocks,
         local_blocks,
-        head_dim**-0.5,
     )
     _assert_topk_indices_equal_unordered(actual, expected)
 
 
-@pytest.mark.parametrize("decode_query_len", [1, 4])
+@pytest.mark.parametrize(
+    ("decode_query_len", "max_decode_query_len"),
+    [
+        (1, 1),
+        (1, 4),
+        (4, 4),
+    ],
+)
 @pytest.mark.parametrize("num_padded_reqs", [0, 2])
 def test_decode_index_topk_correctness(
     decode_query_len: int,
+    max_decode_query_len: int,
     num_padded_reqs: int,
 ):
     topk = 6
@@ -249,8 +298,8 @@ def test_decode_index_topk_correctness(
         init_blocks=init_blocks,
         local_blocks=local_blocks,
         num_kv_heads=num_idx_heads,
-        sm_scale=head_dim**-0.5,
         decode_query_len=decode_query_len,
+        max_decode_query_len=max_decode_query_len,
     )
     expected = torch.full_like(actual, -1)
     active_tokens = active_batch * decode_query_len
@@ -264,7 +313,6 @@ def test_decode_index_topk_correctness(
         topk,
         init_blocks,
         local_blocks,
-        head_dim**-0.5,
     )
     _assert_topk_indices_equal_unordered(actual, expected)
 
