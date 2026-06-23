@@ -6211,9 +6211,11 @@ class GPUModelRunner(
             sampler_output = self.sampler(
                 logits=logits, sampling_metadata=dummy_metadata
             )
-            # Skip second sampler warm-up on ROCm DP>=16 (AITER top_k_top_p hang).
+            # Skip second sampler warm-up on ROCm DP>=1 (AITER top_k_top_p hang).
+            # Relaxed from DP>=16 to DP>=1: the collective also deadlocks at
+            # DP=8 (1P1D Wide-EP), so skip the warm-up on all ROCm DP runs.
             skip_rocm_dp16 = (current_platform.is_rocm()
-                              and self.parallel_config.data_parallel_size >= 16)
+                              and self.parallel_config.data_parallel_size >= 1)
             if not skip_rocm_dp16 and (
                 self.sampler.logprobs_mode
                 not in ("processed_logits", "processed_logprobs")
@@ -6420,9 +6422,11 @@ class GPUModelRunner(
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True
         )
-        # Skip profile-time sampler on ROCm DP>=16 (AITER top_k_top_p hang).
+        # Skip profile-time sampler on ROCm DP>=1 (AITER top_k_top_p hang).
+        # Relaxed from DP>=16 to DP>=1: the collective also deadlocks at
+        # DP=8 (1P1D Wide-EP), so skip the warm-up on all ROCm DP runs.
         skip_sampler_warmup = (current_platform.is_rocm()
-                               and self.parallel_config.data_parallel_size >= 16)
+                               and self.parallel_config.data_parallel_size >= 1)
         if skip_sampler_warmup:
             output = None
         elif get_pp_group().is_last_rank:
