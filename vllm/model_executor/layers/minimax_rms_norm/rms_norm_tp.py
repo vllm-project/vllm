@@ -294,7 +294,11 @@ class MiniMaxText01RMSNormTP(CustomOp):
         self.variance_epsilon = eps
 
         self.workspace = None
-        if _MINIMAX_FUSED_AR_RMS_QK is not None and self.tp_world > 1:
+        if (
+            _MINIMAX_FUSED_AR_RMS_QK is not None
+            and self.tp_world > 1
+            and torch.cuda.is_available()
+        ):
             from .lamport_workspace import (
                 get_allreduce_workspace,
             )
