@@ -43,6 +43,11 @@ pub struct ManagedEngineArgs {
     /// Arguments after an explicit `--` are forwarded verbatim. Before `--`,
     /// `vllm-rs serve` automatically keeps recognized frontend options on
     /// the Rust side and forwards everything else to Python.
+    ///
+    /// The explicit `--` passthrough is a last-resort escape hatch. Rust does
+    /// not interpret, validate, or de-duplicate those arguments against
+    /// managed-engine arguments that it appends later; if the same Python flag
+    /// appears more than once, Python argparse owns the final result.
     #[arg(
         last = true,
         allow_hyphen_values = true,
@@ -72,6 +77,7 @@ impl ManagedEngineArgs {
         model: String,
         max_model_len: Option<u32>,
         max_logprobs: Option<i32>,
+        reasoning_parser: Option<&str>,
         language_model_only: bool,
         disable_log_stats: bool,
         shutdown_timeout: u64,
@@ -86,6 +92,10 @@ impl ManagedEngineArgs {
         if let Some(max_logprobs) = max_logprobs {
             python_args.push("--max-logprobs".to_string());
             python_args.push(max_logprobs.to_string());
+        }
+        if let Some(reasoning_parser) = reasoning_parser {
+            python_args.push("--reasoning-parser".to_string());
+            python_args.push(reasoning_parser.to_string());
         }
         if language_model_only {
             python_args.push("--language-model-only".to_string());
