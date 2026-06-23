@@ -22,7 +22,10 @@ def has_hpc() -> bool:
     # Use find_spec to check if the module exists without importing it
     # This avoids potential CUDA initialization side effects
     if importlib.util.find_spec("hpc") is None:
-        logger.debug_once("HPC unavailable since package was not found")
+        logger.warning_once(
+            "HPC attention requires the hpc module to be installed. "
+            "Please install it from https://github.com/Tencent/hpc-ops"
+        )
         return False
     return True
 
