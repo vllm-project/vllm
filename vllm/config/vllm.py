@@ -2005,9 +2005,6 @@ class VllmConfig:
         ):
             unsupported.append("hybrid/mamba models with align cache mode")
 
-        if self.parallel_config.prefill_context_parallel_size > 1:
-            unsupported.append("prefill context parallelism")
-
         if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
             unsupported.append("stock torch.compile")
 
