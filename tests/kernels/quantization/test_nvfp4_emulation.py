@@ -736,15 +736,15 @@ def test_nvfp4_moe_correctness(
         **apply_kwargs,
     )
 
-    if current_platform.is_rocm():
-        atol = 0.
-    else:
-        # Not strict equality on e.g. H100 (< 0.1% elements). The fused
-        # on-the-fly dequant path can lower to a slightly different
-        # Triton/MMA tiling than the pre-dequantized reference;
-        # experiments with reference-like tiling/masking
-        # reduced some diffs were not kept because they regress
-        # the fused kernel speed.
-        atol = 2e-3
-
-    torch.testing.assert_close(output_fused, output_ref, atol=atol, rtol=0)
+    # Not strict equality on e.g. H100 (< 0.1% elements). The fused
+    # on-the-fly dequant path can lower to a slightly different
+    # Triton/MMA tiling than the pre-dequantized reference;
+    # experiments with reference-like tiling/masking
+    # reduced some diffs were not kept because they regress
+    # the fused kernel speed.
+    torch.testing.assert_close(
+        output_fused,
+        output_ref,
+        atol=0.0 if current_platform.is_rocm() else 0.002,
+        rtol=0,
+    )
