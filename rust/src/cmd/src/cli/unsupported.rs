@@ -526,27 +526,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub disable_access_log_for_endpoints: Option<Noop>,
 
-    /// Allow credentials.
-    #[arg(
-        long,
-        visible_alias = "no-allow-credentials",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub allow_credentials: Option<Unsupported>,
-
-    /// Allowed origins.
-    #[arg(long)]
-    pub allowed_origins: Option<Unsupported>,
-
-    /// Allowed methods.
-    #[arg(long)]
-    pub allowed_methods: Option<Unsupported>,
-
-    /// Allowed headers.
-    #[arg(long)]
-    pub allowed_headers: Option<Unsupported>,
-
     /// The file path to the SSL key file.
     #[arg(long)]
     pub ssl_keyfile: Option<Unsupported>,
