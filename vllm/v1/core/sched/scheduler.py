@@ -1625,8 +1625,9 @@ class Scheduler(SchedulerInterface):
                 assert struct_output_request is not None
                 grammar = struct_output_request.grammar
                 assert grammar is not None
-                # Reasoning content (up to and including the end marker) is
-                # not grammar content; drop it before advancing (#44006).
+                # new_token_ids can be a mixed block of reasoning content, then
+                # the reasoning end marker, then the start of the grammar content.
+                # Trim the reasoning content so the grammar only sees grammar content.
                 advance_token_ids = (
                     self.structured_output_manager.trim_reasoning_for_advance(
                         request, new_token_ids
