@@ -632,7 +632,7 @@ steps:
 #-----------------------------------------------------  mi300 · basic_correctness  -----------------------------------------------------#
 
 - label: Basic Correctness # TBD
-  timeout_in_minutes: 180
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   fast_check: true
