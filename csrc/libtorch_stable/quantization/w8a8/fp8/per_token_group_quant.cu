@@ -255,8 +255,8 @@ __global__ void per_token_group_quant_8bit_group128_register_kernel(
   uint32_t packed_3 = 0;
 #pragma unroll
   for (int i = 0; i < VEC_SIZE; ++i) {
-    const float q = fminf(
-        fmaxf(static_cast<float>(regs[i]) * inv_y, min_8bit), max_8bit);
+    const float q =
+        fminf(fmaxf(static_cast<float>(regs[i]) * inv_y, min_8bit), max_8bit);
     DST_DTYPE qb = DST_DTYPE(q);
     const uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
     const int shift = (i & 3) * 8;
@@ -330,55 +330,55 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
       dst_type != torch::headeronly::ScalarType::Char) {
     constexpr int GROUPS_PER_BLOCK = 16;
     constexpr int THREADS_PER_GROUP = 8;
-    const int64_t num_blocks = (num_groups + GROUPS_PER_BLOCK - 1) /
-                               GROUPS_PER_BLOCK;
+    const int64_t num_blocks =
+        (num_groups + GROUPS_PER_BLOCK - 1) / GROUPS_PER_BLOCK;
     const int num_threads = GROUPS_PER_BLOCK * THREADS_PER_GROUP;
     STD_TORCH_CHECK(
         num_blocks <= static_cast<int64_t>(std::numeric_limits<int>::max()),
         "per_token_group_quant_8bit group128 fast-path grid too large: ",
         num_blocks);
 
-#define LAUNCH_GROUP128_REG_KERNEL(T, DST_DTYPE)                            \
-  do {                                                                      \
-    dim3 grid(static_cast<unsigned int>(num_blocks));                       \
-    dim3 block(num_threads);                                                \
-    if (is_column_major) {                                                  \
-      if (scale_ue8m0) {                                                    \
-        per_token_group_quant_8bit_group128_register_kernel<T, DST_DTYPE,   \
-                                                            true, true>     \
-            <<<grid, block, 0, stream>>>(                                   \
-                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),     \
-                static_cast<float*>(output_s.data_ptr()), num_groups,       \
-                scale_num_rows, scale_stride, (float)eps, (float)min_8bit,  \
-                (float)max_8bit);                                           \
-      } else {                                                              \
-        per_token_group_quant_8bit_group128_register_kernel<T, DST_DTYPE,   \
-                                                            true, false>    \
-            <<<grid, block, 0, stream>>>(                                   \
-                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),     \
-                static_cast<float*>(output_s.data_ptr()), num_groups,       \
-                scale_num_rows, scale_stride, (float)eps, (float)min_8bit,  \
-                (float)max_8bit);                                           \
-      }                                                                     \
-    } else {                                                                \
-      if (scale_ue8m0) {                                                    \
-        per_token_group_quant_8bit_group128_register_kernel<T, DST_DTYPE,   \
-                                                            false, true>    \
-            <<<grid, block, 0, stream>>>(                                   \
-                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),     \
-                static_cast<float*>(output_s.data_ptr()), num_groups,       \
-                scale_num_rows, scale_stride, (float)eps, (float)min_8bit,  \
-                (float)max_8bit);                                           \
-      } else {                                                              \
-        per_token_group_quant_8bit_group128_register_kernel<T, DST_DTYPE,   \
-                                                            false, false>   \
-            <<<grid, block, 0, stream>>>(                                   \
-                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),     \
-                static_cast<float*>(output_s.data_ptr()), num_groups,       \
-                scale_num_rows, scale_stride, (float)eps, (float)min_8bit,  \
-                (float)max_8bit);                                           \
-      }                                                                     \
-    }                                                                       \
+#define LAUNCH_GROUP128_REG_KERNEL(T, DST_DTYPE)                           \
+  do {                                                                     \
+    dim3 grid(static_cast<unsigned int>(num_blocks));                      \
+    dim3 block(num_threads);                                               \
+    if (is_column_major) {                                                 \
+      if (scale_ue8m0) {                                                   \
+        per_token_group_quant_8bit_group128_register_kernel<T, DST_DTYPE,  \
+                                                            true, true>    \
+            <<<grid, block, 0, stream>>>(                                  \
+                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
+                static_cast<float*>(output_s.data_ptr()), num_groups,      \
+                scale_num_rows, scale_stride, (float)eps, (float)min_8bit, \
+                (float)max_8bit);                                          \
+      } else {                                                             \
+        per_token_group_quant_8bit_group128_register_kernel<T, DST_DTYPE,  \
+                                                            true, false>   \
+            <<<grid, block, 0, stream>>>(                                  \
+                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
+                static_cast<float*>(output_s.data_ptr()), num_groups,      \
+                scale_num_rows, scale_stride, (float)eps, (float)min_8bit, \
+                (float)max_8bit);                                          \
+      }                                                                    \
+    } else {                                                               \
+      if (scale_ue8m0) {                                                   \
+        per_token_group_quant_8bit_group128_register_kernel<T, DST_DTYPE,  \
+                                                            false, true>   \
+            <<<grid, block, 0, stream>>>(                                  \
+                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
+                static_cast<float*>(output_s.data_ptr()), num_groups,      \
+                scale_num_rows, scale_stride, (float)eps, (float)min_8bit, \
+                (float)max_8bit);                                          \
+      } else {                                                             \
+        per_token_group_quant_8bit_group128_register_kernel<T, DST_DTYPE,  \
+                                                            false, false>  \
+            <<<grid, block, 0, stream>>>(                                  \
+                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),    \
+                static_cast<float*>(output_s.data_ptr()), num_groups,      \
+                scale_num_rows, scale_stride, (float)eps, (float)min_8bit, \
+                (float)max_8bit);                                          \
+      }                                                                    \
+    }                                                                      \
   } while (0)
 
     VLLM_STABLE_DISPATCH_HALF_TYPES(
