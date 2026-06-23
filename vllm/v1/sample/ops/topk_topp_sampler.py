@@ -116,7 +116,7 @@ class TopKTopPSampler(nn.Module):
             logger.info_once(
                 "Using aiter sampler on ROCm (lazy import, sampling-only)."
             )
-            self.forward = self.forward_hip
+            self.forward = self.forward_native
         else:
             self.forward = self.forward_native
 

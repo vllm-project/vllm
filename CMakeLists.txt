@@ -1401,6 +1401,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   if(VLLM_GPU_ARCHES MATCHES "gfx1250")                               
     target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
   endif()
+
+  if(VLLM_ROCM_HAS_GFX1100)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
+  endif()
 endif()
 
 # Must run after the last HIP `define_extension_target` so every extension
