@@ -88,7 +88,10 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         parallel_config = get_current_vllm_config().parallel_config
-        if self.cp_layout.enabled and parallel_config.dcp_comm_backend != "a2a":
+        if (
+            parallel_config.decode_context_parallel_size > 1
+            and parallel_config.dcp_comm_backend != "a2a"
+        ):
             raise ValueError("DeepseekV4 FlashMLA DCP requires dcp_comm_backend='a2a'.")
         self._einsum_recipe, self._tma_aligned_scales = compute_fp8_einsum_recipe()
 
@@ -369,11 +372,15 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
         workspace_manager = current_workspace_manager()
         for chunk_start, chunk_end, chunk_N, chunk_M in chunk_plan:
             chunk_size = chunk_end - chunk_start
-            query_start = (
-                query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
+            query_start = int(
+                (
+                    query_start_loc_cpu[num_decodes + chunk_start] - prefill_token_base
+                ).item()
             )
-            query_end = (
-                query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
+            query_end = int(
+                (
+                    query_start_loc_cpu[num_decodes + chunk_end] - prefill_token_base
+                ).item()
             )
             if use_dcp:
                 kv, dcp_out = workspace_manager.get_simultaneous(
@@ -450,4 +457,5 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
                     self.attn_sink,
                     output[query_start:query_end],
                     dcp_group,
+                    use_a2a=False,
                 )

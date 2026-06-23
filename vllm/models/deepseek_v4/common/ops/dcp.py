@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 
 if TYPE_CHECKING:
@@ -28,13 +29,22 @@ def dcp_merge_flashmla_output(
     attn_sink: torch.Tensor,
     output: torch.Tensor,
     group: "GroupCoordinator",
+    use_a2a: bool = True,
 ) -> None:
-    out, lse = dcp_a2a_lse_reduce(
-        local_out,
-        local_lse,
-        group,
-        return_lse=True,
-    )
+    if use_a2a:
+        out, lse = dcp_a2a_lse_reduce(
+            local_out,
+            local_lse,
+            group,
+            return_lse=True,
+        )
+    else:
+        out, lse = cp_lse_ag_out_rs(
+            local_out,
+            local_lse,
+            group,
+            return_lse=True,
+        )
     output[:, : out.shape[1], :].copy_(apply_attn_sink(out, lse, attn_sink))
 
 
