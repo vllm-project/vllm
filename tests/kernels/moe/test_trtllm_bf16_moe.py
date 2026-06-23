@@ -30,7 +30,6 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe import (
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
-    swap_w13_to_w31,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
@@ -100,7 +99,7 @@ def test_trtllm_bf16_moe_modular_no_graph(
 
         trtllm_w1, trtllm_w2 = convert_moe_weights_to_flashinfer_trtllm_block_layout(
             {},
-            swap_w13_to_w31(w1),
+            w1,
             w2,
         )
 
