@@ -42,6 +42,8 @@ TOOL_CALL_START = "<tool_call>"
 TOOL_CALL_END = "</tool_call>"
 FUNC_PREFIX = "<function="
 FUNC_END = "</function>"
+PARAM_START = "<parameter="
+PARAM_END = "</parameter>"
 
 _PARAM_RE = re.compile(
     r"<\s*parameter\s*=\s*([^>]*)>"
@@ -49,7 +51,7 @@ _PARAM_RE = re.compile(
     r"(?:<\s*/\s*parameter\s*>|(?=<\s*parameter\s*=))",
     re.DOTALL,
 )
-_PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>([^<]*)$", re.DOTALL)
+_PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>(.*)$", re.DOTALL)
 
 
 def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
@@ -67,7 +69,7 @@ def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
             name = m.group(1)
             value = m.group(2)
             if name:
-                params[name] = value
+                params[name] = value.strip()
 
     return json.dumps(params, ensure_ascii=False)
 
@@ -86,6 +88,8 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
             "TOOL_END": TOOL_CALL_END,
             "FUNC_PREFIX": FUNC_PREFIX,
             "FUNC_END": FUNC_END,
+            "PARAM_START": PARAM_START,
+            "PARAM_END": PARAM_END,
             "CLOSE_ANGLE": ">",
         },
         token_id_terminals={
@@ -125,6 +129,10 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+            (ParserState.TOOL_PREAMBLE, "TOOL_END"): Transition(
+                ParserState.CONTENT,
+                (EventType.TOOL_CALL_END,),
+            ),
             (ParserState.TOOL_PREAMBLE, "FUNC_PREFIX"): Transition(
                 ParserState.TOOL_NAME,
                 (),
@@ -141,6 +149,14 @@ def qwen3_config(thinking: bool = True) -> ParserEngineConfig:
             (ParserState.TOOL_ARGS, "FUNC_END"): Transition(
                 ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
+            ),
+            (ParserState.TOOL_ARGS, "PARAM_START"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.ARG_VALUE_CHUNK,),
+            ),
+            (ParserState.TOOL_ARGS, "PARAM_END"): Transition(
+                ParserState.TOOL_ARGS,
+                (EventType.ARG_VALUE_CHUNK,),
             ),
             (ParserState.TOOL_BETWEEN, "TOOL_END"): Transition(
                 ParserState.CONTENT,
