@@ -2,44 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek V3.2 indexer metadata builder for the hw_agnostic path.
 
-The four metadata dataclasses (``DeepseekV32IndexerMetadata``,
-``DeepseekV32IndexerPrefillMetadata``,
-``DeepseekV32IndexerPrefillChunkMetadata``,
-``DeepSeekV32IndexerDecodeMetadata``) are intentionally kept upstream
-and re-imported here so external ``isinstance(..., DeepseekV32IndexerMetadata)``
-sites (sparse_attn_indexer, rocm_aiter_mla_sparse, llm_base_proposer)
-continue to identity-match. This is the only carve-out the lint rule
-keeps for ``vllm.v1.attention.backends.mla.indexer``.
-
-The hw_agnostic path consumes the indexer's decode result through the
-torch fallback in ``sparse_attn_indexer.py`` (the ``current_platform.
-is_out_of_tree()`` branch), which:
-
-- does not consume ``DeepSeekV32IndexerDecodeMetadata.schedule_metadata``
-  (only the DeepGEMM/XPU/ROCm-aiter kernels read that field), and
-- accepts arbitrary ``next_n`` for spec-decode natively, so the upstream
-  flatten path (which existed to work around the FP8 paged MQA logits
-  kernel's ``next_n in (1, 2)`` ceiling) is dead weight here.
-
-Accordingly this builder strips, relative to the upstream V3.2 builder:
-
-- ``get_paged_mqa_logits_metadata`` and ``scheduler_metadata_buffer``
-  (DeepGEMM scheduling apparatus),
-- ``use_flattening`` and the flatten path
-  (``_prepare_uniform_decode_kernel`` + the variable-decode-len
-  expansion in ``_prepare_decode_tensors``),
-- ``expanded_block_table_buffer`` (only consumed by the flatten path).
+Strips the upstream V3.2 builder's DeepGEMM scheduling apparatus, the
+flatten path (the ``_prepare_uniform_decode_kernel`` + variable-decode
+expansion), and the ``schedule_metadata`` field. The hw_agnostic
+indexer dispatch goes through pure Triton + pure PyTorch kernels and
+accepts any ``next_n``.
 """
+
+from dataclasses import dataclass
 
 import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.models.deepseek_v4.hw_agnostic.attention._metadata_utils import (
+    split_decodes_and_prefills,
+)
 from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla import (
     _get_compressed_slot_mapping,
 )
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
@@ -49,17 +31,53 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.mla.indexer import (
-    DeepSeekV32IndexerDecodeMetadata,
-    DeepseekV32IndexerMetadata,
-    DeepseekV32IndexerPrefillChunkMetadata,
-    DeepseekV32IndexerPrefillMetadata,
-)
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec, MLAAttentionSpec
 from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class DeepseekV4IndexerPrefillChunkMetadata:
+    block_table: torch.Tensor
+    cu_seqlen_ks: torch.Tensor
+    cu_seqlen_ke: torch.Tensor
+    cu_seq_lens: torch.Tensor
+    token_to_seq: torch.Tensor
+    total_seq_lens: int
+    token_start: int
+    token_end: int
+    num_reqs: int
+    skip_kv_gather: bool = False
+
+
+@dataclass
+class DeepseekV4IndexerPrefillMetadata:
+    chunks: list[DeepseekV4IndexerPrefillChunkMetadata]
+
+
+@dataclass
+class DeepseekV4IndexerDecodeMetadata:
+    block_table: torch.Tensor
+    # seq_lens: per-token effective context lengths, shape (B, next_n).
+    seq_lens: torch.Tensor
+    decode_lens: torch.Tensor
+    requires_padding: bool
+
+
+@dataclass
+class DeepseekV4IndexerMetadata:
+    seq_lens: torch.Tensor
+    max_seq_len: int
+    slot_mapping: torch.Tensor
+
+    num_decodes: int
+    num_decode_tokens: int
+    num_prefills: int
+    num_prefill_tokens: int
+
+    decode: DeepseekV4IndexerDecodeMetadata | None = None
+    prefill: DeepseekV4IndexerPrefillMetadata | None = None
 
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig) -> int:
@@ -70,13 +88,10 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig) -> int:
 
 
 class DeepseekV4IndexerBackend(AttentionBackend):
-    """KV-cache spec carrier for the indexer's k_cache.
+    """Spec carrier for the indexer's k_cache.
 
-    The ``Attention`` half of this backend never runs (no ``get_impl_cls``);
-    the indexer's compute path is ``SparseAttnIndexer.forward_*`` calling
-    ``torch.ops.vllm.sparse_attn_indexer`` directly. This class only hands
-    the framework a metadata builder, a KV cache shape, and a kernel
-    block-size hint.
+    Hands the runner a metadata builder, a KV cache shape and a kernel
+    block-size hint. Compute lives in ``SparseAttnIndexer``.
     """
 
     @staticmethod
@@ -86,10 +101,6 @@ class DeepseekV4IndexerBackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [256]
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 128]
 
     @staticmethod
     def get_builder_cls() -> type["DeepseekV4IndexerMetadataBuilder"]:
@@ -232,7 +243,7 @@ def build_prefill_chunk_metadata(
     compress_ratio: int,
     query_slice: slice | None = None,
     skip_kv_gather: bool = False,
-) -> DeepseekV32IndexerPrefillChunkMetadata | None:
+) -> DeepseekV4IndexerPrefillChunkMetadata | None:
     total_seq_lens = compressed_seq_lens_cpu[start_idx:end_idx].sum().item()
     if total_seq_lens == 0:
         return None
@@ -285,7 +296,7 @@ def build_prefill_chunk_metadata(
     else:
         token_end = query_start_loc_cpu[end_idx].item()
 
-    return DeepseekV32IndexerPrefillChunkMetadata(
+    return DeepseekV4IndexerPrefillChunkMetadata(
         cu_seqlen_ks=cu_seq_len_ks,
         cu_seqlen_ke=cu_seq_len_ke,
         cu_seq_lens=cu_seq_lens,
@@ -300,15 +311,7 @@ def build_prefill_chunk_metadata(
 
 
 class DeepseekV4IndexerMetadataBuilder(AttentionMetadataBuilder):
-    """Vendored, hw-agnostic-only copy of upstream
-    ``DeepseekV32IndexerMetadataBuilder``.
-
-    The decode tensors are always shaped ``(B, next_n)`` (native path);
-    the upstream flatten path that pre-expands multi-token decodes for
-    the FP8 paged-MQA-logits kernel's ``next_n in (1, 2)`` ceiling is
-    omitted because the hw_agnostic indexer dispatch goes through a
-    pure-PyTorch fallback that accepts any ``next_n``.
-    """
+    """Builds indexer metadata. Decode tensors are always (B, next_n)."""
 
     reorder_batch_threshold: int = 1
 
@@ -323,26 +326,12 @@ class DeepseekV4IndexerMetadataBuilder(AttentionMetadataBuilder):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         scheduler_config = self.vllm_config.scheduler_config
-        # NOTE(Chen): an estimated max size of flattened_kv. Need to double check.
         self.max_prefill_buffer_size = get_max_prefill_buffer_size(self.vllm_config)
         self.num_speculative_tokens = (
             self.vllm_config.speculative_config.num_speculative_tokens
             if self.vllm_config.speculative_config
             else 0
         )
-        self.use_fp4_indexer_cache = (
-            self.vllm_config.attention_config.use_fp4_indexer_cache
-        )
-
-        assert (
-            current_platform.is_device_capability_family(100)
-            or not self.use_fp4_indexer_cache
-        ), (
-            "use_fp4_indexer_cache requires Blackwell datacenter GPUs "
-            "(sm_10x, e.g. B200/GB200); sm_120 (consumer Blackwell) and "
-            "earlier architectures are not supported."
-        )
-
         next_n = self.num_speculative_tokens + 1
         self.reorder_batch_threshold += self.num_speculative_tokens
 
@@ -354,32 +343,16 @@ class DeepseekV4IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
-        # Native-path workspace: viewed as (B, max_decode_len) at runtime, with
-        # max_decode_len <= next_n. ``decode_seq_lens_buffer`` therefore only
-        # needs ``max_num_seqs * next_n`` slots, but we keep it sized at
-        # ``max_num_batched_tokens`` to match the upstream allocation pattern
-        # and stay safe under MTP padding.
         self.decode_seq_lens_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
             device=self.device,
         )
 
-        # ``schedule_metadata`` placeholder. The upstream
-        # ``DeepSeekV32IndexerDecodeMetadata`` dataclass requires a tensor
-        # here, but the OOT torch fallback in ``sparse_attn_indexer`` does
-        # not read it. A 1-element zero tensor satisfies the typing without
-        # allocating the (num_sms+1, 2) DeepGEMM-shaped buffer.
-        self._dummy_schedule_metadata = torch.zeros(
-            1, dtype=torch.int32, device=self.device
-        )
-
-        # KV compression. Default to 1 for no compression.
         self.compress_ratio = 1
         if isinstance(self.kv_cache_spec, MLAAttentionSpec):
             self.compress_ratio = self.kv_cache_spec.compress_ratio
 
-        # Pre-allocate buffers for CUDA graph compatibility when compressed.
         if self.compress_ratio > 1:
             self.compressed_slot_mapping_buffer = torch.zeros(
                 (scheduler_config.max_num_batched_tokens,),
@@ -392,9 +365,6 @@ class DeepseekV4IndexerMetadataBuilder(AttentionMetadataBuilder):
                 device=self.device,
             )
 
-        # Used by max-num-blocks-per-req sizing in the upstream allocation.
-        # Retained even though buffers it sized are gone, so subclasses (none
-        # today) and tests can still observe it.
         self._max_num_blocks_per_req = cdiv(
             self.vllm_config.model_config.max_model_len,
             self.kv_cache_spec.block_size * get_total_cp_world_size(),
@@ -444,7 +414,7 @@ class DeepseekV4IndexerMetadataBuilder(AttentionMetadataBuilder):
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-    ) -> DeepseekV32IndexerMetadata:
+    ) -> DeepseekV4IndexerMetadata:
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc = common_attn_metadata.query_start_loc
@@ -522,7 +492,7 @@ class DeepseekV4IndexerMetadataBuilder(AttentionMetadataBuilder):
                 # Skip when total_seq_lens is 0 (i.e., no compressed token).
                 if metadata is not None:
                     chunks.append(metadata)
-            prefill_metadata = DeepseekV32IndexerPrefillMetadata(chunks)
+            prefill_metadata = DeepseekV4IndexerPrefillMetadata(chunks)
 
         decode_metadata = None
         if num_decodes > 0:
@@ -569,21 +539,19 @@ class DeepseekV4IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.expanded_seq_lens_buffer[num_decodes:num_decode_tokens] = 0
                     seq_lens = self.expanded_seq_lens_buffer[:num_decode_tokens]
 
-            # Non-MTP: deep_gemm paged MQA logits requires 2D context_lens
-            # (csrc/apis/attention.hpp). Unsqueeze to (B, 1) so downstream
-            # kernels see the same (B, next_n) layout as the MTP path.
+            # Non-MTP: unsqueeze to (B, 1) so consumers see the (B, next_n)
+            # layout consistently with the MTP path.
             if seq_lens.dim() == 1:
                 seq_lens = seq_lens.unsqueeze(-1)
 
-            decode_metadata = DeepSeekV32IndexerDecodeMetadata(
+            decode_metadata = DeepseekV4IndexerDecodeMetadata(
                 block_table=block_table,
                 seq_lens=seq_lens,
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
-                schedule_metadata=self._dummy_schedule_metadata,
             )
 
-        return DeepseekV32IndexerMetadata(
+        return DeepseekV4IndexerMetadata(
             seq_lens=common_attn_metadata.seq_lens,
             max_seq_len=common_attn_metadata.max_seq_len,
             slot_mapping=compressed_slot_mapping,

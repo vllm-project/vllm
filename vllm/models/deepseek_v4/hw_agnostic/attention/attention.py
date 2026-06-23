@@ -33,6 +33,9 @@ from vllm.models.deepseek_v4.hw_agnostic.attention.kernels import (
     triton_qnorm_rope_kv_fp8_insert,
     triton_sparse_decode_fp8,
 )
+from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_attn_indexer import (
+    SparseAttnIndexer,
+)
 from vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla import (
     DeepseekV4HWAgnosticBackend,
     DeepseekV4HWAgnosticMetadata,
@@ -47,11 +50,8 @@ from vllm.models.deepseek_v4.hw_agnostic.shared.layers.layernorm import (
     RMSNorm,
 )
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.linear import ReplicatedLinear
-from vllm.models.deepseek_v4.hw_agnostic.shared.layers.sparse_attn_indexer import (
-    SparseAttnIndexer,
-)
 from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -85,6 +85,13 @@ class DeepseekV4MLAModules:
 LAYER_NAME = "deepseek_v4_multi_head_latent_attention"
 
 
+# KV-cache writeback on this path happens explicitly inside ``attention_impl``
+# (via ``triton_qnorm_rope_kv_fp8_insert``) and inside the
+# ``dsv4_sparse_attn_indexer`` op (via ``indexer_k_quant_and_cache_triton``).
+# The standard ``AttentionImpl.forward(... kv_cache ...)`` interface and the
+# ``forward_includes_kv_cache_update`` backend hook are NOT used here — the
+# three hw_agnostic backends are spec carriers only; compute is dispatched
+# through ``torch.ops.vllm.deepseek_v4_attention`` directly into Triton.
 @PluggableLayer.register(LAYER_NAME)
 class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
     def __init__(
@@ -326,9 +333,11 @@ class DeepseekV4MultiHeadLatentAttentionWrapper(PluggableLayer):
         q: torch.Tensor,
         kv: torch.Tensor,
         positions: torch.Tensor,
-        attn_metadata: (
-            dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
-        ),
+        # Untyped here because ``forward_context.attn_metadata`` carries
+        # upstream's ``AttentionMetadata`` value type, while the runtime
+        # narrow below is to ``DeepseekSparseSWAMetadata``. The cast() is
+        # the real type guard.
+        attn_metadata: Any,
     ) -> torch.Tensor:
         # Profile run: pad q manually since kernel doesn't fire.
         if not isinstance(attn_metadata, dict):
@@ -787,11 +796,7 @@ class DeepseekV4Indexer(nn.Module):
         self.rope_dim = config.qk_rope_head_dim
         self.q_lora_rank = q_lora_rank
         self.compress_ratio = compress_ratio
-        self.use_fp4_kv = self.vllm_config.attention_config.use_fp4_indexer_cache
-        logger.info_once(
-            "Using %s indexer cache for Lightning Indexer.",
-            "MXFP4" if self.use_fp4_kv else "FP8",
-        )
+        logger.info_once("Using FP8 indexer cache for Lightning Indexer.")
 
         self.wq_b = ReplicatedLinear(
             self.q_lora_rank,
@@ -824,8 +829,7 @@ class DeepseekV4Indexer(nn.Module):
         )
 
         assert cache_config is not None
-        # FP8 layout: 128 fp8 + 4 fp32 scale = 132 bytes/head_dim. FP4 reuses the
-        # same allocation but only fills the first half.
+        # FP8 layout: 128 fp8 + 4 fp32 scale = 132 bytes/head_dim.
         k_cache_head_dim = self.head_dim + self.head_dim // self.quant_block_size * 4
         self.k_cache = DeepseekV4IndexerCache(
             head_dim=k_cache_head_dim,
@@ -842,7 +846,6 @@ class DeepseekV4Indexer(nn.Module):
             rotate=True,
             prefix=f"{prefix}.compressor",
             k_cache_prefix=self.k_cache.prefix,
-            use_fp4_cache=self.use_fp4_kv,
         )
 
         self.indexer_op = SparseAttnIndexer(
@@ -855,7 +858,6 @@ class DeepseekV4Indexer(nn.Module):
             self.max_total_seq_len,
             self.topk_indices_buffer,
             skip_k_cache_insert=True,
-            use_fp4_cache=self.use_fp4_kv,
         )
 
     def forward(
@@ -877,6 +879,5 @@ class DeepseekV4Indexer(nn.Module):
             indexer_weights,
             self.softmax_scale,
             self.n_head**-0.5,
-            use_fp4=self.use_fp4_kv,
         )
         return self.indexer_op(hidden_states, q_quant, k, weights)

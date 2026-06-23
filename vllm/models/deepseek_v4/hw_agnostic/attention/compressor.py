@@ -9,7 +9,6 @@ from torch import nn
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.hw_agnostic.attention.kernels import (
-    MXFP4_BLOCK_SIZE,
     compress_norm_rope_store_triton,
     save_partial_states,
 )
@@ -36,8 +35,11 @@ from vllm.v1.kv_cache_interface import (
 
 
 class CompressorBackend(AttentionBackend):
-    def __init__(self):
-        super().__init__()
+    """Spec carrier for the compressor's state cache.
+
+    Hands the runner a metadata builder, a KV cache shape and a kernel
+    block-size hint. Compute lives in ``DeepseekCompressor``.
+    """
 
     @staticmethod
     def get_name() -> str:
@@ -46,10 +48,6 @@ class CompressorBackend(AttentionBackend):
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(1)]
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [512, 1024]
 
     @staticmethod
     def get_builder_cls() -> type["CompressorMetadataBuilder"]:
@@ -179,7 +177,6 @@ class DeepseekCompressor(nn.Module):
         rotate: bool = False,
         prefix: str = "",
         k_cache_prefix="",
-        use_fp4_cache: bool = False,
     ):
         super().__init__()
         self.compress_ratio = compress_ratio
@@ -188,7 +185,6 @@ class DeepseekCompressor(nn.Module):
         self.rotate = rotate
         self.prefix = prefix
         self.k_cache_prefix = k_cache_prefix
-        self.use_fp4_cache = use_fp4_cache
 
         config = vllm_config.model_config.hf_config
         self.rope_head_dim = config.qk_rope_head_dim
@@ -235,21 +231,13 @@ class DeepseekCompressor(nn.Module):
         )
 
         if self.head_dim == 512:
-            assert not use_fp4_cache, (
-                "MXFP4 cache is only supported for indexer (head=128)"
-            )
             self._quant_block = 64
             self._token_stride = self.nope_head_dim + self.rope_head_dim * 2
             self._scale_dim = self.nope_head_dim // 64 + 1  # 7 real + 1 pad
         elif self.head_dim == 128:
-            if use_fp4_cache:
-                self._quant_block = MXFP4_BLOCK_SIZE
-                self._token_stride = self.head_dim // 2
-                self._scale_dim = self.head_dim // MXFP4_BLOCK_SIZE
-            else:
-                self._quant_block = 128
-                self._token_stride = self.head_dim
-                self._scale_dim = 4  # single float32 scale
+            self._quant_block = 128
+            self._token_stride = self.head_dim
+            self._scale_dim = 4  # single float32 scale
         else:
             raise ValueError(
                 f"Unsupported head_dim for fused quant+cache: {self.head_dim}"
@@ -283,10 +271,13 @@ class DeepseekCompressor(nn.Module):
         # state_cache: [num_blocks, block_size, kv_dim+score_dim] (kv first half).
         state_cache = self.state_cache.kv_cache
         state_width = state_cache.shape[-1] // 2
+        # ``launch_pdl`` is a CUDA-only Triton kwarg. Allow-list CUDA in-tree;
+        # OOT plugins reusing CUDA infrastructure (is_cuda()=True) must NOT
+        # receive it, because their Triton stack may not accept the arg.
         pdl_kwargs = (
-            {}
-            if current_platform.is_rocm() or current_platform.is_xpu()
-            else {"launch_pdl": False}
+            {"launch_pdl": False}
+            if current_platform.is_cuda() and not current_platform.is_out_of_tree()
+            else {}
         )
 
         # PDL disabled to avoid read-after-write race with preceding kernels.
@@ -325,7 +316,7 @@ class DeepseekCompressor(nn.Module):
             rope_head_dim=self.rope_head_dim,
             compress_ratio=self.compress_ratio,
             overlap=self.overlap,
-            use_fp4_cache=self.use_fp4_cache,
+            use_fp4_cache=False,
             rms_norm_weight=self.norm.weight,
             rms_norm_eps=self.rms_norm_eps,
             quant_block=self._quant_block,

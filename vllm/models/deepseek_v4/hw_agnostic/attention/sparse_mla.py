@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import numpy as np
 import torch
 
 from vllm.config import VllmConfig
-from vllm.config.cache import CacheDType
+from vllm.models.deepseek_v4.hw_agnostic.attention._metadata_utils import (
+    split_decodes_and_prefills,
+)
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
@@ -18,7 +20,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 # FlashMLA asserts extra_topk % B_TOPK == 0; 128 covers h_q in {64, 128}.
@@ -97,13 +98,11 @@ def _get_compressed_slot_mapping(
 
 
 class DeepseekV4HWAgnosticBackend(AttentionBackend):
-    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "auto",
-        "bfloat16",
-        "fp8_ds_mla",
-        "fp8",  # alias for fp8_ds_mla
-    ]
+    """Spec carrier for the DSv4 sparse-MLA cache.
+
+    Hands the runner a metadata builder, a KV cache shape and a kernel
+    block-size hint. Compute lives in ``DeepseekV4MLAAttention``.
+    """
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -116,25 +115,6 @@ class DeepseekV4HWAgnosticBackend(AttentionBackend):
     @staticmethod
     def get_builder_cls() -> type["DeepseekV4HWAgnosticMetadataBuilder"]:
         return DeepseekV4HWAgnosticMetadataBuilder
-
-    @staticmethod
-    def get_impl_cls() -> type[Any]:
-        raise NotImplementedError(
-            "Attention runs through DeepseekV4MLAAttention; backend has no impl."
-        )
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        # 448 NoPE + 64 RoPE.
-        return [512]
-
-    @classmethod
-    def is_mla(cls) -> bool:
-        return True
-
-    @classmethod
-    def is_sparse(cls) -> bool:
-        return True
 
     @staticmethod
     def get_kv_cache_shape(

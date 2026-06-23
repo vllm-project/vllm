@@ -87,11 +87,11 @@ CHECK_IMPORTS = {
         pattern=(
             r"^\s*from\s+vllm\."
             r"(?:"
-            r"model_executor\.layers(?!\.utils\b)(?!\.quantization\.base_config\b)(?!\.quantization\.utils\.fp8_utils\b)(?!\.quantization\.utils\.quant_utils\b)(?!\.quantization\.utils\.w8a8_utils\b)(?!\.quantization\.utils\.layer_utils\b)(?!\.quantization\.input_quant_fp8\b)(?!\.quantization\.kv_cache\b)(?!\.quantization\.compressed_tensors\.triton_scaled_mm\b)(?!\.fusion\.quant_activation\b)(?!\.fused_moe\.activation\b)(?!\.fused_moe\.config\b)(?!\.fused_moe\.fused_moe_method_base\b)(?!\.fused_moe\.modular_kernel\b)(?!\.fused_moe\.oracle\.fp8\b)(?!\.fused_moe\.routed_experts\b)(?!\.fused_moe\.runner\.moe_runner_interface\b)(?!\.fused_moe\.runner\.shared_experts\b)(?!\.sparse_attn_indexer\b)(?!\.attention_layer_base\b)"
+            r"model_executor\.layers(?!\.utils\b)(?!\.quantization\.base_config\b)(?!\.quantization\.utils\.fp8_utils\b)(?!\.quantization\.utils\.quant_utils\b)(?!\.quantization\.utils\.w8a8_utils\b)(?!\.quantization\.utils\.layer_utils\b)(?!\.quantization\.input_quant_fp8\b)(?!\.quantization\.kv_cache\b)(?!\.quantization\.compressed_tensors\.triton_scaled_mm\b)(?!\.fusion\.quant_activation\b)(?!\.fused_moe\.activation\b)(?!\.fused_moe\.config\b)(?!\.fused_moe\.fused_moe_method_base\b)(?!\.fused_moe\.modular_kernel\b)(?!\.fused_moe\.oracle\.fp8\b)(?!\.fused_moe\.routed_experts\b)(?!\.fused_moe\.runner\.moe_runner_interface\b)(?!\.fused_moe\.runner\.shared_experts\b)(?!\.attention_layer_base\b)"
             r"|model_executor\.kernels\b"
             r"|model_executor\.models(?!\.utils\b)"
             r"|models\.[^.]+(?!\.hw_agnostic\b)"
-            r"|v1\.attention\.backends(?!\.utils\b)(?!\.mla\.indexer\b)"
+            r"|v1\.attention\.backends\b"
             r")"
             r"(?:\.|\s+import\b)"
         ),
@@ -103,6 +103,7 @@ CHECK_IMPORTS = {
         applies_to=re.compile(r"^vllm/models/[^/]+/hw_agnostic/.*\.py$"),
         allowed_files={
             "vllm/models/deepseek_v4/hw_agnostic/quantization/quant_config.py",
+            "vllm/models/deepseek_v4/hw_agnostic/quantization/fp8_quant.py",
         },
     ),
 }
@@ -179,9 +180,10 @@ def test_regex():
         ("from vllm.model_executor.layers.layernorm import RMSNorm", True),
         ("from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm", True),
         ("from vllm.model_executor.layers.rotary_embedding import get_rope", True),
-        # sparse_attn_indexer carve-out: the upstream class has the OOT
-        # torch-fallback wired in; the vendored copy re-exports it.
-        ("from vllm.model_executor.layers.sparse_attn_indexer import X", False),
+        # sparse_attn_indexer is now vendored under
+        # ``hw_agnostic/attention/sparse_attn_indexer.py`` — the upstream
+        # module is forbidden from hw_agnostic.
+        ("from vllm.model_executor.layers.sparse_attn_indexer import X", True),
         ("from vllm.model_executor.layers.mhc import HCHeadOp", True),
         ("from vllm.model_executor.layers.linear import ColumnParallelLinear", True),
         ("from vllm.model_executor.layers.fused_moe import FusedMoE", True),
@@ -226,20 +228,18 @@ def test_regex():
         ("from vllm.models.deepseek_v4.common.ops.fused_indexer_q import bar", True),
         ("from vllm.models.minimax_m3.compressor import X", True),
         ("from vllm.models.llama4.experts import X", True),
-        # mla.indexer carve-out: the indexer's metadata builder is
-        # framework-driven (called per kv-cache group at request time) but
-        # does not contain hardware-specific kernel calls — it only
-        # composes Triton helpers and shape/index math. Re-exporting
-        # rather than vendoring keeps the per-step metadata logic in
-        # sync with upstream.
-        ("from vllm.v1.attention.backends.mla.indexer import X", False),
+        # ``v1.attention.backends`` is forbidden whole-subtree: the indexer
+        # metadata dataclasses are vendored under hw_agnostic and
+        # ``split_decodes_and_prefills`` lives in
+        # ``hw_agnostic/attention/_metadata_utils.py``.
+        ("from vllm.v1.attention.backends.mla.indexer import X", True),
         ("from vllm.v1.attention.backends.mla.sparse_swa import Y", True),
+        ("from vllm.v1.attention.backends.utils import split_decodes", True),
         ("    from vllm.model_executor.layers.activation import SiluAndMul", True),
         ("from vllm.model_executor.custom_op import PluggableLayer", False),
         ("from vllm.model_executor.custom_op import CustomOp", False),
         ("from vllm.model_executor.models.utils import maybe_prefix", False),
         ("from vllm.model_executor.models.utils import make_layers", False),
-        ("from vllm.v1.attention.backends.utils import split_decodes", False),
         # Quantization abstract-bases carve-out: vendored linear/embedding
         # code must inherit from the registry's QuantizeMethodBase to keep
         # quant-method dispatch working. The base ABCs aren't HW-specific.

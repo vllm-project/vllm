@@ -94,10 +94,6 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     ROCM_FLASHMLA_SPARSE_DSV4 = (
         "vllm.models.deepseek_v4.amd.rocm.DeepseekV4ROCMAiterMLASparseBackend"
     )
-    DEEPSEEK_V4_HW_AGNOSTIC = (
-        "vllm.models.deepseek_v4.hw_agnostic.attention.sparse_mla."
-        "DeepseekV4HWAgnosticBackend"
-    )
     FLASH_ATTN_MLA = "vllm.v1.attention.backends.mla.flashattn_mla.FlashAttnMLABackend"
     MINIMAX_M3_SPARSE = (
         "vllm.models.minimax_m3.common.sparse_attention.MiniMaxM3SparseBackend"

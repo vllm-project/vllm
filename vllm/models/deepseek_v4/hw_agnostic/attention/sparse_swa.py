@@ -6,6 +6,9 @@ from typing import TYPE_CHECKING, ClassVar, cast
 import torch
 
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.models.deepseek_v4.hw_agnostic.attention._metadata_utils import (
+    split_decodes_and_prefills,
+)
 from vllm.models.deepseek_v4.hw_agnostic.shared.layers.attention_layer_base import (
     AttentionLayerBase,
 )
@@ -17,7 +20,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
@@ -94,6 +96,8 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
 
 
 class DeepseekSparseSWABackend(AttentionBackend):
+    """Spec carrier for the DSv4 sliding-window cache."""
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_SPARSE_SWA"
@@ -105,10 +109,6 @@ class DeepseekSparseSWABackend(AttentionBackend):
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int) -> int:
         return 256
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [512]
 
     @staticmethod
     def get_builder_cls() -> type["DeepseekSparseSWAMetadataBuilder"]:
