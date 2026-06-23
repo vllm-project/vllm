@@ -11,7 +11,7 @@ import platform
 from collections.abc import Callable
 from datetime import timedelta
 from functools import cache, lru_cache, wraps
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
@@ -23,7 +23,6 @@ import vllm._C_stable_libtorch  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum, in_wsl
@@ -32,6 +31,7 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
     from vllm.config.kernel import IrOpPriorityConfig
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -88,6 +88,8 @@ def _get_backend_priorities(
     kv_cache_dtype: CacheDType | None = None,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
+    from vllm.utils.torch_utils import is_quantized_kv_cache
+
     if use_mla:
         if device_capability.major == 10:
             # Sparse MLA backend priorities
@@ -125,6 +127,11 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_MLA,
                 *sparse_backends,
             ]
+        elif device_capability.major == 12:
+            return [
+                AttentionBackendEnum.TRITON_MLA,
+                AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
+            ]
         else:
             return [
                 AttentionBackendEnum.FLASH_ATTN_MLA,
@@ -150,6 +157,21 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLEX_ATTENTION,
                 AttentionBackendEnum.TURBOQUANT,
             ]
+
+
+def _backend_cls_path(backend_cls: type[AttentionBackend]) -> str:
+    module, qualname = backend_cls.full_cls_name()
+    return f"{module}.{qualname}"
+
+
+def _get_attn_backend_class(backend: AttentionBackendEnum) -> type[AttentionBackend]:
+    return backend.get_class()
+
+
+class _BackendCandidate(NamedTuple):
+    backend_class: type[AttentionBackend]
+    backend: AttentionBackendEnum
+    priority: int
 
 
 def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -339,7 +361,7 @@ class CudaPlatformBase(Platform):
         attn_selector_config: AttentionSelectorConfig,
         num_heads: int | None = None,
     ) -> tuple[
-        list[tuple[AttentionBackendEnum, int]],
+        list[_BackendCandidate],
         dict[AttentionBackendEnum, tuple[int, list[str]]],
     ]:
         valid_backends_priorities = []
@@ -353,7 +375,7 @@ class CudaPlatformBase(Platform):
         )
         for priority, backend in enumerate(backend_priorities):
             try:
-                backend_class = backend.get_class()
+                backend_class = _get_attn_backend_class(backend)
                 invalid_reasons_i = backend_class.validate_configuration(
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
@@ -363,7 +385,9 @@ class CudaPlatformBase(Platform):
             if invalid_reasons_i:
                 invalid_reasons[backend] = (priority, invalid_reasons_i)
             else:
-                valid_backends_priorities.append((backend, priority))
+                valid_backends_priorities.append(
+                    _BackendCandidate(backend_class, backend, priority)
+                )
 
         return valid_backends_priorities, invalid_reasons
 
@@ -380,7 +404,7 @@ class CudaPlatformBase(Platform):
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             try:
-                backend_class = selected_backend.get_class()
+                backend_class = _get_attn_backend_class(selected_backend)
                 invalid_reasons = backend_class.validate_configuration(
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
@@ -394,7 +418,7 @@ class CudaPlatformBase(Platform):
                 )
             else:
                 logger.info("Using %s backend.", selected_backend)
-                return selected_backend.get_path()
+                return _backend_cls_path(backend_class)
 
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.
@@ -424,13 +448,13 @@ class CudaPlatformBase(Platform):
 
         # We have found some valid backends. Select the one with the
         # highest priority.
-        sorted_indices = sorted(
-            range(len(valid_backends_priorities)),
-            key=lambda i: valid_backends_priorities[i][1],
+        selected_candidate = min(
+            valid_backends_priorities,
+            key=lambda candidate: candidate.priority,
         )
-        selected_index = sorted_indices[0]
-        selected_backend = valid_backends_priorities[selected_index][0]
-        selected_priority = valid_backends_priorities[selected_index][1]
+        selected_backend_class = selected_candidate.backend_class
+        selected_backend = selected_candidate.backend
+        selected_priority = selected_candidate.priority
 
         # If the user specified --block-size (but not --attention-backend),
         # check whether that constraint precluded any higher-priority backends.
@@ -456,10 +480,14 @@ class CudaPlatformBase(Platform):
         logger.info_once(
             "Using %s attention backend out of potential backends: %s.",
             selected_backend.name,
-            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
+            "["
+            + ", ".join(
+                f"'{candidate.backend.name}'" for candidate in valid_backends_priorities
+            )
+            + "]",
         )
 
-        return selected_backend.get_path()
+        return _backend_cls_path(selected_backend_class)
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list[AttentionBackendEnum]:
@@ -634,7 +662,11 @@ class CudaPlatformBase(Platform):
     @classmethod
     def support_deep_gemm(cls) -> bool:
         """Currently, only Hopper and Blackwell GPUs are supported."""
-        return cls.is_device_capability(90) or cls.is_device_capability_family(100)
+        return (
+            cls.is_device_capability(90)
+            or cls.is_device_capability_family(100)
+            or cls.is_device_capability_family(120)
+        )
 
     @classmethod
     def is_integrated_gpu(cls, device_id: int = 0) -> bool:
