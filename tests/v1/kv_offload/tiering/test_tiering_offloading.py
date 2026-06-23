@@ -17,18 +17,29 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+)
 from vllm.v1.kv_offload.base import (
+    OffloadingCounterMetadata,
     OffloadKey,
     OffloadPolicy,
     ReqContext,
     RequestOffloadingContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.tiering.base import (
+    JobMetadata,
+    JobResult,
+    SecondaryTierManager,
+)
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
+from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
 )
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
@@ -61,6 +72,102 @@ def count_hits(manager, keys: list[OffloadKey]) -> int | None:
             break
         count += 1
     return count
+
+
+class MetricsSecondaryTierManager(SecondaryTierManager):
+    """Test-only secondary tier that declares and emits one labeled metric."""
+
+    MY_TIER_METRIC = "my_tier_metric"
+
+    @classmethod
+    def build_metric_definitions(cls, extra_config):
+        return {
+            cls.MY_TIER_METRIC: OffloadingCounterMetadata(
+                documentation="Number of bytes served by the test tier.",
+                labelnames=("tier",),
+            )
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.stats: OffloadingConnectorStats | None = None
+
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+        return False
+
+    def submit_store(self, job_metadata: JobMetadata) -> None:
+        return
+
+    def submit_load(self, job_metadata: JobMetadata) -> None:
+        return
+
+    def get_finished_jobs(self) -> Iterable[JobResult]:
+        return ()
+
+    def drain_jobs(self) -> None:
+        return
+
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
+
+    def get_stats(self) -> OffloadingConnectorStats | None:
+        stats = self.stats
+        self.stats = None
+        return stats
+
+
+def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
+    monkeypatch.setitem(
+        SecondaryTierFactory._registry,
+        "test_metrics",
+        lambda: MetricsSecondaryTierManager,
+    )
+
+    metrics = TieringOffloadingSpec.build_metric_definitions(
+        {"secondary_tiers": [{"type": "test_metrics"}]}
+    )
+
+    metadata = metrics[MetricsSecondaryTierManager.MY_TIER_METRIC]
+    assert metadata.documentation == "Number of bytes served by the test tier."
+    assert metadata.labelnames == ("tier",)
+
+
+def test_tiering_manager_aggregates_secondary_stats():
+    mock_region = _mock_mmap_region(5)
+    primary_tier = CPUPrimaryTierOffloadingManager(
+        num_blocks=5, mmap_region=mock_region
+    )
+    secondary_tier = MetricsSecondaryTierManager(
+        offloading_spec=_MOCK_OFFLOADING_SPEC,
+        primary_kv_view=mock_region.create_kv_memoryview(),
+        tier_type="test_metrics",
+    )
+    secondary_stats = OffloadingConnectorStats()
+    secondary_stats.increase_counter(
+        MetricsSecondaryTierManager.MY_TIER_METRIC, 7, ("test_metrics",)
+    )
+    secondary_tier.stats = secondary_stats
+    manager = TieringOffloadingManager(
+        primary_tier=primary_tier,
+        secondary_tiers=[secondary_tier],
+    )
+
+    stats = manager.get_stats()
+
+    assert stats is not None
+    assert (
+        stats.data["data"][MetricsSecondaryTierManager.MY_TIER_METRIC][
+            ("test_metrics",)
+        ]
+        == 7
+    )
+
+    # The primary tier's cache-usage gauge is always reported, so get_stats()
+    # never returns None, but the secondary tier has nothing new to report
+    # once its stats have been consumed.
+    second_stats = manager.get_stats()
+    assert second_stats is not None
+    assert MetricsSecondaryTierManager.MY_TIER_METRIC not in second_stats.data["data"]
 
 
 class TestExampleSecondaryTierManager:
@@ -295,6 +402,8 @@ class TestTieringOffloadingManager:
         self.manager.prepare_store(blocks, _CTX)
         self.manager.complete_store(blocks, _CTX, success=True)
         self._simulate_on_schedule_end()
+        # for secondary tiers to drain jobs, so primary tier's blocks are evictable.
+        self._simulate_on_schedule_end()
 
         self.secondary_tier1.touch = MagicMock(wraps=self.secondary_tier1.touch)
         self.secondary_tier2.touch = MagicMock(wraps=self.secondary_tier2.touch)
@@ -303,7 +412,7 @@ class TestTieringOffloadingManager:
         self.manager.touch(blocks, _CTX)
 
         # Verify touch was called on primary tier (check LRU order)
-        primary_keys = list(self.primary_tier._policy.blocks.keys())
+        primary_keys = list(self.primary_tier._policy.evictable_blocks.keys())
         assert primary_keys[-3:] == list(reversed(blocks))
 
         # Verify touch was propagated to all secondary tiers
@@ -489,6 +598,85 @@ class TestTieringOffloadingManager:
 
         # tier2 (block-level) does not get existing blocks here.
         self.secondary_tier2.submit_store.assert_not_called()
+
+    def test_reset_cache_clears_all_state(self, manager_setup):
+        """reset_cache wipes every kind of orchestrator state and resets
+        primary tier; pending submissions are dropped without being sent
+        to the secondary tier."""
+        # Cascade — populates primary blocks and leaves cascade jobs
+        # in _transfer_jobs (the synchronous example tier has already
+        # queued completions); reset_cache's drain loop will pick them up.
+        blocks = to_keys(range(3))
+        self.manager.prepare_store(blocks, _CTX)
+        self.manager.complete_store(blocks, _CTX, success=True)
+        assert self.manager._transfer_jobs
+
+        # Pending promotion submission (deferred — no on_schedule_end after
+        # the lookup that staged it).
+        promo_block = to_keys([99])[0]
+        self.secondary_tier1.blocks[promo_block] = True
+        assert self.manager.lookup(promo_block, ReqContext(req_id="pending")) is None
+        assert self.manager._pending_load_submissions
+
+        # Request-level tier registration.
+        self.secondary_tier1.on_new_request = (
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
+            )
+        )
+        self.manager.on_new_request(ReqContext(req_id="rl"))
+        assert self.manager._request_level_tiers
+
+        # Mark this step as already polled (reset_cache must clear it).
+        self.manager._processed_jobs_this_step = True
+
+        # Spy: pending submission must NOT reach the tier.
+        self.secondary_tier1.submit_load = MagicMock(
+            wraps=self.secondary_tier1.submit_load
+        )
+
+        self.manager.reset_cache()
+
+        # Orchestrator state cleared.
+        assert self.manager._transfer_jobs == {}
+        assert self.manager._pending_load_submissions == {}
+        assert self.manager._request_level_tiers == {}
+        assert self.manager._processed_jobs_this_step is False
+
+        # Primary tier reset to a fresh state.
+        assert self.primary_tier._num_allocated_blocks == 0
+        assert self.primary_tier._free_list == []
+        for block in blocks:
+            assert self.primary_tier.lookup(block, _CTX) is False
+
+        # Pending submission was dropped, not submitted.
+        self.secondary_tier1.submit_load.assert_not_called()
+
+    def test_reset_cache_drains_all_tiers(self, manager_setup):
+        """reset_cache must drain each secondary tier before resetting
+        the primary tier so no tier I/O is touching primary memory.
+        Without the drain, an in-flight transfer could write into, or
+        read junk from, a primary slot that the post-reset path has
+        reallocated.
+        """
+        self.secondary_tier1.drain_jobs = MagicMock(
+            wraps=self.secondary_tier1.drain_jobs
+        )
+        self.secondary_tier2.drain_jobs = MagicMock(
+            wraps=self.secondary_tier2.drain_jobs
+        )
+
+        # Drive a cascade so a job lands in _transfer_jobs.
+        blocks = to_keys(range(3))
+        self.manager.prepare_store(blocks, _CTX)
+        self.manager.complete_store(blocks, _CTX, success=True)
+        assert self.manager._transfer_jobs
+
+        self.manager.reset_cache()
+
+        self.secondary_tier1.drain_jobs.assert_called_once()
+        self.secondary_tier2.drain_jobs.assert_called_once()
+        assert self.manager._transfer_jobs == {}
 
 
 class TestTieringOffloadingWithoutSecondaryTiers:

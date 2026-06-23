@@ -1585,15 +1585,12 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
     e: int,
     topk: int,
     dtype: torch.dtype,
-    monkeypatch,
     workspace_init,
 ):
     """
     Test BF16 unquantized MoE with FlashInfer TRTLLM backend.
     """
     set_random_seed(7)
-
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
 
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEConfig,
@@ -1626,6 +1623,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         in_dtype=dtype,
         routing_method=RoutingMethodType.Renormalize,
         max_num_tokens=next_power_of_2(m),
+        moe_backend="flashinfer_trtllm",
     )
 
     with set_current_vllm_config(vllm_config):

@@ -90,6 +90,8 @@ def create_scheduler(
         enable_chunked_prefill=enable_chunked_prefill,
         async_scheduling=async_scheduling,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        # Ensure admission/preemption mechanics are deterministic
+        watermark=0.0,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
