@@ -60,8 +60,10 @@ def test_rocm_compressed_tensors_w8a8(
     vllm_runner, example_prompts, model_path, max_tokens, num_logprobs
 ):
     dtype = "bfloat16"
-
-    with vllm_runner(model_path, dtype=dtype) as vllm_model:
+    # Pin to TRITON_ATTN, see https://github.com/vllm-project/vllm/issues/46179
+    with vllm_runner(
+        model_path, dtype=dtype, attention_backend="TRITON_ATTN"
+    ) as vllm_model:
         vllm_model.generate_greedy_logprobs(example_prompts, max_tokens, num_logprobs)
 
 
