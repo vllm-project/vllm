@@ -47,15 +47,6 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-def _linear_bias_or_none(
-    bias: torch.Tensor | None,
-    expected_size: int,
-) -> torch.Tensor | None:
-    if bias is None or bias.numel() != expected_size:
-        return None
-    return bias
-
-
 class DFlashQwen3Attention(nn.Module):
     """Attention for DFlash speculative decoding.
 
@@ -305,11 +296,7 @@ class DFlashQwen3Model(nn.Module):
         """
         layers_attn = [layer.self_attn for layer in self.layers]
         attn0 = layers_attn[0]
-        qkv_biases = [
-            _linear_bias_or_none(a.qkv_proj.bias, a.q_size + 2 * a.kv_size)
-            for a in layers_attn
-        ]
-        has_bias = any(bias is not None for bias in qkv_biases)
+        has_bias = attn0.qkv_proj.bias is not None
 
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
@@ -317,14 +304,7 @@ class DFlashQwen3Model(nn.Module):
         kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
         self._fused_kv_weight = torch.cat(kv_weights, dim=0)
         if has_bias:
-            assert all(bias is not None for bias in qkv_biases), (
-                "DFlash QKV projection bias must be present for all layers or none."
-            )
-            kv_biases = [
-                bias[a.q_size :]
-                for a, bias in zip(layers_attn, qkv_biases)
-                if bias is not None
-            ]
+            kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
             self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
         else:
             self._fused_kv_bias = None
