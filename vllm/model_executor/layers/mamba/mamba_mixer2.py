@@ -614,8 +614,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
         ssm_state: torch.Tensor,
         x_dtype: torch.dtype,
         B_dtype: torch.dtype,
+        *,
+        use_temporal_slots: bool,
     ) -> torch.Tensor:
-        cache_size = self._mtp_replay_temporal_slot_capacity
+        cache_size = (
+            self._mtp_replay_temporal_slot_capacity
+            if use_temporal_slots
+            else ssm_state.shape[0]
+        )
         num_heads = self.num_heads // self.tp_size
         num_groups = self.n_groups // self.tp_size
         num_steps = 1 + self.num_spec
@@ -630,10 +636,13 @@ class MambaMixer2(MambaBase, PluggableLayer):
             B_dtype,
             ssm_state.dtype,
             ssm_state.device,
+            use_temporal_slots,
         )
         if self._mtp_replay_cache_key == cache_key:
-            assert self._mtp_replay_ssm_state is not None
-            return self._mtp_replay_ssm_state
+            if use_temporal_slots:
+                assert self._mtp_replay_ssm_state is not None
+                return self._mtp_replay_ssm_state
+            return ssm_state
         if self._mtp_replay_cache_key is not None:
             self._clear_mtp_replay_cache()
 
@@ -677,19 +686,23 @@ class MambaMixer2(MambaBase, PluggableLayer):
             dtype=torch.int32,
             device=ssm_state.device,
         )
-        self._mtp_replay_ssm_state = torch.zeros(
-            cache_size,
-            *ssm_state.shape[1:],
-            dtype=ssm_state.dtype,
-            device=ssm_state.device,
-        )
-        self._mtp_replay_ssm_initialized = torch.zeros(
-            cache_size,
-            dtype=torch.int32,
-            device=ssm_state.device,
-        )
+        if use_temporal_slots:
+            self._mtp_replay_ssm_state = torch.zeros(
+                cache_size,
+                *ssm_state.shape[1:],
+                dtype=ssm_state.dtype,
+                device=ssm_state.device,
+            )
+            self._mtp_replay_ssm_initialized = torch.zeros(
+                cache_size,
+                dtype=torch.int32,
+                device=ssm_state.device,
+            )
         self._mtp_replay_cache_key = cache_key
-        return self._mtp_replay_ssm_state
+        if use_temporal_slots:
+            assert self._mtp_replay_ssm_state is not None
+            return self._mtp_replay_ssm_state
+        return ssm_state
 
     def _ensure_mtp_replay_workspace(
         self,
@@ -1318,10 +1331,14 @@ class MambaMixer2(MambaBase, PluggableLayer):
             if use_mtp_replay:
                 num_steps = 1 + self.num_spec
                 num_heads = self.num_heads // self.tp_size
+                use_temporal_slots = (
+                    attn_metadata.mtp_replay_temporal_slot_indices_d is not None
+                )
                 replay_ssm_state = self._ensure_mtp_replay_cache(
                     ssm_state,
                     hidden_states_B_C_d.dtype,
                     hidden_states_B_C_d.dtype,
+                    use_temporal_slots=use_temporal_slots,
                 )
                 self._ensure_mtp_replay_workspace(
                     num_decodes,
@@ -1336,20 +1353,19 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 physical_replay_state_indices = state_indices_tensor_d[
                     :num_decodes, 0
                 ].contiguous()
-                replay_state_indices = attn_metadata.mtp_replay_temporal_slot_indices_d
-                if replay_state_indices is None:
-                    replay_state_indices = torch.arange(
-                        1,
-                        num_decodes + 1,
-                        dtype=torch.int32,
-                        device=physical_replay_state_indices.device,
+                if use_temporal_slots:
+                    replay_state_indices = (
+                        attn_metadata.mtp_replay_temporal_slot_indices_d[
+                            :num_decodes
+                        ].contiguous()
                     )
-                replay_state_indices = replay_state_indices[:num_decodes].contiguous()
-                replay_ssm_state = self._prepare_mtp_replay_temporal_slots(
-                    ssm_state,
-                    physical_replay_state_indices,
-                    replay_state_indices,
-                )
+                    replay_ssm_state = self._prepare_mtp_replay_temporal_slots(
+                        ssm_state,
+                        physical_replay_state_indices,
+                        replay_state_indices,
+                    )
+                else:
+                    replay_state_indices = physical_replay_state_indices
 
             # 2. Convolution sequence transformation
             hidden_states_B_C_d = causal_conv1d_update(
