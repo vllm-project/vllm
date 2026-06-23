@@ -625,30 +625,9 @@ class SpecDecodeBaseProposer:
         if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
             self.model.model.set_skip_topk(False)
 
-        if (
-            isinstance(slot_mappings, dict)
-            and self._per_group_slot_mapping_buffers
-            and self._draft_attn_layer_names
-            and next(iter(self._draft_attn_layer_names)) in slot_mappings
-        ):
-            # Multi-group draft models need the first pass to use the
-            # runner-provided per-layer slot mappings. Seed the per-group
-            # buffers so subsequent autoregressive steps keep using each
-            # group's own KV slots.
-            first_pass_slot_mapping = slot_mappings
-            seeded_gids: set[int] = set()
-            for layer_name in self._draft_attn_layer_names:
-                gid = self._layer_to_gid[layer_name]
-                if gid in seeded_gids:
-                    continue
-                seeded_gids.add(gid)
-                self._store_per_group_slot_mapping(
-                    gid, slot_mappings[layer_name], slot_mapping_size
-                )
-        else:
-            first_pass_slot_mapping = self._get_slot_mapping(
-                slot_mapping_size, common_attn_metadata.slot_mapping
-            )
+        first_pass_slot_mapping = self._get_slot_mapping(
+            slot_mapping_size, common_attn_metadata.slot_mapping
+        )
 
         with set_forward_context(
             per_layer_attn_metadata,
