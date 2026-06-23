@@ -25,7 +25,8 @@ constexpr uint32_t kHistBins = 1 << kHistBits;
 constexpr uint32_t kMaxTopK = 2048;
 
 constexpr uint32_t kElemPerStage = 16;
-constexpr uint32_t kSizePerStage = kElemPerStage * hist4096::kBlockSize;  // 16384
+constexpr uint32_t kSizePerStage =
+    kElemPerStage * hist4096::kBlockSize;  // 16384
 
 // CS=4 two-pass path uses two TMA stages as a double buffer.
 constexpr uint32_t kStreamingStagesCS4 = 2;
@@ -43,7 +44,8 @@ struct CooperativeTopKParams {
   const float* __restrict__ input;
   int32_t* __restrict__ output;
   const int32_t* __restrict__ lengths;
-  hist4096::Tie* __restrict__ tie_ws;  // per-row tie workspace, see kTieWsPerRow
+  hist4096::Tie* __restrict__ tie_ws;  // per-row tie workspace, see
+                                       // kTieWsPerRow
   uint32_t num_rows, stride;
 };
 
@@ -549,26 +551,30 @@ __device__ void cooperative_topk_body(CooperativeTopKParams<TopK> params) {
                     1);  // init 2×2=4 barriers (2 passes × 2 stages)
     }
     __syncthreads();
-    uint32_t hp[kStreamingStagesCS4] = {0, 0};  // histogram+scatter pass counters
+    uint32_t hp[kStreamingStagesCS4] = {0,
+                                        0};  // histogram+scatter pass counters
     large_topk<TopK, CS, Smem4, false>(in, out, sl, hp, row_tie_ws);
   }
 }
 
 template <uint32_t TopK>
-__global__ void __launch_bounds__(hist4096::kBlockSize, 1) __cluster_dims__(1, 4, 1)
-    cooperative_topk_cs4(CooperativeTopKParams<TopK> params) {
+__global__ void __launch_bounds__(hist4096::kBlockSize, 1)
+    __cluster_dims__(1, 4, 1)
+        cooperative_topk_cs4(CooperativeTopKParams<TopK> params) {
   cooperative_topk_body<TopK, 4>(params);
 }
 
 template <uint32_t TopK>
-__global__ void __launch_bounds__(hist4096::kBlockSize, 1) __cluster_dims__(1, 8, 1)
-    cooperative_topk_cs8(CooperativeTopKParams<TopK> params) {
+__global__ void __launch_bounds__(hist4096::kBlockSize, 1)
+    __cluster_dims__(1, 8, 1)
+        cooperative_topk_cs8(CooperativeTopKParams<TopK> params) {
   cooperative_topk_body<TopK, 8>(params);
 }
 
 template <uint32_t TopK>
-__global__ void __launch_bounds__(hist4096::kBlockSize, 1) __cluster_dims__(1, 16, 1)
-    cooperative_topk_cs16(CooperativeTopKParams<TopK> params) {
+__global__ void __launch_bounds__(hist4096::kBlockSize, 1)
+    __cluster_dims__(1, 16, 1)
+        cooperative_topk_cs16(CooperativeTopKParams<TopK> params) {
   cooperative_topk_body<TopK, 16>(params);
 }
 

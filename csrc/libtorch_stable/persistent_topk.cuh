@@ -1051,9 +1051,10 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
     extern __shared__ uint8_t _smem_reg[];
     if constexpr (UsePredicatedShortLoads) {
       hist4096::histogram_4096_topk_predicated<MAX_K, 12, 8>(score, dst, length,
-                                                   _smem_reg);
+                                                             _smem_reg);
     } else {
-      hist4096::histogram_4096_topk<MAX_K, 12, 8>(score, dst, length, _smem_reg);
+      hist4096::histogram_4096_topk<MAX_K, 12, 8>(score, dst, length,
+                                                  _smem_reg);
     }
     return;
   }

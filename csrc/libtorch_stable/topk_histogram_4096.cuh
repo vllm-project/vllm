@@ -307,8 +307,7 @@ __device__ void tie_handle_large(const Tie* ties, uint32_t num_ties,
 template <uint32_t TopK, uint32_t HIST_BITS>
 struct Histogram4096Smem {
   static constexpr uint32_t HIST_BINS = 1 << HIST_BITS;
-  static constexpr uint32_t TIE_CAPACITY =
-      TopK > kMaxTies ? TopK : kMaxTies;
+  static constexpr uint32_t TIE_CAPACITY = TopK > kMaxTies ? TopK : kMaxTies;
   alignas(128) uint32_t counter_gt;
   alignas(128) uint32_t counter_eq;
   MatchBin match;
