@@ -473,6 +473,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self._store_pressure_active = False
         self._skip_store_requests: set[str] = set()
 
+        # Per-request high-water mark of tokens actually persisted; the next
+        # batch resumes here, so pressure-skipped or failed ranges are retried.
+        self._saved_offset: dict[str, int] = {}
+
     def add_stored_request(self, req_id: str):
         with self.done_task_lock:
             self.stored_requests[req_id] += 1
@@ -487,6 +491,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
             if req_id in self.stored_requests:
                 del self.stored_requests[req_id]
             self._skip_store_requests.discard(req_id)
+            self._saved_offset.pop(req_id, None)
+
+    def _record_saved(self, req_id: str, token_len: int) -> None:
+        # Guard on liveness so a concurrent finish/preempt pop isn't recreated.
+        with self.done_task_lock:
+            if req_id in self.stored_requests:
+                self._saved_offset[req_id] = token_len
 
     def _should_skip_request(self, req_id: str) -> bool:
         with self.done_task_lock:
@@ -535,11 +546,14 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 )
                 return
 
+            # Resume from where this rank left off; only the new suffix is saved.
+            save_start = self._saved_offset.get(req_id, 0)
+
             # Within each lcm region only per-spec relevant chunks are loaded
             # (e.g., SWA or linear attn), so mask out irrelevant chunks
-            store_mask_ranges = self.coord.store_mask_ranges(
+            store_masks = self.coord.store_mask(
                 token_len,
-                req_meta.save_start_token,
+                save_start,
                 num_prompt_tokens=req_meta.num_prompt_tokens,
             )
 
@@ -548,33 +562,26 @@ class KVCacheStoreSendingThread(KVTransferThread):
             keys: list[str] = []
             kv_event_block_hashes: list[BlockHash] = []
             group_indices: list[int] = []
-            put_step_rank = self.tp_rank % self.put_step
             for g_idx, db in enumerate(self.token_databases):
-                mask_range = store_mask_ranges[g_idx]
-
-                # Randomize the put_step start index using suffix windows/groups to
-                # balance load across TP ranks.
-                span = max(1, mask_range.end_chunk - mask_range.start_chunk)
-                put_step_start_idx = (
-                    mask_range.start_chunk + mask_range.start_chunk // span + g_idx
-                ) % self.put_step
+                # Rotate the stride phase per group to balance load across ranks.
+                put_step_rank = (self.tp_rank + g_idx) % self.put_step
                 for start, end, block_hash in db.process_tokens(
                     token_len,
                     req_meta.block_hashes,
-                    mask_num=req_meta.save_start_token,
-                    chunk_mask=mask_range.mask,
-                    put_step_start_idx=put_step_start_idx,
+                    mask_num=save_start,
+                    chunk_mask=store_masks[g_idx],
                     put_step=self.put_step,
                     put_step_rank=put_step_rank,
                 ):
                     starts.append(start)
                     ends.append(end)
-                    keys.append(PoolKey(db.metadata, block_hash.hex()).to_string())
+                    keys.append(db.key_for(block_hash))
                     if self.enable_kv_event:
                         kv_event_block_hashes.append(block_hash)
                     group_indices.append(g_idx)
 
             if not keys:
+                self._record_saved(req_id, token_len)
                 return
 
             # Check which blocks already exist (dedup)
@@ -600,6 +607,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             ]
 
             if not missing_indices:
+                self._record_saved(req_id, token_len)
                 return
 
             if len(missing_indices) != len(keys):
@@ -701,11 +709,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             "batch succeeds",
                             req_id,
                         )
-                elif self._clear_store_pressure():
-                    logger.info(
-                        "Mooncake CPU/disk offloading pressure cleared after a "
-                        "successful store batch"
-                    )
+                else:
+                    self._record_saved(req_id, token_len)
+                    if self._clear_store_pressure():
+                        logger.info(
+                            "Mooncake CPU/disk offloading pressure cleared "
+                            "after a successful store batch"
+                        )
             except Exception as e:
                 self._record_operation(
                     "save_put",
@@ -798,7 +808,7 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                 addr, size, block_id = db.prepare_value(
                     start, end, req_meta.block_ids[g_idx]
                 )
-                key_list.append(PoolKey(db.metadata, block_hash.hex()).to_string())
+                key_list.append(db.key_for(block_hash))
                 addr_list.append(addr)
                 size_list.append(size)
                 block_id_list.append(block_id)

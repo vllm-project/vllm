@@ -22,9 +22,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store import (
     worker as mooncake_store_worker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
-    StoreMaskRange,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     BlobBlockHashes,
     ChunkedTokenDatabase,
@@ -478,29 +475,6 @@ def test_process_tokens_applies_stride_before_hash_access():
     assert results == [(96, 128, bytes([15]))]
 
 
-def test_process_tokens_applies_put_step_start_idx_before_hash_access():
-    db = ChunkedTokenDatabase(
-        KeyMetadata("test-model", 0, 0, 0, 0),
-        block_size=32,
-        hash_block_size=8,
-    )
-    block_hashes = _RecordingBlockHashes([bytes([i]) for i in range(16)])
-
-    results = list(
-        db.process_tokens(
-            token_len=128,
-            block_hashes=block_hashes,
-            mask_num=64,
-            put_step_start_idx=1,
-            put_step=2,
-            put_step_rank=0,
-        )
-    )
-
-    assert block_hashes.accessed == [15]
-    assert results == [(96, 128, bytes([15]))]
-
-
 def test_store_sending_thread_delta_saves_only_new_full_attention_chunks():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
@@ -508,13 +482,13 @@ def test_store_sending_thread_delta_saves_only_new_full_attention_chunks():
     thread = _make_store_sending_thread(store)
 
     thread.add_stored_request("req-a")
+    thread._saved_offset["req-a"] = 32
     thread._handle_request(
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([0, 1, 2, 3],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
-            save_start_token=32,
             can_save=True,
         )
     )
@@ -534,13 +508,13 @@ def test_store_sending_thread_delta_strides_with_local_phase():
     thread = _make_store_sending_thread(store, tp_rank=0, put_step=2)
 
     thread.add_stored_request("req-a")
+    thread._saved_offset["req-a"] = 16
     thread._handle_request(
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([0, 1, 2, 3],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
-            save_start_token=16,
             can_save=True,
         )
     )
@@ -552,12 +526,14 @@ def test_store_sending_thread_delta_strides_with_local_phase():
     assert store.batch_put_from_multi_buffers.call_args.args[0] == keys
 
 
-def test_store_sending_thread_skipped_delta_does_not_advance_stride_phase():
+def test_store_sending_thread_retries_skipped_range_after_pressure():
     store = MagicMock()
     store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
-    store.batch_put_from_multi_buffers.return_value = [256]
+    store.batch_put_from_multi_buffers.side_effect = lambda keys, *a: [256] * len(keys)
     thread = _make_store_sending_thread(store, tp_rank=0, put_step=2)
 
+    # Under pressure the request is skipped without persisting anything, so the
+    # saved offset stays at 0.
     thread._store_pressure_active = True
     thread._skip_store_requests.add("req-a")
 
@@ -568,16 +544,18 @@ def test_store_sending_thread_skipped_delta_does_not_advance_stride_phase():
             token_len_chunk=16,
             block_ids=([0],),
             block_hashes=[b"a0"],
-            save_start_token=0,
             can_save=True,
         )
     )
 
     store.batch_is_exist.assert_not_called()
+    assert thread._saved_offset.get("req-a", 0) == 0
 
     thread._store_pressure_active = False
     thread._skip_store_requests.clear()
 
+    # The next batch resumes from offset 0, re-covering the chunk skipped under
+    # pressure (chunk 0) rather than losing it.
     thread.add_stored_request("req-a")
     thread._handle_request(
         ReqMeta(
@@ -585,13 +563,13 @@ def test_store_sending_thread_skipped_delta_does_not_advance_stride_phase():
             token_len_chunk=64,
             block_ids=([0, 1, 2, 3],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
-            save_start_token=16,
             can_save=True,
         )
     )
 
     keys = store.batch_is_exist.call_args.args[0]
     assert keys == [
+        "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6130",
         "test-model@tp_rank:0@pcp0@dcp0@pp_rank:0@group:0@6132",
     ]
     assert store.batch_put_from_multi_buffers.call_args.args[0] == keys
@@ -604,13 +582,13 @@ def test_store_sending_thread_delta_start_rank_saves_second_local_chunk():
     thread = _make_store_sending_thread(store, tp_rank=1, put_step=2)
 
     thread.add_stored_request("req-a")
+    thread._saved_offset["req-a"] = 16
     thread._handle_request(
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([0, 1, 2, 3],),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
-            save_start_token=16,
             can_save=True,
         )
     )
@@ -631,21 +609,9 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
     )
     coord = SimpleNamespace(
         lcm_block_size=16,
-        store_mask=lambda token_len, num_prompt_tokens=None: (
+        store_mask=lambda token_len, start_token, num_prompt_tokens=None: (
             None,
-            [True, False, True, False],
-        ),
-        store_mask_ranges=lambda token_len, start_token, num_prompt_tokens=None: (
-            StoreMaskRange(
-                start_chunk=2,
-                end_chunk=4,
-                mask=None,
-            ),
-            StoreMaskRange(
-                start_chunk=2,
-                end_chunk=4,
-                mask=[True, False],
-            ),
+            [True, False],
         ),
     )
 
@@ -669,13 +635,13 @@ def test_store_sending_thread_delta_saves_only_new_masked_chunks():
     )
 
     thread.add_stored_request("req-a")
+    thread._saved_offset["req-a"] = 32
     thread._handle_request(
         ReqMeta(
             req_id="req-a",
             token_len_chunk=64,
             block_ids=([0, 1, 2, 3], [0, 1, 2, 3]),
             block_hashes=[b"a0", b"a1", b"a2", b"a3"],
-            save_start_token=32,
             can_save=True,
         )
     )
@@ -1464,13 +1430,13 @@ def test_store_sending_thread_delta_saves_only_new_swa_boundary_chunks():
 
     hs = [bytes([i + 1]) * 4 for i in range(8)]
     thread.add_stored_request("r0")
+    thread._saved_offset["r0"] = 32
     thread._handle_request(
         ReqMeta(
             req_id="r0",
             token_len_chunk=64,
             block_ids=([0, 1], list(range(8))),
             block_hashes=hs,
-            save_start_token=32,
             can_save=True,
         )
     )

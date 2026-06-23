@@ -369,24 +369,20 @@ def test_store_mask_retention_interval_keeps_segment_and_replay_tails():
     assert masks[1] == [i in (7, 11, 15) for i in range(16)]
 
 
-def test_store_mask_ranges_match_full_mask_suffixes():
+def test_store_mask_suffix_matches_full_mask_tail():
     coord = _make_coord(_retention_groups(), hash_block_size=8, retention_interval=64)
-    masks = coord.store_mask(128, num_prompt_tokens=100)
-    ranges = coord.store_mask_ranges(128, start_token=64, num_prompt_tokens=100)
+    full = coord.store_mask(128, num_prompt_tokens=100)
+    suffix = coord.store_mask(128, start_token=64, num_prompt_tokens=100)
 
     for g_idx, cache_group in enumerate(coord.kv_cache_groups):
         block_size = cache_group.kv_cache_spec.block_size
         start_chunk = 64 // block_size
         end_chunk = 128 // block_size
-        mask = masks[g_idx]
-        mask_range = ranges[g_idx]
-
-        assert mask_range.start_chunk == start_chunk
-        assert mask_range.end_chunk == end_chunk
-        if mask is None:
-            assert mask_range.mask is None
+        full_mask = full[g_idx]
+        if full_mask is None:
+            assert suffix[g_idx] is None
         else:
-            assert mask_range.mask == mask[start_chunk:end_chunk]
+            assert suffix[g_idx] == full_mask[start_chunk:end_chunk]
 
 
 def test_store_mask_retention_prefix_stable_as_aligned_length_grows():

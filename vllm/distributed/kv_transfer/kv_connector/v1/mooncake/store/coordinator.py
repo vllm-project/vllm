@@ -3,7 +3,6 @@
 """External-store cache-hit coordinator for MooncakeStoreConnector."""
 
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
@@ -25,15 +24,6 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
-
-
-@dataclass(frozen=True)
-class StoreMaskRange:
-    """Range-local store mask for a token suffix."""
-
-    start_chunk: int
-    end_chunk: int
-    mask: list[bool] | None
 
 
 class ExternalCachedBlockPool:
@@ -184,35 +174,19 @@ class MooncakeStoreCoordinator:
     def store_mask(
         self,
         aligned_token_len: int,
+        start_token: int = 0,
         num_prompt_tokens: int | None = None,
     ) -> tuple[list[bool] | None, ...]:
-        """Per-group store masks.
+        """Per-group store masks for the suffix starting at ``start_token``.
 
-        ``mask[g][i]`` is True iff chunk ``i`` of group ``g`` should be
-        written to the store so a future cache hit can consume it. ``None`` is
-        the all-True sentinel.
+        ``mask[g][i]`` is True iff the i-th chunk of group ``g`` *after*
+        ``start_token`` should be written to the store so a future cache hit
+        can consume it. ``None`` is the all-True sentinel for the suffix.
 
         Reuses the engine's ``SingleTypeKVCacheManager.reachable_block_mask``
         so the store retains exactly the blocks the local prefix cache would.
         """
         return self._reachable_masks(
-            aligned_token_len,
-            retention_interval=self.retention_interval,
-            num_prompt_tokens=num_prompt_tokens,
-        )
-
-    def store_mask_ranges(
-        self,
-        aligned_token_len: int,
-        start_token: int,
-        num_prompt_tokens: int | None = None,
-    ) -> tuple[StoreMaskRange, ...]:
-        """Per-group store masks for the suffix starting at ``start_token``.
-
-        ``mask`` is relative to ``start_chunk``. ``None`` is the all-True
-        sentinel for the suffix range.
-        """
-        return self._reachable_mask_ranges(
             aligned_token_len,
             start_token,
             retention_interval=self.retention_interval,
@@ -231,6 +205,7 @@ class MooncakeStoreCoordinator:
         """
         return self._reachable_masks(
             aligned_token_len,
+            0,
             retention_interval=None,
             num_prompt_tokens=None,
         )
@@ -238,31 +213,16 @@ class MooncakeStoreCoordinator:
     def _reachable_masks(
         self,
         aligned_token_len: int,
-        *,
-        retention_interval: int | None,
-        num_prompt_tokens: int | None,
-    ) -> tuple[list[bool] | None, ...]:
-        ranges = self._reachable_mask_ranges(
-            aligned_token_len,
-            0,
-            retention_interval=retention_interval,
-            num_prompt_tokens=num_prompt_tokens,
-        )
-        return tuple(mask_range.mask for mask_range in ranges)
-
-    def _reachable_mask_ranges(
-        self,
-        aligned_token_len: int,
         start_token: int,
         *,
         retention_interval: int | None,
         num_prompt_tokens: int | None,
-    ) -> tuple[StoreMaskRange, ...]:
+    ) -> tuple[list[bool] | None, ...]:
         assert aligned_token_len % self.lcm_block_size == 0, (
             f"aligned_token_len ({aligned_token_len}) must be a multiple of "
             f"lcm_block_size ({self.lcm_block_size})"
         )
-        ranges: list[StoreMaskRange] = []
+        masks: list[list[bool] | None] = []
         for g_idx, g in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(g.kv_cache_spec)
             end_chunk = aligned_token_len // spec.block_size
@@ -281,14 +241,8 @@ class MooncakeStoreCoordinator:
             )
             if mask is not None:
                 assert len(mask) == end_chunk - start_chunk
-            ranges.append(
-                StoreMaskRange(
-                    start_chunk=start_chunk,
-                    end_chunk=end_chunk,
-                    mask=mask,
-                )
-            )
-        return tuple(ranges)
+            masks.append(mask)
+        return tuple(masks)
 
     def block_hashes_for_spec(
         self, block_hashes: Sequence[BlockHash], spec: KVCacheSpec
