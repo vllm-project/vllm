@@ -97,6 +97,7 @@ from vllm.model_executor.parameter import (
     RowvLLMParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.utils.torch_utils import direct_register_custom_op
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -2446,6 +2447,45 @@ _MIXED_LINEAR_STABLE_PARAMETER_NAMES = (
 )
 
 
+_MODEL_OPT_MIXED_LINEAR_REGISTRY: dict[
+    int, tuple[torch.nn.Module, LinearMethodBase]
+] = {}
+_MODEL_OPT_MIXED_LINEAR_NEXT_ID = 0
+
+
+def _modelopt_mixed_linear_impl(
+    x: torch.Tensor,
+    layer_id: torch.Tensor,
+    out_features: int,
+    use_bias: bool,
+) -> torch.Tensor:
+    del out_features
+    layer, inner_method = _MODEL_OPT_MIXED_LINEAR_REGISTRY[int(layer_id.item())]
+    bias = layer.bias if use_bias else None
+    return inner_method.apply(layer, x, bias)
+
+
+def _modelopt_mixed_linear_fake(
+    x: torch.Tensor,
+    layer_id: torch.Tensor,
+    out_features: int,
+    use_bias: bool,
+) -> torch.Tensor:
+    del layer_id, use_bias
+    return torch.empty(
+        (*x.shape[:-1], out_features),
+        dtype=x.dtype,
+        device=x.device,
+    )
+
+
+direct_register_custom_op(
+    op_name="modelopt_mixed_linear",
+    op_func=_modelopt_mixed_linear_impl,
+    fake_impl=_modelopt_mixed_linear_fake,
+)
+
+
 def _ensure_mixed_linear_stable_parameters(layer: torch.nn.Module) -> None:
     """Keep ModelOpt mixed Linear parameter names stable for torch.compile."""
     weight = getattr(layer, "weight", None)
@@ -2456,6 +2496,32 @@ def _ensure_mixed_linear_stable_parameters(layer: torch.nn.Module) -> None:
             layer.register_parameter(
                 name, Parameter(dummy.clone(), requires_grad=False)
             )
+
+
+def _register_modelopt_mixed_linear(
+    layer: torch.nn.Module,
+    inner_method: LinearMethodBase,
+) -> None:
+    global _MODEL_OPT_MIXED_LINEAR_NEXT_ID
+    layer_id = getattr(layer, "_modelopt_mixed_layer_id_value", None)
+    if layer_id is None:
+        layer_id = _MODEL_OPT_MIXED_LINEAR_NEXT_ID
+        _MODEL_OPT_MIXED_LINEAR_NEXT_ID += 1
+        layer._modelopt_mixed_layer_id_value = layer_id
+        layer.register_buffer(
+            "_modelopt_mixed_layer_id",
+            torch.tensor(layer_id, dtype=torch.int64),
+            persistent=False,
+        )
+    _MODEL_OPT_MIXED_LINEAR_REGISTRY[layer_id] = (layer, inner_method)
+
+
+def _modelopt_mixed_linear_out_features(layer: torch.nn.Module) -> int:
+    for attr in ("output_size_per_partition", "num_embeddings_per_partition"):
+        value = getattr(layer, attr, None)
+        if value is not None:
+            return int(value)
+    return int(layer.output_size)
 
 
 class ModelOptMixedLinearMethod(LinearMethodBase):
@@ -2491,6 +2557,7 @@ class ModelOptMixedLinearMethod(LinearMethodBase):
         if self.quant_algo == "BF16" and isinstance(layer.weight, BasevLLMParameter):
             layer.weight = Parameter(layer.weight.data, requires_grad=False)
         _ensure_mixed_linear_stable_parameters(layer)
+        _register_modelopt_mixed_linear(layer, self.inner_method)
 
     def apply(
         self,
@@ -2498,7 +2565,15 @@ class ModelOptMixedLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.inner_method.apply(layer, x, bias)
+        if not hasattr(layer, "_modelopt_mixed_layer_id"):
+            _register_modelopt_mixed_linear(layer, self.inner_method)
+        out_features = _modelopt_mixed_linear_out_features(layer)
+        return torch.ops.vllm.modelopt_mixed_linear(
+            x,
+            layer._modelopt_mixed_layer_id,
+            out_features,
+            bias is not None,
+        )
 
 
 class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
