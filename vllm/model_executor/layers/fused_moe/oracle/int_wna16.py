@@ -1081,16 +1081,12 @@ def convert_to_wna16_moe_kernel_format(
             AutoGPTQConfig,
         )
 
-        if isinstance(quant_config, AutoGPTQConfig):
-            # AutoGPTQ always builds in Marlin (K-first) format even when
-            # the Triton backend is selected.  Transpose to N-first first.
+        if isinstance(quant_config, (AutoGPTQConfig, QuantizationArgs)):
             w13_uint8 = w13.transpose(1, 2).contiguous().view(torch.uint8)
             w2_uint8 = w2.transpose(1, 2).contiguous().view(torch.uint8)
             w13_scale = w13_scale.transpose(1, 2).contiguous()
             w2_scale = w2_scale.transpose(1, 2).contiguous()
         else:
-            # MoeWNA16 and compressed-tensors both use N-first layout when
-            # targeting the Triton backend.
             w13_uint8 = w13.view(torch.uint8)
             w2_uint8 = w2.view(torch.uint8)
         return (
