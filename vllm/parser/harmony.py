@@ -28,7 +28,7 @@ from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 
 if TYPE_CHECKING:
-    from openai_harmony import Message
+    from openai_harmony import Message, StreamableParser
 
 
 class _SegmentType(Enum):
@@ -81,9 +81,16 @@ class HarmonyParser(DelegatingParser):
                 f"got {self.tool_parser.__class__.__name__}."
             )
 
-        self._harmony_parser = get_streamable_parser_for_assistant()
+        self._parser: StreamableParser | None = None
         self._next_tool_call_index = 0
         self._num_processed_messages = 0
+
+    @property
+    def _harmony_parser(self) -> StreamableParser:
+        """Lazily initializes the Harmony parser."""
+        if self._parser is None:
+            self._parser = get_streamable_parser_for_assistant()
+        return self._parser
 
     def _poll_completed_message(self) -> Message | None:
         messages = self._harmony_parser.messages
@@ -103,7 +110,7 @@ class HarmonyParser(DelegatingParser):
             pass
 
         # Reset to the initial assistant-parser state for the next turn.
-        self._harmony_parser = get_streamable_parser_for_assistant()
+        self._parser = None
         self._num_processed_messages = 0
 
         if msg is None:

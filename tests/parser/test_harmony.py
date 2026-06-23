@@ -10,7 +10,6 @@ from openai_harmony import (
     Message,
     RenderConversationConfig,
     Role,
-    StreamState,
 )
 from transformers import AutoTokenizer
 
@@ -95,16 +94,6 @@ def get_text(msg: Message) -> str:
     return msg.content[0].text if msg.content else ""
 
 
-def assert_init_state(harmony_parser: HarmonyParser) -> None:
-    harmony = harmony_parser._harmony_parser
-    assert harmony.state == StreamState.HEADER
-    assert harmony.current_role == Role.ASSISTANT
-    assert harmony.current_channel is None
-    assert harmony.current_recipient is None
-    assert harmony.current_content == ""
-    assert harmony_parser._num_processed_messages == 0
-
-
 def tool_call_tuples(tool_calls: list[FunctionCall] | None) -> list[tuple[str, str]]:
     return [] if tool_calls is None else [(tc.name, tc.arguments) for tc in tool_calls]
 
@@ -156,7 +145,7 @@ class TestFlush:
         assert flushed.delta == ""
         assert flushed.completed_message is not None
         assert get_text(flushed.completed_message) == "Think"
-        assert_init_state(harmony_parser)
+        assert harmony_parser._parser is None
 
     def test_flush_resets_after_eos_error(self, harmony_parser):
         harmony_parser.process_chunk(encode_output("<|channel|>analysis"))
@@ -164,7 +153,7 @@ class TestFlush:
         flushed = harmony_parser.flush()
 
         assert flushed is None
-        assert_init_state(harmony_parser)
+        assert harmony_parser._parser is None
 
 
 class TestParse:
@@ -375,7 +364,7 @@ class TestParse:
         assert reasoning is None
         assert content == "I'm in the middle of answering"
         assert tool_calls is None
-        assert_init_state(harmony_parser)
+        assert harmony_parser._parser is None
 
     def test_interrupted_reasoning_first_message(self, harmony_parser, chat_request):
         reasoning, content, tool_calls = harmony_parser.parse(
@@ -389,7 +378,7 @@ class TestParse:
         assert reasoning == "I'm in the middle of thinking"
         assert content is None
         assert tool_calls is None
-        assert_init_state(harmony_parser)
+        assert harmony_parser._parser is None
 
     def test_truncated_output(self, harmony_parser, chat_request):
         reasoning, content, tool_calls = harmony_parser.parse(
@@ -405,7 +394,7 @@ class TestParse:
         assert reasoning == "I'm thinking."
         assert content == "I'm in the middle of answering"
         assert tool_calls is None
-        assert_init_state(harmony_parser)
+        assert harmony_parser._parser is None
 
     @pytest.mark.parametrize(
         ("harmony_str", "expected_content"),
@@ -483,7 +472,7 @@ class TestParseDelta:
         assert second_delta is not None
         assert second_delta.content == "Answer"
         assert second_delta.reasoning is None
-        assert_init_state(parser)
+        assert parser._parser is None
 
     def test_multi_token(self, gpt_oss_tokenizer, chat_request):
         parser = HarmonyParser(gpt_oss_tokenizer)
