@@ -274,7 +274,7 @@ def convert_to_unquantized_kernel_format(
             w13_weight = swap_w13_to_w31(w13_weight)
 
     elif unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
-        is_act_and_mul = layer.moe_config.is_act_and_mul
+        is_act_and_mul = moe_config.is_act_and_mul
         if not is_act_and_mul:
             # Kernel requires intermediate_size_per_partition % 128 == 0 (BlockMajorK
             # weight layout uses block_k=128). Pad along the intermediate dim when
@@ -282,7 +282,7 @@ def convert_to_unquantized_kernel_format(
             w13_weight, w2_weight, padded_intermediate = align_moe_weights_for_fi(
                 w13_weight, w2_weight, is_act_and_mul, min_alignment=128
             )
-            layer.moe_config.intermediate_size_per_partition = padded_intermediate
+            moe_config.intermediate_size_per_partition = padded_intermediate
 
         _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
         w13_weight, w2_weight = convert_moe_weights_to_flashinfer_trtllm_block_layout(
