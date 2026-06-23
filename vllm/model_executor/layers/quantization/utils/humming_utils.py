@@ -41,21 +41,12 @@ if TYPE_CHECKING:
         AWQWeightSchema,
         BaseInputSchema,
         BaseWeightSchema,
-        BitnetWeightSchema,
         CompressedTensorsInputSchema,
         CompressedTensorsWeightSchema,
-        Fp8InputSchema,
         Fp8WeightSchema,
-        GptOssMxfp4WeightSchema,
         GPTQWeightSchema,
         HummingInputSchema,
-        HummingMethod,
         HummingWeightSchema,
-        ModeloptMxfp8WeightSchema,
-        ModeloptNvfp4InputSchema,
-        ModeloptNvfp4WeightSchema,
-        Mxfp4WeightSchema,
-        WeightScaleType,
     )
     from vllm.utils.humming import dtypes as humming_dtypes
 
@@ -107,6 +98,8 @@ def _group_shape(group_size: int, group_size_n: int = 0) -> GroupShape:
 def _humming_weight_schema_to_quant_key(
     schema: "HummingWeightSchema",
 ) -> QuantKey:
+    from vllm.utils.humming import WeightScaleType
+
     """Convert a HummingWeightSchema to a QuantKey."""
     dtype = _HUMMING_TO_QUANT_DTYPE[schema.b_dtype]
 
@@ -233,6 +226,19 @@ def _compressed_tensors_weight_schema_to_quant_key(
 def weight_schema_to_quant_key(
     schema: "BaseWeightSchema",
 ) -> QuantKey:
+    from vllm.utils.humming import (
+        AWQWeightSchema,
+        BitnetWeightSchema,
+        CompressedTensorsWeightSchema,
+        Fp8WeightSchema,
+        GptOssMxfp4WeightSchema,
+        GPTQWeightSchema,
+        HummingWeightSchema,
+        ModeloptMxfp8WeightSchema,
+        ModeloptNvfp4WeightSchema,
+        Mxfp4WeightSchema,
+    )
+
     """Convert any BaseWeightSchema to a QuantKey."""
     if isinstance(schema, HummingWeightSchema):
         return _humming_weight_schema_to_quant_key(schema)
@@ -303,6 +309,8 @@ def _resolve_input_quant_key(
     origin_a_dtype: "humming_dtypes.DataType",
     group_size: int,
 ) -> QuantKey | None:
+    from vllm.utils.humming import HummingInputSchema
+
     """Resolve the actual activation QuantKey after platform fallback."""
     a_dtype = HummingInputSchema().get_fallback_input_dtype(origin_a_dtype)
     if a_dtype is None or a_dtype.num_bits >= 16:
@@ -338,6 +346,13 @@ def _compressed_tensors_input_schema_to_quant_key(
 def input_schema_to_quant_key(
     schema: "BaseInputSchema",
 ) -> QuantKey | None:
+    from vllm.utils.humming import (
+        CompressedTensorsInputSchema,
+        Fp8InputSchema,
+        HummingInputSchema,
+        ModeloptNvfp4InputSchema,
+    )
+
     """Convert any BaseInputSchema to a QuantKey. Returns None if
     the schema represents unquantized (bf16/fp16) inputs."""
     if isinstance(schema, HummingInputSchema):
@@ -421,6 +436,12 @@ def convert_linear_layer_to_humming_standard(
 
 
 def prepare_humming_layer(layer: LinearBase, quant_config: dict):
+    from vllm.utils.humming import (
+        BaseWeightSchema,
+        HummingInputSchema,
+        HummingMethod,
+    )
+
     weight_schema = BaseWeightSchema.from_config(quant_config)
     input_schema = HummingInputSchema()
 
