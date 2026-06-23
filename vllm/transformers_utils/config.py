@@ -82,6 +82,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     cosmos3_omni="Cosmos3Config",
     diffusion_gemma="DiffusionGemmaConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
+    **{"unlimited-ocr": "UnlimitedOCRConfig"},
     deepseek_v32="DeepseekV3Config",
     deepseek_v4="DeepseekV4Config",
     flex_olmo="FlexOlmoConfig",
