@@ -6,6 +6,7 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
@@ -116,6 +117,28 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         do_expand = not self.use_cudagraph
         do_cpu_sync = not self.use_cudagraph
 
+        # In do_expand=False mode, the recv buffer is the worst case
+        # R * num_max_tokens_per_rank. Defaulting to the buffer's init value
+        # (= max_num_batched_tokens) makes the experts process ~R*8192 rows even
+        # for a handful of decode tokens. Bound it to the actual DP-padded batch
+        # size (uniform across ranks): max(num_tokens_across_dp).
+        #
+        # DeepEP JIT-compiles a separate dispatch kernel per distinct
+        # num_max_tokens_per_rank, so feeding it the raw per-step size would make
+        # it recompile for every batch size (a cicc storm that starves the GPU at
+        # high concurrency). Round up to a power of 2 instead: this bounds the
+        # set to ~log2(max_num_batched_tokens) values (compiled once, then
+        # cached) while staying small for decode (e.g. 1 token -> 1) and capped
+        # at the buffer's init capacity for prefill.
+        num_max_tokens_per_rank = None
+        if not do_expand:
+            dp_meta = get_forward_context().dp_metadata
+            if dp_meta is not None:
+                n = int(dp_meta.num_tokens_across_dp_cpu.max())
+            else:
+                n = tokens.shape[0]
+            num_max_tokens_per_rank = 1 << max(n - 1, 0).bit_length()
+
         (
             recv_x,
             recv_topk_idx,
@@ -127,6 +150,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             topk_idx=rank_topk_ids,
             topk_weights=rank_topk_weights,
             num_experts=num_experts,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
             do_expand=do_expand,
             do_cpu_sync=do_cpu_sync,
             async_with_compute_stream=False,
