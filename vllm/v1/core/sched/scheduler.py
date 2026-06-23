@@ -1872,6 +1872,11 @@ class Scheduler(SchedulerInterface):
         if not cached_encoder_input_ids:
             return
 
+        # Defer the free by the drafter's look-ahead so an entry stays
+        # referenced until the drafter's +1 read has also passed it, mirroring
+        # the shift the encoder scheduling path applies.
+        spec_lookahead = 1 if self.use_eagle else 0
+
         # Here, we use list(set) to avoid modifying the set while iterating
         # over it.
         for input_id in list(cached_encoder_input_ids):
@@ -1884,13 +1889,12 @@ class Scheduler(SchedulerInterface):
                 # KVs have been calculated and cached already.
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
             elif (
-                start_pos + num_tokens
+                start_pos + num_tokens + spec_lookahead
                 <= request.num_computed_tokens - request.num_output_placeholders
             ):
-                # The encoder output is already processed and stored in the
-                # decoder's KV cache, and progress is far enough past the
-                # placeholder range that no pending draft-token rejection can
-                # roll num_computed_tokens back into it.
+                # Processed, stored in the decoder KV cache, and far enough past
+                # the placeholder range (plus the drafter's look-ahead) that no
+                # rejection or drafter gather can reference it.
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
