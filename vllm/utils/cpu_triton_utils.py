@@ -300,7 +300,6 @@ def _sample_recovered_tokens_kernel_impl(
     vocab_size,
     BLOCK_SIZE=None,
     NO_DRAFT_PROBS=False,
-    USE_FP64_GUMBEL=False,
 ):
     # C++ reads integer tensors as int64_t*; ensure correct dtype.
     orig_dtype = output_token_ids.dtype
@@ -311,8 +310,7 @@ def _sample_recovered_tokens_kernel_impl(
         _ensure_int64(draft_token_ids),
         draft_probs,
         target_probs,
-        # C++ kernel reads inv_q as float32.
-        inv_q.to(torch.float32),
+        inv_q,
         vocab_size,
         NO_DRAFT_PROBS,
     )
