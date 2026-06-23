@@ -164,6 +164,7 @@ pub fn lower_sampling_params(
         logit_bias,
         allowed_token_ids,
         bad_words_token_ids: tokenize_bad_words(bad_words.as_deref(), tokenizer)?,
+        // TODO: Validate structured-output schemas and regexes before submitting requests to engine-core.
         structured_outputs,
         logprob_token_ids,
         skip_reading_prefix_cache,

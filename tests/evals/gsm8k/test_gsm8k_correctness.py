@@ -48,6 +48,7 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
     results = evaluate_gsm8k(
         num_questions=eval_config["num_questions"],
         num_shots=eval_config["num_fewshot"],
+        max_tokens=eval_config.get("max_tokens", 256),
         host=host,
         port=port,
         request_timeout_seconds=request_timeout_seconds,
@@ -67,6 +68,15 @@ def test_gsm8k_correctness(config_filename):
         pytest.skip(
             "Skipping Qwen3-30B-A3B-MXFP4A16 on non-CUDA platforms. "
             "Marlin kernels are not supported."
+        )
+
+    if (
+        not current_platform.is_cuda()
+        and "gemma-4-E4B-it-qat-mobile-ct" in eval_config["model_name"]
+    ):
+        pytest.skip(
+            "Skipping gemma-4-E4B-it-qat-mobile-ct on non-CUDA platforms. "
+            "Its W2A16 (uint2b2) scheme has no kernel outside CUDA."
         )
 
     # TODO(akaratza): Enable DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms
