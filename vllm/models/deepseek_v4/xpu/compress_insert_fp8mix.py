@@ -50,8 +50,10 @@ def compress_norm_rope_store_sycl_fp8mix(
             f"got ndim={kv_cache.ndim}."
         )
 
-    # xpu_compress_insert_fp8mix currently expects fp32 RMSNorm weight.
-    if rms_norm_weight.dtype != torch.float32:
+    # xpu_compress_insert_fp8mix accepts fp32 or bf16 RMSNorm weight and upcasts
+    # to fp32 inside the kernel (matching Triton). Only convert exotic dtypes
+    # (e.g. fp16) that the kernel does not support, to avoid a hot-path .float().
+    if rms_norm_weight.dtype not in (torch.float32, torch.bfloat16):
         rms_norm_weight = rms_norm_weight.float()
 
     torch.ops._xpu_C.xpu_compress_insert_fp8mix(
