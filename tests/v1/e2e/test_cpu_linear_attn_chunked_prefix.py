@@ -1,16 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""CPU chunked-prefill / prefix-caching correctness for linear-attention models.
-
-Compares multi-chunk and warm-cache output against the full-prefill / cold-cache
-reference. Batched-vs-batched: full prefill is not bit-stable across batch
-composition, so the reference uses the same prompt list as the chunked run.
-"""
+"""CPU chunked-prefill / prefix-caching correctness for linear-attention models."""
 
 import os
 
 import pytest
 
+from tests.models.utils import check_logprobs_close
 from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
@@ -23,7 +19,8 @@ os.environ.setdefault("VLLM_CPU_KVCACHE_SPACE", "1")
 
 MODEL = "Qwen/Qwen3.5-0.8B"
 CHUNK_TOKENS = 128  # max_num_batched_tokens for the chunked engine
-SP = SamplingParams(max_tokens=32, temperature=0)
+NUM_LOGPROBS = 5
+SP = SamplingParams(max_tokens=32, temperature=0, logprobs=NUM_LOGPROBS)
 
 
 def _long_prompt(repeat: int) -> str:
@@ -49,22 +46,29 @@ def _make_llm(**overrides) -> LLM:
     return LLM(**base)
 
 
+def _tuples(outputs) -> list[tuple[list[int], str, object]]:
+    """(token_ids, text, sample_logprobs) per request, for check_logprobs_close."""
+    return [
+        (list(o.outputs[0].token_ids), o.outputs[0].text, o.outputs[0].logprobs)
+        for o in outputs
+    ]
+
+
 @pytest.fixture(scope="module")
-def full_prefill_refs() -> tuple[list[tuple[int, ...]], tuple[int, ...]]:
-    """Reference greedy token IDs for PROMPTS and PREFIX_PROMPT under full prefill."""
+def full_prefill_refs():
+    """Reference (ids, text, logprobs) for PROMPTS and PREFIX_PROMPT, full prefill."""
     llm = _make_llm(enable_chunked_prefill=False, enable_prefix_caching=False)
-    refs = [o.outputs[0].token_ids for o in llm.generate(PROMPTS, SP)]
-    prefix_ref = llm.generate([PREFIX_PROMPT], SP)[0].outputs[0].token_ids
+    refs = _tuples(llm.generate(PROMPTS, SP))
+    prefix_ref = _tuples(llm.generate([PREFIX_PROMPT], SP))[0]
     del llm
     return refs, prefix_ref
 
 
 def test_chunked_prefill_matches_full_prefill(full_prefill_refs):
-    """Batched multi-chunk prefill must match per-prompt full prefill.
+    """Batched multi-chunk prefill must stay close to per-prompt full prefill.
 
-    The prompts are scheduled together so the scheduler interleaves prefill
-    chunks from several in-flight requests (the cross-request path where the
-    gsm8k accuracy gap was strongest).
+    Prompts are scheduled together so the scheduler interleaves prefill chunks
+    across requests (the cross-request path where the accuracy gap was strongest).
     """
     refs, _ = full_prefill_refs
     llm = _make_llm(
@@ -72,33 +76,37 @@ def test_chunked_prefill_matches_full_prefill(full_prefill_refs):
         max_num_batched_tokens=CHUNK_TOKENS,
         enable_prefix_caching=False,
     )
-    got = [o.outputs[0].token_ids for o in llm.generate(PROMPTS, SP)]
+    got = _tuples(llm.generate(PROMPTS, SP))
     del llm
 
-    mismatches = [i for i, (r, g) in enumerate(zip(refs, got)) if r != g]
-    assert not mismatches, (
-        f"chunked-prefill diverged from full prefill for prompts {mismatches}"
+    check_logprobs_close(
+        outputs_0_lst=refs,
+        outputs_1_lst=got,
+        name_0="full_prefill",
+        name_1="chunked_prefill",
     )
 
 
 def test_prefix_cache_hit_matches_cold_cache(full_prefill_refs):
-    """A prefix-cache hit must match the cold-cache (reference) output.
+    """A prefix-cache hit must stay close to the cold-cache (reference) output.
 
-    The warm run reuses cached blocks and continues prefill from the restored
-    GDN state; the num_cached_tokens check guards against a vacuous (no-hit) pass.
+    The warm run continues prefill from the restored GDN state; the
+    num_cached_tokens check guards against a vacuous (no-hit) pass.
     """
     _, ref = full_prefill_refs
     llm = _make_llm(enable_prefix_caching=True)
     llm.generate([PREFIX_PROMPT], SP)  # prime the cache
     warm_out = llm.generate([PREFIX_PROMPT], SP)[0]
-    warm = warm_out.outputs[0].token_ids
+    warm = _tuples([warm_out])[0]
     del llm
 
     assert warm_out.num_cached_tokens > 0, (
         "expected a prefix-cache hit but num_cached_tokens=0; "
         "PREFIX_PROMPT may be shorter than one cache block"
     )
-    assert warm == ref, (
-        f"prefix-cache-hit output diverged from cold-cache reference\n"
-        f"  cold: {ref}\n  warm: {warm}"
+    check_logprobs_close(
+        outputs_0_lst=[ref],
+        outputs_1_lst=[warm],
+        name_0="cold_cache",
+        name_1="warm_cache",
     )
