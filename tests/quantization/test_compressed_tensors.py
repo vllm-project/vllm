@@ -702,12 +702,12 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
         (None, 32, 64, 128, (False, 64, True)),
     ],
 )
-def test_wna16_marlin_moe_w2_scale_sharding(actorder, group_size, part, full, expected):
-    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16_marlin import (  # noqa: E501
-        CompressedTensorsWNA16MarlinMoEMethod,
+def test_wna16_moe_w2_scale_sharding(actorder, group_size, part, full, expected):
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_wna16 import (  # noqa: E501
+        CompressedTensorsWNA16MoEMethod,
     )
 
-    result = CompressedTensorsWNA16MarlinMoEMethod._w2_scale_sharding(
+    result = CompressedTensorsWNA16MoEMethod._w2_scale_sharding(
         actorder, group_size, part, full
     )
     assert result == expected
