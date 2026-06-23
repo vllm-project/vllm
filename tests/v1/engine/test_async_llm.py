@@ -517,7 +517,6 @@ async def test_header_dp_rank_argument():
         online_renderer = OnlineRenderer(
             model_config=engine.model_config,
             renderer=engine.renderer,
-            model_registry=models.registry,
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",

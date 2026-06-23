@@ -15,6 +15,10 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
 )
+from vllm.entrypoints.openai.models.serving import (
+    OpenAIModelRegistry,
+    OpenAIServingModels,
+)
 from vllm.entrypoints.serve.disagg.mm_serde import encode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import (
     DerenderChatRequest,
@@ -37,6 +41,7 @@ from vllm.renderers.inputs.preprocess import (
     extract_prompt_components,
     extract_prompt_len,
 )
+from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.utils import random_uuid
 
@@ -46,16 +51,21 @@ logger = init_logger(__name__)
 class ServingRender(BaseServing):
     def __init__(
         self,
+        models: OpenAIServingModels | OpenAIModelRegistry,
         online_renderer: "OnlineRenderer",
+        online_derenderer: "OnlineDerenderer",
+        *,
         request_logger: RequestLogger | None = None,
     ) -> None:
         super().__init__(
-            models=online_renderer.model_registry,
+            models=models,
             model_config=online_renderer.model_config,
             request_logger=request_logger,
         )
 
         self.online_renderer = online_renderer
+        self.online_derenderer = online_derenderer
+
         self.default_sampling_params = (
             online_renderer.model_config.get_diff_sampling_param()
         )
@@ -207,7 +217,7 @@ class ServingRender(BaseServing):
             return error_check_ret
 
         try:
-            choices = await self.online_renderer.derender_chat(
+            choices = await self.online_derenderer.derender_chat(
                 request.generate_response, request.chat_request
             )
         except ValueError as exc:
@@ -259,7 +269,7 @@ class ServingRender(BaseServing):
             choices,
             total_prompt_tokens,
             total_completion_tokens,
-        ) = await self.online_renderer.derender_completion(
+        ) = await self.online_derenderer.derender_completion(
             request.generate_responses, request.prompt_tokens
         )
 

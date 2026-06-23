@@ -147,7 +147,6 @@ def mock_serving_setup():
     online_renderer = OnlineRenderer(
         model_config=mock_engine.model_config,
         renderer=mock_engine.renderer,
-        model_registry=models.registry,
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
