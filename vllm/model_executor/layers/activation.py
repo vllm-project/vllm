@@ -296,8 +296,10 @@ class GELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM and hasattr(
-            torch.ops._C, "activation_lut_bf16"
+        if (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+            and hasattr(torch.ops._C, "activation_lut_bf16")
         ):
             self.op = torch.ops._C.activation_lut_bf16
         else:
@@ -324,8 +326,10 @@ class GELUTanh(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM and hasattr(
-            torch.ops._C, "gelu_tanh"
+        if (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+            and hasattr(torch.ops._C, "gelu_tanh")
         ):
             self.op = torch.ops._C.gelu_tanh
         else:
@@ -397,7 +401,9 @@ class GeluAndMul(CustomOp):
         return out
 
     def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_cuda(x)
+        if self.op:
+            return self.forward_cuda(x)
+        return self.native(x)
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_cuda(x)
@@ -762,7 +768,10 @@ def _get_gelu_pytorch_tanh() -> nn.Module:
             "Falling back to GELU(approximate='none')."
         )
         return nn.GELU(approximate="none")
-    if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
+    if (
+        current_platform.is_cpu()
+        and current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+    ):
         return GELUTanh()
     return nn.GELU(approximate="tanh")
 
