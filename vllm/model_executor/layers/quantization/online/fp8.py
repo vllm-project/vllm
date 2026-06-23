@@ -483,6 +483,8 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
             per_act_token_quant=self.per_act_token_quant,
             per_out_ch_quant=self.per_out_ch_quant,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
         )
 
 
