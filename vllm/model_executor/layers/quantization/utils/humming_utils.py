@@ -33,52 +33,55 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
 )
-from vllm.utils.humming import (
-    AWQWeightSchema,
-    BaseInputSchema,
-    BaseWeightSchema,
-    BitnetWeightSchema,
-    CompressedTensorsInputSchema,
-    CompressedTensorsWeightSchema,
-    Fp8InputSchema,
-    Fp8WeightSchema,
-    GptOssMxfp4WeightSchema,
-    GPTQWeightSchema,
-    HummingInputSchema,
-    HummingMethod,
-    HummingWeightSchema,
-    ModeloptMxfp8WeightSchema,
-    ModeloptNvfp4InputSchema,
-    ModeloptNvfp4WeightSchema,
-    Mxfp4WeightSchema,
-    WeightScaleType,
-)
-from vllm.utils.humming import dtypes as humming_dtypes
 from vllm.utils.import_utils import has_humming
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.utils.humming import (
+        AWQWeightSchema,
+        BaseInputSchema,
+        BaseWeightSchema,
+        BitnetWeightSchema,
+        CompressedTensorsInputSchema,
+        CompressedTensorsWeightSchema,
+        Fp8InputSchema,
+        Fp8WeightSchema,
+        GptOssMxfp4WeightSchema,
+        GPTQWeightSchema,
+        HummingInputSchema,
+        HummingMethod,
+        HummingWeightSchema,
+        ModeloptMxfp8WeightSchema,
+        ModeloptNvfp4InputSchema,
+        ModeloptNvfp4WeightSchema,
+        Mxfp4WeightSchema,
+        WeightScaleType,
+    )
+    from vllm.utils.humming import dtypes as humming_dtypes
 
 logger = init_logger(__name__)
 
-_HUMMING_TO_QUANT_DTYPE: dict[humming_dtypes.DataType, Any] = {
-    humming_dtypes.float4e2m1: FP4_DTYPE,
-    humming_dtypes.float8e4m3: FP8_DTYPE,
-    humming_dtypes.float8e5m2: torch.float8_e5m2,
-    humming_dtypes.int8: torch.int8,
-    humming_dtypes.uint4: INT4_DTYPE,
-    humming_dtypes.uint8: INT8_DTYPE,
-    humming_dtypes.uint2: torch.uint8,
-    humming_dtypes.uint3: torch.uint8,
-}
+if has_humming():
+    from vllm.utils.humming import dtypes as humming_dtypes
 
-_HUMMING_TO_SCALE_DTYPE: dict[humming_dtypes.DataType, torch.dtype] = {
-    humming_dtypes.float8e8m0: MXFP_SCALE_DTYPE,
-    humming_dtypes.float8e4m3: FP8_DTYPE,
-    humming_dtypes.float16: torch.float16,
-    humming_dtypes.bfloat16: torch.bfloat16,
-    humming_dtypes.float32: torch.float32,
-}
+    _HUMMING_TO_QUANT_DTYPE: dict[humming_dtypes.DataType, Any] = {
+        humming_dtypes.float4e2m1: FP4_DTYPE,
+        humming_dtypes.float8e4m3: FP8_DTYPE,
+        humming_dtypes.float8e5m2: torch.float8_e5m2,
+        humming_dtypes.int8: torch.int8,
+        humming_dtypes.uint4: INT4_DTYPE,
+        humming_dtypes.uint8: INT8_DTYPE,
+        humming_dtypes.uint2: torch.uint8,
+        humming_dtypes.uint3: torch.uint8,
+    }
+
+    _HUMMING_TO_SCALE_DTYPE: dict[humming_dtypes.DataType, torch.dtype] = {
+        humming_dtypes.float8e8m0: MXFP_SCALE_DTYPE,
+        humming_dtypes.float8e4m3: FP8_DTYPE,
+        humming_dtypes.float16: torch.float16,
+        humming_dtypes.bfloat16: torch.bfloat16,
+        humming_dtypes.float32: torch.float32,
+    }
 
 
 def _group_shape(group_size: int, group_size_n: int = 0) -> GroupShape:
@@ -102,7 +105,7 @@ def _group_shape(group_size: int, group_size_n: int = 0) -> GroupShape:
 
 
 def _humming_weight_schema_to_quant_key(
-    schema: HummingWeightSchema,
+    schema: "HummingWeightSchema",
 ) -> QuantKey:
     """Convert a HummingWeightSchema to a QuantKey."""
     dtype = _HUMMING_TO_QUANT_DTYPE[schema.b_dtype]
@@ -138,7 +141,7 @@ def _humming_weight_schema_to_quant_key(
 # ---- Checkpoint-format weight schemas (pre-conversion) --------------------
 
 
-def _fp8_weight_schema_to_quant_key(schema: Fp8WeightSchema) -> QuantKey:
+def _fp8_weight_schema_to_quant_key(schema: "Fp8WeightSchema") -> QuantKey:
     if schema.weight_block_size is not None:
         gs_n, gs_k = schema.weight_block_size
         group_shape = GroupShape(row=gs_n, col=gs_k)
@@ -149,7 +152,7 @@ def _fp8_weight_schema_to_quant_key(schema: Fp8WeightSchema) -> QuantKey:
     return QuantKey(dtype=FP8_DTYPE, scale=scale, symmetric=True)
 
 
-def _awq_weight_schema_to_quant_key(schema: AWQWeightSchema) -> QuantKey:
+def _awq_weight_schema_to_quant_key(schema: "AWQWeightSchema") -> QuantKey:
     group_shape = _group_shape(schema.group_size)
     scale = ScaleDesc(
         dtype=torch.float16,
@@ -163,7 +166,7 @@ def _awq_weight_schema_to_quant_key(schema: AWQWeightSchema) -> QuantKey:
     )
 
 
-def _gptq_weight_schema_to_quant_key(schema: GPTQWeightSchema) -> QuantKey:
+def _gptq_weight_schema_to_quant_key(schema: "GPTQWeightSchema") -> QuantKey:
     group_shape = _group_shape(schema.group_size)
     scale = ScaleDesc(
         dtype=torch.float16,
@@ -174,7 +177,7 @@ def _gptq_weight_schema_to_quant_key(schema: GPTQWeightSchema) -> QuantKey:
 
 
 def _compressed_tensors_weight_schema_to_quant_key(
-    schema: CompressedTensorsWeightSchema,
+    schema: "CompressedTensorsWeightSchema",
 ) -> QuantKey:
     # Determine dtype from format/type/num_bits
     fmt = schema.format
@@ -228,7 +231,7 @@ def _compressed_tensors_weight_schema_to_quant_key(
 
 
 def weight_schema_to_quant_key(
-    schema: BaseWeightSchema,
+    schema: "BaseWeightSchema",
 ) -> QuantKey:
     """Convert any BaseWeightSchema to a QuantKey."""
     if isinstance(schema, HummingWeightSchema):
@@ -274,7 +277,7 @@ def weight_schema_to_quant_key(
 
 
 def _humming_input_schema_to_quant_key(
-    schema: HummingInputSchema,
+    schema: "HummingInputSchema",
 ) -> QuantKey | None:
     """Convert a HummingInputSchema to a QuantKey. Returns None if
     the schema represents unquantized (bf16/fp16) inputs."""
@@ -297,7 +300,7 @@ def _humming_input_schema_to_quant_key(
 
 
 def _resolve_input_quant_key(
-    origin_a_dtype: humming_dtypes.DataType,
+    origin_a_dtype: "humming_dtypes.DataType",
     group_size: int,
 ) -> QuantKey | None:
     """Resolve the actual activation QuantKey after platform fallback."""
@@ -315,7 +318,7 @@ def _resolve_input_quant_key(
 
 
 def _compressed_tensors_input_schema_to_quant_key(
-    schema: CompressedTensorsInputSchema,
+    schema: "CompressedTensorsInputSchema",
 ) -> QuantKey | None:
     type_bits_to_dtype = {
         ("float", 8): humming_dtypes.float8e4m3,
@@ -333,7 +336,7 @@ def _compressed_tensors_input_schema_to_quant_key(
 
 
 def input_schema_to_quant_key(
-    schema: BaseInputSchema,
+    schema: "BaseInputSchema",
 ) -> QuantKey | None:
     """Convert any BaseInputSchema to a QuantKey. Returns None if
     the schema represents unquantized (bf16/fp16) inputs."""
