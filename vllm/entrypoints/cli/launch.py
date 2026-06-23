@@ -19,6 +19,7 @@ from vllm.entrypoints.grpc import (  # type: ignore[attr-defined]
     vllm_render_pb2,
     vllm_render_pb2_grpc,
 )
+from vllm.entrypoints.grpc.auth import build_auth_interceptors
 from vllm.entrypoints.grpc.render_servicer import RenderGrpcServicer
 from vllm.entrypoints.openai.api_server import (
     build_and_serve_renderer,
@@ -161,6 +162,9 @@ async def run_launch_grpc(args: argparse.Namespace) -> None:
     start_time = time.time()
     servicer = RenderGrpcServicer(state, start_time)
     server = grpc.aio.server(
+        # Enforce the same --api-key / VLLM_API_KEY auth as the HTTP server
+        # (no-op when no key is configured).
+        interceptors=build_auth_interceptors(args),
         options=[
             ("grpc.max_send_message_length", -1),
             ("grpc.max_receive_message_length", -1),
