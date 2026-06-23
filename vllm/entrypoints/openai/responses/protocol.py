@@ -19,6 +19,7 @@ from openai.types.responses import (
     ResponseMcpCallArgumentsDeltaEvent,
     ResponseMcpCallArgumentsDoneEvent,
     ResponseMcpCallCompletedEvent,
+    ResponseMcpCallFailedEvent,
     ResponseMcpCallInProgressEvent,
     ResponseOutputItem,
     ResponseOutputItemAddedEvent,
@@ -818,4 +819,5 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseMcpCallArgumentsDoneEvent
     | ResponseMcpCallInProgressEvent
     | ResponseMcpCallCompletedEvent
+    | ResponseMcpCallFailedEvent
 )

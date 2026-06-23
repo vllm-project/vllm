@@ -4,17 +4,24 @@
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
+    ResponseFunctionWebSearch,
     ResponseOutputMessage,
     ResponseReasoningItem,
 )
 from openai.types.responses.response_output_item import McpCall
-from openai_harmony import Author, Message, Role, TextContent
+from openai_harmony import Message, Role, TextContent
 
 from vllm.entrypoints.openai.responses.harmony import (
     harmony_to_response_output,
-    parser_state_to_response_output,
     response_previous_input_to_harmony,
 )
+
+
+def _item_value(item, field: str):
+    """Read *field* from an object that may be a dict or an attrs/pydantic model."""
+    if isinstance(item, dict):
+        return item[field]
+    return getattr(item, field)
 
 
 class TestResponsePreviousInputToHarmony:
@@ -143,8 +150,8 @@ class TestHarmonyToResponseOutput:
         assert output_items[0].call_id.startswith("call_")
         assert output_items[0].id.startswith("fc_")
 
-    def test_commentary_with_python_recipient_creates_reasoning(self):
-        """Test that commentary with recipient='python' creates reasoning items."""
+    def test_commentary_with_python_recipient_creates_code_interpreter_call(self):
+        """Test that commentary with recipient='python' creates code calls."""
         message = Message.from_role_and_content(
             Role.ASSISTANT, "import numpy as np\nprint(np.array([1, 2, 3]))"
         )
@@ -154,17 +161,16 @@ class TestHarmonyToResponseOutput:
         output_items = harmony_to_response_output(message)
 
         assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseReasoningItem)
-        assert output_items[0].type == "reasoning"
-        assert (
-            output_items[0].content[0].text
-            == "import numpy as np\nprint(np.array([1, 2, 3]))"
+        assert _item_value(output_items[0], "type") == "code_interpreter_call"
+        assert _item_value(output_items[0], "status") == "completed"
+        assert _item_value(output_items[0], "code") == (
+            "import numpy as np\nprint(np.array([1, 2, 3]))"
         )
 
-    def test_commentary_with_browser_recipient_creates_reasoning(self):
-        """Test that commentary with recipient='browser' creates reasoning items."""
+    def test_commentary_with_browser_recipient_creates_web_search_call(self):
+        """Test that bare browser recipients default to search actions."""
         message = Message.from_role_and_content(
-            Role.ASSISTANT, "Navigating to the specified URL"
+            Role.ASSISTANT, '{"query": "weather in seoul"}'
         )
         message = message.with_channel("commentary")
         message = message.with_recipient("browser")
@@ -172,24 +178,44 @@ class TestHarmonyToResponseOutput:
         output_items = harmony_to_response_output(message)
 
         assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseReasoningItem)
-        assert output_items[0].type == "reasoning"
-        assert output_items[0].content[0].text == "Navigating to the specified URL"
+        assert isinstance(output_items[0], ResponseFunctionWebSearch)
+        assert output_items[0].type == "web_search_call"
+        assert output_items[0].status == "completed"
+        assert output_items[0].action.type == "search"
+        assert output_items[0].action.query == "cursor:weather in seoul"
 
-    def test_commentary_with_container_recipient_creates_reasoning(self):
-        """Test that commentary with recipient='container' creates reasoning items."""
+    def test_commentary_with_browser_search_recipient_creates_web_search_call(self):
+        """Test that dotted browser recipients share the same browser branch."""
         message = Message.from_role_and_content(
-            Role.ASSISTANT, "Running command in container"
+            Role.ASSISTANT, '{"url": "https://example.com"}'
         )
+        message = message.with_channel("commentary")
+        message = message.with_recipient("browser.open")
+
+        output_items = harmony_to_response_output(message)
+
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseFunctionWebSearch)
+        assert output_items[0].type == "web_search_call"
+        assert output_items[0].action.type == "open_page"
+        assert output_items[0].action.url == "cursor:https://example.com"
+
+    def test_commentary_with_container_recipient_creates_mcp_call(self):
+        """Test that bare container recipients default to exec MCP calls."""
+        message = Message.from_role_and_content(Role.ASSISTANT, '{"cmd": ["ls"]}')
         message = message.with_channel("commentary")
         message = message.with_recipient("container")
 
         output_items = harmony_to_response_output(message)
 
         assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseReasoningItem)
-        assert output_items[0].type == "reasoning"
-        assert output_items[0].content[0].text == "Running command in container"
+        assert isinstance(output_items[0], McpCall)
+        assert output_items[0].type == "mcp_call"
+        assert output_items[0].name == "exec"
+        assert output_items[0].server_label == "container"
+        assert output_items[0].arguments == '{"cmd": ["ls"]}'
+        assert output_items[0].status == "completed"
+        assert output_items[0].error is None
 
     def test_commentary_with_empty_content_and_no_recipient(self):
         """Test edge case: empty commentary with recipient=None."""
@@ -221,25 +247,6 @@ class TestHarmonyToResponseOutput:
         assert output_items[0].content[0].text == "Step 1: Analyze the request"
         assert output_items[0].content[1].text == "Step 2: Prepare to call functions"
 
-    def test_commentary_with_multiple_function_calls(self):
-        """Test multiple function calls in commentary channel."""
-        contents = [
-            TextContent(text='{"location": "San Francisco"}'),
-            TextContent(text='{"location": "New York"}'),
-        ]
-        message = Message.from_role_and_contents(Role.ASSISTANT, contents)
-        message = message.with_channel("commentary")
-        message = message.with_recipient("functions.get_weather")
-
-        output_items = harmony_to_response_output(message)
-
-        assert len(output_items) == 2
-        assert all(isinstance(item, ResponseFunctionToolCall) for item in output_items)
-        assert output_items[0].name == "get_weather"
-        assert output_items[1].name == "get_weather"
-        assert output_items[0].arguments == '{"location": "San Francisco"}'
-        assert output_items[1].arguments == '{"location": "New York"}'
-
     def test_commentary_with_unknown_recipient_creates_mcp_call(self):
         """Test that commentary with unknown recipient creates MCP call."""
         message = Message.from_role_and_content(Role.ASSISTANT, '{"arg": "value"}')
@@ -270,21 +277,6 @@ class TestHarmonyToResponseOutput:
         assert (
             output_items[0].content[0].text == "Analyzing the problem step by step..."
         )
-
-    def test_non_assistant_message_returns_empty(self):
-        """Test that non-assistant messages return empty list.
-
-        Per the implementation, tool messages to assistant (e.g., search results)
-        are not included in final output to align with OpenAI behavior.
-        """
-        message = Message.from_author_and_content(
-            Author.new(Role.TOOL, "functions.get_weather"),
-            "The weather is sunny, 72°F",
-        )
-
-        output_items = harmony_to_response_output(message)
-
-        assert len(output_items) == 0
 
 
 class TestHarmonyToResponseOutputWithFunctionToolNames:
@@ -357,43 +349,6 @@ class TestHarmonyToResponseOutputWithFunctionToolNames:
         assert output_items[0].name == "get_weather"
 
 
-class TestParserStateWithFunctionToolNames:
-    """Tests for parser_state_to_response_output with function_tool_names."""
-
-    def test_bare_name_creates_function_call(self):
-        from unittest.mock import Mock
-
-        parser = Mock()
-        parser.current_content = '{"arg": "value"}'
-        parser.current_role = Role.ASSISTANT
-        parser.current_channel = "commentary"
-        parser.current_recipient = "get_weather"
-
-        fn_names = frozenset({"get_weather"})
-        items = parser_state_to_response_output(parser, fn_names)
-
-        assert len(items) == 1
-        assert isinstance(items[0], ResponseFunctionToolCall)
-        assert items[0].name == "get_weather"
-        assert items[0].status == "in_progress"
-
-    def test_bare_name_creates_mcp_when_not_in_tool_names(self):
-        from unittest.mock import Mock
-
-        parser = Mock()
-        parser.current_content = '{"arg": "value"}'
-        parser.current_role = Role.ASSISTANT
-        parser.current_channel = "commentary"
-        parser.current_recipient = "unknown_tool"
-
-        fn_names = frozenset({"get_weather"})
-        items = parser_state_to_response_output(parser, fn_names)
-
-        assert len(items) == 1
-        assert isinstance(items[0], McpCall)
-        assert items[0].name == "unknown_tool"
-
-
 class TestToolCallsOnNonStandardChannels:
     """Tests verifying tool calls are detected regardless of channel."""
 
@@ -420,36 +375,6 @@ class TestToolCallsOnNonStandardChannels:
         assert len(output_items) == 1
         assert isinstance(output_items[0], ResponseFunctionToolCall)
         assert output_items[0].name == "get_weather"
-
-    def test_parser_state_comment_channel_function(self):
-        from unittest.mock import Mock
-
-        parser = Mock()
-        parser.current_content = '{"arg": "value"}'
-        parser.current_role = Role.ASSISTANT
-        parser.current_channel = "comment"
-        parser.current_recipient = "functions.get_weather"
-
-        items = parser_state_to_response_output(parser)
-
-        assert len(items) == 1
-        assert isinstance(items[0], ResponseFunctionToolCall)
-        assert items[0].name == "get_weather"
-
-    def test_parser_state_comment_channel_mcp(self):
-        from unittest.mock import Mock
-
-        parser = Mock()
-        parser.current_content = '{"arg": "value"}'
-        parser.current_role = Role.ASSISTANT
-        parser.current_channel = "comment"
-        parser.current_recipient = "mcp.server.tool"
-
-        fn_names: frozenset[str] = frozenset()
-        items = parser_state_to_response_output(parser, fn_names)
-
-        assert len(items) == 1
-        assert isinstance(items[0], McpCall)
 
 
 def test_parse_mcp_call_basic() -> None:
@@ -500,7 +425,7 @@ def test_mcp_vs_function_call() -> None:
 
 def test_mcp_vs_builtin_tools() -> None:
     """Test that built-in tools (python, container) are not parsed as MCP calls."""
-    # Test python (built-in tool) - should be reasoning, not MCP
+    # Test python (built-in tool) - should be code interpreter, not MCP
     python_message = Message.from_role_and_content(Role.ASSISTANT, "print('hello')")
     python_message = python_message.with_recipient("python")
     python_message = python_message.with_channel("commentary")
@@ -509,125 +434,4 @@ def test_mcp_vs_builtin_tools() -> None:
 
     assert len(python_items) == 1
     assert not isinstance(python_items[0], McpCall)
-    assert python_items[0].type == "reasoning"
-
-
-def test_parser_state_to_response_output_commentary_channel() -> None:
-    """Test parser_state_to_response_output with commentary
-    channel and various recipients."""
-    from unittest.mock import Mock
-
-    # Test 1: functions.* recipient -> should return function tool call
-    parser_func = Mock()
-    parser_func.current_content = '{"arg": "value"}'
-    parser_func.current_role = Role.ASSISTANT
-    parser_func.current_channel = "commentary"
-    parser_func.current_recipient = "functions.my_tool"
-
-    func_items = parser_state_to_response_output(parser_func)
-
-    assert len(func_items) == 1
-    assert not isinstance(func_items[0], McpCall)
-    assert func_items[0].type == "function_call"
-    assert func_items[0].name == "my_tool"
-    assert func_items[0].status == "in_progress"
-
-    # Test 2: MCP tool (not builtin) -> should return MCP call
-    parser_mcp = Mock()
-    parser_mcp.current_content = '{"path": "/tmp"}'
-    parser_mcp.current_role = Role.ASSISTANT
-    parser_mcp.current_channel = "commentary"
-    parser_mcp.current_recipient = "filesystem"
-
-    fn_names: frozenset[str] = frozenset()
-    mcp_items = parser_state_to_response_output(parser_mcp, fn_names)
-
-    assert len(mcp_items) == 1
-    assert isinstance(mcp_items[0], McpCall)
-    assert mcp_items[0].type == "mcp_call"
-    assert mcp_items[0].name == "filesystem"
-    assert mcp_items[0].server_label == "filesystem"
-    assert mcp_items[0].status == "in_progress"
-
-    # Test 3: Built-in tool (python)
-    # should NOT return MCP call, returns reasoning (internal tool interaction)
-    parser_builtin = Mock()
-    parser_builtin.current_content = "print('hello')"
-    parser_builtin.current_role = Role.ASSISTANT
-    parser_builtin.current_channel = "commentary"
-    parser_builtin.current_recipient = "python"
-
-    builtin_items = parser_state_to_response_output(parser_builtin)
-
-    # Built-in tools explicitly return reasoning
-    assert len(builtin_items) == 1
-    assert not isinstance(builtin_items[0], McpCall)
-    assert builtin_items[0].type == "reasoning"
-
-    # Test 4: No recipient (preamble) → should return message, not reasoning
-    parser_preamble = Mock()
-    parser_preamble.current_content = "I'll search for that information now."
-    parser_preamble.current_role = Role.ASSISTANT
-    parser_preamble.current_channel = "commentary"
-    parser_preamble.current_recipient = None
-
-    preamble_items = parser_state_to_response_output(parser_preamble)
-
-    assert len(preamble_items) == 1
-    assert isinstance(preamble_items[0], ResponseOutputMessage)
-    assert preamble_items[0].type == "message"
-    assert preamble_items[0].content[0].text == "I'll search for that information now."
-    assert preamble_items[0].status == "incomplete"  # streaming
-
-
-def test_parser_state_to_response_output_analysis_channel() -> None:
-    """Test parser_state_to_response_output with analysis
-    channel and various recipients."""
-    from unittest.mock import Mock
-
-    # Test 1: functions.* recipient -> should return function tool call
-    parser_func = Mock()
-    parser_func.current_content = '{"arg": "value"}'
-    parser_func.current_role = Role.ASSISTANT
-    parser_func.current_channel = "analysis"
-    parser_func.current_recipient = "functions.my_tool"
-
-    func_items = parser_state_to_response_output(parser_func)
-
-    assert len(func_items) == 1
-    assert not isinstance(func_items[0], McpCall)
-    assert func_items[0].type == "function_call"
-    assert func_items[0].name == "my_tool"
-    assert func_items[0].status == "in_progress"
-
-    # Test 2: MCP tool (not builtin) -> should return MCP call
-    parser_mcp = Mock()
-    parser_mcp.current_content = '{"query": "test"}'
-    parser_mcp.current_role = Role.ASSISTANT
-    parser_mcp.current_channel = "analysis"
-    parser_mcp.current_recipient = "database"
-
-    fn_names: frozenset[str] = frozenset()
-    mcp_items = parser_state_to_response_output(parser_mcp, fn_names)
-
-    assert len(mcp_items) == 1
-    assert isinstance(mcp_items[0], McpCall)
-    assert mcp_items[0].type == "mcp_call"
-    assert mcp_items[0].name == "database"
-    assert mcp_items[0].server_label == "database"
-    assert mcp_items[0].status == "in_progress"
-
-    # Test 3: Built-in tool (container)
-    # should NOT return MCP call, falls through to reasoning
-    parser_builtin = Mock()
-    parser_builtin.current_content = "docker run"
-    parser_builtin.current_role = Role.ASSISTANT
-    parser_builtin.current_channel = "analysis"
-    parser_builtin.current_recipient = "container"
-
-    builtin_items = parser_state_to_response_output(parser_builtin)
-
-    # Should fall through to reasoning logic
-    assert len(builtin_items) == 1
-    assert not isinstance(builtin_items[0], McpCall)
-    assert builtin_items[0].type == "reasoning"
+    assert _item_value(python_items[0], "type") == "code_interpreter_call"

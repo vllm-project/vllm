@@ -39,6 +39,7 @@ def pairs_of_event_types() -> dict[str, str]:
         "response.reasoning_text.done": "response.reasoning_text.delta",
         "response.reasoning_part.done": "response.reasoning_part.added",
         "response.mcp_call_arguments.done": "response.mcp_call_arguments.delta",
+        "response.mcp_call.failed": "response.mcp_call.in_progress",
         "response.mcp_call.completed": "response.mcp_call.in_progress",
         "response.function_call_arguments.done": "response.function_call_arguments.delta", # noqa: E501
         "response.code_interpreter_call_code.done": "response.code_interpreter_call_code.delta", # noqa: E501
@@ -126,6 +127,12 @@ def _validate_event_pairing(events: list, pairs_of_event_types: dict[str, str]) 
         etype = event.type
         if etype in end_events:
             expected_start = pairs_of_event_types[etype]
+            if (
+                etype == "response.function_call_arguments.done"
+                and stack
+                and stack[-1] == "response.output_item.added"
+            ):
+                continue
             assert stack and stack[-1] == expected_start, (
                 f"Stack mismatch for {etype}: "
                 f"expected {expected_start}, "

@@ -55,13 +55,15 @@ from vllm.entrypoints.openai.responses.context import (
     HarmonyContext,
     ParsableContext,
     SimpleContext,
-    StreamingHarmonyContext,
 )
 from vllm.entrypoints.openai.responses.harmony import (
     construct_harmony_previous_input_messages,
     harmony_to_response_output,
-    parser_state_to_response_output,
     response_input_to_harmony,
+)
+from vllm.entrypoints.openai.responses.harmony_streaming_events import (
+    HarmonyStreamingState,
+    emit_harmony_segment_events,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     InputTokensDetails,
@@ -78,11 +80,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
     SimpleStreamingEventProcessor,
-    StreamingState,
     _StateType,
-    emit_content_delta_events,
-    emit_previous_item_done_events,
-    emit_tool_action_events,
     split_delta,
 )
 from vllm.entrypoints.openai.responses.utils import (
@@ -102,7 +100,7 @@ from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import CompletionOutput
-from vllm.parser import Parser, ParserManager
+from vllm.parser import HarmonyParser, Parser, ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -446,14 +444,12 @@ class OpenAIServingResponses(OpenAIServing):
             context: ConversationContext
             function_tool_names = extract_function_tool_names(request.tools)
             if self.use_harmony:
-                if request.stream:
-                    context = StreamingHarmonyContext(
-                        messages, available_tools, function_tool_names
-                    )
-                else:
-                    context = HarmonyContext(
-                        messages, available_tools, function_tool_names
-                    )
+                parser_cls = self.parser
+                assert parser_cls is not None and issubclass(parser_cls, HarmonyParser)
+                harmony_parser = parser_cls(tokenizer, request.tools)
+                context = HarmonyContext(
+                    messages, available_tools, harmony_parser, function_tool_names
+                )
             else:
                 if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
                     # This is a feature in development for parsing
@@ -694,7 +690,7 @@ class OpenAIServingResponses(OpenAIServing):
 
             # Create inputs for the next turn.
             # Render the next prompt token ids and update sampling_params.
-            if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
+            if isinstance(context, HarmonyContext):
                 token_ids = context.render_for_completion()
                 engine_input = tokens_input(token_ids)
 
@@ -788,8 +784,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         input_messages: ResponseInputOutputMessage | None = None
         output_messages: ResponseInputOutputMessage | None = None
-        if self.use_harmony:
-            assert isinstance(context, HarmonyContext)
+        if isinstance(context, HarmonyContext):
             output = self._make_response_output_items_with_harmony(context)
             if request.enable_response_messages:
                 input_messages = context.messages[: context.num_init_messages]
@@ -1075,10 +1070,6 @@ class OpenAIServingResponses(OpenAIServing):
         fn_names = context.function_tool_names
         for msg in context.messages[num_init_messages:]:
             output_items.extend(harmony_to_response_output(msg, fn_names))
-        # Handle the generation stopped in the middle (if any).
-        last_items = parser_state_to_response_output(context.parser, fn_names)
-        if last_items:
-            output_items.extend(last_items)
         return output_items
 
     def _get_harmony_builtin_tool_descriptions(
@@ -1427,30 +1418,21 @@ class OpenAIServingResponses(OpenAIServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        state = StreamingState()
+        state = HarmonyStreamingState()
 
         async for ctx in result_generator:
-            assert isinstance(ctx, StreamingHarmonyContext)
+            assert isinstance(ctx, HarmonyContext)
 
             # finish_reason='error' indicates a retryable error
             self._raise_if_error(ctx.finish_reason, request.request_id)
 
-            if ctx.is_expecting_start():
-                if len(ctx.parser.messages) > 0:
-                    previous_item = ctx.parser.messages[-1]
-                    for event in emit_previous_item_done_events(
-                        previous_item, state, ctx.function_tool_names
-                    ):
-                        yield _increment_sequence_number_and_return(event)
-                state.reset_for_new_item()
-
-            # Stream the output of a harmony message
-            for event in emit_content_delta_events(ctx, state):
-                yield _increment_sequence_number_and_return(event)
-
-            # Stream tool call outputs
-            for event in emit_tool_action_events(ctx, state, self.tool_server):
-                yield _increment_sequence_number_and_return(event)
+            for segment in ctx.batch_segments:
+                for event in emit_harmony_segment_events(
+                    segment,
+                    state,
+                    ctx.function_tool_names,
+                ):
+                    yield _increment_sequence_number_and_return(event)
 
     async def responses_stream_generator(
         self,
@@ -1481,7 +1463,7 @@ class OpenAIServingResponses(OpenAIServing):
             return event
 
         async with AsyncExitStack() as exit_stack:
-            if self.use_harmony:
+            if isinstance(context, HarmonyContext):
                 # TODO: in streaming, we noticed this bug:
                 # https://github.com/vllm-project/vllm/issues/25697
                 await self._initialize_tool_sessions(request, context, exit_stack)

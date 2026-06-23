@@ -9,8 +9,11 @@ Handles two directions:
 """
 
 import json
+from dataclasses import dataclass
+from enum import Enum, auto
 
 from openai.types.responses import (
+    ResponseCodeInterpreterToolCall,
     ResponseFunctionToolCall,
     ResponseOutputItem,
     ResponseOutputMessage,
@@ -27,7 +30,7 @@ from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
-from openai_harmony import Author, Message, Role, StreamableParser, TextContent
+from openai_harmony import Author, Message, Role, TextContent
 
 from vllm.entrypoints.openai.parser.harmony_utils import (
     BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
@@ -257,166 +260,244 @@ def construct_harmony_previous_input_messages(
 # ---------------------------------------------------------------------------
 
 
-def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutputItem:
-    """Parse browser tool calls (search, open, find) into web search items."""
-    if len(message.content) != 1:
-        raise ValueError("Invalid number of contents in browser message")
-    content = message.content[0]
+class ResponseItemKind(Enum):
+    REASONING = auto()
+    TEXT = auto()
+    FUNCTION = auto()
+    CODE_INTERPRETER = auto()
+    WEB_SEARCH = auto()
+    CONTAINER = auto()
+    MCP = auto()
+    IGNORE = auto()
 
-    # Parse JSON args (with retry detection)
+
+@dataclass(frozen=True)
+class ResponseItemType:
+    """Normalized response target derived from a Harmony channel/recipient."""
+
+    kind: ResponseItemKind
+    name: str | None = None
+    action: str | None = None
+
+
+_VALID_BROWSER_ACTIONS = frozenset({"search", "open", "find"})
+_VALID_CONTAINER_ACTIONS = frozenset({"exec"})
+
+
+def resolve_response_item_type(
+    channel: str | None,
+    recipient: str | None,
+    function_tool_names: frozenset[str] | None = None,
+) -> ResponseItemType:
+    """Classify and normalize Harmony channel/recipient pairs."""
+    if recipient == "assistant":
+        # TODO: In reality, we should emit built-in tool calls
+        # based on whether the tool result was successful or not.
+        # For now, we assume ignore the actual result and assumes
+        # tool calls are always successful.
+        return ResponseItemType(ResponseItemKind.IGNORE)
+
+    if recipient:
+        if is_function_recipient(recipient, function_tool_names):
+            return ResponseItemType(
+                ResponseItemKind.FUNCTION,
+                name="functions",
+                action=extract_function_from_recipient(recipient),
+            )
+
+        recipient_parts = recipient.split(".", 1)
+        name = recipient_parts[0].lower()
+        name_or_server_label = BUILTIN_TOOL_TO_MCP_SERVER_LABEL.get(name, name)
+        action = recipient_parts[1].lower() if len(recipient_parts) > 1 else None
+
+        if name_or_server_label == "code_interpreter":
+            return ResponseItemType(
+                ResponseItemKind.CODE_INTERPRETER,
+                name_or_server_label,
+            )
+
+        if name_or_server_label == "web_search_preview":
+            return ResponseItemType(
+                ResponseItemKind.WEB_SEARCH,
+                name_or_server_label,
+                action if action in _VALID_BROWSER_ACTIONS else "search",
+            )
+
+        if name_or_server_label == "container":
+            return ResponseItemType(
+                ResponseItemKind.CONTAINER,
+                name_or_server_label,
+                action if action in _VALID_CONTAINER_ACTIONS else "exec",
+            )
+
+        return ResponseItemType(
+            ResponseItemKind.MCP,
+            name_or_server_label,
+            action or name_or_server_label,
+        )
+
+    if channel == "analysis":
+        return ResponseItemType(ResponseItemKind.REASONING)
+
+    if channel in ("commentary", "final"):
+        return ResponseItemType(ResponseItemKind.TEXT)
+
+    return ResponseItemType(ResponseItemKind.IGNORE)
+
+
+def build_code_interpreter_call(
+    item_type: ResponseItemType,
+    code: str,
+    item_id: str,
+    status: str = "completed",
+) -> ResponseCodeInterpreterToolCall:
+    assert item_type.kind == ResponseItemKind.CODE_INTERPRETER
+    return ResponseCodeInterpreterToolCall(
+        id=item_id,
+        code=code,
+        container_id="auto",
+        outputs=[],
+        status=status,
+        type="code_interpreter_call",
+    )
+
+
+def build_web_search_call(
+    item_type: ResponseItemType,
+    arguments: str,
+    item_id: str,
+) -> ResponseFunctionWebSearch:
+    assert item_type.kind == ResponseItemKind.WEB_SEARCH
+    browser_action = item_type.action
+
     try:
-        browser_call = json.loads(content.text)
-    except json.JSONDecodeError:
-        logger.warning(
-            "Invalid JSON in browser tool call, using error placeholder: %s",
-            content.text,
+        browser_args = json.loads(arguments)
+    except json.JSONDecodeError as e:
+        # ResponseFunctionWebSearch does not allow an error message
+        # so we return a failed MCP call instead
+        return McpCall(
+            arguments=arguments,
+            name=browser_action,
+            server_label="browser",
+            id=item_id,
+            status="failed",
+            error=f"Invalid JSON arguments: {e}",
+            type="mcp_call",
         )
-        json_retry_output_message = (
-            f"Invalid JSON args, caught and retried: {content.text}"
-        )
-        browser_call = {
-            "query": json_retry_output_message,
-            "url": json_retry_output_message,
-            "pattern": json_retry_output_message,
-        }
 
-    # Create appropriate action based on recipient
-    if recipient == "browser.search":
-        action = ActionSearch(
-            query=f"cursor:{browser_call.get('query', '')}", type="search"
-        )
-    elif recipient == "browser.open":
-        action = ActionOpenPage(
-            url=f"cursor:{browser_call.get('url', '')}", type="open_page"
-        )
-    elif recipient == "browser.find":
-        action = ActionFind(
-            pattern=browser_call.get("pattern", ""),
-            url=f"cursor:{browser_call.get('url', '')}",
-            type="find",
-        )
-    else:
-        raise ValueError(f"Unknown browser action: {recipient}")
+    match browser_action:
+        case "search":
+            action = ActionSearch(
+                query=f"cursor:{browser_args.get('query', '')}",
+                type="search",
+            )
+        case "open":
+            action = ActionOpenPage(
+                type="open_page",
+                url=f"cursor:{browser_args.get('url', '')}",
+            )
+        case "find":
+            action = ActionFind(
+                pattern=browser_args.get("pattern", ""),
+                type="find_in_page",
+                url=f"cursor:{browser_args.get('url', '')}",
+            )
+        case _:
+            raise ValueError(f"Invalid browser action: {browser_action}")
 
     return ResponseFunctionWebSearch(
-        id=f"ws_{random_uuid()}",
+        id=item_id,
         action=action,
         status="completed",
         type="web_search_call",
     )
 
 
-def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
-    """Parse function calls into function tool call items."""
-    function_name = extract_function_from_recipient(recipient)
-    output_items = []
-    for content in message.content:
-        random_id = random_uuid()
-        response_item = ResponseFunctionToolCall(
-            arguments=content.text,
-            call_id=f"call_{random_id}",
-            type="function_call",
-            name=function_name,
-            id=f"fc_{random_id}",
-        )
-        output_items.append(response_item)
-    return output_items
+def build_mcp_or_container_call(
+    item_type: ResponseItemType,
+    arguments: str,
+    item_id: str,
+    status: str = "completed",
+) -> McpCall:
+    assert item_type.kind in (ResponseItemKind.MCP, ResponseItemKind.CONTAINER)
+    server_label, name = item_type.name, item_type.action
+
+    return McpCall(
+        arguments=arguments,
+        name=name,
+        server_label=server_label,
+        id=item_id,
+        status=status,
+        type="mcp_call",
+    )
 
 
-def _parse_reasoning(message: Message) -> list[ResponseOutputItem]:
-    """Parse reasoning/analysis content into reasoning items."""
-    output_items = []
-    for content in message.content:
-        reasoning_item = ResponseReasoningItem(
-            id=f"rs_{random_uuid()}",
-            summary=[],
-            type="reasoning",
-            content=[
-                ResponseReasoningTextContent(text=content.text, type="reasoning_text")
-            ],
-            status=None,
-        )
-        output_items.append(reasoning_item)
-    return output_items
+def build_reasoning(
+    item_type: ResponseItemType,
+    content: list[str],
+    item_id: str,
+) -> ResponseReasoningItem:
+    """TODO: Unify ResponseReasoningItem creation between
+    Harmony and non-Harmony and streaming and non-streaming"""
+    assert item_type.kind == ResponseItemKind.REASONING
+    return ResponseReasoningItem(
+        id=item_id,
+        summary=[],
+        type="reasoning",
+        content=[
+            ResponseReasoningTextContent(text=c, type="reasoning_text") for c in content
+        ],
+    )
 
 
-def _parse_final_message(message: Message) -> ResponseOutputItem:
-    """Parse final channel messages into output message items."""
-    contents = []
-    for content in message.content:
-        output_text = ResponseOutputText(
-            text=content.text,
-            annotations=[],  # TODO
-            type="output_text",
-            logprobs=None,  # TODO
-        )
-        contents.append(output_text)
+def build_output_message(
+    item_type: ResponseItemType,
+    content: list[str],
+    item_id: str,
+) -> ResponseOutputMessage:
+    """TODO: Unify ResponseOutputMessage creation between
+    Harmony and non-Harmony and streaming and non-streaming"""
+    assert item_type.kind == ResponseItemKind.TEXT
     return ResponseOutputMessage(
-        id=f"msg_{random_uuid()}",
-        content=contents,
-        role=message.author.role,
+        id=item_id,
+        content=[
+            ResponseOutputText(text=c, annotations=[], type="output_text")
+            for c in content
+        ],
+        role="assistant",
         status="completed",
         type="message",
     )
 
 
-def _parse_mcp_recipient(recipient: str) -> tuple[str, str]:
-    """Parse MCP recipient into (server_label, tool_name).
+def build_function_call(
+    item_type: ResponseItemType,
+    arguments: str,
+    call_id: str,
+    item_id: str,
+) -> ResponseFunctionToolCall:
+    """TODO: Unify ResponseFunctionToolCall creation between
+    Harmony and non-Harmony and streaming and non-streaming"""
+    assert item_type.kind == ResponseItemKind.FUNCTION
 
-    For dotted recipients like "repo_browser.list":
-        - server_label: "repo_browser" (namespace/server)
-        - tool_name: "list" (specific tool)
+    try:
+        arguments = json.dumps(json.loads(arguments))
+    except json.JSONDecodeError:
+        # Ignore JSON decode error
+        arguments = arguments.strip()
 
-    For simple recipients like "filesystem":
-        - server_label: "filesystem"
-        - tool_name: "filesystem"
-    """
-    if "." in recipient:
-        server_label = recipient.split(".")[0]
-        tool_name = recipient.split(".")[-1]
-    else:
-        server_label = recipient
-        tool_name = recipient
-    return server_label, tool_name
-
-
-def _parse_mcp_call(message: Message, recipient: str) -> list[ResponseOutputItem]:
-    """Parse MCP calls into MCP call items."""
-    # Handle built-in tools that need server_label mapping
-    if recipient in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
-        server_label = BUILTIN_TOOL_TO_MCP_SERVER_LABEL[recipient]
-        tool_name = recipient
-    else:
-        server_label, tool_name = _parse_mcp_recipient(recipient)
-
-    output_items = []
-    for content in message.content:
-        response_item = McpCall(
-            arguments=content.text,
-            type="mcp_call",
-            name=tool_name,
-            server_label=server_label,
-            id=f"mcp_{random_uuid()}",
-            status="completed",
-        )
-        output_items.append(response_item)
-    return output_items
+    return ResponseFunctionToolCall(
+        id=item_id,
+        arguments=arguments,
+        call_id=call_id,
+        name=item_type.action,
+        type="function_call",
+    )
 
 
-def _parse_message_no_recipient(
-    message: Message,
-) -> list[ResponseOutputItem]:
-    """Parse a Harmony message with no recipient based on its channel."""
-    if message.channel == "analysis":
-        return _parse_reasoning(message)
-
-    if message.channel in ("commentary", "final"):
-        # Per Harmony format, preambles (commentary with no recipient) and
-        # final channel content are both intended to be shown to end-users.
-        # See: https://cookbook.openai.com/articles/openai-harmony
-        return [_parse_final_message(message)]
-
-    raise ValueError(f"Unknown channel: {message.channel}")
+def message_text_content(message: Message) -> list[str]:
+    """Extract text content from a Harmony message."""
+    return [c.text for c in message.content]
 
 
 # ---------------------------------------------------------------------------
@@ -432,149 +513,41 @@ def harmony_to_response_output(
 
     This is the main dispatcher that routes based on channel and recipient.
     """
-    if message.author.role != "assistant":
-        # This is a message from a tool to the assistant (e.g., search result).
-        # Don't include it in the final output for now. This aligns with
-        # OpenAI's behavior on models like o4-mini.
-        return []
-
-    output_items: list[ResponseOutputItem] = []
-    recipient = message.recipient
-
-    if recipient is not None:
-        # Browser tool calls (browser.search, browser.open, browser.find)
-        if recipient.startswith("browser."):
-            output_items.append(_parse_browser_tool_call(message, recipient))
-
-        # Function calls (with or without "functions." prefix)
-        elif is_function_recipient(recipient, function_tool_names):
-            output_items.extend(_parse_function_call(message, recipient))
-
-        # Built-in MCP tools (python, browser, container)
-        elif recipient in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
-            output_items.extend(_parse_reasoning(message))
-
-        # All other recipients are MCP calls
-        else:
-            output_items.extend(_parse_mcp_call(message, recipient))
-
-    # No recipient - handle based on channel for non-tool messages
-    else:
-        output_items.extend(_parse_message_no_recipient(message))
-
-    return output_items
-
-
-def parser_state_to_response_output(
-    parser: StreamableParser,
-    function_tool_names: frozenset[str] | None = None,
-) -> list[ResponseOutputItem]:
-    """Extract in-progress response items from incomplete parser state.
-
-    Called when the parser has buffered content that hasn't formed a
-    complete message yet (e.g., generation was cut short).
-    """
-    if not parser.current_content:
-        return []
-    if parser.current_role != Role.ASSISTANT:
-        return []
-    current_recipient = parser.current_recipient
-    if current_recipient is not None and current_recipient.startswith("browser."):
-        return []
-
-    if current_recipient:
-        if is_function_recipient(current_recipient, function_tool_names):
+    item_type = resolve_response_item_type(
+        message.channel,
+        message.recipient,
+        function_tool_names,
+    )
+    content = message_text_content(message)
+    match item_type.kind:
+        case ResponseItemKind.REASONING:
+            return [build_reasoning(item_type, content, f"rs_{random_uuid()}")]
+        case ResponseItemKind.TEXT:
+            return [build_output_message(item_type, content, f"msg_{random_uuid()}")]
+        case ResponseItemKind.FUNCTION:
             rid = random_uuid()
+            item_id = f"fc_{rid}"
+            tool_call_id = f"call_{rid}"
+            return [build_function_call(item_type, content[0], tool_call_id, item_id)]
+        case ResponseItemKind.CODE_INTERPRETER:
             return [
-                ResponseFunctionToolCall(
-                    arguments=parser.current_content,
-                    call_id=f"call_{rid}",
-                    type="function_call",
-                    name=extract_function_from_recipient(current_recipient),
-                    id=f"fc_{rid}",
-                    status="in_progress",
+                build_code_interpreter_call(
+                    item_type, content[0], f"ci_{random_uuid()}"
                 )
             ]
-        # Built-in MCP tools (python, browser, container)
-        elif current_recipient in BUILTIN_TOOL_TO_MCP_SERVER_LABEL:
+        case ResponseItemKind.WEB_SEARCH:
+            return [build_web_search_call(item_type, content[0], f"ws_{random_uuid()}")]
+        case ResponseItemKind.CONTAINER:
             return [
-                ResponseReasoningItem(
-                    id=f"rs_{random_uuid()}",
-                    summary=[],
-                    type="reasoning",
-                    content=[
-                        ResponseReasoningTextContent(
-                            text=parser.current_content, type="reasoning_text"
-                        )
-                    ],
-                    status=None,
+                build_mcp_or_container_call(
+                    item_type, content[0], f"container_{random_uuid()}"
                 )
             ]
-        # All other recipients are MCP calls
-        else:
-            rid = random_uuid()
-            server_label, tool_name = _parse_mcp_recipient(current_recipient)
+        case ResponseItemKind.MCP:
             return [
-                McpCall(
-                    arguments=parser.current_content,
-                    type="mcp_call",
-                    name=tool_name,
-                    server_label=server_label,
-                    id=f"mcp_{rid}",
-                    status="in_progress",
+                build_mcp_or_container_call(
+                    item_type, content[0], f"mcp_{random_uuid()}"
                 )
             ]
-
-    if parser.current_channel == "commentary":
-        # Per Harmony format, preambles (commentary with no recipient) are
-        # intended to be shown to end-users, unlike analysis channel content.
-        output_text = ResponseOutputText(
-            text=parser.current_content,
-            annotations=[],
-            type="output_text",
-            logprobs=None,
-        )
-        return [
-            ResponseOutputMessage(
-                id=f"msg_{random_uuid()}",
-                content=[output_text],
-                role="assistant",
-                status="incomplete",
-                type="message",
-            )
-        ]
-
-    if parser.current_channel == "analysis":
-        return [
-            ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(
-                        text=parser.current_content, type="reasoning_text"
-                    )
-                ],
-                status=None,
-            )
-        ]
-
-    if parser.current_channel == "final":
-        output_text = ResponseOutputText(
-            text=parser.current_content,
-            annotations=[],  # TODO
-            type="output_text",
-            logprobs=None,  # TODO
-        )
-        text_item = ResponseOutputMessage(
-            id=f"msg_{random_uuid()}",
-            content=[output_text],
-            role="assistant",
-            # if the parser still has messages (ie if the generator got cut
-            # abruptly), this should be incomplete
-            status="incomplete",
-            type="message",
-        )
-        return [text_item]
-
-    return []
+        case ResponseItemKind.IGNORE:
+            return []
