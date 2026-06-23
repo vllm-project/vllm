@@ -2486,8 +2486,16 @@ class GPUModelRunner(
                         spec_decode_common_attn_metadata = cm
                 else:
                     spec_decode_common_attn_metadata = cm
-            # Capture per-group block tables for multi-group proposers.
-            if self.speculative_config and isinstance(self.drafter, Step3p5MTPProposer):
+            # Capture per-group KV metadata for multi-group proposers. Draft
+            # model proposers need both block_table (read path) and slot_mapping
+            # (write path) because they reshape the draft input batch.
+            if self.speculative_config and isinstance(
+                self.drafter,
+                (
+                    Step3p5MTPProposer,
+                    DraftModelProposer,
+                ),
+            ):
                 self.drafter.set_per_group_attn_metadata(
                     kv_cache_gid, cm.block_table_tensor, cm.slot_mapping
                 )
