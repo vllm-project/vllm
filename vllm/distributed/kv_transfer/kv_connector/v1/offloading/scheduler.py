@@ -1175,7 +1175,9 @@ class OffloadingConnectorScheduler:
         if req_status is None:
             # Untracked request (offloading never started): no in-flight jobs,
             # nothing was deferred, so finalize immediately.
-            self.manager.on_request_finished(_create_req_context(request))
+            req_context = _create_req_context(request)
+            self.manager.on_new_request(req_context)
+            self.manager.on_request_finished(req_context)
             return False, None
 
         self.manager.on_request_finished(req_status.req_context)
