@@ -240,6 +240,13 @@ class FrontendArgs(BaseFrontendArgs):
     dp_supervisor_probe_failure_threshold: int = 3
     """Number of consecutive connection-error retries before a child health
     probe is declared failed in multi-port external LB mode."""
+    dp_supervisor_startup_timeout_s: float = 0.0
+    """Seconds to wait for all child DP Servers to become ready before the
+    supervisor gives up and shuts down in multi-port external LB mode. This
+    bounds startup so that a child hanging during initialization (e.g. a
+    cross-node DeepEP/RDMA timeout) does not leave the supervisor returning 503
+    indefinitely; the supervisor instead tears the children down cleanly so the
+    orchestrator can restart the replica. 0 disables the timeout."""
     uds: str | None = None
     """Unix domain socket path. If set, host and port arguments are ignored."""
     uvicorn_log_level: Literal[

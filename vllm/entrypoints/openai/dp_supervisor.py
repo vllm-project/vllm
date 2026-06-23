@@ -258,6 +258,7 @@ class DPSupervisor:
             args.port + local_rank
             for local_rank in range(args.data_parallel_size_local)
         ]
+        self.startup_timeout_s = getattr(args, "dp_supervisor_startup_timeout_s", 0.0)
         self._is_ready = False
         self._processes: list[BaseProcess] = []
         self._shutdown_event = asyncio.Event()
@@ -429,6 +430,12 @@ class DPSupervisor:
             self._probe_all_children(), name="dp-health-probe"
         )
 
+        startup_deadline = (
+            time.monotonic() + self.startup_timeout_s
+            if self.startup_timeout_s > 0
+            else None
+        )
+
         try:
             while not self._shutdown_event.is_set():
                 # 1. Check for dead processes
@@ -442,6 +449,23 @@ class DPSupervisor:
                     # Extract exception if it crashed, or log failure
                     exc = probe_task.exception() if not probe_task.cancelled() else None
                     logger.info("DPSupervisor probe task stopped. Exception: %s", exc)
+                    break
+
+                # 3. Check for a startup timeout. A child that hangs during
+                # initialization stays alive but never becomes ready, which
+                # would otherwise leave the supervisor returning 503 forever.
+                # Bound that window so we shut down cleanly and let the
+                # orchestrator restart the replica.
+                if (
+                    startup_deadline is not None
+                    and not self._is_ready
+                    and time.monotonic() >= startup_deadline
+                ):
+                    logger.error(
+                        "DPSupervisor: DP Servers did not become ready within "
+                        "%.1fs; shutting down.",
+                        self.startup_timeout_s,
+                    )
                     break
 
                 # Sleep for probe_interval seconds or until a shutdown.
