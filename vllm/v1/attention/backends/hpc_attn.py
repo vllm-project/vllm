@@ -387,7 +387,7 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
             seq_lens_prefill = attn_metadata.seq_lens[num_decode_reqs:]
             cu_seqlens_prefill = attn_metadata.qo_indptr
             max_seqlens = attn_metadata.max_query_len
-            block_table_prefill = attn_metadata.block_table_tensor[num_decode_tokens:]
+            block_table_prefill = attn_metadata.block_table_tensor[num_decode_reqs:]
 
             q_prefill = query[num_decode_tokens:]
             output_prefill = output[num_decode_tokens:]
@@ -421,7 +421,7 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         # --- Decode ---
         if num_decode_reqs > 0:
             num_seq_kvcache = attn_metadata.seq_lens[:num_decode_reqs]
-            block_table_decode = attn_metadata.block_table_tensor[:num_decode_tokens]
+            block_table_decode = attn_metadata.block_table_tensor[:num_decode_reqs]
 
             q_decode = query[:num_decode_tokens]
             output_decode = output[:num_decode_tokens]

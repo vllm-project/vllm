@@ -29,7 +29,6 @@ SKIP_TENSORS: set[str] = {
     "expert_physical_to_global",
     "expert_local_to_global",
     "e_score_correction_bias",
-    "cos_sin_cache",
 }
 
 
