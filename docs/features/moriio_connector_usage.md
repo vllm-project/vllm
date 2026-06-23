@@ -126,6 +126,7 @@ WRITE mode is used by default. READ mode can be configured by setting `--kv-tran
 **Control-plane configuration:** MoRI moves KV bytes over RDMA/xGMI, but producers and consumers also need out-of-band TCP channels for handshake, block id exchange, liveness, and completion signaling. These keys live under `kv_connector_extra_config`:
 
 - `proxy_ip`: IP address of the disaggregation proxy/router that fronts the prefiller and decoder. Each vLLM instance uses it to register itself and to send heartbeats so the proxy knows where to route incoming requests.
+- `host_ip`: Optional local IP address for this vLLM instance. In most cases, leave this unset. When unset, vLLM asks the kernel which local IP it would use to reach `proxy_ip` and advertises that IP. Loopback routes keep the legacy `get_ip()` fallback unless `host_ip` is set explicitly. If `MORI_SOCKET_IFNAME` is also unset, vLLM sets it to the network interface that owns the selected IP. Set `host_ip` only when you need to force a specific control-plane address.
 - `proxy_ping_port`: TCP port on `proxy_ip` where the proxy listens for instance heartbeats and registration messages. Used to detect dead vLLM instances and keep routing tables fresh.
 - `http_port`: HTTP port that this vLLM instance exposes its OpenAI-compatible API on. The proxy registers this port, and forwards user requests to this port once it has picked an instance.
 - `handshake_port`: TCP port used for the one-time MoRI engine handshake between a prefiller and a decoder. The two sides exchange RDMA engine descriptors here before any KV transfer can happen.
@@ -149,6 +150,8 @@ The configuration options for each backend are as follows.
 - `num_workers`: number of worker threads MoRI uses to post and poll transfer completions.
 
 Advanced users can also configure MoRI itself using environment variables such as `MORI_IO_QP_MAX_SEND_WR`, `MORI_IO_QP_MAX_CQE`, etc. These are MoRI library variables and are separate from vLLM's own `VLLM_MORIIO_*` settings. Refer to the [MoRI repository](https://github.com/rocm/mori) for more information.
+
+`MORI_RDMA_DEVICES` and `MORI_IB_GID_INDEX` are optional MoRI environment variables. If `MORI_RDMA_DEVICES` is unset, MoRI considers the available active RDMA devices. If `MORI_IB_GID_INDEX` is unset, MoRI uses its default GID selection. vLLM does not infer or modify either variable; set them only when your deployment needs a specific RDMA device pool or GID policy.
 
 #### xGMI backend
 

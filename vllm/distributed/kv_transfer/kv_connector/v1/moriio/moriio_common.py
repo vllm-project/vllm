@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import array
 import contextlib
+import fcntl
+import ipaddress
 import os
+import socket
+import struct
 import threading
 import time
 from collections.abc import Iterator
@@ -36,6 +41,11 @@ from enum import Enum
 
 logger = init_logger(__name__)
 
+
+_IFNAMSIZ = 16
+_IFREQ_SIZE = 40 if struct.calcsize("P") == 8 else 32
+_SIOCGIFCONF = 0x8912
+_MORI_SOCKET_IFNAME = "MORI_SOCKET_IFNAME"
 
 Transfer = tuple[int, float]
 EngineId = str
@@ -186,16 +196,116 @@ def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
     return (dp_rank) * tp_size + tp_rank
 
 
+def _infer_local_ip_for_peer(peer_ip: str) -> str:
+    peer = socket.getaddrinfo(
+        peer_ip,
+        1,
+        family=socket.AF_INET,
+        type=socket.SOCK_DGRAM,
+    )[0][4]
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.connect(peer)
+        return sock.getsockname()[0]
+
+
+def _is_loopback_ip(ip: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip).is_loopback
+    except ValueError:
+        return False
+
+
+def _interface_for_ipv4(ip: str) -> str | None:
+    try:
+        target_ip = socket.inet_aton(ip)
+    except OSError:
+        return None
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        buf_size = 4096
+        while True:
+            ifreqs = array.array("B", b"\0" * buf_size)
+            ifconf = struct.pack("iP", buf_size, ifreqs.buffer_info()[0])
+            try:
+                out = fcntl.ioctl(sock.fileno(), _SIOCGIFCONF, ifconf)
+            except OSError:
+                return None
+            out_bytes = struct.unpack("iP", out)[0]
+            if out_bytes < buf_size - _IFREQ_SIZE:
+                break
+            buf_size *= 2
+
+        for offset in range(0, out_bytes, _IFREQ_SIZE):
+            if bytes(ifreqs[offset + 20 : offset + 24]) != target_ip:
+                continue
+            ifname = bytes(ifreqs[offset : offset + _IFNAMSIZ])
+            return ifname.split(b"\0", 1)[0].decode()
+
+    return None
+
+
+def _configure_mori_socket_ifname(host_ip: str) -> None:
+    if os.environ.get(_MORI_SOCKET_IFNAME):
+        return
+
+    ifname = _interface_for_ipv4(host_ip)
+    if ifname is None:
+        logger.warning_once(
+            "Unable to infer %s from MoRIIO host_ip=%s. "
+            "MoRI will use its own socket interface fallback.",
+            _MORI_SOCKET_IFNAME,
+            host_ip,
+        )
+        return
+
+    os.environ[_MORI_SOCKET_IFNAME] = ifname
+    logger.info_once(
+        "Inferred %s=%s from MoRIIO host_ip=%s.",
+        _MORI_SOCKET_IFNAME,
+        ifname,
+        host_ip,
+    )
+
+
 def resolve_host_ip(extra_config: dict) -> str:
     """The IP this MoRIIO process advertises for KV transfer.
 
     Honors an explicit ``host_ip`` in ``kv_connector_extra_config`` before
-    falling back to ``get_ip()``. An external router/orchestrator can set it to
-    the node's routable address; this is required under frameworks (e.g. Ray)
-    where ``get_ip()`` resolves to an unroutable public IP and ``VLLM_HOST_IP``
-    cannot be propagated to the worker processes that bind the transfer engine.
+    inferring the local source IP used to reach ``proxy_ip``. If
+    ``MORI_SOCKET_IFNAME`` is not set, the selected host IP is also mapped back
+    to its owning interface for MoRI's control-plane sockets.
     """
-    return extra_config.get("host_ip") or get_ip()
+    host_ip = extra_config.get("host_ip")
+    if host_ip:
+        host_ip = str(host_ip)
+        _configure_mori_socket_ifname(host_ip)
+        return host_ip
+
+    proxy_ip = extra_config.get("proxy_ip")
+    if proxy_ip:
+        try:
+            host_ip = _infer_local_ip_for_peer(str(proxy_ip))
+        except OSError as e:
+            logger.warning_once(
+                "Unable to infer MoRIIO host_ip from route to proxy_ip=%s: %s. "
+                "Falling back to get_ip().",
+                proxy_ip,
+                e,
+            )
+        else:
+            if _is_loopback_ip(host_ip):
+                logger.info_once(
+                    "Inferred loopback MoRIIO host_ip=%s from proxy_ip=%s. "
+                    "Falling back to get_ip(). Set host_ip explicitly to use "
+                    "a loopback address.",
+                    host_ip,
+                    proxy_ip,
+                )
+                return get_ip()
+            _configure_mori_socket_ifname(host_ip)
+            return host_ip
+
+    return get_ip()
 
 
 _DEPRECATED_ENV_VARS: dict[str, str] = {
