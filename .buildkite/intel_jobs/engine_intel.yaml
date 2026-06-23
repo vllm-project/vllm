@@ -2,6 +2,44 @@ group: Engine Intel
 depends_on:
   - image-build-xpu
 steps:
+- label: Engine
+  key: engine
+  timeout_in_minutes: 15
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/compilation/
+  - vllm/config/
+  - vllm/engine/
+  - vllm/entrypoints/logger.py
+  - vllm/envs.py
+  - vllm/logger.py
+  - vllm/logging_utils/
+  - vllm/platforms/
+  - vllm/sequence.py
+  - vllm/triton_utils/
+  - vllm/utils/
+  - tests/engine
+  - tests/test_sequence
+  - tests/test_config
+  - tests/test_logger
+  - tests/test_vllm_port
+  - tests/test_jit_monitor.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py test_jit_monitor.py'
+
 - label: Engine (1 GPU)
   timeout_in_minutes: 30
   device: intel_gpu

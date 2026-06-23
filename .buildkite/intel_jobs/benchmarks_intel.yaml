@@ -1,9 +1,10 @@
-group: Kernels Intel
+group: Benchmarks
 depends_on: 
   - image-build-xpu
 steps:
-- label: vLLM IR Tests
-  timeout_in_minutes: 30
+- label: Benchmarks CLI Test
+  key: benchmarks-cli-test
+  timeout_in_minutes: 20
   device: intel_gpu
   agent_tags:
     label: production
@@ -16,11 +17,10 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
-    - vllm/ir
-    - vllm/kernels
+  - vllm/
+  - tests/benchmarks/
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
-      pytest -v -s ir
-      pytest -v -s kernels/ir'
+      pytest -v -s benchmarks/'
