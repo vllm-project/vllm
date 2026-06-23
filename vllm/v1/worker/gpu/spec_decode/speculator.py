@@ -95,6 +95,9 @@ class DraftModelSpeculator(BaseSpeculator):
         self.vocab_size = self.draft_model_config.get_vocab_size()
         self.dtype = vllm_config.model_config.dtype
         self.use_fp64_gumbel = vllm_config.model_config.use_fp64_gumbel
+        self.use_local_argmax_reduction: bool = (
+            self.speculative_config.use_local_argmax_reduction
+        )
 
         # DP configuration
         self.dp_size = vllm_config.parallel_config.data_parallel_size
@@ -221,6 +224,9 @@ class DraftModelSpeculator(BaseSpeculator):
         draft_step: torch.Tensor,
         draft_logits: torch.Tensor | None,
     ) -> torch.Tensor:
+        if self.use_local_argmax_reduction and draft_logits is None:
+            return self.model.get_top_tokens(hidden_states)
+
         logits = self.model.compute_logits(hidden_states)
         if draft_logits is not None:
             # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
@@ -236,8 +242,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 output_processed_logits_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
-        else:
-            return logits.argmax(dim=-1)
+        return logits.argmax(dim=-1)
 
     def _copy_request_inputs(
         self,
