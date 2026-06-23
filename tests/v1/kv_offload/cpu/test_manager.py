@@ -14,11 +14,12 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import (
+    CPULoadStoreSpec,
+    CPUOffloadingMetrics,
+)
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
-
-STORES_SKIPPED = "vllm:kv_offload_stores_skipped"
 
 
 def make_req_context(
@@ -181,10 +182,45 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     )
     stats = manager.get_stats()
     assert stats is not None
-    assert stats.reduce()[STORES_SKIPPED] == 3
+    assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 3
     stats = manager.get_stats()
     assert stats is not None
-    assert stats.reduce()[STORES_SKIPPED] == 0
+    assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 0
+
+
+def test_cpu_manager_reports_cache_usage_gauge():
+    def check_usage_stats(manager: CPUOffloadingManager, value: float):
+        stats = manager.get_stats()
+        assert stats is not None
+        assert stats.reduce()[
+            CPUOffloadingMetrics.CPU_CACHE_USAGE_PERC
+        ] == pytest.approx(value)
+
+    # Zero-capacity manager always reports 0.0
+    manager = make_cpu_manager(num_blocks=0)
+    check_usage_stats(manager, 0.0)
+
+    # Empty manager (4 blocks, none allocated): usage = 0.0
+    manager = make_cpu_manager(num_blocks=4)
+    check_usage_stats(manager, 0.0)
+
+    # After allocating 2 of 4 blocks: usage = 0.5
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_usage_stats(manager, 0.5)
+
+    # After filling all 4 blocks: usage = 1.0
+    manager.prepare_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    check_usage_stats(manager, 1.0)
+
+    # After completing store, the blocks becomes evictable as it is not actively used
+    # and usage drops.
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    check_usage_stats(manager, 0.5)
+
+    # After completing store, the blocks becomes evictable as it is not actively used
+    # and usage drops.
+    manager.complete_store(to_keys([3, 4]), _EMPTY_REQ_CTX)
+    check_usage_stats(manager, 0.0)
 
 
 def test_cpu_manager():
@@ -258,25 +294,25 @@ def test_cpu_manager():
     # prepare store with no space ([2, 3] is being loaded)
     assert cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX) is None
 
-    # complete load [2, 3]
+    # complete load [2, 3]. Load changes the eviction list, making 2, 3 recent.
     cpu_manager.complete_load(to_keys([2, 3]), _EMPTY_REQ_CTX)
 
-    # prepare store [6, 7, 8] -> evicts [2, 3, 4] (oldest)
+    # prepare store [6, 7, 8] -> evicts [4, 5, 2] (oldest)
     prepare_store_output = cpu_manager.prepare_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
     verify_store_output(
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[6, 7, 8],
-            store_block_ids=[3, 2, 1],
-            evicted_keys=[2, 3, 4],
+            store_block_ids=[1, 0, 3],
+            evicted_keys=[4, 5, 2],
         ),
     )
 
     # complete store [6, 7, 8]
     cpu_manager.complete_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
 
-    # touch [5, 6, 7] (move to end of LRU order)
-    cpu_manager.touch(to_keys([5, 6, 7]), _EMPTY_REQ_CTX)
+    # touch [3, 6, 7] (move to end of LRU order)
+    cpu_manager.touch(to_keys([3, 6, 7]), _EMPTY_REQ_CTX)
 
     # prepare store [7, 9] -> evicts [8] (oldest following previous touch)
     prepare_store_output = cpu_manager.prepare_store(to_keys([9]), _EMPTY_REQ_CTX)
@@ -284,7 +320,7 @@ def test_cpu_manager():
         prepare_store_output,
         ExpectedPrepareStoreOutput(
             keys_to_store=[9],
-            store_block_ids=[1],
+            store_block_ids=[3],
             evicted_keys=[8],
         ),
     )
@@ -299,7 +335,7 @@ def test_cpu_manager():
     verify_events(
         cpu_manager.take_events(),
         expected_stores=({3, 4, 5}, {6, 7, 8}),
-        expected_evictions=({2, 3, 4}, {8}),
+        expected_evictions=({4, 5, 2}, {8}),
     )
 
 
@@ -689,3 +725,96 @@ def test_filter_reused_manager():
     assert prepare_store_output.keys_to_store == []
 
     manager.complete_store(to_keys([1]), _EMPTY_REQ_CTX)
+
+
+def test_evictable_cache_block_count():
+    """
+    Verifies _num_evictable_cache_blocks is maintained correctly through the
+    full store/load lifecycle, eviction, failed stores, concurrent loads,
+    reset_cache, and the early-exit fast path in prepare_store.
+    """
+    manager = make_cpu_manager(num_blocks=4, cache_policy="lru")
+
+    # Initially no blocks allocated.
+    assert manager._num_evictable_cache_blocks == 0
+
+    # Initial cache state [x, x, x, x]
+
+    # We get 3 blocks from the cache.
+    manager.prepare_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+    # cache state [1', 2', 3', x] <- 1', 2', 3' are actively being used.
+    assert manager._num_evictable_cache_blocks == 0
+
+    # Completing stores makes them idle.
+    manager.complete_store(to_keys([1, 2, 3]), _EMPTY_REQ_CTX)
+    # cache state [1, 2, 3, x] <- 1, 2, 3 blocks are idle.
+    assert manager._num_evictable_cache_blocks == 3
+
+    # prepare_load pins a block: idle count decrements once even if the
+    # same block is loaded by two concurrent callers.
+    manager.prepare_load(to_keys([1]), _EMPTY_REQ_CTX)
+    # cache state [1', 2, 3, x] <- 2, 3 blocks are idle.
+    assert manager._num_evictable_cache_blocks == 2
+    manager.prepare_load(to_keys([1]), _EMPTY_REQ_CTX)  # 2nd concurrent load
+    # cache state [1', 2, 3, x] <- 2, 3 blocks are idle.
+    assert manager._num_evictable_cache_blocks == 2  # no double-decrement
+
+    # First complete_load does not restore idle (ref_cnt still 1).
+    manager.complete_load(to_keys([1]), _EMPTY_REQ_CTX)
+    # cache state [1', 2, 3, x] <- 2, 3 blocks are idle.
+    assert manager._num_evictable_cache_blocks == 2
+    # Second complete_load drops ref_cnt to 0 -> block becomes idle again.
+    manager.complete_load(to_keys([1]), _EMPTY_REQ_CTX)
+    # cache state [1, 2, 3, x] <- 1, 2, 3 blocks are idle.
+    assert manager._num_evictable_cache_blocks == 3
+
+    # Eviction decrements idle count.
+    # Cache has 3 stored blocks and 1 free slot. Storing 3 new keys needs 2 eviction.
+    manager.prepare_store(to_keys([4, 5, 6]), _EMPTY_REQ_CTX)
+    # cache state [1, 4', 5', 6'] <- block 1 is idle
+    assert manager._num_evictable_cache_blocks == 1
+
+    # Failed store does not increment idle count (block discarded from cache).
+    manager.complete_store(to_keys([4, 5, 6]), _EMPTY_REQ_CTX, success=False)
+    # cache state [1, x, x, x] <- block 1 is idle. Other returned to cache.
+    assert manager._num_evictable_cache_blocks == 1
+
+    # reset_cache zeroes the count unconditionally.
+    manager.reset_cache()
+    # cache state [x, x, x, x]
+    assert manager._num_evictable_cache_blocks == 0
+
+    # setup 3 blocks with loads so idle count drops to 0.
+    manager.prepare_store(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
+    manager.prepare_load(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
+    # cache state [10', 11', 12', x]
+    assert manager._num_evictable_cache_blocks == 0
+
+    # prepare_store requiring eviction must return None immediately (fast exit).
+    # Spy on policy.evict to confirm the fast path short-circuits before calling it.
+    evict_called = False
+    original_evict = manager._policy.evict
+
+    def spy_evict(*args, **kwargs):
+        nonlocal evict_called
+        evict_called = True
+        return original_evict(*args, **kwargs)
+
+    manager._policy.evict = spy_evict  # type: ignore[method-assign]
+    # cache state [10', 11', 12', x] <- cannot evict anything
+    assert manager.prepare_store(to_keys([14, 15]), _EMPTY_REQ_CTX) is None
+    assert not evict_called, (
+        "_num_evictable_cache_blocks==0 should short-circuit before evict()"
+    )
+
+    # After releasing the loads, eviction becomes possible again.
+    manager.complete_load(to_keys([10, 11, 12]), _EMPTY_REQ_CTX)
+    # cache state [10, 11, 12, x] <- 10, 11, 12 are idle
+    assert manager._num_evictable_cache_blocks == 3
+    assert manager.prepare_store(to_keys([14, 15]), _EMPTY_REQ_CTX) is not None
+    # cache state [10, 11, 14', 15'] <- 10, 11 are idle
+    assert manager._num_evictable_cache_blocks == 2
+    manager.complete_store(to_keys([14, 15]), _EMPTY_REQ_CTX)
+    # cache state [10, 11, 14, 15] <- all blocks idle
+    assert manager._num_evictable_cache_blocks == 4
