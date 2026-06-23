@@ -4,6 +4,7 @@
 import os
 import socket
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, overload
 
 import regex as re
@@ -96,6 +97,24 @@ class EPLBConfig:
     - "pynccl": Use PyNccl send/recv
     - None: Auto-select backend (prefers "nixl", falls back to "torch_gloo")
     """
+
+    save_path: Path | None = None
+    """If set, save the cumulative per-logical-expert load tensor to this file
+    at every rearrange step. The file is overwritten in place. The resulting
+    file is suitable for loading via `load_path` in a subsequent run with a
+    different EP topology."""
+
+    load_path: Path | None = None
+    """If set, load a per-logical-expert load tensor from this file at startup,
+    run the EPLB policy once against the live deploy topology, and apply the
+    resulting physical-to-logical mapping before warmup."""
+
+    disable_online: bool = False
+    """If True, online EPLB is suppressed: no per-step stats accumulation
+    and no periodic rearrange. Intended for offline-EPLB scenarios where
+    a initial placement is loaded via `load_path` and the user does not
+    want online EPLB activity for the rest of the run. Online and offline
+    EPLB are otherwise orthogonal — by default they can be combined."""
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
