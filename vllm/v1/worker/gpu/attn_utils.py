@@ -368,7 +368,8 @@ def init_kv_cache(
 
 
 def build_slot_mappings_by_layer(
-    slot_mappings: torch.Tensor, kv_cache_config: KVCacheConfig
+    slot_mappings: torch.Tensor | list[torch.Tensor],
+    kv_cache_config: KVCacheConfig,
 ) -> dict[str, torch.Tensor]:
     slot_mappings_by_layer: dict[str, torch.Tensor] = {}
     kv_cache_groups = kv_cache_config.kv_cache_groups

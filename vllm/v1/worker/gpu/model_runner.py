@@ -1102,6 +1102,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_reqs_padded=input_batch.num_reqs_after_padding,
         )
         pcp_metadata = None
+        slot_mappings: torch.Tensor | list[torch.Tensor]
         if self.pcp_world_size > 1:
             # PCP: the KV-cache slot mapping is built from the pre-PCP (canonical)
             # positions captured in prepare_inputs, then expanded per rank via
@@ -1450,6 +1451,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # canonical order before ExecuteModelState (sampling re-reads these).
         # (MRv1 gpu_model_runner.py:4528-4536.)
         if self.is_last_pp_rank and self.pcp_world_size > 1:
+            assert hidden_states is not None
             hidden_states = self.pcp_manager.get_restore_hidden_states(hidden_states)
             if aux_hidden_states is not None:
                 aux_hidden_states = [
