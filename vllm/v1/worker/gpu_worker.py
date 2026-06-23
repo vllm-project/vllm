@@ -446,7 +446,7 @@ class Worker(WorkerBase):
             # differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
             if (
-                current_platform.is_cuda()
+                not current_platform.is_rocm()
                 and self.vllm_config.compilation_config.cudagraph_mode
                 != CUDAGraphMode.NONE
             ):
