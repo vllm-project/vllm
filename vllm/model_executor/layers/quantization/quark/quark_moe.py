@@ -1223,8 +1223,25 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
     def process_weights_after_loading(self, layer):
         self._setup_kernel(layer)
 
+    def _m3_ck_moe_enabled(self) -> bool:
+        """MiniMax-M3 MXFP4 W4A8 routed through aiter CK ``fused_moe``.
+
+        Enabled by default for the W4A8 (``AITER_MXFP4_FP8``) backend on gfx950,
+        where the tuned CK MoE kernels live. Mirrors ATOM's CK MoE path and lets
+        the always-on shared expert fuse into one grouped call.
+        """
+        if self.mxfp4_backend != Mxfp4MoeBackend.AITER_MXFP4_FP8:
+            return False
+        from vllm.platforms.rocm import on_gfx950
+
+        return on_gfx950()
+
     def _setup_kernel(self, layer: RoutedExperts):
         """Setup kernel using oracle functions for MXFP4 schemes (W4A16, W4A8)."""
+        if self._m3_ck_moe_enabled():
+            self._setup_ck_moe(layer)
+            return
+
         w13_bias = getattr(layer, "w13_bias", None)
         w2_bias = getattr(layer, "w2_bias", None)
 
@@ -1279,6 +1296,85 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+
+    def _setup_ck_moe(self, layer: RoutedExperts):
+        """Prepare W4A8 MXFP4 weights for aiter's CK ``fused_moe`` kernel.
+
+        Mirrors ATOM's ``process_weights_after_loading`` CK branch: shuffle the
+        raw (uint8-packed) MXFP4 weights and their e8m0 block scales into the CK
+        layout, reduce the static FP8 activation scales to a per-tensor scalar,
+        and record the pad amounts so ``apply`` can strip the rounded-up rows.
+        Leaves ``self.moe_kernel`` as ``None`` so the layer treats this method as
+        non-monolithic (it computes topk itself and calls ``apply``).
+        """
+        from aiter import ActivationType, QuantType
+        from aiter.ops.shuffle import moe_shuffle_scale, shuffle_weight
+
+        num_experts = layer.w13_weight_scale.shape[0]
+
+        # M3 uses the separated (non-interleaved) gate_up layout.
+        is_guinterleave = False
+
+        if getattr(layer, "w13_bias", None) is not None:
+            layer.w13_bias.data = layer.w13_bias.data.to(torch.float32)
+        if getattr(layer, "w2_bias", None) is not None:
+            layer.w2_bias.data = layer.w2_bias.data.to(torch.float32)
+
+        # Static per-tensor FP8 activation scale (one scalar, max over experts).
+        if self.static_input_scales:
+            layer.w13_input_scale = torch.nn.Parameter(
+                layer.w13_input_scale.max().to(torch.float32), requires_grad=False
+            )
+            layer.w2_input_scale = torch.nn.Parameter(
+                layer.w2_input_scale.max().to(torch.float32), requires_grad=False
+            )
+
+        # Shuffle weights into CK layout.
+        layer.w13_weight.data = shuffle_weight(
+            layer.w13_weight, is_guinterleave=is_guinterleave, gate_up=True
+        )
+        layer.w2_weight.data = shuffle_weight(
+            layer.w2_weight, is_guinterleave=is_guinterleave, gate_up=False
+        )
+        layer.w13_weight.is_shuffled = True
+        layer.w2_weight.is_shuffled = True
+
+        # Shuffle block scales into CK layout (flatten experts into rows first).
+        w13_scale_2d = layer.w13_weight_scale.reshape(
+            -1, layer.w13_weight_scale.shape[-1]
+        )
+        w2_scale_2d = layer.w2_weight_scale.reshape(
+            -1, layer.w2_weight_scale.shape[-1]
+        )
+        layer.w13_weight_scale = torch.nn.Parameter(
+            moe_shuffle_scale(
+                w13_scale_2d,
+                num_experts,
+                is_guinterleave=is_guinterleave,
+                gate_up=True,
+            ),
+            requires_grad=False,
+        )
+        layer.w2_weight_scale = torch.nn.Parameter(
+            moe_shuffle_scale(
+                w2_scale_2d,
+                num_experts,
+                is_guinterleave=is_guinterleave,
+                gate_up=False,
+            ),
+            requires_grad=False,
+        )
+
+        torch.accelerator.empty_cache()
+
+        self._ck_activation = ActivationType.Silu
+        self._ck_quant_type = QuantType.per_1x32
+        self._ck_swiglu_limit = float(getattr(layer, "swiglu_limit", 0.0) or 0.0)
+        self._ck_hidden_pad = self.moe.hidden_dim - self.moe.hidden_dim_unpadded
+        self._ck_intermediate_pad = (
+            self.moe.intermediate_size_per_partition
+            - self.moe.intermediate_size_per_partition_unpadded
+        )
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
@@ -1362,6 +1458,29 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
+        if self._m3_ck_moe_enabled():
+            from aiter.fused_moe import fused_moe
+
+            return fused_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                activation=self._ck_activation,
+                quant_type=self._ck_quant_type,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                a1_scale=getattr(layer, "w13_input_scale", None),
+                a2_scale=getattr(layer, "w2_input_scale", None),
+                doweight_stage1=layer.apply_router_weight_on_input,
+                hidden_pad=self._ck_hidden_pad,
+                intermediate_pad=self._ck_intermediate_pad,
+                bias1=getattr(layer, "w13_bias", None),
+                bias2=getattr(layer, "w2_bias", None),
+                swiglu_limit=self._ck_swiglu_limit,
+            )
+
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
