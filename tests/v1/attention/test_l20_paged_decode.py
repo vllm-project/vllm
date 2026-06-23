@@ -7,6 +7,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 
 from vllm import _custom_ops as ops
+from vllm import envs
 
 
 def _reference(query, key_cache, value_cache, block_tables, seq_lens):
@@ -105,3 +106,10 @@ def test_l20_paged_decode_fake_tensor():
             129,
             64,
         )
+
+
+def test_l20_paged_decode_is_opt_in(monkeypatch):
+    monkeypatch.delenv("VLLM_ENABLE_L20_PAGED_DECODE", raising=False)
+    assert not envs.VLLM_ENABLE_L20_PAGED_DECODE
+    monkeypatch.setenv("VLLM_ENABLE_L20_PAGED_DECODE", "1")
+    assert envs.VLLM_ENABLE_L20_PAGED_DECODE

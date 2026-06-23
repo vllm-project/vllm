@@ -1828,7 +1828,8 @@ class FlashInferImpl(AttentionImpl):
                     l20_batch = decode_query.shape[0]
                     l20_max_seq = attn_metadata.decode.max_seq_len
                     l20_enabled = (
-                        current_platform.get_device_capability()
+                        envs.VLLM_ENABLE_L20_PAGED_DECODE
+                        and current_platform.get_device_capability()
                         == DeviceCapability(8, 9)
                         and not torch.cuda.is_current_stream_capturing()
                         and decode_query.dtype == torch.float16
