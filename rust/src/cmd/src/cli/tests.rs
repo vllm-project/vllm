@@ -104,10 +104,13 @@ fn serve_args_auto_forward_python_flags_without_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(
-        args.managed_engine.python_args,
-        vec!["--quantization", "awq"]
-    );
+    expect![[r#"
+        [
+            "--quantization",
+            "awq",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -118,7 +121,12 @@ fn serve_args_auto_forward_enable_lora_to_python() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.managed_engine.python_args, vec!["--enable-lora"]);
+    expect![[r#"
+        [
+            "--enable-lora",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -138,7 +146,15 @@ fn serve_args_forward_shutdown_timeout_to_managed_engine() {
     assert_eq!(args.runtime.shutdown_timeout, 60);
 
     let config = args.to_managed_engine_config(5555);
-    assert_eq!(config.python_args, vec!["--shutdown-timeout", "60"]);
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "qwen3",
+            "--shutdown-timeout",
+            "60",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
 }
 
 #[test]
@@ -152,7 +168,14 @@ fn serve_args_forward_disable_log_stats_to_managed_engine() {
     assert!(args.runtime.disable_log_stats);
 
     let config = args.to_managed_engine_config(5555);
-    assert_eq!(config.python_args, vec!["--disable-log-stats"]);
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "qwen3",
+            "--disable-log-stats",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
 }
 
 #[test]
@@ -175,7 +198,106 @@ fn serve_args_forward_max_logprobs_to_frontend_and_managed_engine() {
     assert_eq!(frontend_config.max_logprobs, Some(-1));
 
     let engine_config = args.to_managed_engine_config(5555);
-    assert_eq!(engine_config.python_args, vec!["--max-logprobs", "-1"]);
+    expect![[r#"
+        [
+            "--max-logprobs",
+            "-1",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&engine_config.python_args);
+}
+
+#[test]
+fn serve_args_resolve_auto_reasoning_parser_for_managed_engine() {
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.reasoning_parser, ParserSelection::Auto);
+
+    let config = args.to_managed_engine_config(5555);
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
+}
+
+#[test]
+fn serve_args_forward_explicit_reasoning_parser_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Unknown/Model",
+        "--reasoning-parser",
+        "deepseek_r1",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+
+    let config = args.to_managed_engine_config(5555);
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "deepseek_r1",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
+}
+
+#[test]
+fn serve_args_do_not_forward_disabled_reasoning_parser_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--reasoning-parser",
+        "none",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+
+    let config = args.to_managed_engine_config(5555);
+    assert!(config.python_args.is_empty());
+}
+
+#[test]
+fn serve_args_forward_reasoning_parser_even_with_passthrough_reasoning_parser() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--",
+        "--reasoning-parser",
+        "deepseek_r1",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+
+    let config = args.to_managed_engine_config(5555);
+    expect![[r#"
+        [
+            "--reasoning-parser",
+            "deepseek_r1",
+            "--reasoning-parser",
+            "qwen3",
+        ]
+    "#]]
+    .assert_debug_eq(&config.python_args);
 }
 
 #[test]
@@ -185,10 +307,13 @@ fn serve_args_auto_forward_python_multi_char_alias_without_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(
-        args.managed_engine.python_args,
-        vec!["--tensor-parallel-size", "2"]
-    );
+    expect![[r#"
+        [
+            "--tensor-parallel-size",
+            "2",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -562,12 +687,13 @@ fn frontend_args_accept_json() {
                     coordinator_address: Some(
                         "tcp://127.0.0.1:7000",
                     ),
+                    engine_start_index: 0,
                     engine_count: 1,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 600,
-                        tool_call_parser: Auto,
-                        reasoning_parser: Auto,
+                        tool_call_parser: None,
+                        reasoning_parser: None,
                         renderer: Auto,
                         language_model_only: false,
                         max_model_len: None,
@@ -631,8 +757,8 @@ fn frontend_args_json_applies_defaults() {
     };
     assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
     assert_eq!(args.runtime.engine_ready_timeout_secs, 600);
-    assert_eq!(args.runtime.tool_call_parser, ParserSelection::Auto);
-    assert_eq!(args.runtime.reasoning_parser, ParserSelection::Auto);
+    assert_eq!(args.runtime.tool_call_parser, ParserSelection::None);
+    assert_eq!(args.runtime.reasoning_parser, ParserSelection::None);
     assert_eq!(args.runtime.renderer, RendererSelection::Auto);
     assert_eq!(args.runtime.max_model_len, None);
     assert_eq!(args.runtime.max_logprobs, None);
@@ -925,10 +1051,15 @@ fn serve_args_keep_python_passthrough_flags_after_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(
-        args.managed_engine.python_args,
-        vec!["--tensor-parallel-size", "2", "--dtype", "float16"]
-    );
+    expect![[r#"
+        [
+            "--tensor-parallel-size",
+            "2",
+            "--dtype",
+            "float16",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -950,10 +1081,15 @@ fn serve_args_keep_python_multi_char_alias_after_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(
-        args.managed_engine.python_args,
-        vec!["-tp", "2", "--dtype", "float16"]
-    );
+    expect![[r#"
+        [
+            "-tp",
+            "2",
+            "--dtype",
+            "float16",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -971,10 +1107,13 @@ fn serve_args_keep_frontend_arg_after_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(
-        args.managed_engine.python_args,
-        vec!["--uds", "/tmp/vllm.sock"]
-    );
+    expect![[r#"
+        [
+            "--uds",
+            "/tmp/vllm.sock",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -994,10 +1133,15 @@ fn serve_args_keep_python_multi_char_engine_aliases_after_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(
-        args.managed_engine.python_args,
-        vec!["-dpr", "1", "-dpl", "2"]
-    );
+    expect![[r#"
+        [
+            "-dpr",
+            "1",
+            "-dpl",
+            "2",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -1007,7 +1151,13 @@ fn serve_args_auto_forward_unknown_flags_without_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(args.managed_engine.python_args, vec!["--foo", "bar"]);
+    expect![[r#"
+        [
+            "--foo",
+            "bar",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -1024,10 +1174,13 @@ fn serve_args_auto_forward_negative_value_without_separator() {
     let Command::Serve(args) = cli.command else {
         panic!("expected serve args");
     };
-    assert_eq!(
-        args.managed_engine.python_args,
-        vec!["--num-gpu-blocks-override", "-1"]
-    );
+    expect![[r#"
+        [
+            "--num-gpu-blocks-override",
+            "-1",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
 }
 
 #[test]
@@ -1353,8 +1506,10 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
         "ipc:///tmp/output.sock",
         "--coordinator-address",
         "tcp://127.0.0.1:7000",
+        "--engine-start-index",
+        "3",
         "--engine-count",
-        "2",
+        "1",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
     ])
@@ -1370,7 +1525,8 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             transport_mode: Bootstrapped {
                 input_address: "ipc:///tmp/input.sock",
                 output_address: "ipc:///tmp/output.sock",
-                engine_count: 2,
+                engine_start_index: 3,
+                engine_count: 1,
                 ready_timeout: 600s,
             },
             coordinator_mode: External {
@@ -1381,8 +1537,8 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             listener_mode: InheritedFd {
                 fd: 3,
             },
-            tool_call_parser: Auto,
-            reasoning_parser: Auto,
+            tool_call_parser: None,
+            reasoning_parser: None,
             renderer: Auto,
             language_model_only: false,
             chat_template: None,
