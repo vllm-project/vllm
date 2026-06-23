@@ -32,6 +32,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_pcp_group,
     get_pp_group,
     prepare_communication_buffer_for_model,
 )
@@ -49,6 +50,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.attention.backend import PrefillContextParallelMetadata
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -65,7 +67,7 @@ from vllm.v1.worker.gpu.buffer_utils import (
     async_copy_to_gpu,
     set_default_max_concurrency,
 )
-from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.cp_utils import PCPManager, prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     ModelCudaGraphManager,
@@ -172,6 +174,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.dcp_rank = get_dcp_group().rank_in_group if self.use_dcp else 0
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
 
+        # Prefill context parallelism.
+        self.pcp_world_size = self.parallel_config.prefill_context_parallel_size
+        self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_world_size > 1 else 0
+        self.use_cp = self.pcp_world_size * self.dcp_size > 1
+        # PCP pads each request's token count up to a multiple of 2 * pcp, so pad
+        # positions land in [seq_len, padded_seq_len). Grow max_model_len so those
+        # positions stay in-bounds of the UVA all_token_ids table
+        # ([max_num_reqs, max_model_len]).
+        if self.pcp_world_size > 1:
+            self.max_model_len += 2 * self.pcp_world_size * self.max_num_reqs
+            self.model_config.max_model_len = self.max_model_len
+        self.max_buffer_num_tokens = self.max_num_tokens
+        if self.use_cp:
+            self.max_buffer_num_tokens += self.max_num_reqs * 2 * self.pcp_world_size
+        arange_size = max(self.max_num_reqs + 1, self.max_buffer_num_tokens)
+        self.arange_np = np.arange(arange_size, dtype=np.int64)
+
         # Multimodal
         self.mm_registry = MULTIMODAL_REGISTRY
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
@@ -216,9 +235,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
-            max_num_tokens=self.max_num_tokens,
+            # Sized to the PCP-grown max_buffer_num_tokens so per-rank token
+            # totals (prefill split + decode replicate + padding) fit.
+            max_num_tokens=self.max_buffer_num_tokens,
             device=self.device,
         )
+
+        if self.use_cp:
+            self.pcp_manager = PCPManager(
+                self.pcp_world_size,
+                self.pcp_rank,
+                self.dcp_size,
+                self.dcp_rank,
+                self.max_buffer_num_tokens,
+                self.max_num_reqs,
+                self.device,
+                self.vllm_config,
+                bool(self.scheduler_config.async_scheduling),
+                is_pin_memory_available(),
+            )
 
         if self.use_pp:
             self.pp_handler = PPHandler(
@@ -840,6 +875,49 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.int32, count=num_reqs)
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
 
+        # PCP: split the prefill sequence across PCP ranks. update_tokens_for_pcp
+        # rewrites num_scheduled_tokens to the per-rank DualChunkSwap layout and
+        # returns the zigzag positions (position_pcp). Must run before
+        # query_start_loc / positions / seq_lens / input_ids are built so they
+        # follow the per-rank counts. (MRv1 gpu_model_runner.py:1958-2010.)
+        tokens_original = None
+        position_pcp = None
+        if self.pcp_world_size > 1:
+            nct_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
+            tokens_original_np = num_scheduled_tokens[:num_reqs].copy()
+            # Pre-PCP (canonical) positions + query_start_loc. The KV-cache slot
+            # mapping is built from these (tokens land at canonical slots, not
+            # zigzag); consumed by prepare_attn -> get_padded_slot_mapping.
+            req_indices_orig = np.repeat(self.arange_np[:num_reqs], tokens_original_np)
+            _, pre_pcp_pos_arange = self.pcp_manager._get_cumsum_and_arange(
+                tokens_original_np, self.arange_np
+            )
+            pre_pcp_positions_np = nct_np[req_indices_orig] + pre_pcp_pos_arange
+            self._pcp_pre_positions = torch.from_numpy(pre_pcp_positions_np).to(
+                self.device
+            )
+            pre_pcp_qsl_np = np.empty(num_reqs + 1, dtype=np.int32)
+            pre_pcp_qsl_np[0] = 0
+            np.cumsum(tokens_original_np, out=pre_pcp_qsl_np[1:])
+            self._pcp_pre_query_start_loc = torch.from_numpy(pre_pcp_qsl_np).to(
+                self.device
+            )
+            self._pcp_pre_num_tokens = int(tokens_original_np.sum())
+
+            self.pcp_manager.init_batch_info(num_scheduled_tokens, num_reqs)
+            tokens_original = tokens_original_np.tolist()
+            num_scheduled_tokens[:num_reqs], position_pcp = (
+                self.pcp_manager.update_tokens_for_pcp(
+                    num_scheduled_tokens[:num_reqs], self.arange_np
+                )
+            )
+            # PCP changes the per-rank token total; recompute it so downstream
+            # query_start_loc / positions / slices use the post-PCP count.
+            # (Backend AttentionCGSupport.NEVER under pcp>1 forces piecewise-
+            # eager, so there is no fixed cudagraph bucket to honor.)
+            num_tokens = int(num_scheduled_tokens[:num_reqs].sum())
+            num_tokens_after_padding = num_tokens
+
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         num_draft_tokens_per_req = None
@@ -914,6 +992,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
 
+        # PCP: override positions with the zigzag layout. The kernel above wrote
+        # sequential positions over the PCP-expanded counts; RoPE and the
+        # attention backend need the zigzag positions (position_pcp).
+        # (MRv1 gpu_model_runner.py:2235-2241.)
+        if self.pcp_world_size > 1:
+            assert position_pcp is not None
+            self.input_buffers.positions[:num_tokens].copy_(
+                torch.from_numpy(position_pcp[:num_tokens]),
+                non_blocking=True,
+            )
+
         dcp_local_seq_lens = None
         if self.use_dcp:
             # Prepare dcp local seq_lens.
@@ -941,6 +1030,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_logits,
             self.model_state.num_new_sampled_tokens_per_step,
         )
+
+        # PCP: pad positions index sentinel cells of the UVA all_token_ids; clamp
+        # the now-fully-built input_ids so no negative id reaches the embedding
+        # gather. Then remap logits_indices to the PCP layout (each request's
+        # last-token index in the all-gathered/restore order).
+        # (MRv1 gpu_model_runner.py:2048-2058, 2304-2308.)
+        if self.pcp_world_size > 1:
+            self.input_buffers.input_ids[:num_tokens].clamp_(min=0)
+            cu_num_tokens_pcp = np.empty(num_reqs, dtype=np.int32)
+            np.cumsum(num_scheduled_tokens[:num_reqs], out=cu_num_tokens_pcp)
+            logits_indices = self.pcp_manager.get_logits_indices(
+                cu_num_tokens_pcp, num_reqs, tokens_original
+            ).to(self.device, non_blocking=True)
 
         # CPU upper bound on seq_lens; padded entries left at zero.
         num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
@@ -989,30 +1091,73 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def prepare_attn(
         self, input_batch: InputBatch
-    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+    ) -> tuple[
+        tuple[torch.Tensor, ...],
+        torch.Tensor | list[torch.Tensor],
+        PrefillContextParallelMetadata | None,
+    ]:
         # Block tables: num_kv_cache_groups x [num_reqs_padded, max_num_blocks].
         block_tables = self.block_tables.gather_block_tables(
             input_batch.idx_mapping,
             num_reqs_padded=input_batch.num_reqs_after_padding,
         )
-        # Slot mappings: [num_kv_cache_groups, num_tokens_padded].
-        # Kernel pads beyond num_tokens with PAD_SLOT_ID.
-        slot_mappings = self.block_tables.compute_slot_mappings(
-            input_batch.idx_mapping,
-            input_batch.query_start_loc,
-            input_batch.positions,
-            num_tokens_padded=input_batch.num_tokens_after_padding,
-        )
-        return block_tables, slot_mappings
+        pcp_metadata = None
+        if self.pcp_world_size > 1:
+            # PCP: the KV-cache slot mapping is built from the pre-PCP (canonical)
+            # positions captured in prepare_inputs, then expanded per rank via
+            # get_padded_slot_mapping. (MRv1 gpu_model_runner.py:1958-1970,
+            # 4148-4174.) Then build the PCP attention metadata the backend reads
+            # from CommonAttentionMetadata.prefill_context_parallel_metadata.
+            # (MRv1 gpu_model_runner.py:2516-2529.)
+            base_slot_mappings = self.block_tables.compute_slot_mappings(
+                input_batch.idx_mapping,
+                self._pcp_pre_query_start_loc,
+                self._pcp_pre_positions,
+                num_tokens_padded=self._pcp_pre_num_tokens,
+            )
+            num_groups = base_slot_mappings.shape[0]
+            slot_mappings = [
+                self.pcp_manager.get_padded_slot_mapping(
+                    input_batch.num_tokens,
+                    input_batch.num_tokens_after_padding,
+                    base_slot_mappings[g],
+                    g,
+                )
+                for g in range(num_groups)
+            ]
+            query_lens_t = torch.from_numpy(
+                input_batch.num_scheduled_tokens[: input_batch.num_reqs].copy()
+            )
+            pcp_metadata, _ = self.pcp_manager.generate_pcp_metadata(
+                input_batch.num_tokens,
+                query_lens_t,
+                input_batch,
+                input_batch.num_scheduled_tokens[: input_batch.num_reqs].copy(),
+                block_tables[0],
+                input_batch.num_reqs_after_padding,
+                input_batch.num_reqs,
+            )
+        else:
+            # Slot mappings: [num_kv_cache_groups, num_tokens_padded].
+            # Kernel pads beyond num_tokens with PAD_SLOT_ID.
+            slot_mappings = self.block_tables.compute_slot_mappings(
+                input_batch.idx_mapping,
+                input_batch.query_start_loc,
+                input_batch.positions,
+                num_tokens_padded=input_batch.num_tokens_after_padding,
+            )
+        return block_tables, slot_mappings, pcp_metadata
 
     def prepare_dummy_attn(
         self, input_batch: InputBatch
-    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+    ) -> tuple[
+        tuple[torch.Tensor, ...], torch.Tensor, PrefillContextParallelMetadata | None
+    ]:
         block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
             input_batch.num_tokens
         )
-        return block_tables, slot_mappings
+        return block_tables, slot_mappings, None
 
     def sample(
         self,
@@ -1131,7 +1276,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Common case.
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
-            block_tables, slot_mappings = self.prepare_attn(input_batch)
+            block_tables, slot_mappings, pcp_metadata = self.prepare_attn(input_batch)
 
             if self.lora_config:
                 # Activate LoRA adapters.
@@ -1149,7 +1294,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.input_buffers,
             )
             if not skip_attn_for_dummy_run:
-                block_tables, slot_mappings = self.prepare_dummy_attn(input_batch)
+                block_tables, slot_mappings, pcp_metadata = self.prepare_dummy_attn(
+                    input_batch
+                )
             else:
                 assert batch_desc.cg_mode != CUDAGraphMode.FULL, (
                     "Attention metadata must be prepared for dummy runs when using "
@@ -1198,6 +1345,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings,
                 self.attn_groups,
                 self.kv_cache_config,
+                prefill_context_parallel_metadata=pcp_metadata,
             )
 
         inputs_embeds = None
@@ -1297,6 +1445,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states = None
             aux_hidden_states = None
             output_intermediate_tensors = model_output
+
+        # PCP: all-gather per-rank hidden states across the PCP group and restore
+        # canonical order before ExecuteModelState (sampling re-reads these).
+        # (MRv1 gpu_model_runner.py:4528-4536.)
+        if self.is_last_pp_rank and self.pcp_world_size > 1:
+            hidden_states = self.pcp_manager.get_restore_hidden_states(hidden_states)
+            if aux_hidden_states is not None:
+                aux_hidden_states = [
+                    self.pcp_manager.get_restore_hidden_states(t)
+                    for t in aux_hidden_states
+                ]
 
         finished_req_ids = scheduler_output.finished_req_ids
         self.execute_model_state = ExecuteModelState(

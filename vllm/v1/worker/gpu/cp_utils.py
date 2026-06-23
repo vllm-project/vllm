@@ -14,7 +14,7 @@ from vllm.v1.utils import CpuGpuBuffer
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
+    from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 def prepare_dcp_local_seq_lens(
@@ -1356,10 +1356,10 @@ class PCPManager:
                 decode_context_lens = fixed_decode_seq_lens_cpu[: self.num_decode_reqs]
             else:
                 decode_context_lens = (
-                    input_batch.num_computed_tokens_cpu[: self.num_decode_reqs]
+                    input_batch.num_computed_tokens_np[: self.num_decode_reqs]
                     + num_scheduled_tokens[: self.num_decode_reqs]
                 )
-            prefill_context_lens = input_batch.num_computed_tokens_cpu[
+            prefill_context_lens = input_batch.num_computed_tokens_np[
                 self.num_decode_reqs : self.num_reqs
             ]
             context_lens = np.concatenate([decode_context_lens, prefill_context_lens])
@@ -1619,7 +1619,7 @@ class PCPManager:
                         - decode_num_scheduled_tokens
                     ).tolist()
                 else:
-                    decode_num_computed_tokens = input_batch.num_computed_tokens_cpu[
+                    decode_num_computed_tokens = input_batch.num_computed_tokens_np[
                         : self.num_decode_reqs
                     ].tolist()
 

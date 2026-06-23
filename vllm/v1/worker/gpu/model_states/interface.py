@@ -9,6 +9,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.tasks import GenerationTask
+from vllm.v1.attention.backend import PrefillContextParallelMetadata
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -89,6 +90,7 @@ class ModelState(ABC):
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        prefill_context_parallel_metadata: PrefillContextParallelMetadata | None = None,
         for_capture: bool = False,
     ) -> dict[str, Any]:
         raise NotImplementedError
