@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Thin wrapper around uccl.p2p.Endpoint for vLLM KV connector use."""
 
+import os
 import queue
 import threading
 import time
@@ -15,6 +16,15 @@ from vllm.distributed.uccl_p2p_utils import XferDesc as UcclP2pXferDesc
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+_UCCL_P2P_TIMING_ENABLED = os.environ.get("VLLM_UCCL_P2P_TIMING", "0") == "1"
+_UCCL_P2P_NOTIF_SPIN_US = int(os.environ.get("VLLM_UCCL_P2P_NOTIF_SPIN_US", "100"))
+_UCCL_P2P_NOTIF_SPIN_S = _UCCL_P2P_NOTIF_SPIN_US / 1e6
+
+
+def _timing(label: str, elapsed_us: float) -> None:
+    if _UCCL_P2P_TIMING_ENABLED:
+        logger.info("[uccl_p2p_timing] %s: %.1f us", label, elapsed_us)
 
 
 class UcclP2pWrapper:
@@ -43,6 +53,8 @@ class UcclP2pWrapper:
 
         # Agent name -> conn_id (shared by data transfers and notifications).
         self._conn_ids: dict[str, int] = {}
+        # Reverse lookup for notification delivery.
+        self._conn_id_to_agent: dict[int, str] = {}
 
         # Notification receive state.
         self._notif_queue: queue.Queue[tuple[str, bytes]] = queue.Queue()
@@ -52,22 +64,20 @@ class UcclP2pWrapper:
         )
         self._notif_recv_thread.start()
 
-        # Small pinned CPU buffers used for notifications.
+        # Small pinned CPU buffer used for sending notifications.
         self._notif_buf_size = 256
         self._notif_send_buf = torch.zeros(
-            self._notif_buf_size, dtype=torch.uint8, pin_memory=True
-        )
-        self._notif_recv_buf = torch.zeros(
             self._notif_buf_size, dtype=torch.uint8, pin_memory=True
         )
         send_descs = self._ep.register_memory([self._notif_send_buf])
         if not send_descs:
             raise RuntimeError("UCCL P2P notification send buffer registration failed")
         self._notif_send_mr = send_descs[0].mr_id
-        recv_descs = self._ep.register_memory([self._notif_recv_buf])
-        if not recv_descs:
-            raise RuntimeError("UCCL P2P notification recv buffer registration failed")
-        self._notif_recv_mr = recv_descs[0].mr_id
+
+        # Per-connection receive buffers and async recv handles.
+        self._notif_recv_bufs: dict[int, torch.Tensor] = {}
+        self._notif_recv_mrs: dict[int, int] = {}
+        self._pending_recvs: dict[int, int] = {}
 
     # ------------------------------------------------------------------
     # Endpoint metadata
@@ -92,12 +102,32 @@ class UcclP2pWrapper:
         if not ok:
             raise RuntimeError(f"Failed to add UCCL P2P endpoint for {agent_name}")
         self._conn_ids[agent_name] = conn_id
+        self._conn_id_to_agent[conn_id] = agent_name
+
+        # Allocate a dedicated pinned receive buffer for this connection so
+        # multiple async recvs can be outstanding without overwriting a shared
+        # buffer.
+        recv_buf = torch.zeros(
+            self._notif_buf_size, dtype=torch.uint8, pin_memory=True
+        )
+        recv_descs = self._ep.register_memory([recv_buf])
+        if not recv_descs:
+            raise RuntimeError(
+                "UCCL P2P notification recv buffer registration failed for "
+                f"{agent_name}"
+            )
+        self._notif_recv_bufs[conn_id] = recv_buf
+        self._notif_recv_mrs[conn_id] = recv_descs[0].mr_id
 
         return agent_name
 
     def remove_remote_agent(self, agent_name: str) -> None:
         conn_id = self._conn_ids.pop(agent_name, None)
         if conn_id is not None:
+            self._conn_id_to_agent.pop(conn_id, None)
+            self._pending_recvs.pop(conn_id, None)
+            self._notif_recv_bufs.pop(conn_id, None)
+            self._notif_recv_mrs.pop(conn_id, None)
             self._ep.remove_remote_endpoint(conn_id)
 
     # ------------------------------------------------------------------
@@ -116,13 +146,16 @@ class UcclP2pWrapper:
         return self._ep.deserialize_descs(serialized)
 
     def copy_xfer_desc(self, base_desc: Any, addr: int, size: int) -> Any:
-        """Return a new XferDesc copying RDMA fields and overriding addr/size."""
+        """Return a new XferDesc sharing RDMA keys and overriding addr/size."""
         desc = UcclP2pXferDesc()
         desc.addr = addr
         desc.size = size
         desc.mr_id = base_desc.mr_id
-        desc.lkeys = list(base_desc.lkeys)
-        desc.rkeys = list(base_desc.rkeys)
+        # lkeys/rkeys are immutable for a registered memory region, so share
+        # the same list object across all per-block descriptors to avoid deep
+        # copy overhead during registration.
+        desc.lkeys = base_desc.lkeys
+        desc.rkeys = base_desc.rkeys
         return desc
 
     # ------------------------------------------------------------------
@@ -144,8 +177,13 @@ class UcclP2pWrapper:
         if agent_name is None:
             raise ValueError("agent_name is required for UCCL P2P transfer")
         conn_id = self._conn_ids[agent_name]
+        t0 = time.perf_counter()
         ok, transfer_id = self._ep.transfer(
             conn_id, op_name.lower(), local_descs, remote_descs
+        )
+        _timing(
+            f"transfer_{op_name.lower()}_n={len(local_descs)}",
+            (time.perf_counter() - t0) * 1e6,
         )
         if not ok:
             raise RuntimeError(f"Failed to start UCCL P2P {op_name} transfer")
@@ -156,7 +194,9 @@ class UcclP2pWrapper:
         pass
 
     def check_xfer_state(self, transfer_id: int) -> str:
+        t0 = time.perf_counter()
         ok, is_done = self._ep.poll_async(transfer_id)
+        _timing("poll_async", (time.perf_counter() - t0) * 1e6)
         if not ok:
             return "ERR"
         return "DONE" if is_done else "PROC"
@@ -179,9 +219,11 @@ class UcclP2pWrapper:
         self._notif_send_buf[:n].copy_(
             torch.frombuffer(notif_msg[:n], dtype=torch.uint8)
         )
+        t0 = time.perf_counter()
         ok = self._ep.send(
             conn_id, self._notif_send_mr, self._notif_send_buf.data_ptr(), n
         )
+        _timing("send_notif", (time.perf_counter() - t0) * 1e6)
         if not ok:
             raise RuntimeError(f"Failed to send UCCL P2P notification to {agent_name}")
 
@@ -199,27 +241,61 @@ class UcclP2pWrapper:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _post_async_recv(self, conn_id: int) -> bool:
+        """Post an asynchronous recv for conn_id. Returns True on success."""
+        buf = self._notif_recv_bufs.get(conn_id)
+        mr = self._notif_recv_mrs.get(conn_id)
+        if buf is None or mr is None:
+            return False
+        t0 = time.perf_counter()
+        ok, handle = self._ep.recv_async(
+            conn_id, mr, buf.data_ptr(), self._notif_buf_size
+        )
+        _timing("recv_async_post", (time.perf_counter() - t0) * 1e6)
+        if ok:
+            self._pending_recvs[conn_id] = handle
+            return True
+        return False
+
+    def _drain_completed_recvs(self) -> bool:
+        """Poll all pending async recvs and enqueue completed messages.
+
+        Returns True if at least one message was received.
+        """
+        received = False
+        for conn_id, handle in list(self._pending_recvs.items()):
+            t0 = time.perf_counter()
+            ok, is_done = self._ep.poll_async(handle)
+            _timing("recv_async_poll", (time.perf_counter() - t0) * 1e6)
+            if ok and is_done:
+                buf = self._notif_recv_bufs[conn_id]
+                arr = buf.numpy()
+                msg = arr.tobytes().rstrip(b"\x00")
+                if msg:
+                    agent_name = self._conn_id_to_agent.get(conn_id)
+                    if agent_name is not None:
+                        self._notif_queue.put((agent_name, msg))
+                received = True
+                # Re-post a fresh recv for this connection.
+                self._pending_recvs.pop(conn_id, None)
+                self._post_async_recv(conn_id)
+            elif not ok:
+                self._pending_recvs.pop(conn_id, None)
+                self._post_async_recv(conn_id)
+        return received
+
     def _notif_recv_loop(self) -> None:
         while not self._notif_stop.is_set():
-            received = False
-            for agent_name, conn_id in list(self._conn_ids.items()):
-                try:
-                    ok = self._ep.recv(
-                        conn_id,
-                        self._notif_recv_mr,
-                        self._notif_recv_buf.data_ptr(),
-                        self._notif_buf_size,
-                    )
-                    if ok:
-                        arr = self._notif_recv_buf.numpy()
-                        msg = arr.tobytes().rstrip(b"\x00")
-                        if msg:
-                            self._notif_queue.put((agent_name, msg))
-                        received = True
-                except Exception as e:
-                    logger.debug("UCCL P2P recv error on %s: %s", agent_name, e)
-            if not received:
-                time.sleep(0.001)
+            # Ensure every known connection has an outstanding async recv.
+            for conn_id in self._notif_recv_bufs:
+                if conn_id not in self._pending_recvs:
+                    self._post_async_recv(conn_id)
+
+            if self._drain_completed_recvs():
+                continue
+
+            # No completions: short spin wait before polling again.
+            time.sleep(_UCCL_P2P_NOTIF_SPIN_S)
 
     def shutdown(self) -> None:
         self._notif_stop.set()

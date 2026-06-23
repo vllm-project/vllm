@@ -84,6 +84,13 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_UCCL_P2P_TIMING_ENABLED = os.environ.get("VLLM_UCCL_P2P_TIMING", "0") == "1"
+
+
+def _timing(label: str, elapsed_us: float) -> None:
+    if _UCCL_P2P_TIMING_ENABLED:
+        logger.info("[uccl_p2p_worker_timing] %s: %.1f us", label, elapsed_us)
+
 
 class UcclP2pConnectorWorker:
     """Implementation of Worker side methods"""
@@ -817,6 +824,7 @@ class UcclP2pConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in uccl_p2p."""
+        t0 = time.perf_counter()
         self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
             tp_size=self.world_size,
@@ -1081,6 +1089,7 @@ class UcclP2pConnectorWorker:
             compatibility_hash=self.compat_hash,
             agent_metadata_bytes=encoder.encode(agent_metadata),
         )
+        _timing("register_kv_caches", (time.perf_counter() - t0) * 1e6)
 
     def _build_mamba_local(
         self,
@@ -1387,6 +1396,7 @@ class UcclP2pConnectorWorker:
         For Mamba hetero-TP, both tp_ratio > 0 (D_TP > P_TP) and
         tp_ratio < 0 (P_TP > D_TP) are supported by the 3-read transfer.
         """  # noqa: E501
+        t0 = time.perf_counter()
         engine_id = uccl_p2p_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery
         if remote_tp_rank in self._remote_agents.get(engine_id, {}):
@@ -1541,6 +1551,7 @@ class UcclP2pConnectorWorker:
                 self.register_local_xfer_handler(uccl_p2p_agent_meta.block_size)[0]
             )
 
+        _timing("add_remote_agent", (time.perf_counter() - t0) * 1e6)
         return remote_agent_name
 
     def _validate_remote_agent_handshake(
@@ -1929,50 +1940,59 @@ class UcclP2pConnectorWorker:
         extending the lease on the referenced requests.
         """
         assert self.transfer_topo is not None
+        t0 = time.perf_counter()
         notified_req_ids: set[str] = set()
-        for notifs in self.uccl_p2p_wrapper.get_new_notifs().values():
-            for notif in notifs:
-                msg = notif.decode("utf-8")
+        notif_count = 0
+        try:
+            for notifs in self.uccl_p2p_wrapper.get_new_notifs().values():
+                for notif in notifs:
+                    notif_count += 1
+                    msg = notif.decode("utf-8")
 
-                # Handle heartbeat messages from D-side.
-                if msg.startswith("HB:"):
-                    self._handle_heartbeat(msg[3:])
-                    continue
+                    # Handle heartbeat messages from D-side.
+                    if msg.startswith("HB:"):
+                        self._handle_heartbeat(msg[3:])
+                        continue
 
-                req_id, tp_size = msg.rsplit(":", 1)
-                if (
-                    req_id not in self._reqs_to_send
-                    and req_id not in self._reqs_to_process
-                ):
-                    logger.error(
-                        "Potentially invalid KV blocks for "
-                        "unrecognized request %s were retrieved by "
-                        "a decode worker. They may have expired.",
-                        req_id,
+                    req_id, tp_size = msg.rsplit(":", 1)
+                    if (
+                        req_id not in self._reqs_to_send
+                        and req_id not in self._reqs_to_process
+                    ):
+                        logger.error(
+                            "Potentially invalid KV blocks for "
+                            "unrecognized request %s were retrieved by "
+                            "a decode worker. They may have expired.",
+                            req_id,
+                        )
+                        continue
+
+                    # NOTE: `tp_ratio` is the opposite when swapping local<>remote
+                    n_consumers = int(tp_size)
+                    tp_ratio = self.transfer_topo.tp_ratio(n_consumers)
+
+                    # Number of reads *per producer* to wait for.
+                    # When remote D TP > local P TP we expect `tp_ratio` reads.
+                    consumers_per_producer = (
+                        -tp_ratio if n_consumers > self.world_size else 1
                     )
-                    continue
 
-                # NOTE: `tp_ratio` is the opposite when swapping local<>remote
-                n_consumers = int(tp_size)
-                tp_ratio = self.transfer_topo.tp_ratio(n_consumers)
-
-                # Number of reads *per producer* to wait for.
-                # When remote D TP > local P TP we expect `tp_ratio` reads.
-                consumers_per_producer = (
-                    -tp_ratio if n_consumers > self.world_size else 1
-                )
-
-                self.consumer_notification_counts_by_req[req_id] += 1
-                # Wait all consumers (D) to be done reading before freeing.
-                if (
-                    self.consumer_notification_counts_by_req[req_id]
-                    == consumers_per_producer
-                ):
-                    notified_req_ids.add(req_id)
-                    del self.consumer_notification_counts_by_req[req_id]
-                    self._reqs_to_process.remove(req_id)
-                    self._reqs_to_send.pop(req_id, None)
-        return notified_req_ids
+                    self.consumer_notification_counts_by_req[req_id] += 1
+                    # Wait all consumers (D) to be done reading before freeing.
+                    if (
+                        self.consumer_notification_counts_by_req[req_id]
+                        == consumers_per_producer
+                    ):
+                        notified_req_ids.add(req_id)
+                        del self.consumer_notification_counts_by_req[req_id]
+                        self._reqs_to_process.remove(req_id)
+                        self._reqs_to_send.pop(req_id, None)
+            return notified_req_ids
+        finally:
+            _timing(
+                f"_get_new_notifs_count={notif_count}_done={len(notified_req_ids)}",
+                (time.perf_counter() - t0) * 1e6,
+            )
 
     def _handle_heartbeat(self, payload: str) -> None:
         """Extend leases for requests referenced in a heartbeat.
@@ -2003,60 +2023,71 @@ class UcclP2pConnectorWorker:
         Returns:
             set of req_ids that have all done xfers
         """
+        t0 = time.perf_counter()
         done_req_ids: set[str] = set()
-        for req_id, handles in list(transfers.items()):
-            in_progress = []
-            for handle in handles:
-                try:
-                    xfer_state = self.uccl_p2p_wrapper.check_xfer_state(handle)
-                    if xfer_state == "DONE":
-                        # Get telemetry from UCCL_P2P
-                        res = self.uccl_p2p_wrapper.get_xfer_telemetry(handle)
-                        self.xfer_stats.record_transfer(res)
-                        self.uccl_p2p_wrapper.release_xfer_handle(handle)
-                        # Send completion notification to remote agent
-                        # so P worker can release KV blocks promptly.
-                        notif_meta = self._recving_notif_meta.pop(handle, None)
-                        if notif_meta is not None:
-                            notif_msg, agent_name = notif_meta
-                            try:
-                                self.uccl_p2p_wrapper.send_notif(
-                                    agent_name, notif_msg=notif_msg
-                                )
-                            except Exception as e:
-                                self._log_failure(
-                                    failure_type="notification_failed",
-                                    msg="P worker blocks will be freed after timeout.",
-                                    req_id=req_id,
-                                    error=e,
-                                )
-                    elif xfer_state == "PROC":
-                        in_progress.append(handle)
-                        continue
-                    else:
+        polled = 0
+        try:
+            for req_id, handles in list(transfers.items()):
+                in_progress = []
+                for handle in handles:
+                    polled += 1
+                    try:
+                        xfer_state = self.uccl_p2p_wrapper.check_xfer_state(handle)
+                        if xfer_state == "DONE":
+                            # Get telemetry from UCCL_P2P
+                            res = self.uccl_p2p_wrapper.get_xfer_telemetry(handle)
+                            self.xfer_stats.record_transfer(res)
+                            self.uccl_p2p_wrapper.release_xfer_handle(handle)
+                            # Send completion notification to remote agent
+                            # so P worker can release KV blocks promptly.
+                            notif_meta = self._recving_notif_meta.pop(handle, None)
+                            if notif_meta is not None:
+                                notif_msg, agent_name = notif_meta
+                                try:
+                                    self.uccl_p2p_wrapper.send_notif(
+                                        agent_name, notif_msg=notif_msg
+                                    )
+                                except Exception as e:
+                                    self._log_failure(
+                                        failure_type="notification_failed",
+                                        msg=(
+                                    "P worker blocks will be freed after timeout."
+                                ),
+                                        req_id=req_id,
+                                        error=e,
+                                    )
+                        elif xfer_state == "PROC":
+                            in_progress.append(handle)
+                            continue
+                        else:
+                            self._log_failure(
+                                failure_type="transfer_failed",
+                                msg="Marking blocks as invalid",
+                                req_id=req_id,
+                                xfer_state=xfer_state,
+                            )
+                            self._handle_failed_transfer(req_id, handle)
+                    except Exception as e:
                         self._log_failure(
-                            failure_type="transfer_failed",
+                            failure_type="transfer_exception",
                             msg="Marking blocks as invalid",
                             req_id=req_id,
-                            xfer_state=xfer_state,
+                            error=e,
                         )
                         self._handle_failed_transfer(req_id, handle)
-                except Exception as e:
-                    self._log_failure(
-                        failure_type="transfer_exception",
-                        msg="Marking blocks as invalid",
-                        req_id=req_id,
-                        error=e,
-                    )
-                    self._handle_failed_transfer(req_id, handle)
 
-            if not in_progress:
-                # Only report request as completed when all transfers are done.
-                done_req_ids.add(req_id)
-                del transfers[req_id]
-            else:
-                transfers[req_id] = in_progress
-        return done_req_ids
+                if not in_progress:
+                    # Only report request as completed when all transfers are done.
+                    done_req_ids.add(req_id)
+                    del transfers[req_id]
+                else:
+                    transfers[req_id] = in_progress
+            return done_req_ids
+        finally:
+            _timing(
+                f"_pop_done_transfers_polled={polled}_done={len(done_req_ids)}",
+                (time.perf_counter() - t0) * 1e6,
+            )
 
     def _handle_failed_transfer(self, req_id: str, handle: int | None):
         """
@@ -2168,90 +2199,96 @@ class UcclP2pConnectorWorker:
                     )
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
-        assert meta.remote is not None and self.transfer_topo is not None
-        engine_id = meta.remote.engine_id
-        # Update last activity from this remote. Mind that cleanup is done on main
-        # thread (this one), so we don't race on this structure.
-        self._engine_last_active[engine_id] = time.perf_counter()
-        plan = self.tp_mappings[engine_id]
-        remote_info = self.transfer_topo.get_engine_info(engine_id)
-        tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
+        t0 = time.perf_counter()
+        try:
+            assert meta.remote is not None and self.transfer_topo is not None
+            engine_id = meta.remote.engine_id
+            # Update last activity from this remote. Mind that cleanup is done on main
+            # thread (this one), so we don't race on this structure.
+            self._engine_last_active[engine_id] = time.perf_counter()
+            plan = self.tp_mappings[engine_id]
+            remote_info = self.transfer_topo.get_engine_info(engine_id)
+            tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
-        meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
-            meta.remote.block_ids,
-            remote_info.remote_physical_blocks_per_logical,
-        )
-        remote_block_ids = meta.remote.block_ids
-        local_block_ids = meta.local_physical_block_ids
-        num_groups = len(local_block_ids)
-        read_specs = [
-            ReadSpec(
-                remote_rank=rank,
-                local_block_ids=[
-                    list(local_block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
-                    for g in range(num_groups)
-                ],
-                remote_block_ids=[
-                    list(remote_block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
-                    for g in range(num_groups)
-                ],
+            meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
+                meta.remote.block_ids,
+                remote_info.remote_physical_blocks_per_logical,
             )
-            for rank in plan.all_source_ranks
-        ]
-
-        # D may have to perform multiple reads from different remote ranks.
-        # MLA opt: when P TP > D TP, only a single read is executed for
-        # the first remote rank (cache is duplicated)..
-        if self.use_mla and tp_ratio < 0:
-            assert len(read_specs) == 1
-
-        for i, spec in enumerate(read_specs):
-            remote_block_size = remote_info.remote_block_size
-            logger.debug(
-                "Remote agent %s available, calling _read_blocks"
-                " on remote rank %s with remote block size %s for req %s",
-                meta.remote.engine_id,
-                spec.remote_rank,
-                remote_block_size,
-                req_id,
-            )
-            # Get side XferDesc lists (instead of NIXL dlist handles).
-            if tp_ratio < 0 and not self.use_mla:
-                assert remote_block_size == self.block_size
-                # Remote tp_size > local tp_size: we must perform multiple
-                # reads. Get the memory chunk onto which we will write to.
-                local_xfer_descs = self.src_xfer_descs_by_tp_ratio[tp_ratio][i]
-            else:
-                # Single read from remote, we write to the whole memory region.
-                # Also handle remote block size different from local block size.
-                local_xfer_descs = self.src_xfer_descs_by_block_size[remote_block_size]
-
-            # Destination XferDesc list: remote_engine_id -> remote_rank -> list.
-            remote_xfer_descs = self.dst_xfer_descs[meta.remote.engine_id][
-                spec.remote_rank
+            remote_block_ids = meta.remote.block_ids
+            local_block_ids = meta.local_physical_block_ids
+            num_groups = len(local_block_ids)
+            read_specs = [
+                ReadSpec(
+                    remote_rank=rank,
+                    local_block_ids=[
+                        list(local_block_ids[g])
+                        if rank in plan.source_ranks_per_group[g]
+                        else []
+                        for g in range(num_groups)
+                    ],
+                    remote_block_ids=[
+                        list(remote_block_ids[g])
+                        if rank in plan.source_ranks_per_group[g]
+                        else []
+                        for g in range(num_groups)
+                    ],
+                )
+                for rank in plan.all_source_ranks
             ]
 
-            self._read_blocks(
-                read_spec=spec,
-                request_id=req_id,
-                dst_engine_id=meta.remote.engine_id,
-                remote_request_id=meta.remote.request_id,
-                local_xfer_descs=local_xfer_descs,
-                remote_xfer_descs=remote_xfer_descs,
-            )
+            # D may have to perform multiple reads from different remote ranks.
+            # MLA opt: when P TP > D TP, only a single read is executed for
+            # the first remote rank (cache is duplicated)..
+            if self.use_mla and tp_ratio < 0:
+                assert len(read_specs) == 1
 
-        if self.use_mla and tp_ratio < 0 and read_specs:
-            # ..but we still need to notify the other remote ranks that we
-            # have the blocks we need so they can update the request state.
-            notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
-            remote_agents = self._remote_agents[meta.remote.engine_id]
-            for rank_to_notify, agent in remote_agents.items():
-                if rank_to_notify != read_specs[0].remote_rank:
-                    self.uccl_p2p_wrapper.send_notif(agent, notif_msg=notif_id)
+            for i, spec in enumerate(read_specs):
+                remote_block_size = remote_info.remote_block_size
+                logger.debug(
+                    "Remote agent %s available, calling _read_blocks"
+                    " on remote rank %s with remote block size %s for req %s",
+                    meta.remote.engine_id,
+                    spec.remote_rank,
+                    remote_block_size,
+                    req_id,
+                )
+                # Get side XferDesc lists (instead of NIXL dlist handles).
+                if tp_ratio < 0 and not self.use_mla:
+                    assert remote_block_size == self.block_size
+                    # Remote tp_size > local tp_size: we must perform multiple
+                    # reads. Get the memory chunk onto which we will write to.
+                    local_xfer_descs = self.src_xfer_descs_by_tp_ratio[tp_ratio][i]
+                else:
+                    # Single read from remote, we write to the whole memory region.
+                    # Also handle remote block size different from local block size.
+                    local_xfer_descs = self.src_xfer_descs_by_block_size[
+                        remote_block_size
+                    ]
+
+                # Destination XferDesc list: remote_engine_id -> remote_rank -> list.
+                remote_xfer_descs = self.dst_xfer_descs[meta.remote.engine_id][
+                    spec.remote_rank
+                ]
+
+                self._read_blocks(
+                    read_spec=spec,
+                    request_id=req_id,
+                    dst_engine_id=meta.remote.engine_id,
+                    remote_request_id=meta.remote.request_id,
+                    local_xfer_descs=local_xfer_descs,
+                    remote_xfer_descs=remote_xfer_descs,
+                )
+
+            if self.use_mla and tp_ratio < 0 and read_specs:
+                # ..but we still need to notify the other remote ranks that we
+                # have the blocks we need so they can update the request state.
+                notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
+                remote_agents = self._remote_agents[meta.remote.engine_id]
+                for rank_to_notify, agent in remote_agents.items():
+                    if rank_to_notify != read_specs[0].remote_rank:
+                        self.uccl_p2p_wrapper.send_notif(agent, notif_msg=notif_id)
+        finally:
+            _timing(f"_read_blocks_for_req_{req_id}", (time.perf_counter() - t0) * 1e6)
 
     def _read_blocks(
         self,
@@ -2266,134 +2303,149 @@ class UcclP2pConnectorWorker:
         Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
         """
-        assert self.transfer_topo is not None
-        remote_rank = read_spec.remote_rank
-        local_block_ids = read_spec.local_block_ids
-        remote_block_ids = read_spec.remote_block_ids
+        t0 = time.perf_counter()
+        try:
+            assert self.transfer_topo is not None
+            remote_rank = read_spec.remote_rank
+            local_block_ids = read_spec.local_block_ids
+            remote_block_ids = read_spec.remote_block_ids
 
-        remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
-        block_size_ratio = self.transfer_topo.block_size_ratio(
-            remote_info.remote_block_size
-        )
-        if block_size_ratio > 1:
-            # TODO (NickLucche) assume HMA is off. Change to handle multiple KV groups.
-            assert not self._is_hma_required
-            local_block_ids0 = local_block_ids[0] if local_block_ids else []
-            remote_block_ids0 = remote_block_ids[0]
-            local_block_ids_mapped = self.get_mapped_blocks(
-                np.asarray(local_block_ids0), block_size_ratio
-            ).tolist()
-            if len(local_block_ids_mapped) > len(remote_block_ids0):
-                # NOTE:
-                # get_mapped_blocks will always expand block_ids for n times.
-                # ex:
-                # prefill block_ids with block_size as 4:
-                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-                # Local decode block_ids with block_size as 16: [1, 2, 3]
-                # expanded decode block_ids with get_mapped_blocks from [1, 2, 3] to
-                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-                # Then we clip local to align with prefill
-                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] to
-                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-                local_block_ids_mapped = local_block_ids_mapped[
-                    : len(remote_block_ids0)
-                ]
-            local_block_ids = [local_block_ids_mapped] if local_block_ids_mapped else []
-            remote_block_ids = [remote_block_ids0]
-        # NOTE(rob): having the staging blocks be on the READER side is
-        # not going to work well (since we will have to call rearrange tensors).
-        # after we detect the txn is complete (which means we cannot make the
-        # read trxn async easily). If we want to make "READ" happen cleanly,
-        # then we will need to have the staging blocks on the remote side.
+            remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
+            block_size_ratio = self.transfer_topo.block_size_ratio(
+                remote_info.remote_block_size
+            )
+            if block_size_ratio > 1:
+                # TODO (NickLucche) assume HMA is off. Change to handle
+                # multiple KV groups.
+                assert not self._is_hma_required
+                local_block_ids0 = local_block_ids[0] if local_block_ids else []
+                remote_block_ids0 = remote_block_ids[0]
+                local_block_ids_mapped = self.get_mapped_blocks(
+                    np.asarray(local_block_ids0), block_size_ratio
+                ).tolist()
+                if len(local_block_ids_mapped) > len(remote_block_ids0):
+                    # NOTE:
+                    # get_mapped_blocks will always expand block_ids for n times.
+                    # ex:
+                    # prefill block_ids with block_size as 4:
+                    # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                    # Local decode block_ids with block_size as 16: [1, 2, 3]
+                    # expanded decode block_ids with get_mapped_blocks from [1, 2, 3] to
+                    # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+                    # Then we clip local to align with prefill
+                    # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] to
+                    # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                    local_block_ids_mapped = local_block_ids_mapped[
+                        : len(remote_block_ids0)
+                    ]
+                if local_block_ids_mapped:
+                    local_block_ids = [local_block_ids_mapped]
+                else:
+                    local_block_ids = []
+                remote_block_ids = [remote_block_ids0]
+            # NOTE(rob): having the staging blocks be on the READER side is
+            # not going to work well (since we will have to call rearrange tensors).
+            # after we detect the txn is complete (which means we cannot make the
+            # read trxn async easily). If we want to make "READ" happen cleanly,
+            # then we will need to have the staging blocks on the remote side.
 
-        # NOTE(rob): according to nvidia the staging blocks are used to
-        # saturate IB with heterogeneous TP sizes.
+            # NOTE(rob): according to nvidia the staging blocks are used to
+            # saturate IB with heterogeneous TP sizes.
 
-        # Number of D TP workers that will read from dst P. Propagate info
-        # on notification so that dst worker can wait before freeing blocks.
-        notif_id = f"{remote_request_id}:{self.world_size}".encode()
+            # Number of D TP workers that will read from dst P. Propagate info
+            # on notification so that dst worker can wait before freeing blocks.
+            notif_id = f"{remote_request_id}:{self.world_size}".encode()
 
-        # Full prefix cache hit: do not need to read remote blocks,
-        # just notify P worker that we have the blocks we need.
-        if len(local_block_ids) == 0:
-            # A full prefix cache hit is indicated with an empty list.
-            agent_name = self._remote_agents[dst_engine_id][remote_rank]
+            # Full prefix cache hit: do not need to read remote blocks,
+            # just notify P worker that we have the blocks we need.
+            if len(local_block_ids) == 0:
+                # A full prefix cache hit is indicated with an empty list.
+                agent_name = self._remote_agents[dst_engine_id][remote_rank]
+                try:
+                    self.uccl_p2p_wrapper.send_notif(agent_name, notif_msg=notif_id)
+                except Exception as e:
+                    self._log_failure(
+                        failure_type="notification_failed",
+                        msg="P worker blocks will be freed after timeout. "
+                        "This may indicate network issues.",
+                        req_id=request_id,
+                        error=e,
+                        dst_engine_id=dst_engine_id,
+                        remote_rank=remote_rank,
+                        remote_agent_name=agent_name,
+                    )
+                    self.xfer_stats.record_failed_notification()
+                return
+
+            assert (
+                len(remote_block_ids)
+                == len(local_block_ids)
+                == len(self.kv_cache_config.kv_cache_groups)
+            )
+            remote_physical_per_logical = remote_info.remote_physical_blocks_per_logical
+            local_block_ids, remote_block_ids = self._apply_prefix_caching(
+                local_block_ids, remote_block_ids, remote_physical_per_logical
+            )
+
+            # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
+            # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
+            # workers will issue xfers to parts of the P worker remote kv caches.
+
+            # Get descs ids.
+            remote_block_descs_ids = self._compute_desc_ids(
+                block_ids=remote_block_ids,
+                dst_num_blocks=self.dst_num_blocks[dst_engine_id],
+                block_size_ratio=None,
+                physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
+            )
+            local_block_descs_ids = self._compute_desc_ids(
+                block_ids=local_block_ids,
+                dst_num_blocks=self.dst_num_blocks[self.engine_id],
+                block_size_ratio=block_size_ratio,
+                physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
+            )
+
+            assert len(local_block_descs_ids) == len(remote_block_descs_ids)
+
+            # Prepare transfer with UcclP2p.
+            # Select per-block XferDesc objects by the computed indices.
+            handle = None
             try:
-                self.uccl_p2p_wrapper.send_notif(agent_name, notif_msg=notif_id)
+                local_descs = [
+                    local_xfer_descs[int(i)] for i in local_block_descs_ids
+                ]
+                remote_descs = [
+                    remote_xfer_descs[int(i)] for i in remote_block_descs_ids
+                ]
+                agent_name = self._remote_agents[dst_engine_id][remote_rank]
+                transfer_id = self.uccl_p2p_wrapper.make_prepped_xfer(
+                    "READ",
+                    local_descs,
+                    remote_descs,
+                    notif_msg=notif_id,
+                    agent_name=agent_name,
+                )
+
+                # Transfer starts immediately in UCCL P2P.
+                # Use transfer_id to check completion in future step().
+                self._recving_transfers[request_id].append(transfer_id)
+                self._recving_notif_meta[transfer_id] = (notif_id, agent_name)
             except Exception as e:
+                # mark all (logical) blocks for this request as invalid
                 self._log_failure(
-                    failure_type="notification_failed",
-                    msg="P worker blocks will be freed after timeout. "
-                    "This may indicate network issues.",
+                    failure_type="transfer_setup_failed",
                     req_id=request_id,
+                    msg="Marking blocks as invalid",
                     error=e,
                     dst_engine_id=dst_engine_id,
                     remote_rank=remote_rank,
-                    remote_agent_name=agent_name,
                 )
-                self.xfer_stats.record_failed_notification()
-            return
-
-        assert (
-            len(remote_block_ids)
-            == len(local_block_ids)
-            == len(self.kv_cache_config.kv_cache_groups)
-        )
-        remote_physical_per_logical = remote_info.remote_physical_blocks_per_logical
-        local_block_ids, remote_block_ids = self._apply_prefix_caching(
-            local_block_ids, remote_block_ids, remote_physical_per_logical
-        )
-
-        # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
-        # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
-        # workers will issue xfers to parts of the P worker remote kv caches.
-
-        # Get descs ids.
-        remote_block_descs_ids = self._compute_desc_ids(
-            block_ids=remote_block_ids,
-            dst_num_blocks=self.dst_num_blocks[dst_engine_id],
-            block_size_ratio=None,
-            physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
-        )
-        local_block_descs_ids = self._compute_desc_ids(
-            block_ids=local_block_ids,
-            dst_num_blocks=self.dst_num_blocks[self.engine_id],
-            block_size_ratio=block_size_ratio,
-            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-        )
-
-        assert len(local_block_descs_ids) == len(remote_block_descs_ids)
-
-        # Prepare transfer with UcclP2p.
-        # Select per-block XferDesc objects by the computed indices.
-        handle = None
-        try:
-            local_descs = [local_xfer_descs[int(i)] for i in local_block_descs_ids]
-            remote_descs = [remote_xfer_descs[int(i)] for i in remote_block_descs_ids]
-            agent_name = self._remote_agents[dst_engine_id][remote_rank]
-            transfer_id = self.uccl_p2p_wrapper.make_prepped_xfer(
-                "READ",
-                local_descs,
-                remote_descs,
-                notif_msg=notif_id,
-                agent_name=agent_name,
+                self._handle_failed_transfer(request_id, handle)
+        finally:
+            _timing(
+                f"_read_blocks_n={len(getattr(read_spec, 'local_block_ids', []))}",
+                (time.perf_counter() - t0) * 1e6,
             )
-
-            # Transfer starts immediately in UCCL P2P.
-            # Use transfer_id to check completion in future step().
-            self._recving_transfers[request_id].append(transfer_id)
-            self._recving_notif_meta[transfer_id] = (notif_id, agent_name)
-        except Exception as e:
-            # mark all (logical) blocks for this request as invalid
-            self._log_failure(
-                failure_type="transfer_setup_failed",
-                req_id=request_id,
-                msg="Marking blocks as invalid",
-                error=e,
-                dst_engine_id=dst_engine_id,
-                remote_rank=remote_rank,
-            )
-            self._handle_failed_transfer(request_id, handle)
 
     def get_mapped_blocks(
         self, block_ids: np.ndarray, block_size_ratio: int

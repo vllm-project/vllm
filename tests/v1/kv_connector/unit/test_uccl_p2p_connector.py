@@ -38,6 +38,7 @@ class FakeUcclP2pWrapper:
     def __init__(self, local_gpu_idx: int):
         self._md = b"fake_md"
         self._conn_ids: dict[str, int] = {}
+        self._conn_id_to_agent: dict[int, str] = {}
         self._counter = 0
 
     def get_agent_metadata(self) -> bytes:
@@ -64,8 +65,8 @@ class FakeUcclP2pWrapper:
             addr=addr,
             size=size,
             mr_id=base_desc.mr_id,
-            lkeys=list(base_desc.lkeys) if base_desc.lkeys is not None else [],
-            rkeys=list(base_desc.rkeys) if base_desc.rkeys is not None else [],
+            lkeys=base_desc.lkeys,
+            rkeys=base_desc.rkeys,
         )
 
     def add_remote_agent(
@@ -76,10 +77,13 @@ class FakeUcclP2pWrapper:
         self._counter += 1
         conn_id = self._counter
         self._conn_ids[agent_name] = conn_id
+        self._conn_id_to_agent[conn_id] = agent_name
         return agent_name
 
     def remove_remote_agent(self, agent_name: str) -> None:
-        self._conn_ids.pop(agent_name, None)
+        conn_id = self._conn_ids.pop(agent_name, None)
+        if conn_id is not None:
+            self._conn_id_to_agent.pop(conn_id, None)
 
     def make_prepped_xfer(
         self,
