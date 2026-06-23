@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
 )
-from vllm.logger import init_logger
 from vllm.parser.engine.registered_adapters import MinimaxM2ParserReasoningAdapter
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
@@ -15,8 +14,6 @@ from vllm.tokenizers import TokenizerLike
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
     from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-
-logger = init_logger(__name__)
 
 
 class MiniMaxM2ReasoningParser(MinimaxM2ParserReasoningAdapter):  # type: ignore[valid-type, misc]

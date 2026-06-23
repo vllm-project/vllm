@@ -143,6 +143,12 @@ SCENARIOS: list[Scenario] = [
         tool_calls=[_READ_TOOL],
         after_tool_response=True,
     ),
+    Scenario(
+        id="empty-tool-block",
+        description="Empty tool block followed by content (edge case recovery)",
+        content="Content after empty tools.",
+        tool_calls=[],
+    ),
 ]
 
 
@@ -344,8 +350,11 @@ def _qwen3_segments(scenario: Scenario) -> list[tuple[str, bool]]:
     segs: list[tuple[str, bool]] = []
     if scenario.reasoning is not None:
         segs.append((scenario.reasoning, False))
-    if scenario.content is not None or scenario.tool_calls:
+    if scenario.content is not None or scenario.tool_calls is not None:
         segs.append(("</think>", True))
+    if scenario.tool_calls is not None and not scenario.tool_calls:
+        segs.append(("<tool_call>", True))
+        segs.append(("</tool_call>", True))
     if scenario.content is not None:
         segs.append((scenario.content, False))
     if scenario.tool_calls:
@@ -437,8 +446,11 @@ def _minimax_m2_segments(scenario: Scenario) -> list[tuple[str, bool]]:
     segs: list[tuple[str, bool]] = []
     if scenario.reasoning is not None:
         segs.append((scenario.reasoning, False))
-    if scenario.content is not None or scenario.tool_calls:
+    if scenario.content is not None or scenario.tool_calls is not None:
         segs.append(("</think>", True))
+    if scenario.tool_calls is not None and not scenario.tool_calls:
+        segs.append(("<minimax:tool_call>", True))
+        segs.append(("</minimax:tool_call>", True))
     if scenario.content is not None:
         segs.append((scenario.content, False))
     if scenario.tool_calls:
@@ -534,6 +546,9 @@ def _gemma4_segments(scenario: Scenario) -> list[tuple[str, bool]]:
         segs.append((_GEMMA4_THOUGHT_PREFIX, False))
         segs.append((scenario.reasoning, False))
         segs.append(("<channel|>", True))
+    if scenario.tool_calls is not None and not scenario.tool_calls:
+        segs.append(("<|tool_call>", True))
+        segs.append(("<tool_call|>", True))
     if scenario.content is not None:
         segs.append((scenario.content, False))
     if scenario.tool_calls:
