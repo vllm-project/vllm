@@ -903,7 +903,6 @@ class GPUModelRunner(
             and self.num_spec_tokens > 0
             and self.model_config.is_hybrid
             and envs.VLLM_MAMBA_MTP_REPLAY
-            and envs.VLLM_MAMBA_MTP_REPLAY_TEMPORAL_SLOT
         )
         self.mamba_mtp_replay_temporal_req_slots: dict[str, int] = {}
         self.mamba_mtp_replay_temporal_free_slots: list[int] = []
@@ -1101,32 +1100,6 @@ class GPUModelRunner(
         self._invalidate_mamba_mtp_replay_temporal_slots(new_slots)
         slot_indices.copy_to_gpu(num_reqs_padded)
         return slot_indices.gpu[:num_reqs_padded]
-
-    def _preserve_mamba_mtp_replay_accepted_state(self, num_reqs: int) -> None:
-        if (
-            self.cache_config.mamba_cache_mode != "none"
-            or self.speculative_config is None
-            or not self.model_config.is_hybrid
-            or not envs.VLLM_MAMBA_MTP_REPLAY
-            or self.use_mamba_mtp_replay_temporal_slots
-        ):
-            return
-
-        mamba_group_ids, _ = mamba_utils.get_mamba_groups(self.kv_cache_config)
-        num_accepted_tokens = self.num_accepted_tokens.gpu[:num_reqs]
-        for kv_cache_group_id in mamba_group_ids:
-            state_indices = self.input_batch.block_table[
-                kv_cache_group_id
-            ].get_device_tensor(num_reqs)
-            for layer_name in self.kv_cache_config.kv_cache_groups[
-                kv_cache_group_id
-            ].layer_names:
-                layer = self.compilation_config.static_forward_context.get(layer_name)
-                preserve_replay_state = getattr(
-                    layer, "preserve_mtp_replay_accepted_state", None
-                )
-                if preserve_replay_state is not None:
-                    preserve_replay_state(state_indices, num_accepted_tokens)
 
     def _collect_mamba_mtp_replay_block_ids(
         self,
@@ -1701,7 +1674,6 @@ class GPUModelRunner(
         # tokens gives us the first -1 position (i.e., number of accepted).
         num_reqs = output_token_ids.size(0)
         self.num_accepted_tokens.gpu[:num_reqs] = (output_token_ids != -1).sum(dim=1)
-        self._preserve_mamba_mtp_replay_accepted_state(num_reqs)
 
         if self.cache_config.mamba_cache_mode == "align":
             # Fused GPU postprocess: state copies + per-request accepted-token

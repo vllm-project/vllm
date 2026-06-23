@@ -188,7 +188,6 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_MAMBA_MTP_REPLAY: bool = False
-    VLLM_MAMBA_MTP_REPLAY_TEMPORAL_SLOT: bool = False
     VLLM_MAMBA_MTP_REPLAY_PDL: bool = False
     VLLM_MAMBA_MTP_REPLAY_EXTERNAL_PDL: bool = False
     VLLM_MAMBA_MTP_REPLAY_INTERNAL_PDL: bool = False
@@ -1531,12 +1530,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Use experimental replay-based SSM state updates for Mamba MTP decode steps.
     "VLLM_MAMBA_MTP_REPLAY": lambda: _getenv_bool("VLLM_MAMBA_MTP_REPLAY", False),
-    # Store Mamba MTP replay SSM state and compact trace in a stable
-    # per-request temporal slot. Physical endpoint rows remain available for
-    # conv/block-table metadata.
-    "VLLM_MAMBA_MTP_REPLAY_TEMPORAL_SLOT": lambda: _getenv_bool(
-        "VLLM_MAMBA_MTP_REPLAY_TEMPORAL_SLOT", False
-    ),
     # Use PDL between Mamba MTP replay kernels. Keep off by default while
     # correctness is being validated separately from kernel overlap.
     "VLLM_MAMBA_MTP_REPLAY_PDL": lambda: _getenv_bool(
