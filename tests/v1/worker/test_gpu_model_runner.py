@@ -887,6 +887,40 @@ def test_apply_sparse_weight_patches_updates_only_selected_entries():
     assert torch.equal(runner.get_model().weight.data, expected)
 
 
+def test_preprocess_clears_padded_input_ids_before_embedding(monkeypatch):
+    monkeypatch.setattr(
+        gpu_model_runner_module,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True),
+    )
+    runner = object.__new__(GPUModelRunner)
+    runner.model_config = SimpleNamespace(is_encoder_decoder=False)
+    runner.supports_mm_inputs = False
+    runner.enable_prompt_embeds = False
+    runner.uses_mrope = False
+    runner.uses_xdrope_dim = 0
+    runner.is_pooling_model = False
+    runner.input_ids = SimpleNamespace(
+        gpu=torch.tensor([10, 11, 92544, 92545], dtype=torch.int32)
+    )
+    runner.positions = torch.empty(4, dtype=torch.int64)
+    scheduler_output = SimpleNamespace(
+        total_num_scheduled_tokens=2,
+        scheduled_encoder_inputs={},
+    )
+
+    embedding = torch.nn.Embedding(92544, 1)
+    with pytest.raises(IndexError):
+        embedding(runner.input_ids.gpu.long())
+
+    input_ids, *_ = GPUModelRunner._preprocess(
+        runner, scheduler_output, num_input_tokens=4
+    )
+
+    assert input_ids.tolist() == [10, 11, 0, 0]
+    embedding(input_ids.long())
+
+
 def test_apply_sparse_weight_patches_rejects_mismatched_lengths():
     class DummyModel(nn.Module):
         def __init__(self):
