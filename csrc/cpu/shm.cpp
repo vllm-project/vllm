@@ -1164,6 +1164,8 @@ void ibv_ar_connect(int64_t handle, const std::string& remote_info,
 // A receive WR is always pre-posted (from connect or previous call).
 void ibv_ar_allreduce(int64_t handle, torch::Tensor& data) {
   auto& s = *g_ibv_states[handle];
+  TORCH_CHECK(data.is_contiguous(),
+              "IBV allreduce requires a contiguous tensor");
   size_t nbytes = data.numel() * data.element_size();
   TORCH_CHECK(nbytes <= s.buf_size,
               "IBV allreduce: tensor size ", nbytes, " exceeds buffer ", s.buf_size);
@@ -1406,6 +1408,8 @@ static inline void tensor_add(void* dst, const void* a, const void* b,
 // This synchronizes IBV timing between nodes and eliminates cascading wait.
 void hier_allreduce(int64_t handle, torch::Tensor& data) {
   auto& state = g_hier_ar_states[handle];
+  TORCH_CHECK(data.is_contiguous(),
+              "Hierarchical allreduce requires a contiguous tensor");
   size_t nbytes = data.numel() * data.element_size();
 
   // IBV-only path: no local peer (1 worker per node, e.g. TP=2 cross-node)
@@ -1429,6 +1433,10 @@ void hier_allreduce(int64_t handle, torch::Tensor& data) {
   uint64_t my_epoch = state.reduce_epoch;
   void* my_slot = (state.local_rank == 0) ? state.slot0 : state.slot1;
   auto& ibv = *g_ibv_states[state.ibv_handle];
+
+  TORCH_CHECK(nbytes <= ibv.buf_size,
+              "Hierarchical allreduce: tensor size ", nbytes,
+              " exceeds IBV buffer ", ibv.buf_size);
 
   // Step 1: Copy data to SHM slot AND IBV send_buf
   memcpy(my_slot, data.data_ptr(), nbytes);
