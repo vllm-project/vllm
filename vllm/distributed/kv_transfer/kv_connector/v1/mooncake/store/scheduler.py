@@ -54,9 +54,9 @@ class MooncakeStoreScheduler:
     ):
         assert vllm_config.kv_transfer_config is not None
         self.kv_role = vllm_config.kv_transfer_config.kv_role
-        self.load_async = vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-            "load_async", True
-        )
+        kvc_extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        self.load_async = kvc_extra_config.get("load_async", True)
+        self.lookup_async = kvc_extra_config.get("lookup_async", False)
         self.client = LookupKeyClient(vllm_config)
 
         # Align with the engine's own scheduler_block_size and hash_block_size.
@@ -75,14 +75,26 @@ class MooncakeStoreScheduler:
         self,
         request: Request,
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
-        """Check for external KV cache hit."""
+    ) -> tuple[int | None, bool]:
+        """Check for external KV cache hit.
+
+        Returns ``(None, False)`` when an async lookup is still in flight,
+        signaling the scheduler to retry this request on a later step.
+        """
         # Look up against the full prefill range, not just the prompt.
         token_len = request.num_tokens // self._block_size * self._block_size
         if token_len < self._block_size:
             return 0, False
 
-        num_external_hit_tokens = self.client.lookup(token_len, request.block_hashes)
+        num_external_hit_tokens = self.client.lookup(
+            request.request_id,
+            token_len,
+            request.block_hashes,
+            non_block=self.lookup_async,
+        )
+        if num_external_hit_tokens is None:
+            # Lookup not ready yet; scheduler will retry on a later step.
+            return None, False
 
         if num_external_hit_tokens == request.num_tokens:
             # Leave a sub-block tail uncomputed for sampling, on a block
@@ -158,6 +170,7 @@ class MooncakeStoreScheduler:
         force_skip_save = self.kv_role == "kv_consumer"
 
         for finished_req_id in scheduler_output.finished_req_ids:
+            self.client.discard(finished_req_id)
             self.load_specs.pop(finished_req_id, None)
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
