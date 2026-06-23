@@ -60,8 +60,10 @@ def _resolve_layer_attention(
     Sliding window:
     - Without ``layer_types``, every layer is full attention unless
       ``dflash_config.use_swa`` is set, in which case every layer is SWA.
-    - With ``layer_types``, each layer follows its own entry; ``use_swa`` is
-      then only valid when every layer is sliding (raises otherwise).
+    - With a ``layer_types`` carrying sliding entries, each layer follows its
+      own entry. An all-"full_attention" ``layer_types`` may be synthesized
+      when the checkpoint omits one, so ``use_swa`` still forces every layer to
+      SWA when ``layer_types`` has no sliding entries.
 
     Causality: ``dflash_config.causal`` applies to all layers when set.
     Otherwise full-attention layers are non-causal and SWA layers are causal;
@@ -77,15 +79,12 @@ def _resolve_layer_attention(
     use_swa = dflash_config.get("use_swa", False)
     config_causal = dflash_config.get("causal", None)
 
-    default_causal = False
-    if layer_types is None:
-        is_sliding = use_swa
-    else:
-        SLIDING_ATTENTION = "sliding_attention"
+    SLIDING_ATTENTION = "sliding_attention"
+    any_sliding = False
+    if layer_types is not None:
         num_sliding = sum(lt == SLIDING_ATTENTION for lt in layer_types)
-        all_sliding = num_sliding == len(layer_types)
         any_sliding = num_sliding > 0
-
+        all_sliding = num_sliding == len(layer_types)
         if any_sliding and not all_sliding:
             # Mixed sliding/full attention needs per-layer causal metadata and
             # multiple KV-cache groups, which DFlash does not yet support.
@@ -94,11 +93,14 @@ def _resolve_layer_attention(
                 "layer_types; see "
                 "https://github.com/vllm-project/vllm/issues/40898."
             )
-        if use_swa and not all_sliding:
-            raise ValueError(
-                "DFlash dflash_config.use_swa=True requires every entry in "
-                "layer_types to be 'sliding_attention'."
-            )
+
+    default_causal = False
+    if layer_types is None or (use_swa and not any_sliding):
+        # An absent ``layer_types`` (or the all-"full_attention" one that may
+        # be synthesized when the checkpoint omits it) must not override
+        # ``dflash_config.use_swa``, which forces SWA on every layer.
+        is_sliding = use_swa
+    else:
         is_sliding = layer_types[layer_idx] == SLIDING_ATTENTION
         # Full-attention layers default non-causal; SWA layers default causal.
         default_causal = is_sliding
