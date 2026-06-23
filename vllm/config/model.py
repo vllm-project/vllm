@@ -212,7 +212,21 @@ class ModelConfig:
     CUDA graph and eager execution in hybrid for maximal performance and
     flexibility."""
     enable_return_routed_experts: bool = False
-    """Whether to return routed experts."""
+    """Whether to return routed experts.
+
+    When enabled, vLLM captures the logical expert IDs selected by the MoE
+    router for every token at every layer during the forward pass, and
+    returns them alongside the generated tokens in the API response.
+
+    The data is returned as a base64-encoded ``.npy`` byte stream that
+    decodes to a NumPy array of shape
+    ``(num_tokens - 1, num_hidden_layers, num_experts_per_tok)``.
+    ``num_tokens - 1`` because the last sampled token has not been
+    forwarded through the model yet and therefore has no routing data.
+
+    See [Routed Experts Capture](../../features/routed_experts.md) for
+    details, limitations, and performance considerations.
+    """
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
