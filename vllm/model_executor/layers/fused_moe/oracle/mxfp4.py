@@ -57,6 +57,40 @@ if has_triton_kernels():
         )
 
 
+def _pack_deepgemm_mxfp4_scales(
+    w13_weight: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w13_weight_scale: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+        deepgemm_post_process_weight_scale_block,
+    )
+
+    num_experts = w13_weight.shape[0]
+    intermediate_size_2 = w13_weight.shape[1]  # = intermediate*2
+    hidden_size = w13_weight.shape[2] * 2  # weight is FP4-packed
+    intermediate_size = w2_weight.shape[2] * 2  # weight is FP4-packed
+    block_shape = (1, 32)  # MXFP4 block (per-row, K=32)
+
+    return (
+        deepgemm_post_process_weight_scale_block(
+            ws=w13_weight_scale.data,
+            mn=intermediate_size_2,
+            k=hidden_size,
+            quant_block_shape=block_shape,
+            num_groups=num_experts,
+        ),
+        deepgemm_post_process_weight_scale_block(
+            ws=w2_weight_scale.data,
+            mn=hidden_size,
+            k=intermediate_size,
+            quant_block_shape=block_shape,
+            num_groups=num_experts,
+        ),
+    )
+
+
 class Mxfp4MoeBackend(Enum):
     NONE = "None"
     # DeepGEMM FP8xFP4 backend (SM100+)
@@ -652,15 +686,18 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     """Convert loaded weights into backend-specific kernel format."""
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            _upcast_e8m0_to_fp32,
+        w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
         )
 
         return (
             w13_weight.data,
             w2_weight.data,
-            _upcast_e8m0_to_fp32(w13_weight_scale.data),
-            _upcast_e8m0_to_fp32(w2_weight_scale.data),
+            w13_weight_scale,
+            w2_weight_scale,
             w13_bias,
             w2_bias,
         )
@@ -1195,17 +1232,18 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     """
 
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
-        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-            _upcast_e8m0_to_fp32,
+        w13_weight_scale, w2_weight_scale = _pack_deepgemm_mxfp4_scales(
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
         )
 
-        # Weights stay as uint8 packed FP4 — no layout change needed.
-        # Convert E8M0 uint8 scales to float32.
         return (
             w13_weight.data,
             w2_weight.data,
-            _upcast_e8m0_to_fp32(w13_weight_scale.data),
-            _upcast_e8m0_to_fp32(w2_weight_scale.data),
+            w13_weight_scale,
+            w2_weight_scale,
             w13_bias,
             w2_bias,
         )
