@@ -93,7 +93,8 @@ ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
 ENV LD_LIBRARY_PATH=${PCP_DIR}/usr/lib64:${PCP_DIR}/usr/lib:${VIRTUAL_ENV}/lib64/python${PYTHON_VERSION}/site-packages/torch/lib:/usr/local/lib:$LD_LIBRARY_PATH:/usr/local/lib64:/usr/lib64:/usr/lib
 ENV UV_LINK_MODE=copy
 ARG VLLM_VERSION="0.22.1"
-ENV UV_EXTRA_INDEX_URL=https://wheels.developerfirst.ibm.com/ppc64le/linux/+simple/
+ARG UV_EXTRA_INDEX_URL="https://wheels.developerfirst.ibm.com/ppc64le/linux/+simple/"
+ENV UV_EXTRA_INDEX_URL=${UV_EXTRA_INDEX_URL}
 ENV UV_INDEX_STRATEGY=first-match
 
 
