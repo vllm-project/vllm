@@ -305,7 +305,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return
 
         def _on_handshake(
-            f: Future[dict[int | tuple[int, int], str]],
+            f: Future[dict[tuple[int, int], str]],
             rid: str = req_id,
             rd: dict[str, Any] = reg_data,
         ) -> None:

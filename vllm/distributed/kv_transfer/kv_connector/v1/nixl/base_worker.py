@@ -330,10 +330,10 @@ class NixlBaseConnectorWorker:
             )
 
         self.nixl_wrapper = nixl_wrapper_cls(str(uuid.uuid4()), config)
-        # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
-        # Keys are tp_rank (int) or (pp_rank, tp_rank) for a PP-sharded remote.
-        self._remote_agents: dict[EngineId, dict[int | tuple[int, int], str]] = (
-            defaultdict(dict)
+        # Map of engine_id -> {(pp_rank, tp_rank): agent_name, ...}.
+        # non-PP remote uses pp_rank 0, i.e. (0, tp_rank).
+        self._remote_agents: dict[EngineId, dict[tuple[int, int], str]] = defaultdict(
+            dict
         )
 
         # Metadata.
@@ -453,9 +453,7 @@ class NixlBaseConnectorWorker:
             thread_name_prefix="vllm-nixl-handshake-initiator",
         )
         self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
-        self._handshake_futures: dict[
-            EngineId, Future[dict[int | tuple[int, int], str]]
-        ] = {}
+        self._handshake_futures: dict[EngineId, Future[dict[tuple[int, int], str]]] = {}
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
 
@@ -544,7 +542,7 @@ class NixlBaseConnectorWorker:
         expected_engine_id: str,
         remote_pp_size: int = 1,
         notif_agents_only: bool = False,
-    ) -> dict[int | tuple[int, int], str]:
+    ) -> dict[tuple[int, int], str]:
         """Do a NIXL handshake with a remote instance."""
 
         # the first time we connect to a remote agent.
@@ -566,7 +564,7 @@ class NixlBaseConnectorWorker:
         # this happens to be the same single rank_i.
         assert self.transfer_topo is not None
         p_remote_ranks = self.transfer_topo.handshake_target_ranks(remote_tp_size)
-        remote_rank_to_agent_name: dict[int | tuple[int, int], str] = {}
+        remote_rank_to_agent_name: dict[tuple[int, int], str] = {}
         path = make_zmq_path("tcp", host, port)
 
         with zmq_ctx(zmq.REQ, path) as sock:
@@ -677,10 +675,9 @@ class NixlBaseConnectorWorker:
                     "NIXL handshake: add agent took: %s",
                     setup_agent_time - got_metadata_time,
                 )
-                key: int | tuple[int, int] = (
-                    (remote_pp_rank, remote_rank) if remote_pp_size > 1 else remote_rank
+                remote_rank_to_agent_name[(remote_pp_rank, remote_rank)] = (
+                    remote_agent_name
                 )
-                remote_rank_to_agent_name[key] = remote_agent_name
         return remote_rank_to_agent_name
 
     def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
@@ -797,7 +794,7 @@ class NixlBaseConnectorWorker:
         tp_size: int,
         pp_size: int = 1,
         notif_agents_only: bool = False,
-    ) -> Future[dict[int | tuple[int, int], str]] | None:
+    ) -> Future[dict[tuple[int, int], str]] | None:
         """
         Ensure a handshake is in-flight (or already done) for *engine_id*.
 
@@ -825,9 +822,7 @@ class NixlBaseConnectorWorker:
             )
             self._handshake_futures[engine_id] = fut
 
-            def done_callback(
-                f: Future[dict[int | tuple[int, int], str]], eid=engine_id
-            ):
+            def done_callback(f: Future[dict[tuple[int, int], str]], eid=engine_id):
                 with self._handshake_lock:
                     del self._handshake_futures[eid]
                     try:
@@ -1413,14 +1408,14 @@ class NixlBaseConnectorWorker:
         """  # noqa: E501
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery
-        if remote_tp_rank in self._remote_agents.get(engine_id, {}):
+        if (0, remote_tp_rank) in self._remote_agents.get(engine_id, {}):
             logger.debug(
                 "Remote agent with engine_id %s and rank"
                 "%s already exchanged metadata, skip handshake.",
                 engine_id,
                 remote_tp_rank,
             )
-            return self._remote_agents[engine_id][remote_tp_rank]
+            return self._remote_agents[engine_id][(0, remote_tp_rank)]
 
         # Compare physical regions, not self.num_regions (doubled by
         # FlashInfer's virtual K/V split).

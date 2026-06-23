@@ -990,7 +990,7 @@ class TestPushWriterMlaReplication:
         w._logical_to_remote_kernel_block_ids = lambda block_ids, ratio: block_ids
         w.dst_xfer_side_handles = {engine_id: {r: 1000 + r for r in d_ranks}}
         w.src_xfer_handles_by_block_size = {16: 2000}
-        w._remote_agents = {engine_id: {r: f"agent-{r}" for r in d_ranks}}
+        w._remote_agents = {engine_id: {(0, r): f"agent-{r}" for r in d_ranks}}
         return w, engine_id
 
     def test_mla_hetero_tp_writes_every_d_rank(self):
