@@ -42,7 +42,7 @@ logger = init_logger(__name__)
 try:
     import vllm._qutlass_C  # noqa: F401
 except ImportError as e:
-    logger.warning_once("Failed to import from vllm._qutlass_C: %r", e)
+    logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")

@@ -43,18 +43,18 @@ except ImportError as e:
 try:
     import vllm._C  # noqa: F401
 except ImportError as e:
-    logger.warning_once("Failed to import from vllm._C with %r", e)
+    logger.warning("Failed to import from vllm._C with %r", e)
 
 # import custom ops, trigger op registration
 try:
     import vllm._C_stable_libtorch  # noqa: F401
 except ImportError as e:
-    logger.warning_once("Failed to import from vllm._C_stable_libtorch with %r", e)
+    logger.warning("Failed to import from vllm._C_stable_libtorch with %r", e)
 
 try:
     import vllm._rocm_C  # noqa: F401
 except ImportError as e:
-    logger.warning_once("Failed to import from vllm._rocm_C with %r", e)
+    logger.warning("Failed to import from vllm._rocm_C with %r", e)
 
 # Models not supported by ROCm.
 _ROCM_UNSUPPORTED_MODELS: list[str] = []
