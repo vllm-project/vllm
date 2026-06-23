@@ -19,17 +19,28 @@ The kernel is imported via
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_fp8_min_max,
+)
 from vllm.models.deepseek_v4.common.ops import (
     dequantize_and_gather_k_cache,
     quantize_and_insert_k_cache,
 )
+from vllm.platforms import current_platform
 
 # ── Constants matching the kernel ────────────────────────────────────────────
 HEAD_DIM = 512
 ROPE_DIM = 64
 NOPE_DIM = HEAD_DIM - ROPE_DIM  # 448
 QUANT_BLOCK = 64
-FP8_MAX = 448.0
+# Match the C++ SWA-K encoder: FNUZ on gfx942, OCP elsewhere.
+USE_FNUZ = current_platform.is_fp8_fnuz()
+_, FP8_MAX = get_fp8_min_max()
+# The kernel emits FNUZ-encoded fp8 bytes on gfx942 (rocm_cvt_float_to_fp8_e4m3)
+# but stores them into float8_e4m3fn-typed tensors, matching vLLM's ROCm cache
+# convention. References must encode under the same scheme and the kernel's
+# e4m3fn-typed outputs must be reinterpreted under it before decoding.
+FP8_STORE_DTYPE = torch.float8_e4m3fnuz if USE_FNUZ else torch.float8_e4m3fn
 HEAD_BYTES = NOPE_DIM + ROPE_DIM * 2 + 8  # 448 + 128 + 8 = 584
 
 
@@ -81,10 +92,11 @@ def apply_rope_gptj_last_k(
         cos = cos.unsqueeze(1)
         sin = sin.unsqueeze(1)
 
-    # Use addcmul (compiles to FMA on CUDA) for the 2x2 rotation. nvcc lowers
-    # the kernel's `e*c - o*s` to fma(e, c, -o*s); matching that here keeps
-    # near-cancellation pairs on the same bf16 grid as the kernel output and
-    # avoids spurious 1-ULP boundary flips at high num_tokens.
+    # Use addcmul (an FMA) for the 2x2 rotation to mirror the kernel's
+    # `e*c - o*s` fused form. This keeps the reference close to the kernel, but
+    # the fp32 reference and the fp32 GPU kernel can still round to bf16 on
+    # opposite sides of a round-to-nearest tie for a tiny number of elements at
+    # high positions, so callers compare the RoPE region within 1 bf16 ULP.
     new_even = torch.addcmul(-odd * sin, even, cos)
     new_odd = torch.addcmul(odd * cos, even, sin)
     rope_rotated = torch.stack((new_even, new_odd), dim=-1).reshape(shape)
@@ -146,6 +158,86 @@ def _call_fused(
         eps,
         bs,
     )
+
+
+def _bf16_ulp_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Representable-step distance between two bf16 tensors.
+
+    Reinterprets the bf16 bit patterns under the IEEE-754 total ordering so
+    that adjacent representable values differ by exactly 1.
+    """
+
+    def key(t: torch.Tensor) -> torch.Tensor:
+        u = t.contiguous().view(torch.int16).to(torch.int64) & 0xFFFF
+        return torch.where(u >= 0x8000, 0xFFFF - u, u + 0x8000)
+
+    return (key(a) - key(b)).abs()
+
+
+def _fp8_ulp_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Representable-step distance between two 8-bit fp8 tensors.
+
+    Reinterprets the fp8 bytes under a sign-magnitude total ordering so that
+    adjacent representable values differ by exactly 1. Inputs must already share
+    the same fp8 encoding (e.g. both FP8_STORE_DTYPE).
+    """
+
+    def key(t: torch.Tensor) -> torch.Tensor:
+        u = t.contiguous().view(torch.uint8).to(torch.int64)
+        return torch.where(u >= 0x80, 0xFF - u, u + 0x80)
+
+    return (key(a) - key(b)).abs()
+
+
+def _as_stored_fp8(t: torch.Tensor) -> torch.Tensor:
+    """Reinterpret a float8_e4m3fn-typed kernel output under the real (FNUZ on
+    gfx942) encoding the kernel actually wrote, without touching the bytes."""
+    return t.contiguous().view(torch.uint8).view(FP8_STORE_DTYPE)
+
+
+def _dequant_cache(k_cache_2d, num_tokens, num_blocks, block_size):
+    """Round-trip a [num_blocks, block_size*HEAD_BYTES] K-cache back to bf16."""
+    device = k_cache_2d.device
+    out = torch.zeros(1, num_tokens, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    seq_lens = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    block_table = torch.arange(num_blocks, dtype=torch.int32, device=device).unsqueeze(
+        0
+    )
+    k_cache_3d = k_cache_2d.view(num_blocks, block_size, HEAD_BYTES)
+    dequantize_and_gather_k_cache(
+        out,
+        k_cache_3d,
+        seq_lens,
+        None,
+        block_table,
+        block_size,
+        offset=0,
+        use_fnuz=USE_FNUZ,
+    )
+    return out[0, :num_tokens]
+
+
+def _assert_kv_cache_parity(
+    k_cache_fused, k_cache_ref, num_tokens, num_blocks, block_size
+):
+    """Assert the fused and reference K-caches agree after decoding.
+
+    The NoPE region is deterministic UE8M0 FP8, so its round-trip must be
+    bit-identical. The RoPE region is stored as bf16 after an fp32 rotation:
+    the GPU kernel and the PyTorch reference can fall on opposite sides of a
+    round-to-nearest tie and differ by at most one bf16 ULP. (Spot checks show
+    the kernel value is the correctly-rounded one; the fp32 torch reference is
+    the one that lands on the wrong side near a midpoint.) Allow <=1 ULP there.
+    """
+    rec_fused = _dequant_cache(k_cache_fused, num_tokens, num_blocks, block_size)
+    rec_ref = _dequant_cache(k_cache_ref, num_tokens, num_blocks, block_size)
+    torch.testing.assert_close(
+        rec_fused[:, :NOPE_DIM], rec_ref[:, :NOPE_DIM], rtol=0, atol=0
+    )
+    max_ulp = int(
+        _bf16_ulp_distance(rec_fused[:, NOPE_DIM:], rec_ref[:, NOPE_DIM:]).max().item()
+    )
+    assert max_ulp <= 1, f"RoPE bf16 region differs by {max_ulp} ULP (>1)"
 
 
 # ── Test 1: Q path numerical parity ──────────────────────────────────────────
@@ -241,7 +333,7 @@ def test_kv_path_matches_reference(num_tokens: int, block_size: int):
         num_blocks, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
     )
     quantize_and_insert_k_cache(
-        kv_ref, k_cache_ref, slot_mapping, block_size=block_size
+        kv_ref, k_cache_ref, slot_mapping, block_size=block_size, use_fnuz=USE_FNUZ
     )
 
     # ── Fused path (dummy q, padded to FlashMLA's min head count 64) ───────
@@ -273,7 +365,14 @@ def test_kv_path_matches_reference(num_tokens: int, block_size: int):
         # gather_lens arg is None (use seq_lens)
         k_cache_3d = k_cache_2d.view(num_blocks, block_size, HEAD_BYTES)
         dequantize_and_gather_k_cache(
-            out, k_cache_3d, seq_lens, None, block_table, block_size, offset=0
+            out,
+            k_cache_3d,
+            seq_lens,
+            None,
+            block_table,
+            block_size,
+            offset=0,
+            use_fnuz=USE_FNUZ,
         )
         return out[0, :num_tokens]
 
@@ -297,12 +396,10 @@ def test_kv_path_matches_reference(num_tokens: int, block_size: int):
             f"fused NoPE token {t} diff {diff_fused} > {max_allowed}"
         )
 
-    # RoPE region: bf16 stored exactly → zero diff.
-    rope_diff = (recovered_fused[:, NOPE_DIM:] - kv_ref[:, NOPE_DIM:]).abs().max()
-    assert rope_diff.item() == 0.0, f"RoPE portion not exact: {rope_diff.item()}"
-
-    # Exact byte equality of the two cache buffers — strong parity.
-    torch.testing.assert_close(k_cache_fused, k_cache_ref, rtol=0, atol=0)
+    # Strong parity: NoPE FP8 round-trip bit-identical, RoPE bf16 within 1 ULP.
+    _assert_kv_cache_parity(
+        k_cache_fused, k_cache_ref, num_tokens, num_blocks, block_size
+    )
 
 
 # ── Test 2b: DP padding (slot_mapping shorter than q/kv) ─────────────────────
@@ -336,7 +433,7 @@ def test_kv_path_with_dp_padding(num_tokens: int, pad: int, block_size: int):
         num_blocks, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
     )
     quantize_and_insert_k_cache(
-        kv_ref, k_cache_ref, slot_mapping, block_size=block_size
+        kv_ref, k_cache_ref, slot_mapping, block_size=block_size, use_fnuz=USE_FNUZ
     )
 
     # Fused: pass full-sized q/kv/positions, shorter slot_mapping.
@@ -354,7 +451,9 @@ def test_kv_path_with_dp_padding(num_tokens: int, pad: int, block_size: int):
         block_size,
     )
 
-    torch.testing.assert_close(k_cache_fused, k_cache_ref, rtol=0, atol=0)
+    _assert_kv_cache_parity(
+        k_cache_fused, k_cache_ref, num_tokens, num_blocks, block_size
+    )
 
 
 # ── Test 3: combined single-call Q + KV parity ───────────────────────────────
@@ -403,7 +502,7 @@ def test_combined_q_and_kv(
         num_blocks, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
     )
     quantize_and_insert_k_cache(
-        kv_ref, k_cache_ref, slot_mapping, block_size=block_size
+        kv_ref, k_cache_ref, slot_mapping, block_size=block_size, use_fnuz=USE_FNUZ
     )
 
     # Fused single call.
@@ -426,7 +525,9 @@ def test_combined_q_and_kv(
         assert pad_region.abs().max().item() == 0.0, (
             "padded head slots must be exact zero"
         )
-    torch.testing.assert_close(k_cache_fused, k_cache_ref, rtol=0, atol=0)
+    _assert_kv_cache_parity(
+        k_cache_fused, k_cache_ref, num_tokens, num_blocks, block_size
+    )
 
 
 # ── Full-cache (FlashInfer) path parity ──────────────────────────────────────
@@ -499,7 +600,7 @@ def _fp8_full_cache_reference(
     q_ref = apply_rope_gptj_last_k(q_ref, positions, cos_sin_cache)
     q_fp8.copy_(
         torch.clamp(q_ref.float() * q_fp8_scale_inv, -FP8_MAX, FP8_MAX).to(
-            torch.float8_e4m3fn
+            FP8_STORE_DTYPE
         )
     )
 
@@ -510,7 +611,7 @@ def _fp8_full_cache_reference(
     pos_in_block = slots % block_size
     k_cache[block_idx, pos_in_block] = torch.clamp(
         kv_ref[valid].float() / fp8_scale, -FP8_MAX, FP8_MAX
-    ).to(torch.float8_e4m3fn)
+    ).to(FP8_STORE_DTYPE)
 
 
 def _bf16_full_cache_reference(
@@ -565,12 +666,17 @@ def test_full_cache_per_tensor_fp8_matches_reference(
     fp8_scale = torch.tensor([1.0], dtype=torch.float32, device=device)
     q_fp8_scale_inv = torch.tensor([1.0], dtype=torch.float32, device=device)
 
-    q_fp8_ref = torch.empty_like(q, dtype=torch.float8_e4m3fn)
+    # References are encoded under the scheme the kernel actually writes
+    # (FNUZ on gfx942); the kernel's own outputs must stay float8_e4m3fn-typed
+    # because the op asserts that dtype.
+    q_fp8_ref = torch.empty_like(q, dtype=FP8_STORE_DTYPE)
     q_fp8_fused = torch.empty_like(q, dtype=torch.float8_e4m3fn)
     k_cache_ref = torch.zeros(
+        num_blocks, block_size, HEAD_DIM, dtype=FP8_STORE_DTYPE, device=device
+    )
+    k_cache_fused = torch.zeros(
         num_blocks, block_size, HEAD_DIM, dtype=torch.float8_e4m3fn, device=device
     )
-    k_cache_fused = torch.zeros_like(k_cache_ref)
 
     _fp8_full_cache_reference(
         q,
@@ -599,12 +705,29 @@ def test_full_cache_per_tensor_fp8_matches_reference(
         block_size,
     )
 
+    # Q is RMSNorm(no-weight)+RoPE in fp32 before fp8 quant; the RMSNorm
+    # reduction and RoPE rotation can land the kernel and the torch reference on
+    # opposite sides of an fp8 round-to-nearest tie, so allow <=1 fp8 ULP.
+    q_fused = _as_stored_fp8(q_fp8_fused)
+    q_max_ulp = int(_fp8_ulp_distance(q_fused, q_fp8_ref).max().item())
+    assert q_max_ulp <= 1, f"Q fp8 differs by {q_max_ulp} ULP (>1)"
+
+    # K-cache NoPE region [0, NOPE_DIM) is a deterministic per-tensor fp8 quant
+    # of the (un-rotated) KV input, so it must be bit-identical. The RoPE region
+    # [NOPE_DIM, HEAD_DIM) is rotated in fp32 and may differ by <=1 fp8 ULP.
+    k_fused = _as_stored_fp8(k_cache_fused)
     torch.testing.assert_close(
-        q_fp8_fused.float(), q_fp8_ref.float(), rtol=0, atol=0.25
+        k_fused[..., :NOPE_DIM].float(),
+        k_cache_ref[..., :NOPE_DIM].float(),
+        rtol=0,
+        atol=0,
     )
-    torch.testing.assert_close(
-        k_cache_fused.float(), k_cache_ref.float(), rtol=0, atol=0.25
+    k_max_ulp = int(
+        _fp8_ulp_distance(k_fused[..., NOPE_DIM:], k_cache_ref[..., NOPE_DIM:])
+        .max()
+        .item()
     )
+    assert k_max_ulp <= 1, f"K-cache RoPE fp8 differs by {k_max_ulp} ULP (>1)"
 
 
 @pytest.mark.skipif(
