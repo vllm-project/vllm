@@ -217,9 +217,7 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
   // reads V scales linearly. That requires a contiguous [all-data | all-SF]
   // page layout (NHD), not the SM100 trtllm-gen per-page [data|scale]
   // interleave with the 4-token V swizzle. Select the layout by arch.
-  cudaDeviceProp dev_prop;
-  cudaGetDeviceProperties(&dev_prop, key.get_device_index());
-  const bool contiguous_layout = dev_prop.major >= 12;
+  const bool contiguous_layout = get_device_prop()->major >= 12;
   const bool swizzle_v_sf = !contiguous_layout;
 
   STD_TORCH_CHECK(!swizzle_v_sf || block_size % 4 == 0,
