@@ -37,7 +37,7 @@ easy-ext = "1.0.3"
 educe = "0.6.0"
 enum-as-inner = "0.7.0"
 expect-test = "1.5.1"
-fastokens = "0.2.0"
+fastokens = { git = "https://github.com/BugenZhao/fastokens", rev = "d6188032f15a72fbddb5d9fdabfc498bbda99965", default-features = false }
 futures = "0.3.31"
 half = { version = "2.7.1", features = ["bytemuck"] }
 hex = "0.4.3"
