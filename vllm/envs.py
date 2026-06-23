@@ -208,6 +208,7 @@ if TYPE_CHECKING:
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_MQ_MAX_CHUNKS: int = 10
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
     VLLM_SSM_CONV_STATE_LAYOUT: Literal["SD", "DS"] | None = None
@@ -1652,6 +1653,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # processes via zmq.
     "VLLM_MQ_MAX_CHUNK_BYTES_MB": lambda: int(
         os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")
+    ),
+    # Control the max number of chunks in the shared memory ring buffer.
+    # Larger values allow more buffering but increase shared memory usage.
+    # CPU inference benefits from larger values (default 256 when on CPU and
+    # the env var is unset; 10 otherwise).
+    "VLLM_MQ_MAX_CHUNKS": lambda: int(
+        os.getenv("VLLM_MQ_MAX_CHUNKS", "10")
     ),
     # Timeout in seconds for execute_model RPC calls in multiprocessing
     # executor (only applies when TP > 1).
