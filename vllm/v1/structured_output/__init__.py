@@ -316,6 +316,16 @@ class StructuredOutputManager:
                 # Diffusion LLMs don't sample a bonus token after the
                 # scheduled positions, so skip its bitmask in that case.
                 if not (self.vllm_config.model_config.is_diffusion and req_tokens):
+                    # bonus_apply must be True when the bonus-row position
+                    # should be grammar-constrained. Two triggers:
+                    # - should_fill_bitmask(request): reasoning was already
+                    #   over at step start (or no reasoner /
+                    #   enable_in_reasoning).
+                    # - apply_bitmask: reasoning ended mid-window in this
+                    #   call and was flipped True after the marker;
+                    #   should_fill_bitmask still returns False here because
+                    #   reasoning_ended is only persisted later by
+                    #   should_advance.
                     bonus_apply = self.should_fill_bitmask(request) or apply_bitmask
                     self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
                     cumulative_index += 1
