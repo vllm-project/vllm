@@ -6,6 +6,7 @@
 #include "libtorch_stable/quantization/w8a8/per_token_group_quant_8bit.h"
 
 #include <cmath>
+#include <limits>
 
 #ifdef USE_ROCM
   #include <hip/hip_fp8.h>
@@ -32,6 +33,23 @@ __device__ __forceinline__ float GroupReduceMax(float val) {
   unsigned mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
 
   val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 1));
+#endif
+  return val;
+}
+
+__device__ __forceinline__ float GroupReduceMax8(float val) {
+#ifdef USE_ROCM
+  const int lane_in_wave = threadIdx.x % warpSize;
+  const unsigned long long mask = 0xFFull << (lane_in_wave & ~7);
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 4, 8));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 2, 8));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 1, 8));
+#else
+  const unsigned lane_in_warp = threadIdx.x % 32;
+  const unsigned mask = 0xffu << (lane_in_warp & ~7u);
   val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
   val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
   val = fmaxf(val, __shfl_xor_sync(mask, val, 1));
@@ -163,6 +181,102 @@ __global__ void per_token_group_quant_8bit_kernel(
 #endif
 }
 
+template <typename T, typename DST_DTYPE, bool IS_COLUMN_MAJOR = false,
+          bool SCALE_UE8M0 = false>
+__global__ void per_token_group_quant_8bit_group128_register_kernel(
+    const T* __restrict__ input, void* __restrict__ output_q,
+    float* __restrict__ output_s, const int64_t num_groups,
+    const int groups_per_row, const int64_t scale_stride, const float eps,
+    const float min_8bit, const float max_8bit) {
+  constexpr int GROUP_SIZE = 128;
+  constexpr int THREADS_PER_GROUP = 8;
+  constexpr int GROUPS_PER_BLOCK = 16;
+  constexpr int VEC_SIZE = 32 / sizeof(T);
+  static_assert(GROUP_SIZE == THREADS_PER_GROUP * VEC_SIZE,
+                "GROUP_SIZE must equal THREADS_PER_GROUP * VEC_SIZE");
+  static_assert(32 % THREADS_PER_GROUP == 0,
+                "THREADS_PER_GROUP must divide warp size");
+
+  const int local_group_id = threadIdx.x / THREADS_PER_GROUP;
+  const int lane_id = threadIdx.x % THREADS_PER_GROUP;
+  const int64_t global_group_id =
+      static_cast<int64_t>(blockIdx.x) * GROUPS_PER_BLOCK + local_group_id;
+  const bool is_valid_group = global_group_id < num_groups;
+
+  alignas(16) T regs[VEC_SIZE];
+  float local_absmax = eps;
+  if (is_valid_group) {
+    const T* group_input =
+        input + global_group_id * GROUP_SIZE + lane_id * VEC_SIZE;
+    uint4* dst = reinterpret_cast<uint4*>(&regs[0]);
+    const uint4* src = reinterpret_cast<const uint4*>(group_input);
+    dst[0] = src[0];
+    dst[1] = src[1];
+
+#pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+      const float abs_v = fabsf(static_cast<float>(regs[i]));
+      local_absmax = fmaxf(local_absmax, abs_v);
+    }
+  }
+
+  local_absmax = GroupReduceMax8(local_absmax);
+
+  float y_s = local_absmax / max_8bit;
+  if constexpr (SCALE_UE8M0) {
+    y_s = fmaxf(y_s, 1e-10f);
+    const uint32_t bits = __float_as_uint(y_s);
+    const uint32_t exp_bits = (bits >> 23) & 0xffu;
+    const uint32_t mant_bits = bits & 0x7fffffu;
+    const uint32_t exp_byte = exp_bits + (mant_bits != 0u ? 1u : 0u);
+    y_s = __uint_as_float(exp_byte << 23);
+  }
+
+  if (is_valid_group && lane_id == 0) {
+    float* scale_output;
+    if constexpr (IS_COLUMN_MAJOR) {
+      const int64_t row_idx = global_group_id / groups_per_row;
+      const int64_t col_idx = global_group_id % groups_per_row;
+      scale_output = output_s + col_idx * scale_stride + row_idx;
+    } else {
+      scale_output = output_s + global_group_id;
+    }
+    *scale_output = y_s;
+  }
+
+  if (!is_valid_group) {
+    return;
+  }
+
+  const float inv_y = 1.0f / y_s;
+  uint32_t packed_0 = 0;
+  uint32_t packed_1 = 0;
+  uint32_t packed_2 = 0;
+  uint32_t packed_3 = 0;
+#pragma unroll
+  for (int i = 0; i < VEC_SIZE; ++i) {
+    const float q = fminf(
+        fmaxf(static_cast<float>(regs[i]) * inv_y, min_8bit), max_8bit);
+    DST_DTYPE qb = DST_DTYPE(q);
+    const uint8_t byte = *reinterpret_cast<uint8_t*>(&qb);
+    const int shift = (i & 3) * 8;
+    if (i < 4) {
+      packed_0 |= static_cast<uint32_t>(byte) << shift;
+    } else if (i < 8) {
+      packed_1 |= static_cast<uint32_t>(byte) << shift;
+    } else if (i < 12) {
+      packed_2 |= static_cast<uint32_t>(byte) << shift;
+    } else {
+      packed_3 |= static_cast<uint32_t>(byte) << shift;
+    }
+  }
+
+  DST_DTYPE* group_output = static_cast<DST_DTYPE*>(output_q) +
+                            global_group_id * GROUP_SIZE + lane_id * VEC_SIZE;
+  *reinterpret_cast<uint4*>(group_output) =
+      make_uint4(packed_0, packed_1, packed_2, packed_3);
+}
+
 inline int GetGroupsPerBlock(int64_t num_groups) {
   if (num_groups % 16 == 0) {
     return 16;
@@ -205,17 +319,86 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
 
   cudaStream_t stream = get_current_cuda_stream();
 
+  auto dst_type = output_q.scalar_type();
+  const bool is_column_major = output_s.stride(0) < output_s.stride(1);
+  const int scale_num_rows = output_s.size(1);
+  const int64_t scale_stride = output_s.stride(1);
+
+  if (group_size == 128 &&
+      (input.scalar_type() == torch::headeronly::ScalarType::Half ||
+       input.scalar_type() == torch::headeronly::ScalarType::BFloat16) &&
+      dst_type != torch::headeronly::ScalarType::Char) {
+    constexpr int GROUPS_PER_BLOCK = 16;
+    constexpr int THREADS_PER_GROUP = 8;
+    const int64_t num_blocks = (num_groups + GROUPS_PER_BLOCK - 1) /
+                               GROUPS_PER_BLOCK;
+    const int num_threads = GROUPS_PER_BLOCK * THREADS_PER_GROUP;
+    STD_TORCH_CHECK(
+        num_blocks <= static_cast<int64_t>(std::numeric_limits<int>::max()),
+        "per_token_group_quant_8bit group128 fast-path grid too large: ",
+        num_blocks);
+
+#define LAUNCH_GROUP128_REG_KERNEL(T, DST_DTYPE)                            \
+  do {                                                                      \
+    dim3 grid(static_cast<unsigned int>(num_blocks));                       \
+    dim3 block(num_threads);                                                \
+    if (is_column_major) {                                                  \
+      if (scale_ue8m0) {                                                    \
+        per_token_group_quant_8bit_group128_register_kernel<T, DST_DTYPE,   \
+                                                            true, true>     \
+            <<<grid, block, 0, stream>>>(                                   \
+                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),     \
+                static_cast<float*>(output_s.data_ptr()), num_groups,       \
+                scale_num_rows, scale_stride, (float)eps, (float)min_8bit,  \
+                (float)max_8bit);                                           \
+      } else {                                                              \
+        per_token_group_quant_8bit_group128_register_kernel<T, DST_DTYPE,   \
+                                                            true, false>    \
+            <<<grid, block, 0, stream>>>(                                   \
+                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),     \
+                static_cast<float*>(output_s.data_ptr()), num_groups,       \
+                scale_num_rows, scale_stride, (float)eps, (float)min_8bit,  \
+                (float)max_8bit);                                           \
+      }                                                                     \
+    } else {                                                                \
+      if (scale_ue8m0) {                                                    \
+        per_token_group_quant_8bit_group128_register_kernel<T, DST_DTYPE,   \
+                                                            false, true>    \
+            <<<grid, block, 0, stream>>>(                                   \
+                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),     \
+                static_cast<float*>(output_s.data_ptr()), num_groups,       \
+                scale_num_rows, scale_stride, (float)eps, (float)min_8bit,  \
+                (float)max_8bit);                                           \
+      } else {                                                              \
+        per_token_group_quant_8bit_group128_register_kernel<T, DST_DTYPE,   \
+                                                            false, false>   \
+            <<<grid, block, 0, stream>>>(                                   \
+                static_cast<T*>(input.data_ptr()), output_q.data_ptr(),     \
+                static_cast<float*>(output_s.data_ptr()), num_groups,       \
+                scale_num_rows, scale_stride, (float)eps, (float)min_8bit,  \
+                (float)max_8bit);                                           \
+      }                                                                     \
+    }                                                                       \
+  } while (0)
+
+    VLLM_STABLE_DISPATCH_HALF_TYPES(
+        input.scalar_type(), "per_token_group_quant_8bit_group128_register",
+        ([&] {
+          VLLM_STABLE_DISPATCH_FP8_TYPES(
+              dst_type, "per_token_group_quant_8bit_group128_register_fp8",
+              ([&] { LAUNCH_GROUP128_REG_KERNEL(scalar_t, fp8_t); }));
+        }));
+
+#undef LAUNCH_GROUP128_REG_KERNEL
+    return;
+  }
+
   constexpr int THREADS_PER_GROUP = 16;
 
   const int groups_per_block = GetGroupsPerBlock(num_groups);
 
-  auto dst_type = output_q.scalar_type();
   const int num_blocks = num_groups / groups_per_block;
   const int num_threads = groups_per_block * THREADS_PER_GROUP;
-
-  const bool is_column_major = output_s.stride(0) < output_s.stride(1);
-  const int scale_num_rows = output_s.size(1);
-  const int scale_stride = output_s.stride(1);
 
 #ifndef USE_ROCM
   #define LAUNCH_KERNEL_INST(T, DST_DTYPE, COL_MAJOR, UE8M0, SMEM_BYTES)     \
