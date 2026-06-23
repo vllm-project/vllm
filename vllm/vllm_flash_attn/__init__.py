@@ -6,11 +6,11 @@ import os
 import sys
 import types
 
-# In local build modes, cute/ may be a symlink or a copied source tree, and its
-# files use `flash_attn.cute.*` imports (not rewritten). Register a virtual
-# `flash_attn` package so those imports resolve.
+# In symlink mode (VLLM_FLASH_ATTN_SRC_DIR), cute/ is a symlink to the real
+# source tree and its files use `flash_attn.cute.*` imports (not rewritten).
+# Register a virtual `flash_attn` package so those imports resolve.
 _cute_dir = os.path.join(os.path.dirname(__file__), "cute")
-if os.path.isdir(_cute_dir) and "flash_attn" not in sys.modules:
+if os.path.islink(_cute_dir) and "flash_attn" not in sys.modules:
     _fa_mod = types.ModuleType("flash_attn")
     _fa_mod.__path__ = [os.path.dirname(os.path.realpath(_cute_dir))]
     _fa_mod.__package__ = "flash_attn"
