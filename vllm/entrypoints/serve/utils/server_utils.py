@@ -412,6 +412,21 @@ async def http_exception_handler(req: Request, exc: HTTPException):
 
 _BRACKETED_INTERNAL_RE = re.compile(r"[\[\]{}()]")
 
+# NOTE: this list is pydantic-core's internal schema-kind vocabulary,
+# not a stable public API -- it can grow when pydantic-core adds new
+# wrapper/validator kinds. To refresh it after a pydantic upgrade:
+#   1. Fuzz the validation-error-prone endpoints (e.g. /tokenize,
+#      /v1/completions, /v1/chat/completions) with deliberately
+#      malformed values for union-typed and wrapped fields (e.g. `stop`,
+#      `prompt`), and inspect the raw `loc` tuples in the response.
+#   2. Any *unbracketed* segment that isn't a real field name or list
+#      index is a new internal marker -- add it here. Bracketed/
+#      parenthesized markers (e.g. "list[...]", "function-wrap[...]")
+#      are already caught structurally by _BRACKETED_INTERNAL_RE and
+#      don't need a list entry.
+#   3. pydantic-core's source (the `error.rs`/schema-kind definitions
+#      in the pydantic-core Rust crate) is the canonical reference if
+#      you want to check before it shows up in a live fuzz run.
 _INTERNAL_LOC_MARKERS = frozenset(
     {
         "function-wrap",
