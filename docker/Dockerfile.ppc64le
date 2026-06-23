@@ -22,6 +22,7 @@ ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH=/root/.cargo/bin:/root/.rustup/bin:${VIRTUAL_ENV}/bin:$PATH
 
+RUN echo "DEBUG: VLLM_VERSION=${VLLM_VERSION}"
 RUN --mount=type=cache,target=/var/cache/dnf \
     microdnf install -y \
     python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip \
