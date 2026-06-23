@@ -892,8 +892,8 @@ class OpenAIServingResponses(OpenAIServing):
             and context.response_parser.reasoning_parser is not None
         ):
             accumulated = getattr(context, "_accumulated_token_ids", []) or []
-            num_reasoning_tokens = (
-                context.response_parser.count_reasoning_tokens(accumulated)
+            num_reasoning_tokens = context.response_parser.count_reasoning_tokens(
+                accumulated
             )
 
         usage = ResponseUsage(
