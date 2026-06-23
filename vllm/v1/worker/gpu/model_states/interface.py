@@ -46,9 +46,25 @@ class ModelState(ABC):
     ) -> None:
         raise NotImplementedError
 
-    @abstractmethod
+    model: nn.Module
+
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
-        raise NotImplementedError
+        from vllm.model_executor.models.interfaces import (
+            supports_realtime,
+            supports_transcription,
+        )
+        from vllm.model_executor.models.interfaces_base import is_text_generation_model
+
+        supported_tasks = list[GenerationTask]()
+        if is_text_generation_model(self.model):
+            supported_tasks.append("generate")
+        if supports_transcription(self.model):
+            if self.model.supports_transcription_only:
+                return ("transcription",)
+            supported_tasks.append("transcription")
+        if supports_realtime(self.model):
+            supported_tasks.append("realtime")
+        return tuple(supported_tasks)
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         return None
