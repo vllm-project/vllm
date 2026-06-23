@@ -442,7 +442,8 @@ def _sample_recovered_tokens_kernel_impl(
         _ensure_int64(draft_token_ids),
         draft_probs,
         target_probs,
-        inv_q,
+        # C++ kernel reads inv_q as float32.
+        inv_q.to(torch.float32),
         vocab_size,
         NO_DRAFT_PROBS,
     )

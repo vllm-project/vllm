@@ -22,36 +22,42 @@ inline int getSMVersion() {
 
 }  // namespace
 
-static constexpr int FP32_NUM_EXPERTS = 256;
-static constexpr int FP32_HIDDEN_DIM = 3072;
 static constexpr int FP32_MAX_TOKENS = 32;
+
+// Supported (hidden_dim, num_experts) pairs (must match the instantiations in
+// fp32_router_gemm.cu): (3072, 256) for MiniMax-M2/M2.5, (6144, 128) for M3.
+static inline bool fp32_router_gemm_supported(int hidden_dim, int num_experts) {
+  return (hidden_dim == 3072 && num_experts == 256) ||
+         (hidden_dim == 6144 && num_experts == 128);
+}
 
 // Forward declarations — 4 template params must match fp32_router_gemm.cu
 template <typename InputT, int kNumTokens, int kNumExperts, int kHiddenDim>
 void invokeFp32RouterGemm(float* output, InputT const* mat_a,
                           float const* mat_b, cudaStream_t stream);
 
-// LoopUnroller templated on InputT
-template <typename InputT, int kBegin, int kEnd>
+// LoopUnroller templated on InputT, kNumExperts and kHiddenDim
+template <typename InputT, int kNumExperts, int kHiddenDim, int kBegin,
+          int kEnd>
 struct Fp32LoopUnroller {
   static void unroll(int num_tokens, float* output, InputT const* mat_a,
                      float const* mat_b, cudaStream_t stream) {
     if (num_tokens == kBegin) {
-      invokeFp32RouterGemm<InputT, kBegin, FP32_NUM_EXPERTS, FP32_HIDDEN_DIM>(
+      invokeFp32RouterGemm<InputT, kBegin, kNumExperts, kHiddenDim>(
           output, mat_a, mat_b, stream);
     } else {
-      Fp32LoopUnroller<InputT, kBegin + 1, kEnd>::unroll(num_tokens, output,
-                                                         mat_a, mat_b, stream);
+      Fp32LoopUnroller<InputT, kNumExperts, kHiddenDim, kBegin + 1,
+                       kEnd>::unroll(num_tokens, output, mat_a, mat_b, stream);
     }
   }
 };
 
-template <typename InputT, int kEnd>
-struct Fp32LoopUnroller<InputT, kEnd, kEnd> {
+template <typename InputT, int kNumExperts, int kHiddenDim, int kEnd>
+struct Fp32LoopUnroller<InputT, kNumExperts, kHiddenDim, kEnd, kEnd> {
   static void unroll(int num_tokens, float* output, InputT const* mat_a,
                      float const* mat_b, cudaStream_t stream) {
     if (num_tokens == kEnd) {
-      invokeFp32RouterGemm<InputT, kEnd, FP32_NUM_EXPERTS, FP32_HIDDEN_DIM>(
+      invokeFp32RouterGemm<InputT, kEnd, kNumExperts, kHiddenDim>(
           output, mat_a, mat_b, stream);
     } else {
       throw std::invalid_argument(
@@ -59,6 +65,23 @@ struct Fp32LoopUnroller<InputT, kEnd, kEnd> {
     }
   }
 };
+
+// Dispatch over the supported (num_experts, hidden_dim) pairs.
+template <typename InputT>
+void dispatchFp32RouterGemm(int num_experts, int hidden_dim, int num_tokens,
+                            float* output, InputT const* mat_a,
+                            float const* mat_b, cudaStream_t stream) {
+  if (num_experts == 256 && hidden_dim == 3072) {
+    Fp32LoopUnroller<InputT, 256, 3072, 1, FP32_MAX_TOKENS>::unroll(
+        num_tokens, output, mat_a, mat_b, stream);
+  } else if (num_experts == 128 && hidden_dim == 6144) {
+    Fp32LoopUnroller<InputT, 128, 6144, 1, FP32_MAX_TOKENS>::unroll(
+        num_tokens, output, mat_a, mat_b, stream);
+  } else {
+    throw std::invalid_argument(
+        "fp32_router_gemm: unsupported (hidden_dim, num_experts) pair");
+  }
+}
 
 void fp32_router_gemm(
     torch::stable::Tensor& output,       // [num_tokens, num_experts]
@@ -85,10 +108,10 @@ void fp32_router_gemm(
   STD_TORCH_CHECK(
       mat_a.size(1) == mat_b.size(1),
       "fp32_router_gemm: mat_a and mat_b must have the same hidden_dim");
-  STD_TORCH_CHECK(hidden_dim == FP32_HIDDEN_DIM,
-                  "fp32_router_gemm: expected hidden_dim=3072");
-  STD_TORCH_CHECK(num_experts == FP32_NUM_EXPERTS,
-                  "fp32_router_gemm: expected num_experts=256");
+  STD_TORCH_CHECK(
+      fp32_router_gemm_supported(hidden_dim, num_experts),
+      "fp32_router_gemm: supported (hidden_dim, num_experts) pairs are "
+      "(3072, 256) and (6144, 128)");
   STD_TORCH_CHECK(num_tokens <= FP32_MAX_TOKENS,
                   "fp32_router_gemm: num_tokens must be in [0, 32]");
   STD_TORCH_CHECK(
@@ -113,12 +136,13 @@ void fp32_router_gemm(
   if (mat_a.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
     auto const* mat_a_ptr =
         reinterpret_cast<__nv_bfloat16 const*>(mat_a.data_ptr());
-    Fp32LoopUnroller<__nv_bfloat16, 1, FP32_MAX_TOKENS>::unroll(
-        num_tokens, out_ptr, mat_a_ptr, mat_b_ptr, stream);
+    dispatchFp32RouterGemm<__nv_bfloat16>(num_experts, hidden_dim, num_tokens,
+                                          out_ptr, mat_a_ptr, mat_b_ptr,
+                                          stream);
   } else {
     auto const* mat_a_ptr = reinterpret_cast<float const*>(mat_a.data_ptr());
-    Fp32LoopUnroller<float, 1, FP32_MAX_TOKENS>::unroll(
-        num_tokens, out_ptr, mat_a_ptr, mat_b_ptr, stream);
+    dispatchFp32RouterGemm<float>(num_experts, hidden_dim, num_tokens, out_ptr,
+                                  mat_a_ptr, mat_b_ptr, stream);
   }
 }
 

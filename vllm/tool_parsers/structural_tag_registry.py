@@ -84,6 +84,17 @@ def register_vllm_structural_tag(model: str):
     return decorator
 
 
+def _any_tool_strict(
+    tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
+) -> bool:
+    for tool in tools:
+        if isinstance(tool, FunctionTool) and tool.strict is True:
+            return True
+        if isinstance(tool, ChatCompletionToolsParam) and tool.function.strict is True:
+            return True
+    return False
+
+
 def get_model_structural_tag(
     model: str,
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool] | None,
@@ -93,6 +104,9 @@ def get_model_structural_tag(
     """Build a structural tag with xgrammar's builtin model templates."""
 
     if not tools or tool_choice == "none":
+        return None
+
+    if tool_choice == "auto" and not _any_tool_strict(tools):
         return None
 
     dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
