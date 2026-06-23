@@ -1,9 +1,13 @@
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
-use axum::extract::{Request, State};
-use axum::middleware::Next;
+use axum::http::Request;
 use axum::response::{IntoResponse, Response};
+use futures::future::BoxFuture;
 use tokio_util::task::AbortOnDropHandle;
+use tonic::Status;
+use tower::Service;
+use tower::layer::layer_fn;
 use tracing::error;
 
 use crate::error::{ApiError, server_error};
@@ -16,39 +20,89 @@ use crate::state::AppState;
 /// lowering, and engine submission. Lightweight operational routes stay on the
 /// HTTP runtime.
 const OFFLOADED_PATHS: &[&str] = &[
+    // HTTP routes:
     "/v1/chat/completions",
     "/v1/completions",
     "/tokenize",
     "/detokenize",
     "/inference/v1/generate",
+    // gRPC routes:
+    "/vllm.Generate/Generate",
+    "/vllm.Generate/GenerateStream",
 ];
 
-/// Run heavyweight inference and tokenization routes on the request runtime.
-///
-/// Axum extractors and route handlers execute inside `next.run(req)`, so
-/// offloading here moves request parsing and preprocessing off the HTTP runtime
-/// without wrapping each handler manually.
-pub async fn offload_inference_routes(
-    State(state): State<Arc<AppState>>,
-    req: Request,
-    next: Next,
-) -> Response {
-    if !should_offload(req.uri().path()) {
-        return next.run(req).await;
+/// Return a Tower layer that runs selected data-plane requests on the request runtime,
+/// so that we can offset heavy request parsing and preprocessing from the HTTP runtime.
+pub(crate) fn request_runtime_layer<S>(
+    state: Arc<AppState>,
+) -> impl tower::Layer<S, Service = RequestRuntimeService<S>> + Clone {
+    layer_fn(move |inner| RequestRuntimeService {
+        inner,
+        state: state.clone(),
+    })
+}
+
+/// Service produced by [`request_runtime_layer`].
+#[derive(Clone)]
+pub(crate) struct RequestRuntimeService<S> {
+    inner: S,
+    state: Arc<AppState>,
+}
+
+impl<S, B> Service<Request<B>> for RequestRuntimeService<S>
+where
+    S: Service<Request<B>> + Clone + Send + 'static,
+    S::Future: Send + 'static,
+    S::Response: RequestRuntimeErrorResponse + Send + 'static,
+    S::Error: Send + 'static,
+    B: Send + 'static,
+{
+    type Response = S::Response;
+    type Error = S::Error;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
     }
 
-    // Note: For non-streaming requests, the output processing is also offloaded
-    // to the request runtime by doing this.
-    // For streaming requests, the SSE stream responses will still be polled on
-    // the HTTP runtime. Benchmarking shows it's typically not worthwhile to poll
-    // the stream on the request runtime and bridge it through a channel.
-    let task = AbortOnDropHandle::new(state.request_runtime().spawn(next.run(req)));
-    match task.await {
-        Ok(response) => response,
-        Err(error) => {
-            error!(%error, "request runtime task failed");
-            server_error!("request runtime task failed").into_response()
+    fn call(&mut self, req: Request<B>) -> Self::Future {
+        if !should_offload(req.uri().path()) {
+            return Box::pin(self.inner.call(req));
         }
+
+        // Axum extractors and route handlers execute inside the inner service,
+        // so offloading here moves request parsing and preprocessing off the
+        // HTTP runtime without wrapping each handler manually. For streaming
+        // HTTP responses, the response body is still polled on the HTTP runtime.
+        let clone = self.inner.clone();
+        let mut inner = std::mem::replace(&mut self.inner, clone);
+        let task = AbortOnDropHandle::new(self.state.request_runtime().spawn(inner.call(req)));
+
+        Box::pin(async move {
+            match task.await {
+                Ok(result) => result,
+                Err(error) => {
+                    error!(%error, "request runtime task failed");
+                    Ok(S::Response::request_runtime_error_response())
+                }
+            }
+        })
+    }
+}
+
+trait RequestRuntimeErrorResponse {
+    fn request_runtime_error_response() -> Self;
+}
+
+impl RequestRuntimeErrorResponse for Response {
+    fn request_runtime_error_response() -> Self {
+        server_error!("request runtime task failed").into_response()
+    }
+}
+
+impl RequestRuntimeErrorResponse for axum::http::Response<tonic::body::Body> {
+    fn request_runtime_error_response() -> Self {
+        Status::internal("request runtime task failed").into_http()
     }
 }
 
@@ -67,6 +121,8 @@ mod tests {
         assert!(should_offload("/tokenize"));
         assert!(should_offload("/detokenize"));
         assert!(should_offload("/inference/v1/generate"));
+        assert!(should_offload("/vllm.Generate/Generate"));
+        assert!(should_offload("/vllm.Generate/GenerateStream"));
     }
 
     #[test]

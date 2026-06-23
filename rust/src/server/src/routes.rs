@@ -108,10 +108,7 @@ fn build_router_with_options(
     let enable_api_key_auth = state.has_api_keys();
     let mut router = router
         .with_state(state.clone())
-        .layer(from_fn_with_state(
-            state.clone(),
-            middleware::offload_inference_routes,
-        ))
+        .layer(middleware::request_runtime_layer(state.clone()))
         .layer(from_fn_with_state(
             state.clone(),
             middleware::track_server_load,
