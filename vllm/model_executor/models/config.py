@@ -158,6 +158,20 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         if sc is not None and sc.max_num_seqs >= SchedulerConfig.DEFAULT_MAX_NUM_SEQS:
             sc.max_num_seqs = 8
 
+        # Remove the model's generation_config.json cap on max_new_tokens
+        # (256) so DiffusionGemma behaves like every other model: no
+        # server-wide limit, each request controls its own output length
+        # via max_tokens.  Setting to None causes get_diff_sampling_param
+        # to skip this key entirely.
+        model_config = vllm_config.model_config
+        if "max_new_tokens" not in model_config.override_generation_config:
+            model_config.override_generation_config["max_new_tokens"] = None
+            logger.info(
+                "DiffusionGemma: removing server-wide max_new_tokens cap "
+                "from generation_config.json (use "
+                "--override-generation-config to set a custom limit).",
+            )
+
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
@@ -613,6 +627,20 @@ class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
             )
 
 
+class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
+    """ColQwen3.5 (late-interaction retrieval) inherits Qwen3.5's mamba cache
+    handling and additionally serves BIDIRECTIONAL attention: ColPali-style
+    document/query encoding attends over the whole sequence, not causally. Set
+    is_causal=False so Qwen3NextAttention builds its full_attention layers with
+    AttentionType.ENCODER_ONLY (the linear_attention GatedDeltaNet layers are
+    unaffected). Generation arches keep the parent (causal) and are untouched.
+    """
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        model_config.hf_config.is_causal = False
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -642,7 +670,7 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
-    "ColQwen3_5": Qwen3_5ForConditionalGenerationConfig,
+    "ColQwen3_5": ColQwen3_5Config,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501

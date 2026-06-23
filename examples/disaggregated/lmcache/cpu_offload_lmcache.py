@@ -1,20 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-This file demonstrates the example usage of cpu offloading
-with LMCache in vLLM v1 or v0.
-
-Usage:
-
-    Specify vLLM version
-
-    -v v0 : Use LMCacheConnector
-            model = mistralai/Mistral-7B-Instruct-v0.2
-            (Includes enable_chunked_prefill = True)
-
-    -v v1 : Use LMCacheConnectorV1 (default)
-            model = meta-llama/Meta-Llama-3.1-8B-Instruct
-            (Without enable_chunked_prefill)
+This file demonstrates the example usage of CPU offloading
+with LMCache in vLLM v1.
 
 Note that `lmcache` is needed to run this example.
 Requirements:
@@ -23,7 +11,6 @@ Learn more about LMCache environment setup, please refer to:
 https://docs.lmcache.ai/getting_started/installation.html
 """
 
-import argparse
 import contextlib
 import os
 import time
@@ -39,8 +26,6 @@ from vllm.engine.arg_utils import EngineArgs
 
 def setup_environment_variables():
     # LMCache-related environment variables
-    # Use experimental features in LMCache
-    os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
     # LMCache is set to use 256 tokens per chunk
     os.environ["LMCACHE_CHUNK_SIZE"] = "256"
     # Enable local CPU backend in LMCache
@@ -50,9 +35,9 @@ def setup_environment_variables():
 
 
 @contextlib.contextmanager
-def build_llm_with_lmcache(lmcache_connector: str, model: str):
+def build_llm_with_lmcache(model: str):
     ktc = KVTransferConfig(
-        kv_connector=lmcache_connector,
+        kv_connector="LMCacheConnectorV1",
         kv_role="kv_both",
     )
     # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
@@ -92,23 +77,10 @@ def print_output(
     print("-" * 50)
 
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "-v",
-        "--version",
-        choices=["v0", "v1"],
-        default="v1",
-        help="Specify vLLM version (default: v1)",
-    )
-    return parser.parse_args()
-
-
 def main():
-    lmcache_connector = "LMCacheConnectorV1"
     model = "meta-llama/Meta-Llama-3.1-8B-Instruct"
     setup_environment_variables()
-    with build_llm_with_lmcache(lmcache_connector, model) as llm:
+    with build_llm_with_lmcache(model) as llm:
         # This example script runs two requests with a shared prefix.
         # Define the shared prompt and specific prompts
         shared_prompt = "Hello, how are you?" * 1000
