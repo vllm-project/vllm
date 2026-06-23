@@ -28,6 +28,7 @@ from transformers import AutoModel
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -130,6 +131,32 @@ def _softcap_logits(logits: torch.Tensor, cap: float) -> torch.Tensor:
     # the [num_tokens, vocab] logits instead of four separate passes.
     logits = logits.float()
     return torch.tanh(logits / cap) * cap
+
+
+def _get_diffusion_gemma_embedding_weight(
+    embed_tokens: Any,
+    *,
+    gather_tp_shards: bool = True,
+) -> torch.Tensor:
+    """Return dequantized embedding weights for DiffusionGemma soft embeds."""
+    weight = getattr(embed_tokens, "weight", None)
+    if weight is None:
+        quant_method = getattr(embed_tokens, "quant_method", None)
+        get_embedding_weight = getattr(quant_method, "get_embedding_weight", None)
+        if get_embedding_weight is None:
+            raise RuntimeError(
+                "DiffusionGemma requires embedding weights for self-conditioning, "
+                f"but {type(embed_tokens).__name__} does not expose `.weight` "
+                "or `quant_method.get_embedding_weight()`."
+            )
+        weight = get_embedding_weight(embed_tokens)
+
+    if gather_tp_shards and getattr(embed_tokens, "tp_size", 1) > 1:
+        weight = tensor_model_parallel_all_gather(weight, dim=0)
+        org_vocab_size = getattr(embed_tokens, "org_vocab_size", None)
+        if org_vocab_size is not None:
+            weight = weight[:org_vocab_size]
+    return weight
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -238,6 +265,8 @@ class DiffusionGemmaForConditionalGeneration(
         self.lm_head = ParallelLMHead(
             num_embeddings=text_config.vocab_size,
             embedding_dim=text_config.hidden_size,
+            quant_config=vllm_config.quant_config,
+            prefix=maybe_prefix(prefix, "lm_head"),
         )
 
         if text_config.tie_word_embeddings:
@@ -273,7 +302,7 @@ class DiffusionGemmaForConditionalGeneration(
         inputs_embeds: torch.Tensor,
         probs: torch.Tensor,
     ) -> torch.Tensor:
-        embed_weight = self.model.embed_tokens.weight
+        embed_weight = _get_diffusion_gemma_embedding_weight(self.model.embed_tokens)
         soft_embeds = torch.matmul(
             probs.to(embed_weight.dtype), embed_weight
         ) * self.model.normalizer.to(inputs_embeds.dtype)
@@ -482,7 +511,7 @@ def _compiled_sample_step(
     is_encoder_phase: torch.Tensor,  # [max_num_reqs]
     confident_tensor: torch.Tensor,  # [max_num_reqs]
     sc_embeds: torch.Tensor,  # [max_num_reqs, CL, hidden]
-    embed_weight: torch.Tensor,  # [vocab, hidden]
+    embed_weight: torch.Tensor,  # [local_vocab, hidden]
     normalizer: torch.Tensor,
     history: torch.Tensor,  # [max_num_reqs, ST, CL]
     history_len_tensor: torch.Tensor,  # [max_num_reqs]
@@ -835,7 +864,7 @@ class DiffusionGemmaModelState(ModelState):
             raise ValueError(
                 f"entropy_bound must be a positive float (got {entropy_bound})"
             )
-        # The self-conditioning matmul (probs @ embed_tokens.weight) runs over a
+        # The self-conditioning matmul (probs @ embedding weight) runs over a
         # vocab-parallel embedding shard. Hand the sampler this rank's vocab
         # slice and TP group so it can all-reduce the partial products.
         embed_tokens = self.model.model.embed_tokens
@@ -850,7 +879,10 @@ class DiffusionGemmaModelState(ModelState):
             t_max=gen["t_max"],
             entropy_bound=entropy_bound,
             confidence_threshold=gen["confidence_threshold"],
-            embed_weight=embed_tokens.weight,
+            embed_weight=_get_diffusion_gemma_embedding_weight(
+                embed_tokens,
+                gather_tp_shards=False,
+            ),
             normalizer=self.model.model.normalizer,
             sc_vocab_start=shard.org_vocab_start_index,
             sc_vocab_end=shard.org_vocab_end_index,
