@@ -626,6 +626,44 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi
 
 #################### DEV IMAGE ####################
+
+#################### FLASHINFER CUBIN CACHE IMAGE ####################
+# Download FlashInfer precompiled cubins in a dedicated stage. This download is
+# ~GBs from NVIDIA's artifactory and is the single largest cost in CI image
+# builds. Isolating it in a stage that does not depend on the per-commit vLLM
+# wheel lets the BuildKit layer cache (warm AMI / registry) reuse it across
+# builds, so it only re-downloads on a flashinfer/CUDA bump (the stage's cache
+# key is its `base` parent + CUDA_VERSION + FLASHINFER_VERSION).
+# vllm-base copies the result in after all installs.
+# Cubins are plain data files, so the stage's Python layout need not match the
+# runtime's; the result is normalized to a neutral path.
+FROM base AS flashinfer-cubins
+ARG CUDA_VERSION
+ARG FLASHINFER_VERSION=0.6.12
+RUN --mount=type=cache,target=/opt/uv/cache \
+    uv pip install --python /opt/venv/bin/python3 \
+        "flashinfer-python==${FLASHINFER_VERSION}" "flashinfer-cubin==${FLASHINFER_VERSION}" \
+        --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+# Download the cubins and normalize them to a neutral path for `COPY --from`.
+# The `flashinfer download-cubin` CLI swallows download failures and exits 0, so
+# call download_artifacts() directly (it raises on an incomplete/checksum-bad set)
+# and retry transient failures -- since this layer is cached, we must not bake a
+# transiently-worse set. A small deterministic upstream gap is logged and tolerated
+# (it matches the previous in-line download's behavior; flashinfer JIT-fetches any
+# missing cubins at runtime on first use). Only structural / cache-poison cases
+# hard-fail: import failure, a near-empty set, a missing dir, or an empty copy.
+RUN set -e; \
+    for i in 1 2 3; do \
+        python3 -c "from flashinfer.artifacts import download_artifacts; download_artifacts()" && break \
+        || { echo "[cubin] download attempt $i failed; retrying in 10s"; sleep 10; }; \
+    done; \
+    python3 -c "import sys; from flashinfer.artifacts import get_artifacts_status as g; s=list(g()); pres=sum(1 for _,p in s if p); miss=[f for f,p in s if not p]; print('[cubin] present %d/%d'%(pres,len(s)), flush=True); (print('[cubin] WARNING: %d cubins missing/unverified; runtime JIT-fetches on first use; e.g. %s'%(len(miss), miss[:10]), flush=True) if miss else 0); (sys.exit('[cubin] FATAL: near-empty cubin set %d/%d (cache-poison risk)'%(pres,len(s))) if (not s or pres/len(s) < 0.5) else 0)"; \
+    SRC="$(python3 -c "import os, flashinfer_cubin; print(os.path.join(os.path.dirname(flashinfer_cubin.__file__), 'cubins'))")"; \
+    test -d "$SRC"; \
+    mkdir -p /opt/flashinfer-cubins; \
+    cp -a "$SRC/." /opt/flashinfer-cubins/; \
+    test -n "$(find /opt/flashinfer-cubins -type f -print -quit)" || { echo "[cubin] FATAL: no cubin files copied"; exit 1; }
+
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
 FROM ${FINAL_BASE_IMAGE} AS vllm-base
@@ -898,12 +936,27 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         fi; \
     fi
 
-# Download FlashInfer precompiled cubins AFTER all pip installs are done.
-# This must run after the vLLM wheel and EP kernels installs above, because
-# those can reinstall/touch flashinfer packages. Downloading cubins earlier
-# (in the flashinfer-jit-cache layer) causes ~2.5 GB of layer duplication
-# when a later pip install overwrites flashinfer package files.
-RUN flashinfer show-config && flashinfer download-cubin
+# Install the FlashInfer precompiled cubins produced by the `flashinfer-cubins`
+# stage. This must run AFTER all pip installs above, because a reinstall of
+# flashinfer-cubin would otherwise wipe the cubins (the reason #41134 placed the
+# download last). This is a `COPY --from` of an already-downloaded stage -- not a
+# ~GBs network fetch on every build.
+#
+# Why a separate stage: flashinfer ignores FLASHINFER_CUBIN_DIR when
+# flashinfer-cubin is installed (jit/env.py `_get_cubin_dir`) and
+# `download_artifacts()` re-downloads unconditionally, so a cache mount cannot
+# help. Instead the download lives in a separate stage that does not depend on
+# the per-commit vLLM wheel, so the BuildKit layer cache (warm AMI / registry)
+# reuses it across builds and only re-downloads on a flashinfer/CUDA bump.
+# `COPY --from` (rather than a bind mount) is used so the stage is a first-class
+# cache edge that `mode=max` reliably exports/imports across builds. The
+# destination is the runtime flashinfer-cubin package dir (deadsnakes layout);
+# the assertion below resolves `flashinfer_cubin.get_cubin_dir()` and fails the
+# build if that path does not match, so the hardcoded path can't silently drift.
+COPY --from=flashinfer-cubins /opt/flashinfer-cubins/ /usr/local/lib/python${PYTHON_VERSION}/dist-packages/flashinfer_cubin/cubins/
+# Local-only sanity check (no network; FlashInfer's `show-config` would hit the
+# cubin repo): confirm the runtime resolves the cubins to the copied files.
+RUN python3 -c "import os, flashinfer_cubin; d=str(flashinfer_cubin.get_cubin_dir()); assert os.path.isdir(d), 'cubin dir missing: '+d; n=sum(len(f) for _, _, f in os.walk(d)); assert n>0, 'no cubin files under '+d; print('FlashInfer cubins present:', n, 'files under', d)"
 
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
