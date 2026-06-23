@@ -465,7 +465,7 @@ class TestGPTOSSChat:
         )
 
         msg = tool_choice_none.choices[0].message
-        assert len(msg.tool_calls) == 0
+        assert msg.tool_calls is None
 
 
 class TestGPTOSSSpeculativeChat:
