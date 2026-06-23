@@ -114,11 +114,6 @@ class CPUOffloadingSpec(OffloadingSpec):
     @override
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
-            kv_events_config = self.vllm_config.kv_events_config
-            enable_events = (
-                kv_events_config is not None and kv_events_config.enable_kv_cache_events
-            )
-
             # store_threshold: how many times a block must appear in lookup()
             # before it is eligible for CPU offloading.  Values < 2 disable
             # filtering (a threshold of 1 equals no filter; 0 is the default).
@@ -130,7 +125,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             self._manager = CPUOffloadingManager(
                 num_blocks=self.num_blocks,
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
-                enable_events=enable_events,
+                enable_events=self.kv_events_config.enable_kv_cache_events,
                 store_threshold=store_threshold,
                 max_tracker_size=max_tracker_size,
             )

@@ -136,8 +136,12 @@ typename T::Fmha::Arguments args_from_options(
   StrideQ stride_Q_pe = cute::make_tuple(
       static_cast<int64_t>(q_pe.stride(1)), _1{}, static_cast<int64_t>(q_pe.stride(0)));
 
+  // Read the token and page strides from the cache tensor instead of assuming
+  // packed pages, so strided views (e.g. per-layer views into a cross-layer
+  // block-major cache) are addressed correctly.
   StrideK stride_C = cute::make_tuple(
-      static_cast<int64_t>(0 + D_latent + D_rope), _1{}, static_cast<int64_t>(page_size * (D_latent + D_rope)));
+      static_cast<int64_t>(kv_c_and_k_pe_cache.stride(1)), _1{},
+      static_cast<int64_t>(kv_c_and_k_pe_cache.stride(0)));
   StrideLSE stride_PT = cute::make_stride(_1{}, page_count_per_seq);
   StrideLSE stride_LSE = cute::make_tuple(_1{}, 0 + H);
   StrideO stride_O = cute::make_tuple(static_cast<int64_t>(0 + D_latent), _1{}, static_cast<int64_t>(0 + H * D_latent));
