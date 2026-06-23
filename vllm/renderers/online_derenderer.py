@@ -17,7 +17,6 @@ from vllm.entrypoints.openai.completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import ToolCall
 from vllm.entrypoints.openai.engine.serving import resolve_token_id_placeholder
 from vllm.entrypoints.serve.disagg.protocol import GenerateResponse
-from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
@@ -165,8 +164,7 @@ class OnlineDerenderer:
         self,
         generate_responses: list[GenerateResponse],
         prompt_tokens: list[int] | None = None,
-    ) -> (list[CompletionResponseChoice], int, int):
-
+    ) -> tuple[list[CompletionResponseChoice], int, int]:
         n = len(generate_responses)
         prompt_tokens_list: list[int] = (
             prompt_tokens if prompt_tokens is not None else [0] * n
@@ -181,10 +179,11 @@ class OnlineDerenderer:
         for gen, pt in zip(generate_responses, prompt_tokens_list):
             for choice in gen.choices:
                 if not choice.token_ids:
-                    return create_error_response(
+                    raise ValueError(
                         f"choice {choice.index} in response {gen.request_id} "
                         "has empty or null token_ids"
                     )
+
                 decoded_text = tokenizer.decode(
                     choice.token_ids, skip_special_tokens=True
                 )
