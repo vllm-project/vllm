@@ -877,9 +877,7 @@ class OpenAIServingChat(OpenAIServing):
                     enable_auto_tools=self.enable_auto_tools,
                     model_output_token_ids=token_ids,
                 )
-                suppress_metadata = (
-                    not request.include_reasoning and reasoning is not None
-                )
+                suppress_metadata = not request.include_reasoning and parser is not None
                 if not request.include_reasoning:
                     reasoning = None
                 if suppress_metadata:
