@@ -7,6 +7,8 @@ from vllm.distributed import get_dcp_group, get_pcp_group
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+else:
+    AttentionLayerBase = object
 
 
 def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:

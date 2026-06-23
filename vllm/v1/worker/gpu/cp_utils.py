@@ -13,11 +13,8 @@ from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.utils import CpuGpuBuffer
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
-else:
-    AttentionLayerBase = object
 
 
 def prepare_dcp_local_seq_lens(
