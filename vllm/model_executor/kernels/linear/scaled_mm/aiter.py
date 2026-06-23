@@ -373,7 +373,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         self.use_triton = (
             not current_platform.is_fp8_fnuz()
             and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
-        )
+        ) or True
 
     @classmethod
     def is_supported(cls, compute_capability=None):
