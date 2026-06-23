@@ -215,6 +215,14 @@ def _is_loopback_ip(ip: str) -> bool:
         return False
 
 
+def _is_non_advertisable_auto_ip(ip: str) -> bool:
+    try:
+        address = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
+
+
 def _interface_for_ipv4(ip: str) -> str | None:
     try:
         target_ip = socket.inet_aton(ip)
@@ -278,34 +286,54 @@ def resolve_host_ip(extra_config: dict) -> str:
     host_ip = extra_config.get("host_ip")
     if host_ip:
         host_ip = str(host_ip)
+        if _is_loopback_ip(host_ip):
+            logger.warning_once(
+                "MoRIIO host_ip=%s is loopback. This only works when all "
+                "MoRIIO peers share the same network namespace.",
+                host_ip,
+            )
         _configure_mori_socket_ifname(host_ip)
         return host_ip
 
     proxy_ip = extra_config.get("proxy_ip")
-    if proxy_ip:
-        try:
-            host_ip = _infer_local_ip_for_peer(str(proxy_ip))
-        except OSError as e:
-            logger.warning_once(
-                "Unable to infer MoRIIO host_ip from route to proxy_ip=%s: %s. "
-                "Falling back to get_ip().",
-                proxy_ip,
-                e,
-            )
-        else:
-            if _is_loopback_ip(host_ip):
-                logger.info_once(
-                    "Inferred loopback MoRIIO host_ip=%s from proxy_ip=%s. "
-                    "Falling back to get_ip(). Set host_ip explicitly to use "
-                    "a loopback address.",
-                    host_ip,
-                    proxy_ip,
-                )
-                return get_ip()
-            _configure_mori_socket_ifname(host_ip)
-            return host_ip
+    if not proxy_ip:
+        raise ValueError(
+            "MoRIIO requires kv_connector_extra_config['proxy_ip'] when "
+            "host_ip is not set."
+        )
 
-    return get_ip()
+    try:
+        host_ip = _infer_local_ip_for_peer(str(proxy_ip))
+    except OSError as e:
+        logger.warning_once(
+            "Unable to infer MoRIIO host_ip from route to proxy_ip=%s: %s. "
+            "Falling back to get_ip().",
+            proxy_ip,
+            e,
+        )
+        host_ip = None
+    else:
+        if _is_loopback_ip(host_ip):
+            logger.warning_once(
+                "Route to MoRIIO proxy_ip=%s uses loopback source IP %s. "
+                "Falling back to get_ip(). Set host_ip explicitly for "
+                "loopback-only deployments.",
+                proxy_ip,
+                host_ip,
+            )
+            host_ip = None
+
+    if not host_ip:
+        host_ip = get_ip()
+
+    if _is_non_advertisable_auto_ip(host_ip):
+        raise ValueError(
+            f"MoRIIO auto networking resolved non-advertisable host_ip={host_ip!r}. "
+            "Set kv_connector_extra_config['host_ip'] explicitly."
+        )
+
+    _configure_mori_socket_ifname(host_ip)
+    return host_ip
 
 
 _DEPRECATED_ENV_VARS: dict[str, str] = {
