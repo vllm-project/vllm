@@ -408,7 +408,6 @@ def _deepseek_v4_indexed_d512_split_prefill_warmup(runner: "GPUModelRunner") -> 
         )
         from vllm.models.deepseek_v4.nvidia.flashmla import (
             _INDEXED_D512_SPLIT_PREFILL_MAX_TOPK,
-            _INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS,
             _INDEXED_D512_SPLIT_PREFILL_MIN_TOPK,
             DeepseekV4FlashMLAAttention,
         )
@@ -419,17 +418,26 @@ def _deepseek_v4_indexed_d512_split_prefill_warmup(runner: "GPUModelRunner") -> 
         from vllm.v1.attention.backends.mla.sparse_mla_kernels import (
             accumulate_indexed_d512_split_sparse_mla_attention,
         )
-    except ImportError:
-        logger.debug(
-            "Skipping DeepSeek V4 D512-split prefill warmup: split kernels or "
-            "helpers are unavailable on this build."
+    except ImportError as exc:
+        # The early gate above already confirmed the warmup is requested, so a
+        # failed import here is not a benign "kernels unavailable" case — it is
+        # usually a renamed symbol (it silently disabled this warmup for weeks).
+        # Surface it at WARNING so a future rename does not no-op the warmup.
+        logger.warning(
+            "Skipping DeepSeek V4 D512-split prefill warmup: a required symbol "
+            "failed to import (%s). The split kernels are likely present but a "
+            "helper was renamed; the first long prefill will JIT them mid-inference.",
+            exc,
         )
         return
 
     try:
         if not is_triton_sparse_mla_enabled_for_platform():
             return
-        if getattr(runner, "max_model_len", 0) < _INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS:
+        if (
+            getattr(runner, "max_model_len", 0)
+            < envs.VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS
+        ):
             return
 
         # The split kernel never sees compress_ratio, so any cr in (4, 128)
