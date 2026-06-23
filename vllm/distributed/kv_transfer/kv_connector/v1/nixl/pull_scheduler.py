@@ -30,6 +30,10 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
+        if self.is_bidirectional_kv_xfer_enabled:
+            raise NotImplementedError(
+                "Bidirectional KV transfer is not supported for NIXL pull connector."
+            )
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
