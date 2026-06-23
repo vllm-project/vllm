@@ -495,3 +495,28 @@ def test_streaming_tool_calls(
         actual_args = json.loads(arguments_str)
         expected_args = json.loads(expected_tool.function.arguments)
         assert actual_args == expected_args
+
+
+def test_streaming_tool_calls_non_ascii(
+    seed_oss_tool_parser, seed_oss_tokenizer, sample_tools
+):
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    model_output = (
+        """<seed:think>\n</seed:cot_budget_reflect>\n</seed:cot_budget_reflect>\n"""
+        """The current thinking budget is 0, so I will directly start answering the question.\n</seed:think>\n"""
+        """<seed:tool_call>\n<function=get_weather>\n"""
+        """<parameter=location>北京</parameter>\n</function>\n</seed:tool_call>"""
+    )
+
+    args = "".join(
+        tool_call.function.arguments
+        for delta_message in stream_delta_message_generator(
+            seed_oss_tool_parser, seed_oss_tokenizer, model_output, request
+        )
+        if delta_message.tool_calls
+        for tool_call in delta_message.tool_calls
+        if tool_call.function and tool_call.function.arguments is not None
+    )
+
+    assert "北京" in args
+    assert "\\u" not in args
