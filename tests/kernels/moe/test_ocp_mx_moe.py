@@ -9,12 +9,19 @@ import pytest
 import torch
 from packaging import version
 
+from vllm._aiter_ops import is_aiter_found
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 
-QUARK_MXFP4_AVAILABLE = find_spec("quark") is not None and version.parse(
-    importlib.metadata.version("amd-quark")
-) >= version.parse("0.8.99")
+# MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.
+# Earlier torch releases work with older quark versions. See
+# https://github.com/amd/Quark/issues/34
+# TODO: Remove once amd-quark>=0.12.0
+QUARK_MXFP4_TORCH_COMPATIBLE = find_spec("quark") is not None and (
+    version.parse(importlib.metadata.version("amd-quark")) >= version.parse("0.12.0")
+    if version.parse(torch.__version__.split("+")[0]) >= version.parse("2.11")
+    else True
+)
 
 TRTLLM_GEN_MXFP4_AVAILABLE = (
     current_platform.is_cuda() and current_platform.is_device_capability_family(100)
@@ -31,17 +38,15 @@ HOPPER_MXFP4_BF16_AVAILABLE = (
 # ROCm platform and dependencies
 ROCM_AVAILABLE = current_platform.is_rocm()
 ROCM_TRITON_KERNELS_AVAILABLE = False
-ROCM_AITER_AVAILABLE = False
+ROCM_AITER_AVAILABLE = is_aiter_found()
 ROCM_GFX950 = False
 
 if ROCM_AVAILABLE:
-    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.platforms.rocm import on_gfx950
     from vllm.utils.import_utils import has_triton_kernels
 
     ROCM_TRITON_KERNELS_AVAILABLE = has_triton_kernels()
     ROCM_GFX950 = on_gfx950()
-    ROCM_AITER_AVAILABLE = rocm_aiter_ops.is_enabled()
 
     if ROCM_AITER_AVAILABLE:
         from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
@@ -83,12 +88,15 @@ def enable_pickle(monkeypatch):
     [
         ModelCase("fxmarty/qwen_1.5-moe-a2.7b-mxfp4", tp=2),
         ModelCase("fxmarty/deepseek_r1_3_layers_mxfp4", tp=8),
-        ModelCase("fxmarty/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
+        ModelCase("mawong-amd/Llama-4-Scout-17B-16E-Instruct-2-layers-mxfp4", tp=1),
         ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=1),
         ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
     ],
 )
-@pytest.mark.skipif(not QUARK_MXFP4_AVAILABLE, reason="amd-quark>=0.9 is not available")
+@pytest.mark.skipif(
+    not QUARK_MXFP4_TORCH_COMPATIBLE,
+    reason="MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.",
+)
 def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
     if torch.accelerator.device_count() < model_case.tp:
         pytest.skip(
@@ -102,6 +110,7 @@ def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
         tensor_parallel_size=model_case.tp,
         load_format="dummy",
         compilation_config={"cudagraph_capture_sizes": [16]},
+        gpu_memory_utilization=0.8,  # mxfp6 models use more scratch space
     ) as llm:
         # Disabled as check_model is broken: https://github.com/vllm-project/vllm/pull/18465#issuecomment-3329880562
         # def check_model(model):
@@ -1267,7 +1276,7 @@ def test_rocm_mxfp4_moe_oracle(
 
     This test validates that the oracle functions work end-to-end:
     - select_mxfp4_moe_backend() selects a valid backend
-    - convert_to_mxfp4_moe_kernel_format() converts weights without error
+    - convert_gpt_oss_weight_to_mxfp4_moe_kernel_format() converts weights without error
     - make_mxfp4_moe_quant_config() builds a valid quant config
     - make_mxfp4_moe_kernel() creates a kernel that runs without error
     - The kernel output is within accuracy tolerance of reference
@@ -1287,7 +1296,7 @@ def test_rocm_mxfp4_moe_oracle(
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
         backend_to_kernel_cls,
-        convert_to_mxfp4_moe_kernel_format,
+        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
         make_mxfp4_moe_kernel,
         make_mxfp4_moe_quant_config,
     )
@@ -1387,7 +1396,7 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Convert weights using oracle
     w13_conv, w2_conv, w13_scale_conv, w2_scale_conv, w13_bias_conv, w2_bias_conv = (
-        convert_to_mxfp4_moe_kernel_format(
+        convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             mxfp4_backend=backend,
             layer=layer,  # type: ignore[arg-type]
             w13_weight=w13_quant,
@@ -1423,7 +1432,7 @@ def test_rocm_mxfp4_moe_oracle(
             mxfp4_backend=backend,
             experts_cls=experts_cls,
             routing_tables=None,
-            shared_experts=None,
+            layer=None,
         )
 
         # Create inputs
