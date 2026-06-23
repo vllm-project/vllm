@@ -10,7 +10,7 @@ from typing import final
 import torch
 
 import vllm.envs as envs
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -1141,8 +1141,10 @@ class FusedMoEKernelModularImpl:
         # Gated by VLLM_MOE_SKIP_PADDING (off by default) because this requires the
         # experts kernel to treat topk_id == -1 as a skip sentinel, which not all
         # MoE backends support yet.
-        is_padding = get_forward_context().is_padding
-        if envs.VLLM_MOE_SKIP_PADDING and is_padding is not None:
+        is_padding = None
+        if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+            is_padding = get_forward_context().is_padding
+        if is_padding is not None:
             n = topk_ids.shape[0]
             # TODO: Properly support DBO (padding lives at the batch tail).
             topk_ids = torch.where(is_padding[:n].unsqueeze(1), -1, topk_ids)
