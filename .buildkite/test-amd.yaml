@@ -2825,7 +2825,7 @@ steps:
   agent_pool: mi355_2
   num_gpus: 2
   optional: true
-  parallelism: 3
+  parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/model_executor/models/qwen3_5.py
