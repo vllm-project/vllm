@@ -812,14 +812,14 @@ class Scheduler(SchedulerInterface):
                 external_load_encoder_input = []
                 new_encoder_compute_budget = encoder_compute_budget
 
-                is_prefill = num_computed_tokens < request.num_tokens - 1
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
-                elif defer_prefills and is_prefill:
-                    # DP prefill balancing: defer committing new prefill compute to
-                    # a cadence-aligned step (exclude full kv cache hits).
+                elif defer_prefills and request.num_computed_tokens == 0:
+                    # DP prefill balancing: async KV loads (the branch above) are
+                    # allowed to start even on throttled steps, but committing new
+                    # prefill compute is deferred to a cadence-aligned step.
                     break
                 else:
                     # Number of tokens to be scheduled.

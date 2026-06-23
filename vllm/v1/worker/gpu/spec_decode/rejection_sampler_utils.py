@@ -245,6 +245,7 @@ def _rejection_kernel(
                     pos = tl.load(pos_ptr + logit_idx)
                     u = tl_rand64(seed, pos, includes_zero=False)
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
+                    # -1 is used for padded draft token ids that should be rejected.
                     accepted &= (u < rate) & (draft_sampled >= 0)
                 else:
                     accepted &= target_argmax == draft_sampled
@@ -253,6 +254,7 @@ def _rejection_kernel(
                     draft_sampled if accepted else target_argmax,
                 )
             else:
+                # -1 is used for padded draft token ids that should be rejected.
                 is_valid_draft = draft_sampled >= 0
                 target_logit = tl.load(
                     target_logits_ptr
