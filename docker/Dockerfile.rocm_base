@@ -1,12 +1,12 @@
-ARG BASE_IMAGE=registry-sc-harbor.amd.com/framework/therock-npi:pytorch-2.10.0-rocm7.14.0a20260611.a0-7.14.0a20260611-a0-nightly-ubuntu24.04-gfx1250
+ARG BASE_IMAGE=registry-sc-harbor.amd.com/framework/therock-npi:pytorch-2.10.0-rocm7.14.0a20260605.a0-7.14.0a20260605-a0-nightly-ubuntu24.04-gfx1250
 ARG ROCM_WHEEL_INDEX=https://rocm.genesis.amd.com/whl/gfx1250
-ARG TORCH_VERSION=2.11.0+rocm7.14.0a20260605
+ARG TORCH_VERSION=2.10.0+rocm7.14.0a20260605.a0
 ARG TORCHVISION_VERSION=0.28.0a0+rocm7.14.0a20260605
 ARG TORCHAUDIO_VERSION=2.11.0a0+rocm7.14.0a20260605
 ARG ROCM_SDK_VERSION=7.14.0a20260605
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="main"
+ARG AITER_BRANCH="jpvillam/gfx1250_0604"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
