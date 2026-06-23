@@ -93,6 +93,23 @@ To address this, manually trigger a build on Buildkite to accomplish two objecti
 <img width="60%" alt="Buildkite new build popup" src="https://github.com/user-attachments/assets/3b07f71b-bb18-4ca3-aeaf-da0fe79d315f" />
 </p>
 
+You can also trigger this build from the command line with
+[`.buildkite/scripts/trigger-ci-build.sh`](../../../.buildkite/scripts/trigger-ci-build.sh)
+(dry-run by default; pass `--execute` to actually trigger it).
+
+## Test against PyTorch nightly
+
+The steps above test against a specific PyTorch RC/stable wheel pinned in the
+requirements files. To instead build and run the **full** CI suite against the
+latest PyTorch **nightly** wheels, set the `TORCH_NIGHTLY=1` environment
+variable on the build (or apply the `ready-torch-nightly` label to the PR).
+This runs the entire test suite in the `vLLM Against PyTorch Nightly` group
+against a torch-nightly image, in addition to the regular pinned-torch run.
+
+This differs from `NIGHTLY=1`, which only runs the curated subset of steps
+tagged with `mirror.torch_nightly`. Use `trigger-ci-build.sh --torch-nightly`
+to trigger it from the command line.
+
 ## Update all the different vLLM platforms
 
 Rather than attempting to update all vLLM platforms in a single pull request, it's more manageable
