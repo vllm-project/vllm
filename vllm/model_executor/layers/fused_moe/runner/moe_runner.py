@@ -607,8 +607,7 @@ class MoERunner(MoERunnerInterface):
         # (Note: This code runs only when "overlapped mode" is on to allow
         #        parallel execution of shared experts with the FusedMoE via
         #        separate cuda stream)
-        if self._shared_experts is not None:
-            assert shared_experts_input is not None
+        if self._shared_experts is not None and shared_experts_input is not None:
             self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
 
     def _maybe_add_zero_expert_output(
@@ -623,8 +622,8 @@ class MoERunner(MoERunnerInterface):
         """
         if isinstance(self.router, ZeroExpertRouter):
             zero_expert_output = self.router.zero_expert_output
-            assert zero_expert_output is not None
-            result = result + zero_expert_output
+            if zero_expert_output is not None:
+                result = result + zero_expert_output
         return result
 
     def forward(
