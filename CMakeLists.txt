@@ -70,6 +70,7 @@ endif()
 #
 set(TORCH_SUPPORTED_VERSION_CUDA "2.11.0")
 set(TORCH_SUPPORTED_VERSION_ROCM "2.11.0")
+set(TORCH_NIGHTLY_BUILD FALSE)
 
 #
 # Try to find python package with an executable that exactly matches
@@ -160,7 +161,7 @@ endif()
 if (NOT HIP_FOUND AND NOT PYTORCH_FOUND_HIP AND CUDA_FOUND)
   set(VLLM_GPU_LANG "CUDA")
 
-  if (NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_CUDA})
+  if (NOT TORCH_NIGHTLY_BUILD AND NOT Torch_VERSION VERSION_EQUAL ${TORCH_SUPPORTED_VERSION_CUDA})
     message(WARNING "Pytorch version ${TORCH_SUPPORTED_VERSION_CUDA} "
       "expected for CUDA build, saw ${Torch_VERSION} instead.")
   endif()
@@ -173,7 +174,7 @@ elseif(HIP_FOUND OR PYTORCH_FOUND_HIP)
   enable_language(HIP)
 
   # ROCm 5.X and 6.X
-  if (ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
+  if (NOT TORCH_NIGHTLY_BUILD AND ROCM_VERSION_DEV_MAJOR GREATER_EQUAL 5 AND
       Torch_VERSION VERSION_LESS ${TORCH_SUPPORTED_VERSION_ROCM})
     message(WARNING "Pytorch version >= ${TORCH_SUPPORTED_VERSION_ROCM} "
       "expected for ROCm build, saw ${Torch_VERSION} instead.")
