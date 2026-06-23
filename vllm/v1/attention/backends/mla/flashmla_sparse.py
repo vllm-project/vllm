@@ -16,7 +16,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -503,7 +503,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # Zero-fill for cudagraphs
         self.req_id_per_token_buffer.fill_(0)
         self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            torch.from_numpy(req_id_per_token), non_blocking=True
+            np_to_pinned_tensor(req_id_per_token), non_blocking=True
         )
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
 
