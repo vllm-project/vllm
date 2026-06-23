@@ -3,11 +3,11 @@
 
 import pytest
 import torch
-from vllm.platforms import current_platform
-from vllm.platforms.interface import DeviceCapability
 
 from vllm import _custom_ops as ops
 from vllm import envs
+from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 
 
 def _reference(query, key_cache, value_cache, block_tables, seq_lens):
