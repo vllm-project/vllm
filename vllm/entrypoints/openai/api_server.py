@@ -386,6 +386,10 @@ async def init_app_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
+    state.serving_renderer = ServingRender(
+        state.online_renderer,
+        request_logger=request_logger,
+    )
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.generate.api_router import init_generate_state
@@ -463,12 +467,16 @@ async def init_render_app_state(
     state.openai_serving_models = model_registry
     state.serving_tokenization = ServingTokenization(
         model_registry,
-        state.openai_serving_render,
+        state.online_renderer,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
+    )
+    state.serving_renderer = ServingRender(
+        state.online_renderer,
+        request_logger=request_logger,
     )
 
     state.vllm_config = vllm_config

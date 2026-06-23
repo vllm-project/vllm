@@ -12,7 +12,6 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIServingModels,
 )
 from vllm.entrypoints.serve.engine.serving import BaseServing
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.protocol import (
     DetokenizeRequest,
     DetokenizeResponse,
@@ -34,7 +33,7 @@ class ServingTokenization(BaseServing):
     def __init__(
         self,
         models: OpenAIServingModels | OpenAIModelRegistry,
-        openai_serving_render: OpenAIServingRender,
+        online_renderer: OnlineRenderer,
         *,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -44,12 +43,12 @@ class ServingTokenization(BaseServing):
     ) -> None:
         super().__init__(
             models=models,
-            model_config=openai_serving_render.model_config,
+            model_config=online_renderer.model_config,
             request_logger=request_logger,
         )
 
-        self.renderer = openai_serving_render.renderer
-        self.openai_serving_render = openai_serving_render
+        self.renderer = online_renderer.renderer
+        self.online_renderer = online_renderer
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
         self.default_chat_template_kwargs = default_chat_template_kwargs or {}

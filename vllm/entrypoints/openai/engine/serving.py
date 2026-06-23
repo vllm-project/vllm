@@ -5,7 +5,6 @@ import time
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import ClassVar, Generic, Protocol, TypeAlias, TypeVar
 from typing import ClassVar, Generic, TypeVar
 
 from fastapi import Request
@@ -14,12 +13,8 @@ from starlette.datastructures import Headers
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.beam_search.online import BeamSearchOnlineMixin
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.completion.protocol import (
-    CompletionRequest,
-)
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     GenerationError,
