@@ -345,6 +345,15 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal, Supports
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
 
+        # Qwen2AudioConfig defaults tie_word_embeddings=True at the top level,
+        # but the checkpoint ships an independent lm_head.weight (HF logs
+        # "both are present ... different values, so we will NOT tie them").
+        # On transformers v5, VllmConfig.with_hf_config propagates the top-level
+        # value onto text_config; without this override the language_model would
+        # alias lm_head to embed_tokens and skip loading the real lm_head weights
+        # from the checkpoint, producing garbage logits at generation time.
+        config.tie_word_embeddings = False
+
         with self._mark_tower_model(vllm_config, "audio"):
             self.audio_tower = Qwen2AudioEncoder(config.audio_config)
             self.multi_modal_projector = Qwen2AudioMultiModalProjector(
