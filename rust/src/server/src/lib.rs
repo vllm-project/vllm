@@ -285,7 +285,7 @@ where
 /// and the TLS integration tests so both exercise the same listener wrapping.
 async fn serve_listener(
     listener: Listener,
-    tls: Option<Arc<rustls::ServerConfig>>,
+    tls: Option<Arc<openssl::ssl::SslContext>>,
     app: Router,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> Result<()> {

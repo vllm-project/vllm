@@ -1,22 +1,22 @@
-//! TLS tests: `build_server_config` unit checks plus end-to-end handshakes over
-//! a real socket, driving the production `serve_listener` path. A trivial router
-//! stands in for the full app since TLS termination is app-agnostic. Certs are
-//! generated at test time (see `TestCerts`), so nothing is committed; the client
-//! is tokio-rustls (not reqwest) for full control over client-certificate
-//! behavior.
-
-use std::sync::Arc;
+//! TLS tests: `build_server_config` unit checks plus end-to-end OpenSSL handshakes
+//! through the production `serve_listener` path, with a trivial router since TLS
+//! terminates below the app.
 
 use axum::Router;
 use axum::routing::get;
-use rcgen::{BasicConstraints, Certificate, CertificateParams, IsCa, Issuer, KeyPair, SigningKey};
-use rustls::{ClientConfig, RootCertStore};
-use rustls_pki_types::pem::PemObject as _;
-use rustls_pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use openssl::asn1::Asn1Time;
+use openssl::bn::{BigNum, MsbOption};
+use openssl::ec::{EcGroup, EcKey};
+use openssl::hash::MessageDigest;
+use openssl::nid::Nid;
+use openssl::pkey::{PKey, Private};
+use openssl::ssl::{SslConnector, SslFiletype, SslMethod};
+use openssl::x509::extension::{BasicConstraints, KeyUsage, SubjectAlternativeName};
+use openssl::x509::{X509, X509NameBuilder};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
-use tokio_rustls::TlsConnector;
+use tokio_openssl::SslStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{HttpListenerMode, TlsConfig};
@@ -27,10 +27,8 @@ use crate::{serve_listener, tls};
 // Test infrastructure
 // ============================================================================
 
-/// A throwaway CA + server/client/untrusted cert set, generated at test time
-/// (matching vLLM's SSL-test convention of not committing key material) as PEM
-/// files in a temp dir. Hold it for the test's lifetime; dropping it deletes the
-/// files.
+/// A throwaway CA + server/client/untrusted/chain cert set as PEM files in a
+/// temp dir; dropping it deletes them.
 struct TestCerts {
     dir: TempDir,
 }
@@ -39,41 +37,43 @@ impl TestCerts {
     fn generate() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
 
-        let ca_key = KeyPair::generate().expect("ca key");
-        let mut ca_params = CertificateParams::new(Vec::new()).expect("ca params");
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        let ca = ca_params.self_signed(&ca_key).expect("self-sign ca");
-        let issuer = Issuer::from_params(&ca_params, &ca_key);
+        let (ca, ca_key) = build_ca();
+        let (server, server_key) = build_leaf("server", &["127.0.0.1", "localhost"], &ca, &ca_key);
+        let (client, client_key) = build_leaf("client", &[], &ca, &ca_key);
+        let (untrusted, untrusted_key) = build_self_signed("untrusted client");
 
-        let (server, server_key) = ca_signed(
-            vec!["127.0.0.1".to_string(), "localhost".to_string()],
-            &issuer,
+        // Leaf signed by an intermediate (itself signed by the root); the cert
+        // file holds leaf + intermediate, for the chain-serving test.
+        let (intermediate, intermediate_key) = build_intermediate(&ca, &ca_key);
+        let (chain_leaf, chain_leaf_key) = build_leaf(
+            "chain",
+            &["127.0.0.1", "localhost"],
+            &intermediate,
+            &intermediate_key,
         );
-        let (client, client_key) = ca_signed(Vec::new(), &issuer);
 
-        let untrusted_key = KeyPair::generate().expect("untrusted key");
-        let untrusted = CertificateParams::new(Vec::new())
-            .expect("untrusted params")
-            .self_signed(&untrusted_key)
-            .expect("self-sign untrusted");
-
-        let server_pem = server.pem();
-        let server_key_pem = server_key.serialize_pem();
+        let server_pem = pem(&server);
+        let server_key_pem = key_pem(&server_key);
         let files = [
-            ("ca.pem", ca.pem()),
+            ("ca.pem", pem(&ca)),
             ("server.pem", server_pem.clone()),
             ("server.key", server_key_pem.clone()),
-            ("client.pem", client.pem()),
-            ("client.key", client_key.serialize_pem()),
-            ("untrusted_client.pem", untrusted.pem()),
-            ("untrusted_client.key", untrusted_key.serialize_pem()),
+            ("client.pem", pem(&client)),
+            ("client.key", key_pem(&client_key)),
+            ("untrusted_client.pem", pem(&untrusted)),
+            ("untrusted_client.key", key_pem(&untrusted_key)),
             (
                 "server_combined.pem",
                 format!("{server_pem}{server_key_pem}"),
             ),
+            (
+                "server_chain.pem",
+                format!("{}{}", pem(&chain_leaf), pem(&intermediate)),
+            ),
+            ("server_chain.key", key_pem(&chain_leaf_key)),
         ];
-        for (name, pem) in files {
-            std::fs::write(dir.path().join(name), pem).expect("write fixture");
+        for (name, contents) in files {
+            std::fs::write(dir.path().join(name), contents).expect("write fixture");
         }
         Self { dir }
     }
@@ -84,13 +84,144 @@ impl TestCerts {
     }
 }
 
-fn ca_signed(sans: Vec<String>, issuer: &Issuer<'_, impl SigningKey>) -> (Certificate, KeyPair) {
-    let key = KeyPair::generate().expect("key");
-    let cert = CertificateParams::new(sans)
-        .expect("params")
-        .signed_by(&key, issuer)
-        .expect("sign");
-    (cert, key)
+fn gen_key() -> PKey<Private> {
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).expect("ec group");
+    let ec = EcKey::generate(&group).expect("ec key");
+    PKey::from_ec_key(ec).expect("pkey")
+}
+
+fn serial() -> openssl::asn1::Asn1Integer {
+    let mut bn = BigNum::new().expect("bignum");
+    bn.rand(159, MsbOption::MAYBE_ZERO, false).expect("rand serial");
+    bn.to_asn1_integer().expect("asn1 serial")
+}
+
+fn x509_name(cn: &str) -> openssl::x509::X509Name {
+    let mut builder = X509NameBuilder::new().expect("name builder");
+    builder.append_entry_by_text("CN", cn).expect("cn");
+    builder.build()
+}
+
+fn pem(cert: &X509) -> String {
+    String::from_utf8(cert.to_pem().expect("cert pem")).expect("utf-8 cert")
+}
+
+fn key_pem(key: &PKey<Private>) -> String {
+    String::from_utf8(key.private_key_to_pem_pkcs8().expect("key pem")).expect("utf-8 key")
+}
+
+/// A self-signed CA used to sign the server/client leaf certs.
+fn build_ca() -> (X509, PKey<Private>) {
+    let key = gen_key();
+    let name = x509_name("vLLM Test CA");
+    let mut builder = X509::builder().expect("x509 builder");
+    builder.set_version(2).expect("version");
+    builder.set_serial_number(&serial()).expect("serial");
+    builder.set_subject_name(&name).expect("subject");
+    builder.set_issuer_name(&name).expect("issuer");
+    builder.set_pubkey(&key).expect("pubkey");
+    builder
+        .set_not_before(&Asn1Time::days_from_now(0).expect("nb"))
+        .expect("set nb");
+    builder
+        .set_not_after(&Asn1Time::days_from_now(3650).expect("na"))
+        .expect("set na");
+    builder
+        .append_extension(BasicConstraints::new().critical().ca().build().expect("bc"))
+        .expect("ext bc");
+    builder
+        .append_extension(
+            KeyUsage::new().critical().key_cert_sign().crl_sign().build().expect("ku"),
+        )
+        .expect("ext ku");
+    builder.sign(&key, MessageDigest::sha256()).expect("sign ca");
+    (builder.build(), key)
+}
+
+/// A CA-signed leaf cert with optional subject-alternative names (IP or DNS).
+fn build_leaf(cn: &str, sans: &[&str], ca: &X509, ca_key: &PKey<Private>) -> (X509, PKey<Private>) {
+    let key = gen_key();
+    let mut builder = X509::builder().expect("x509 builder");
+    builder.set_version(2).expect("version");
+    builder.set_serial_number(&serial()).expect("serial");
+    builder.set_subject_name(&x509_name(cn)).expect("subject");
+    builder.set_issuer_name(ca.subject_name()).expect("issuer");
+    builder.set_pubkey(&key).expect("pubkey");
+    builder
+        .set_not_before(&Asn1Time::days_from_now(0).expect("nb"))
+        .expect("set nb");
+    builder
+        .set_not_after(&Asn1Time::days_from_now(3650).expect("na"))
+        .expect("set na");
+    builder
+        .append_extension(BasicConstraints::new().build().expect("bc"))
+        .expect("ext bc");
+    if !sans.is_empty() {
+        let mut san = SubjectAlternativeName::new();
+        for entry in sans {
+            if entry.parse::<std::net::IpAddr>().is_ok() {
+                san.ip(entry);
+            } else {
+                san.dns(entry);
+            }
+        }
+        let ext = san.build(&builder.x509v3_context(Some(ca), None)).expect("san");
+        builder.append_extension(ext).expect("ext san");
+    }
+    builder.sign(ca_key, MessageDigest::sha256()).expect("sign leaf");
+    (builder.build(), key)
+}
+
+/// A self-signed leaf not chained to the CA, for the untrusted-client test.
+fn build_self_signed(cn: &str) -> (X509, PKey<Private>) {
+    let key = gen_key();
+    let name = x509_name(cn);
+    let mut builder = X509::builder().expect("x509 builder");
+    builder.set_version(2).expect("version");
+    builder.set_serial_number(&serial()).expect("serial");
+    builder.set_subject_name(&name).expect("subject");
+    builder.set_issuer_name(&name).expect("issuer");
+    builder.set_pubkey(&key).expect("pubkey");
+    builder
+        .set_not_before(&Asn1Time::days_from_now(0).expect("nb"))
+        .expect("set nb");
+    builder
+        .set_not_after(&Asn1Time::days_from_now(3650).expect("na"))
+        .expect("set na");
+    builder
+        .append_extension(BasicConstraints::new().build().expect("bc"))
+        .expect("ext bc");
+    builder.sign(&key, MessageDigest::sha256()).expect("sign self");
+    (builder.build(), key)
+}
+
+/// A CA-capable intermediate signed by the root, for the full-chain test.
+fn build_intermediate(ca: &X509, ca_key: &PKey<Private>) -> (X509, PKey<Private>) {
+    let key = gen_key();
+    let mut builder = X509::builder().expect("x509 builder");
+    builder.set_version(2).expect("version");
+    builder.set_serial_number(&serial()).expect("serial");
+    builder
+        .set_subject_name(&x509_name("vLLM Test Intermediate CA"))
+        .expect("subject");
+    builder.set_issuer_name(ca.subject_name()).expect("issuer");
+    builder.set_pubkey(&key).expect("pubkey");
+    builder
+        .set_not_before(&Asn1Time::days_from_now(0).expect("nb"))
+        .expect("set nb");
+    builder
+        .set_not_after(&Asn1Time::days_from_now(3650).expect("na"))
+        .expect("set na");
+    builder
+        .append_extension(BasicConstraints::new().critical().ca().build().expect("bc"))
+        .expect("ext bc");
+    builder
+        .append_extension(
+            KeyUsage::new().critical().key_cert_sign().crl_sign().build().expect("ku"),
+        )
+        .expect("ext ku");
+    builder.sign(ca_key, MessageDigest::sha256()).expect("sign intermediate");
+    (builder.build(), key)
 }
 
 fn server_tls(certs: &TestCerts, cert_reqs: i32) -> TlsConfig {
@@ -99,6 +230,7 @@ fn server_tls(certs: &TestCerts, cert_reqs: i32) -> TlsConfig {
         key_file: Some(certs.path("server.key")),
         ca_certs: (cert_reqs != 0).then(|| certs.path("ca.pem")),
         cert_reqs,
+        ciphers: None,
     }
 }
 
@@ -110,6 +242,7 @@ fn build_tls(certs: &TestCerts, cert: &str, key: Option<&str>) -> TlsConfig {
         key_file: key.map(|k| certs.path(k)),
         ca_certs: None,
         cert_reqs: 0,
+        ciphers: None,
     }
 }
 
@@ -126,8 +259,9 @@ async fn spawn_server(tls_config: Option<TlsConfig>) -> (String, CancellationTok
     .expect("bind listener");
     let addr = listener.local_addr().expect("local addr");
 
-    let server_config = tls_config
-        .map(|cfg| Arc::new(tls::build_server_config(&cfg).expect("build server config")));
+    let server_config = tls_config.map(|cfg| {
+        std::sync::Arc::new(tls::build_server_config(&cfg).expect("build server config"))
+    });
     let app = Router::new().route("/health", get(|| async { "ok" }));
     let shutdown = CancellationToken::new();
     let server_shutdown = shutdown.clone();
@@ -143,41 +277,41 @@ async fn spawn_server(tls_config: Option<TlsConfig>) -> (String, CancellationTok
     (addr, shutdown)
 }
 
-/// Client config trusting the test CA, optionally presenting a client identity
-/// (`<name>.pem` + `<name>.key`) for mTLS.
-fn client_config(certs: &TestCerts, identity: Option<&str>) -> ClientConfig {
-    let mut roots = RootCertStore::empty();
-    for ca in CertificateDer::pem_file_iter(certs.path("ca.pem")).expect("read ca") {
-        roots.add(ca.expect("parse ca")).expect("add ca");
-    }
-    let builder = ClientConfig::builder().with_root_certificates(roots);
-    match identity {
-        Some(name) => {
-            let chain = CertificateDer::pem_file_iter(certs.path(&format!("{name}.pem")))
-                .expect("read client cert")
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .expect("parse client cert");
-            let key = PrivateKeyDer::from_pem_file(certs.path(&format!("{name}.key")))
-                .expect("read client key");
-            builder.with_client_auth_cert(chain, key).expect("client auth cert")
-        }
-        None => builder.with_no_client_auth(),
-    }
-}
-
+/// Issue an HTTPS GET trusting the test CA, optionally presenting a client
+/// identity (`<name>.pem` + `<name>.key`) for mTLS. Hostname verification is
+/// disabled (the IP-SAN match is not under test); chain verification stays on,
+/// so an untrusted server cert is still rejected.
 async fn https_get(
     certs: &TestCerts,
     addr: &str,
     identity: Option<&str>,
 ) -> std::io::Result<String> {
     let tcp = TcpStream::connect(addr).await?;
-    let connector = TlsConnector::from(Arc::new(client_config(certs, identity)));
-    let server_name = ServerName::try_from("127.0.0.1").expect("server name");
-    let mut tls = connector.connect(server_name, tcp).await?;
-    tls.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+
+    let mut builder = SslConnector::builder(SslMethod::tls_client()).expect("connector builder");
+    builder.set_ca_file(certs.path("ca.pem")).expect("trust ca");
+    if let Some(name) = identity {
+        builder
+            .set_certificate_chain_file(certs.path(&format!("{name}.pem")))
+            .expect("client cert");
+        builder
+            .set_private_key_file(certs.path(&format!("{name}.key")), SslFiletype::PEM)
+            .expect("client key");
+    }
+    let connector = builder.build();
+    let mut config = connector.configure().expect("configure");
+    config.set_verify_hostname(false);
+    let ssl = config.into_ssl("127.0.0.1").expect("ssl");
+
+    let stream = SslStream::new(ssl, tcp).expect("client ssl stream");
+    tokio::pin!(stream);
+    stream.as_mut().connect().await.map_err(std::io::Error::other)?;
+
+    stream
+        .write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .await?;
     let mut response = String::new();
-    tls.read_to_string(&mut response).await?;
+    stream.read_to_string(&mut response).await?;
     Ok(response)
 }
 
@@ -207,11 +341,54 @@ fn rejects_missing_cert_file() {
     assert!(tls::build_server_config(&build_tls(&certs, "does_not_exist.pem", None)).is_err());
 }
 
+#[test]
+fn accepts_valid_cipher_list() {
+    let certs = TestCerts::generate();
+    let mut cfg = build_tls(&certs, "server.pem", Some("server.key"));
+    cfg.ciphers = Some("ECDHE-ECDSA-AES256-GCM-SHA384".to_string());
+    assert!(tls::build_server_config(&cfg).is_ok());
+}
+
+#[test]
+fn rejects_invalid_cipher_list() {
+    let certs = TestCerts::generate();
+    let mut cfg = build_tls(&certs, "server.pem", Some("server.key"));
+    cfg.ciphers = Some("THIS-IS-NOT-A-CIPHER".to_string());
+    assert!(tls::build_server_config(&cfg).is_err());
+}
+
+#[test]
+fn rejects_mismatched_cert_and_key() {
+    // check_private_key must reject a key that does not match the certificate.
+    let certs = TestCerts::generate();
+    let tls = build_tls(&certs, "client.pem", Some("server.key"));
+    assert!(tls::build_server_config(&tls).is_err());
+}
+
 #[tokio::test]
 async fn https_request_succeeds_over_tls() {
     let certs = TestCerts::generate();
     let (addr, shutdown) = spawn_server(Some(server_tls(&certs, 0))).await;
     let response = https_get(&certs, &addr, None).await.expect("https request");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn serves_full_certificate_chain() {
+    // Cert file holds leaf + intermediate; a client trusting only the root can
+    // verify only if the server sends the intermediate, guarding against a
+    // leaf-only load.
+    let certs = TestCerts::generate();
+    let tls = TlsConfig {
+        cert_file: Some(certs.path("server_chain.pem")),
+        key_file: Some(certs.path("server_chain.key")),
+        ca_certs: None,
+        cert_reqs: 0,
+        ciphers: None,
+    };
+    let (addr, shutdown) = spawn_server(Some(tls)).await;
+    let response = https_get(&certs, &addr, None).await.expect("chained https request");
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
     shutdown.cancel();
 }

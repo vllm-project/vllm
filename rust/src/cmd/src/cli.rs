@@ -279,6 +279,12 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub ssl_cert_reqs: i32,
 
+    /// OpenSSL cipher string for HTTPS (TLS 1.2 and below).
+    /// When unset, the linked OpenSSL's default suites are used.
+    #[arg(long)]
+    #[serde(default)]
+    pub ssl_ciphers: Option<String>,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -431,12 +437,14 @@ impl SharedRuntimeArgs {
         let tls_requested = self.ssl_certfile.is_some()
             || self.ssl_keyfile.is_some()
             || self.ssl_ca_certs.is_some()
-            || self.ssl_cert_reqs != 0;
+            || self.ssl_cert_reqs != 0
+            || self.ssl_ciphers.is_some();
         tls_requested.then(|| TlsConfig {
             cert_file: self.ssl_certfile.clone(),
             key_file: self.ssl_keyfile.clone(),
             ca_certs: self.ssl_ca_certs.clone(),
             cert_reqs: self.ssl_cert_reqs,
+            ciphers: self.ssl_ciphers.clone(),
         })
     }
 }

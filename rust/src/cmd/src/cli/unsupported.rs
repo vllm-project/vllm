@@ -535,11 +535,6 @@ pub struct ServerUnsupportedArgs {
     )]
     pub enable_ssl_refresh: Option<Unsupported>,
 
-    /// SSL cipher suites for HTTPS (TLS 1.2 and below only).
-    /// Example: 'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305'
-    #[arg(long)]
-    pub ssl_ciphers: Option<Unsupported>,
-
     /// FastAPI root_path when app is behind a path based routing proxy.
     #[arg(long)]
     pub root_path: Option<Unsupported>,

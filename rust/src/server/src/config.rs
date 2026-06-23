@@ -114,16 +114,20 @@ pub struct TlsConfig {
     /// Client-certificate requirement, mirroring Python's `ssl.CERT_*`:
     /// 0 = none, 1 = optional, 2 = required.
     pub cert_reqs: i32,
+    /// OpenSSL cipher string for TLS 1.2 and below, mirroring Python's
+    /// `ssl.set_ciphers`. `None` defers to the linked OpenSSL's default suites.
+    pub ciphers: Option<String>,
 }
 
 impl TlsConfig {
     /// Structurally validate the TLS arguments; the cert/key material is parsed
-    /// later, when the rustls server config is built.
+    /// later, when the OpenSSL context is built.
     pub fn validate(&self) -> Result<()> {
         if self.cert_file.is_none() {
             bail!(
                 "--ssl-certfile is required to enable TLS; \
-                 --ssl-keyfile/--ssl-ca-certs/--ssl-cert-reqs cannot be used without it"
+                 --ssl-keyfile/--ssl-ca-certs/--ssl-cert-reqs/--ssl-ciphers \
+                 cannot be used without it"
             );
         }
         if !matches!(self.cert_reqs, 0..=2) {

@@ -69,6 +69,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         ssl_certfile: None,
                         ssl_ca_certs: None,
                         ssl_cert_reqs: 0,
+                        ssl_ciphers: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "../vllm/.venv/bin/python",
@@ -619,13 +620,13 @@ fn serve_args_reject_unsupported_flag_arg() {
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
-        "--ssl-ciphers",
-        "HIGH",
+        "--root-path",
+        "/prefix",
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'HIGH' for '--ssl-ciphers <SSL_CIPHERS>': argument is not implemented in Rust frontend yet
+        error: invalid value '/prefix' for '--root-path <ROOT_PATH>': argument is not implemented in Rust frontend yet
 
         Remove this unsupported argument to continue.
 
@@ -728,6 +729,7 @@ fn frontend_args_accept_json() {
                         ssl_certfile: None,
                         ssl_ca_certs: None,
                         ssl_cert_reqs: 0,
+                        ssl_ciphers: None,
                     },
                 },
             ),
@@ -940,14 +942,14 @@ fn frontend_args_json_rejects_unsupported_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","ssl_ciphers":"HIGH"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}"#,
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","ssl_ciphers":"HIGH"}' for '--args-json <JSON>': 
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","root_path":"/prefix"}' for '--args-json <JSON>': 
         The following arguments are not implemented in Rust frontend yet:
-        - ssl_ciphers
+        - root_path
 
         Remove these arguments to continue.
 
@@ -967,16 +969,16 @@ fn frontend_args_json_aggregates_multiple_unsupported_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","ssl_ciphers":"HIGH"}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","root_path":"/prefix"}"#,
     ])
     .unwrap_err();
 
     let actual = error.to_string().replace(": \n", ":\n");
     expect![[r#"
-        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","ssl_ciphers":"HIGH"}' for '--args-json <JSON>':
+        error: invalid value '{"model_tag":"Qwen/Qwen3-0.6B","response_role":"assistant","root_path":"/prefix"}' for '--args-json <JSON>':
         The following arguments are not implemented in Rust frontend yet:
         - response_role
-        - ssl_ciphers
+        - root_path
 
         Remove these arguments to continue.
 
@@ -1247,6 +1249,7 @@ fn serve_args_accept_handshake_aliases() {
                         ssl_certfile: None,
                         ssl_ca_certs: None,
                         ssl_cert_reqs: 0,
+                        ssl_ciphers: None,
                     },
                     managed_engine: ManagedEngineArgs {
                         python: "python3",
