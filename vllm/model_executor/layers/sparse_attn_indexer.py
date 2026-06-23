@@ -123,36 +123,6 @@ def _stable_topk_from_candidates(
     return _stable_topk_from_candidates_fp64(candidate_scores, candidate_token_ids, k)
 
 
-def _dcp_interleave_source_index(
-    global_cu_seq_lens: torch.Tensor,
-    local_cu_seq_lens_per_rank: torch.Tensor,
-    max_local_total: int,
-    dcp_size: int,
-    global_total: int,
-    cp_kv_cache_interleave_size: int = 1,
-) -> torch.Tensor:
-    assert cp_kv_cache_interleave_size == 1, (
-        "DCP prefill K-gather currently supports only cp_kv_cache_interleave_size=1."
-    )
-    device = global_cu_seq_lens.device
-    if global_total == 0:
-        return torch.empty(0, dtype=torch.long, device=device)
-
-    counts = (global_cu_seq_lens[1:] - global_cu_seq_lens[:-1]).to(torch.int64)
-    num_reqs = counts.numel()
-    req_ids = torch.repeat_interleave(
-        torch.arange(num_reqs, device=device, dtype=torch.int64), counts
-    )
-    pos_in_chunk = torch.arange(global_total, device=device, dtype=torch.int64)
-    req_starts = global_cu_seq_lens[:-1].to(torch.int64)
-    t_in_req = pos_in_chunk - req_starts[req_ids]
-
-    rank_per_pos = t_in_req % dcp_size
-    lpos_per_pos = t_in_req // dcp_size
-    local_starts = local_cu_seq_lens_per_rank.to(torch.int64)[rank_per_pos, req_ids]
-    return rank_per_pos * max_local_total + local_starts + lpos_per_pos
-
-
 def _local_dcp_indices_to_global(
     local_indices: torch.Tensor,
     dcp_rank: int,
@@ -374,73 +344,30 @@ def sparse_attn_indexer(
         prefill_dcp_world = prefill_dcp_group.world_size if prefill_dcp_group else 1
 
         for chunk in prefill_metadata.chunks:
-            k_quant = k_quant_full[: chunk.total_seq_lens]
-            k_scale = k_scale_full[: chunk.total_seq_lens]
-
-            if not chunk.skip_kv_gather:
-                if prefill_dcp_world > 1:
-                    assert prefill_dcp_group is not None
-                    assert chunk.local_cu_seq_lens is not None
-                    max_local = chunk.max_local_total_seq_lens
-                    local_k_quant = torch.empty(
-                        (max_local, k_quant.shape[1]),
-                        dtype=k_quant.dtype,
-                        device=k_quant.device,
-                    )
-                    local_k_scale = torch.empty(
-                        (max_local, k_scale.shape[1]),
-                        dtype=k_scale.dtype,
-                        device=k_scale.device,
-                    )
+            use_dcp_prefill_candidates = prefill_dcp_world > 1
+            if use_dcp_prefill_candidates:
+                assert chunk.local_cu_seq_lens is not None
+                assert chunk.local_cu_seqlen_ks is not None
+                assert chunk.local_cu_seqlen_ke is not None
+                max_local = chunk.max_local_total_seq_lens
+                k_quant = k_quant_full[:max_local]
+                k_scale = k_scale_full[:max_local]
+                cu_seqlen_ks = chunk.local_cu_seqlen_ks
+                cu_seqlen_ke = chunk.local_cu_seqlen_ke
+                if not chunk.skip_kv_gather:
                     ops.cp_gather_indexer_k_quant_cache(
                         kv_cache,
-                        local_k_quant,
-                        local_k_scale,
+                        k_quant,
+                        k_scale,
                         chunk.block_table,
                         chunk.local_cu_seq_lens,
                     )
-                    gathered_k_quant = prefill_dcp_group.all_gather(
-                        local_k_quant, dim=0
-                    )
-                    gathered_k_scale = prefill_dcp_group.all_gather(
-                        local_k_scale, dim=0
-                    )
-                    counts = chunk.cu_seq_lens[1:] - chunk.cu_seq_lens[:-1]
-                    ranks = torch.arange(
-                        prefill_dcp_world,
-                        device=k_quant.device,
-                        dtype=torch.int32,
-                    ).unsqueeze(1)
-                    local_counts_all = torch.clamp(
-                        (
-                            counts.to(torch.int32).unsqueeze(0)
-                            + (prefill_dcp_world - 1 - ranks)
-                        )
-                        // prefill_dcp_world,
-                        min=0,
-                    )
-                    local_cu_seq_lens_all = torch.zeros(
-                        prefill_dcp_world,
-                        chunk.num_reqs + 1,
-                        dtype=torch.int32,
-                        device=k_quant.device,
-                    )
-                    torch.cumsum(
-                        local_counts_all,
-                        dim=1,
-                        out=local_cu_seq_lens_all[:, 1:],
-                    )
-                    src_idx = _dcp_interleave_source_index(
-                        chunk.cu_seq_lens,
-                        local_cu_seq_lens_all,
-                        max_local,
-                        prefill_dcp_world,
-                        chunk.total_seq_lens,
-                        chunk.cp_kv_cache_interleave_size,
-                    )
-                    k_quant.copy_(gathered_k_quant.view(-1, k_quant.shape[1])[src_idx])
-                    k_scale.copy_(gathered_k_scale.view(-1, k_scale.shape[1])[src_idx])
-                else:
+            else:
+                k_quant = k_quant_full[: chunk.total_seq_lens]
+                k_scale = k_scale_full[: chunk.total_seq_lens]
+                cu_seqlen_ks = chunk.cu_seqlen_ks
+                cu_seqlen_ke = chunk.cu_seqlen_ke
+                if not chunk.skip_kv_gather:
                     ops.cp_gather_indexer_k_quant_cache(
                         kv_cache,
                         k_quant,
@@ -473,16 +400,16 @@ def sparse_attn_indexer(
                     k_quant_cast,
                     k_scale_cast,
                     weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
                 )
             else:
                 logits = fp8_fp4_mqa_logits(
                     (q_slice_cast, q_scale_slice),
                     (k_quant_cast, k_scale_cast),
                     weights[chunk.token_start : chunk.token_end],
-                    chunk.cu_seqlen_ks,
-                    chunk.cu_seqlen_ke,
+                    cu_seqlen_ks,
+                    cu_seqlen_ke,
                     clean_logits=False,
                 )
             num_rows = logits.shape[0]
@@ -493,14 +420,26 @@ def sparse_attn_indexer(
 
             ops.top_k_per_row_prefill(
                 logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
+                cu_seqlen_ks,
+                cu_seqlen_ke,
                 topk_indices,
                 num_rows,
                 logits.stride(0),
                 logits.stride(1),
                 topk_tokens,
             )
+            if use_dcp_prefill_candidates:
+                topk_indices.copy_(
+                    _merge_dcp_topk_global(
+                        logits,
+                        topk_indices,
+                        topk_tokens,
+                        chunk.dcp_rank,
+                        chunk.dcp_world_size,
+                        chunk.cp_kv_cache_interleave_size,
+                        row_starts=cu_seqlen_ks,
+                    )
+                )
 
     if has_decode:
         decode_metadata = attn_metadata_narrowed.decode

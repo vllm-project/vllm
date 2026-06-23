@@ -675,6 +675,16 @@ def test_sparse_prefill_dcp_metadata_uses_global_causal_bounds():
         chunk.cu_seqlen_ke.cpu(),
         torch.arange(1, seq_len + 1, dtype=torch.int32),
     )
+    assert chunk.local_cu_seqlen_ks is not None
+    assert chunk.local_cu_seqlen_ke is not None
+    torch.testing.assert_close(
+        chunk.local_cu_seqlen_ks.cpu(),
+        torch.zeros(seq_len, dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        chunk.local_cu_seqlen_ke.cpu(),
+        torch.tensor([1, 1, 1, 1, 2, 2, 2, 2], dtype=torch.int32),
+    )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")

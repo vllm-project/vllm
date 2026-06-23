@@ -172,6 +172,8 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     block_table: torch.Tensor
     cu_seqlen_ks: torch.Tensor
     cu_seqlen_ke: torch.Tensor
+    local_cu_seqlen_ks: torch.Tensor | None
+    local_cu_seqlen_ke: torch.Tensor | None
     cu_seq_lens: torch.Tensor
     token_to_seq: torch.Tensor
     total_seq_lens: int
@@ -809,14 +811,27 @@ def build_prefill_chunk_metadata(
 
     cu_seq_len_ks = torch.empty(output_query_len, dtype=torch.int32, device=device)
     cu_seq_len_ke = torch.empty(output_query_len, dtype=torch.int32, device=device)
+    local_cu_seq_len_ks = (
+        torch.empty(output_query_len, dtype=torch.int32, device=device)
+        if dcp_world_size > 1
+        else None
+    )
+    local_cu_seq_len_ke = (
+        torch.empty(output_query_len, dtype=torch.int32, device=device)
+        if dcp_world_size > 1
+        else None
+    )
 
     _build_prefill_chunk_metadata_kernel[(num_reqs,)](
         query_start_loc,
         uncompressed_seq_lens[start_idx:end_idx],
         cu_seq_lens,
+        local_cu_seq_lens if local_cu_seq_lens is not None else cu_seq_lens,
         token_to_seq,
         cu_seq_len_ks,
         cu_seq_len_ke,
+        local_cu_seq_len_ks if local_cu_seq_len_ks is not None else cu_seq_len_ks,
+        local_cu_seq_len_ke if local_cu_seq_len_ke is not None else cu_seq_len_ke,
         qs_start,
         qs_stop,
         dcp_rank,
@@ -837,6 +852,8 @@ def build_prefill_chunk_metadata(
     return DeepseekV32IndexerPrefillChunkMetadata(
         cu_seqlen_ks=cu_seq_len_ks,
         cu_seqlen_ke=cu_seq_len_ke,
+        local_cu_seqlen_ks=local_cu_seq_len_ks,
+        local_cu_seqlen_ke=local_cu_seq_len_ke,
         cu_seq_lens=cu_seq_lens,
         token_to_seq=token_to_seq,
         total_seq_lens=total_seq_lens,
@@ -860,10 +877,13 @@ def _build_prefill_chunk_metadata_kernel(
     query_start_loc_ptr,
     uncompressed_seq_lens_ptr,
     cu_compressed_seq_lens_ptr,
+    local_cu_compressed_seq_lens_ptr,
     # Outputs
     token_to_seq_ptr,
     cu_compressed_seq_len_ks_ptr,
     cu_compressed_seq_len_ke_ptr,
+    local_cu_compressed_seq_len_ks_ptr,
+    local_cu_compressed_seq_len_ke_ptr,
     query_slice_start,
     query_slice_stop,
     DCP_RANK,
@@ -908,6 +928,21 @@ def _build_prefill_chunk_metadata_kernel(
             seq_start + seq_len_per_token,
             mask=mask,
         )
+        if DCP_WORLD > 1:
+            local_seq_start = tl.load(local_cu_compressed_seq_lens_ptr + batch_idx)
+            local_len_per_token = (
+                seq_len_per_token + (DCP_WORLD - 1 - DCP_RANK)
+            ) // DCP_WORLD
+            tl.store(
+                local_cu_compressed_seq_len_ks_ptr + out_pos,
+                local_seq_start,
+                mask=mask,
+            )
+            tl.store(
+                local_cu_compressed_seq_len_ke_ptr + out_pos,
+                local_seq_start + local_len_per_token,
+                mask=mask,
+            )
 
     # Compute token_to_seq
     for i in range(0, compressed_seq_len, BLOCK_SIZE):
