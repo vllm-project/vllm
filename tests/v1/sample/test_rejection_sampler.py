@@ -571,8 +571,6 @@ def native_sample_recovered_tokens(
         # state because RNG state advances after each call.
         generator.set_state(states[i])
 
-    inv_q = q.reciprocal()
-
     out = torch.empty_like(draft_token_ids)
 
     for req_idx in range(batch_size):
@@ -595,7 +593,7 @@ def native_sample_recovered_tokens(
                     0.0
                 )
 
-            score = prob * inv_q[req_idx]
+            score = prob / q[req_idx]
             recovered_id = torch.argmax(score, dim=-1)
             out[token_idx] = recovered_id
     return out
@@ -1089,6 +1087,321 @@ def test_sample_recovered_tokens_vocab_boundary(vocab_size: int, no_draft_probs:
         f"Recovered token IDs >= vocab_size ({vocab_size}): "
         f"{recovered[recovered >= vocab_size].tolist()}"
     )
+
+
+def _run_forced_recovery(
+    target_probs: torch.Tensor,
+    draft_probs: torch.Tensor,
+    draft_token_ids: list[list[int]],
+    generators: dict[int, torch.Generator] | None = None,
+    use_fp64_gumbel: bool = False,
+) -> torch.Tensor:
+    batch_size = len(draft_token_ids)
+    sampler = _make_synthetic_sampler([0.0])
+    sampler.use_fp64_gumbel = use_fp64_gumbel
+    target_logits = target_probs.log()
+    bonus_token_ids = torch.zeros(batch_size, dtype=torch.int64, device=DEVICE_TYPE)
+    temperature = torch.ones(batch_size, dtype=torch.float32, device=DEVICE_TYPE)
+    metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=temperature,
+        generators=generators,
+    )
+    spec_decode_metadata = create_spec_decode_metadata(draft_token_ids, target_logits)
+
+    mock_sampler_output(sampler, bonus_token_ids)
+    output = sampler(
+        spec_decode_metadata,
+        draft_probs=draft_probs,
+        logits=target_logits,
+        sampling_metadata=metadata,
+    )
+    return output.sampled_token_ids
+
+
+@pytest.mark.parametrize("use_fp64_gumbel", [False, True])
+def test_lazy_recovery_distribution_matches_residual_distribution(
+    use_fp64_gumbel: bool,
+):
+    torch.manual_seed(0)
+    vocab_size = 6
+    target_base = torch.tensor(
+        [0.05, 0.20, 0.05, 0.25, 0.10, 0.35],
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    draft_base = torch.tensor(
+        [0.20, 0.05, 0.10, 0.05, 0.25, 0.35],
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    residual_ref = (target_base - draft_base).clamp_min(0.0)
+    residual_ref = residual_ref / residual_ref.sum()
+
+    tv_distances: list[float] = []
+    for num_samples in (1_000, 10_000, 100_000):
+        target_probs = target_base.repeat(num_samples, 1)
+        draft_probs = draft_base.repeat(num_samples, 1)
+        draft_token_ids = [[0] for _ in range(num_samples)]
+
+        recovered = _run_forced_recovery(
+            target_probs,
+            draft_probs,
+            draft_token_ids,
+            use_fp64_gumbel=use_fp64_gumbel,
+        )[:, 0]
+        hist = torch.bincount(recovered, minlength=vocab_size).to(torch.float32)
+        empirical = hist / hist.sum()
+        tv = 0.5 * torch.sum(torch.abs(empirical - residual_ref)).item()
+        tv_distances.append(tv)
+
+    assert tv_distances[-1] < 0.015
+    assert tv_distances[0] > tv_distances[-1]
+
+
+def test_lazy_recovery_distribution_matches_residual_distribution_multitile():
+    torch.manual_seed(0)
+    vocab_size = 128256
+    num_samples = 1024
+    residual_ids = torch.tensor(
+        [3, 8197, 32771, 65537, 81919, 98317, 120001, 128255],
+        dtype=torch.int64,
+        device=DEVICE_TYPE,
+    )
+    residual_probs = torch.tensor(
+        [0.05, 0.08, 0.11, 0.14, 0.17, 0.13, 0.20, 0.12],
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    residual_probs = residual_probs / residual_probs.sum()
+
+    target_base = torch.zeros(vocab_size, dtype=torch.float32, device=DEVICE_TYPE)
+    target_base[residual_ids] = residual_probs
+    target_probs = target_base.repeat(num_samples, 1)
+    draft_probs = torch.zeros_like(target_probs)
+    draft_token_ids = [[0] for _ in range(num_samples)]
+
+    recovered = _run_forced_recovery(
+        target_probs,
+        draft_probs,
+        draft_token_ids,
+    )[:, 0]
+    assert torch.isin(recovered, residual_ids).all()
+
+    residual_id_to_bin = {
+        int(token_id.item()): idx for idx, token_id in enumerate(residual_ids)
+    }
+    recovered_bins = torch.tensor(
+        [residual_id_to_bin[int(token_id.item())] for token_id in recovered],
+        dtype=torch.int64,
+        device=DEVICE_TYPE,
+    )
+    hist = torch.bincount(recovered_bins, minlength=len(residual_ids)).to(torch.float32)
+    empirical = hist / hist.sum()
+    tv = 0.5 * torch.sum(torch.abs(empirical - residual_probs)).item()
+
+    assert tv < 0.08
+
+
+@pytest.mark.parametrize("no_draft_probs", [True, False])
+def test_lazy_recovery_distribution_matches_eager_helper(no_draft_probs: bool):
+    """Compare lazy recovery directly against the eager recovery helper.
+
+    The production lazy path and eager helper use different RNG streams, so this
+    is intentionally a distributional two-sample check rather than a bitwise
+    comparison.  Synthetic rejection forces the lazy path to recover on every
+    sample, and fixed seeds make the test reproducible.
+    """
+    vocab_size = 6
+    num_samples = 100_000
+    target_base = torch.tensor(
+        [0.05, 0.20, 0.05, 0.25, 0.10, 0.35],
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    draft_base = torch.tensor(
+        [0.20, 0.05, 0.10, 0.05, 0.25, 0.35],
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    target_probs = target_base.repeat(num_samples, 1)
+    draft_probs = None if no_draft_probs else draft_base.repeat(num_samples, 1)
+    draft_token_ids = torch.zeros(num_samples, dtype=torch.int32, device=DEVICE_TYPE)
+    num_draft_tokens = [1] * num_samples
+    cu_num_draft_tokens = torch.arange(
+        1, num_samples + 1, dtype=torch.int32, device=DEVICE_TYPE
+    )
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.ones(num_samples, dtype=torch.float32, device=DEVICE_TYPE),
+    )
+
+    torch.manual_seed(123)
+    eager = sample_recovered_tokens(
+        1,
+        num_draft_tokens,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        sampling_metadata,
+        device=DEVICE_TYPE,
+    )
+
+    torch.manual_seed(456)
+    lazy = _run_forced_recovery(
+        target_probs,
+        draft_probs,
+        [[0] for _ in range(num_samples)],
+    )[:, 0]
+
+    eager_hist = torch.bincount(eager, minlength=vocab_size).to(torch.float32)
+    lazy_hist = torch.bincount(lazy, minlength=vocab_size).to(torch.float32)
+    eager_empirical = eager_hist / eager_hist.sum()
+    lazy_empirical = lazy_hist / lazy_hist.sum()
+    tv = 0.5 * torch.sum(torch.abs(eager_empirical - lazy_empirical)).item()
+
+    assert tv < 0.02
+
+
+def test_lazy_recovery_zero_residual_mass_falls_back_to_target_argmax():
+    target_base = torch.tensor(
+        [0.05, 0.60, 0.25, 0.10],
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    target_probs = target_base.reshape(1, -1)
+    draft_probs = target_probs.clone()
+
+    recovered = _run_forced_recovery(
+        target_probs,
+        draft_probs,
+        [[1]],
+    )
+
+    assert recovered[0, 0].item() == 1
+
+
+def test_lazy_recovery_supports_fp64_gumbel():
+    target_base = torch.tensor(
+        [0.05, 0.20, 0.05, 0.25, 0.10, 0.35],
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    draft_base = torch.tensor(
+        [0.20, 0.05, 0.10, 0.05, 0.25, 0.35],
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+
+    recovered = _run_forced_recovery(
+        target_base.reshape(1, -1),
+        draft_base.reshape(1, -1),
+        [[0]],
+        {0: torch.Generator(device=DEVICE_TYPE).manual_seed(123)},
+        use_fp64_gumbel=True,
+    )
+
+    residual_support = (target_base - draft_base).clamp_min(0.0).nonzero().flatten()
+    assert torch.isin(recovered[0, 0], residual_support)
+
+
+def test_lazy_recovery_reject_at_last_position():
+    vocab_size = 16
+    max_spec_len = 3
+    sampler = _make_synthetic_sampler([1.0, 1.0, 0.0])
+    target_probs = torch.full(
+        (max_spec_len, vocab_size),
+        1e-3,
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    target_probs[:, 7] = 1.0
+    target_probs = target_probs / target_probs.sum(dim=-1, keepdim=True)
+    draft_probs = torch.zeros_like(target_probs)
+    target_logits = target_probs.log()
+    draft_token_ids = [[1, 2, 3]]
+    bonus_token_ids = torch.tensor([5], dtype=torch.int64, device=DEVICE_TYPE)
+    metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.ones(1, dtype=torch.float32, device=DEVICE_TYPE),
+    )
+    spec_decode_metadata = create_spec_decode_metadata(draft_token_ids, target_logits)
+
+    mock_sampler_output(sampler, bonus_token_ids)
+    output = sampler(
+        spec_decode_metadata,
+        draft_probs=draft_probs,
+        logits=target_logits,
+        sampling_metadata=metadata,
+    )
+
+    assert output.sampled_token_ids[0, 0].item() == 1
+    assert output.sampled_token_ids[0, 1].item() == 2
+    assert output.sampled_token_ids[0, 2].item() != PLACEHOLDER_TOKEN_ID
+    assert output.sampled_token_ids[0, 3].item() == PLACEHOLDER_TOKEN_ID
+
+
+def test_mixed_greedy_and_random_batch():
+    sampler = _make_synthetic_sampler([1.0, 0.0])
+    spec_tokens = [[1, 2], [3, 4]]
+    output_tokens = [[1, 9, 11], [7, 8, 12]]
+    logits = create_logits_tensor(output_tokens)
+    bonus_token_ids = torch.tensor([11, 12], dtype=torch.int64, device=DEVICE_TYPE)
+    metadata = create_sampling_metadata(
+        all_greedy=False,
+        temperature=torch.tensor([0.0, 1.0], dtype=torch.float32, device=DEVICE_TYPE),
+    )
+    metadata.all_random = False
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+
+    mock_sampler_output(sampler, bonus_token_ids)
+    output = sampler(
+        spec_decode_metadata,
+        draft_probs=None,
+        logits=logits,
+        sampling_metadata=metadata,
+    )
+
+    assert output.sampled_token_ids[0].tolist() == [
+        1,
+        9,
+        PLACEHOLDER_TOKEN_ID,
+    ]
+    assert output.sampled_token_ids[1, 0].item() == 3
+    assert output.sampled_token_ids[1, 1].item() != PLACEHOLDER_TOKEN_ID
+    assert output.sampled_token_ids[1, 2].item() == PLACEHOLDER_TOKEN_ID
+
+
+def test_seeded_lazy_recovery_isolated_from_other_requests():
+    target_base = torch.tensor(
+        [0.05, 0.20, 0.05, 0.25, 0.10, 0.35],
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+    draft_base = torch.tensor(
+        [0.20, 0.05, 0.10, 0.05, 0.25, 0.35],
+        dtype=torch.float32,
+        device=DEVICE_TYPE,
+    )
+
+    generator_single = {0: torch.Generator(device=DEVICE_TYPE).manual_seed(123)}
+    single = _run_forced_recovery(
+        target_base.reshape(1, -1),
+        draft_base.reshape(1, -1),
+        [[0]],
+        generator_single,
+    )
+
+    generator_mixed = {0: torch.Generator(device=DEVICE_TYPE).manual_seed(123)}
+    mixed = _run_forced_recovery(
+        target_base.repeat(2, 1),
+        draft_base.repeat(2, 1),
+        [[0], [0]],
+        generator_mixed,
+    )
+
+    assert mixed[0, 0].item() == single[0, 0].item()
 
 
 ########################### Tests for Synthetic Rejection Sampling #########
