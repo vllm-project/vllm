@@ -5,6 +5,7 @@ from typing import ClassVar, cast
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.platforms import current_platform
@@ -423,10 +424,18 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 TRITON_BLOCK_SIZE=1024,
             )
 
-        # Prefill SWA indices live in paged coordinates. `token_offset` lets
-        # the kernel read is_valid_token / token_to_req_indices at absolute
-        # prefill positions while writing output starting at index 0.
-        if num_prefill_tokens > 0:
+        # Prefill SWA indices (paged coords; `token_offset` lets the kernel read at
+        # absolute prefill positions while writing from index 0) are consumed ONLY by
+        # the FlashInfer SM120 sparse-MLA fork path. The stock FlashMLA/Triton prefill
+        # self-computes and never reads them, so gate the launch behind
+        # VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL (default off). Running it
+        # unconditionally faulted `_compute_swa_indices_and_lens_kernel` over 32k
+        # prefill rows (unclamped block_table address arithmetic on masked-off lanes
+        # -> cudaErrorLaunchFailure under concurrent load).
+        want_prefill_swa = (
+            num_prefill_tokens > 0 and envs.VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL
+        )
+        if want_prefill_swa:
             prefill_swa_indices = self.prefill_swa_indices[:num_prefill_tokens]
             prefill_swa_lens = self.prefill_swa_lens[:num_prefill_tokens]
             _compute_swa_indices_and_lens_kernel[(num_prefill_tokens,)](
@@ -473,12 +482,12 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             decode_swa_lens=self.decode_swa_lens[:num_decode_tokens],
             prefill_swa_indices=(
                 self.prefill_swa_indices[:num_prefill_tokens]
-                if num_prefill_tokens > 0
+                if want_prefill_swa
                 else None
             ),
             prefill_swa_lens=(
                 self.prefill_swa_lens[:num_prefill_tokens]
-                if num_prefill_tokens > 0
+                if want_prefill_swa
                 else None
             ),
             block_size=self.block_size,
@@ -664,8 +673,14 @@ def _compute_swa_indices_and_lens_kernel(
 
         pos_offset = start_pos + offset
         block_indices = pos_offset // block_size
+        # Clamp masked-off lanes before the address add: SM12x + Triton 3.6 raises
+        # IMA on out-of-bounds address arithmetic even when the load mask gates the
+        # read (same hazard the sibling _compute_prefill_metadata_kernel clamps via
+        # safe_offset). Over a deep prefill row the tail lanes index past the
+        # request's block_table row -> cudaErrorLaunchFailure without this.
+        safe_block_indices = tl.where(pos_offset < end_pos, block_indices, 0)
         block_numbers = tl.load(
-            block_table_ptr + req_idx * block_table_stride + block_indices,
+            block_table_ptr + req_idx * block_table_stride + safe_block_indices,
             mask=pos_offset < end_pos,
         )
         block_offsets = pos_offset % block_size

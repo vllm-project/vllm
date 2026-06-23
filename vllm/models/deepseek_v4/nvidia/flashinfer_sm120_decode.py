@@ -367,6 +367,7 @@ class DeepseekV4FlashInferSM120DecodeAttention(DeepseekV4FlashMLAAttention):
                 swa_metadata.block_table,
                 swa_metadata.block_table.stride(0),
                 swa_metadata.block_size,
+                token_offset=0,
                 TRITON_BLOCK_SIZE=1024,
             )
             swa_indices = swa_idx_full[num_decode_tokens:num_tokens]
