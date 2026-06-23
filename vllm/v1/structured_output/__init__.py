@@ -313,9 +313,9 @@ class StructuredOutputManager:
                                 (token, req_id, scheduled_spec_decode_tokens)
                             )
                     cumulative_index += 1
+                # Diffusion LLMs don't sample a bonus token after the
+                # scheduled positions, so skip its bitmask in that case.
                 if not (self.vllm_config.model_config.is_diffusion and req_tokens):
-                    # Diffusion LLMs don't sample a bonus token after the
-                    # scheduled positions, so skip its bitmask in that case.
                     bonus_apply = self.should_fill_bitmask(request) or apply_bitmask
                     self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
                     cumulative_index += 1
