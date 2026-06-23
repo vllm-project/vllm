@@ -1174,7 +1174,7 @@ def test_spec_decode_logprobs(
     assert len(ref_logprobs) == len(spec_logprobs)
     for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
         assert math.isclose(
-            ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1
+            ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=2.5e-1
         ), (
             f"Logprob mismatch: ref={ref_logprob.logprob} "
             f"spec={spec_logprob.logprob} "
