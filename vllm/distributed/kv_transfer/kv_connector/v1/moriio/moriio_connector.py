@@ -234,7 +234,13 @@ class MoRIIOConnector(KVConnectorBase_V1):
         return None
 
     def wait_for_save(self):
-        pass
+        if self.mode != MoRIIOMode.WRITE or get_role() != ROLE.PRODUCER:
+            return
+        assert self.connector_worker is not None
+        assert isinstance(self._connector_metadata, MoRIIOConnectorMetadata), (
+            "Connector metadata not initialized yet"
+        )
+        self.connector_worker.wait_for_save(self._connector_metadata)
 
     def shutdown(self):
         if self.connector_worker is not None:
@@ -390,6 +396,49 @@ class MoRIIOConnectorScheduler:
         serialized_data = msgpack.dumps(data)
         self.paths[path].send(serialized_data)
 
+    def _send_transfer_release(self, transfer_id: TransferId, host: str, port: int):
+        path = make_zmq_path("tcp", host, port)
+        if path not in self.paths:
+            ctx = zmq.Context.instance()
+            sock = make_zmq_socket(
+                ctx=ctx, path=path, socket_type=zmq.DEALER, bind=False
+            )
+            self.paths[path] = sock
+
+        self.paths[path].send(
+            msgpack.dumps({"type": "release", "transfer_id": transfer_id})
+        )
+
+    def _release_write_prefill_blocks(self, request_id: ReqId, params: dict[str, Any]):
+        transfer_id = params.get("transfer_id")
+        if transfer_id is None:
+            logger.warning(
+                "Cannot release WRITE prefill blocks for request %s: "
+                "missing transfer_id",
+                request_id,
+            )
+            return
+
+        remote_dp_rank = params.get("remote_dp_rank", 0)
+        remote_host = params.get("remote_host")
+        remote_notify_port = params.get("remote_notify_port")
+        if remote_host is None or remote_notify_port is None:
+            try:
+                peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=False)
+                remote_host, _, remote_notify_port = parse_moriio_zmq_address(peer_zmq)
+            except ValueError:
+                logger.warning(
+                    "Cannot release WRITE prefill blocks for request %s: "
+                    "missing remote notify address",
+                    request_id,
+                )
+                return
+
+        remote_notify_port = int(remote_notify_port)
+        for tp_index in range(self.tp_size):
+            target_port = remote_notify_port + get_port_offset(remote_dp_rank, tp_index)
+            self._send_transfer_release(transfer_id, remote_host, target_port)
+
     def update_state_after_alloc(
         self,
         request: "Request",
@@ -443,11 +492,20 @@ class MoRIIOConnectorScheduler:
                 )
 
                 remote_dp_rank = request.kv_transfer_params.get("remote_dp_rank", 0)
-
-                peer_zmq = get_peer_zmq_from_request_id(
-                    request.request_id, is_producer=False
+                remote_host = request.kv_transfer_params.get("remote_host")
+                remote_notify_port = request.kv_transfer_params.get(
+                    "remote_notify_port"
                 )
-                remote_host, _, remote_notify_port = parse_moriio_zmq_address(peer_zmq)
+                if remote_host is None or remote_notify_port is None:
+                    peer_zmq = get_peer_zmq_from_request_id(
+                        request.request_id, is_producer=False
+                    )
+                    remote_host, _, remote_notify_port = parse_moriio_zmq_address(
+                        peer_zmq
+                    )
+                remote_notify_port = int(remote_notify_port)
+
+                block_ids = blocks.get_block_ids()[0]
 
                 for tp_index in range(self.tp_size):
                     target_port = remote_notify_port + get_port_offset(
@@ -457,7 +515,7 @@ class MoRIIOConnectorScheduler:
                     self.send_notify_block(
                         req_id=request.request_id,
                         transfer_id=request.kv_transfer_params["transfer_id"],
-                        block_notify_list=blocks.get_block_ids()[0],
+                        block_notify_list=block_ids,
                         host=remote_host,
                         port=target_port,
                     )
@@ -473,60 +531,31 @@ class MoRIIOConnectorScheduler:
         meta = MoRIIOConnectorMetadata()
         meta.transfer_id_to_request_id = self.transfer_id_to_request_id
 
-        if self.mode == MoRIIOMode.WRITE:
-            # when async_load_kv finished,
-            # new reqs will be added to scheduler_output.scheduled_new_reqs
+        if self.mode == MoRIIOMode.WRITE and get_role() == ROLE.PRODUCER:
+            # This is the logic for checking against chunked prefill.
+            # When the last chunk is identified,
+            # It places the request metadata into the saving queue.
 
-            if get_role() == ROLE.CONSUMER:
-                for new_req in scheduler_output.scheduled_new_reqs:
-                    red_id = new_req.req_id
-                    local_block_ids = list(new_req.block_ids)[0]
-                    assert new_req.sampling_params is not None, (
-                        f"sampling_params is None for req {new_req.req_id}"
-                    )
-                    assert hasattr(new_req.sampling_params, "extra_args"), (
-                        f"sampling_params missing extra_args for req {new_req.req_id}"
-                    )
-                    kv_transfer_params = (
-                        new_req.sampling_params.extra_args.get("kv_transfer_params", {})
-                        if new_req.sampling_params.extra_args
-                        else {}
-                    )
-                    meta.add_new_req(
-                        red_id,
-                        local_block_ids,
-                        kv_transfer_params,
-                    )
-            if get_role() == ROLE.PRODUCER:
-                # This is the logic for checking against chunked prefill.
-                # When the last chunk is identified,
-                # It places the request metadata into the saving queue.
+            for i, req_id in enumerate(scheduler_output.scheduled_cached_reqs.req_ids):
+                new_block_ids = scheduler_output.scheduled_cached_reqs.new_block_ids[i]
 
-                for i, req_id in enumerate(
-                    scheduler_output.scheduled_cached_reqs.req_ids
-                ):
-                    new_block_ids = (
-                        scheduler_output.scheduled_cached_reqs.new_block_ids[i]
-                    )
-
-                    if new_block_ids is not None:
-                        block_ids = new_block_ids[0]
-                        # TODO : hybrid attn, etc
-                        req, existing_blocks = self._reqs_need_pending_save[req_id]
-                        updated_blocks = list(existing_blocks) + (block_ids)
-                        self._reqs_need_pending_save[req_id] = (req, updated_blocks)
-                        if (
-                            len(self._reqs_need_pending_save[req_id][1])
-                            * self.block_size
-                            >= req.num_prompt_tokens
-                        ):
-                            meta.add_new_req(
-                                request_id=req_id,
-                                local_block_ids=self._reqs_need_pending_save[req_id][1],
-                                kv_transfer_params=req.kv_transfer_params or {},
-                                write_mode=True,
-                            )
-                            del self._reqs_need_pending_save[req_id]
+                if new_block_ids is not None:
+                    block_ids = new_block_ids[0]
+                    # TODO : hybrid attn, etc
+                    req, existing_blocks = self._reqs_need_pending_save[req_id]
+                    updated_blocks = list(existing_blocks) + (block_ids)
+                    self._reqs_need_pending_save[req_id] = (req, updated_blocks)
+                    if (
+                        len(self._reqs_need_pending_save[req_id][1]) * self.block_size
+                        >= req.num_prompt_tokens
+                    ):
+                        meta.add_new_req(
+                            request_id=req_id,
+                            local_block_ids=self._reqs_need_pending_save[req_id][1],
+                            kv_transfer_params=req.kv_transfer_params or {},
+                            write_mode=True,
+                        )
+                        del self._reqs_need_pending_save[req_id]
 
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
@@ -601,9 +630,15 @@ class MoRIIOConnectorScheduler:
             # update_state_after_alloc must not have been called (the request
             # must have been aborted before it was scheduled).
             # To avoid stranding the prefill blocks in the prefill instance,
-            # we must add empty block_ids to _reqs_need_recv so that our
-            # worker side will notify and free blocks in the prefill instance.
-            self._reqs_need_recv[request.request_id] = (request, [])
+            # READ mode adds empty block_ids to _reqs_need_recv so the worker
+            # side notifies the prefill instance. WRITE mode should notify the
+            # producer directly: there is no decode allocation for the producer
+            # to write into, and a plain request_id may not contain router-
+            # embedded MoRIIO ZMQ addresses.
+            if self.mode == MoRIIOMode.WRITE:
+                self._release_write_prefill_blocks(request.request_id, params)
+            else:
+                self._reqs_need_recv[request.request_id] = (request, [])
             params["do_remote_prefill"] = False
             return False, None
 
@@ -635,6 +670,10 @@ class MoRIIOConnectorScheduler:
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
             remote_engine_id=self.engine_id,
+            remote_host=self.host_ip,
+            remote_handshake_port=self.handshake_port,
+            remote_notify_port=self.side_notify_port,
+            remote_dp_size=self.vllm_config.parallel_config.data_parallel_size,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
             transfer_id=params["transfer_id"],
         )
@@ -1480,7 +1519,7 @@ class MoRIIOConnectorWorker:
         metadata: MoRIIOConnectorMetadata,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: "AttentionMetadata | None",
         **kwargs,
     ):
         if not self.is_producer:
@@ -1603,6 +1642,12 @@ class MoRIIOConnectorWorker:
                 break
 
         self._reqs_to_send.update(metadata.reqs_to_send)
+
+    def wait_for_save(self, metadata: MoRIIOConnectorMetadata):
+        if self.mode == MoRIIOMode.WRITE and self.is_producer:
+            for layer_name, kv_layer in self.kv_caches.items():
+                self.save_kv_layer(metadata, layer_name, kv_layer, None)
+            self._writer.seal_pending_transfers()
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         logger.debug(
