@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import cdiv
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
     CanonicalKVCacheRef,
@@ -156,7 +156,7 @@ def pin_mmap_region(region: SharedOffloadRegion) -> None:
 def _new_descriptor_buffers(
     num_copy_ops: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    pin = is_pin_memory_available()
+    pin = PIN_MEMORY
     # CUDA cache_kernels.cu requires int64; XPU DMA engine requires uint64.
     ptr_dtype = torch.uint64 if current_platform.is_xpu() else torch.int64
     return (
@@ -482,7 +482,7 @@ class CpuGpuOffloadingHandlers:
         num_cpu_blocks: int,
         mmap_region: SharedOffloadRegion | None = None,
     ):
-        pin_memory = is_pin_memory_available()
+        pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         self._mmap_region = mmap_region
         if mmap_region is not None and pin_memory:

@@ -28,7 +28,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import is_quantized_kv_cache, is_torch_equal_or_newer
+from vllm.utils.torch_utils import (
+    async_tensor_h2d,
+    is_quantized_kv_cache,
+    is_torch_equal_or_newer,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -58,7 +62,7 @@ def _offsets_to_doc_ids_tensor(
     doc_ids = torch.repeat_interleave(
         torch.arange(len(counts), dtype=torch.int32), counts
     )
-    return doc_ids.to(device, non_blocking=True)
+    return async_tensor_h2d(doc_ids, device=device)
 
 
 def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):

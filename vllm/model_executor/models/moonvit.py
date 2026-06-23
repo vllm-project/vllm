@@ -66,6 +66,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
+from vllm.utils.torch_utils import async_tensor_h2d
 
 
 def _apply_rope_input_validation(x, freqs_cis):
@@ -758,7 +759,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
                         ),
                     ]
                 )
-        metadata["cu_seqlens"] = torch.from_numpy(cu_seqlens_np).to(device)
+        metadata["cu_seqlens"] = async_tensor_h2d(cu_seqlens_np, device=device)
 
         if max_seqlen_override is not None:
             max_seqlen_val = int(max_seqlen_override)
@@ -770,7 +771,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
         metadata["max_seqlen"] = torch.tensor(max_seqlen_val, dtype=torch.int32)
 
         gather_idx_np = _build_merge_gather_idx(grid_pairs, self.merge_kernel_size)
-        metadata["merge_gather_idx"] = torch.from_numpy(gather_idx_np).to(device)
+        metadata["merge_gather_idx"] = async_tensor_h2d(gather_idx_np, device=device)
 
         return metadata
 
