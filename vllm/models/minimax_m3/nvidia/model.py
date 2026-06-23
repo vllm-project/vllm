@@ -933,9 +933,30 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsEagle3):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
 
+    # VL exports nest the text backbone under a `language_model.` prefix and ship
+    # a vision tower / projector. Rewrite that prefix to this module's `model.`
+    # and skip the vision weights when serving the text backbone standalone.
+    # Handles both `language_model.` (e.g. Mapika/MiniMax-M3-NVFP4) and
+    # `model.language_model.` layouts. No-op for native text-only checkpoints.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.language_model.": "model.",
+            "language_model.": "",
+        },
+    )
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=[
+                "model.vision_tower.",
+                "model.multi_modal_projector.",
+                "vision_tower.",
+                "multi_modal_projector.",
+                "patch_merge_mlp.",
+            ],
+        )
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @MULTIMODAL_REGISTRY.register_processor(

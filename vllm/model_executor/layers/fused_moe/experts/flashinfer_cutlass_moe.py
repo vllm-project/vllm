@@ -102,15 +102,35 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 device=self.device,
             )
 
+        # Per-expert SwiGLU alpha/beta from the quant config (e.g. MiniMax-M3
+        # clamped swigluoai_uninterleave). The mxfp4 (gpt-oss) branch below
+        # fills in its hard-coded defaults only when these are still unset.
+        self.gemm1_alpha: torch.Tensor | None = None
+        self.gemm1_beta: torch.Tensor | None = None
+        if quant_config.gemm1_alpha is not None:
+            self.gemm1_alpha = torch.tensor(
+                [quant_config.gemm1_alpha] * self.num_experts,
+                dtype=torch.float32,
+                device=self.device,
+            )
+        if quant_config.gemm1_beta is not None:
+            self.gemm1_beta = torch.tensor(
+                [quant_config.gemm1_beta] * self.num_experts,
+                dtype=torch.float32,
+                device=self.device,
+            )
+
         if quant_config.weight_quant_dtype == "mxfp4":
             # This value is used specifically for gpt-oss,
             # Need to revisit this for other models
-            self.gemm1_alpha = torch.tensor(
-                [1.702] * self.num_experts, dtype=torch.float32, device=self.device
-            )
-            self.gemm1_beta = torch.tensor(
-                [1.0] * self.num_experts, dtype=torch.float32, device=self.device
-            )
+            if self.gemm1_alpha is None:
+                self.gemm1_alpha = torch.tensor(
+                    [1.702] * self.num_experts, dtype=torch.float32, device=self.device
+                )
+            if self.gemm1_beta is None:
+                self.gemm1_beta = torch.tensor(
+                    [1.0] * self.num_experts, dtype=torch.float32, device=self.device
+                )
             if self.gemm1_clamp_limit is None:
                 self.gemm1_clamp_limit = torch.tensor(
                     [7.0] * self.num_experts,
@@ -191,6 +211,9 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             MoEActivation.GELU_TANH,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.SWIGLUOAI,
+            # Packed gate_up clamped SwiGLU (e.g. MiniMax-M3). Same kernel as
+            # SWIGLUOAI; weights are already packed [w3,w1] for this path.
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -270,6 +293,12 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             MoEActivation.SILU: ActivationType.Swiglu,  # This is the default
             MoEActivation.GELU_TANH: ActivationType.Geglu,
             MoEActivation.SWIGLUOAI: ActivationType.Swiglu,  # gpt-oss alias
+            # MiniMax-M3: packed gate_up clamped swiglu. MUST be SwigluBias, not
+            # Swiglu — only the SwigluBiasAdaptor (ActivationType::SwigluBias) in
+            # cutlass_fused_moe_kernels.cuh applies the forwarded swiglu
+            # alpha/beta/limit. Plain Swiglu silently drops the clamp -> the
+            # activations explode across the MoE stack -> garbage output.
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.SwigluBias,
             MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
         }
         assert activation in activation_str_to_value_map, (
@@ -322,6 +351,12 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             # FlashInfer API requires weight to be long for nvfp4
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
+            # Clamped SwiGLU (MiniMax-M3): forward alpha/beta/limit so the
+            # cutlass kernel computes silu(clamp(gate))*clamp(up).
+            if activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE:
+                swiglu_alpha = self.gemm1_alpha
+                swiglu_beta = self.gemm1_beta
+                swiglu_limit = self.gemm1_clamp_limit
         elif self.weight_quant_dtype == "mxfp4":
             assert self.w1_scale is not None and self.w2_scale is not None
             assert w1.is_contiguous() and w2.is_contiguous()
