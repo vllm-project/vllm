@@ -480,6 +480,7 @@ class CPUOffloadingWorker(OffloadingWorker):
                     (num_cpu_blocks, cpu_page_size_bytes),
                     dtype=torch.int8,
                     device="cpu",
+                    pin_memory=PIN_MEMORY and not current_platform.is_cuda_alike(),
                 )
                 logger.debug(
                     "torch.zeros tensor %d×%d (%.2f GB): %.3f s",
@@ -546,6 +547,8 @@ class CPUOffloadingWorker(OffloadingWorker):
                     result.value,
                 )
                 continue
+            if self._mmap_region is not None:
+                self._mmap_region.is_pinned = True
 
             logger.debug(
                 "cudaHostRegister pin %.2f GB",
@@ -557,8 +560,6 @@ class CPUOffloadingWorker(OffloadingWorker):
             len(tensors_to_pin),
             time.monotonic() - t0,
         )
-        if self._mmap_region is not None:
-            self._mmap_region.is_pinned = True
         
         if self.pin_thread is not None:
             self.pin_thread.join()
