@@ -7,6 +7,7 @@ Independent metadata / builder; KV cache layout is NHD:
 (num_blocks, 2, block_size, num_kv_heads, head_size).
 """
 
+import importlib.util
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -265,6 +266,11 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
     ) -> None:
+        if importlib.util.find_spec("hpc") is None:
+            raise ImportError(
+                "HPC attention requires the hpc module to be installed. "
+                "Please install it from https://github.com/Tencent/hpc-ops"
+            )
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("HPC attention only supports decoder attention")
         if alibi_slopes is not None:
