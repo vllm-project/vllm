@@ -47,6 +47,13 @@ class QuantizeMethodBase(ABC):
         Expects create_weights to have been called before on the layer."""
         raise NotImplementedError
 
+    # Not required functions
+    def tie_weights(self, layer: torch.nn.Module, *args, **kwargs):
+        """Tie layer's weights for the layer from another layer/tensors.
+
+        Expects create_weights to have been called before on the layer."""
+        raise NotImplementedError
+
     def process_weights_after_loading(self, layer: nn.Module) -> None:
         """Process the weight after loading.
 

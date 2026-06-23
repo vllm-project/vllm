@@ -3,6 +3,7 @@
 """Unit tests for EmbedIOProcessor."""
 
 import pytest
+from pydantic import TypeAdapter, ValidationError
 
 from vllm import PoolingParams
 from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
@@ -10,8 +11,193 @@ from vllm.entrypoints.pooling.embed.protocol import (
     CohereEmbedContent,
     CohereEmbedInput,
     CohereEmbedRequest,
+    EmbeddingBatchChatInputRequest,
+    EmbeddingBatchChatRequest,
+    EmbeddingChatInputRequest,
+    EmbeddingChatRequest,
+    EmbeddingCompletionRequest,
+    EmbeddingRequest,
 )
 from vllm.entrypoints.pooling.typing import PoolingServeContext
+
+
+class TestEmbeddingRequestParsing:
+    """Unit tests for OpenAI embedding request parsing."""
+
+    def test_input_messages_parses_as_chat_request(self):
+        request = TypeAdapter(EmbeddingRequest).validate_python(
+            {
+                "model": "test",
+                "input": [{"role": "user", "content": "hello"}],
+                "chat_template_kwargs": {"instruction": "Represent the query: "},
+            }
+        )
+
+        assert isinstance(request, EmbeddingChatInputRequest)
+        assert request.input == [{"role": "user", "content": "hello"}]
+        assert request.messages == [{"role": "user", "content": "hello"}]
+        assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
+
+    def test_batched_input_messages_parses_as_batch_chat_input_request(self):
+        request = TypeAdapter(EmbeddingRequest).validate_python(
+            {
+                "model": "test",
+                "input": [
+                    [{"role": "user", "content": "hello"}],
+                    [{"role": "user", "content": "goodbye"}],
+                ],
+                "chat_template_kwargs": {"instruction": "Represent the query: "},
+            }
+        )
+
+        assert isinstance(request, EmbeddingBatchChatInputRequest)
+        assert request.input == [
+            [{"role": "user", "content": "hello"}],
+            [{"role": "user", "content": "goodbye"}],
+        ]
+        assert request.messages == [
+            [{"role": "user", "content": "hello"}],
+            [{"role": "user", "content": "goodbye"}],
+        ]
+        assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
+
+    def test_token_ids_still_parse_as_completion_request(self):
+        request = TypeAdapter(EmbeddingRequest).validate_python(
+            {
+                "model": "test",
+                "input": [[1, 2, 3], [4, 5]],
+            }
+        )
+
+        assert isinstance(request, EmbeddingCompletionRequest)
+        assert request.input == [[1, 2, 3], [4, 5]]
+
+    def test_messages_still_parses_as_chat_request(self):
+        request = TypeAdapter(EmbeddingRequest).validate_python(
+            {
+                "model": "test",
+                "messages": [{"role": "user", "content": "hello"}],
+                "chat_template_kwargs": {"instruction": "Represent the query: "},
+            }
+        )
+
+        assert isinstance(request, EmbeddingChatRequest)
+        assert request.messages == [{"role": "user", "content": "hello"}]
+        assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
+
+    def test_batched_messages_parses_as_batch_chat_request(self):
+        request = TypeAdapter(EmbeddingRequest).validate_python(
+            {
+                "model": "test",
+                "messages": [
+                    [{"role": "user", "content": "hello"}],
+                    [{"role": "user", "content": "goodbye"}],
+                ],
+                "chat_template_kwargs": {"instruction": "Represent the query: "},
+            }
+        )
+
+        assert isinstance(request, EmbeddingBatchChatRequest)
+        assert request.messages == [
+            [{"role": "user", "content": "hello"}],
+            [{"role": "user", "content": "goodbye"}],
+        ]
+        assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
+
+
+class TestCohereEmbedRequestParsing:
+    """Unit tests for Cohere embed request parsing."""
+
+    @pytest.mark.parametrize(
+        "request_body",
+        [
+            {"model": "test"},
+            {"model": "test", "texts": ["hello"], "images": ["image-uri"]},
+            {
+                "model": "test",
+                "texts": ["hello"],
+                "inputs": [
+                    {"content": [{"type": "text", "text": "hello"}]},
+                ],
+            },
+            {
+                "model": "test",
+                "images": ["image-uri"],
+                "inputs": [
+                    {"content": [{"type": "text", "text": "hello"}]},
+                ],
+            },
+            {"model": "test", "texts": []},
+            {"model": "test", "images": []},
+            {"model": "test", "inputs": []},
+        ],
+    )
+    def test_rejects_invalid_input_field_combinations(self, request_body):
+        with pytest.raises(
+            ValidationError,
+            match="Exactly one of texts, images, or inputs must be provided",
+        ):
+            CohereEmbedRequest(**request_body)
+
+    @pytest.mark.parametrize(
+        "request_body",
+        [
+            {"model": "test", "texts": ["hello"]},
+            {"model": "test", "images": ["image-uri"]},
+            {
+                "model": "test",
+                "inputs": [
+                    {"content": [{"type": "text", "text": "hello"}]},
+                ],
+            },
+            {
+                "model": "test",
+                "inputs": [
+                    {
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": "image-uri"}}
+                        ]
+                    },
+                ],
+            },
+        ],
+    )
+    def test_accepts_exactly_one_non_empty_input_field(self, request_body):
+        request = CohereEmbedRequest(**request_body)
+
+        assert request.model == "test"
+
+    @pytest.mark.parametrize(
+        ("content", "error"),
+        [
+            (
+                {"type": "text"},
+                "CohereEmbedContent with type='text' requires text",
+            ),
+            (
+                {"type": "image_url"},
+                "CohereEmbedContent with type='image_url' requires image_url.url",
+            ),
+            (
+                {"type": "image_url", "image_url": {}},
+                "CohereEmbedContent with type='image_url' requires image_url.url",
+            ),
+            (
+                {"type": "image_url", "image_url": {"url": ""}},
+                "CohereEmbedContent with type='image_url' requires image_url.url",
+            ),
+        ],
+    )
+    def test_rejects_invalid_mixed_content_payloads(self, content, error):
+        with pytest.raises(ValidationError, match=error):
+            CohereEmbedRequest(
+                model="test",
+                inputs=[
+                    {
+                        "content": [content],
+                    },
+                ],
+            )
 
 
 class TestResolveTruncation:
@@ -324,3 +510,113 @@ class TestPreProcessCohereOnline:
                 },
             )
         ]
+
+
+class TestPreProcessOpenAIEmbeddingChatOnline:
+    """Unit tests for OpenAI embedding chat preprocessing."""
+
+    class _FakeModelConfig:
+        max_model_len = 128
+        encoder_config: dict[str, object] = {}
+        pooler_config = None
+        multimodal_config = None
+        is_encoder_decoder = False
+
+    class _FakeRenderer:
+        tokenizer = object()
+
+        def __init__(self):
+            self.calls = []
+
+        def render_chat(
+            self,
+            all_messages,
+            chat_params,
+            tok_params,
+            prompt_extras=None,
+        ):
+            self.calls.append(
+                {
+                    "all_messages": all_messages,
+                    "chat_params": chat_params,
+                    "tok_params": tok_params,
+                    "prompt_extras": prompt_extras,
+                }
+            )
+            return all_messages, [
+                {"prompt_token_ids": [index]} for index, _ in enumerate(all_messages)
+            ]
+
+    @classmethod
+    def _make_handler(cls, renderer):
+        handler = object.__new__(EmbedIOProcessor)
+        handler.renderer = renderer
+        handler.model_config = cls._FakeModelConfig()
+        handler.chat_template = "template"
+        handler.chat_template_content_format = "auto"
+        handler.trust_request_chat_template = False
+        handler.enable_chunked_processing = False
+        return handler
+
+    @staticmethod
+    def _make_context(
+        request: (
+            EmbeddingChatRequest
+            | EmbeddingBatchChatRequest
+            | EmbeddingChatInputRequest
+            | EmbeddingBatchChatInputRequest
+        ),
+    ) -> PoolingServeContext[
+        EmbeddingChatRequest
+        | EmbeddingBatchChatRequest
+        | EmbeddingChatInputRequest
+        | EmbeddingBatchChatInputRequest
+    ]:
+        return PoolingServeContext(
+            request=request,
+            pooling_params=PoolingParams(),
+            model_name="test",
+            request_id="embd-test",
+        )
+
+    def test_chat_template_kwargs_forwarded_for_batched_input_messages(self):
+        request = TypeAdapter(EmbeddingRequest).validate_python(
+            {
+                "model": "test",
+                "input": [
+                    [{"role": "user", "content": "hello"}],
+                    [{"role": "user", "content": "goodbye"}],
+                ],
+                "add_generation_prompt": True,
+                "chat_template_kwargs": {"instruction": "Represent the query: "},
+                "mm_processor_kwargs": {"max_pixels": 1},
+                "cache_salt": "salt",
+            }
+        )
+        assert isinstance(request, EmbeddingBatchChatInputRequest)
+
+        renderer = self._FakeRenderer()
+        handler = self._make_handler(renderer)
+        ctx = self._make_context(request)
+
+        handler.pre_process_online(ctx)
+
+        assert ctx.engine_inputs == [
+            {"prompt_token_ids": [0]},
+            {"prompt_token_ids": [1]},
+        ]
+        assert len(renderer.calls) == 1
+
+        call = renderer.calls[0]
+        assert call["all_messages"] == request.messages
+        assert call["prompt_extras"] == {
+            "mm_processor_kwargs": {"max_pixels": 1},
+            "cache_salt": "salt",
+        }
+
+        chat_template_kwargs = call["chat_params"].chat_template_kwargs
+        assert chat_template_kwargs["instruction"] == "Represent the query: "
+        assert chat_template_kwargs["add_generation_prompt"] is True
+        assert chat_template_kwargs["continue_final_message"] is False
+        assert "tools" not in chat_template_kwargs
+        assert chat_template_kwargs["tokenize"] is False
