@@ -167,6 +167,32 @@ def verify_marlin_supported(
         raise ValueError(err_msg)
 
 
+def verify_group_size_divides_partition(
+    input_size_per_partition: int,
+    group_size: int,
+    layer_name: str | None = None,
+    extra_suggestion: str = "",
+) -> None:
+    """Validate that a TP-sharded layer holds a whole number of quant groups.
+
+    When group-quantized scales are partitioned across tensor-parallel ranks,
+    each rank's ``input_size_per_partition`` (``input_size // tp_size``) must be
+    a multiple of ``group_size``; otherwise a group would straddle a rank
+    boundary and its scales cannot be sliced. Raises an actionable ``ValueError``
+    instead of a bare assertion (issue #46230).
+    """
+    if input_size_per_partition % group_size == 0:
+        return
+    location = f" for layer '{layer_name}'" if layer_name else ""
+    raise ValueError(
+        f"Weight input_size_per_partition = {input_size_per_partition}"
+        f"{location} is not divisible by group_size = {group_size}. "
+        "This happens when tensor_parallel_size splits the layer input into "
+        "shards that are not a whole number of quant groups. Consider reducing "
+        f"tensor_parallel_size{extra_suggestion}."
+    )
+
+
 def verify_marlin_supports_shape(
     output_size_per_partition: int,
     input_size_per_partition: int,
@@ -193,12 +219,11 @@ def verify_marlin_supports_shape(
             "with --quantization gptq."
         )
 
-    if group_size < input_size and input_size_per_partition % group_size != 0:
-        raise ValueError(
-            f"Weight input_size_per_partition = {input_size_per_partition}"
-            f" is not divisible by group_size = {group_size}. "
-            "Consider reducing tensor_parallel_size or running "
-            "with --quantization gptq."
+    if group_size < input_size:
+        verify_group_size_divides_partition(
+            input_size_per_partition,
+            group_size,
+            extra_suggestion=" or running with --quantization gptq",
         )
 
 
@@ -418,28 +443,6 @@ def marlin_repeat_scales_on_all_ranks(
     # channelwise and RowParallelLinear
     is_channelwise = group_size == -1
     return act_order or (is_channelwise and is_row_parallel)
-
-
-def verify_group_size_divides_partition(
-    input_size_per_partition: int, group_size: int, layer_name: str | None = None
-) -> None:
-    """Validate that a TP-sharded layer holds a whole number of quant groups.
-
-    When group-quantized scales are partitioned across tensor-parallel ranks,
-    each rank's ``input_size_per_partition`` (``input_size // tp_size``) must be
-    a multiple of ``group_size``; otherwise a group would straddle a rank
-    boundary and its scales cannot be sliced. Raises an actionable ``ValueError``
-    instead of a bare assertion (issue #46230).
-    """
-    if input_size_per_partition % group_size != 0:
-        raise ValueError(
-            f"Cannot load group-quantized weights for layer "
-            f"'{layer_name or '<unknown>'}': input_size_per_partition="
-            f"{input_size_per_partition} is not divisible by group_size="
-            f"{group_size}. This happens when tensor_parallel_size splits the "
-            f"layer input into shards that are not a whole number of quant "
-            f"groups. Consider reducing tensor_parallel_size."
-        )
 
 
 def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
