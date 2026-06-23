@@ -207,6 +207,17 @@ class CohereEmbedContent(BaseModel):
     text: str | None = None
     image_url: dict[str, str] | None = None
 
+    @model_validator(mode="after")
+    def validate_content_payload(self):
+        if self.type == "text":
+            if self.text is None:
+                raise ValueError("CohereEmbedContent with type='text' requires text")
+        elif not self.image_url or not self.image_url.get("url"):
+            raise ValueError(
+                "CohereEmbedContent with type='image_url' requires image_url.url"
+            )
+        return self
+
 
 class CohereEmbedInput(BaseModel):
     content: list[CohereEmbedContent]
@@ -223,6 +234,17 @@ class CohereEmbedRequest(BaseModel):
     truncate: CohereTruncate = "END"
     max_tokens: int | None = None
     priority: int = 0
+
+    @model_validator(mode="after")
+    def validate_input_fields(self):
+        input_fields = (self.texts, self.images, self.inputs)
+        provided_fields = [field for field in input_fields if field is not None]
+        if len(provided_fields) != 1 or not provided_fields[0]:
+            raise ValueError(
+                "Exactly one of texts, images, or inputs must be provided, "
+                "and it must be non-empty"
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------

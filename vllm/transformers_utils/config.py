@@ -103,6 +103,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     medusa="MedusaConfig",
     mellum="MellumConfig",
     midashenglm="MiDashengLMConfig",
+    minimax_m3_vl="MiniMaxM3Config",
+    minimax_m3_mtp="MiniMaxM3MTPConfig",
     moondream3="Moondream3Config",
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
@@ -137,6 +139,22 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
     "Llama_Nemotron_Nano_VL": {"attn_implementation": "eager"},
     "NVLM_D": {"has_no_defaults_at_init": True},
 }
+
+
+def _register_config_class(
+    model_type: str, config_class: type[PretrainedConfig]
+) -> None:
+    config_class.model_type = model_type
+    AutoConfig.register(model_type, config_class, exist_ok=True)
+
+
+def _maybe_register_hf_config(config: PretrainedConfig | None) -> None:
+    if config is None:
+        return
+
+    model_type = getattr(config, "model_type", None)
+    if isinstance(model_type, str) and model_type in _CONFIG_REGISTRY:
+        _register_config_class(model_type, _CONFIG_REGISTRY[model_type])
 
 
 def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
@@ -242,8 +260,7 @@ class HFConfigParser(ConfigParserBase):
                 # in future calls to `from_pretrained` (e.g. from
                 # AutoTokenizer or AutoProcessor).
                 config_class = _CONFIG_REGISTRY[model_type]
-                config_class.model_type = model_type
-                AutoConfig.register(model_type, config_class, exist_ok=True)
+                _register_config_class(model_type, config_class)
                 # If the on-disk model_type differs from the overridden
                 # one, register under both so AutoConfig.from_pretrained
                 # returns the correct class regardless of what the
@@ -251,8 +268,7 @@ class HFConfigParser(ConfigParserBase):
                 if (
                     config_model_type := config_dict.get("model_type")
                 ) and config_model_type != model_type:
-                    config_class.model_type = config_model_type
-                    AutoConfig.register(config_model_type, config_class, exist_ok=True)
+                    _register_config_class(config_model_type, config_class)
                     config_class.model_type = model_type
                 # Now that it is registered, it is not considered remote code anymore
                 trust_remote_code = False
