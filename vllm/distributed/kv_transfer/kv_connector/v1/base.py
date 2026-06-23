@@ -121,6 +121,61 @@ def supports_hma(connector: Any) -> bool:
         return isinstance(connector, SupportsHMA)
 
 
+class SupportsVmmSafeTransfers(ABC):  # noqa: B024
+    """Mixin indicating that a connector's KV transfers are safe under CUDA
+    Virtual Memory Management (VMM) remapping.
+
+    PyTorch's ``expandable_segments`` allocator uses CUDA VMM, which can remap
+    a GPU virtual address range to different physical pages over the engine's
+    lifetime.  Connectors that *register* GPU memory with RDMA / InfiniBand
+    frameworks (e.g. via ``ibv_reg_mr``) end up with registrations pointing at
+    stale physical pages after any remap, producing RDMA failures such as
+    ``IBV_WC_REM_ACCESS_ERR``.
+
+    Connectors that transfer KV data using only **DMA copies** (cuMemcpy /
+    cudaMemcpy) are *not* affected: the GPU page tables are transparently
+    updated by the CUDA driver, so subsequent DMA operations target the
+    correct physical pages without any stale-registration issues.
+
+    When to implement this mixin
+    ----------------------------
+
+    Implement ``SupportsVmmSafeTransfers`` only when **all** of the following
+    are true:
+
+    1. The connector transfers KV cache data exclusively via **DMA memcpy**
+       operations (e.g. ``cuMemcpy``, ``cuMemcpyBatchAsync``,
+       ``cudaMemcpyAsync``) that operate on GPU **virtual** addresses.
+    2. The connector **never** registers (pins) GPU memory with an RDMA
+       framework — it does not call ``ibv_reg_mr``, ``nixl_register``, or any
+       equivalent RDMA memory-registration API on KV cache buffers.
+    3. The connector does not share GPU memory directly with a remote node
+       via GPUDirect RDMA or similar zero-copy RDMA paths.
+
+    When **not** to implement this mixin
+    -------------------------------------
+
+    - The connector uses NIXL, Mooncake Transfer Engine, or any library that
+      registers GPU memory with an InfiniBand / RDMA subsystem.
+    - The connector relies on physical-page stability (e.g. it stores or
+      caches physical addresses independently of the GPU virtual address).
+    - You are unsure whether the connector performs RDMA registration.  When
+      in doubt, do *not* implement this mixin — the conservative default is
+      to reject the connector with ``expandable_segments:True``, which is the
+      safe choice.
+    """
+
+
+def supports_vmm_safe_transfers(connector_cls: type) -> bool:
+    """Return ``True`` if *connector_cls* declares its transfers safe under
+    CUDA VMM remapping by implementing the ``SupportsVmmSafeTransfers``
+    mixin.
+
+    Accepts a **class** (not an instance).  The caller is responsible for
+    resolving the connector class first (e.g. via the factory)."""
+    return issubclass(connector_cls, SupportsVmmSafeTransfers)
+
+
 class KVConnectorRole(enum.Enum):
     # Connector running in the scheduler process
     SCHEDULER = 0
