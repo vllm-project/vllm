@@ -17,8 +17,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
-    get_tool_call_id_type,
-    make_tool_call_id,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -171,8 +169,6 @@ class OpenAIServingChat(OpenAIServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
-        self.tool_call_id_type = get_tool_call_id_type(self.model_config)
-
         # NOTE(woosuk): While OpenAI's chat completion API supports browsing
         # for some models, currently vLLM doesn't support it. Please use the
         # Responses API instead.
@@ -888,12 +884,6 @@ class OpenAIServingChat(OpenAIServing):
                 tool_call_items: list[ToolCall] = []
                 tool_calls = tool_calls or []
                 for tc in tool_calls:
-                    if not tc.id:
-                        tc.id = make_tool_call_id(
-                            id_type=self.tool_call_id_type,
-                            func_name=tc.name,
-                            idx=len(tool_call_items),
-                        )
                     tool_call_items.append(ToolCall(id=tc.id, function=tc))
                 message = ChatMessage(
                     role=role,
@@ -906,12 +896,6 @@ class OpenAIServingChat(OpenAIServing):
                 tool_call_items = []
                 tool_calls = tool_calls or []
                 for tool_call in tool_calls:
-                    if not tool_call.id:
-                        tool_call.id = make_tool_call_id(
-                            id_type=self.tool_call_id_type,
-                            func_name=tool_call.name,
-                            idx=len(tool_call_items),
-                        )
                     tool_call_items.append(
                         ToolCall(id=tool_call.id, function=tool_call)
                     )
@@ -938,12 +922,6 @@ class OpenAIServingChat(OpenAIServing):
                 if tool_calls:
                     tool_call_items = []
                     for tc in tool_calls:
-                        if not tc.id:
-                            tc.id = make_tool_call_id(
-                                id_type=self.tool_call_id_type,
-                                func_name=tc.name,
-                                idx=len(tool_call_items),
-                            )
                         tool_call_items.append(ToolCall(id=tc.id, function=tc))
                     message = ChatMessage(
                         role=role,

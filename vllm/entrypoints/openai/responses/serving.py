@@ -30,7 +30,6 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
-    get_tool_call_id_type,
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
@@ -222,9 +221,6 @@ class OpenAIServingResponses(OpenAIServing):
                 "For gpt-oss, we ignore --enable-auto-tool-choice "
                 "and always enable tool use."
             )
-
-        self.tool_call_id_type = get_tool_call_id_type(self.model_config)
-
         self.enable_auto_tools = enable_auto_tools
         # HACK(woosuk): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
@@ -272,6 +268,7 @@ class OpenAIServingResponses(OpenAIServing):
             tokenizer,
             request.tools,
             chat_template_kwargs=chat_template_kwargs,
+            model_config=self.model_config,
         )
 
     def _validate_generator_input(
@@ -493,8 +490,6 @@ class OpenAIServingResponses(OpenAIServing):
                         chat_template=self.chat_template,
                         chat_template_content_format=self.chat_template_content_format,
                         enable_auto_tools=self.enable_auto_tools,
-                        tool_call_id_type=self.tool_call_id_type,
-                        model_config=self.model_config,
                     )
                 else:
                     context = SimpleContext(
@@ -1063,14 +1058,7 @@ class OpenAIServingResponses(OpenAIServing):
             )
 
         # Use parser to extract reasoning, content, and tool calls
-        if self.parser:
-            chat_template_kwargs = self._effective_chat_template_kwargs(request)
-            parser = self.parser(
-                tokenizer,
-                request.tools,
-                chat_template_kwargs=chat_template_kwargs,
-                model_config=self.model_config,
-            )
+        if parser:
             reasoning, content, tool_calls = parser.parse(
                 final_output.text,
                 request,
@@ -1081,7 +1069,6 @@ class OpenAIServingResponses(OpenAIServing):
                 content=content,
                 tool_calls=tool_calls,
                 logprobs=logprobs,
-                tool_call_id_type=self.tool_call_id_type,
             )
 
         # Fallback when no parser is configured
@@ -1388,16 +1375,6 @@ class OpenAIServingResponses(OpenAIServing):
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor()
-        parser = (
-            self.parser(
-                tokenizer,
-                request.tools,
-                chat_template_kwargs=self._effective_chat_template_kwargs(request),
-                model_config=self.model_config,
-            )
-            if self.parser
-            else None
-        )
 
         def _get_logprobs(
             output: CompletionOutput,
