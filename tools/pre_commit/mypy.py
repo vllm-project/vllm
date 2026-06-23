@@ -25,8 +25,6 @@ import regex as re
 # from "skip" to "silent", remove its directory from SEPARATE_GROUPS.
 SEPARATE_GROUPS = [
     "tests",
-    # v0 related
-    "vllm/lora",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.

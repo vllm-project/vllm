@@ -109,7 +109,7 @@ from vllm import LLM
 
 # Combine pipeline and tensor parallelism
 llm = LLM(
-    model="meta-llama/Llama-3.3-70B-Instruct,
+    model="meta-llama/Llama-3.3-70B-Instruct",
     tensor_parallel_size=4,
     pipeline_parallel_size=2,
 )

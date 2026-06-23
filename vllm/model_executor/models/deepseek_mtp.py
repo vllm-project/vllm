@@ -119,8 +119,12 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             hidden_states=hidden_states,
             residual=None,
         )
-        hidden_states = residual + hidden_states
-        return hidden_states
+        hidden_states = residual + hidden_states  # pre-final-norm (logits hidden)
+        # Recycle the post-final-norm hidden into the next draft step.
+        # compute_logits applies shared_head (== final norm) to the pre-norm
+        # element, so logits and the recycle each get exactly one final-norm.
+        # Matches SGLang's deepseek_nextn.
+        return hidden_states, self.shared_head(hidden_states)
 
 
 class DeepSeekMultiTokenPredictor(nn.Module):

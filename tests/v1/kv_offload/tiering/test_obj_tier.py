@@ -37,6 +37,7 @@ def _make_vllm_config():
             decode_context_parallel_size=1,
             rank=0,
         ),
+        use_v2_model_runner=False,
     )
 
 
