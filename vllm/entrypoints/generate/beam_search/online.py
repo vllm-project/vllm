@@ -62,7 +62,6 @@ class BeamSearchOnlineMixin(ABC):
             max_tokens=1,
             temperature=temperature,
             detokenize=False,
-            detokenize=False,
         )
         all_beams = [
             BeamSearchSequence(
