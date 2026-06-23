@@ -45,6 +45,7 @@ MTPModelTypes = Literal[
     "qwen3_next_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
+    "minimax_m3_mtp",
     "mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
@@ -62,11 +63,12 @@ SpeculativeMethod = Literal[
     "mlp_speculator",
     "draft_model",
     "suffix",
+    "custom_class",
     EagleModelTypes,
     NgramGPUTypes,
 ]
 RejectionSampleMethod = Literal["standard", "synthetic"]
-DraftSampleMethod = Literal["greedy", "gumbel"]
+DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 
 @config
@@ -155,6 +157,14 @@ class SpeculativeConfig:
     """The configuration of the target model."""
     target_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
+
+    # dynamic speculative decoding control
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
+    """Batch-size schedule used to dynamically choose speculative-token count.
+
+    Each entry is ``(range_start, range_end, num_speculative_tokens)`` with an
+    inclusive batch-size range.
+    """
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -255,10 +265,10 @@ class SpeculativeConfig:
     draft_sample_method: DraftSampleMethod = "greedy"
     """How the draft model samples tokens. 'greedy' always picks the argmax
     token, and the draft probabilities are treated as one-hot during rejection
-    sampling. 'gumbel' adds Gumbel noise for stochastic sampling, and the full
-    draft logits are used for the probability ratio test during rejection
-    sampling. This comes at the cost of additional GPU memory usage. This
-    parameter currently only applies to Model Runner V2."""
+    sampling. 'probabilistic' samples stochastically from the draft
+    distribution and uses the full draft logits for the probability ratio test
+    during rejection sampling. This comes at the cost of additional GPU memory
+    usage."""
 
     def compute_hash(self) -> str:
         """
@@ -466,6 +476,17 @@ class SpeculativeConfig:
                     "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
                 }
             )
+        if hf_config.model_type == "intern_s2_preview":
+            text_config = getattr(hf_config, "text_config", None)
+            is_moe = getattr(text_config, "model_type", None) == "qwen3_5_moe_text"
+            hf_config.model_type = "qwen3_5_mtp"
+            n_predict = getattr(text_config, "mtp_num_hidden_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                }
+            )
         if hf_config.model_type == "longcat_flash":
             hf_config.model_type = "longcat_flash_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
@@ -473,7 +494,16 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["LongCatFlashMTPModel"]}
             )
 
-        if hf_config.model_type == "step3p5":
+        if hf_config.model_type in ("step3p5", "step3p7") or hf_config.architectures[
+            0
+        ] in ("Step3p5ForCausalLM", "Step3p7ForConditionalGeneration"):
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
             hf_config.model_type = "step3p5_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
@@ -488,7 +518,7 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["HYV3MTPModel"]}
             )
 
-        if hf_config.model_type == "gemma4_assistant":
+        if hf_config.model_type in ("gemma4_assistant", "gemma4_unified_assistant"):
             hf_config.model_type = "gemma4_mtp"
             text_config = getattr(hf_config, "text_config", hf_config)
             # The assistant runs all decoder layers in a single forward
@@ -498,6 +528,36 @@ class SpeculativeConfig:
             if hasattr(text_config, "num_kv_shared_layers"):
                 text_config.num_kv_shared_layers = 0
             hf_config.update({"n_predict": 1, "architectures": ["Gemma4MTPModel"]})
+
+        if (
+            hf_config.model_type == "minimax_m3_vl"
+            or initial_architecture == "MiniMaxM3SparseForConditionalGeneration"
+        ):
+            # MTP modules live on the language model of this VL checkpoint, so
+            # promote text_config before rewriting it into an MTP config.
+            quantization_config = getattr(hf_config, "quantization_config", None)
+            hf_config = getattr(hf_config, "text_config", hf_config)
+            if (
+                quantization_config is not None
+                and getattr(hf_config, "quantization_config", None) is None
+            ):
+                hf_config.update({"quantization_config": quantization_config})
+            hf_config.model_type = "minimax_m3_mtp"
+            n_predict = getattr(hf_config, "num_mtp_modules", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["MiniMaxM3MTP"]}
+            )
+        elif (
+            hf_config.model_type == "minimax_m3_mtp"
+            or initial_architecture == "MiniMaxM3MTP"
+        ):
+            # Standalone MTP checkpoints already use a flat MTP config with no
+            # VL wrapper / text_config to promote, so just normalize the
+            # architecture and derive n_predict from num_mtp_modules.
+            n_predict = getattr(hf_config, "num_mtp_modules", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["MiniMaxM3MTP"]}
+            )
 
         return hf_config
 
@@ -511,7 +571,16 @@ class SpeculativeConfig:
         # default.
 
         # infer method from user args
-        if self.method is None:
+        # Check if the model field contains a custom module path (e.g., 'pkg.Mod')
+        if (
+            self.model is not None
+            and "." in self.model
+            and not self.model.startswith(("http://", "https://", "file://"))
+            and "/" not in self.model  # not a HuggingFace repo (org/model)
+        ):
+            # Treat as a custom class path
+            self.method = "custom_class"
+        elif self.method is None:
             if self.model in ("ngram", "[ngram]"):
                 self.method = "ngram"
             else:
@@ -545,6 +614,14 @@ class SpeculativeConfig:
                 self.model = "suffix"
             elif self.method == "extract_hidden_states":
                 self.model = "extract_hidden_states"
+            elif self.method == "custom_class":
+                # method was set explicitly, but model should already contain the
+                # custom module path. If not, this is a configuration error.
+                if self.model is None:
+                    raise ValueError(
+                        "method='custom_class' requires 'model' to contain the "
+                        "custom proposer module path (e.g., 'my_module.MyProposer')."
+                    )
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
@@ -588,6 +665,18 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             self._validate_suffix_decoding()
+        elif self.method == "custom_class":
+            # Custom class proposer does not need a draft model.
+            # It will dynamically load the user-provided class at runtime.
+            logger.warning_once(
+                "Using a custom class-based proposer backend. This is an "
+                "experimental feature and the proposer interface is subject to "
+                "breaking changes in future vLLM releases."
+            )
+            self.prompt_lookup_max = 0
+            self.prompt_lookup_min = 0
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
         elif self.method == "extract_hidden_states":
             from vllm.transformers_utils.configs.extract_hidden_states import (
                 ExtractHiddenStatesConfig,
@@ -664,21 +753,15 @@ class SpeculativeConfig:
                     MTPModelTypes
                 ):
                     self.method = "mtp"
-                    if self.num_speculative_tokens > 1:
+                    if (
+                        self.num_speculative_tokens > 1
+                        and self.draft_model_config.hf_config.model_type
+                        != "step3p5_mtp"
+                    ):
                         logger.warning(
                             "Enabling num_speculative_tokens > 1 will run "
                             "multiple times of forward on same MTP layer"
                             ",which may result in lower acceptance rate"
-                        )
-                elif self.draft_model_config.hf_config.model_type in (
-                    "longcat_flash_mtp"
-                ):
-                    self.method = "longcat_flash_mtp"
-                    if self.num_speculative_tokens > 1:
-                        logger.warning(
-                            "LongCat MTP models only have "
-                            "one layer. Might need some code changes "
-                            "to support multiple layers."
                         )
                 elif self.method == "draft_model":
                     pass
@@ -971,35 +1054,6 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        aux_hidden_states_supported = [
-            "llama",
-            "qwen",
-            "minicpm",
-            "gpt_oss",
-            "hunyuan_vl",
-            "hunyuan_v1_dense",
-            "afmoe",
-            "nemotron_h",
-            "deepseek_v2",
-            "deepseek_v3",
-            "kimi_k2",
-            "kimi_k25",
-            "minimax_m2",
-            "gemma4",
-            "laguna",
-        ]
-        if (
-            self.method in ("eagle3", "extract_hidden_states", "dflash")
-            and self.target_model_config
-            and not any(
-                supported_model in self.target_model_config.hf_text_config.model_type
-                for supported_model in aux_hidden_states_supported
-            )
-        ):
-            raise ValueError(
-                f"{self.method} is only supported for {aux_hidden_states_supported}"
-                f" models. Got {self.target_model_config.hf_text_config.model_type=}"
-            )
         self.verify_equal_vocab_size_if_draft_model()
         return self
 
@@ -1044,11 +1098,22 @@ class SpeculativeConfig:
             == "gemma4_mtp"
         )
 
+    def use_step3p5_mtp(self) -> bool:
+        return (
+            self.method == "mtp"
+            and self.draft_model_config is not None
+            and getattr(self.draft_model_config.hf_config, "model_type", None)
+            == "step3p5_mtp"
+        )
+
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp", "dflash")
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
+
+    def uses_dynamic_speculative_decoding(self) -> bool:
+        return self.num_speculative_tokens_per_batch_size is not None
 
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
@@ -1063,7 +1128,13 @@ class SpeculativeConfig:
         method = self.method
         model = (
             None
-            if method in ("ngram", "suffix", "extract_hidden_states")
+            if method
+            in (
+                "ngram",
+                "suffix",
+                "extract_hidden_states",
+                "custom_class",
+            )
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens

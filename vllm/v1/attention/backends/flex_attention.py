@@ -22,12 +22,17 @@ from torch.nn.attention.flex_attention import (
 )
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import is_quantized_kv_cache, is_torch_equal_or_newer
+from vllm.utils.torch_utils import (
+    async_tensor_h2d,
+    is_quantized_kv_cache,
+    is_torch_equal_or_newer,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -57,7 +62,7 @@ def _offsets_to_doc_ids_tensor(
     doc_ids = torch.repeat_interleave(
         torch.arange(len(counts), dtype=torch.int32), counts
     )
-    return doc_ids.to(device, non_blocking=True)
+    return async_tensor_h2d(doc_ids, device=device)
 
 
 def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
@@ -125,7 +130,15 @@ class FlexAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            return (1, 0, 3, 2, 4, 5)
+        return (0, 2, 1, 3, 4)
 
     @staticmethod
     def get_builder_cls() -> type["FlexAttentionMetadataBuilder"]:
@@ -769,8 +782,15 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.kv_cache_spec = kv_cache_spec
         supports_small_blocks = is_torch_equal_or_newer("2.9.0.dev0")
         self.direct_build: bool = supports_small_blocks
-        self.q_block_size: int = 16 if supports_small_blocks else 128
-        self.kv_block_size: int = self.block_size if supports_small_blocks else 128
+
+        self.q_block_size, self.kv_block_size = self._get_block_sizes(
+            vllm_config.attention_config,
+            supports_small_blocks,
+            self.block_size,
+        )
+
+        if self.direct_build and self.kv_block_size != self.block_size:
+            self.direct_build = False
 
         self.max_model_len = self.model_config.max_model_len
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
@@ -792,6 +812,46 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.persistent_physical_to_logical = None
         self.persistent_kv_indices = None
 
+        self.custom_logical_mask_mod: _mask_mod_signature | None = None
+        if self._uses_full_cudagraphs():
+            layers = get_layers_from_vllm_config(
+                vllm_config, Attention, self.layer_names
+            )
+            self.custom_logical_mask_mod = self._maybe_get_custom_mask_mod(layers)
+
+    @staticmethod
+    def _get_block_sizes(
+        attn_cfg,
+        supports_small_blocks: bool,
+        cache_block_size: int,
+    ) -> tuple[int, int]:
+        q_block_size = 16 if supports_small_blocks else 128
+        kv_block_size = cache_block_size if supports_small_blocks else 128
+
+        q_block_size = attn_cfg.flex_attn_q_block_size or q_block_size
+        if (q_block_size & (q_block_size - 1)) != 0 or (
+            attn_cfg.flex_attn_block_m is not None
+            and q_block_size % attn_cfg.flex_attn_block_m != 0
+        ):
+            raise ValueError(
+                f"flex_attn_q_block_size must be a power of 2 "
+                f"and divisible by flex_attn_block_m, got "
+                f"{q_block_size}, {attn_cfg.flex_attn_block_m}"
+            )
+
+        kv_block_size = attn_cfg.flex_attn_kv_block_size or kv_block_size
+        if (kv_block_size & (kv_block_size - 1)) != 0 or (
+            attn_cfg.flex_attn_block_n is not None
+            and kv_block_size % attn_cfg.flex_attn_block_n != 0
+        ):
+            raise ValueError(
+                f"flex_attn_kv_block_size must be a power of 2 "
+                f"and divisible by flex_attn_block_n, got "
+                f"{kv_block_size}, {attn_cfg.flex_attn_block_n}"
+            )
+
+        return q_block_size, kv_block_size
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> FlexAttentionMetadata:
@@ -804,6 +864,21 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         return self.build(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
+
+    def _maybe_get_custom_mask_mod(self, layers) -> _mask_mod_signature | None:
+        mask_mods = {
+            getattr(layer, "logical_mask_mod", None) for layer in layers.values()
+        }
+        if len(mask_mods) > 1:
+            raise ValueError(
+                f"Found differing mask mods {mask_mods}, "
+                "cannot use alternating mask mods w/ full CUDA graphs"
+            )
+        return next(iter(mask_mods), None)
+
+    def _uses_full_cudagraphs(self) -> bool:
+        mode = self.vllm_config.compilation_config.cudagraph_mode
+        return mode is not None and mode.has_full_cudagraphs()
 
     def build(
         self,
@@ -876,9 +951,16 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             else causal_mask_mod
         )
 
+        sliding_window = None
+        if self._uses_full_cudagraphs():
+            if self.custom_logical_mask_mod is not None:
+                logical_mask_mod = self.custom_logical_mask_mod
+            sliding_window = getattr(self.kv_cache_spec, "sliding_window", None)
+
         out = FlexAttentionMetadata(
             causal=common_attn_metadata.causal,
             logical_mask_mod=logical_mask_mod,
+            sliding_window=sliding_window,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -909,6 +991,7 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             persistent_kv_indices=self.persistent_kv_indices,
             persistent_kv_num_blocks=self.persistent_kv_num_blocks,
             persistent_doc_ids=self.persistent_doc_ids,
+            mm_prefix_range=common_attn_metadata.mm_req_doc_ranges,
         )
 
         # Pre-build block_mask so it is ready before CUDA graph capture.
@@ -946,6 +1029,8 @@ class FlexAttentionImpl(AttentionImpl):
         logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
+        block_m: int | None = None,
+        block_n: int | None = None,
         **kwargs,
     ) -> None:
         self.num_heads = num_heads
@@ -986,6 +1071,14 @@ class FlexAttentionImpl(AttentionImpl):
                 "FlexAttention does not support quantized kv-cache. Yet"
             )
 
+        self.block_m = 16 if envs.VLLM_BATCH_INVARIANT else None
+        self.block_n = 16 if envs.VLLM_BATCH_INVARIANT else None
+
+        if block_m is not None:
+            self.block_m = block_m
+        if block_n is not None:
+            self.block_n = block_n
+
     @staticmethod
     def view_as_4d(tensor: torch.Tensor) -> torch.Tensor:
         """View a 3d tensor as 4D."""
@@ -1005,7 +1098,7 @@ class FlexAttentionImpl(AttentionImpl):
         if self.attn_type == AttentionType.ENCODER_ONLY:
             return
 
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = kv_cache.unbind(1)
         torch.ops._C_cache_ops.reshape_and_cache_flash(
             key,
             value,
@@ -1036,7 +1129,7 @@ class FlexAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -1110,9 +1203,9 @@ class FlexAttentionImpl(AttentionImpl):
 
         else:
             assert self.attn_type == AttentionType.DECODER
-            key_cache, value_cache = kv_cache.unbind(0)
+            key_cache, value_cache = kv_cache.unbind(1)
 
-            # View out the block_size dim
+            # Flatten (num_blocks, block_size) into a single token dim
             key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)
             value_cache = value_cache.view(-1, self.num_kv_heads, self.head_size)
             query, key_tensor, value_tensor = map(
@@ -1131,6 +1224,13 @@ class FlexAttentionImpl(AttentionImpl):
         kernel_options = get_kernel_options(
             query, block_m, block_n, attn_metadata.direct_build
         )
+
+        if self.block_m is not None:
+            kernel_options["BLOCK_M"] = self.block_m
+        if self.block_n is not None:
+            kernel_options["BLOCK_N"] = self.block_n
+        if envs.VLLM_BATCH_INVARIANT:
+            kernel_options["IS_DIVISIBLE"] = False
         out = flex_attention_compiled(
             query,
             key_tensor,
@@ -1170,11 +1270,6 @@ def get_kernel_options(
             return block_size
         return candidate
 
-    if envs.VLLM_BATCH_INVARIANT:
-        kernel_options["BLOCK_M"] = 16
-        kernel_options["BLOCK_N"] = 16
-        kernel_options["IS_DIVISIBLE"] = False
-        return kernel_options
     if use_direct_build:
         kernel_options["BLOCK_M"] = block_m
         kernel_options["BLOCK_N"] = block_n

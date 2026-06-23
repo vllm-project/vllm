@@ -9,12 +9,12 @@ import torch
 
 from vllm.config import AttentionConfig, ModelConfig, VllmConfig
 from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backends.mla.prefill.base import MLADimensions
 from vllm.v1.attention.backends.mla.prefill.registry import MLAPrefillBackendEnum
 from vllm.v1.attention.backends.mla.prefill.selector import (
     MLAPrefillSelectorConfig,
     _auto_select_mla_prefill_backend,
     get_mla_prefill_backend,
-    is_deepseek_r1_mla_compatible,
 )
 
 
@@ -149,11 +149,14 @@ class TestAutoSelectMLAPrefillBackend:
     """Tests for fallback and error paths in auto-selection."""
 
     def test_blackwell_falls_back_to_trtllm(self):
-        vllm_config = _make_vllm_config()
         capability = DeviceCapability(major=10, minor=0)
         selector_config = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
-            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
+            mla_dimensions=MLADimensions(
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+            ),
         )
 
         try:
@@ -177,11 +180,14 @@ class TestAutoSelectMLAPrefillBackend:
             assert backend.get_name() == "TRTLLM_RAGGED"
 
     def test_all_fail_raises_error(self):
-        vllm_config = _make_vllm_config()
         capability = DeviceCapability(major=10, minor=0)
         selector_config = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
-            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
+            mla_dimensions=MLADimensions(
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+            ),
         )
 
         def mock_get_class(backend_enum):  # noqa: ARG001
@@ -201,28 +207,26 @@ class TestAutoSelectMLAPrefillBackend:
 class TestBackendValidation:
     """Tests for backend validation logic."""
 
-    def test_r1_dimension_requirement(self):
+    def test_backend_supported_dimension_validation(self):
         try:
             from vllm.v1.attention.backends.mla.prefill.flashinfer import (
                 FlashInferPrefillBackend,
             )
+            from vllm.v1.attention.backends.mla.prefill.trtllm_ragged import (
+                TrtllmRaggedPrefillBackend,
+            )
         except ImportError:
-            pytest.skip("FlashInfer prefill backend not available")
+            pytest.skip("MLA prefill backend not available")
             return
 
-        assert FlashInferPrefillBackend.requires_r1_mla_dimensions is True
-
-        vllm_config = _make_vllm_config(
-            model_config=_make_mock_model_config(
-                qk_nope_head_dim=128,
-                qk_rope_head_dim=64,
-                v_head_dim=128,
-            )
-        )
         capability = DeviceCapability(major=10, minor=0)
         selector_config = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
-            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config),
+            mla_dimensions=MLADimensions(
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+            ),
         )
 
         with patch.object(FlashInferPrefillBackend, "is_available", return_value=True):
@@ -232,16 +236,13 @@ class TestBackendValidation:
             )
             assert len(invalid_reasons) == 0
 
-        vllm_config_invalid = _make_vllm_config(
-            model_config=_make_mock_model_config(
+        selector_config_invalid = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=MLADimensions(
                 qk_nope_head_dim=64,
                 qk_rope_head_dim=64,
                 v_head_dim=128,
-            )
-        )
-        selector_config_invalid = MLAPrefillSelectorConfig(
-            dtype=torch.bfloat16,
-            is_r1_compatible=is_deepseek_r1_mla_compatible(vllm_config_invalid),
+            ),
         )
 
         with patch.object(FlashInferPrefillBackend, "is_available", return_value=True):
@@ -250,7 +251,25 @@ class TestBackendValidation:
                 selector_config_invalid,
             )
             assert len(invalid_reasons) == 1
-            assert "DeepSeek R1 MLA dimensions" in invalid_reasons[0]
+            assert "supported MLA dimensions" in invalid_reasons[0]
+
+        selector_config_glm5 = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=MLADimensions(
+                qk_nope_head_dim=192,
+                qk_rope_head_dim=64,
+                v_head_dim=256,
+            ),
+        )
+
+        with patch.object(
+            TrtllmRaggedPrefillBackend, "is_available", return_value=True
+        ):
+            invalid_reasons = TrtllmRaggedPrefillBackend.validate_configuration(
+                capability,
+                selector_config_glm5,
+            )
+            assert invalid_reasons == []
 
 
 class TestMLAPrefillBackendParsing:
@@ -269,36 +288,21 @@ class TestMLAPrefillBackendParsing:
             )
 
 
-class TestDeprecatedFlagMigration:
-    """Tests for _migrate_deprecated_mla_prefill_flags in AttentionConfig."""
+class TestMLAPrefillBackendConfig:
+    """Tests for mla_prefill_backend configuration in AttentionConfig."""
 
-    def test_no_deprecated_flags_leaves_backend_none(self):
+    def test_default_backend_is_none(self):
         config = AttentionConfig()
         assert config.mla_prefill_backend is None
 
-    def test_use_trtllm_ragged_migrates_to_trtllm_ragged(self):
-        config = AttentionConfig(use_trtllm_ragged_deepseek_prefill=True)
-        assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED
-
-    def test_disable_flashinfer_prefill_migrates_to_flash_attn(self):
-        config = AttentionConfig(disable_flashinfer_prefill=True)
-        assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
-
-    def test_explicit_backend_ignores_deprecated_flags(self):
+    def test_explicit_flash_attn_backend(self):
         config = AttentionConfig(
             mla_prefill_backend=MLAPrefillBackendEnum.FLASH_ATTN,
-            use_cudnn_prefill=True,
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.FLASH_ATTN
 
-    def test_cudnn_raises_error(self):
-        match = "cuDNN MLA prefill backend has been removed"
-        with pytest.raises(ValueError, match=match):
-            AttentionConfig(use_cudnn_prefill=True)
-
-    def test_trtllm_takes_priority_over_disable_flashinfer(self):
+    def test_explicit_trtllm_ragged_backend(self):
         config = AttentionConfig(
-            use_trtllm_ragged_deepseek_prefill=True,
-            disable_flashinfer_prefill=True,
+            mla_prefill_backend=MLAPrefillBackendEnum.TRTLLM_RAGGED,
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED

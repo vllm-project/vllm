@@ -123,7 +123,7 @@ def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms."
 )
-def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm, monkeypatch):
+def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm):
     """Test CUDA backend selection when FlashInfer TRTLLM is available and enabled."""
     with (
         patch.object(current_platform, "is_cuda", return_value=True),
@@ -134,9 +134,8 @@ def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm, monkeyp
         patch.object(current_platform, "is_out_of_tree", return_value=False),
         patch.object(current_platform, "has_device_capability", return_value=True),
     ):
-        monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
-
         moe_config = make_dummy_moe_config()
+        moe_config.moe_backend = "flashinfer_trtllm"
         # TRTLLM requires EP and does not support DP
         moe_config.moe_parallel_config.use_ep = True
         moe_config.moe_parallel_config.use_dp = False
@@ -158,7 +157,7 @@ def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm, monkeyp
     return_value=(False, None),
 )
 @patch(
-    "vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe.FlashInferExperts.is_supported_config",
+    "vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe.FlashInferExperts.is_supported_config",
     return_value=(True, None),
 )
 @pytest.mark.skipif(
@@ -168,7 +167,6 @@ def test_select_cuda_flashinfer_cutlass_backend(
     mock_has_flashinfer,
     mock_is_supported_trtllm,
     mock_is_supported_cutlass,
-    monkeypatch,
 ):
     """Test CUDA backend selection when FlashInfer TRTLLM is not available
     and FlashInfer CUTLASS is available."""
@@ -181,10 +179,9 @@ def test_select_cuda_flashinfer_cutlass_backend(
         patch.object(current_platform, "is_out_of_tree", return_value=False),
         patch.object(current_platform, "has_device_capability", return_value=True),
     ):
-        # Enable FlashInfer via env var
-        monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
-
         moe_config = make_dummy_moe_config()
+        # Select FlashInfer CUTLASS explicitly
+        moe_config.moe_backend = "flashinfer_cutlass"
         # CUTLASS requires EP and does not support DP
         moe_config.moe_parallel_config.use_ep = True
         moe_config.moe_parallel_config.use_dp = False
@@ -235,40 +232,6 @@ def test_select_explicit_triton_backend(is_lora_enabled):
     moe_config.is_lora_enabled = is_lora_enabled
     moe_config.moe_backend = "triton"
 
-    selected_backend, experts_cls = select_unquantized_moe_backend(
-        moe_config=moe_config
-    )
-
-    assert selected_backend == UnquantizedMoeBackend.TRITON
-    assert experts_cls is not None
-
-
-@skipif_not_cuda_rocm
-def test_select_explicit_triton_ignores_flashinfer_env(monkeypatch):
-    """Explicit triton backend should override FlashInfer env selection."""
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
-    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
-
-    moe_config = make_dummy_moe_config()
-    moe_config.is_lora_enabled = False
-    moe_config.moe_backend = "triton"
-
-    selected_backend, experts_cls = select_unquantized_moe_backend(
-        moe_config=moe_config
-    )
-
-    assert selected_backend == UnquantizedMoeBackend.TRITON
-    assert experts_cls is not None
-
-
-@skipif_not_cuda_rocm
-def test_select_lora_ignores_flashinfer_env(monkeypatch):
-    """LoRA path should still choose Triton even if FlashInfer env is on."""
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
-    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "throughput")
-
-    moe_config = make_dummy_moe_config()
-    moe_config.is_lora_enabled = True
     selected_backend, experts_cls = select_unquantized_moe_backend(
         moe_config=moe_config
     )

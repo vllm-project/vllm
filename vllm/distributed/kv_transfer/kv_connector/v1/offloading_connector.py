@@ -52,11 +52,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: KVCacheConfig | None = None,
+        kv_cache_config: KVCacheConfig,
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
-        assert kv_cache_config is not None
         spec = OffloadingSpecFactory.create_spec(vllm_config, kv_cache_config)
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
@@ -105,18 +104,29 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         pass
 
     def wait_for_save(self):
-        assert self.connector_worker is not None
-        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
-        self.connector_worker.prepare_store_kv(self._connector_metadata)
+        # Store deferral is handled in get_finished(), which always runs even
+        # when wait_for_save() is skipped (e.g. kv_connector_no_forward).
+        pass
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         assert self.connector_worker is not None
+        assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
+
+        # Defer store jobs to the next step's start_kv_transfers. Done here
+        # (rather than wait_for_save) so stores are queued even on steps where
+        # wait_for_save is skipped.
+        self.connector_worker.prepare_store_kv(self._connector_metadata)
+
         return self.connector_worker.get_finished(finished_req_ids)
 
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         if self.connector_worker is not None:
             return self.connector_worker.build_connector_worker_meta()
         return None
+
+    def on_new_request(self, request: "Request") -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.on_new_request(request)
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -139,6 +149,10 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
+
+    def has_pending_push_work(self) -> bool:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.has_pending_push_work()
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         assert self.connector_scheduler is not None
@@ -164,10 +178,19 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.take_events()
 
+    @classmethod
+    def get_required_kvcache_layout(cls, vllm_config: VllmConfig) -> str | None:
+        return "HND"
+
+    def reset_cache(self) -> bool | None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.reset_cache()
+        return True
+
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_worker is None:
-            return None  # We only emit stats from the worker-side
-        return self.connector_worker.get_kv_connector_stats()
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_stats()
+        return None
 
     @classmethod
     def build_kv_connector_stats(

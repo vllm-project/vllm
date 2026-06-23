@@ -18,12 +18,16 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
+from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
     set_custom_all_reduce,
 )
-from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
+from vllm.distributed.ec_transfer import (
+    ensure_ec_transfer_initialized,
+    ensure_ec_transfer_shutdown,
+)
 from vllm.distributed.eplb.eplb_utils import override_envs_for_eplb
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
@@ -31,12 +35,18 @@ from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
+)
 from vllm.distributed.parallel_state import (
     Handle,
     get_pp_group,
     get_tp_group,
 )
-from vllm.distributed.weight_transfer import WeightTransferEngineFactory
+from vllm.distributed.weight_transfer import (
+    WeightTransferEngine,
+    WeightTransferEngineFactory,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
@@ -45,6 +55,7 @@ from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
@@ -131,15 +142,9 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
-        # Weight transfer engine (initialized on-demand)
-        self.weight_transfer_engine = (
-            WeightTransferEngineFactory.create_engine(
-                self.vllm_config.weight_transfer_config,
-                self.vllm_config.parallel_config,
-            )
-            if self.vllm_config.weight_transfer_config is not None
-            else None
-        )
+        # Weight transfer engine is created in `load_model` once the model
+        # is available, since the engine needs a reference to the model.
+        self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
         self._is_checkpoint_format = True
 
@@ -153,13 +158,11 @@ class Worker(WorkerBase):
         if self.profiler_config.profiler not in ("torch", "cuda", None):
             raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
 
-        self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
     def sleep(self, level: int = 1) -> None:
-        from vllm.device_allocator.cumem import CuMemAllocator
-
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
         # Save the buffers before level 2 sleep
@@ -169,7 +172,7 @@ class Worker(WorkerBase):
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
 
-        allocator = CuMemAllocator.get_instance()
+        allocator = get_mem_allocator_instance()
         allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
@@ -182,9 +185,7 @@ class Worker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        from vllm.device_allocator.cumem import CuMemAllocator
-
-        allocator = CuMemAllocator.get_instance()
+        allocator = get_mem_allocator_instance()
         allocator.wake_up(tags)
 
         # Restore the buffers after level 2 sleep
@@ -199,15 +200,25 @@ class Worker(WorkerBase):
             self.model_runner.post_kv_cache_wake_up()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
-        if not self.vllm_config.model_config.enable_sleep_mode:
+        if (
+            current_platform.is_cuda_alike()
+            and not self.vllm_config.model_config.enable_cumem_allocator
+        ):
             return nullcontext()
 
-        from vllm.device_allocator.cumem import CuMemAllocator
+        if (
+            current_platform.is_xpu()
+            and not self.vllm_config.model_config.enable_sleep_mode
+        ):
+            return nullcontext()
 
-        allocator = CuMemAllocator.get_instance()
+        if current_platform.is_cpu():
+            return nullcontext()
+
+        allocator = get_mem_allocator_instance()
         if tag == "weights":
             assert allocator.get_current_usage() == 0, (
-                "Sleep mode can only be used for one instance per process."
+                "CuMem allocator can only be used for one instance per process."
             )
         return allocator.use_memory_pool(tag=tag)
 
@@ -259,19 +270,47 @@ class Worker(WorkerBase):
 
                 # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
                 self.local_rank += dp_local_rank * tp_pp_world_size
+
+            # Publish the logical-to-physical mapping for topology queries
+            # such as NIC affinity and P2P checks.
+            assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
+            if assigned_physical_gpu_ids is not None:
+                from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+                set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+                assert self.local_rank < len(assigned_physical_gpu_ids), (
+                    f"local_rank {self.local_rank} is out of bounds for "
+                    f"assigned_physical_gpu_ids {assigned_physical_gpu_ids}"
+                )
+                # NOTE(patch pr45026): local_world_size is derived from
+                # parallel_config.nnodes, which is only set for the "mp"
+                # multi-node backend. With the "ray"/"external_launcher"
+                # backends nnodes stays 1, so local_world_size collapses to
+                # the full world_size and this check wrongly fires on
+                # cross-node deployments. assigned_physical_gpu_ids is already
+                # per-node and the local_rank bound above fully validates the
+                # mapping for these backends, so skip the check for them.
+                if parallel_config.distributed_executor_backend not in (
+                    "ray",
+                    "external_launcher",
+                ):
+                    assert self.parallel_config.local_world_size <= len(
+                        assigned_physical_gpu_ids
+                    ), (
+                        f"local_world_size ({self.parallel_config.local_world_size})"
+                        " exceeds assigned_physical_gpu_ids count "
+                        f"({len(assigned_physical_gpu_ids)})"
+                    )
+            else:
                 assert self.local_rank < torch.accelerator.device_count(), (
-                    f"DP adjusted local rank {self.local_rank} is out of bounds. "
-                )
-                visible_device_count = (
-                    torch.accelerator.device_count() if torch.cuda.is_available() else 0
-                )
-                assert self.parallel_config.local_world_size <= visible_device_count, (
-                    f"local_world_size ({self.parallel_config.local_world_size}) must "
-                    f"be less than or equal to the number of visible devices "
-                    f"({visible_device_count})."
+                    f"DP adjusted local rank {self.local_rank} is out of "
+                    f"bounds for {torch.accelerator.device_count()} devices."
                 )
 
-            self.device = torch.device(f"cuda:{self.local_rank}")
+            visible_device_index = (
+                current_platform.logical_device_id_to_visible_device_id(self.local_rank)
+            )
+            self.device = torch.device(f"cuda:{visible_device_index}")
             torch.accelerator.set_device_index(self.device)
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
@@ -343,6 +382,13 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+
+        if self.vllm_config.weight_transfer_config is not None:
+            self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+                self.vllm_config.weight_transfer_config,
+                self.vllm_config.parallel_config,
+                self.model_runner.get_model(),
+            )
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
@@ -505,8 +551,13 @@ class Worker(WorkerBase):
 
         return int(self.available_kv_cache_memory_bytes)
 
-    def get_kv_connector_handshake_metadata(self) -> dict | None:
-        """Get KV connector metadata from this worker if available."""
+    def get_kv_connector_handshake_metadata(
+        self,
+    ) -> dict[tuple[int, int], KVConnectorHandshakeMetadata] | None:
+        """Get KV connector metadata from this worker if available.
+
+        Returned dict is keyed by `(pp_rank, tp_rank)`.
+        """
 
         if not has_kv_transfer_group():
             return None
@@ -517,8 +568,9 @@ class Worker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
 
+        pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
-        return {tp_rank: metadata}
+        return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
@@ -550,13 +602,7 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
-        if self.vllm_config.model_config.enable_sleep_mode:
-            from vllm.device_allocator.cumem import CuMemAllocator
-
-            allocator = CuMemAllocator.get_instance()
-            with allocator.use_memory_pool(tag="kv_cache"):
-                self.model_runner.initialize_kv_cache(kv_cache_config)
-        else:
+        with self._maybe_get_memory_pool_context(tag="kv_cache"):
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
         if self.model_config.enable_return_routed_experts:
@@ -719,7 +765,14 @@ class Worker(WorkerBase):
             activate as activate_triton_jit_monitor,
         )
 
-        activate_triton_jit_monitor()
+        activate_triton_jit_monitor(
+            verbose=self.observability_config.jit_monitor_verbose
+        )
+
+        # Freeze the worker heap so the GC won't scan static objects
+        # (model weights, KV caches, CUDA graphs) during inference.
+        freeze_gc_heap()
+        maybe_attach_gc_debug_callback()
 
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
@@ -991,23 +1044,19 @@ class Worker(WorkerBase):
 
     def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
         """
-        Start a new weight update.
-
-        Prepares the model for receiving weights. For checkpoint format,
-        this initializes state for layerwise processing. For kernel format, this is
-        a no-op but must still be called for consistency.
+        Start a new weight update session.
 
         Args:
             is_checkpoint_format: Whether incoming weights are in checkpoint
                 format (need layerwise processing) or kernel format (direct
-                copy). Stored as state for finish_weight_update.
+                copy / sparse patch application).
         """
         self._check_weight_transfer_engine()
 
         if self._weight_update_active:
             raise RuntimeError(
-                "start_weight_update called while a weight update is "
-                "already active. Call finish_weight_update first."
+                "start_weight_update called while a weight update is already "
+                "active. Call finish_weight_update first."
             )
 
         if is_checkpoint_format:
@@ -1019,16 +1068,15 @@ class Worker(WorkerBase):
             with torch.device(self.device):
                 initialize_layerwise_reload(model)
 
-        # Store state so update_weights/finish_weight_update can check
         self._is_checkpoint_format = is_checkpoint_format
         self._weight_update_active = True
 
     def update_weights(self, update_info: dict) -> None:
         """
-        Receive weights from the trainer (one or more chunks).
+        Receive one weight update chunk from the trainer.
 
         start_weight_update must be called before update_weights and
-        finish_weight_update must be called after.
+        finish_weight_update must be called after all chunks have been sent.
 
         Args:
             update_info: Dictionary containing backend-specific update info
@@ -1041,52 +1089,72 @@ class Worker(WorkerBase):
                 "start_weight_update must be called before update_weights."
             )
 
-        # Parse dict into backend-specific typed dataclass
-        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
+        update_succeeded = False
+        try:
+            # Parse dict into backend-specific typed dataclass
+            typed_update_info = self.weight_transfer_engine.parse_update_info(
+                update_info
+            )
 
-        model = self.model_runner.model
+            with torch.device(self.device):
+                if self._is_checkpoint_format:
+                    if typed_update_info.update_kind != "dense":
+                        raise ValueError(
+                            "Sparse weight updates require "
+                            "`start_weight_update(is_checkpoint_format=False)`."
+                        )
 
-        with torch.device(self.device):
-            if self._is_checkpoint_format:
-                self.weight_transfer_engine.receive_weights(
-                    typed_update_info,
-                    load_weights=model.load_weights,
-                )
-            else:
-                # Weights are already in kernel format, copy directly
-                def load_weights_direct(
-                    weights: list[tuple[str, torch.Tensor]],
-                ) -> None:
-                    for name, weight in weights:
-                        param = model.get_parameter(name)
-                        param.copy_(weight)
+                    model = self.model_runner.model
 
-                self.weight_transfer_engine.receive_weights(
-                    typed_update_info,
-                    load_weights=load_weights_direct,
-                )
+                    # Use layerwise reload pattern for checkpoint format weights
+                    self.weight_transfer_engine.receive_weights(
+                        typed_update_info,
+                        load_weights=model.load_weights,
+                    )
+                elif typed_update_info.update_kind == "sparse_flat":
+                    if self.parallel_config.world_size != 1:
+                        raise NotImplementedError(
+                            "Sparse weight updates currently require TP=1 and PP=1"
+                        )
+                    self.weight_transfer_engine.receive_sparse_weights(
+                        typed_update_info,
+                        apply_patches=self.model_runner.apply_sparse_weight_patches,
+                    )
+                else:
+                    model = self.model_runner.model
 
-        # NCCL broadcast/packed path are asynchronous.
-        # Sync here so the next step uses the new weights.
-        torch.accelerator.synchronize()
+                    # Weights are already in kernel format, copy directly.
+                    def load_weights_direct(
+                        weights: list[tuple[str, torch.Tensor]],
+                    ) -> None:
+                        for name, weight in weights:
+                            param = model.get_parameter(name)
+                            param.copy_(weight)
+
+                    self.weight_transfer_engine.receive_weights(
+                        typed_update_info,
+                        load_weights=load_weights_direct,
+                    )
+
+            # NCCL broadcast/packed path are asynchronous.
+            # Sync here so the next step uses the new weights.
+            torch.accelerator.synchronize()
+            update_succeeded = True
+        finally:
+            if not update_succeeded:
+                self._weight_update_active = False
+                self._is_checkpoint_format = True
 
     def finish_weight_update(self) -> None:
-        """
-        Finish the current weight update.
-
-        For checkpoint format, this runs layerwise postprocessing.
-        Uses the is_checkpoint_format state stored by start_weight_update.
-        """
+        """Finish the current weight update session."""
         self._check_weight_transfer_engine()
 
         if not self._weight_update_active:
             raise RuntimeError(
-                "start_weight_update must be called before finish_weight_update."
+                "finish_weight_update called without a matching start_weight_update."
             )
 
-        is_checkpoint_format = self._is_checkpoint_format
-
-        if is_checkpoint_format:
+        if self._is_checkpoint_format:
             from vllm.model_executor.model_loader.reload import (
                 finalize_layerwise_reload,
             )
@@ -1095,14 +1163,17 @@ class Worker(WorkerBase):
             with torch.device(self.device):
                 finalize_layerwise_reload(model, self.model_config)
 
-        # Reset state
         self._weight_update_active = False
         self._is_checkpoint_format = True
 
     def shutdown(self) -> None:
+        gc.unfreeze()
+
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
+        if ensure_ec_transfer_shutdown is not None:
+            ensure_ec_transfer_shutdown()
         if self.profiler is not None:
             self.profiler.shutdown()
 
@@ -1130,7 +1201,10 @@ def init_worker_distributed_environment(
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
     init_batch_invariance()
-    override_envs_for_eplb(parallel_config)
+    override_envs_for_eplb(
+        parallel_config,
+        moe_backend=getattr(vllm_config.kernel_config, "moe_backend", None),
+    )
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_method = distributed_init_method or "env://"

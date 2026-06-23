@@ -13,6 +13,17 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
+from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
+    deepseek_v4_mhc_warmup,
+)
+from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    resolve_flashinfer_autotune_file,
+    write_flashinfer_autotune_cache,
+)
+from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
+    deepseek_v4_sparse_mla_attention_warmup,
+    flashinfer_sparse_mla_decode_autotune_warmup,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -25,6 +36,25 @@ logger = init_logger(__name__)
 
 
 def kernel_warmup(worker: "Worker"):
+    from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
+        minimax_m3_msa_warmup,
+    )
+
+    # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
+    # layer per token; warm them across token sizes first so the first real
+    # request doesn't pay JIT cost. No-op for non-DSv4 models (gated inside).
+    deepseek_v4_mhc_warmup(
+        worker.get_model(),
+        max_tokens=worker.scheduler_config.max_num_batched_tokens,
+        cudagraph_capture_sizes=(
+            worker.vllm_config.compilation_config.cudagraph_capture_sizes or []
+        ),
+    )
+
+    # Run next so input-prep kernels JIT against pristine runner state.
+    flashinfer_sparse_mla_decode_autotune_warmup(worker)
+    deepseek_v4_sparse_mla_attention_warmup(worker)
+
     # Deep GEMM warmup
     do_deep_gemm_warmup = (
         envs.VLLM_USE_DEEP_GEMM
@@ -35,6 +65,8 @@ def kernel_warmup(worker: "Worker"):
         model = worker.get_model()
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
+
+    minimax_m3_msa_warmup(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
@@ -78,6 +110,12 @@ def kernel_warmup(worker: "Worker"):
         )
 
 
+# TODO: remove once FlashInfer upstream fixes the persistent file cache
+# to resolve collisions like `use_8x4_sf_layout=True/False`, which causes
+# invalid tactics to be chosen
+_FLASHINFER_USE_PERSISTENT_CACHE = False
+
+
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """
     Autotune FlashInfer operations.
@@ -87,23 +125,69 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     future calls to FlashInfer will use the best implementation.
     Without autotuning, FlashInfer will rely on heuristics, which may
     be significantly slower.
+
+    Tuning is performed only on rank 0. The resulting cache is broadcast
+    to every rank so all ranks dispatch the same kernel tactic.
     """
     import vllm.utils.flashinfer as fi_utils
+    from vllm.distributed.parallel_state import get_world_group
 
-    with torch.inference_mode(), fi_utils.autotune():
-        # Certain FlashInfer kernels (e.g. nvfp4 routed moe) are
-        # incompatible with autotuning. This state is used to skip
-        # those kernels during the autotuning process.
-        fi_utils._is_fi_autotuning = True
+    if not _FLASHINFER_USE_PERSISTENT_CACHE:
+        with torch.inference_mode(), fi_utils.autotune():
+            runner._dummy_run(
+                num_tokens=runner.scheduler_config.max_num_batched_tokens,
+                skip_eplb=True,
+                is_profile=True,
+            )
+        get_world_group().barrier()
+        return
 
-        # We skip EPLB here since we don't want to record dummy metrics
-        # When autotuning with number of tokens m, flashinfer will autotune
-        # operations for all number of tokens up to m.
-        # So we only need to run with the max number of tokens.
-        runner._dummy_run(
-            runner.scheduler_config.max_num_batched_tokens,
-            skip_eplb=True,
-            is_profile=True,
+    world = get_world_group()
+    is_leader = world.rank_in_group == 0
+
+    cache_path = resolve_flashinfer_autotune_file(runner)
+    if is_leader:
+        logger.info("Using FlashInfer autotune cache file: %s", cache_path)
+
+    # We skip EPLB here since we don't want to record dummy metrics.
+    # When autotuning with number of tokens m, flashinfer will autotune
+    # operations for all number of tokens up to m, so we only need to
+    # run with the max number of tokens.
+    dummy_run_kwargs = dict(
+        num_tokens=runner.scheduler_config.max_num_batched_tokens,
+        skip_eplb=True,
+        is_profile=True,
+    )
+
+    with torch.inference_mode():
+        if is_leader:
+            with fi_utils.autotune(tune_mode=True, cache=str(cache_path)):
+                runner._dummy_run(**dummy_run_kwargs)
+        else:
+            runner._dummy_run(**dummy_run_kwargs)
+
+    # Broadcast autotune cache from rank 0 to all other ranks so every
+    # rank loads the same set of chosen tactics.
+    tune_results: bytes | None = None
+    if is_leader and cache_path.exists():
+        with open(cache_path, "rb") as f:
+            tune_results = f.read()
+
+    tune_results = world.broadcast_object(tune_results, src=0)
+
+    if tune_results is None:
+        logger.warning(
+            "No FlashInfer autotune cache entries found."
+            "Falling back to default tactics."
         )
+    else:
+        write_flashinfer_autotune_cache(cache_path, tune_results)
+        world.barrier()
+        from flashinfer.autotuner import AutoTuner
 
-        fi_utils._is_fi_autotuning = False
+        AutoTuner.get().load_configs(str(cache_path))
+        logger.info(
+            "FlashInfer autotune cache loaded on rank %d from %s.",
+            world.rank_in_group,
+            cache_path,
+        )

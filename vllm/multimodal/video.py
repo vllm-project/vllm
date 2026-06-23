@@ -7,6 +7,7 @@ from typing import Any, ClassVar, Literal, NamedTuple, cast
 
 import numpy as np
 import numpy.typing as npt
+import torch
 
 from vllm.logger import init_logger
 from vllm.utils.import_utils import PlaceholderModule
@@ -26,6 +27,60 @@ except ImportError:
 
 
 logger = init_logger(__name__)
+
+
+class VideoLoaderRegistry(ExtensionManager):
+    def __init__(self) -> None:
+        super().__init__()
+        self.processor2backend: dict[str, str] = {}
+
+    @staticmethod
+    def _normalize_registered_video_processors(
+        video_processor: str | tuple[str, ...] | None,
+    ) -> tuple[str, ...]:
+        if video_processor is None:
+            return ()
+
+        if isinstance(video_processor, str):
+            return (video_processor,)
+
+        if all(isinstance(processor, str) for processor in video_processor):
+            return video_processor
+
+        raise TypeError(
+            "video_processor must be a class name or a tuple of class names"
+        )
+
+    def register(
+        self,
+        name: str,
+        *,
+        video_processor: str | tuple[str, ...] | None = None,
+    ):
+        processors = self._normalize_registered_video_processors(video_processor)
+
+        def wrap(cls_to_register):
+            self.name2class[name] = cls_to_register
+            for processor_name in processors:
+                self.processor2backend[processor_name] = name
+            return cls_to_register
+
+        return wrap
+
+    def get_backend_for_video_processor(
+        self,
+        video_processor: str | None,
+    ) -> str | None:
+        if video_processor is None:
+            return None
+
+        return self.processor2backend.get(video_processor)
+
+
+def get_video_loader_backend_for_processor(
+    video_processor: str | None,
+) -> str | None:
+    return VIDEO_LOADER_REGISTRY.get_backend_for_video_processor(video_processor)
 
 
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
@@ -113,7 +168,7 @@ class VideoLoader:
         }
 
 
-VIDEO_LOADER_REGISTRY = ExtensionManager()
+VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
 
 
 class OpenCVVideoBackendMixin:
@@ -390,7 +445,7 @@ class PyAVVideoBackendMixin:
         fps: float,
         duration: float,
     ) -> tuple[npt.NDArray, list[int]]:
-        """Decode target frames via per-frame seek + keyframe decode."""
+        """Decode target frames via per-frame seek + forward decode to PTS."""
         stream = container.streams.video[0]
         # SLICE parallelizes within a single frame without the
         # one-frame-per-thread latency penalty of FRAME threading.
@@ -402,14 +457,28 @@ class PyAVVideoBackendMixin:
         frame_interval = 1.0 / fps if fps > 0 else 0.1
         max_ts = max(0.0, duration - frame_interval) if duration > 0 else float("inf")
 
+        decoder = None
+        last_pts = None
         for idx in frame_indices:
             ts = min(idx / fps, max_ts) if fps > 0 else 0.0
             pts = int(ts / time_base)
-            container.seek(pts, stream=stream)
-            frame = next(container.decode(video=0), None)
-            if frame is not None:
-                frames_list.append(frame.to_ndarray(format="rgb24"))
+            # seek() snaps backward to a keyframe; reuse the running decoder
+            # while targets advance monotonically to avoid re-decoding the
+            # GOP prefix once per requested frame.
+            if decoder is None or last_pts is None or pts <= last_pts:
+                container.seek(pts, stream=stream)
+                decoder = container.decode(video=0)
+            chosen = None
+            for frame in decoder:
+                if frame.pts is not None and frame.pts >= pts:
+                    chosen = frame
+                    last_pts = frame.pts
+                    break
+            if chosen is not None:
+                frames_list.append(chosen.to_ndarray(format="rgb24"))
                 valid_indices.append(idx)
+            else:
+                decoder = None
 
         if not frames_list:
             return np.empty((0,), dtype=np.uint8), valid_indices
@@ -536,7 +605,138 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
         )
 
 
-@VIDEO_LOADER_REGISTRY.register("opencv_dynamic")
+@VIDEO_LOADER_REGISTRY.register(
+    "qwen3_vl",
+    video_processor="Qwen3VLVideoProcessor",
+)
+class Qwen3VLVideoBackend(VideoBackend):
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        total_frames_num = source.total_frames_num
+        original_fps = source.original_fps
+        fps = target.fps
+        max_frame_idx = source.total_frames_num - 1
+        min_frames = kwargs.get("min_frames", 4)
+        max_frames = kwargs.get("max_frames", 768)
+
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/models/qwen3_vl/video_processing_qwen3_vl.py#L119-L125
+        num_frames = int(total_frames_num / original_fps * fps)
+        num_frames = min(max(num_frames, min_frames), max_frames, total_frames_num)
+        indices = np.linspace(0, max_frame_idx, num_frames).round().astype(int).tolist()
+        return indices
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 2,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal["opencv", "pyav"] = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+
+
+@VIDEO_LOADER_REGISTRY.register(
+    "qwen2_vl",
+    video_processor="Qwen2VLVideoProcessor",
+)
+class Qwen2VLVideoBackend(VideoBackend):
+    """Qwen2-VL / Qwen2.5-VL fps-based video backend.
+
+    Ports transformers' ``Qwen2VLVideoProcessor.sample_frames`` (fps mode),
+    shared by Qwen2-VL and Qwen2.5-VL (the latter has no video processor of its
+    own): sample ``total / original_fps * fps`` frames, clamp to
+    ``[min_frames, max_frames]`` (4 and 768), floor to a multiple of
+    ``temporal_patch_size`` (2), and take indices with the exact
+    ``torch.arange(0, total, total / n)`` call so they match HF byte-for-byte.
+
+    ``num_frames`` is ignored (fps-driven, like the Qwen3-VL loader). The
+    float32 step can emit an out-of-range tail index (e.g. 451 for a 451-frame
+    clip); it is clamped to the last valid frame.
+    """
+
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v5.7.0/src/transformers/models/qwen2_vl/video_processing_qwen2_vl.py#L122-L190
+        total_frames_num = source.total_frames_num
+        original_fps = source.original_fps
+        temporal_patch_size = kwargs.get("temporal_patch_size", 2)
+        min_frames = kwargs.get("min_frames", 4)
+        max_frames = kwargs.get("max_frames", 768)
+
+        # vLLM reports original_fps == 0 for clips with unknown/variable fps
+        # (VFR, malformed, streaming); fail loudly instead of dividing by zero.
+        if original_fps <= 0:
+            raise ValueError(
+                "Qwen2-VL video sampling needs a known source fps, but the "
+                "container reported 0 (variable or unknown frame rate)."
+            )
+
+        max_frames = (
+            math.floor(min(max_frames, total_frames_num) / temporal_patch_size)
+            * temporal_patch_size
+        )
+        n = total_frames_num / original_fps * target.fps
+        n = min(max(n, min_frames), max_frames, total_frames_num)
+        n = math.floor(n / temporal_patch_size) * temporal_patch_size
+
+        # ``torch.arange`` matches transformers' float32 index math exactly
+        # (numpy's float64 diverges by a frame on some inputs); clamp the tail
+        # because that step can emit an index == total_frames_num.
+        indices = torch.arange(0, total_frames_num, total_frames_num / n).int()
+        return torch.clamp(indices, max=total_frames_num - 1).tolist()
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 2,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal["opencv", "pyav"] = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+
+
+@VIDEO_LOADER_REGISTRY.register(
+    "opencv_dynamic",
+    video_processor="Glm4vVideoProcessor",
+)
 class DynamicVideoBackend(VideoBackend):
     """Duration-aware dynamic-sampling video backend.
 
@@ -625,7 +825,240 @@ class DynamicVideoBackend(VideoBackend):
         )
 
 
-@VIDEO_LOADER_REGISTRY.register("molmo2")
+@VIDEO_LOADER_REGISTRY.register(
+    "glm46v",
+    video_processor="Glm46VVideoProcessor",
+)
+class GLM46VVideoBackend(VideoBackend):
+    """GLM-4.6V dynamic FPS video backend.
+
+    Faithfully replicates the frame sampling logic from transformers'
+    ``Glm46VVideoProcessor.sample_frames``:
+
+    - Dynamic FPS thresholds based on effective video duration:
+      ``{≤30s: 3fps, ≤300s: 1fps, >300s: 0.5fps}``
+    - ``temporal_patch_size`` multiplier (default 2) applied to extract count
+    - Duration capped at 2400s, frame count capped at 640
+    - Even frame count enforced (append last frame if odd)
+    """
+
+    # Match transformers defaults
+    _DYNAMIC_FPS_THRESHOLDS: ClassVar[dict[int, float]] = {
+        30: 3.0,
+        300: 1.0,
+        2400: 0.5,
+    }
+    _MAX_FRAME_COUNT_DYNAMIC: ClassVar[int] = 640
+    _MAX_DURATION: ClassVar[int] = 2400
+
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v5.9.0/src/transformers/models/glm46v/video_processing_glm46v.py#L97-L102
+        total_frames_num = source.total_frames_num
+        original_fps = source.original_fps
+        duration = source.duration
+        temporal_patch_size = kwargs.get("temporal_patch_size", 2)
+
+        max_frame_idx = total_frames_num - 1
+
+        # Estimate duration from frame count and fps when not reported
+        if not duration and original_fps > 0:
+            duration = round(max_frame_idx / original_fps) + 1
+
+        effective_duration = min(duration, cls._MAX_DURATION)
+
+        # Select target_fps from dynamic thresholds
+        if effective_duration <= 30:
+            target_fps = cls._DYNAMIC_FPS_THRESHOLDS[30]
+        elif effective_duration <= 300:
+            target_fps = cls._DYNAMIC_FPS_THRESHOLDS[300]
+        else:
+            target_fps = cls._DYNAMIC_FPS_THRESHOLDS[2400]
+
+        extract_t = int(effective_duration * target_fps * temporal_patch_size)
+        extract_t = min(extract_t, cls._MAX_FRAME_COUNT_DYNAMIC)
+
+        duration_per_frame = 1 / original_fps if original_fps > 0 else 0
+        timestamps = [i * duration_per_frame for i in range(total_frames_num)]
+        max_second = int(duration) if duration else 0
+
+        if total_frames_num < extract_t:
+            frame_indices = np.linspace(
+                0, total_frames_num - 1, extract_t, dtype=int
+            ).tolist()
+        else:
+            frame_indices = []
+            current_second = 0.0
+            inv_fps = 1 / (temporal_patch_size * target_fps)
+            for frame_index in range(total_frames_num):
+                if timestamps[frame_index] >= current_second:
+                    current_second += inv_fps
+                    frame_indices.append(frame_index)
+                    if current_second >= max_second:
+                        break
+
+        if len(frame_indices) < extract_t:
+            if len(frame_indices) == 0:
+                start, end = 0, max(total_frames_num - 1, 0)
+            else:
+                start, end = frame_indices[0], frame_indices[-1]
+            frame_indices = np.linspace(start, end, extract_t, dtype=int).tolist()
+        elif len(frame_indices) > extract_t:
+            frame_indices = np.linspace(
+                0, total_frames_num - 1, extract_t, dtype=int
+            ).tolist()
+
+        # Deduplicate
+        seen: set[int] = set()
+        uniq: list[int] = []
+        for idx in frame_indices:
+            if idx not in seen:
+                seen.add(idx)
+                uniq.append(idx)
+
+        # Ensure even frame count
+        if len(uniq) & 1:
+            uniq.append(uniq[-1])
+
+        return uniq
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = -1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal["opencv", "pyav"] = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+
+
+@VIDEO_LOADER_REGISTRY.register(
+    "glmga",
+    video_processor="GlmgaVideoProcessor",
+)
+class GLMGAVideoBackend(VideoBackend):
+    @classmethod
+    def _prepare_source(cls, source: VideoSourceMetadata) -> VideoSourceMetadata:
+        # Estimate duration from frame count and fps when the container
+        # does not report it (common for WebM/streaming inputs).
+        if source.duration:
+            return source
+        if source.original_fps > 0:
+            max_frame_idx = source.total_frames_num - 1
+            duration = round(max_frame_idx / source.original_fps) + 1
+        else:
+            duration = 0
+        return VideoSourceMetadata(
+            source.total_frames_num, source.original_fps, duration
+        )
+
+    @classmethod
+    def compute_frames_index_to_sample(
+        cls,
+        source: VideoSourceMetadata,
+        target: VideoTargetMetadata,
+        **kwargs,
+    ) -> list[int]:
+        total_frames_num = source.total_frames_num
+        duration = source.duration
+        original_fps = source.original_fps
+        target_fps = target.fps
+        max_frame_idx = source.total_frames_num - 1
+        max_frames = kwargs.get("max_frames", 640)
+
+        duration = duration or round(max_frame_idx / original_fps) + 1
+
+        extract_t = int(duration * target_fps)
+        extract_t = min(extract_t, max_frames)
+
+        duration_per_frame = 1 / original_fps
+        timestamps = [i * duration_per_frame for i in range(total_frames_num)]
+
+        if total_frames_num < extract_t:
+            frame_indices = [
+                math.floor(i * total_frames_num / extract_t) for i in range(extract_t)
+            ]
+        else:
+            frame_indices = []
+            current_second = 0.0
+            inv_fps = 1 / target_fps
+            for frame_index in range(total_frames_num):
+                if timestamps[frame_index] >= current_second:
+                    current_second += inv_fps
+                    frame_indices.append(frame_index)
+                    if current_second >= duration - inv_fps:
+                        break
+
+        if len(frame_indices) < extract_t:
+            if len(frame_indices) == 0:
+                start, end = 0, max(total_frames_num - 1, 0)
+            else:
+                start, end = frame_indices[0], frame_indices[-1]
+            frame_indices = np.linspace(start, end, extract_t, dtype=int).tolist()
+        elif len(frame_indices) > extract_t:
+            frame_indices = np.linspace(
+                0, total_frames_num - 1, extract_t, dtype=int
+            ).tolist()
+
+        seen, uniq = set(), []
+        for idx in frame_indices:
+            if idx not in seen:
+                seen.add(idx)
+                uniq.append(idx)
+
+        return uniq
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 2,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        *,
+        backend: Literal["opencv", "pyav"] = "opencv",
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        frames, metadata = super().load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            backend=backend,
+            **kwargs,
+        )
+        # Ensure even frame count — matches HF's sample_frames even-padding
+        # and _preprocess temporal_patch_size divisibility check.
+        if frames.shape[0] & 1:
+            frames = np.concatenate([frames, frames[-1:]], axis=0)
+        return frames, metadata
+
+
+@VIDEO_LOADER_REGISTRY.register(
+    "molmo2",
+    video_processor="Molmo2VideoProcessor",
+)
 class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
     @classmethod
     def get_candidate_target_fps(

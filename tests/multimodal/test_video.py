@@ -1,19 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import itertools
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
 import pytest
+from transformers import AutoVideoProcessor
+from transformers.video_utils import VideoMetadata
 
 from vllm.assets.base import get_vllm_public_assets
 from vllm.multimodal.video import (
     VIDEO_LOADER_REGISTRY,
+    DynamicVideoBackend,
+    GLM46VVideoBackend,
+    Molmo2VideoBackend,
+    Qwen2VLVideoBackend,
+    Qwen3VLVideoBackend,
     VideoLoader,
+    VideoSourceMetadata,
+    VideoTargetMetadata,
+    get_video_loader_backend_for_processor,
 )
+from vllm.transformers_utils.processor import get_video_processor_cls_name_from_config
 
-from .utils import create_video_from_image
+from .utils import create_long_gop_video, create_video_from_image
 
 pytestmark = pytest.mark.cpu_test
 
@@ -52,6 +63,122 @@ def test_video_loader_registry():
 def test_video_loader_type_doesnt_exist():
     with pytest.raises(AssertionError):
         VIDEO_LOADER_REGISTRY.load("non_existing_video_loader")
+
+
+# ============================================================================
+# Video Processor → Video Loader Tests (via model repo)
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "model_repo, expected_loader_cls, hf_sample_kwargs",
+    [
+        pytest.param(
+            "allenai/Molmo2-4B",
+            Molmo2VideoBackend,
+            None,
+            marks=pytest.mark.skip(
+                reason="Video processor not aligned, investigate later.",
+            ),
+            id="molmo2",
+        ),
+        pytest.param(
+            "zai-org/GLM-4.1V-9B-Thinking",
+            DynamicVideoBackend,
+            None,
+            id="glm4v",
+        ),
+        pytest.param(
+            "zai-org/GLM-4.6V-Flash",
+            GLM46VVideoBackend,
+            None,
+            id="glm46v",
+        ),
+        pytest.param(
+            "Qwen/Qwen3-VL-4B-Instruct",
+            Qwen3VLVideoBackend,
+            None,
+            id="qwen3vl",
+        ),
+        # Qwen2-VL/Qwen2.5-VL ship no ``video_processor_type`` in their
+        # preprocessor config, so resolution relies on the model_type ->
+        # video processor fallback in get_video_processor_cls_name_from_config.
+        # They also ship no default fps/num_frames, so the HF sampler needs an
+        # explicit target rate; pass fps=2 to match the loader default.
+        pytest.param(
+            "Qwen/Qwen2-VL-7B-Instruct",
+            Qwen2VLVideoBackend,
+            {"fps": 2},
+            id="qwen2vl",
+        ),
+        pytest.param(
+            "Qwen/Qwen2.5-VL-7B-Instruct",
+            Qwen2VLVideoBackend,
+            {"fps": 2},
+            id="qwen2_5_vl",
+        ),
+    ],
+)
+def test_video_processor_from_model_repo(
+    model_repo: str,
+    expected_loader_cls: type,
+    hf_sample_kwargs: dict[str, int | float] | None,
+):
+    """Test that a model repo resolves to the correct video loader backend.
+
+    The test downloads the preprocessor config from HuggingFace Hub,
+    extracts the ``video_processor_type`` field, and verifies it maps
+    to the expected backend and loader class.  When a corresponding HF
+    ``VideoProcessor.sample_frames`` implementation exists, the test
+    also verifies that the vLLM backend produces identical frame indices.
+    """
+    video_processor = get_video_processor_cls_name_from_config(model_repo)
+    assert video_processor is not None, (
+        f"Model repo {model_repo!r} did not contain a video_processor_type "
+        f"in its preprocessor config"
+    )
+
+    backend = get_video_loader_backend_for_processor(video_processor)
+    loader = VIDEO_LOADER_REGISTRY.load(backend)
+    assert isinstance(loader, expected_loader_cls), (
+        f"{model_repo!r}: backend={backend!r} loaded "
+        f"{type(loader)}, expected {expected_loader_cls}"
+    )
+
+    # --- Alignment check with HF VideoProcessor.sample_frames ---
+    processor = AutoVideoProcessor.from_pretrained(model_repo, trust_remote_code=True)
+
+    fps_list = [1, 2, 30, 60]
+    duration_list = [10, 60, 600]
+    for fps, duration_secs in itertools.product(fps_list, duration_list):
+        num_frames = fps * duration_secs
+        video_bytes = create_long_gop_video(
+            num_frames=num_frames,
+            fps=fps,
+            width=8,
+            height=8,
+        )
+
+        _, vllm_meta = loader.load_bytes(video_bytes)  # type: ignore[attr-defined]
+
+        hf_metadata = VideoMetadata(
+            total_num_frames=vllm_meta["total_num_frames"],
+            fps=vllm_meta["fps"],
+            duration=vllm_meta["duration"],
+        )
+        hf_indices = processor.sample_frames(hf_metadata, **(hf_sample_kwargs or {}))
+        vllm_indices = np.array(vllm_meta["frames_indices"])
+        np.testing.assert_array_equal(
+            hf_indices,
+            vllm_indices,
+            err_msg=(
+                f"{model_repo!r} fps={fps} duration={duration_secs}s: "
+                f"HF has {len(hf_indices)} indices "
+                f"{hf_indices[:5].tolist()}..{hf_indices[-5:].tolist()}, "
+                f"vLLM has {len(vllm_indices)} indices "
+                f"{vllm_indices[:5].tolist()}..{vllm_indices[-5:].tolist()}"
+            ),
+        )
 
 
 def test_video_backend_handles_broken_frames(monkeypatch: pytest.MonkeyPatch):
@@ -364,6 +491,49 @@ def test_pyav_dynamic_backend_loads_frames(
         assert metadata["video_backend"] == "pyav_dynamic"
 
 
+def test_pyav_backend_returns_target_frames_not_keyframes():
+    """Regression test: PyAV must decode forward past the seek keyframe.
+
+    container.seek() snaps backward to the nearest keyframe. With a long GOP
+    (here: one keyframe at frame 0), a decoder that does not advance forward
+    to the target PTS collapses every sampled slot onto the keyframe. This
+    test encodes a per-frame marker on the green channel and verifies the
+    returned frames are distinct, ordered, and match the requested indices.
+    """
+    num_frames = 50
+    num_sampled = 4
+    height, width = 64, 64
+
+    video_bytes = create_long_gop_video(
+        num_frames=num_frames, width=width, height=height
+    )
+
+    loader = VIDEO_LOADER_REGISTRY.load("opencv")
+    frames, metadata = loader.load_bytes(
+        video_bytes, num_frames=num_sampled, backend="pyav"
+    )
+    assert frames.shape == (num_sampled, height, width, 3)
+
+    requested = list(metadata["frames_indices"])
+    assert len(requested) == num_sampled
+
+    actual = [int(f[height // 2, width // 2, 1]) for f in frames]
+
+    assert len(set(actual)) == num_sampled, (
+        f"PyAV returned only {len(set(actual))} distinct frames for "
+        f"{num_sampled} requested indices: markers={actual}, "
+        f"requested={requested}. Keyframe-snap regression."
+    )
+
+    assert actual == sorted(actual), f"Returned frames out of order: markers={actual}"
+
+    for marker, want_idx in zip(actual, requested):
+        assert abs(marker - want_idx) <= 10, (
+            f"Frame mismatch: requested index {want_idx}, "
+            f"got marker {marker} (tolerance ±10)"
+        )
+
+
 @pytest.mark.parametrize(
     "loader_key, kwargs, expected_num_frames",
     [
@@ -436,6 +606,20 @@ def test_pyav_dynamic_backend_loads_frames(
             60,
             id="pyav_dynamic-exceeds_max_duration",
         ),
+        # glm46v dynamic FPS (1800 frames @ 30fps = 60s)
+        # 60s falls in (30, 300] → target_fps=1.0, extract_t = 60*1.0*2 = 120
+        pytest.param(
+            "glm46v",
+            {"backend": "opencv"},
+            120,
+            id="glm46v-60s",
+        ),
+        pytest.param(
+            "glm46v",
+            {"backend": "pyav"},
+            120,
+            id="glm46v-pyav-60s",
+        ),
     ],
 )
 def test_video_loader_frames_sampling(
@@ -457,3 +641,114 @@ def test_video_loader_frames_sampling(
     assert frames.ndim == 4
     assert frames.shape[3] == 3  # RGB
     assert frames.shape[0] == expected_num_frames
+
+
+# ============================================================================
+# GLM-4.6V Dynamic FPS Threshold Tests
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    "duration, original_fps, total_frames, temporal_patch_size, expected_extract_t",
+    [
+        # Short video ≤30s → target_fps=3.0
+        # extract_t = 10 * 3.0 * 2 = 60
+        pytest.param(10, 30, 300, 2, 60, id="short-10s"),
+        # Exactly at boundary → target_fps=3.0
+        # extract_t = 30 * 3.0 * 2 = 180
+        pytest.param(30, 30, 900, 2, 180, id="boundary-30s"),
+        # Medium video → target_fps=1.0
+        # extract_t = 60 * 1.0 * 2 = 120
+        pytest.param(60, 30, 1800, 2, 120, id="medium-60s"),
+        # Medium boundary → target_fps=1.0
+        # extract_t = 300 * 1.0 * 2 = 600
+        pytest.param(300, 30, 9000, 2, 600, id="boundary-300s"),
+        # Long video → target_fps=0.5
+        # extract_t = 600 * 0.5 * 2 = 600
+        pytest.param(600, 30, 18000, 2, 600, id="long-600s"),
+        # Very long video, capped by _MAX_FRAME_COUNT_DYNAMIC=640
+        # extract_t = min(2400 * 0.5 * 2, 640) = min(2400, 640) = 640
+        pytest.param(2400, 30, 72000, 2, 640, id="long-capped-640"),
+        # Duration exceeds _MAX_DURATION=2400
+        # effective_duration = min(5000, 2400) = 2400, target_fps=0.5
+        # extract_t = min(2400 * 0.5 * 2, 640) = 640
+        pytest.param(5000, 30, 150000, 2, 640, id="exceeds-max-duration"),
+        # temporal_patch_size=4
+        # extract_t = 60 * 1.0 * 4 = 240
+        pytest.param(60, 30, 1800, 4, 240, id="medium-patch-size-4"),
+        # temporal_patch_size=1
+        # extract_t = 60 * 1.0 * 1 = 60
+        pytest.param(60, 30, 1800, 1, 60, id="medium-patch-size-1"),
+    ],
+)
+def test_glm46v_dynamic_fps_thresholds(
+    duration: int,
+    original_fps: int,
+    total_frames: int,
+    temporal_patch_size: int,
+    expected_extract_t: int,
+):
+    """Test GLM-4.6V dynamic FPS threshold selection and frame count."""
+    source = VideoSourceMetadata(
+        total_frames_num=total_frames,
+        original_fps=original_fps,
+        duration=duration,
+    )
+    target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
+
+    indices = GLM46VVideoBackend.compute_frames_index_to_sample(
+        source, target, temporal_patch_size=temporal_patch_size
+    )
+
+    # Frame count should match expected (may be +1 from even padding)
+    assert len(indices) in (expected_extract_t, expected_extract_t + 1), (
+        f"Expected ~{expected_extract_t} frames, got {len(indices)}"
+    )
+
+    # Frame count must be even
+    assert len(indices) % 2 == 0, f"Frame count must be even, got {len(indices)}"
+
+    # All indices must be valid
+    assert all(0 <= idx < total_frames for idx in indices), (
+        f"Indices out of range [0, {total_frames})"
+    )
+
+    # Indices must be sorted and deduplicated
+    assert indices == sorted(set(indices)), "Indices must be sorted and deduplicated"
+
+
+def test_glm46v_even_frame_count_enforcement():
+    """Test that GLM-4.6V always returns an even number of frames."""
+    target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
+    # 5-second video at 30fps → 150 frames
+    # extract_t = 5 * 3.0 * 2 = 30 (even, no padding needed)
+    source_even = VideoSourceMetadata(total_frames_num=150, original_fps=30, duration=5)
+    indices_even = GLM46VVideoBackend.compute_frames_index_to_sample(
+        source_even, target
+    )
+    assert len(indices_even) % 2 == 0
+
+    # 3-second video at 30fps → 90 frames
+    # extract_t = 3 * 3.0 * 2 = 18 (even, no padding needed)
+    source_even2 = VideoSourceMetadata(total_frames_num=90, original_fps=30, duration=3)
+    indices_even2 = GLM46VVideoBackend.compute_frames_index_to_sample(
+        source_even2, target
+    )
+    assert len(indices_even2) % 2 == 0
+
+
+def test_glm46v_duration_estimation_from_fps():
+    """Test GLM-4.6V handles missing duration by estimating from fps."""
+    target = VideoTargetMetadata(num_frames=-1, fps=-1, max_duration=-1)
+    # duration=0 → estimated from total_frames / fps
+    # (89 / 30) + 1 ≈ 4s → target_fps=3.0, extract_t = 4 * 3.0 * 2 = 24
+    source_no_duration = VideoSourceMetadata(
+        total_frames_num=90, original_fps=30, duration=0
+    )
+    indices = GLM46VVideoBackend.compute_frames_index_to_sample(
+        source_no_duration, target
+    )
+
+    assert len(indices) > 0
+    assert len(indices) % 2 == 0
+    assert all(0 <= idx < 90 for idx in indices)

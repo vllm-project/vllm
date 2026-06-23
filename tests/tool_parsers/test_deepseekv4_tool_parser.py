@@ -14,6 +14,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
+    FunctionDefinition,
 )
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
@@ -164,19 +165,83 @@ def test_streaming_extracts_complete_invokes():
         for delta in deltas
         if delta.tool_calls
         for tool_call in delta.tool_calls
+        if tool_call.function.name
     ]
     assert names == ["search"]
     assert json.loads(reconstruct_args(deltas)) == {"query": "deepseek v4"}
+
+
+def test_streaming_emits_incremental_argument_chunks():
+    tool = ChatCompletionToolsParam(
+        function=FunctionDefinition(
+            name="plan_trip",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "days": {"type": "integer"},
+                    "flexible": {"type": "boolean"},
+                    "cities": {"type": "array", "items": {"type": "string"}},
+                    "notes": {"type": "string"},
+                },
+            },
+        ),
+    )
+    parser = make_parser(tools=[tool])
+    full_text = (
+        f"{TC_START}\n"
+        f'{INV_START}plan_trip">\n'
+        f'{PARAM_START}days" string="false">3{PARAM_END}\n'
+        f'{PARAM_START}flexible" string="false">false{PARAM_END}\n'
+        f'{PARAM_START}cities" string="false">'
+        f'["Beijing","Shanghai","Tokyo","New York"]{PARAM_END}\n'
+        f'{PARAM_START}notes" string="true">靠窗座位{PARAM_END}\n'
+        f"{INV_END}\n"
+        f"{TC_END}"
+    )
+
+    deltas = stream(parser, full_text, chunk_size=4)
+    arg_chunks = [
+        tool_call.function.arguments
+        for delta in deltas
+        for tool_call in delta.tool_calls or []
+        if tool_call.function and tool_call.function.arguments is not None
+    ]
+
+    assert len([chunk for chunk in arg_chunks if chunk]) > 2
+    assert json.loads("".join(arg_chunks)) == {
+        "days": 3,
+        "flexible": False,
+        "cities": ["Beijing", "Shanghai", "Tokyo", "New York"],
+        "notes": "靠窗座位",
+    }
+
+
+def _with_strict(
+    tools: list[ChatCompletionToolsParam],
+) -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type=t.type,
+            function=FunctionDefinition(
+                name=t.function.name,
+                description=t.function.description,
+                parameters=t.function.parameters,
+                strict=True,
+            ),
+        )
+        for t in tools
+    ]
 
 
 def test_get_vllm_registry_structural_tag_returns_structural_tag(
     sample_tools: list[ChatCompletionToolsParam],
 ) -> None:
     parser = make_parser()
+    strict_tools = _with_strict(sample_tools)
     req = ChatCompletionRequest(
         messages=[],
         model="m",
-        tools=sample_tools,
+        tools=strict_tools,
         tool_choice="auto",
     )
     tag = parser.get_structural_tag(req)
@@ -236,3 +301,52 @@ def test_extract_tool_calls_arguments_wrapper():
     assert result.tools_called
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args == {"location": "Beijing"}
+
+
+@pytest.mark.skip_global_cleanup
+def test_composed_schema_converts_object_and_array_params():
+    tool = ChatCompletionToolsParam(
+        type="function",
+        function={
+            "name": "set_timer",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "wait": {
+                        "anyOf": [
+                            {"type": "object"},
+                            {"type": "null"},
+                        ],
+                    },
+                    "patches": {
+                        "allOf": [
+                            {"type": "array", "items": {"type": "object"}},
+                        ],
+                    },
+                },
+            },
+        },
+    )
+    parser = make_parser(tools=[tool])
+    request = make_request(tools=[tool])
+    model_output = (
+        f"{TC_START}\n"
+        f'{INV_START}set_timer">\n'
+        f'{PARAM_START}wait" string="false">'
+        f'{{"type":"for","minutes":2880}}'
+        f"{PARAM_END}\n"
+        f'{PARAM_START}patches" string="false">'
+        f'[{{"op":"replace","path":"/schedule","value":"quiet"}}]'
+        f"{PARAM_END}\n"
+        f"{INV_END}\n"
+        f"{TC_END}"
+    )
+
+    result = parser.extract_tool_calls(model_output, request)
+
+    assert result.tools_called
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args == {
+        "wait": {"type": "for", "minutes": 2880},
+        "patches": [{"op": "replace", "path": "/schedule", "value": "quiet"}],
+    }

@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
     MoveDirectionality,
@@ -20,12 +22,11 @@ def maybe_create_thinking_budget_state_holder(
     max_num_seqs: int,
     num_spec_tokens: int,
     device: torch.device,
-    is_pin_memory: bool,
 ) -> "ThinkingBudgetStateHolder | None":
     if reasoning_config is None:
         return None
     return ThinkingBudgetStateHolder(
-        reasoning_config, max_num_seqs, num_spec_tokens, device, is_pin_memory
+        reasoning_config, max_num_seqs, num_spec_tokens, device, PIN_MEMORY
     )
 
 
@@ -65,22 +66,9 @@ class ThinkingBudgetStateHolder:
         self.cu_num_tokens: dict[int, int] = {}
 
         if self.num_spec_tokens > 0:
-            self.mask = torch.zeros(
-                max_num_reqs * (self.num_spec_tokens + 1),
-                dtype=torch.bool,
-                device=device,
-            )
-            self.force_token_ids = torch.full(
-                (max_num_reqs * (self.num_spec_tokens + 1),),
-                -1,
-                dtype=torch.long,
-                device=device,
-            )
+            self._mask_capacity = max_num_reqs * (self.num_spec_tokens + 1)
         else:
-            self.mask = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
-            self.force_token_ids = torch.full(
-                (max_num_reqs,), -1, dtype=torch.long, device=device
-            )
+            self._mask_capacity = max_num_reqs
 
     def has_tracked_requests(self) -> bool:
         """True when ``sync_batch`` has state for a ``thinking_token_budget`` row.
@@ -454,7 +442,6 @@ class ThinkingBudgetStateHolder:
         predict_bonus_token: bool,
         spec_token_ids_for_layout: list[list[int]],
     ) -> torch.Tensor:
-        self.mask[:] = False
         cumulative_total = 0
         self.cu_num_tokens.clear()
 
@@ -473,6 +460,11 @@ class ThinkingBudgetStateHolder:
                 cumulative_total += len(spec_tokens) if not predict_bonus_token else 1
             else:
                 cumulative_total += 1
+
+        # Build the active index / forced-token lists entirely on CPU so we
+        # avoid per-iteration scalar sync writes to GPU tensors.
+        active_indices_cpu: list[int] = []
+        force_tokens_cpu: list[int] = []
 
         for seq_idx in sorted(self._state.keys()):
             if seq_idx not in self.cu_num_tokens:
@@ -502,9 +494,12 @@ class ThinkingBudgetStateHolder:
                     for force_idx in force_index:
                         if end_count < len(self.think_end_token_ids):
                             mask_idx = self.cu_num_tokens[seq_idx] + force_idx
-                            if mask_idx < len(self.mask) and mask_idx < logits.shape[0]:
-                                self.mask[mask_idx] = True
-                                self.force_token_ids[mask_idx] = (
+                            if (
+                                mask_idx < self._mask_capacity
+                                and mask_idx < logits.shape[0]
+                            ):
+                                active_indices_cpu.append(mask_idx)
+                                force_tokens_cpu.append(
                                     self.think_end_token_ids[end_count]
                                 )
                             if predict_bonus_token:
@@ -514,15 +509,33 @@ class ThinkingBudgetStateHolder:
                                 else:
                                     state["bonus_token_forced"] = True
 
-        has_active_thinking = any(
-            state.get("in_end", False) for state in self._state.values()
-        )
-
-        if has_active_thinking:
-            active_indices = self.mask.nonzero(as_tuple=False).view(-1)
-
-            if len(active_indices) > 0:
-                force_tokens = self.force_token_ids[active_indices]
-                logits[active_indices, force_tokens] = 1e9
+        if active_indices_cpu:
+            device = logits.device
+            if current_platform.is_rocm() and logits.is_contiguous():
+                # Flattened index_fill avoids ROCm faults seen with 2-D
+                # advanced-indexing writes on the thinking-budget path.
+                vocab_size = logits.shape[1]
+                flat_indices_cpu = [
+                    row * vocab_size + token
+                    for row, token in zip(active_indices_cpu, force_tokens_cpu)
+                ]
+                flat_indices = async_tensor_h2d(
+                    flat_indices_cpu, dtype=torch.long, device=device
+                )
+                logits.view(-1).index_fill_(0, flat_indices, 1e9)
+            elif current_platform.is_rocm():
+                fill = logits.new_tensor(1e9)
+                for row, token in zip(active_indices_cpu, force_tokens_cpu):
+                    logits[row, token] = fill
+            else:
+                active_indices = async_tensor_h2d(
+                    active_indices_cpu, dtype=torch.long, device=device
+                )
+                force_tokens = async_tensor_h2d(
+                    force_tokens_cpu, dtype=torch.long, device=device
+                )
+                # Avoid CPU->GPU sync.
+                fill = logits.new_full((len(active_indices_cpu),), 1e9)
+                logits.index_put_((active_indices, force_tokens), fill)
 
         return logits

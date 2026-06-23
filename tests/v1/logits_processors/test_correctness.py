@@ -20,7 +20,7 @@ from tests.v1.sample.utils import (
 )
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, validate_thinking_token_budget
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.sample.logits_processor import (
     BatchUpdate,
@@ -145,7 +145,6 @@ def _generate_fake_sampling_metadata(
         vllm_config.scheduler_config.max_num_seqs,
         num_spec,
         device,
-        PIN_MEMORY_AVAILABLE,
     )
     fake_sampling_metadata = SamplingMetadata(
         temperature=torch.full((batch_size,), 0.0),
@@ -880,7 +879,6 @@ def test_maybe_create_thinking_budget_holder_without_reasoning():
             cfg.scheduler_config.max_num_seqs,
             0,
             torch.device("cpu"),
-            False,
         )
         is None
     )
@@ -1092,7 +1090,7 @@ def test_thinking_budget_holder_spec_mode_tensor_layout():
         False,
     )
     assert h.in_spec_mode
-    assert h.mask.shape[0] == 8 * (2 + 1)
+    assert h._mask_capacity == 8 * (2 + 1)
 
 
 def test_thinking_budget_holder_empty_end_tokens_disables_row():
@@ -1122,3 +1120,109 @@ def test_thinking_budget_holder_empty_end_tokens_disables_row():
     )
     h.update_state([[THINK_START_TOKEN_ID, 1]], None, None)
     assert h._state[0]["thinking_token_budget"] == -1
+
+
+def test_thinking_budget_enforced_without_penalties():
+    """Regression test for gpu_input_batch.py bug.
+
+    When thinking_budget_tracks_reqs=True and no penalties/bad_words are set,
+    the old code computed needs_output_token_ids=False (inverted condition:
+    ``or not thinking_budget_tracks_reqs``), causing update_state to receive
+    an empty list and skip _update_think_state for every request.
+
+    Fix: changed ``or not thinking_budget_tracks_reqs`` to
+    ``or thinking_budget_tracks_reqs`` so that output_token_ids is populated
+    whenever the thinking budget state holder has tracked requests.
+
+    This test verifies that update_state correctly calls _update_think_state
+    (setting in_end=True) when given the real output_token_ids, and that
+    passing an empty list (the pre-fix behavior) prevents budget enforcement.
+    """
+    vc = VllmConfig()
+    vc.reasoning_config = MockReasoningConfig()
+    budget = 3  # allow 3 thinking tokens
+
+    h = ThinkingBudgetStateHolder(
+        vc.reasoning_config,
+        vc.scheduler_config.max_num_seqs,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    output_token_ids: list[int] = []
+    h.sync_batch(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(thinking_token_budget=budget),
+                    None,
+                    output_token_ids,
+                )
+            ],
+            moved=(),
+        )
+    )
+    assert h.has_tracked_requests()
+
+    # Simulate the buggy behavior: update_state receives empty list.
+    # _update_think_state is skipped → in_end stays False → no budget enforcement.
+    h.update_state([], None, None)
+    assert not h._state[0].get("in_end", False), (
+        "With empty output_token_ids, in_end should stay False (budget not yet tracked)"
+    )
+
+    # Simulate the correct behavior: output_token_ids is the live list.
+    # Step 1: think-start token appears.
+    output_token_ids.append(THINK_START_TOKEN_ID)
+    h.update_state([output_token_ids], None, None)
+    assert not h._state[0].get("in_end", False), (
+        "Still within budget after 0 think tokens"
+    )
+
+    # Steps 2–4: 3 thinking tokens (hits the budget exactly).
+    for tok in [1, 2, 3]:
+        output_token_ids.append(tok)
+        h.update_state([output_token_ids], None, None)
+
+    # After exactly `budget` thinking tokens the holder should force end token.
+    assert h._state[0].get("in_end", False), (
+        "Budget exceeded: in_end should be True so that apply_to_logits "
+        "forces the end token"
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "expected"),
+    [
+        (None, None),
+        (-1, None),
+        (10, 10),
+        (0, 0),
+    ],
+)
+def test_validate_thinking_token_budget(raw_value, expected):
+    assert validate_thinking_token_budget(raw_value) == expected
+
+
+def test_sampling_params_minus_one_normalizes_to_none():
+    params = SamplingParams(thinking_token_budget=-1)
+    assert params.thinking_token_budget is None
+
+
+@pytest.mark.parametrize("invalid_budget", [-2, 0.6, 10.5, True])
+def test_validate_thinking_token_budget_rejects_invalid(invalid_budget):
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises(VLLMValidationError, match="thinking_token_budget"):
+        validate_thinking_token_budget(invalid_budget)
+
+
+@pytest.mark.parametrize("invalid_budget", [-2, 0.6, 10.5])
+def test_thinking_budget_invalid_budget_rejected(invalid_budget):
+    from vllm.exceptions import VLLMValidationError
+
+    with pytest.raises(VLLMValidationError, match="thinking_token_budget"):
+        SamplingParams(thinking_token_budget=invalid_budget)

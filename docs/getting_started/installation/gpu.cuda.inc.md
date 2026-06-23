@@ -101,11 +101,21 @@ This command will do the following:
 1. Look for the current branch in your vLLM clone.
 1. Identify the corresponding base commit in the main branch.
 1. Download the pre-built wheel of the base commit.
-1. Use its compiled libraries in the installation.
+1. Use its compiled libraries and `vllm-rs` binary in the installation.
 
 !!! note
     1. If you change C++ or kernel code, you cannot use Python-only build; otherwise you will see an import error about library not found or undefined symbol.
     2. If you rebase your dev branch, it is recommended to uninstall vllm and re-run the above command to make sure your libraries are up to date.
+
+!!! tip "Rebuilding the Rust frontend"
+If you need to recompile the `vllm-rs` Rust frontend binary, you can rebuild and install it without re-running the full pip install:
+
+    ```bash
+    ./build_rust.sh          # release build
+    ./build_rust.sh --debug  # faster build for development
+    ```
+
+    This will install the required Rust toolchain if needed, build the binary, and place it in `vllm/vllm-rs`.
 
 In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the `main` branch was just merged and its precompiled wheel is not available yet. You can wait around an hour and retry, or set `VLLM_PRECOMPILED_WHEEL_COMMIT=nightly` to automatically select the most recent already-built commit on `main`.
 
@@ -128,6 +138,15 @@ You can find more information about vLLM's wheels in [Install the latest code](#
     It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to [Install the latest code](#install-the-latest-code) for instructions on how to install a specified wheel.
 
 #### Full build (with compilation) {#full-build}
+
+!!! note "Compiler requirement"
+    Building from source requires GCC/G++ ≥ 11.3. PyTorch's C++20 headers are
+    not compatible with GCC 10 or GCC < 11.3. On Ubuntu 22.04:
+    ```bash
+    sudo apt-get install -y gcc-11 g++-11
+    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110 \
+        --slave /usr/bin/g++ g++ /usr/bin/g++-11
+    ```
 
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 

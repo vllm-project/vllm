@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 
 import torch
 
@@ -33,19 +32,15 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
         num_fused_shared_experts: int,
+        eplb_state: EplbLayerState | None = None,
         scoring_func: str = "softmax",
         renormalize: bool = True,
-        enable_eplb: bool = False,
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
     ):
         super().__init__(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
-            enable_eplb=enable_eplb,
-            indices_type_getter=indices_type_getter,
         )
         self.renormalize = renormalize
         self.scoring_func = scoring_func
@@ -73,7 +68,7 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
             "Number of tokens mismatch"
         )
 
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
             aiter_topK_meta_data,
         )
 
@@ -127,7 +122,7 @@ class AiterSharedRoutedFusedMoERouter(BaseRouter):
         )
 
         if aiter_topK_meta_data is not None:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
                 inject_shared_expert_weights,
             )
 

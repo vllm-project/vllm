@@ -15,16 +15,14 @@ from vllm.config import (
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 
-# CudaPlatform and RocmPlatform import their respective compiled C extensions
-# at module level, raising ModuleNotFoundError on incompatible builds.
-try:
+if current_platform.is_cuda():
     from vllm.platforms.cuda import CudaPlatform
-except (ImportError, ModuleNotFoundError):
+else:
     CudaPlatform = None
 
-try:
+if current_platform.is_rocm():
     from vllm.platforms.rocm import RocmPlatform
-except (ImportError, ModuleNotFoundError):
+else:
     RocmPlatform = None
 
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -434,9 +432,15 @@ def test_per_head_quant_scales_backend_selection(
     [
         ("FLASH_ATTN", True, True),  # FlashAttn supports non-causal
         ("FLASH_ATTN", False, True),  # FlashAttn also works with causal
-        ("FLASHINFER", True, False),  # FlashInfer does not support non-causal
-        ("FLASHINFER", False, True),  # FlashInfer works with causal
-    ],
+    ]
+    + (
+        [
+            ("FLASHINFER", True, True),  # FlashInfer supports non-causal
+            ("FLASHINFER", False, True),  # FlashInfer works with causal
+        ]
+        if CudaPlatform is not None
+        else []
+    ),
 )
 def test_non_causal_backend_selection(
     backend_name: str, use_non_causal: bool, should_succeed: bool
@@ -459,11 +463,12 @@ def test_non_causal_backend_selection(
         attention_config=attention_config, cache_config=cache_config
     )
 
-    if CudaPlatform is None:
-        pytest.skip("CudaPlatform not available")
+    platform = CudaPlatform or RocmPlatform
+    if platform is None:
+        pytest.skip("CudaPlatform and RocmPlatform are not available")
     with (
         set_current_vllm_config(vllm_config),
-        patch("vllm.platforms.current_platform", CudaPlatform()),
+        patch("vllm.platforms.current_platform", platform()),
     ):
         if should_succeed:
             backend = get_attn_backend(
@@ -514,3 +519,35 @@ def test_non_causal_autoselect_backend():
             kv_cache_dtype=None,
         )
         assert backend.supports_non_causal()
+
+
+@pytest.mark.parametrize(
+    "kv_cache_dtype",
+    [
+        "fp8_e5m2",
+        "fp8_ds_mla",
+        "fp8_inc",
+        "nvfp4",
+        "fp8_per_token_head",
+        "int8_per_token_head",
+    ],
+)
+def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: str):
+    """FlashAttentionBackend must not claim support for kv_cache dtypes
+    that it cannot handle."""
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    assert not FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
+def test_flash_attn_accepts_handled_fp8_variants(
+    kv_cache_dtype: str, monkeypatch: pytest.MonkeyPatch
+):
+    """FlashAttentionBackend must accept the two fp8 dtypes it can actually
+    handle: 'fp8' (alias for fp8_e4m3fn) and 'fp8_e4m3'."""
+    import vllm.v1.attention.backends.flash_attn as fa_mod
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+    monkeypatch.setattr(fa_mod.current_platform, "is_xpu", lambda: True)
+    assert FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
