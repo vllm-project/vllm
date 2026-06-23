@@ -104,8 +104,14 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
         k: torch.Tensor,
         v: torch.Tensor,
         return_softmax_lse: bool,
+        out: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        out = self.flash_attn_varlen_func(
+
+        assert output_scale is None, (
+            "AiterFlashAttnPrefillBackend does not support fused quantized output."
+        )
+        result = self.flash_attn_varlen_func(
             q=q,
             k=k,
             v=v,
@@ -116,14 +122,14 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
             softmax_scale=self.scale,
             causal=True,
             return_lse=return_softmax_lse,
+            out=out,
         )
 
         # aiter returns the bare output tensor when return_lse is False, and
-        # (out, softmax_lse) when it is True. softmax_lse is already shaped
-        # (nheads, total_q), so no transpose is needed.
+        # (out, softmax_lse) when it is True.
         if return_softmax_lse:
-            return out[0], out[1]
-        return out
+            return result[0], result[1]
+        return result
 
     def run_prefill_context_chunk(
         self,
