@@ -42,9 +42,12 @@ from enum import Enum
 logger = init_logger(__name__)
 
 
-_IFNAMSIZ = 16
-_IFREQ_SIZE = 40 if struct.calcsize("P") == 8 else 32
-_SIOCGIFCONF = 0x8912
+# Linux ioctl ABI values used to enumerate IPv4 interface addresses.
+# Python exposes fcntl.ioctl(), but does not expose these constants portably.
+_IFNAMSIZ = 16  # sizeof(ifreq.ifr_name), from linux/if.h.
+_IFREQ_SIZE = 40 if struct.calcsize("P") == 8 else 32  # sizeof(struct ifreq).
+_IFREQ_IPV4_ADDR_OFFSET = 20  # ifr_name[16] + sockaddr family[2] + port[2].
+_SIOCGIFCONF = 0x8912  # from asm-generic/sockios.h.
 _MORI_SOCKET_IFNAME = "MORI_SOCKET_IFNAME"
 
 Transfer = tuple[int, float]
@@ -244,7 +247,8 @@ def _interface_for_ipv4(ip: str) -> str | None:
             buf_size *= 2
 
         for offset in range(0, out_bytes, _IFREQ_SIZE):
-            if bytes(ifreqs[offset + 20 : offset + 24]) != target_ip:
+            addr_offset = offset + _IFREQ_IPV4_ADDR_OFFSET
+            if bytes(ifreqs[addr_offset : addr_offset + 4]) != target_ip:
                 continue
             ifname = bytes(ifreqs[offset : offset + _IFNAMSIZ])
             return ifname.split(b"\0", 1)[0].decode()
