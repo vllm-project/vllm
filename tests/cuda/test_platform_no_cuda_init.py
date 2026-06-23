@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 SCRIPTS_DIR = Path(__file__).parent / "scripts"
+QUTLASS_IMPORT_WARNING = "Failed to import from vllm._qutlass_C"
 
 
 def run_script(script_name: str) -> subprocess.CompletedProcess:
@@ -33,6 +34,7 @@ def test_platform_import_does_not_init_cuda():
     result = run_script("check_platform_no_cuda_init.py")
     if result.returncode != 0:
         pytest.fail(f"Platform import initialized CUDA:\n{result.stderr}")
+    assert QUTLASS_IMPORT_WARNING not in result.stderr
 
 
 def test_device_count_respects_env_after_platform_import():
