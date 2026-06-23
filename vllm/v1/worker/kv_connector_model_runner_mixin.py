@@ -4,7 +4,6 @@
 Define KV connector functionality mixin for model runners.
 """
 
-import copy
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from typing import TYPE_CHECKING
@@ -20,7 +19,6 @@ from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import (
-    EMPTY_MODEL_RUNNER_OUTPUT,
     KVConnectorOutput,
     ModelRunnerOutput,
 )
@@ -47,12 +45,7 @@ class KVConnectorModelRunnerMixin:
         ):
             pass
 
-        if kv_connector_output.is_empty():
-            return EMPTY_MODEL_RUNNER_OUTPUT
-
-        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.kv_connector_output = kv_connector_output
-        return output
+        return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
     @staticmethod
     def maybe_get_kv_connector_output(
@@ -121,7 +114,6 @@ class KVConnectorModelRunnerMixin:
     @staticmethod
     def use_uniform_kv_cache(
         attn_groups: list[list[AttentionGroup]],
-        cache_dtype: CacheDType,
     ) -> bool:
         """
         Determines whether a uniform KV layout should be used.
@@ -135,9 +127,9 @@ class KVConnectorModelRunnerMixin:
             have the same page size.
         2. A KV connector is configured, and the KV connector instance prefers
             to use this layout (prefer_cross_layer_blocks() returns True)
-        2. The flash attention backend supports this layout
-            (get_kv_cache_stride_order(True) includes a placement for a
-            num_layers dimension)
+        3. The attention backend indexes KV by the block stride
+            (kv_cache_spec.indexes_kv_by_block_stride), i.e. num_blocks is the
+            outermost physical dim so per-block all-layers data is contiguous.
 
         Note that the actual placement of the num_layers dimensions
         in the unified layers tensors will be determined by the attention
@@ -147,7 +139,6 @@ class KVConnectorModelRunnerMixin:
 
         Args:
             attn_groups: The list of attention groups for this model
-            cache_dtype: The KV cache dtype
         Returns:
             True if we should use a uniform KV cache layout.
         """
@@ -164,30 +155,7 @@ class KVConnectorModelRunnerMixin:
         kv_cache_spec = attn_group.kv_cache_spec
         if not isinstance(kv_cache_spec, AttentionSpec):
             return False
-
-        attn_backend = attn_group.backend
-        kv_cache_shape = attn_backend.get_kv_cache_shape(
-            1234,
-            kv_cache_spec.block_size,
-            kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
-        )
-
-        try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
-            )
-        except (AttributeError, NotImplementedError):
-            return False
-
-        # check that attention backend includes a layers dimension
-        if len(kv_cache_stride_order) != len(kv_cache_shape) + 1:
-            return False
-
-        # stride_order[0] == 0 means num_layers stays first in physical
-        # layout (identity permutation), so cross-layer is unsupported.
-        return kv_cache_stride_order[0] != 0
+        return kv_cache_spec.indexes_kv_by_block_stride
 
     @staticmethod
     def allocate_uniform_kv_caches(

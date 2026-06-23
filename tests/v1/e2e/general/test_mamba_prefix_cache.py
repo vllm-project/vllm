@@ -180,6 +180,8 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
         full_sequence_must_fit: bool = False,
+        reserved_blocks: int = 0,
+        has_scheduled_reqs: bool = True,
     ):
         ret = original_allocate_slots_fn(
             self,
@@ -192,6 +194,8 @@ def get_fake_allocate_slots_fn(original_allocate_slots_fn: Callable):
             delay_cache_blocks,
             num_encoder_tokens,
             full_sequence_must_fit,
+            reserved_blocks,
+            has_scheduled_reqs,
         )
         if cur_step_action is not None:
             cur_block_ids = self.coordinator.single_type_managers[0].req_to_blocks[

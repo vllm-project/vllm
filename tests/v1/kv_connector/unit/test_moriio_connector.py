@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
-import os
-import subprocess
+import socket
 import uuid
 from unittest.mock import MagicMock, patch
 
@@ -11,7 +10,6 @@ import pytest
 import torch
 import zmq
 
-from tests.conftest import _find_free_port
 from vllm.config import (
     CacheConfig,
     DeviceConfig,
@@ -25,11 +23,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOAgentMetadata,
     MoRIIOConnectorMetadata,
     MoRIIOConstants,
+    MoRIIOMode,
+    resolve_host_ip,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
     KVConnectorRole,
     MoRIIOConnector,
+    MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
 )
 from vllm.platforms import current_platform
@@ -37,29 +38,43 @@ from vllm.utils.network_utils import (
     get_ip,
     make_zmq_path,
 )
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    KVCacheTensor,
+)
 
 from .utils import create_request, create_scheduler
 
 
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return sock.getsockname()[1]
+
+
 def _make_test_kv_cache_config() -> KVCacheConfig:
-    return KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    layer_names = ["layer0", "layer1", "layer2"]
+    return KVCacheConfig(
+        num_blocks=2,
+        kv_cache_tensors=[KVCacheTensor(size=0, shared_by=layer_names)],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=layer_names,
+                kv_cache_spec=FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=4,
+                    head_size=64,
+                    dtype=torch.float16,
+                ),
+            )
+        ],
+    )
 
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
-
-
-def _rdma_available() -> bool:
-    """Check if RDMA devices are available."""
-    try:
-        result = subprocess.run(["ibv_devinfo"], capture_output=True, text=True)
-        return "No IB devices found" not in result.stderr
-    except FileNotFoundError:
-        return False
-
-
-rdma_available = _rdma_available()
 
 pytestmark = pytest.mark.skipif(
     not (current_platform.is_rocm() and mori_available),
@@ -112,6 +127,16 @@ def _setup_kv_transfer_request(
         f"___prefill_addr_{zmq_addr}___decode_addr_{zmq_addr}_{fake_uuid}"
     )
     return request
+
+
+def _write_consumer_scheduler_for_finished_request(tp_size: int = 2):
+    scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
+    scheduler.is_producer = False
+    scheduler.mode = MoRIIOMode.WRITE
+    scheduler.tp_size = tp_size
+    scheduler._reqs_need_recv = {}
+    scheduler.unmap_request_id = MagicMock()
+    return scheduler
 
 
 class FakeMoRIIOWrapper:
@@ -170,7 +195,14 @@ class FakeMoRIIOWrapper:
     def _handle_completion_message(self, msg: str):
         pass
 
-    def send_notify(self, req_ids, remote_ip, remote_port):
+    def send_notify(
+        self,
+        req_ids,
+        remote_ip,
+        remote_port,
+        message_type=None,
+        message_fields=None,
+    ):
         pass
 
     def pop_finished_req_ids(self):
@@ -188,9 +220,18 @@ class FakeMoRIIOConnectorWorker(MoRIIOConnectorWorker):
     REMOTE_ENGINE_ID = "remote_engine"
 
     def __init__(
-        self, *args, hand_shake_latency: float = 1.8, kv_cache_layout="HND", **kwargs
+        self,
+        vllm_config,
+        engine_id,
+        *args,
+        hand_shake_latency: float = 1.8,
+        kv_cache_layout="HND",
+        kv_cache_config=None,
+        **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            vllm_config, engine_id, kv_cache_config or _make_test_kv_cache_config()
+        )
 
 
 def create_vllm_config(
@@ -202,6 +243,7 @@ def create_vllm_config(
     enable_chunked_prefill: bool = True,
     enable_permute_local_kv: bool = False,
     role="kv_consumer",
+    read_mode: bool = False,
 ) -> VllmConfig:
     """Initialize VllmConfig for testing."""
     scheduler_config = SchedulerConfig(
@@ -224,10 +266,14 @@ def create_vllm_config(
         cache_dtype="auto",
         enable_prefix_caching=True,
     )
+    # These tests exercise connector setup, not real RDMA transfer (MoRI wrapper is
+    # mocked), so we can use any backend without affecting test validity. Use xGMI to
+    # avoid requiring RNICs in CI.
     kv_transfer_config = KVTransferConfig(
         kv_connector="MoRIIOConnector",
         kv_role=role,
         enable_permute_local_kv=enable_permute_local_kv,
+        kv_connector_extra_config={"read_mode": read_mode, "backend": "xgmi"},
     )
     return VllmConfig(
         scheduler_config=scheduler_config,
@@ -236,15 +282,6 @@ def create_vllm_config(
         kv_transfer_config=kv_transfer_config,
         device_config=DeviceConfig("cpu"),
     )
-
-
-@pytest.fixture
-def moriio_read_mode():
-    """Force the connector into read mode via env for tests."""
-    os.environ["VLLM_MORIIO_CONNECTOR_READ_MODE"] = "True"
-    yield
-    # Cleanup after test
-    os.environ.pop("VLLM_MORIIO_CONNECTOR_READ_MODE", None)
 
 
 def test_write_mode_saves_local_block_ids():
@@ -358,11 +395,11 @@ def test_write_mode_with_chunked_prefill_saves_local_block_ids():
         assert block_id == block.block_id, f"{block_id} != {block.block_id}"
 
 
-def test_read_mode_loads_remote_block_ids(moriio_read_mode):
+def test_read_mode_loads_remote_block_ids():
     """Read mode loads remote block ids into local cache mapping."""
 
     # Setup Scheduler and Request
-    vllm_config = create_vllm_config(role="kv_consumer")
+    vllm_config = create_vllm_config(role="kv_consumer", read_mode=True)
     scheduler = create_scheduler(vllm_config)
 
     # 2 Full Blocks and 1 Half Block.
@@ -422,10 +459,64 @@ def test_read_mode_loads_remote_block_ids(moriio_read_mode):
         assert block_id == block.block_id, f"{block_id} != {block.block_id}"
 
 
+@pytest.mark.parametrize(
+    ("transfer_id", "extra_params", "expected_notifications"),
+    [
+        pytest.param(
+            "xfer-7",
+            {"remote_host": "127.0.0.1", "remote_notify_port": 7000},
+            [
+                ("xfer-7", "127.0.0.1", 7000),
+                ("xfer-7", "127.0.0.1", 7001),
+            ],
+            id="address-available",
+        ),
+        pytest.param("xfer-8", {}, [], id="address-unavailable-plain-id"),
+    ],
+)
+def test_write_mode_finished_before_alloc_releases_prefill_blocks(
+    transfer_id, extra_params, expected_notifications
+):
+    scheduler = _write_consumer_scheduler_for_finished_request(tp_size=2)
+    notifications = []
+    scheduler._send_transfer_release = lambda transfer_id, host, port: (
+        notifications.append((transfer_id, host, port))
+    )
+    request = create_request(request_id=7, do_remote_prefill=True)
+    request.request_id = "plain-decode-id"
+    request.kv_transfer_params = {
+        "do_remote_prefill": True,
+        "do_remote_decode": False,
+        "transfer_id": transfer_id,
+    } | extra_params
+
+    delay_free, new_params = scheduler.request_finished(request, block_ids=[])
+
+    assert not delay_free
+    assert new_params is None
+    assert request.kv_transfer_params["do_remote_prefill"] is False
+    assert scheduler._reqs_need_recv == {}
+    assert notifications == expected_notifications
+
+
+def test_send_transfer_release_sends_structured_release_message():
+    scheduler = _write_consumer_scheduler_for_finished_request()
+    path = make_zmq_path("tcp", "127.0.0.1", 7000)
+    sock = MagicMock()
+    scheduler.paths = {path: sock}
+
+    scheduler._send_transfer_release("xfer-7", "127.0.0.1", 7000)
+
+    payload = sock.send.call_args.args[0]
+    assert msgspec.msgpack.decode(payload) == {
+        "type": "release",
+        "transfer_id": "xfer-7",
+    }
+
+
 @pytest.mark.skipif(
     not aiter_available, reason="Requires aiter package for ROCm FlashAttention backend"
 )
-@pytest.mark.skipif(not rdma_available, reason="No RDMA devices available")
 def test_register_kv_caches(mock_parallel_groups):
     """Test that MoRIIOConnector.register_kv_caches correctly registers kv caches."""
     ROLE = "kv_consumer"
@@ -525,7 +616,6 @@ def test_register_kv_caches(mock_parallel_groups):
 @pytest.mark.skipif(
     not aiter_available, reason="Requires aiter package for ROCm FlashAttention backend"
 )
-@pytest.mark.skipif(not rdma_available, reason="No RDMA devices available")
 def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     """MoRIIO handshake socket returns valid agent metadata over ZMQ."""
 
@@ -588,3 +678,14 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
             assert isinstance(metadata, MoRIIOAgentMetadata), (
                 "Decoded metadata is not MoRIIOAgentMetadata"
             )
+
+
+def test_resolve_host_ip_prefers_extra_config():
+    """An explicit ``host_ip`` in kv_connector_extra_config overrides get_ip()
+    (so an external router can advertise a routable/internal address); an
+    absent or empty value falls back to get_ip()."""
+    assert resolve_host_ip({"host_ip": "10.0.0.7"}) == "10.0.0.7"
+
+    fallback = get_ip()
+    assert resolve_host_ip({}) == fallback
+    assert resolve_host_ip({"host_ip": ""}) == fallback

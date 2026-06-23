@@ -702,16 +702,12 @@ class Step3VLForConditionalGeneration(
 
         return EncoderCudaGraphConfig(
             modalities=["image"],
-            input_key_by_modality={"image": "pixel_values"},
-            buffer_keys=["patch_pixel_values"],
+            buffer_keys=[
+                "pixel_values",
+                "patch_pixel_values",
+            ],
             out_hidden_size=self.config.hidden_size,
         )
-
-    def get_input_modality(
-        self,
-        mm_kwargs: dict[str, Any],
-    ) -> str:
-        return "image"
 
     def get_encoder_cudagraph_budget_range(
         self,
@@ -808,6 +804,7 @@ class Step3VLForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -846,33 +843,28 @@ class Step3VLForConditionalGeneration(
             device=device,
             dtype=dtype,
         )
-        # num_patches is NOT in buffers -- the per-item merge is done
+        # num_patches is NOT in values -- the per-item merge is done
         # CPU-side by finalize_encoder_cudagraph_output using the actual
         # batch's num_patches from mm_kwargs.
-        mm_kwargs = {
+        values = {
             "pixel_values": dummy_pixel_values,
             "patch_pixel_values": dummy_patch_pixel_values,
         }
 
-        buffers = {
-            "patch_pixel_values": dummy_patch_pixel_values,
-        }
-
         return EncoderCudaGraphCaptureInputs(
-            mm_kwargs=mm_kwargs,
-            buffers=buffers,
+            values=values,
         )
 
     def encoder_cudagraph_forward(
         self,
-        mm_kwargs: dict[str, Any],
-        buffers: dict[str, torch.Tensor],
+        values: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         # Graph captures only the compute (vision model + conv projector).
         # Per-item merge happens CPU-side in finalize_encoder_cudagraph_output
         # using actual num_patches from the batch data.
-        pixel_values = mm_kwargs["pixel_values"]
-        patch_pixel_values = buffers["patch_pixel_values"]
+        pixel_values = values["pixel_values"]
+        patch_pixel_values = values["patch_pixel_values"]
 
         image_features = self._process_image_features(
             self._get_vision_model_output(pixel_values)
@@ -894,6 +886,7 @@ class Step3VLForConditionalGeneration(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         image_input = Step3VLImagePixelInputs(
             type="pixel_values",
@@ -912,6 +905,7 @@ class Step3VLForConditionalGeneration(
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
         batch_mm_kwargs: dict[str, Any] | None = None,
+        local_output: torch.Tensor | None = None,
     ):
         """CPU-side per-item merge after graph replay.
 
@@ -969,15 +963,17 @@ class Step3VLForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
         )
 
-        # Only patch_pixel_values lives in the buffers dict; num_patches is
+        # Only patch_pixel_values lives in the values dict; num_patches is
         # processed CPU-side by finalize_encoder_cudagraph_output.
         return EncoderCudaGraphReplayBuffers(
-            buffers={
+            values={
+                "pixel_values": mm_kwargs["pixel_values"],
                 "patch_pixel_values": mm_kwargs["patch_pixel_values"],
             },
         )

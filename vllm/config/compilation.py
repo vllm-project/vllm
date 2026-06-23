@@ -134,8 +134,6 @@ class PassConfig:
     """Enable async TP."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
     """Enable flashinfer allreduce fusion."""
-    fuse_minimax_qk_norm: bool = None  # type: ignore[assignment]
-    """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
@@ -1199,7 +1197,7 @@ class CompilationConfig:
                 "are optimized for prefill and are incompatible with CUDA Graphs. "
                 "In order to use CUDA Graphs for decode-optimized workloads, "
                 "use --all2all-backend with another option, such as "
-                "deepep_low_latency or allgather_reducescatter."
+                "deepep_low_latency, nixl_ep, or allgather_reducescatter."
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 

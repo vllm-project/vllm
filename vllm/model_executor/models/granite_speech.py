@@ -389,10 +389,8 @@ class GraniteSpeechConformerAttention(nn.Module):
         # shaw's relative positional embedding
         dist = attention_dists.to(hidden_states.device)
         rel_pos_emb = self.rel_pos_emb(dist)
-        rel_pos_emb_expanded = rel_pos_emb.view([1, 1, 1] + list(rel_pos_emb.shape))
         pos_attn = (
-            torch.sum(query_states.unsqueeze(-2) * rel_pos_emb_expanded, dim=-1)
-            * self.scale
+            torch.einsum("bnhid,ijd->bnhij", query_states, rel_pos_emb) * self.scale
         )
 
         if remainder > 0:
@@ -616,8 +614,7 @@ class GraniteSpeechForConditionalGeneration(
             )
 
         with self._mark_tower_model(vllm_config, "audio"):
-            # Conformer encoder
-            self.encoder = GraniteSpeechCTCEncoder(
+            self.encoder = self._build_encoder(
                 config=config.encoder_config,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "encoder"),
@@ -633,6 +630,18 @@ class GraniteSpeechForConditionalGeneration(
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
+        )
+
+    def _build_encoder(
+        self,
+        config: PretrainedConfig,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> "GraniteSpeechCTCEncoder":
+        return GraniteSpeechCTCEncoder(
+            config=config,
+            quant_config=quant_config,
+            prefix=prefix,
         )
 
     def _parse_and_validate_audio_input(

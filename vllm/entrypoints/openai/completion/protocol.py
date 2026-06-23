@@ -18,6 +18,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     StreamOptions,
     StructuralTagResponseFormat,
     UsageInfo,
+    validate_structural_tag_response_format,
+    validate_structured_outputs_structural_tag,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -29,6 +31,7 @@ from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
+    ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
 
@@ -185,11 +188,12 @@ class CompletionRequest(OpenAIBaseModel):
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
-    thinking_token_budget: int | None = Field(
+    thinking_token_budget: ThinkingTokenBudget = Field(
         default=None,
         description=(
             "Maximum number of tokens allowed for thinking operations "
-            "(reasoning models). -1 = unlimited."
+            "(reasoning models). Non-negative integer sets the limit; "
+            "-1 means unlimited (treated as unset)."
         ),
     )
 
@@ -344,6 +348,14 @@ class CompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def normalize_null_max_tokens(cls, data):
+        if isinstance(data, dict) and data.get("max_tokens") is None:
+            data = data.copy()
+            data["max_tokens"] = cls.model_fields["max_tokens"].default
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def validate_response_format(cls, data):
         response_format = data.get("response_format")
         if response_format is None:
@@ -367,6 +379,9 @@ class CompletionRequest(OpenAIBaseModel):
                     "'json_schema' field must be provided.",
                     parameter="response_format",
                 )
+
+        if rf_type == "structural_tag":
+            validate_structural_tag_response_format(response_format)
 
         return data
 
@@ -395,6 +410,7 @@ class CompletionRequest(OpenAIBaseModel):
                 "outputs ('json', 'regex' or 'choice').",
                 parameter="structured_outputs",
             )
+        validate_structured_outputs_structural_tag(structured_outputs_kwargs)
         return data
 
     @model_validator(mode="before")
@@ -445,8 +461,9 @@ class CompletionRequest(OpenAIBaseModel):
         )
 
         if prompt_is_empty and embeds_is_empty:
-            raise ValueError(
-                "Either prompt or prompt_embeds must be provided and non-empty."
+            raise VLLMValidationError(
+                "Either prompt or prompt_embeds must be provided and non-empty.",
+                parameter="prompt",
             )
 
         return data
@@ -457,8 +474,9 @@ class CompletionRequest(OpenAIBaseModel):
         if data.get("cache_salt") is not None and (
             not isinstance(data["cache_salt"], str) or not data["cache_salt"]
         ):
-            raise ValueError(
-                "Parameter 'cache_salt' must be a non-empty string if provided."
+            raise VLLMValidationError(
+                "Parameter 'cache_salt' must be a non-empty string if provided.",
+                parameter="cache_salt",
             )
         return data
 

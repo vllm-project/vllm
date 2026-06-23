@@ -192,5 +192,4 @@ def make_w4a8_moe_kernel(
     return mk.FusedMoEKernel(
         prepare_finalize,
         experts,
-        inplace=not moe_config.disable_inplace,
     )

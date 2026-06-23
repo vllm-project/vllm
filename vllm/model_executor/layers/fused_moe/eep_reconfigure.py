@@ -21,7 +21,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 )
 
 if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 
 def _make_eep_experts(
@@ -58,10 +58,10 @@ def _make_eep_experts(
 
 
 def make_eep_staged_quant_method(
-    module: "FusedMoE",
+    module: "MoERunner",
     moe_config: FusedMoEConfig,
 ) -> FusedMoEMethodBase | None:
-    quant_method = module.quant_method
+    quant_method = module._quant_method
     if not quant_method.supports_internal_mk:
         return None
     if getattr(quant_method, "wraps_legacy_quant_method", False):
@@ -118,6 +118,5 @@ def make_eep_staged_quant_method(
         mk.FusedMoEKernel(
             prepare_finalize,
             experts,
-            inplace=moe_kernel.inplace,
         ),
     )
