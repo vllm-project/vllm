@@ -325,8 +325,13 @@ class ScalarType:
 
 
 class scalar_types:
+    uint2 = ScalarType.uint(2, None)
+    uint3 = ScalarType.uint(3, None)
     int4 = ScalarType.int_(4, None)
     uint4 = ScalarType.uint(4, None)
+    uint5 = ScalarType.uint(5, None)
+    uint6 = ScalarType.uint(6, None)
+    uint7 = ScalarType.uint(7, None)
     int8 = ScalarType.int_(8, None)
     uint8 = ScalarType.uint(8, None)
     float8_e4m3fn = ScalarType.float_(4, 3, True, NanRepr.EXTD_RANGE_MAX_MIN)
