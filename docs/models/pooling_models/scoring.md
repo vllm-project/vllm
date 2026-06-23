@@ -440,7 +440,7 @@ More examples can be found here: [examples/pooling/score](../../../examples/pool
 
 ## Supported Features
 
-AS cross-encoder models are a subset of classification models that accept two prompts as input and output num_labels equal to 1, cross-encoder features should be consistent with (sequence) classification. For more information, see [this page](classify.md#supported-features).
+As cross-encoder models are a subset of classification models that accept two prompts as input and output num_labels equal to 1, cross-encoder features should be consistent with (sequence) classification. For more information, see [this page](classify.md#supported-features).
 
 ### Score Template
 
