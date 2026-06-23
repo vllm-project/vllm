@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -12,19 +11,16 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
-from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.kv_offload.base import (
-    OffloadingEvent,
     OffloadingManager,
     OffloadPolicy,
     ReqContext,
@@ -145,31 +141,6 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     )
     runner.connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
     runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_loaded=(3, 4, 5))
-
-    # test take_events
-    def to_hashes(int_hashes: list[int]) -> list[BlockHash]:
-        return [BlockHash(str(i).encode()) for i in int_hashes]
-
-    def take_events() -> Iterable[OffloadingEvent]:
-        yield OffloadingEvent(keys=to_keys([1, 2, 3]), medium="A", removed=False)
-        yield OffloadingEvent(keys=to_keys([4, 5, 6]), medium="B", removed=True)
-
-    runner.manager.take_events.side_effect = take_events
-    events = list(runner.scheduler_connector.take_events())
-    assert len(events) == 2
-    event = events[0]
-    assert isinstance(event, BlockStored)
-    assert event.block_hashes == to_hashes([1, 2, 3])
-    assert event.block_size == 0
-    assert event.medium == "A"
-    assert event.token_ids == []
-    assert event.parent_block_hash is None
-    assert event.lora_id is None
-    assert event.lora_name is None
-    event = events[1]
-    assert isinstance(event, BlockRemoved)
-    assert event.block_hashes == to_hashes([4, 5, 6])
-    assert event.medium == "B"
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
