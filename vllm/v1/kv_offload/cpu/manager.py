@@ -140,6 +140,7 @@ class CPUOffloadingManager(OffloadingManager):
             assert block is not None, f"Block {key!r} not found in cache"
             assert block.is_ready, f"Block {key!r} is not ready for reading"
             if block.ref_cnt == 0:
+                self._policy.mark_non_evictable(key)
                 self._num_evictable_cache_blocks -= 1  # ref_cnt 0 -> 1
                 assert self._num_evictable_cache_blocks >= 0
             block.ref_cnt += 1
@@ -161,6 +162,7 @@ class CPUOffloadingManager(OffloadingManager):
             block.ref_cnt -= 1
             if block.ref_cnt == 0:
                 self._num_evictable_cache_blocks += 1  # ref_cnt 1 -> 0
+                self._policy.mark_evictable(key)
 
     @override
     def prepare_store(
@@ -248,6 +250,7 @@ class CPUOffloadingManager(OffloadingManager):
                 if block is not None and not block.is_ready:
                     block.ref_cnt = 0
                     self._num_evictable_cache_blocks += 1
+                    self._policy.mark_evictable(key)
                     stored_keys.append(key)
         else:
             for key in keys:
