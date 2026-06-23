@@ -1,5 +1,5 @@
-model_name: "openai/gpt-oss-20b"
-accuracy_threshold: 0.30
+model_name: "RedHatAI/Qwen3-30B-A3B-Instruct-2507-quantized.w8a8"
+accuracy_threshold: 0.86
 num_questions: 1319
 num_fewshot: 5
 server_args: >-

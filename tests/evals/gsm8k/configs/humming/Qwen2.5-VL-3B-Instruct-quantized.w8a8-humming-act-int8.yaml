@@ -1,0 +1,10 @@
+model_name: "nm-testing/Qwen2.5-VL-3B-Instruct-quantized.w8a8"
+accuracy_threshold: 0.65
+num_questions: 1319
+num_fewshot: 5
+server_args: >-
+  --enforce-eager
+  --max-model-len 8192
+  --linear-backend humming
+env:
+  VLLM_HUMMING_INPUT_QUANT_CONFIG: '{"dtype":"int8"}'

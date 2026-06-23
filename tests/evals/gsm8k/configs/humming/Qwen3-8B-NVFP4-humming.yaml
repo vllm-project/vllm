@@ -1,8 +1,8 @@
-model_name: "openai/gpt-oss-20b"
-accuracy_threshold: 0.30
+model_name: "nvidia/Qwen3-8B-NVFP4"
+accuracy_threshold: 0.86
 num_questions: 1319
 num_fewshot: 5
 server_args: >-
   --enforce-eager
   --max-model-len 8192
-  --moe-backend humming
+  --linear-backend humming

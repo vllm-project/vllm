@@ -113,6 +113,7 @@ async def call_vllm_api(
 def _build_gsm8k_prompts(
     num_questions: int = 1319,
     num_shots: int = 5,
+    gen_prefix: str = "",
 ) -> tuple[list[str], list[int]]:
     """Build few-shot GSM8K completion prompts and ground-truth labels."""
     if num_questions == 0:
@@ -124,14 +125,15 @@ def _build_gsm8k_prompts(
     for i in range(num_shots):
         few_shot_examples += (
             f"Question: {train_data[i]['question']}\n"
-            f"Answer: {train_data[i]['answer']}\n\n"
+            f"Answer:{gen_prefix} {train_data[i]['answer']}\n\n"
         )
 
     prompts = []
     labels = []
     for i in range(num_questions):
         prompts.append(
-            few_shot_examples + f"Question: {test_data[i]['question']}\nAnswer:"
+            few_shot_examples
+            + f"Question: {test_data[i]['question']}\nAnswer:{gen_prefix}"
         )
         labels.append(get_answer_value(test_data[i]["answer"]))
 
@@ -178,6 +180,7 @@ def evaluate_gsm8k(
     temperature: float = 0.0,
     seed: int | None = 42,
     request_timeout_seconds: float = 600,
+    gen_prefix: str = "",
 ) -> dict[str, float | int]:
     """
     Evaluate GSM8K accuracy using vLLM serve endpoint.
@@ -185,7 +188,7 @@ def evaluate_gsm8k(
     Returns dict with accuracy, invalid_rate, latency, etc.
     """
     base_url = f"{host}:{port}"
-    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots)
+    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots, gen_prefix)
     num_questions = len(prompts)
 
     async def run_async_evaluation():
@@ -228,6 +231,7 @@ def evaluate_gsm8k_offline(
     num_shots: int = 5,
     max_tokens: int = 256,
     temperature: float = 0.0,
+    gen_prefix: str = "",
 ) -> dict[str, float | int]:
     """Evaluate GSM8K accuracy using an offline vllm.LLM object.
 
@@ -236,7 +240,7 @@ def evaluate_gsm8k_offline(
     """
     from vllm import SamplingParams
 
-    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots)
+    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots, gen_prefix)
 
     sampling_params = SamplingParams(
         temperature=temperature,

@@ -1,0 +1,8 @@
+Qwen3.5-4B-quantized.w4a16-humming-act-int8.yaml
+Qwen2.5-VL-3B-Instruct-quantized.w8a8-humming-act-int8.yaml
+Qwen2.5-3B-Instruct-GPTQ-Int4-humming-act-int8.yaml
+Qwen1.5-32B-Chat-AWQ-humming-act-int8.yaml
+Qwen3-30B-A3B-Instruct-2507-quantized.w8a8-humming-act-int8.yaml
+Qwen3.5-35B-A3B-GPTQ-Int4-humming-act-int8.yaml
+Qwen3.6-35B-A3B-AWQ-humming-act-int8.yaml
+Qwen3.5-35B-A3B-experts-int8-humming-act-int8.yaml

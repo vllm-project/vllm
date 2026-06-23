@@ -1,5 +1,5 @@
-model_name: "openai/gpt-oss-20b"
-accuracy_threshold: 0.30
+model_name: "nvidia/Qwen3-30B-A3B-NVFP4"
+accuracy_threshold: 0.86
 num_questions: 1319
 num_fewshot: 5
 server_args: >-

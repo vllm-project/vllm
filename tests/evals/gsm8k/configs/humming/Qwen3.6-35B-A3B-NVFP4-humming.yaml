@@ -1,7 +1,8 @@
-model_name: "openai/gpt-oss-20b"
-accuracy_threshold: 0.30
+model_name: "RedHatAI/Qwen3.6-35B-A3B-NVFP4"
+accuracy_threshold: 0.91
 num_questions: 1319
 num_fewshot: 5
+gen_prefix: " <think>\n\n</think>\n"
 server_args: >-
   --enforce-eager
   --max-model-len 8192
