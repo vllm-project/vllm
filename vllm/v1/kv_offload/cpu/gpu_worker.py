@@ -122,50 +122,6 @@ def compute_sub_block_ptrs(
     output[:] = flat[skip_count : skip_count + num_sub_blocks]
 
 
-def pin_tensor(
-    cpu_tensors: list[torch.Tensor],
-    mmap_region: SharedOffloadRegion | None,
-) -> None:
-    """Register the CPU offload memory as CUDA pinned memory."""
-    if not current_platform.is_cuda_alike():
-        logger.info(
-            "Skipping host registration on %s; cudaHostRegister is only "
-            "available on CUDA/ROCm.",
-            current_platform.device_name,
-        )
-        return
-
-    if mmap_region is not None:
-        if mmap_region.is_pinned:
-            logger.debug("Region already pinned; skipping cudaHostRegister for mmap.")
-            return
-        tensors = [(mmap_region._base, f"mmap rank={mmap_region.rank}")]
-    else:
-        tensors = [(tensor, "CPU tensor") for tensor in cpu_tensors]
-
-    for tensor, description in tensors:
-        total_size_bytes = tensor.numel() * tensor.element_size()
-        result = torch.cuda.cudart().cudaHostRegister(
-            tensor.data_ptr(), total_size_bytes, 0
-        )
-        if result.value != 0:
-            logger.warning(
-                "cudaHostRegister failed for %s (code=%d) - transfers will "
-                "still work but may be slower (unpinned DMA)",
-                description,
-                result.value,
-            )
-            continue
-
-        logger.debug(
-            "cudaHostRegister %s %.2f GB",
-            description,
-            total_size_bytes / 1e9,
-        )
-        if mmap_region is not None:
-            mmap_region.is_pinned = True
-
-
 def _new_descriptor_buffers(
     num_copy_ops: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -469,10 +425,6 @@ class SingleDirectionOffloadingHandler:
                 event.synchronize()
 
     def shutdown(self) -> None:
-        if self._pin_thread is not None:
-            self._pin_thread.join()
-            self._pin_thread = None
-
         while self._transfers:
             transfer = self._transfers.popleft()
             transfer.end_event.synchronize()
@@ -482,6 +434,9 @@ class SingleDirectionOffloadingHandler:
         self._buffer_pool.clear()
         self.src_tensors.clear()
         self.dst_tensors.clear()
+        if self._pin_thread is not None:
+            self._pin_thread.join()
+            self._pin_thread = None
         if self._mmap_region is not None:
             self._mmap_region.cleanup()
             self._mmap_region = None
@@ -508,8 +463,8 @@ class CPUOffloadingWorker(OffloadingWorker):
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
         self._mmap_region = mmap_region
 
-        gpu_tensors: list[torch.Tensor] = []
-        cpu_tensors: list[torch.Tensor] = []
+        self.gpu_tensors: list[torch.Tensor] = []
+        self.cpu_tensors: list[torch.Tensor] = []
         for kv_cache_tensor in kv_caches.tensors:
             gpu_page_size_bytes = kv_cache_tensor.page_size_bytes
             gpu_tensor = kv_cache_tensor.tensor.view(torch.int8).view(
@@ -534,21 +489,20 @@ class CPUOffloadingWorker(OffloadingWorker):
                     time.monotonic() - t0,
                 )
 
-            gpu_tensors.append(gpu_tensor)
-            cpu_tensors.append(cpu_tensor)
+            self.gpu_tensors.append(gpu_tensor)
+            self.cpu_tensors.append(cpu_tensor)
 
         if pin_memory:
             self.pin_thread = threading.Thread(
-                target=pin_tensor,
-                args=(cpu_tensors, mmap_region),
+                target=self._pin_tensors,
                 name="CPUTensorPinThread",
             )
             self.pin_thread.start()
             logger.info("Starting to pin memory in background...")
 
         self._store_handler = SingleDirectionOffloadingHandler(
-            gpu_tensors=gpu_tensors,
-            cpu_tensors=cpu_tensors,
+            gpu_tensors=self.gpu_tensors,
+            cpu_tensors=self.cpu_tensors,
             block_size_factor=block_size_factor,
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=True,
@@ -557,13 +511,45 @@ class CPUOffloadingWorker(OffloadingWorker):
         )
 
         self._load_handler = SingleDirectionOffloadingHandler(
-            gpu_tensors=gpu_tensors,
-            cpu_tensors=cpu_tensors,
+            gpu_tensors=self.gpu_tensors,
+            cpu_tensors=self.cpu_tensors,
             block_size_factor=block_size_factor,
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=False,
-            pin_thread=self.pin_thread,
         )
+
+    def _pin_tensors(self) -> None:
+        """Register the CPU offload memory as CUDA pinned memory."""
+        if not current_platform.is_cuda_alike():
+            logger.info(
+                "Skipping host registration on %s; cudaHostRegister is only "
+                "available on CUDA/ROCm.",
+                current_platform.device_name,
+            )
+            return
+
+        tensors_to_pin = (
+            self._mmap_region._base
+            if self._mmap_region is not None
+            else self.cpu_tensors
+        )
+        for tensor in tensors_to_pin:
+            total_size_bytes = tensor.numel() * tensor.element_size()
+            result = torch.cuda.cudart().cudaHostRegister(
+                tensor.data_ptr(), total_size_bytes, 0
+            )
+            if result.value != 0:
+                logger.warning(
+                    "cudaHostRegister failed for host tensor (code=%d) "
+                    "- transfers will still work but may be slower (unpinned DMA)",
+                    result.value,
+                )
+                continue
+
+            logger.info(
+                "cudaHostRegister pin %.2f GB",
+                total_size_bytes / 1e9,
+            )
         
         if self.pin_thread is not None:
             self.pin_thread.join()
