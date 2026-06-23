@@ -43,16 +43,18 @@ MODEL_ARG_EXPTYPES = [
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "gptq", "auto_gptq"),
     ("LnL-AI/TinyLlama-1.1B-Chat-v1.0-GPTQ-4bit", "awq", "ERROR"),
     # AUTOAWQ
+    # AutoAWQConfig.override_quantization_method() returns "auto_awq" for AWQ models
+    # when user_quant is None, "awq", "awq_marlin", "marlin", or "auto_awq"
     (
         "TheBloke/OpenHermes-2.5-Mistral-7B-AWQ",
         None,
-        "awq_marlin" if current_platform.is_cuda_alike() else "awq",
+        "auto_awq",
     ),
-    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "awq", "awq"),
+    ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "awq", "auto_awq"),
     (
         "TheBloke/OpenHermes-2.5-Mistral-7B-AWQ",
         "marlin",
-        "awq_marlin" if current_platform.is_cuda_alike() else "ERROR",
+        "auto_awq" if current_platform.is_cuda_alike() else "ERROR",
     ),
     ("TheBloke/OpenHermes-2.5-Mistral-7B-AWQ", "gptq", "ERROR"),
 ]
