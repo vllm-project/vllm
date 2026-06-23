@@ -674,6 +674,8 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     w2_weight_scale: torch.Tensor,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
+    w13_input_scale: torch.Tensor | None = None,
+    w2_input_scale: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
 ) -> tuple[
     torch.Tensor,
@@ -1191,8 +1193,29 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w2_bias,
         )
     elif mxfp4_backend == Mxfp4MoeBackend.EMULATION:
-        # No additional transformation needed for emulation backend,
-        # weights are dequantized on the fly in the experts class.
+        w13_has_per_expert_scale = (
+            w13_input_scale is not None
+            and w13_input_scale.ndim == 1
+            and not all_close_1d(w13_input_scale)
+        )
+        w2_has_per_expert_scale = (
+            w2_input_scale is not None
+            and w2_input_scale.ndim == 1
+            and not all_close_1d(w2_input_scale)
+        )
+        if w13_has_per_expert_scale or w2_has_per_expert_scale:
+            logger.warning_once(
+                "Found input_scales that are not equal for OCP MX MoE "
+                "emulation. Using the maximum across experts for each layer."
+            )
+        if w13_input_scale is not None:
+            layer.w13_input_scale = torch.nn.Parameter(
+                w13_input_scale.max().to(torch.float32), requires_grad=False
+            )
+        if w2_input_scale is not None:
+            layer.w2_input_scale = torch.nn.Parameter(
+                w2_input_scale.max().to(torch.float32), requires_grad=False
+            )
         return (
             w13_weight,
             w2_weight,
