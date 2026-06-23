@@ -42,6 +42,10 @@ class OpenAIModelRegistry:
     ) -> None:
         self.model_config = model_config
         self.base_model_paths = base_model_paths
+        self.lora_requests: dict[str, LoRARequest] = {}
+
+    def model_name(self, lora_request: LoRARequest | None = None) -> str:
+        return self.base_model_paths[0].name
 
     def is_base_model(self, model_name: str) -> bool:
         return any(model.name == model_name for model in self.base_model_paths)
@@ -71,6 +75,9 @@ class OpenAIModelRegistry:
                 for base_model in self.base_model_paths
             ]
         )
+
+    async def resolve_lora(self, lora_name: str):
+        raise RuntimeError("The OpenAIModelRegistry has no LoRA support.")
 
 
 class OpenAIServingModels:

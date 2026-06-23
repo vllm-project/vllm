@@ -107,6 +107,8 @@ class TurnMetrics:
 
 
 class ConversationContext(ABC):
+    response_parser: Parser | None = None
+
     @abstractmethod
     def append_output(self, output: RequestOutput) -> None:
         pass
@@ -167,8 +169,25 @@ def _create_json_parse_error_messages(
 class SimpleContext(ConversationContext):
     """This is a context that cannot handle MCP tool calls"""
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        response_parser: Parser | None = None,
+        parser_cls: type[Parser] | None = None,
+        tokenizer: TokenizerLike | None = None,
+        request: ResponsesRequest | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
+    ):
         self.last_output = None
+        self.response_parser = response_parser or (
+            parser_cls(
+                tokenizer,
+                request.tools,
+                chat_template_kwargs=chat_template_kwargs,
+            )
+            if parser_cls is not None and tokenizer is not None and request is not None
+            else None
+        )
 
         # Accumulated final output for streaming mode
         self._accumulated_text: str = ""
@@ -181,7 +200,7 @@ class SimpleContext(ConversationContext):
         # todo num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
         # not implemented yet for SimpleContext
-        self.all_turn_metrics = []
+        self.all_turn_metrics: list[TurnMetrics] = []
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.kv_transfer_params: dict[str, Any] | None = None
@@ -280,6 +299,7 @@ class ParsableContext(ConversationContext):
         available_tools: list[str] | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
+        response_parser: Parser | None = None,
         enable_auto_tools: bool = False,
         tool_call_id_type: str = "random",
     ):
@@ -296,13 +316,13 @@ class ParsableContext(ConversationContext):
         self.enable_auto_tools = enable_auto_tools
         self.tool_call_id_type = tool_call_id_type
 
-        self.parser_instance: Parser | None = None
-        if parser_cls is not None:
+        self.response_parser = response_parser
+        if self.response_parser is None and parser_cls is not None:
             chat_template_kwargs = request.build_chat_params(
                 default_template=chat_template,
                 default_template_content_format=chat_template_content_format,
             ).chat_template_kwargs
-            self.parser_instance = parser_cls(
+            self.response_parser = parser_cls(
                 tokenizer,
                 tools=request.tools,
                 chat_template_kwargs=chat_template_kwargs,
@@ -334,8 +354,8 @@ class ParsableContext(ConversationContext):
         completion = output.outputs[0]
         self.finish_reason = completion.finish_reason
 
-        if self.parser_instance is not None:
-            reasoning, content, tool_calls = self.parser_instance.parse(
+        if self.response_parser is not None:
+            reasoning, content, tool_calls = self.response_parser.parse(
                 completion.text,
                 self.request,
                 enable_auto_tools=self.enable_auto_tools,
@@ -591,8 +611,10 @@ class HarmonyContext(ConversationContext):
         messages: list,
         available_tools: list[str],
         function_tool_names: frozenset[str] | None = None,
+        response_parser: Parser | None = None,
     ):
         self._messages = messages
+        self.response_parser = response_parser
         self.finish_reason: str | None = None
         self.available_tools = available_tools
         self.function_tool_names = function_tool_names

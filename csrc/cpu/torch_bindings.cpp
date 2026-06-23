@@ -146,6 +146,8 @@ at::Tensor causal_conv1d_update_cpu(
 void activation_lut_bf16(torch::Tensor& out, torch::Tensor& input,
                          const std::string& activation);
 
+bool cpu_attn_has_isa(const std::string& isa);
+
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
     const int64_t num_heads_kv, const int64_t head_dim,
@@ -310,13 +312,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
-      "rms_norm(Tensor! out, Tensor input, Tensor weight, float epsilon) -> "
+      "rms_norm(Tensor! out, Tensor input, Tensor? weight, float epsilon) -> "
       "()");
   ops.impl("rms_norm", torch::kCPU, &rms_norm);
 
   // In-place fused Add and RMS Normalization.
   ops.def(
-      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor weight, "
+      "fused_add_rms_norm(Tensor! input, Tensor! residual, Tensor? weight, "
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCPU, &fused_add_rms_norm);
 
@@ -497,6 +499,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("fused_gdn_gating_cpu", torch::kCPU, &fused_gdn_gating_cpu);
 
   // CPU attention kernels
+  ops.def("cpu_attn_has_isa(str isa) -> bool", &cpu_attn_has_isa);
   ops.def(
       "get_scheduler_metadata(int num_req, int num_heads_q, int num_heads_kv, "
       "int head_dim, Tensor seq_lens, ScalarType dtype, Tensor "
