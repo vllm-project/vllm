@@ -10,7 +10,7 @@ use openssl::ec::{EcGroup, EcKey};
 use openssl::hash::MessageDigest;
 use openssl::nid::Nid;
 use openssl::pkey::{PKey, Private};
-use openssl::ssl::{SslConnector, SslFiletype, SslMethod};
+use openssl::ssl::{SslConnector, SslFiletype, SslMethod, SslVersion};
 use openssl::x509::extension::{BasicConstraints, KeyUsage, SubjectAlternativeName};
 use openssl::x509::{X509, X509NameBuilder};
 use tempfile::TempDir;
@@ -315,6 +315,27 @@ async fn https_get(
     Ok(response)
 }
 
+/// Attempt a handshake offering only a legacy CBC+SHA1 suite over TLS 1.2,
+/// capping the version so TLS 1.3 cannot rescue the negotiation.
+async fn legacy_suite_handshake(certs: &TestCerts, addr: &str) -> std::io::Result<()> {
+    let tcp = TcpStream::connect(addr).await?;
+
+    let mut builder = SslConnector::builder(SslMethod::tls_client()).expect("connector builder");
+    builder.set_ca_file(certs.path("ca.pem")).expect("trust ca");
+    builder.set_max_proto_version(Some(SslVersion::TLS1_2)).expect("cap tls1.2");
+    builder
+        .set_cipher_list("ECDHE-ECDSA-AES256-SHA:@SECLEVEL=0")
+        .expect("legacy cipher");
+    let connector = builder.build();
+    let mut config = connector.configure().expect("configure");
+    config.set_verify_hostname(false);
+    let ssl = config.into_ssl("127.0.0.1").expect("ssl");
+
+    let stream = SslStream::new(ssl, tcp).expect("client ssl stream");
+    tokio::pin!(stream);
+    stream.as_mut().connect().await.map_err(std::io::Error::other)
+}
+
 async fn plain_get(addr: &str) -> std::io::Result<String> {
     let mut tcp = TcpStream::connect(addr).await?;
     tcp.write_all(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
@@ -390,6 +411,31 @@ async fn serves_full_certificate_chain() {
     let (addr, shutdown) = spawn_server(Some(tls)).await;
     let response = https_get(&certs, &addr, None).await.expect("chained https request");
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn rejects_legacy_cipher_only_client() {
+    let certs = TestCerts::generate();
+    let (addr, shutdown) = spawn_server(Some(server_tls(&certs, 0))).await;
+    let result = legacy_suite_handshake(&certs, &addr).await;
+    assert!(result.is_err(), "legacy-only client must be rejected");
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn ssl_ciphers_override_widens_past_preset() {
+    // Counterpart to rejects_legacy_cipher_only_client: --ssl-ciphers set to that
+    // same legacy suite lets the client through, proving the override beats the preset.
+    let certs = TestCerts::generate();
+    let mut tls = server_tls(&certs, 0);
+    tls.ciphers = Some("ECDHE-ECDSA-AES256-SHA:@SECLEVEL=0".to_string());
+    let (addr, shutdown) = spawn_server(Some(tls)).await;
+    let result = legacy_suite_handshake(&certs, &addr).await;
+    assert!(
+        result.is_ok(),
+        "override must allow the legacy suite: {result:?}"
+    );
     shutdown.cancel();
 }
 

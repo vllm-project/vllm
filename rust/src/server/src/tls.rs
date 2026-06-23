@@ -17,7 +17,10 @@ use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Context as _, Result};
-use openssl::ssl::{Ssl, SslContext, SslContextBuilder, SslFiletype, SslMethod, SslVerifyMode};
+use openssl::ssl::{
+    Ssl, SslAcceptor, SslContext, SslContextBuilder, SslFiletype, SslMethod, SslOptions,
+    SslVerifyMode,
+};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_openssl::SslStream;
 
@@ -27,13 +30,15 @@ use crate::config::TlsConfig;
 /// certificate chain, the private key (`key_file`, or the certificate file when
 /// unset), the mTLS client verifier, and an optional cipher list.
 ///
-/// No TLS floor or cipher list unless `--ssl-ciphers` is set; defers to the
-/// linked OpenSSL's defaults.
+/// Starts from the Mozilla intermediate baseline (forward-secret AEAD suites,
+/// TLS 1.2 floor, no compression), matching what the Python frontend uses by
+/// default; `--ssl-ciphers` overrides it.
 pub(crate) fn build_server_config(tls: &TlsConfig) -> Result<SslContext> {
     let cert_file = tls.cert_file.as_deref().context("--ssl-certfile is required to enable TLS")?;
 
-    let mut builder =
-        SslContextBuilder::new(SslMethod::tls_server()).context("failed to initialize TLS")?;
+    let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls_server())
+        .context("failed to initialize TLS")?;
+    builder.set_options(SslOptions::CIPHER_SERVER_PREFERENCE);
 
     // Load the whole chain (leaf + intermediates), not just the leaf, so
     // deployments behind an intermediate CA serve a complete chain.
@@ -61,7 +66,7 @@ pub(crate) fn build_server_config(tls: &TlsConfig) -> Result<SslContext> {
             .with_context(|| format!("invalid --ssl-ciphers {ciphers:?}"))?;
     }
 
-    Ok(builder.build())
+    Ok(builder.build().into_context())
 }
 
 /// Fail loudly with a flag-named message when a configured file is missing,
