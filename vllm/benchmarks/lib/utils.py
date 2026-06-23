@@ -9,6 +9,20 @@ from contextlib import contextmanager
 from typing import Any
 
 
+def parse_metadata(metadata: list[str] | None) -> dict[str, str]:
+    """Parse KEY=VALUE metadata CLI arguments into a result JSON mapping."""
+    result: dict[str, str] = {}
+    if not metadata:
+        return result
+
+    for item in metadata:
+        if "=" not in item:
+            raise ValueError("Invalid metadata format. Please use KEY=VALUE format.")
+        key, value = item.split("=", 1)
+        result[key.strip()] = value.strip()
+    return result
+
+
 def extract_field(
     args: argparse.Namespace, extra_info: dict[str, Any], field_name: str
 ) -> str:
