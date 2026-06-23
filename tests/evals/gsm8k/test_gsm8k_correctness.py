@@ -26,6 +26,7 @@ from .gsm8k_eval import evaluate_gsm8k
 # MXFP4 via quark requires amd-quark >= 0.12 on torch >= 2.11.
 # Earlier torch releases work with older quark versions. See
 # https://github.com/amd/Quark/issues/34
+# TODO: Remove once amd-quark>=0.12.0
 QUARK_MXFP4_TORCH_COMPATIBLE = find_spec("quark") is not None and (
     version.parse(importlib.metadata.version("amd-quark")) >= version.parse("0.12.0")
     if version.parse(torch.__version__.split("+")[0]) >= version.parse("2.11")
