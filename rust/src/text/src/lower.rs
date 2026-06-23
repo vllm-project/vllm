@@ -274,7 +274,7 @@ mod tests {
     use super::*;
     use crate::backend::hf::HfTextBackend;
     use crate::backend::{SamplingHints, TextBackend as _};
-    use crate::error::{LogprobsError, OutOfVocabError};
+    use crate::error::{LogprobsError, TokenIdsError};
     use crate::request::{Prompt, TextRequest};
 
     /// Stub tokenizer that returns empty token IDs — sufficient for tests that
@@ -555,7 +555,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::OutOfVocab(OutOfVocabError {
+            Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "prompt",
                 token_ids,
                 vocab_size: 2000,
@@ -857,7 +857,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::OutOfVocab(OutOfVocabError {
+            Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "logprob_token_ids",
                 token_ids,
                 vocab_size: 1000,
@@ -878,7 +878,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::OutOfVocab(OutOfVocabError {
+            Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "stop_token_ids",
                 token_ids,
                 vocab_size: 1000,
@@ -899,11 +899,28 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::OutOfVocab(OutOfVocabError {
+            Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "allowed_token_ids",
                 token_ids,
                 vocab_size: 2000,
             }) if token_ids == vec![2000]
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_empty_allowed_token_ids() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                allowed_token_ids: Some(vec![]),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::EmptyAllowedTokenIds)
         ));
     }
 
@@ -926,7 +943,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::OutOfVocab(OutOfVocabError {
+            Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "bad_words",
                 token_ids,
                 vocab_size: 2000,
@@ -947,7 +964,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::OutOfVocab(OutOfVocabError {
+            Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "logit_bias",
                 token_ids,
                 vocab_size: 1000,
