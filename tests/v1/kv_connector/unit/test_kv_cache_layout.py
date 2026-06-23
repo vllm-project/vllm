@@ -4,6 +4,18 @@
 import pytest
 
 
+def _import_optional_backend(module_path, name):
+    try:
+        module = __import__(module_path, fromlist=[name])
+    except ImportError as e:
+        pytest.skip(f"backend deps unavailable: {e}")
+    except (AssertionError, RuntimeError) as e:
+        if "cuda" in str(e).lower():
+            pytest.skip(f"backend deps unavailable: {e}")
+        raise
+    return getattr(module, name)
+
+
 def test_mla_common_backend_rejects_cross_layer_kv_cache():
     """MLACommonBackend defaults to the identity permutation (layers dim
     first) so MLA backends whose decode kernels are not verified to honor
@@ -37,9 +49,7 @@ def test_verified_mla_backends_support_cross_layer_kv_cache(backend_path):
     in to the cross-layer layout with a non-identity permutation placing
     num_blocks first in physical layout."""
     module_path, name = backend_path.rsplit(".", 1)
-    backend = getattr(
-        pytest.importorskip(module_path, reason="backend deps unavailable"), name
-    )
+    backend = _import_optional_backend(module_path, name)
 
     stride_order = backend.get_kv_cache_stride_order(include_num_layers_dimension=True)
     assert stride_order == (1, 0, 2, 3)
