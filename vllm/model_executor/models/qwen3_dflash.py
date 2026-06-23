@@ -12,7 +12,10 @@ from transformers import Qwen3Config
 from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -198,6 +201,7 @@ class DFlashQwen3Attention(nn.Module):
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
+            sinks=self.attention_sink_bias,
         )
         if sliding_window is not None and not causal:
             # Dedicated override for FlashAttention + non-causal SWA:
@@ -588,6 +592,8 @@ class DFlashQwen3Model(nn.Module):
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        tp_rank = get_tensor_model_parallel_rank()
+        tp_size = get_tensor_model_parallel_world_size()
         for name, loaded_weight in weights:
             if "midlayer." in name:
                 name = name.replace("midlayer.", "layers.0.")
@@ -595,6 +601,18 @@ class DFlashQwen3Model(nn.Module):
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
+            if "attention_sink_bias" in name:
+                if name not in params_dict:
+                    continue
+                # Sink bias is per-head; shard it across TP ranks like the
+                # attention heads themselves.
+                param = params_dict[name]
+                heads_per_rank = loaded_weight.shape[0] // tp_size
+                head_start = tp_rank * heads_per_rank
+                narrow_weight = loaded_weight.narrow(0, head_start, heads_per_rank)
+                param.data.copy_(narrow_weight)
+                loaded_params.add(name)
+                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
