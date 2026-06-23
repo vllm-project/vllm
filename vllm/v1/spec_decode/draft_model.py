@@ -42,6 +42,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
 
     def _init_heterogeneous_vocab(self, device: torch.device):
         from vllm.tokenizers.registry import get_tokenizer
+        from vllm.v1.spec_decode.slem import SlemMapper
 
         spec = self.speculative_config
 
@@ -54,26 +55,11 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             trust_remote_code=spec.draft_model_config.trust_remote_code,
         )
 
-        if self.heterogeneous_vocab_method == "slem":
-            from vllm.v1.spec_decode.slem import SlemMapper
-
-            self.slem_mapper: SlemMapper | None = SlemMapper(
-                target_tokenizer=target_tokenizer,
-                draft_tokenizer=draft_tokenizer,
-                device=device,
-            )
-            self.vocab_mapping = None
-        else:
-            from vllm.v1.spec_decode.vocab_mapping import VocabMapping
-
-            self.slem_mapper = None
-            self.vocab_mapping: VocabMapping | None = VocabMapping(
-                target_tokenizer=target_tokenizer,
-                draft_tokenizer=draft_tokenizer,
-                target_vocab_size=spec.target_model_config.get_vocab_size(),
-                draft_vocab_size=spec.draft_model_config.get_vocab_size(),
-                device=device,
-            )
+        self.slem_mapper: SlemMapper | None = SlemMapper(
+            target_tokenizer=target_tokenizer,
+            draft_tokenizer=draft_tokenizer,
+            device=device,
+        )
 
     def _raise_if_vocab_size_mismatch(self):
         self.speculative_config.verify_equal_vocab_size_if_draft_model()

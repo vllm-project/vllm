@@ -142,9 +142,8 @@ class SpeculativeConfig:
     When enabled, builds a mapping between vocabularies at init.
     Requires method='draft_model'."""
 
-    heterogeneous_vocab_method: str = "tli"
+    heterogeneous_vocab_method: str = "slem"
     """Method for heterogeneous vocabulary handling.
-    "tli": Token-Level Intersection — constrain draft to vocab intersection.
     "slem": String-Level Exact Match — draft uses full vocab, verify via text.
     Only applies when use_heterogeneous_vocab=True."""
 
@@ -1074,9 +1073,9 @@ class SpeculativeConfig:
                 raise ValueError(
                     "use_heterogeneous_vocab only works with method='draft_model'"
                 )
-            if self.heterogeneous_vocab_method not in ("tli", "slem"):
+            if self.heterogeneous_vocab_method not in ("slem",):
                 raise ValueError(
-                    f"heterogeneous_vocab_method must be 'tli' or 'slem', "
+                    f"heterogeneous_vocab_method must be 'slem', "
                     f"got '{self.heterogeneous_vocab_method}'"
                 )
         else:
