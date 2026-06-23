@@ -5,6 +5,7 @@ from http import HTTPStatus
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from vllm.entrypoints.anthropic.protocol import AnthropicMessagesRequest
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -51,6 +52,30 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
         )
 
     result = await handler.render_chat_request(request)
+
+    if isinstance(result, ErrorResponse):
+        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+
+    return JSONResponse(content=result.model_dump())
+
+
+@router.post(
+    "/v1/messages/render",
+    dependencies=[Depends(validate_json_request)],
+    response_model=GenerateRequest,
+    responses={
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+async def render_messages(request: AnthropicMessagesRequest, raw_request: Request):
+    handler = render(raw_request)
+    if handler is None:
+        raise NotImplementedError("The model does not support Messages Render API")
+
+    result = await handler.render_messages_request(request)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)

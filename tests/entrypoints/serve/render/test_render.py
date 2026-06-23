@@ -263,3 +263,73 @@ async def test_chat_completion_render_with_sampling_params(client):
 
     # Check that internal fields are not present
     assert "_all_stop_token_ids" not in sampling_params
+
+
+@pytest.mark.asyncio
+async def test_messages_render_basic(client):
+    """Test basic Anthropic Messages render endpoint."""
+    response = await client.post(
+        "/v1/messages/render",
+        json={
+            "model": MODEL_NAME,
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "Render this Anthropic message."}],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+
+    # Single GenerateRequest, like chat render.
+    assert isinstance(data, dict)
+    assert "token_ids" in data
+    assert "sampling_params" in data
+    assert "model" in data
+    assert data["model"] == MODEL_NAME
+
+    token_ids = data["token_ids"]
+    assert isinstance(token_ids, list)
+    assert len(token_ids) > 0
+    assert all(isinstance(tid, int) for tid in token_ids)
+    assert token_ids[0] == 1  # BOS
+
+
+@pytest.mark.asyncio
+async def test_messages_render_system_and_multi_turn(client):
+    """System field + multi-turn messages render to a single prompt."""
+    response = await client.post(
+        "/v1/messages/render",
+        json={
+            "model": MODEL_NAME,
+            "max_tokens": 16,
+            "system": "You are a helpful assistant.",
+            "messages": [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "Hi! How can I help?"},
+                {"role": "user", "content": "What is 2 + 2?"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, dict)
+    assert len(data["token_ids"]) > 0
+    assert data["token_ids"][0] == 1  # BOS
+
+
+@pytest.mark.asyncio
+async def test_messages_render_error_invalid_model(client):
+    """Messages render with an invalid model returns an error."""
+    response = await client.post(
+        "/v1/messages/render",
+        json={
+            "model": "invalid-model-name",
+            "max_tokens": 16,
+            "messages": [{"role": "user", "content": "Hello"}],
+        },
+    )
+
+    assert response.status_code == 404
+    data = response.json()
+    assert "error" in data
