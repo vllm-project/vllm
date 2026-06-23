@@ -310,10 +310,10 @@ class HpcRopeNorm(CustomOp, HpcModule):
         )
 
         # Dynamic per-token-per-head Q quant + per-tensor K/V (dqskv).
-        # The hpc kernel expects a hpc.QuantType enum (it reads
-        # ``quant_policy.value`` internally), so pass the enum member rather
-        # than a bare int.
-        QUANT_POLICY_DQSKV = hpc.QuantType.QPERTOKEN_PERHEAD_KPERTENSOR_VPERTENSOR
+        # rope_norm_store_kv_fp8 is registered as a torch op whose ``quant_policy``
+        # argument is typed as ``int``; pybind cannot cast the hpc.QuantType enum
+        # automatically, so pass its integer ``.value``.
+        QUANT_POLICY_DQSKV = hpc.QuantType.QPERTOKEN_PERHEAD_KPERTENSOR_VPERTENSOR.value
 
         # --- Prefill ---
         if num_prefill_reqs > 0:
