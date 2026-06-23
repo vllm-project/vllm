@@ -712,6 +712,24 @@ def choose_mp_linear_kernel(
                 f" {kernel.__name__} cannot implement due to: {failure_reason}"
             )
 
+    # On ROCm, the only mixed-precision kernel that supports activation
+    # reordering (desc_act / g_idx) is Exllama, which requires float16
+    # activations. A model run in bfloat16 therefore has no viable kernel and
+    # fails with an opaque list of rejections. Surface an actionable hint.
+    if (
+        current_platform.is_rocm()
+        and config.has_g_idx
+        and config.act_type != torch.float16
+    ):
+        raise ValueError(
+            "Failed to find a kernel that can implement the WNA16 linear "
+            "layer. On ROCm, quantized models with activation reordering "
+            "(desc_act=True) require float16 activations; the current dtype "
+            f"is {config.act_type}. Re-run with dtype='float16' "
+            '(e.g. --dtype float16 or LLM(..., dtype="float16")). '
+            "Reasons: \n" + "\n".join(failure_reasons)
+        )
+
     raise ValueError(
         "Failed to find a kernel that can implement the "
         "WNA16 linear layer. Reasons: \n" + "\n".join(failure_reasons)

@@ -45,10 +45,16 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
             )
 
         if is_quant_method_supported("gptq_marlin"):
+            # This checkpoint uses activation reordering (desc_act=True). On
+            # ROCm the only g_idx-capable mixed-precision kernel (Exllama)
+            # requires float16 activations, so pin the dtype there.
+            gptq_marlin_kwargs: dict[str, Any] = {"quantization": "gptq_marlin"}
+            if current_platform.is_rocm():
+                gptq_marlin_kwargs["dtype"] = torch.float16
             TEST_MODELS.append(
                 (
                     "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",
-                    {"quantization": "gptq_marlin"},
+                    gptq_marlin_kwargs,
                 )
             )
 
