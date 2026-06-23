@@ -19,7 +19,6 @@ from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.parse import ImageSize
 from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.tokenizers import cached_tokenizer_from_config
-from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
 from vllm.transformers_utils.processors.deepseek_ocr import DeepseekOCRProcessor
 
 from ...transformers_utils.processors.deepseek_ocr import count_tiles
@@ -116,12 +115,11 @@ class UnlimitedOCRForCausalLM(DeepseekOCR2ForCausalLM):
         nn.Module.__init__(self)
 
         config = vllm_config.model_config.hf_config
-        compat_config = DeepseekVLV2Config(**config.to_dict())
         self.config = config
         self.multimodal_config = vllm_config.model_config.multimodal_config
-        self.vision_config = compat_config.vision_config
-        self.projector_config = compat_config.projector_config
-        self.text_config = compat_config.text_config
+        self.vision_config = config.vision_config
+        self.projector_config = config.projector_config
+        self.text_config = config.text_config
         self.text_config.architectures = ["DeepseekV2ForCausalLM"]
         self.text_config.model_type = "deepseek_v2"
 
