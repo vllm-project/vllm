@@ -2298,7 +2298,7 @@ class LongcatNextForCausalLM(
 
         # Configure multimodal token handling
         # CRITICAL: Use text_vocab_size (131072), NOT vocab_size (282624).
-        # All multimodal tokens (131103-131109) are >= text_vocab_size, so
+        # All multimodal tokens (131103-131109, 131116, 131120-131124) are >= text_vocab_size, so
         # _has_oov_mm_tokens becomes True. This causes _embed_text_input_ids
         # to mask them to 0 BEFORE ngram embedding, matching the HF model
         # which explicitly zeroes them at line 153:
@@ -2308,13 +2308,23 @@ class LongcatNextForCausalLM(
         self.configure_mm_token_handling(
             vocab_size=config.text_vocab_size,
             mm_token_ids=[
+                # Image tokens
                 config.visual_config.image_start_token_id,  # 131106
                 config.visual_config.image_end_token_id,  # 131107
                 config.visual_config.image_pad_token_id,  # 131108
                 config.visual_config.image_newline_token_id,  # 131109
+                # Audio tokens (basic)
                 config.audio_config.audio_start_token_id,  # 131103
                 config.audio_config.audio_end_token_id,  # 131104
                 config.audio_config.audio_pad_token_id,  # 131105
+                config.audio_config.audio_delim_token_id,  # 131116
+                # Audio-text tokens
+                config.audio_config.audiotext_start_token_id,  # 131120
+                config.audio_config.audiotext_end_token_id,  # 131121
+                config.audio_config.audiotext_pad_token_id,  # 131122
+                # Audio-generation tokens
+                config.audio_config.audiogen_start_token_id,  # 131123
+                config.audio_config.audiogen_end_token_id,  # 131124
             ],
         )
 
@@ -2775,6 +2785,18 @@ class LongcatNextForCausalLM(
         # Map to vocab space using per-level cumulative offsets.
         visual_ids = visual_ids + self.visual_offset_vals.to(visual_ids.device)
 
+        # CRITICAL: Protect against OOV visual IDs (same as audio).
+        vocab_size = self.language_model.embed_tokens.weight.shape[0]
+        max_visual_id = int(visual_ids.max())
+        if max_visual_id >= vocab_size:
+            logger.warning(
+                "[VISUAL_FIX] visual_ids contain OOV tokens: max=%d >= vocab_size=%d. "
+                "Clamping to 0. This indicates a vocab_size mismatch in the model config.",
+                max_visual_id,
+                vocab_size,
+            )
+            visual_ids = visual_ids.clamp(max=vocab_size - 1)
+
         # Look up embeddings
         visual_embeds = self.language_model.embed_tokens(visual_ids).sum(dim=1)
 
@@ -2856,12 +2878,31 @@ class LongcatNextForCausalLM(
         )
         audio_ids = audio_ids + self.audio_offset_vals.to(audio_ids.device)
 
+        vocab_size = self.language_model.embed_tokens.weight.shape[0]
         logger.warning(
             "[AUDIO_DIAG] after offset: audio_ids min=%d max=%d vocab_size=%d",
             int(audio_ids.min()),
             int(audio_ids.max()),
-            self.language_model.embed_tokens.weight.shape[0],
+            vocab_size,
         )
+
+        # CRITICAL: Protect against OOV audio IDs.
+        # The audio encoder produces discrete token IDs per codebook level,
+        # which are then offset to different regions of the embedding table.
+        # If the config's vocab_size is smaller than the max offset ID,
+        # the embedding lookup will fail (with TP=1) or silently produce
+        # wrong embeddings (with TP=2 due to OOV masking in
+        # VocabParallelEmbedding). Clamp OOV IDs to 0 to prevent crashes
+        # and ensure deterministic behavior regardless of TP size.
+        max_audio_id = int(audio_ids.max())
+        if max_audio_id >= vocab_size:
+            logger.warning(
+                "[AUDIO_FIX] audio_ids contain OOV tokens: max=%d >= vocab_size=%d. "
+                "Clamping to 0. This indicates a vocab_size mismatch in the model config.",
+                max_audio_id,
+                vocab_size,
+            )
+            audio_ids = audio_ids.clamp(max=vocab_size - 1)
 
         # Look up embeddings: [L, depth] -> [L, depth, hidden] -> [L, hidden]
         audio_embeds = self.language_model.embed_tokens(audio_ids).sum(dim=1)
