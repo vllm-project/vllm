@@ -938,17 +938,12 @@ class MLADualRMSPerTokenQuantPattern(
 ):
     """
     Fuse the MLA FP8 attention path -- q-latent RMSNorm + FP8 *per-token* quant
-    together with the kv-latent RMSNorm -- into AITER's
-    ``fused_qk_rmsnorm_per_token_quant`` HIP kernel in a *single* launch.
+    plus kv-latent RMSNorm -- into AITER's ``fused_qk_rmsnorm_per_token_quant``.
 
-    This is the form that appears when the FP8 ``q_b_proj`` uses per-output-channel
-    weights with a per-token activation scale (Quark / ModelOpt). In that case
-    ``RocmAiterRMSNormQuantFusionPass`` (which runs earlier) folds the q-side
-    ``rms_norm -> per-token fp8 quant`` into ``rocm_aiter_rmsnorm_fused_dynamic_quant``
-    (a single ``(M, 1)`` scale) and leaves the kv side a plain ``vllm_ir.rms_norm``.
-    This pattern matches that asymmetric pair.
-
-    Target FX-graph pattern (post norm+quant fusion)::
+    With a per-token FP8 ``q_b_proj`` (Quark / ModelOpt), the earlier
+    ``RocmAiterRMSNormQuantFusionPass`` folds the q side into
+    ``rocm_aiter_rmsnorm_fused_dynamic_quant`` and leaves the kv side a plain
+    ``vllm_ir.rms_norm``. This pattern matches that asymmetric pair::
 
         gemm -> split_with_sizes([q_dim, kv_dim])
             +-- q_c     -> rocm_aiter_rmsnorm_fused_dynamic_quant -> (q_fp8, q_scale)
@@ -1077,14 +1072,6 @@ class MLADualRMSNormFusionPass(VllmFusionPatternMatcherPass):
         for epsilon in [1e-5, 1e-6]:
             self.register(MLADualRMSNormPattern(epsilon))
 
-        # In the FP8 attention path the q rms_norm is already fused into
-        # rocm_aiter_rmsnorm_fused_dynamic_quant by RocmAiterRMSNormQuantFusionPass
-        # (which runs earlier), so the symmetric BF16 dual pattern above no
-        # longer fires. Restore the dual fusion by matching that asymmetric
-        # (q per-token-quant + kv rms_norm) form -- where the q rms_norm is
-        # folded into a single (M, 1) activation scale -- and fuse it into
-        # AITER's fused_qk_rmsnorm_per_token_quant kernel. Only register when
-        # the installed aiter actually provides that kernel.
         if check_aiter_fused_qk_rmsnorm_per_token_quant():
             for epsilon in [1e-5, 1e-6]:
                 self.register(MLADualRMSPerTokenQuantPattern(epsilon))

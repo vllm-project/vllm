@@ -157,31 +157,12 @@ def test_fuse_mla_dual_rms_norm(
 
 class MLADualRMSNormFp8PerTokenTestModel(torch.nn.Module):
     """
-    Minimal model reproducing the FP8 MLA attention path with *per-token* quant.
-
-    In this path only the *q* latent is FP8 per-token-quantized (it feeds the FP8
-    ``q_b_proj`` GEMM); the *kv* latent is RMS-normed and consumed by attention
-    as bf16. So ``RocmAiterRMSNormQuantFusionPass`` (which runs earlier) folds
-    only the q-side ``rms_norm -> fp8 per-token quant`` into a single
-    ``rocm_aiter_rmsnorm_fused_dynamic_quant`` op (a single ``(M, 1)`` scale) and
-    leaves the kv side a plain ``vllm_ir.rms_norm``. This model mirrors that
-    asymmetric graph:
-
+    Minimal model reproducing the FP8 MLA attention path with *per-token* quant:
         linear -> split([q_dim, kv_dim])
             +-- q_c (getitem 0) -> rocm_aiter_rmsnorm_fused_dynamic_quant -> dequant
             +-- kv_lora (getitem 1) -> split([kv_c_dim, k_pe_dim])
                     +-- kv_c (getitem 0) -> rms_norm (bf16)
                     +-- k_pe
-
-    ``forward`` dequantizes the q fp8 output in-graph and returns it as bf16.
-    Returning the fp8 tensor directly graph-breaks dynamo (the quant op then
-    escapes to eager and the fusion never matches), so the dequant keeps the
-    quant op inside the compiled FX graph. The unfused path runs aiter's
-    ``rmsnorm2d_fwd_with_dynamicquant`` (q) plus ``vllm_ir.rms_norm`` (kv); the
-    fused path runs both through the single HIP ``fused_qk_rmsnorm_per_token_quant``
-    kernel. With identical per-token scales the dequantized q values are bit-exact
-    except on fp8 rounding ties (at most one e4m3 step), and the bf16 kv norm
-    matches to bf16 tolerance.
     """
 
     def __init__(
@@ -201,8 +182,6 @@ class MLADualRMSNormFp8PerTokenTestModel(torch.nn.Module):
 
         self.proj = torch.nn.Linear(hidden_size, q_dim + self.kv_dim, bias=False)
         self.q_weight = torch.nn.Parameter(torch.ones(q_dim))
-        # kv latent is RMS-normed only (no quant); RMSNorm with custom_ops
-        # ["+rms_norm"] lowers to vllm_ir.rms_norm, matching the FP8 graph.
         self.kv_norm = RMSNorm(kv_c_dim, eps=eps)
 
     def _dequant(self, x_fp8: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -223,9 +202,6 @@ class MLADualRMSNormFp8PerTokenTestModel(torch.nn.Module):
         )
         kv_normed = self.kv_norm(kv_c)
 
-        # Dequant q in-graph keeps the quant op inside the compiled graph so the
-        # fusion pass can match it (returning fp8 directly graph-breaks dynamo);
-        # kv_normed is already bf16 and is returned (and matched) directly.
         return self._dequant(q_fp8, q_scale), kv_normed, k_pe
 
     def ops_in_model_before(self):
@@ -291,9 +267,6 @@ def test_fuse_mla_dual_rms_norm_fp8_per_token(
         x = torch.randn(4, hidden_size)
         torch._dynamo.mark_dynamic(x, 0)
 
-        # Decode runs under inference_mode; the fp8 quant op has no autograd
-        # kernel, so without this AOTAutograd builds a joint forward/backward
-        # graph that graph-breaks and the fusion never fires.
         with torch.inference_mode():
             outputs_unfused = model(x)
 
@@ -303,18 +276,10 @@ def test_fuse_mla_dual_rms_norm_fp8_per_token(
         q_deq_u, kv_normed_u, k_pe_u = outputs_unfused
         q_deq_f, kv_normed_f, k_pe_f = outputs_fused
 
-        # k_pe is a pure passthrough and must be bit-identical.
         torch.testing.assert_close(k_pe_u, k_pe_f, atol=0, rtol=0)
 
-        # kv latent is RMS-normed (not quantized) on both paths; the Triton and
-        # HIP rms norms agree to bf16 tolerance.
         torch.testing.assert_close(kv_normed_u, kv_normed_f, atol=1e-2, rtol=1e-2)
 
-        # With matching per-token scales the dequantized q values are bit-exact
-        # except where the unfused and fused quant kernels round an fp8 tie
-        # differently. Require the bulk to be exact (this catches scale bugs,
-        # which shift whole rows) and bound the rare ties to one e4m3 step
-        # (relative gap 2**-3 = 0.125).
         E4M3_STEP = 0.125
         exact_frac = (q_deq_u == q_deq_f).float().mean().item()
         assert exact_frac > 0.99, (
