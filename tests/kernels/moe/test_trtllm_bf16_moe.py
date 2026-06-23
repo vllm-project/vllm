@@ -15,7 +15,6 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.utils import torch_moe
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
-from vllm.model_executor.layers.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -47,15 +46,19 @@ if pytest and (
         allow_module_level=True,
     )
 
+# (m, n, k) = (tokens, intermediate_size_per_partition, hidden_dim).
+# Covers larger NvFP4-like shapes while keeping BF16's FlashInfer TRTLLM
+# intermediate-size multiple-of-128 requirement.
 MNK_FACTORS = [
     (2, 1024, 1024),
-    (32, 1024, 1024),
+    (64, 2048, 1536),
+    (64, 1024, 4096),
 ]
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
-@pytest.mark.parametrize("e", [8])
-@pytest.mark.parametrize("topk", [2])
+@pytest.mark.parametrize("e", [128])
+@pytest.mark.parametrize("topk", [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @torch.inference_mode()
 def test_trtllm_bf16_moe_modular_no_graph(
@@ -75,20 +78,22 @@ def test_trtllm_bf16_moe_modular_no_graph(
         w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
         w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
         score = torch.randn((m, e), device="cuda", dtype=dtype)
-        topk_weights, topk_ids, _ = fused_topk(a, score, topk, renormalize=False)
+        scores = torch.softmax(score, dim=-1, dtype=torch.float32)
+        topk_weights, topk_ids = torch.topk(scores, topk)
+        topk_weights = topk_weights.contiguous()
+        topk_ids = topk_ids.to(torch.int32).contiguous()
 
         moe_config = FusedMoEConfig(
             num_experts=e,
             experts_per_token=topk,
             hidden_dim=k,
-            intermediate_size_per_partition=n,
+            intermediate_size=n,
             num_local_experts=e,
             num_logical_experts=e,
             activation=MoEActivation.SILU,
             device="cuda",
             moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
             in_dtype=dtype,
-            is_act_and_mul=True,
             routing_method=RoutingMethodType.TopK,
             max_num_tokens=next_power_of_2(m),
         )
@@ -133,5 +138,9 @@ def test_trtllm_bf16_moe_modular_no_graph(
             activation=MoEActivation.SILU,
         )
 
-        close = torch.isclose(trtllm_output, torch_output, atol=1e-1, rtol=0.85)
-        assert close.float().mean() > 0.925
+        torch.testing.assert_close(
+            torch_output,
+            trtllm_output,
+            atol=1e-1,
+            rtol=2e-1,
+        )

@@ -334,7 +334,7 @@ def make_unquantized_moe_kernel(
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
-    logger.info_once("Using %s experts", experts_cls.__name__)
+    logger.info_once("Using %s MoE backend", experts_cls.__name__)
 
     # Create Experts
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
