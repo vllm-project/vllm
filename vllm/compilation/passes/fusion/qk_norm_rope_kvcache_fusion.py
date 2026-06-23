@@ -12,7 +12,6 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.utils import Range
 from vllm.logger import init_logger
@@ -234,7 +233,7 @@ class QkNormRopeKvCachePattern:
         k_weight: torch.Tensor,
         cos_sin_cache: torch.Tensor,
         q_scale: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
         q_by_head = q.view(-1, self.q_size // self.head_size, self.head_size)
         q_normed = vllm.ir.ops.rms_norm(q_by_head, q_weight, self.eps)
@@ -246,15 +245,24 @@ class QkNormRopeKvCachePattern:
 
         q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
         # Match the quant-query op Attention.forward inserts (fp8 KV + UNIFIED).
-        q_rope_fp8 = rocm_aiter_ops.per_tensor_quant(
-            q_rope, current_platform.fp8_dtype(), q_scale
-        )[0]
-        q_rope_fp8 = q_rope_fp8.view(-1, self.num_heads, self.head_size)
+        # Explicit auto_functionalized (out=[1]) keeps the quant node in the pattern.
+        q_out = torch.empty_like(q_rope, dtype=current_platform.fp8_dtype())
+        q_quant = auto_functionalized(
+            torch.ops.vllm.rocm_aiter_per_tensor_quant.default,
+            out=q_out,
+            x=q_rope,
+            scale=q_scale,
+            is_dynamic=False,
+        )
+        # The op marks `scale` mutable, so the model graph also reads the scale
+        # output ([2]) and copies it back into the _q_scale buffer.
+        q_rope_fp8 = q_quant[1].view(-1, self.num_heads, self.head_size)
+        q_scale_out = q_quant[2]
 
         k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size_v)
         dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
-        return dummy, q_rope_fp8, k_rope, v
+        return dummy, q_rope_fp8, k_rope, v, q_scale_out
 
     def replacement_fp8_quant_query(
         self,
@@ -264,7 +272,7 @@ class QkNormRopeKvCachePattern:
         k_weight: torch.Tensor,
         cos_sin_cache: torch.Tensor,
         q_scale: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         q_out = torch.empty(
             qkv.shape[0],
             self.num_heads,
@@ -295,11 +303,20 @@ class QkNormRopeKvCachePattern:
             layer_name=self.layer_name,
         )
         # Re-apply the quant on the kernel's bf16 q_out; fused op does not quant q.
-        q_fp8 = rocm_aiter_ops.per_tensor_quant(
-            results[1].view(-1, self.q_size), current_platform.fp8_dtype(), q_scale
-        )[0]
-        q_fp8 = q_fp8.view(-1, self.num_heads, self.head_size)
-        return results[0], q_fp8, results[2], v
+        # Same explicit auto_functionalized form as the pattern: [1] = quantized
+        # q, [2] = scale (returned so the buffer-writeback use is preserved).
+        q_fp8_flat = results[1].view(-1, self.q_size)
+        q_fp8_out = torch.empty_like(q_fp8_flat, dtype=current_platform.fp8_dtype())
+        q_requant = auto_functionalized(
+            torch.ops.vllm.rocm_aiter_per_tensor_quant.default,
+            out=q_fp8_out,
+            x=q_fp8_flat,
+            scale=q_scale,
+            is_dynamic=False,
+        )
+        q_fp8 = q_requant[1].view(-1, self.num_heads, self.head_size)
+        q_scale_out = q_requant[2]
+        return results[0], q_fp8, results[2], v, q_scale_out
 
     @staticmethod
     def wrap_trace_fn(
