@@ -358,7 +358,6 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         if DeepEPLLAll2AllManager._last_mask is None:
             DeepEPLLAll2AllManager._last_mask = torch.zeros_like(current)
         has_fault = (current != DeepEPLLAll2AllManager._last_mask).any()
-        DeepEPLLAll2AllManager._last_mask.copy_(current)
         return has_fault, current
 
 
@@ -574,8 +573,6 @@ class NixlEPAll2AllManager(All2AllManagerBase):
             NixlEPAll2AllManager._last_mask = torch.zeros_like(current)
             last = NixlEPAll2AllManager._last_mask
         has_fault = (current != last).any()
-        assert last is not None
-        last.copy_(current)
         return has_fault, current
 
 

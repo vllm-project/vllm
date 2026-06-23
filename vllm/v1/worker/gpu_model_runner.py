@@ -265,7 +265,6 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._logprobs_tensors = logprobs_tensors
         self._routed_experts = routed_experts
         self._has_fault: torch.Tensor | None = None
-        self._current_mask: torch.Tensor | None = None
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
@@ -285,9 +284,8 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 else None
             )
             if check_ep_fault:
-                has_fault, current_mask = get_ep_all2all_manager().query_fault()
+                has_fault, _ = get_ep_all2all_manager().query_fault()
                 self._has_fault = has_fault.to("cpu", non_blocking=True)
-                self._current_mask = current_mask
             self.async_copy_ready_event.record()
 
     def get_output(self) -> ModelRunnerOutput:
@@ -325,11 +323,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         del self._routed_experts
 
         if self._has_fault is not None and self._has_fault.item():
-            assert self._current_mask is not None
+            mask = get_ep_all2all_manager().query_active_mask()
             raise RuntimeError(
                 "Fault detected in EP all2all communication: "
                 "one or more ranks timed out during dispatch/combine. "
-                f"Mask: {self._current_mask.cpu().tolist()}"
+                f"Mask: {mask.cpu().tolist()}"
             )
 
         return output
