@@ -43,8 +43,8 @@ MODELS = [
     pytest.param(
         "Intel/Qwen2-0.5B-Instruct-int4-sym-AutoRound",
         marks=pytest.mark.skipif(
-            not current_platform.is_cuda(),
-            reason="AWQ AutoRound model only supports CUDA backend for now.",
+            not (current_platform.is_cuda() or current_platform.is_xpu()),
+            reason="AWQ AutoRound model only supports CUDA/XPU backend for now.",
         ),
         id="auto_round:auto_awq",
     ),
