@@ -226,6 +226,23 @@ class TieringOffloadingManager(OffloadingManager):
                     self.primary_tier.complete_read(
                         job_metadata.keys, job_metadata.req_context
                     )
+                    # Announce secondary-tier presence: append a raw
+                    # OffloadingEvent (keys + medium, removed=False). The
+                    # connector's events tracker renders it downstream as a
+                    # hash-only placeholder BlockStored (no self-describing
+                    # token payload, since no store-time metadata is snapshotted
+                    # for cascade keys). Emit only on success; a failed cascade
+                    # stored nothing. Secondary eviction is not reported here
+                    # (it may be tier-external, e.g. shared storage), so there
+                    # is no matching removed=True event.
+                    if completed_job.success and self.events is not None:
+                        self.events.append(
+                            OffloadingEvent(
+                                keys=list(job_metadata.keys),
+                                medium=tier.tier_type,
+                                removed=False,
+                            )
+                        )
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
@@ -593,14 +610,18 @@ class TieringOffloadingManager(OffloadingManager):
     def take_events(self) -> Iterable[OffloadingEvent]:
         """Yield offloading events collected since the last call.
 
+        Primary-tier (CPU) events are yielded before secondary-tier presence
+        events, so consumers observe the primary placement before the
+        additional secondary-tier placement.
+
         Yields:
             New OffloadingEvents collected since the last call.
         """
+        yield from self.primary_tier.take_events()
+
         if self.events is not None:
             yield from self.events
             self.events.clear()
-
-        yield from self.primary_tier.take_events()
 
     @override
     def reset_cache(self) -> None:

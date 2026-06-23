@@ -703,5 +703,145 @@ class TestTieringOffloadingWithoutSecondaryTiers:
         assert count_hits(manager, blocks) == 3
 
 
+class TestTieringOffloadingSecondaryEvents:
+    """Secondary-tier presence events.
+
+    A successful primary→secondary cascade appends a raw OffloadingEvent
+    (keys + medium, removed=False), one per secondary tier; the connector
+    renders it downstream as a hash-only placeholder BlockStored (no
+    self-describing token payload, no secondary removed event). take_events()
+    yields primary events first.
+    """
+
+    @staticmethod
+    def _single_example(primary_events: bool = False, tier_type: str = "example"):
+        mock_region = _mock_mmap_region(5)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=5, mmap_region=mock_region, enable_events=primary_events
+        )
+        secondary_tier = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type=tier_type,
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[secondary_tier],
+            enable_events=True,
+        )
+        return primary_tier, secondary_tier, manager
+
+    def test_successful_cascade_emits_secondary_presence_event(self):
+        """A completed cascade store yields one secondary OffloadingEvent
+        carrying the cascaded offload keys, the tier medium, removed=False."""
+        _, _, manager = self._single_example(tier_type="object_store")
+        blocks = to_keys(range(3))
+
+        manager.prepare_store(blocks, _CTX)
+        manager.complete_store(blocks, _CTX, success=True)
+        # Drive the primary→secondary cascade completion.
+        manager._process_finished_jobs()
+
+        events = list(manager.take_events())
+
+        assert len(events) == 1
+        event = events[0]
+        assert event.medium == "object_store"
+        assert event.removed is False
+        assert set(event.keys) == set(blocks)
+
+    def test_failed_cascade_emits_no_event(self):
+        """A failed cascade store stored nothing, so no presence event fires
+        (ref_cnt is still released via complete_read)."""
+
+        class _FailingStoreTier(ExampleSecondaryTierManager):
+            def submit_store(self, job_metadata):
+                # Report the cascade store as failed, storing nothing.
+                self.completed_jobs.append(
+                    JobResult(job_id=job_metadata.job_id, success=False)
+                )
+
+        mock_region = _mock_mmap_region(5)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=5, mmap_region=mock_region
+        )
+        secondary_tier = _FailingStoreTier(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="object_store",
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[secondary_tier],
+            enable_events=True,
+        )
+
+        blocks = to_keys(range(3))
+        manager.prepare_store(blocks, _CTX)
+        manager.complete_store(blocks, _CTX, success=True)
+        manager._process_finished_jobs()
+
+        assert list(manager.take_events()) == []
+        # ref_cnt was still released despite the failure.
+        for block in blocks:
+            assert primary_tier._policy.get(block).ref_cnt == 0
+
+    def test_take_events_yields_primary_before_secondary(self):
+        """Primary CPU BlockStored precedes the secondary presence event for
+        the same offload keys."""
+        _, _, manager = self._single_example(primary_events=True)
+        blocks = to_keys(range(3))
+
+        manager.prepare_store(blocks, _CTX)
+        manager.complete_store(blocks, _CTX, success=True)
+        manager._process_finished_jobs()
+
+        events = list(manager.take_events())
+
+        assert [e.medium for e in events] == ["CPU", "example"]
+        assert events[0].removed is False
+        assert events[-1].removed is False
+        assert set(events[0].keys) == set(blocks)
+        assert set(events[-1].keys) == set(blocks)
+
+    def test_cascade_emits_one_event_per_secondary_tier(self):
+        """A successful cascade to N secondary tiers yields N presence events,
+        one per tier, each carrying that tier's own tier_type as medium."""
+        mock_region = _mock_mmap_region(5)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=5, mmap_region=mock_region
+        )
+        view = mock_region.create_kv_memoryview()
+        tier_obj = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=view,
+            tier_type="object_store",
+        )
+        tier_fs = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=view,
+            tier_type="fs",
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[tier_obj, tier_fs],
+            enable_events=True,
+        )
+        blocks = to_keys(range(3))
+
+        manager.prepare_store(blocks, _CTX)
+        manager.complete_store(blocks, _CTX, success=True)
+        manager._process_finished_jobs()
+
+        events = list(manager.take_events())
+
+        # One event per tier (order across tiers is not contractual -> set).
+        assert len(events) == 2
+        assert {e.medium for e in events} == {"object_store", "fs"}
+        for event in events:
+            assert event.removed is False
+            assert set(event.keys) == set(blocks)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
