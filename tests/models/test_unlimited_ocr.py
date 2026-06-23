@@ -2,10 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from pathlib import Path
+
+import pytest
 
 from vllm.model_executor.models import is_text_generation_model, supports_multimodal
 from vllm.model_executor.models.registry import ModelRegistry
 from vllm.model_executor.models.unlimited_ocr import UnlimitedOCRProcessingInfo
+from vllm.tokenizers import get_tokenizer
 from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.configs.unlimited_ocr import UnlimitedOCRConfig
 from vllm.transformers_utils.processors.deepseek_ocr import count_tiles
@@ -92,3 +96,13 @@ def test_unlimited_ocr_image_token_count_matches_v1_layout():
     assert info.get_num_image_tokens(image_width=1200, image_height=800) == (
         global_tokens + local_tokens
     )
+
+
+def test_unlimited_ocr_tokenizer_uses_bytelevel_decoder():
+    model_path = Path("/mnt/weight/Unlimited-OCR")
+    if not (model_path / "tokenizer.json").is_file():
+        pytest.skip("Unlimited-OCR tokenizer assets are not available")
+
+    tokenizer = get_tokenizer(str(model_path), trust_remote_code=False)
+
+    assert tokenizer.decode([695, 1266, 1080, 201]) == "年月日\n"
