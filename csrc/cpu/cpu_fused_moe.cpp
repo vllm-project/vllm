@@ -297,7 +297,7 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
     const int64_t cache_size = cpu_utils::get_available_l2_size();
     // input tile + optional packed input + weight
     const int32_t n_size_cache_limit =
-        (cache_size - w2_input_tile_size - w2_input_buffer_size) /
+        (cache_size - (pack_a ? w2_input_buffer_size : w2_input_tile_size)) /
         (input_size_2 * sizeof(scalar_t));
     const int32_t n_size_thread_limit =
         output_size_2 / std::max(1, thread_num / topk_num);
