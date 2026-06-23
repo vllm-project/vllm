@@ -149,12 +149,11 @@ class PoolKey:
             f"@dcp{key_metadata.dcp_rank}"
             f"@pp_rank:{key_metadata.pp_rank if pp_rank is None else pp_rank}"
             f"@group:{key_metadata.group_id}"
-            "@"
         )
 
     @staticmethod
     def build_key_string(key_prefix: str, chunk_hash: str) -> str:
-        return key_prefix + chunk_hash
+        return f"{key_prefix}@{chunk_hash}"
 
     def to_string(self) -> str:
         return self.build_key_string(

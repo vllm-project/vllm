@@ -1132,7 +1132,7 @@ class MooncakeStoreWorker:
             )
             for db in self.token_dbs
         )
-        self._lookup_expected_per_key = max(1, tp_count * self.pp_size)
+        self._lookup_expected_per_key = tp_count * self.pp_size
 
     def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
         """Register a cross-layers KV cache tensor.
@@ -1395,9 +1395,9 @@ class MooncakeStoreWorker:
             return 0
 
         # Build per-(group, hash) candidate keys expanded across TP/PP.
-        # candidate_meta stores the key slice for each logical candidate.
+        # candidate_meta stores the (group, hash_bytes) for key slice.
         candidate_keys: list[str] = []
-        candidate_meta: list[tuple[int, bytes, int, int]] = []
+        candidate_meta: list[tuple[int, bytes]] = []
         lookup_masks = self.coord.lookup_mask(token_len)
         for g_idx, db in enumerate(self.token_dbs):
             spec_block_size = db.block_size
@@ -1415,12 +1415,11 @@ class MooncakeStoreWorker:
                 ):
                     continue
                 hash_hex = h.hex()
-                key_start = len(candidate_keys)
                 for key_prefix in key_prefixes:
                     candidate_keys.append(
                         PoolKey.build_key_string(key_prefix, hash_hex)
                     )
-                candidate_meta.append((g_idx, bytes(h), key_start, len(key_prefixes)))
+                candidate_meta.append((g_idx, bytes(h)))
 
         if not candidate_keys:
             return 0
@@ -1445,15 +1444,15 @@ class MooncakeStoreWorker:
             return 0
 
         # A (group, hash) is "present" only when every TP*PP rank has it.
-        exists_set: set[tuple[int, bytes]] = set()
-        for g_idx, hash_bytes, key_start, num_keys in candidate_meta:
-            all_ranks_present = num_keys >= self._lookup_expected_per_key
-            for key_idx in range(key_start, key_start + num_keys):
-                if res[key_idx] != 1:
-                    all_ranks_present = False
-                    break
-            if all_ranks_present:
-                exists_set.add((g_idx, hash_bytes))
+        ranks_per_candidate = self._lookup_expected_per_key
+        exists_set = {
+            (g_idx, hash_bytes)
+            for i, (g_idx, hash_bytes) in enumerate(candidate_meta)
+            if all(
+                res[i * ranks_per_candidate + j] == 1
+                for j in range(ranks_per_candidate)
+            )
+        }
 
         _masks, hit_length = self.coord.find_longest_cache_hit(
             block_hashes, token_len, ExternalCachedBlockPool(exists_set)
