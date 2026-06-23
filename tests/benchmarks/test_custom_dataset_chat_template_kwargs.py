@@ -73,3 +73,72 @@ def test_chat_template_kwargs_default_is_noop(tmp_path: Path) -> None:
     get_samples(_args(str(jsonl), None), tok)
 
     assert tok.captured_kwargs == {}
+
+
+@pytest.mark.benchmark
+def test_custom_audio_chat_template_kwargs_forwarded(tmp_path: Path) -> None:
+    """--chat-template-kwargs must reach CustomAudioDataset."""
+    jsonl = tmp_path / "data.jsonl"
+    jsonl.write_text(
+        json.dumps(
+            {
+                "prompt": "hello audio",
+                "audio": {"array": [0.0, 0.0], "sampling_rate": 16000},
+            }
+        )
+        + "\n"
+    )
+
+    args = argparse.Namespace(
+        dataset_name="custom_audio",
+        dataset_path=str(jsonl),
+        disable_shuffle=True,
+        num_prompts=1,
+        custom_output_len=32,
+        skip_chat_template=False,
+        chat_template_kwargs={"thinking": True},
+        no_oversample=False,
+        seed=0,
+        request_id_prefix="",
+        enable_multimodal_chat=False,
+    )
+
+    tok = _RecordingTokenizer()
+    get_samples(args, tok)
+
+    assert tok.captured_kwargs == {"thinking": True}
+
+
+@pytest.mark.benchmark
+def test_spec_bench_chat_template_kwargs_forwarded(tmp_path: Path) -> None:
+    """--chat-template-kwargs must reach SpecBench."""
+    jsonl = tmp_path / "data.jsonl"
+    jsonl.write_text(
+        json.dumps(
+            {
+                "turns": ["hello spec_bench"],
+                "category": "test_cat",
+            }
+        )
+        + "\n"
+    )
+
+    args = argparse.Namespace(
+        dataset_name="spec_bench",
+        dataset_path=str(jsonl),
+        disable_shuffle=True,
+        num_prompts=1,
+        spec_bench_category="test_cat",
+        spec_bench_output_len=32,
+        skip_chat_template=False,
+        chat_template_kwargs={"thinking": True},
+        no_oversample=False,
+        seed=0,
+        request_id_prefix="",
+        enable_multimodal_chat=False,
+    )
+
+    tok = _RecordingTokenizer()
+    get_samples(args, tok)
+
+    assert tok.captured_kwargs == {"thinking": True}
