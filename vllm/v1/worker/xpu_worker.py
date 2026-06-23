@@ -162,3 +162,16 @@ class XPUWorker(Worker):
             logger.debug("Starting torch profiler with trace name: %s", trace_name)
 
         super().profile(is_start=is_start, profile_prefix=profile_prefix)
+
+    def shutdown(self) -> None:
+        logger.info(
+            "XPUWorker shutdown: cleaning up (rank=%d, local_rank=%d)",
+            self.rank,
+            self.local_rank,
+        )
+        super().shutdown()
+        logger.info(
+            "XPUWorker shutdown: done (rank=%d, local_rank=%d)",
+            self.rank,
+            self.local_rank,
+        )
