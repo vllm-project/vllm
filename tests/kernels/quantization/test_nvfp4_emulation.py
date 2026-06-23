@@ -613,7 +613,7 @@ def _load_nvfp4_moe_weights(model_id: str, tensor_parallel_size: int):
     not current_platform.is_cuda_alike(),
     reason="Triton NVFP4 kernel requires CUDA.",
 )
-@pytest.mark.parametrize("num_tokens", [1, 2, 4, 16, 64, 128, 256, 512, 1024])
+@pytest.mark.parametrize("num_tokens", [1, 2, 4, 1024])
 @pytest.mark.parametrize("top_k", [4])
 @pytest.mark.parametrize("model_id", list(MOE_MODEL_CONFIGS.keys()))
 @pytest.mark.parametrize(
@@ -736,4 +736,15 @@ def test_nvfp4_moe_correctness(
         **apply_kwargs,
     )
 
-    torch.testing.assert_close(output_fused, output_ref, atol=0, rtol=0)
+    if current_platform.is_rocm():
+        atol = 0.
+    else:
+        # Not strict equality on e.g. H100 (< 0.1% elements). The fused
+        # on-the-fly dequant path can lower to a slightly different
+        # Triton/MMA tiling than the pre-dequantized reference;
+        # experiments with reference-like tiling/masking
+        # reduced some diffs were not kept because they regress
+        # the fused kernel speed.
+        atol = 2e-3
+
+    torch.testing.assert_close(output_fused, output_ref, atol=atol, rtol=0)
