@@ -70,6 +70,15 @@ def test_gsm8k_correctness(config_filename):
             "Marlin kernels are not supported."
         )
 
+    if (
+        not current_platform.is_cuda()
+        and "gemma-4-E4B-it-qat-mobile-ct" in eval_config["model_name"]
+    ):
+        pytest.skip(
+            "Skipping gemma-4-E4B-it-qat-mobile-ct on non-CUDA platforms. "
+            "Its W2A16 (uint2b2) scheme has no kernel outside CUDA."
+        )
+
     # TODO(akaratza): Enable DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms
     if current_platform.is_rocm() and (
         "deepseek-ai/DeepSeek-V3.2" in eval_config["model_name"]
