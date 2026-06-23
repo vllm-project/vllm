@@ -10,6 +10,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
@@ -78,7 +79,7 @@ from vllm.v1.engine.utils import (
 )
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
-from vllm.v1.metrics.stats import SchedulerStats
+from vllm.v1.metrics.stats import SchedulerIterationDetails, SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
@@ -87,6 +88,15 @@ from vllm.v1.utils import IterationDetails, compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class PendingIterationDetails:
+    iteration_index: int
+    details: IterationDetails
+    start_time: float
+    is_dummy: bool = False
+
 
 HANDSHAKE_TIMEOUT_MINS = 5
 
@@ -430,46 +440,78 @@ class EngineCore:
             )
             raise err
 
-    @contextmanager
-    def log_iteration_details(self, scheduler_output: SchedulerOutput | None):
-        if not self.vllm_config.observability_config.enable_logging_iteration_details:
-            yield
-            return
+    def _start_iteration_details(
+        self, scheduler_output: SchedulerOutput | None
+    ) -> PendingIterationDetails | None:
+        enable_details = (
+            self.vllm_config.observability_config.enable_logging_iteration_details
+        )
+        if not self.log_stats or not enable_details:
+            return None
         # 0-token step: let the dummy_batch wrapper log it (avoids double-log).
-        if scheduler_output and scheduler_output.total_num_scheduled_tokens == 0:
-            yield
-            return
-        self._iteration_index = getattr(self, "_iteration_index", 0)
+        if (
+            scheduler_output is not None
+            and scheduler_output.total_num_scheduled_tokens == 0
+        ):
+            return None
+
+        iteration_index = getattr(self, "_iteration_index", 0)
         # scheduler_output=None marks a DP dummy iteration.
         if scheduler_output is None:
-            iteration_details = IterationDetails(0, 0, 0, 0)
+            details = IterationDetails(0, 0, 0, 0)
             is_dummy = True
         else:
-            iteration_details = compute_iteration_details(scheduler_output)
+            details = compute_iteration_details(scheduler_output)
             is_dummy = False
-        before = time.monotonic()
-        yield
-        logger.info(
-            "".join(
-                [
-                    "Iteration(",
-                    str(self._iteration_index),
-                    "): ",
-                    str(iteration_details.num_ctx_requests),
-                    " context requests, ",
-                    str(iteration_details.num_ctx_tokens),
-                    " context tokens, ",
-                    str(iteration_details.num_generation_requests),
-                    " generation requests, ",
-                    str(iteration_details.num_generation_tokens),
-                    " generation tokens, iteration elapsed time: ",
-                    format((time.monotonic() - before) * 1000, ".2f"),
-                    " ms",
-                    " (dummy)" if is_dummy else "",
-                ]
-            )
+
+        return PendingIterationDetails(
+            iteration_index=iteration_index,
+            details=details,
+            start_time=time.monotonic(),
+            is_dummy=is_dummy,
         )
-        self._iteration_index += 1
+
+    def _finish_iteration_details(
+        self, pending: PendingIterationDetails | None
+    ) -> SchedulerIterationDetails | None:
+        if pending is None:
+            return None
+
+        self._iteration_index = pending.iteration_index + 1
+        details = pending.details
+        return SchedulerIterationDetails(
+            iteration_index=pending.iteration_index,
+            num_ctx_requests=details.num_ctx_requests,
+            num_ctx_tokens=details.num_ctx_tokens,
+            num_generation_requests=details.num_generation_requests,
+            num_generation_tokens=details.num_generation_tokens,
+            elapsed_ms=(time.monotonic() - pending.start_time) * 1000,
+            is_dummy=pending.is_dummy,
+        )
+
+    def _make_iteration_details_stats(
+        self, iteration_details: SchedulerIterationDetails
+    ) -> SchedulerStats:
+        stats = self.scheduler.make_stats() or SchedulerStats()
+        stats.iteration_details = iteration_details
+        return stats
+
+    def _attach_iteration_details(
+        self,
+        outputs: dict[int, EngineCoreOutputs],
+        iteration_details: SchedulerIterationDetails | None,
+    ) -> None:
+        if iteration_details is None:
+            return
+
+        if outputs:
+            eco = outputs[min(outputs)]
+        else:
+            outputs[0] = eco = EngineCoreOutputs()
+        if eco.scheduler_stats is None:
+            eco.scheduler_stats = self._make_iteration_details_stats(iteration_details)
+        else:
+            eco.scheduler_stats.iteration_details = iteration_details
 
     def _should_throttle_prefills(self) -> bool:
         """Whether to defer new prefills this step (DP prefill balancing).
@@ -490,13 +532,13 @@ class EngineCore:
         scheduler_output = self.scheduler.schedule(self._should_throttle_prefills())
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-        with (
-            self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
-        ):
+        pending_iteration = self._start_iteration_details(scheduler_output)
+        with self.log_error_detail(scheduler_output):
             model_output = future.result()
             if model_output is None:
                 model_output = self.model_executor.sample_tokens(grammar_output)
+
+        iteration_details = self._finish_iteration_details(pending_iteration)
 
         # Before processing the model output, process any aborts that happened
         # during the model execution.
@@ -504,6 +546,7 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -588,10 +631,8 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
-        with (
-            self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
-        ):
+        pending_iteration = self._start_iteration_details(scheduler_output)
+        with self.log_error_detail(scheduler_output):
             model_output = future.result()
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
@@ -599,12 +640,15 @@ class EngineCore:
                 exec_model_fut.result()
                 raise RuntimeError("unexpected error")
 
+        iteration_details = self._finish_iteration_details(pending_iteration)
+
         # Before processing the model output, process any aborts that happened
         # during the model execution.
         self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+        self._attach_iteration_details(engine_core_outputs, iteration_details)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -1949,8 +1993,14 @@ class DPEngineCoreProc(EngineCoreProc):
 
                 # We are in a running state and so must execute a dummy pass
                 # if the model didn't execute any ready requests.
-                with self.log_iteration_details(None):
-                    self.execute_dummy_batch()
+                pending_iteration = self._start_iteration_details(None)
+                self.execute_dummy_batch()
+                iteration_details = self._finish_iteration_details(pending_iteration)
+                if iteration_details is not None and not self.has_coordinator:
+                    stats = self._make_iteration_details_stats(iteration_details)
+                    self.output_queue.put_nowait(
+                        (0, EngineCoreOutputs(scheduler_stats=stats))
+                    )
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(

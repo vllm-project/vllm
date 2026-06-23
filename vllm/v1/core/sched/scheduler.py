@@ -43,6 +43,7 @@ from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
     NewRequestData,
+    ScheduledEncoderInputStats,
     SchedulerOutput,
 )
 from vllm.v1.core.sched.request_queue import (
@@ -1056,6 +1057,15 @@ class Scheduler(SchedulerInterface):
                 len(num_scheduled_tokens)
             ]
 
+        scheduled_encoder_input_stats = None
+        if (
+            self.log_stats
+            and self.observability_config.enable_logging_iteration_details
+        ):
+            scheduled_encoder_input_stats = self._make_scheduled_encoder_input_stats(
+                scheduled_encoder_inputs
+            )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -1063,6 +1073,7 @@ class Scheduler(SchedulerInterface):
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
+            scheduled_encoder_input_stats=scheduled_encoder_input_stats,
             num_common_prefix_blocks=num_common_prefix_blocks,
             preempted_req_ids={req.request_id for req in preempted_reqs},
             # finished_req_ids is an existing state in the scheduler,
@@ -1437,6 +1448,67 @@ class Scheduler(SchedulerInterface):
             external_load_encoder_input,
         )
 
+    @staticmethod
+    def _get_vit_input_seq_len(mm_feature: Any) -> int | None:
+        data = mm_feature.data
+        if data is None:
+            return None
+
+        if mm_feature.modality == "image":
+            grid_key = "image_grid_thw"
+            pixel_key = "pixel_values"
+        elif mm_feature.modality == "video":
+            grid_key = "video_grid_thw"
+            pixel_key = "pixel_values_videos"
+        else:
+            return None
+
+        pixel_elem = data.get(pixel_key)
+        if pixel_elem is None or pixel_elem.data is None:
+            return None
+
+        grid_elem = data.get(grid_key)
+        if grid_elem is None or grid_elem.data is None:
+            return None
+
+        grid_thw = grid_elem.data
+        if hasattr(grid_thw, "tolist"):
+            grid_thw = grid_thw.tolist()
+        if not grid_thw:
+            return None
+
+        grids = grid_thw if isinstance(grid_thw[0], (list, tuple)) else [grid_thw]
+        input_len = 0
+        for grid in grids:
+            if len(grid) != 3:
+                return None
+            t, h, w = grid
+            input_len += int(t) * int(h) * int(w)
+        return input_len
+
+    def _make_scheduled_encoder_input_stats(
+        self, scheduled_encoder_inputs: dict[str, list[int]]
+    ) -> ScheduledEncoderInputStats | None:
+        stats = ScheduledEncoderInputStats()
+
+        for req_id, input_ids in scheduled_encoder_inputs.items():
+            request = self.requests.get(req_id)
+            if request is None:
+                continue
+
+            for input_id in input_ids:
+                mm_feature = request.mm_features[input_id]
+                input_len = self._get_vit_input_seq_len(mm_feature)
+                if input_len is None:
+                    continue
+
+                stats.num_inputs += 1
+                stats.input_tokens += input_len
+                stats.output_tokens += mm_feature.mm_position.get_num_embeds()
+                stats.input_token_lens.append(input_len)
+
+        return stats if stats.num_inputs else None
+
     def get_grammar_bitmask(
         self, scheduler_output: SchedulerOutput
     ) -> GrammarOutput | None:
@@ -1790,11 +1862,17 @@ class Scheduler(SchedulerInterface):
 
         if (
             stats := self.make_stats(
-                spec_decoding_stats, kv_connector_stats, cudagraph_stats, perf_stats
+                spec_decoding_stats,
+                kv_connector_stats,
+                cudagraph_stats,
+                perf_stats,
+                scheduler_output.scheduled_encoder_input_stats,
             )
         ) is not None:
-            # Return stats to only one of the front-ends.
-            if (eco := next(iter(engine_core_outputs.values()), None)) is None:
+            # Return stats to one deterministic front-end.
+            if engine_core_outputs:
+                eco = engine_core_outputs[min(engine_core_outputs)]
+            else:
                 # We must return the stats even if there are no request
                 # outputs this step.
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
@@ -2227,6 +2305,7 @@ class Scheduler(SchedulerInterface):
         kv_connector_stats: KVConnectorStats | None = None,
         cudagraph_stats: CUDAGraphStat | None = None,
         perf_stats: PerfStats | None = None,
+        scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None,
     ) -> SchedulerStats | None:
         if not self.log_stats:
             return None
@@ -2250,6 +2329,7 @@ class Scheduler(SchedulerInterface):
             num_waiting_reqs=len(self.waiting),
             num_skipped_waiting_reqs=len(self.skipped_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
+            scheduled_encoder_input_stats=scheduled_encoder_input_stats,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             kv_cache_eviction_events=eviction_events,

@@ -1,17 +1,53 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.engine import FinishReason
+from vllm.v1.core.sched.output import ScheduledEncoderInputStats
+from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
+    SchedulerIterationDetails,
+    SchedulerStats,
 )
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
 def test_iteration_stats_repr():
     iteration_stats = IterationStats()
     assert repr(iteration_stats).startswith("IterationStats(")
+
+
+def test_scheduler_iteration_details_serialization():
+    iteration_details = SchedulerIterationDetails(
+        iteration_index=1,
+        num_ctx_requests=2,
+        num_ctx_tokens=3,
+        num_generation_requests=4,
+        num_generation_tokens=5,
+        elapsed_ms=6.7,
+    )
+    encoder_input_stats = ScheduledEncoderInputStats(
+        num_inputs=2,
+        input_tokens=1568,
+        output_tokens=392,
+        input_token_lens=[784, 784],
+    )
+    outputs = EngineCoreOutputs(
+        scheduler_stats=SchedulerStats(
+            kv_cache_usage=0.5,
+            iteration_details=iteration_details,
+            scheduled_encoder_input_stats=encoder_input_stats,
+        )
+    )
+
+    encoded = MsgpackEncoder().encode(outputs)
+    decoded = MsgpackDecoder(EngineCoreOutputs).decode(encoded)
+
+    assert decoded.scheduler_stats is not None
+    assert decoded.scheduler_stats.kv_cache_usage == 0.5
+    assert decoded.scheduler_stats.iteration_details == iteration_details
+    assert decoded.scheduler_stats.scheduled_encoder_input_stats == encoder_input_stats
 
 
 def test_prefill_kv_computed_with_cache():
