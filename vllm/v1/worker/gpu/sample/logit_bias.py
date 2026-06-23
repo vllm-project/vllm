@@ -189,6 +189,8 @@ def _bias_kernel(
             logits_ptr + token_idx * logits_stride + allowed_token_ids, mask=mask
         )
 
+        tl.debug_barrier()  # save must read original logits before the -inf overwrite
+
         # Set logits to -inf for all tokens.
         for i in range(0, vocab_size, LOGITS_BLOCK_SIZE):
             offset = i + tl.arange(0, LOGITS_BLOCK_SIZE)
@@ -197,6 +199,8 @@ def _bias_kernel(
                 -float("inf"),
                 mask=offset < vocab_size,
             )
+
+        tl.debug_barrier()  # -inf overwrite must finish before restoring saved logits
 
         # Restore logits for allowed token IDs.
         tl.store(
@@ -222,7 +226,7 @@ def _bias_kernel(
     num_stop_token_ids = tl.load(num_stop_token_ids_ptr + req_state_idx)
     pos = tl.load(pos_ptr + token_idx)
     min_len = tl.load(min_lens_ptr + req_state_idx)
-    if num_stop_token_ids > 0 and pos < min_len:
+    if num_stop_token_ids > 0 and pos + 1 < min_len:
         mask = block < num_stop_token_ids
         stop_token_ids = tl.load(
             stop_token_ids_ptr + req_state_idx * stop_token_ids_stride + block,
