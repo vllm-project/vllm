@@ -3,7 +3,6 @@
 import asyncio
 import hashlib
 import json
-import re
 import secrets
 import uuid
 from argparse import Namespace
@@ -12,6 +11,7 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 
 import pydantic
+import regex as re
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse

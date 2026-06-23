@@ -15,9 +15,11 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.exceptions import RequestValidationError
-from vllm.entrypoints.serve.utils.server_utils import validation_exception_handler
 
-from vllm.entrypoints.serve.utils.server_utils import clean_loc_for_param
+from vllm.entrypoints.serve.utils.server_utils import (
+    clean_loc_for_param,
+    validation_exception_handler,
+)
 
 
 def _fake_request(log_error_stack: bool = False) -> SimpleNamespace:
@@ -64,6 +66,7 @@ class TestValidationErrorParamFallback:
         body = json.loads(response.body)
 
         assert body["error"]["param"] is None
+
 
 class TestCleanLocForParam:
     """Guards against PR #1's naive dot-joined `loc` fallback leaking
