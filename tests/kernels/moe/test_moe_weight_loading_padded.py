@@ -346,3 +346,53 @@ class TestPerTensorScaleCoercion:
         # numel > 1 must fail loudly instead of silently picking an element.
         with pytest.raises(RuntimeError):
             RoutedExperts._to_scalar(torch.tensor([0.1, 0.2]))
+
+
+class TestWeightShapeLoading:
+    """Regression test for compressed-tensors MoE weight_shape vectors."""
+
+    @staticmethod
+    def _make_minimal_wna16_moe():
+        def map_global_expert_id_to_local_expert_id(expert_id):
+            return expert_id
+
+        moe = object.__new__(RoutedExperts)
+        moe.quant_config = None
+        moe.quant_method = type("CompressedTensorsWNA16MoEMethod", (), {})()
+        moe._map_global_expert_id_to_local_expert_id = (
+            map_global_expert_id_to_local_expert_id
+        )
+        return moe
+
+    def test_loads_vector_shape(self):
+        moe = self._make_minimal_wna16_moe()
+        param = torch.nn.Parameter(torch.empty(2, 2), requires_grad=False)
+        loaded_weight = torch.tensor([4096, 14336], dtype=torch.int64)
+
+        loaded = RoutedExperts.weight_loader(
+            moe,
+            param,
+            loaded_weight,
+            weight_name="w2_weight_shape",
+            shard_id="w2",
+            expert_id=1,
+            return_success=True,
+        )
+
+        assert loaded is True
+        assert torch.equal(param.data[1], loaded_weight.to(param.data.dtype))
+
+    def test_rejects_shape_size_mismatch(self):
+        moe = self._make_minimal_wna16_moe()
+        param = torch.nn.Parameter(torch.empty(2, 2), requires_grad=False)
+        loaded_weight = torch.tensor([4096, 14336, 1], dtype=torch.int64)
+
+        with pytest.raises(ValueError, match="weight_shape checkpoint tensor size"):
+            RoutedExperts.weight_loader(
+                moe,
+                param,
+                loaded_weight,
+                weight_name="w2_weight_shape",
+                shard_id="w2",
+                expert_id=1,
+            )

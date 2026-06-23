@@ -533,6 +533,20 @@ class RoutedExperts(PluggableLayer):
         # Input scales can be loaded directly and should be equal.
         param_data[expert_id] = self._to_scalar(loaded_weight)
 
+    def _load_weight_shape(
+        self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
+    ):
+        param_data = param.data
+        target = param_data[expert_id]
+
+        if loaded_weight.numel() != target.numel():
+            raise ValueError(
+                "weight_shape checkpoint tensor size does not match the "
+                f"target parameter slot: {loaded_weight.numel()} != {target.numel()}"
+            )
+
+        target.copy_(loaded_weight.reshape_as(target))
+
     def _load_g_idx(
         self,
         shard_id: str,
@@ -840,7 +854,7 @@ class RoutedExperts(PluggableLayer):
         # Case weight_shape
         if "weight_shape" in weight_name:
             # only required by compressed-tensors
-            self._load_single_value(
+            self._load_weight_shape(
                 param=param, loaded_weight=loaded_weight, expert_id=expert_id
             )
             return True if return_success else None
