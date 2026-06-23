@@ -733,6 +733,8 @@ void dsv3_fused_a_gemm(torch::stable::Tensor& output,
       output.scalar_type() == torch::headeronly::ScalarType::BFloat16,
       "Only BFloat16 output dtype is supported");
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      mat_a.get_device_index());
   STD_TORCH_CHECK(getSMVersion() >= 90, "required CUDA ARCH >= SM_90");
 
   auto stream = get_current_cuda_stream(mat_a.get_device_index());

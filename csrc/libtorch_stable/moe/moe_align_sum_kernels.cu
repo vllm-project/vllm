@@ -584,6 +584,8 @@ void moe_align_block_size(
     torch::stable::Tensor sorted_token_ids, torch::stable::Tensor experts_ids,
     torch::stable::Tensor num_tokens_post_pad,
     std::optional<torch::stable::Tensor> maybe_expert_map) {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      topk_ids.get_device_index());
   const cudaStream_t stream =
       get_current_cuda_stream(topk_ids.get_device_index());
 
@@ -685,6 +687,8 @@ void batched_moe_align_block_size(int64_t max_tokens_per_batch,
                                   torch::stable::Tensor num_tokens_post_pad) {
   namespace batched_kernel = vllm::moe::batched_moe_align_block_size;
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      batch_num_tokens.get_device_index());
   const cudaStream_t stream =
       get_current_cuda_stream(batch_num_tokens.get_device_index());
   int32_t const B = batch_num_tokens.size(0);
@@ -802,6 +806,7 @@ void moe_lora_align_block_size(
 
   int device_max_shared_mem;
   int dev = topk_ids.get_device_index();
+  const torch::stable::accelerator::DeviceGuard device_guard(dev);
   cudaDeviceGetAttribute(&device_max_shared_mem,
                          cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
   const cudaStream_t stream = get_current_cuda_stream(dev);
