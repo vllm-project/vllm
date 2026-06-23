@@ -16,7 +16,7 @@ from tests.v1.attention.utils import (
     try_backend_includes_kv_cache_update,
     try_get_attention_backend,
 )
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
@@ -29,7 +29,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
     set_kv_cache_layout,
 )
-from vllm.v1.kv_cache_interface import FullAttentionSpec
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
 
 BACKENDS_TO_TEST = [
     AttentionBackendEnum.FLASH_ATTN,
@@ -624,6 +624,94 @@ def test_causal_backend_correctness(
             block_size=128,
             tensor_parallel_size=tensor_parallel_size,
         )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_sm90_fp8_decode_selects_xqa(monkeypatch):
+    """FlashInfer should route Hopper FP8 decode through XQA metadata."""
+    if not current_platform.is_cuda():
+        pytest.skip("FlashInfer XQA decode requires CUDA.")
+
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability",
+        lambda capability: capability == 90,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability_family",
+        lambda family: False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "get_device_capability",
+        lambda: DeviceCapability(9, 0),
+    )
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "can_use_trtllm_attention",
+        lambda num_qo_heads, num_kv_heads, is_prefill=False: not is_prefill,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "use_trtllm_attention",
+        lambda *args, **kwargs: not kwargs.get("is_prefill", False),
+    )
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "get_per_layer_parameters",
+        lambda *args, **kwargs: {
+            "placeholder": PerLayerParameters(
+                window_left=-1,
+                logits_soft_cap=0.0,
+                sm_scale=1.0,
+            )
+        },
+    )
+
+    batch_spec = BATCH_SPECS["small_decode"]
+    vllm_config = create_vllm_config(
+        model_name="meta-llama/Meta-Llama-3-8B",
+        max_model_len=max(batch_spec.seq_lens),
+        block_size=16,
+    )
+    vllm_config.cache_config.cache_dtype = "fp8"
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    kv_cache_spec = FullAttentionSpec(
+        block_size=vllm_config.cache_config.block_size,
+        num_kv_heads=vllm_config.model_config.get_num_kv_heads(
+            vllm_config.parallel_config
+        ),
+        head_size=vllm_config.model_config.get_head_size(),
+        dtype=vllm_config.model_config.dtype,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+    )
+
+    with set_current_vllm_config(vllm_config):
+        builder = flashinfer_backend.FlashInferMetadataBuilder(
+            kv_cache_spec, ["placeholder"], vllm_config, device
+        )
+        common_attn_metadata = create_common_attn_metadata(
+            batch_spec, vllm_config.cache_config.block_size, device
+        )
+        try:
+            set_kv_cache_layout("HND")
+            attn_metadata = builder.build(0, common_attn_metadata)
+        finally:
+            set_kv_cache_layout(None)
+
+    assert isinstance(
+        attn_metadata.decode,
+        flashinfer_backend.FlashInferTrtllmAPIDecode,
+    )
+    assert attn_metadata.decode.kernel == flashinfer_backend.FlashInferDecodeKernel.XQA
 
 
 if current_platform.is_rocm():
