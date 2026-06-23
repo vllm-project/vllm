@@ -11,11 +11,13 @@ logger = init_logger(__name__)
 
 # declaration for static analyzers
 Endpoint: Any
+XferDesc: Any
 
 
 def _load_uccl_p2p_attr(name: str) -> Any:
     attr_name = {
         "Endpoint": "Endpoint",
+        "XferDesc": "XferDesc",
     }[name]
 
     try:
@@ -47,5 +49,6 @@ def is_uccl_p2p_available() -> bool:
 
 __all__ = [
     "Endpoint",
+    "XferDesc",
     "is_uccl_p2p_available",
 ]

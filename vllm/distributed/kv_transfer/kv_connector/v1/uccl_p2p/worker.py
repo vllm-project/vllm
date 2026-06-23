@@ -1274,11 +1274,10 @@ class UcclP2pConnectorWorker:
         """Convert (addr, size, dev) tuples to per-block XferDesc objects.
 
         Each block is matched to the registered tensor whose address range
-        contains it.  The corresponding base XferDesc is shallow-copied and
-        its addr and size are set to the block's values.
+        contains it.  The corresponding base XferDesc is copied through the
+        UCCL P2P wrapper (``XferDesc`` is not pickleable / copyable) and its
+        addr and size are set to the block's values.
         """
-        import copy
-
         result: list[Any] = []
         for addr, block_size_val, dev in blocks_data:
             base_desc = None
@@ -1290,9 +1289,9 @@ class UcclP2pConnectorWorker:
                 raise RuntimeError(
                     f"Block at addr {addr} not found in registered tensors"
                 )
-            xfer_desc = copy.copy(base_desc)
-            xfer_desc.addr = addr
-            xfer_desc.size = block_size_val
+            xfer_desc = self.uccl_p2p_wrapper.copy_xfer_desc(
+                base_desc, addr, block_size_val
+            )
             result.append(xfer_desc)
         return result
 

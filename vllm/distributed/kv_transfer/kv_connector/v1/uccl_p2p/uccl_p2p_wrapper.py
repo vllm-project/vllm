@@ -11,6 +11,7 @@ from typing import Any
 import torch
 
 from vllm.distributed.uccl_p2p_utils import Endpoint as UcclP2pEndpoint
+from vllm.distributed.uccl_p2p_utils import XferDesc as UcclP2pXferDesc
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -113,6 +114,16 @@ class UcclP2pWrapper:
 
     def deserialize_descs(self, serialized: bytes) -> list[Any]:
         return self._ep.deserialize_descs(serialized)
+
+    def copy_xfer_desc(self, base_desc: Any, addr: int, size: int) -> Any:
+        """Return a new XferDesc copying RDMA fields and overriding addr/size."""
+        desc = UcclP2pXferDesc()
+        desc.addr = addr
+        desc.size = size
+        desc.mr_id = base_desc.mr_id
+        desc.lkeys = list(base_desc.lkeys)
+        desc.rkeys = list(base_desc.rkeys)
+        return desc
 
     # ------------------------------------------------------------------
     # Transfer

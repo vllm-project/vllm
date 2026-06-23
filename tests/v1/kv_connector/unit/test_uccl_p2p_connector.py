@@ -59,6 +59,15 @@ class FakeUcclP2pWrapper:
     def deserialize_descs(self, serialized: bytes) -> list[Any]:
         return [FakeXferDesc()]
 
+    def copy_xfer_desc(self, base_desc: Any, addr: int, size: int) -> Any:
+        return FakeXferDesc(
+            addr=addr,
+            size=size,
+            mr_id=base_desc.mr_id,
+            lkeys=list(base_desc.lkeys) if base_desc.lkeys is not None else [],
+            rkeys=list(base_desc.rkeys) if base_desc.rkeys is not None else [],
+        )
+
     def add_remote_agent(
         self,
         agent_name: str,
