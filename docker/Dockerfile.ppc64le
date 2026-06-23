@@ -21,7 +21,6 @@ ENV GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH=/root/.cargo/bin:/root/.rustup/bin:${VIRTUAL_ENV}/bin:$PATH
-#RUN rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
 
 RUN --mount=type=cache,target=/var/cache/dnf \
     microdnf install -y \
@@ -73,13 +72,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     find /root/.cache/uv -name "*.whl" && \
     SETUPTOOLS_SCM_PRETEND_VERSION="$VLLM_VERSION" uv build \
       --wheel --out-dir ${WHEEL_DIR} --no-build-isolation && \
-    uv pip install --no-deps "$(echo ${WHEEL_DIR}/vllm*.whl)[tensorizer]" --refresh
-
-RUN --mount=type=cache,target=/root/.cache/uv \
-    source /opt/rh/gcc-toolset-14/enable && \
-    export IBM_DEVPI_URL="https://wheels.developerfirst.ibm.com/ppc64le/linux/+simple/" && \
-    uv pip install $WHEEL_DIR/*.whl --extra-index-url $IBM_DEVPI_URL --index-strategy unsafe-best-match --verbose
- 
+    uv pip install "$(echo ${WHEEL_DIR}/vllm*.whl)[tensorizer]" --refresh
 
 ###############################################################
 #                   FINAL VLLM IMAGE STAGE                    #

@@ -117,17 +117,10 @@ export GRPC_PYTHON_BUILD_SYSTEM_OPENSSL=1
 ########################################
 # Install Packages From Devpi
 ########################################
-uv pip install numpy==2.4.4 --extra-index-url "$IBM_DEVPI_URL"
+uv pip install numpy==2.3.5 --extra-index-url "$IBM_DEVPI_URL"
 try_install_from_devpi "opencv-python-headless==${OPENCV_VERSION}"
 try_install_from_devpi "torch==${TORCH_VERSION}"
 try_install_from_devpi "torchvision==${TORCHVISION_VERSION}"
-
-echo "========== Installing SymPy =========="
-uv pip install \
-    --extra-index-url "$IBM_DEVPI_URL" \
-    --index-strategy unsafe-best-match \
-    "sympy>=1.13.3"
-
 
 ########################################
 # torch audio
@@ -231,10 +224,7 @@ pip download \
 ########################################
 uv pip install setuptools_scm maturin setuptools-rust ninja scikit-build-core pybind11 nanobind \
     --no-build-isolation
-uv pip install "${WHEEL_DIR}"/*.whl \
-    --extra-index-url "$IBM_DEVPI_URL" \
-    --index-strategy unsafe-best-match \
-    --no-build-isolation
+uv pip install "${WHEEL_DIR}"/*.whl
 
 ########################################
 # install remaining deps
@@ -248,4 +238,4 @@ export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig:/usr/
 
 uv pip install -r requirements/common.txt \
                -r requirements/cpu.txt \
-               -r requirements/build/cpu.txt --extra-index-url "$IBM_DEVPI_URL" --index-strategy unsafe-best-match
+               -r requirements/build/cpu.txt --index-strategy unsafe-best-match
