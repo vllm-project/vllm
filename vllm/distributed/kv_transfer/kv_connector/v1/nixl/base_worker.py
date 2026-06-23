@@ -2228,7 +2228,7 @@ class NixlBaseConnectorWorker:
         """
         assert self.transfer_topo is not None
         virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
-        if virtually_split and mamba_view:
+if self.transfer_topo.virtually_split_kv_in_blocks and mamba_view:
             block_len = self._mamba_ssm_size[not first_split]
         else:
             block_len = self.block_len_per_layer[layer_idx]
