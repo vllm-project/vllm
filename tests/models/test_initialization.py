@@ -98,16 +98,21 @@ def can_initialize(
         vllm_config.validate_block_size()
         return scheduler_kv_cache_config
 
-    if model_arch == "MiniMaxVL01ForConditionalGeneration":
-        pytest.skip(
-            "pickle error when loading `transformers.models.auto.CONFIG_MAPPING`"
-        )
-
     if model_arch == "MoonshotKimiaForCausalLM":
         pytest.skip(
             "Kimi-Audio requires SpeechToTextConfig "
             "which is not configured in test environment"
         )
+
+    if model_arch in ("PrithviGeoSpatialMAE", "Terratorch"):
+        import importlib.util
+
+        if importlib.util.find_spec("terratorch") is None:
+            pytest.skip(
+                "terratorch is not installed; "
+                "temporarily skipped while PyPI has `lightning` quarantined "
+                "(see #41376)"
+            )
 
     if model_arch in ["DeepseekV32ForCausalLM", "GlmMoeDsaForCausalLM"]:
         from vllm.platforms import current_platform

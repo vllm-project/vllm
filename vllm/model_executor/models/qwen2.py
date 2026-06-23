@@ -312,48 +312,15 @@ class Qwen2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-def qwen_2_model_invariants(
-    input_ids: torch.Tensor,
-    positions: torch.Tensor,
-    intermediate_tensors: IntermediateTensors | None = None,
-    inputs_embeds: torch.Tensor | None = None,
-):
-    """Shape invariants for Qwen2Model Model, those are translated to
-    runtime assertions for unbacked dynamic shapes and are compiled away for
-    backed"""
-    # All these should be equal.
-    # input_ids.size()[0]
-    # positions.size()[-1]
-    # intermediate_tensors["hidden_states"].size()[0]
-    # inputs_embeds.size()[0]
-    torch._check(input_ids.size()[0] == positions.size()[-1])
-    if intermediate_tensors is not None:
-        torch._check(
-            input_ids.size()[0] == intermediate_tensors["hidden_states"].size()[0]
-        )
-
-    if inputs_embeds is not None:
-        torch._check(input_ids.size()[0] == inputs_embeds.size()[0])
-
-    # Hidden dimensions should match (hidden_size)
-    # intermediate_tensors["hidden_states"].size()[1]
-    # inputs_embeds.size()[1]
-    if inputs_embeds is not None and intermediate_tensors is not None:
-        torch._check(
-            inputs_embeds.size()[1] == intermediate_tensors["hidden_states"].size()[1]
-        )
-
-
 @support_torch_compile(
     dynamic_arg_dims={
-        "input_ids": 0,
+        "input_ids": {0: "b"},
         # positions is of shape (3, seq_len) if mrope is enabled for qwen2-vl,
         # otherwise (seq_len, ).
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-    },
-    shape_invariants=qwen_2_model_invariants,
+        "positions": {-1: "b"},
+        "intermediate_tensors": {0: "b"},
+        "inputs_embeds": {0: "b"},
+    }
 )
 class Qwen2Model(nn.Module, EagleModelMixin):
     def __init__(
@@ -471,18 +438,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
-                continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                # Loading kv cache quantization scales
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:

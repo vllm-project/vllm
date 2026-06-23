@@ -257,6 +257,13 @@ class MultiGroupBlockTable:
                 f"must match block_sizes length ({len(block_sizes)})"
             )
 
+        # Align to a multiple of (128 / block_size) as required
+        # by some attention backends such as TRTLLM (#39324)
+        max_num_blocks = [
+            cdiv(n, 128 // bs) * (128 // bs) if bs <= 128 else n
+            for n, bs in zip(max_num_blocks, block_sizes)
+        ]
+
         self.block_tables = [
             BlockTable(
                 block_size,
@@ -315,7 +322,7 @@ class MultiGroupBlockTable:
         return self.block_tables[idx]
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens", "max_num_tokens"])
 def _compute_slot_mapping_kernel(
     num_tokens,
     max_num_tokens,

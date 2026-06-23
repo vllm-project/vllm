@@ -35,6 +35,12 @@ class SpeechToTextParams:
     language: str | None = None
     """ISO 639-1 language code (validated / auto-detected)."""
 
+    hotwords: str | None = None
+    """
+    hotwords refers to a list of important words or phrases that the model
+    should pay extra attention to during transcription.
+    """
+
     task_type: str = "transcribe"
     """``"transcribe"`` or ``"translate"``."""
 

@@ -538,6 +538,11 @@ class ElasticEPScalingState:
         self.model_executor.collective_rpc(
             "elastic_ep_execute", args=("perform_eplb_reshuffle",)
         )
+        # Reshuffle changes per-rank token routing; the locked MoE workspace
+        # may now be too small. Rewarm covers both new and existing engines.
+        self.model_executor.collective_rpc(
+            "elastic_ep_execute", args=("rewarm_workspace",)
+        )
         assert self.new_dp_group is not None
         if self.new_dp_group.rank() == 0:
             logger.info("[Elastic EP] EPLB reshuffle completed")

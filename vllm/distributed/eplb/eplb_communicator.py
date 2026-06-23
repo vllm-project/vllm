@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from datetime import timedelta
 
+import numpy as np
 import torch
 from torch.distributed import (
     P2POp,
@@ -18,13 +19,10 @@ from torch.distributed import (
     batch_isend_irecv,
 )
 
+import vllm.distributed.nixl_utils as nixl_utils
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclDataTypeEnum,
-)
-from vllm.distributed.nixl_utils import (
-    NixlWrapper,
-    nixl_agent_config,
 )
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
@@ -32,6 +30,7 @@ from vllm.distributed.parallel_state import (
     is_local_first_rank,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
+from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -40,23 +39,47 @@ logger = init_logger(__name__)
 
 def has_nixl() -> bool:
     """Whether the optional NIXL / RIXL package is available."""
-    return NixlWrapper is not None
+    return nixl_utils.NixlWrapper is not None
 
 
 class EplbCommunicator(ABC):
     """Abstract EPLB communicator for expert weight transfers."""
 
     @abstractmethod
-    def add_send(self, tensor: torch.Tensor, dst_rank: int) -> None:
+    def add_send(
+        self,
+        tensors: list[torch.Tensor],
+        dst_rank: int,
+        expert_id: int,
+    ) -> None:
         pass
 
     @abstractmethod
-    def add_recv(self, tensor: torch.Tensor, src_rank: int) -> None:
+    def add_recv(
+        self,
+        tensors: list[torch.Tensor],
+        src_rank: int,
+        expert_id: int,
+    ) -> None:
         pass
 
     @abstractmethod
     def execute(self) -> None:
-        pass
+        """Complete all enqueued transfers.
+
+        Some backends perform communication here; others (e.g. NIXL)
+        issue transfers eagerly in add_recv and only wait here.
+        On return, all data is available in the destination buffers.
+        """
+
+    def set_transfer_context(  # noqa: B027
+        self, old_indices: np.ndarray, layer_idx: int
+    ) -> None:
+        """Pre-set layer context before add_recv calls.
+
+        Default is a no-op; overridden by backends (e.g. NIXL) that need
+        layer-level context to issue transfers inside add_recv.
+        """
 
     @property
     def needs_profile_buffer_reservation(self) -> bool:
@@ -85,25 +108,37 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
         self._p2p_ops: list[P2POp] = []
         self._log_initialized()
 
-    def add_send(self, tensor: torch.Tensor, dst_rank: int) -> None:
-        self._p2p_ops.append(
-            P2POp(
-                torch.distributed.isend,
-                tensor,
-                dst_rank,
-                self._ep_group,
+    def add_send(
+        self,
+        tensors: list[torch.Tensor],
+        dst_rank: int,
+        expert_id: int,  # unused by this backend
+    ) -> None:
+        for tensor in tensors:
+            self._p2p_ops.append(
+                P2POp(
+                    torch.distributed.isend,
+                    tensor,
+                    dst_rank,
+                    self._ep_group,
+                )
             )
-        )
 
-    def add_recv(self, tensor: torch.Tensor, src_rank: int) -> None:
-        self._p2p_ops.append(
-            P2POp(
-                torch.distributed.irecv,
-                tensor,
-                src_rank,
-                self._ep_group,
+    def add_recv(
+        self,
+        tensors: list[torch.Tensor],
+        src_rank: int,
+        expert_id: int,  # unused by this backend
+    ) -> None:
+        for tensor in tensors:
+            self._p2p_ops.append(
+                P2POp(
+                    torch.distributed.irecv,
+                    tensor,
+                    src_rank,
+                    self._ep_group,
+                )
             )
-        )
 
     def execute(self) -> None:
         if not self._p2p_ops:
@@ -130,11 +165,23 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
         self._ops: list[tuple[str, torch.Tensor, int]] = []
         self._log_initialized()
 
-    def add_send(self, tensor: torch.Tensor, dst_rank: int) -> None:
-        self._ops.append(("send", tensor, dst_rank))
+    def add_send(
+        self,
+        tensors: list[torch.Tensor],
+        dst_rank: int,
+        expert_id: int,  # unused by this backend
+    ) -> None:
+        for tensor in tensors:
+            self._ops.append(("send", tensor, dst_rank))
 
-    def add_recv(self, tensor: torch.Tensor, src_rank: int) -> None:
-        self._ops.append(("recv", tensor, src_rank))
+    def add_recv(
+        self,
+        tensors: list[torch.Tensor],
+        src_rank: int,
+        expert_id: int,  # unused by this backend
+    ) -> None:
+        for tensor in tensors:
+            self._ops.append(("recv", tensor, src_rank))
 
     def execute(self) -> None:
         if not self._ops:
@@ -197,48 +244,100 @@ class NixlEplbCommunicator(EplbCommunicator):
     def __init__(
         self,
         cpu_group: ProcessGroup,
-        expert_weights: Sequence[torch.Tensor],
-        cuda_stream: torch.cuda.Stream | None = None,
+        all_expert_weights: Sequence[Sequence[torch.Tensor]],
+        expert_buffer: Sequence[torch.Tensor],
+        defer_remote_setup: bool = False,
     ) -> None:
-        assert expert_weights, "NixlEplbCommunicator requires non-empty expert_weights."
-        if NixlWrapper is None:
+        """Create a NIXL-backed EPLB communicator.
+
+        Args:
+            cpu_group: CPU process group for metadata exchange.
+            all_expert_weights: Expert weight tensors for all MoE layers.
+            expert_buffer: Pre-allocated receive buffer tensors.
+            defer_remote_setup: If True, postpone the collective
+                all-gather of NIXL agent metadata until the first
+                ``set_transfer_context`` call.  Required for elastic EP
+                where ranks join asynchronously and cannot participate
+                in collectives at construction time.
+        """
+        assert all_expert_weights, (
+            "NixlEplbCommunicator requires non-empty all_expert_weights."
+        )
+        assert expert_buffer, "NixlEplbCommunicator requires non-empty expert_buffer."
+        nixl_wrapper_cls = nixl_utils.NixlWrapper
+        if nixl_wrapper_cls is None:
             raise RuntimeError("NIXL/ RIXL is unavailable.")
+
         self._cpu_group = cpu_group
-        self._cuda_stream = cuda_stream
         self._world_size = cpu_group.size()
         self._rank = cpu_group.rank()
-        self._send_tensors: dict[torch.dtype, list[list[torch.Tensor]]] = {}
-        self._recv_tensors: dict[torch.dtype, list[list[torch.Tensor]]] = {}
-        self._dtypes: list[torch.dtype] = []
-        self._device = expert_weights[0].device
-        for tensor in expert_weights:
-            assert tensor.device == self._device, (
-                "All local EPLB tensors are expected to be on the same device: "
-                f"expected={self._device}, got={tensor.device}"
-            )
-            if tensor.dtype not in self._dtypes:
-                self._dtypes.append(tensor.dtype)
 
+        self._all_expert_weights = all_expert_weights
+        self._expert_buffer = expert_buffer
+        self._num_local_experts: int = all_expert_weights[0][0].shape[0]
+        self._device = all_expert_weights[0][0].device
+
+        for layer_tensors in all_expert_weights:
+            for tensor in layer_tensors:
+                assert is_weak_contiguous(tensor), (
+                    "Expert weight tensors must be contiguous in memory"
+                )
+                assert tensor.device == self._device, (
+                    "All local EPLB tensors are expected to be on the same "
+                    f"device: expected={self._device}, got={tensor.device}"
+                )
+        for tensor in expert_buffer:
+            assert is_weak_contiguous(tensor), (
+                "expert_buffer tensors must be contiguous in memory"
+            )
+
+        # (local_dlist, remote_dlist, xfer_handle) for in-flight READs;
+        # accumulated by add_recv, drained by execute.
+        self._xfer_entries: list[tuple[int, int, int]] = []
+        # Per-rank expert_id -> physical row; set by set_transfer_context.
+        self._expert_to_src_row: list[dict[int, int]] | None = None
+        self._layer_idx: int | None = None
+
+        nixl_agent_config = nixl_utils.nixl_agent_config
         config = (
             nixl_agent_config(capture_telemetry=False)
             if nixl_agent_config is not None
             else None
         )
-        self._nixl_wrapper = NixlWrapper(self._make_agent_name(), config)
+        self._nixl_wrapper = nixl_wrapper_cls(self._make_agent_name(), config)
         self._nixl_memory_type = "VRAM"
-        self._registered_desc: object | None = None
+        # NIXL registration handles; deregistered in __del__.
+        self._registered_descs: list[object] = []
         self._remote_agents: dict[int, str] = {}
-        self._remote_send_meta: dict[int, tuple[int, int, int]] = {}
-        self._send_buffer: torch.Tensor = torch.empty(0)
-        self._recv_buffer: torch.Tensor = torch.empty(0)
-        self._peer_partition_bytes: int = 0
-        self._dtype_max_bytes: dict[torch.dtype, int] = {}
+        # peer -> (layer, tensor) -> (base_ptr, bytes_per_expert, dev_id).
+        self._remote_send_meta: dict[
+            int, dict[tuple[int, int], tuple[int, int, int]]
+        ] = {}
+
         self._cuda_device_id = int(self._device.index or 0)
-        self._xfer_cache: dict[tuple[int, int, int], tuple[int, int, int]] = {}
-        self._init_step("buffers", self._init_registered_buffers, expert_weights)
+        self._remote_state_initialized = False
+        self._init_step("buffers", self._init_registered_buffers)
+        if defer_remote_setup:
+            logger.info_once("NIXL EPLB: deferring remote agent setup (elastic EP).")
+        else:
+            self._init_remote_state()
+        self._log_initialized()
+
+    def _init_remote_state(self) -> None:
+        """Exchange NIXL agent metadata and RDMA pointer info with all peers.
+
+        This is a collective operation (uses ``all_gather_object`` twice).
+        Under elastic EP the call is deferred to the first
+        ``set_transfer_context`` invocation, where all ranks are
+        guaranteed to be synchronized.
+        """
         self._init_step("agents", self._init_remote_agents)
         self._init_step("send meta", self._exchange_remote_send_meta)
-        self._log_initialized()
+        self._remote_state_initialized = True
+
+    def _ensure_remote_state(self) -> None:
+        if not self._remote_state_initialized:
+            self._init_remote_state()
 
     @property
     def needs_profile_buffer_reservation(self) -> bool:
@@ -258,34 +357,78 @@ class NixlEplbCommunicator(EplbCommunicator):
         uid = uuid.uuid4().hex[:8]
         return f"eplb-{self._rank}{pp_suffix}-{uid}"
 
-    def _get_peer_buckets(
+    def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
+        pass
+
+    def add_send(
         self,
-        bucket_map: dict[torch.dtype, list[list[torch.Tensor]]],
-        dtype: torch.dtype,
-    ) -> list[list[torch.Tensor]]:
-        peer_buckets = bucket_map.get(dtype)
-        if peer_buckets is None:
-            peer_buckets = [[] for _ in range(self._world_size)]
-            bucket_map[dtype] = peer_buckets
-        return peer_buckets
+        tensors: list[torch.Tensor],
+        dst_rank: int,
+        expert_id: int,
+    ) -> None:
+        # No-op: NIXL READ is receiver-initiated. The sender's expert
+        # weights are pre-registered and always readable in-place.
+        pass
 
-    def add_send(self, tensor: torch.Tensor, dst_rank: int) -> None:
-        assert dst_rank != self._rank, (
-            "EPLB communicator should not enqueue same-rank sends: "
-            f"rank={self._rank}, dst_rank={dst_rank}"
+    def set_transfer_context(self, old_indices: np.ndarray, layer_idx: int) -> None:
+        self._ensure_remote_state()
+        assert not self._xfer_entries, (
+            f"set_transfer_context() called with {len(self._xfer_entries)} "
+            f"pending transfers from layer {self._layer_idx}; "
+            f"execute() was not called after previous add_recv() calls"
         )
-        self._get_peer_buckets(self._send_tensors, tensor.dtype)[dst_rank].append(
-            tensor
-        )
+        self._layer_idx = layer_idx
+        n = self._num_local_experts
+        rank_experts = old_indices[: self._world_size * n].reshape(self._world_size, n)
+        self._expert_to_src_row = [
+            {int(eid): i for i, eid in enumerate(row) if eid != -1}
+            for row in rank_experts
+        ]
 
-    def add_recv(self, tensor: torch.Tensor, src_rank: int) -> None:
-        assert src_rank != self._rank, (
-            "EPLB communicator should not enqueue same-rank recvs: "
-            f"rank={self._rank}, src_rank={src_rank}"
+    def add_recv(
+        self,
+        tensors: list[torch.Tensor],
+        src_rank: int,
+        expert_id: int,
+    ) -> None:
+        # Build NIXL descriptors and issue the RDMA READ immediately,
+        # overlapping the transfer with the remaining Python loop in
+        # move_to_buffer.
+        assert self._expert_to_src_row is not None and self._layer_idx is not None, (
+            "set_transfer_context() must be called before add_recv()"
         )
-        self._get_peer_buckets(self._recv_tensors, tensor.dtype)[src_rank].append(
-            tensor
+        src_row = self._expert_to_src_row[src_rank][expert_id]
+        layer_idx = self._layer_idx
+
+        local_descs: list[tuple[int, int, int]] = []
+        remote_descs: list[tuple[int, int, int]] = []
+        for t_idx, t in enumerate(tensors):
+            send_base, send_stride, remote_dev = self._remote_send_meta[src_rank][
+                (layer_idx, t_idx)
+            ]
+            assert t.nbytes == send_stride, (
+                f"tensor {t_idx} size {t.nbytes} != remote stride {send_stride}"
+            )
+            local_descs.append(
+                (
+                    t.data_ptr(),
+                    t.nbytes,
+                    self._cuda_device_id,
+                )
+            )
+            remote_descs.append(
+                (
+                    send_base + src_row * send_stride,
+                    send_stride,
+                    remote_dev,
+                )
+            )
+
+        local_h, remote_h, xfer_h = self._create_peer_xfer(
+            src_rank, local_descs, remote_descs
         )
+        self._nixl_wrapper.transfer(xfer_h)
+        self._xfer_entries.append((local_h, remote_h, xfer_h))
 
     def _init_remote_agents(self) -> None:
         local_metadata = self._nixl_wrapper.get_agent_metadata()
@@ -302,105 +445,59 @@ class NixlEplbCommunicator(EplbCommunicator):
                 peer_metadata
             )
 
-    def _init_registered_buffers(self, expert_weights: Sequence[torch.Tensor]) -> None:
-        total_max_bytes = 0
-        for dtype in self._dtypes:
-            max_numel = max(
-                sum(t.numel() for t in expert_weights if t.dtype == dtype), 1
-            )
-            max_bytes = max_numel * dtype.itemsize
-            self._dtype_max_bytes[dtype] = max_bytes
-            total_max_bytes += max_bytes
+    def _init_registered_buffers(self) -> None:
+        all_tensors: list[torch.Tensor] = []
+        for layer_tensors in self._all_expert_weights:
+            all_tensors.extend(layer_tensors)
+        all_tensors.extend(self._expert_buffer)
 
-        self._peer_partition_bytes = total_max_bytes
-
-        # The send buffer needs world_size partitions because remote peers
-        # READ from fixed offsets (rank * partition_bytes).
-        # This allocates world_size * partition_bytes
-        # which can cause OOM on large models.
-        # TODO(ilmarkov): shrink to const * partition_bytes and execute
-        # communication in multiple steps dealing with the worst case.
-        send_total_bytes = self._peer_partition_bytes * self._world_size
-
-        self._send_buffer = torch.empty(
-            send_total_bytes, device=self._device, dtype=torch.uint8
-        )
-        self._recv_buffer = torch.empty(
-            self._peer_partition_bytes, device=self._device, dtype=torch.uint8
-        )
-
-        descs = self._nixl_wrapper.get_reg_descs([self._send_buffer, self._recv_buffer])
+        descs = self._nixl_wrapper.get_reg_descs(all_tensors)
         self._nixl_wrapper.register_memory(descs)
-        self._registered_desc = descs
+        self._registered_descs.append(descs)
 
     def _exchange_remote_send_meta(self) -> None:
-        """Exchange send-buffer metadata so each rank can build dynamic
-        descriptors at execute time."""
-        local_meta: tuple[int, int, int] = (
-            self._send_buffer.data_ptr(),
-            self._peer_partition_bytes,
-            self._cuda_device_id,
-        )
-        gathered_meta: list[tuple[int, int, int] | None] = [None] * self._world_size
+        """Exchange per-layer per-tensor metadata so receivers can compute
+        remote RDMA addresses at transfer time."""
+        local_meta: dict[tuple[int, int], tuple[int, int, int]] = {}
+        for layer_idx, layer_tensors in enumerate(self._all_expert_weights):
+            for t_idx, t in enumerate(layer_tensors):
+                nbytes_per_expert = t.nbytes // self._num_local_experts
+                local_meta[(layer_idx, t_idx)] = (
+                    t.data_ptr(),
+                    nbytes_per_expert,
+                    self._cuda_device_id,
+                )
+
+        # Per-rank map: (layer_idx, tensor_idx) -> (base_ptr, bytes_per_expert, dev_id).
+        # add_recv uses base_ptr + src_row * bytes_per_expert to compute
+        # the remote RDMA address for each expert.
+        gathered_meta: list[dict[tuple[int, int], tuple[int, int, int]] | None] = [
+            None
+        ] * self._world_size
         torch.distributed.all_gather_object(
             gathered_meta, local_meta, group=self._cpu_group
         )
 
+        local_keys = set(local_meta.keys())
         for peer in self._remote_agents:
             peer_meta = gathered_meta[peer]
             assert peer_meta is not None
+            peer_keys = set(peer_meta.keys())
+            if peer_keys != local_keys:
+                raise RuntimeError(
+                    f"NIXL EPLB metadata key mismatch with rank {peer}: "
+                    f"local={sorted(local_keys)}, peer={sorted(peer_keys)}"
+                )
+            for key in local_keys:
+                _, local_stride, _ = local_meta[key]
+                _, peer_stride, _ = peer_meta[key]
+                if local_stride != peer_stride:
+                    raise RuntimeError(
+                        f"NIXL EPLB nbytes_per_expert mismatch for {key} "
+                        f"with rank {peer}: "
+                        f"local={local_stride}, peer={peer_stride}"
+                    )
             self._remote_send_meta[peer] = peer_meta
-
-    @staticmethod
-    def _pack_send_buffer(
-        peer_tensors: list[torch.Tensor],
-        send_buffer: torch.Tensor,
-        byte_offset: int,
-    ) -> int:
-        """
-        Returns the byte offset after the last written byte.
-        """
-        for tensor in peer_tensors:
-            raw = tensor.reshape(-1).view(torch.uint8)
-            if raw.numel() == 0:
-                continue
-            send_buffer[byte_offset : byte_offset + raw.numel()].copy_(
-                raw, non_blocking=True
-            )
-            byte_offset += raw.numel()
-        return byte_offset
-
-    @staticmethod
-    def _unpack_recv_buffer(
-        recv_buffer: torch.Tensor,
-        peer_tensors: list[torch.Tensor],
-        byte_offset: int,
-    ) -> int:
-        """
-        Returns the byte offset after the last read byte.
-        """
-        for tensor in peer_tensors:
-            num_bytes = tensor.numel() * tensor.element_size()
-            if num_bytes == 0:
-                continue
-            tensor.reshape(-1).view(torch.uint8).copy_(
-                recv_buffer[byte_offset : byte_offset + num_bytes],
-                non_blocking=True,
-            )
-            byte_offset += num_bytes
-        return byte_offset
-
-    def _release_all_cached_handles(self) -> None:
-        """Best-effort release of every cached dlist and xfer handle."""
-        for local_dlist, remote_dlist, xfer in self._xfer_cache.values():
-            for release_fn, handle in (
-                (self._nixl_wrapper.release_xfer_handle, xfer),
-                (self._nixl_wrapper.release_dlist_handle, local_dlist),
-                (self._nixl_wrapper.release_dlist_handle, remote_dlist),
-            ):
-                with contextlib.suppress(Exception):
-                    release_fn(handle)
-        self._xfer_cache.clear()
 
     def _wait_for_all_transfers(self, handles: list[int]) -> None:
         pending = set(handles)
@@ -418,156 +515,100 @@ class NixlEplbCommunicator(EplbCommunicator):
             if pending:
                 time.sleep(0.0005)
 
-    def _get_or_create_xfer(self, src: int, total_bytes: int, recv_offset: int) -> int:
-        """Return a cached xfer handle or create and cache a new one."""
-        key = (src, total_bytes, recv_offset)
-        cached = self._xfer_cache.get(key)
-        if cached is not None:
-            return cached[2]
+    def _create_peer_xfer(
+        self,
+        src: int,
+        local_descs: list[tuple[int, int, int]],
+        remote_descs: list[tuple[int, int, int]],
+    ) -> tuple[int, int, int]:
+        """Create a batched xfer for multiple descriptors from one peer.
 
-        recv_base = self._recv_buffer.data_ptr()
+        Each element in *local_descs* / *remote_descs* is an
+        ``(address, size, device_id)`` tuple.
+
+        Returns ``(local_dlist, remote_dlist, xfer_handle)``.
+        """
         local_desc = self._nixl_wrapper.get_xfer_descs(
-            [
-                (
-                    recv_base + recv_offset,
-                    total_bytes,
-                    self._cuda_device_id,
-                )
-            ],
-            self._nixl_memory_type,
+            local_descs, self._nixl_memory_type
         )
         local_handle = self._nixl_wrapper.prep_xfer_dlist(
             "NIXL_INIT_AGENT",
             local_desc,
         )
 
-        remote_base, remote_part_bytes, remote_dev = self._remote_send_meta[src]
-        agent_name = self._remote_agents[src]
         remote_desc = self._nixl_wrapper.get_xfer_descs(
-            [
-                (
-                    remote_base + self._rank * remote_part_bytes,
-                    total_bytes,
-                    remote_dev,
-                )
-            ],
-            self._nixl_memory_type,
+            remote_descs, self._nixl_memory_type
         )
         remote_handle = self._nixl_wrapper.prep_xfer_dlist(
-            agent_name,
+            self._remote_agents[src],
             remote_desc,
         )
 
+        indices = list(range(len(local_descs)))
         xfer_handle = self._nixl_wrapper.make_prepped_xfer(
             "READ",
             local_handle,
-            [0],
+            indices,
             remote_handle,
-            [0],
+            indices,
         )
-        self._xfer_cache[key] = (local_handle, remote_handle, xfer_handle)
-        return xfer_handle
+        return (local_handle, remote_handle, xfer_handle)
+
+    def _post_read_barrier(self) -> None:
+        """Correctness fence: prevents overwrite-while-remote-read race.
+
+        We avoid ``torch.distributed.monitored_barrier`` because it
+        calls ``get_backend(group)`` which fails for stateless groups
+        (elastic EP).  An async ``all_reduce`` + ``wait(timeout)``
+        works with both regular and stateless groups and provides
+        equivalent timeout detection.
+        """
+        _dummy = torch.zeros(1, dtype=torch.int32)
+        work = torch.distributed.all_reduce(
+            _dummy, group=self._cpu_group, async_op=True
+        )
+        work.wait(timeout=timedelta(minutes=5))
 
     def execute(self) -> None:
-        xfer_handles: list[int] = []
+        assert self._layer_idx is not None or not self._xfer_entries, (
+            "set_transfer_context() must be called before execute() "
+            "if any add_recv() calls were made"
+        )
         try:
-            # Phase 1: pack send buffers.
-            with torch.cuda.stream(self._cuda_stream):
-                for dst in range(self._world_size):
-                    byte_offset = dst * self._peer_partition_bytes
-                    for dtype in self._dtypes:
-                        peer_tensors = self._send_tensors.get(
-                            dtype, [[] for _ in range(self._world_size)]
-                        )[dst]
-                        actual_bytes = sum(
-                            t.numel() * t.element_size() for t in peer_tensors
-                        )
-                        if actual_bytes > self._dtype_max_bytes[dtype]:
-                            raise RuntimeError(
-                                "NIXL EPLB send overflow for dtype "
-                                f"{dtype}: peer={dst}, "
-                                f"required={actual_bytes}, "
-                                f"capacity={self._dtype_max_bytes[dtype]}"
-                            )
-                        byte_offset = self._pack_send_buffer(
-                            peer_tensors,
-                            self._send_buffer,
-                            byte_offset,
-                        )
+            self._wait_for_all_transfers([x[2] for x in self._xfer_entries])
 
-            # Ensure all packed data is visible in device memory before pulls.
-            if self._cuda_stream is not None:
-                self._cuda_stream.synchronize()
-            else:
-                torch.cuda.current_stream().synchronize()
-            # READ is receiver-initiated; synchronize all ranks before transfer.
-            # We use monitored_barrier so a rank that crashes or exits early
-            # produces a diagnostic timeout instead of a silent hang.
-            torch.distributed.monitored_barrier(
-                group=self._cpu_group,
-                timeout=timedelta(minutes=5),
-            )
-
-            # Phase 2: look up or create descriptors and issue all READs.
-            # Data from all peers is packed sequentially into the single
-            # partition-sized recv buffer at running offsets.
-            recv_offsets: dict[int, int] = {}
-            recv_offset = 0
-            for src in range(self._world_size):
-                if src == self._rank:
-                    continue
-                actual_total_bytes = 0
-                for dtype in self._dtypes:
-                    peer_tensors = self._recv_tensors.get(
-                        dtype, [[] for _ in range(self._world_size)]
-                    )[src]
-                    actual_total_bytes += sum(
-                        t.numel() * t.element_size() for t in peer_tensors
-                    )
-                if actual_total_bytes == 0:
-                    continue
-
-                recv_offsets[src] = recv_offset
-                xfer_handle = self._get_or_create_xfer(
-                    src, actual_total_bytes, recv_offset
-                )
-                self._nixl_wrapper.transfer(xfer_handle)
-                xfer_handles.append(xfer_handle)
-                recv_offset += actual_total_bytes
-
-            # Phase 3: single wait for all in-flight transfers, then unpack.
-            self._wait_for_all_transfers(xfer_handles)
-
-            with torch.cuda.stream(self._cuda_stream):
-                for src, offset in recv_offsets.items():
-                    byte_offset = offset
-                    for dtype in self._dtypes:
-                        peer_tensors = self._recv_tensors.get(
-                            dtype, [[] for _ in range(self._world_size)]
-                        )[src]
-                        byte_offset = self._unpack_recv_buffer(
-                            self._recv_buffer,
-                            peer_tensors,
-                            byte_offset,
-                        )
-        except Exception:
-            self._release_all_cached_handles()
-            raise
+            self._post_read_barrier()
         finally:
-            self._send_tensors.clear()
-            self._recv_tensors.clear()
+            for local_h, remote_h, xfer_h in self._xfer_entries:
+                with contextlib.suppress(Exception):
+                    self._nixl_wrapper.release_xfer_handle(xfer_h)
+                with contextlib.suppress(Exception):
+                    self._nixl_wrapper.release_dlist_handle(local_h)
+                with contextlib.suppress(Exception):
+                    self._nixl_wrapper.release_dlist_handle(remote_h)
+            self._xfer_entries.clear()
+            self._expert_to_src_row = None
+            self._layer_idx = None
 
     def __del__(self) -> None:
-        try:
-            self._release_all_cached_handles()
-            if self._registered_desc is not None:
-                self._nixl_wrapper.deregister_memory(self._registered_desc)
-                self._registered_desc = None
+        with contextlib.suppress(Exception):
+            for local_h, remote_h, xfer_h in self._xfer_entries:
+                with contextlib.suppress(Exception):
+                    self._nixl_wrapper.release_xfer_handle(xfer_h)
+                with contextlib.suppress(Exception):
+                    self._nixl_wrapper.release_dlist_handle(local_h)
+                with contextlib.suppress(Exception):
+                    self._nixl_wrapper.release_dlist_handle(remote_h)
+        with contextlib.suppress(Exception):
+            for descs in self._registered_descs:
+                with contextlib.suppress(Exception):
+                    self._nixl_wrapper.deregister_memory(descs)
+            self._registered_descs.clear()
+        with contextlib.suppress(Exception):
             for agent_name in self._remote_agents.values():
-                self._nixl_wrapper.remove_remote_agent(agent_name)
+                with contextlib.suppress(Exception):
+                    self._nixl_wrapper.remove_remote_agent(agent_name)
             self._remote_agents.clear()
-        except Exception as e:
-            logger.warning("Error during NixlEplbCommunicator cleanup: %s", e)
 
 
 class PyNcclEplbCommunicator(EplbCommunicator):
@@ -588,13 +629,25 @@ class PyNcclEplbCommunicator(EplbCommunicator):
             self._pynccl_comm.group_start()
             self._group_started = True
 
-    def add_send(self, tensor: torch.Tensor, dst_rank: int) -> None:
+    def add_send(
+        self,
+        tensors: list[torch.Tensor],
+        dst_rank: int,
+        expert_id: int,  # unused by this backend
+    ) -> None:
         self._ensure_group_started()
-        self._pynccl_comm.send(tensor, dst_rank, stream=self._cuda_stream)
+        for tensor in tensors:
+            self._pynccl_comm.send(tensor, dst_rank, stream=self._cuda_stream)
 
-    def add_recv(self, tensor: torch.Tensor, src_rank: int) -> None:
+    def add_recv(
+        self,
+        tensors: list[torch.Tensor],
+        src_rank: int,
+        expert_id: int,  # unused by this backend
+    ) -> None:
         self._ensure_group_started()
-        self._pynccl_comm.recv(tensor, src_rank, stream=self._cuda_stream)
+        for tensor in tensors:
+            self._pynccl_comm.recv(tensor, src_rank, stream=self._cuda_stream)
 
     def execute(self) -> None:
         if self._group_started:
@@ -604,8 +657,9 @@ class PyNcclEplbCommunicator(EplbCommunicator):
 
 def create_eplb_communicator(
     group_coordinator: GroupCoordinator,
-    backend: str | None,
-    expert_weights: Sequence[torch.Tensor],
+    backend: str,
+    expert_weights: Sequence[Sequence[torch.Tensor]],
+    expert_buffer: Sequence[torch.Tensor],
 ) -> EplbCommunicator:
     """Create an EPLB communicator for the given backend.
 
@@ -615,21 +669,21 @@ def create_eplb_communicator(
         backend: Communicator backend name (``"torch_nccl"``,
             ``"torch_gloo"``, ``"pynccl"``, or ``"nixl"``).
             Falls back to ``"torch_nccl"`` when *None*.
-            Stateless (elastic EP) groups only support ``"torch_nccl"``
-            and ``"pynccl"``; ``"torch_nccl"`` is silently promoted to
-            ``"pynccl"`` in that case.  When tensors reside on CPU,
-            ``"torch_gloo"`` or ``"torch_nccl"`` are used via the CPU
-            process group.
-        expert_weights: Expert weight tensors from *one* MoE layer.
-            NixlEplbCommunicator pre-allocates send/recv buffers sized
-            to this layer, so all other MoE layers must have the same
-            tensor count, shapes, and dtypes.
+            Stateless (elastic EP) groups support ``"torch_nccl"``,
+            ``"pynccl"``, and ``"nixl"``; ``"torch_nccl"`` is silently
+            promoted to ``"pynccl"``.  ``"nixl"`` uses deferred remote
+            agent setup to avoid collective deadlocks during elastic
+            scaling.  When tensors reside on CPU, ``"torch_gloo"`` or
+            ``"torch_nccl"`` are used via the CPU process group.
+        expert_weights: Expert weight tensors for *all* MoE layers.
+            Shape ``(num_layers)(num_tensors_per_layer)``.
+            NixlEplbCommunicator registers all layers with NIXL for
+            zero-copy RDMA reads.
+        expert_buffer: Pre-allocated receive buffer tensors (one per
+            weight tensor in a single layer).
     """
-    # Keep a safe default for callers that have not resolved communicator yet.
-    if backend is None:
-        backend = "torch_nccl"
-
-    tensor_device_type = expert_weights[0].device.type if expert_weights else "cpu"
+    first_layer = expert_weights[0] if expert_weights else []
+    tensor_device_type = first_layer[0].device.type if first_layer else "cpu"
     torch_group = (
         group_coordinator.cpu_group
         if tensor_device_type == "cpu"
@@ -645,7 +699,7 @@ def create_eplb_communicator(
         unsupported_dtypes = sorted(
             {
                 tensor.dtype
-                for tensor in expert_weights
+                for tensor in first_layer
                 if not ncclDataTypeEnum.supports_torch_dtype(tensor.dtype)
             },
             key=str,
@@ -674,18 +728,21 @@ def create_eplb_communicator(
 
     is_stateless = isinstance(group_coordinator, StatelessGroupCoordinator)
     if is_stateless:
-        if backend not in ("torch_nccl", "pynccl"):
+        if backend == "nixl":
+            pass  # handled below with defer_remote_setup=True
+        elif backend not in ("torch_nccl", "pynccl"):
             raise ValueError(
-                f"Elastic EP requires 'torch_nccl' or 'pynccl' EPLB communicator "
-                f"(got '{backend}')."
+                f"Elastic EP requires 'torch_nccl', 'pynccl', or 'nixl' "
+                f"EPLB communicator (got '{backend}')."
             )
-        if backend == "torch_nccl":
-            logger.warning(
-                "Stateless elastic EP requires PyNCCL backend. "
-                "Forcing EPLB communicator to 'pynccl'."
-            )
-            backend = "pynccl"
-        return _create_pynccl()
+        else:
+            if backend == "torch_nccl":
+                logger.warning(
+                    "Stateless elastic EP requires PyNCCL backend. "
+                    "Forcing EPLB communicator to 'pynccl'."
+                )
+                backend = "pynccl"
+            return _create_pynccl()
 
     if backend == "nixl":
         if not has_nixl():
@@ -700,7 +757,9 @@ def create_eplb_communicator(
         try:
             return NixlEplbCommunicator(
                 cpu_group=group_coordinator.cpu_group,
-                expert_weights=expert_weights,
+                all_expert_weights=expert_weights,
+                expert_buffer=expert_buffer,
+                defer_remote_setup=is_stateless,
             )
         except Exception as exc:
             raise RuntimeError(

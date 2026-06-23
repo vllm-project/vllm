@@ -25,6 +25,9 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
     QuarkW8A8Int8MoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    is_layer_skipped,
+)
 from vllm.platforms import current_platform
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
@@ -146,8 +149,8 @@ def test_quark_int8_w8a8_moe(vllm_runner, tp):
             layer = model.model.layers[0]
             # MoE experts should use QuarkW8A8Int8MoEMethod
             moe = layer.mlp.experts
-            assert isinstance(moe.quant_method, QuarkW8A8Int8MoEMethod), (
-                f"Expected QuarkW8A8Int8MoEMethod, got {type(moe.quant_method)}"
+            assert isinstance(moe._quant_method, QuarkW8A8Int8MoEMethod), (
+                f"Expected QuarkW8A8Int8MoEMethod, got {type(moe._quant_method)}"
             )
             # Non-MoE linear layers should use QuarkW8A8Int8
             qkv_proj = layer.self_attn.qkv_proj
@@ -240,8 +243,13 @@ WIKITEXT_ACCURACY_CONFIGS = [
     not QUARK_MXFP4_AVAILABLE,
     reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
 )
-@pytest.mark.parametrize("config", WIKITEXT_ACCURACY_CONFIGS)
-@pytest.mark.parametrize("tp_size", [1, 2])
+@pytest.mark.parametrize(
+    "config",
+    [pytest.param(val, id=f"config:{val}") for val in WIKITEXT_ACCURACY_CONFIGS],
+)
+@pytest.mark.parametrize(
+    "tp_size", [pytest.param(val, id=f"tp_size:{val}") for val in [1, 2]]
+)
 def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
     device_count = torch.accelerator.device_count()
     if device_count < tp_size:
@@ -256,6 +264,53 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
         model_args=config.get_model_args(
             tp_size=tp_size, kwargs={"cudagraph_capture_sizes": [16]}
         ),
+        tasks=task,
+        batch_size=64,
+    )
+
+    EXPECTED_VALUE = config.excepted_value
+    measured_value = results["results"][task]["word_perplexity,none"]
+    assert (
+        measured_value < EXPECTED_VALUE + rtol
+        and measured_value > EXPECTED_VALUE - rtol
+    ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+
+
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason=f"amd-quark>={QUARK_MXFP4_MIN_VERSION} is not available",
+)
+@pytest.mark.parametrize("tp_size", [1, 2])
+def test_nvfp4_wikitext_correctness(tp_size: int):
+    device_count = torch.accelerator.device_count()
+    if device_count < tp_size:
+        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
+
+    # NOTE: expected_value from nvidia/Qwen3-30B-A3B-NVFP4
+    expected_value = 11.2391
+
+    model_name = "amd-quark/Qwen3-30B-A3B-nvfp4-quark"
+    task = "wikitext"
+
+    rtol = 0.25
+
+    config = AccuracyTestConfig(
+        model_name=model_name,
+        excepted_value=expected_value,
+    )
+
+    model_args = config.get_model_args(
+        tp_size=tp_size,
+        kwargs={
+            "cudagraph_capture_sizes": [16],
+        },
+    )
+    model_args.pop("add_bos_token")
+
+    # Smaller cudagraph_capture_sizes to speed up the test.
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=model_args,
         tasks=task,
         batch_size=64,
     )
@@ -385,3 +440,88 @@ def test_mxfp4_dequant_kernel_match_quark(
     out_torch = dq_mxfp4_torch(w_mxfp4, scale, float_dtype)
 
     assert torch.equal(out_hip, out_torch)
+
+
+# Unit tests for ``is_layer_skipped`` fused-name handling.
+
+FUSED_MAPPING = {
+    "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+    "gate_up_proj": ["gate_proj", "up_proj"],
+}
+
+
+def test_fused_name_listed_directly_is_skipped():
+    # Regression for Step-3.5-Flash-FP8: the checkpoint lists the fused
+    # name (``qkv_proj``) directly in ``modules_to_not_convert``. When a
+    # ``packed_modules_mapping`` is registered on the model, the fused
+    # match must still win over per-shard expansion.
+    ignored = ["model.layers.0.self_attn.qkv_proj"]
+    assert is_layer_skipped(
+        prefix="model.layers.0.self_attn.qkv_proj",
+        ignored_layers=ignored,
+        fused_mapping=FUSED_MAPPING,
+    )
+    assert is_layer_skipped(
+        prefix="model.layers.0.mlp.gate_up_proj",
+        ignored_layers=["model.layers.0.mlp.gate_up_proj"],
+        fused_mapping=FUSED_MAPPING,
+    )
+
+
+def test_unfused_shards_listed_is_skipped():
+    # Quark INT8 style: per-shard names listed; all shards present means
+    # the fused layer is skipped via expansion.
+    ignored = [
+        "model.layers.0.self_attn.q_proj",
+        "model.layers.0.self_attn.k_proj",
+        "model.layers.0.self_attn.v_proj",
+    ]
+    assert is_layer_skipped(
+        prefix="model.layers.0.self_attn.qkv_proj",
+        ignored_layers=ignored,
+        fused_mapping=FUSED_MAPPING,
+    )
+
+
+def test_partial_shards_raises():
+    # Only some shards listed -> ambiguous, must raise. Fused name is
+    # not in ignored_layers, so we fall through to per-shard expansion.
+    ignored = ["model.layers.0.self_attn.q_proj"]
+    with pytest.raises(ValueError):
+        is_layer_skipped(
+            prefix="model.layers.0.self_attn.qkv_proj",
+            ignored_layers=ignored,
+            fused_mapping=FUSED_MAPPING,
+        )
+
+
+def test_not_skipped_when_nothing_listed():
+    assert not is_layer_skipped(
+        prefix="model.layers.0.self_attn.qkv_proj",
+        ignored_layers=["model.layers.0.mlp.gate_up_proj"],
+        fused_mapping=FUSED_MAPPING,
+    )
+
+
+def test_non_fused_layer_unaffected():
+    assert is_layer_skipped(
+        prefix="model.layers.0.self_attn.o_proj",
+        ignored_layers=["model.layers.0.self_attn.o_proj"],
+        fused_mapping=FUSED_MAPPING,
+    )
+    assert not is_layer_skipped(
+        prefix="model.layers.0.self_attn.o_proj",
+        ignored_layers=["model.layers.1.self_attn.o_proj"],
+        fused_mapping=FUSED_MAPPING,
+    )
+
+
+def test_substr_match_on_fused_name():
+    # skip_with_substr=True path: fused-name substring match should also
+    # short-circuit before shard expansion.
+    assert is_layer_skipped(
+        prefix="model.layers.0.self_attn.qkv_proj",
+        ignored_layers=["self_attn.qkv_proj"],
+        fused_mapping=FUSED_MAPPING,
+        skip_with_substr=True,
+    )

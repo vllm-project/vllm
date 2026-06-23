@@ -2,10 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    PrivateAttr,
+    field_validator,
+    model_validator,
+)
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionLogProbs,
+    ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.engine.protocol import StreamOptions, UsageInfo
 from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
@@ -62,7 +72,7 @@ class GenerateRequest(BaseModel):
             "through out the inference process and return in response."
         ),
     )
-    token_ids: list[int]
+    token_ids: list[int] = Field(min_length=1)
     """The token ids to generate text from."""
 
     @field_validator("token_ids")
@@ -108,6 +118,39 @@ class GenerateRequest(BaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
+    # Tracks which keys the caller explicitly set inside ``sampling_params``
+    # when the request was parsed from a JSON body. Lets the server tell
+    # "client said max_tokens=16" from "client said nothing → dataclass
+    # default 16" so it can apply server-side defaulting only in the latter
+    # case. ``None`` means the request was constructed with a pre-built
+    # ``SamplingParams`` instance (e.g. from internal callers that have
+    # already resolved values), in which case all fields are considered set.
+    _sampling_params_provided_keys: set[str] | None = PrivateAttr(default=None)
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _capture_sampling_params_provided_keys(cls, data: Any, handler):
+        provided: set[str] | None = None
+        if isinstance(data, dict):
+            sp = data.get("sampling_params")
+            if isinstance(sp, dict):
+                provided = set(sp.keys())
+        instance = handler(data)
+        instance._sampling_params_provided_keys = provided
+        return instance
+
+    def is_sampling_param_provided(self, name: str) -> bool:
+        """Whether the caller explicitly set ``sampling_params.<name>``.
+
+        For requests parsed from a JSON body, this reflects the raw input
+        dict. For requests constructed with a pre-built ``SamplingParams``
+        instance, all fields are considered provided so server-side defaults
+        do not clobber values already resolved upstream.
+        """
+        if self._sampling_params_provided_keys is None:
+            return True
+        return name in self._sampling_params_provided_keys
+
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         return TokenizeParams(
             max_total_tokens=None,
@@ -121,6 +164,16 @@ class GenerateResponseChoice(BaseModel):
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
     token_ids: list[int] | None = None
+    # Per-token expert routing decisions, base64-encoded ``.npy`` bytes
+    # (numpy serialization). Shape after decode:
+    #   (num_tokens - 1, num_layers, num_experts_per_tok)  dtype uint8/uint16
+    # ``num_tokens - 1`` because the last sampled token has not been
+    # forwarded yet and therefore has no routing data.
+    # Decode:
+    #   np.load(io.BytesIO(base64.b64decode(s)))
+    # ``None`` if (a) the request was aborted before any forward pass,
+    # or (b) ``enable_return_routed_experts`` is off server-side.
+    routed_experts: str | None = None
 
 
 class GenerateResponseStreamChoice(BaseModel):
@@ -128,6 +181,7 @@ class GenerateResponseStreamChoice(BaseModel):
     logprobs: ChatCompletionLogProbs | None = None
     finish_reason: str | None = None
     token_ids: list[int] | None = None
+    routed_experts: str | None = None
 
 
 class GenerateStreamResponse(BaseModel):
@@ -160,3 +214,70 @@ class GenerateResponse(BaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+
+
+####### Derender (postprocessing) #######
+
+
+class DerenderChatRequest(BaseModel):
+    """Request for the /v1/chat/completions/derender endpoint (non-streaming).
+
+    Wraps a complete GenerateResponse and caller-supplied metadata needed to
+    produce a fully-formed ChatCompletionResponse without a GPU.
+
+    Streaming derender would require a separate endpoint design with
+    incremental token delivery, ``OutputProcessor``-based detokenization,
+    and ``parser.parse_delta()`` instead of ``parser.parse()``.
+    """
+
+    model: str
+    generate_response: GenerateResponse
+    prompt_tokens: int | None = None
+    """Prompt token count for usage; defaults to 0 if omitted.
+
+    GenerateResponse carries only output tokens; the caller already has
+    len(GenerateRequest.token_ids) from the render step.
+    """
+
+    chat_request: ChatCompletionRequest | None = None
+    """The original (post-adjust_request) ChatCompletionRequest from /render.
+
+    Required by the parsing so that tool/reasoning parsers can receive the full
+    request context they expect (request.tools, request.tool_choice,
+    request._grammar_from_tool_parser, etc.).
+    """
+
+
+class DerenderCompletionRequest(BaseModel):
+    """Request for the /v1/completions/derender endpoint (non-streaming).
+
+    Parallel to DerenderChatRequest but handles the multi-prompt completions
+    case: one GenerateResponse per prompt, mirroring the list[GenerateRequest]
+    returned by /v1/completions/render.
+    """
+
+    model: str
+    generate_responses: list[GenerateResponse]
+    prompt_tokens: list[int] | None = None
+    """One prompt token count per response; each defaults to 0 if omitted.
+
+    If provided, len(prompt_tokens) must equal len(generate_responses).
+    """
+
+    completion_request: CompletionRequest | None = None
+    """The original (post-adjust_request) CompletionRequest from /render.
+
+    Mirrors chat_request on DerenderChatRequest. Required by the parsing
+    so parsers receive the full request context.
+    """
+
+    @model_validator(mode="after")
+    def _validate_prompt_tokens_length(self) -> "DerenderCompletionRequest":
+        if self.prompt_tokens is not None and len(self.prompt_tokens) != len(
+            self.generate_responses
+        ):
+            raise ValueError(
+                f"prompt_tokens length ({len(self.prompt_tokens)}) must equal "
+                f"generate_responses length ({len(self.generate_responses)})"
+            )
+        return self

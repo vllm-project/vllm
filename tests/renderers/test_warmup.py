@@ -34,6 +34,14 @@ def _make_renderer_mock(mm_limits: dict[str, int]) -> MagicMock:
     mm_processor = MagicMock()
     mm_processor.info.allowed_mm_limits = mm_limits
     renderer.mm_processor = mm_processor
+    renderer._readonly_mm_processor = None
+    renderer._warmup_mm_processor = BaseRenderer._warmup_mm_processor.__get__(
+        renderer, BaseRenderer
+    )
+    renderer._clear_processor_cache = BaseRenderer._clear_processor_cache
+    renderer.clear_mm_cache = MagicMock()
+    renderer.model_config.max_model_len = 128
+    renderer.model_config.get_multimodal_config.return_value.limit_per_prompt = {}
 
     return renderer
 
@@ -109,3 +117,19 @@ class TestMmWarmupSkippedWhenNoProcessor:
         BaseRenderer.warmup(renderer, ChatParams())
 
         renderer.model_config.get_multimodal_config.assert_not_called()
+
+
+class TestReadonlyMmWarmup:
+    """Readonly MM processor warmup must mirror the render path behavior."""
+
+    def test_readonly_processor_apply_called_and_cache_cleared(self):
+        renderer = _make_renderer_mock({"image": 1})
+        readonly_mm_processor = MagicMock()
+        readonly_mm_processor.info.allowed_mm_limits = {"image": 1}
+        renderer._readonly_mm_processor = readonly_mm_processor
+
+        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
+            BaseRenderer.warmup(renderer, ChatParams())
+
+        readonly_mm_processor.apply.assert_called_once()
+        readonly_mm_processor.cache.clear_cache.assert_called_once()

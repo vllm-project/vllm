@@ -8,13 +8,15 @@
 #include "cpu/cpu_types.hpp"
 
 namespace cpu_utils {
-enum class ISA { AMX, VEC };
+enum class ISA { AMX, VEC, RVV };
 
 inline ISA get_isa(const std::string& isa) {
   if (isa == "amx") {
     return ISA::AMX;
   } else if (isa == "vec") {
     return ISA::VEC;
+  } else if (isa == "rvv") {
+    return ISA::RVV;
   } else {
     TORCH_CHECK(false, "Invalid isa type: " + isa);
   }
@@ -54,7 +56,7 @@ struct Counter {
 };
 
 inline int64_t get_available_l2_size() {
-#if defined(__s390x__)
+#if defined(__s390x__) || defined(__powerpc__)
   static int64_t size = []() {
     uint32_t l2_cache_size = 0;
     auto caps = at::cpu::get_cpu_capabilities();

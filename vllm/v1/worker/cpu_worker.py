@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Must be imported firstly
+import vllm.v1.worker.cpu.shm  # noqa # isort: skip
+
 import math
 import os
 import sys
@@ -71,8 +75,11 @@ class CPUWorker(Worker):
                 f"is less than desired CPU memory utilization "
                 f"({vllm_config.cache_config.gpu_memory_utilization}, "
                 f"{format_gib(self.requested_cpu_memory)} GiB). "
-                "Decrease --gpu-memory-utilization"
-                f" or reduce CPU memory used by other processes."
+                "On the CPU backend, the `--gpu-memory-utilization` flag "
+                "controls the fraction of CPU memory reserved (despite its "
+                "name). To resolve: decrease `--gpu-memory-utilization` "
+                "(e.g. `--gpu-memory-utilization 0.5`) "
+                "or reduce CPU memory used by other processes."
             )
 
         super().__init__(
@@ -98,8 +105,10 @@ class CPUWorker(Worker):
             )
 
     def init_device(self):
+        self.device = torch.device("cpu")
+
         # Check whether critical libraries are loaded
-        def check_preloaded_libs(name: str):
+        def check_preloaded_libs(name: str) -> bool:
             ld_preload_list = os.environ.get("LD_PRELOAD", "")
             if name not in ld_preload_list:
                 logger.warning(
@@ -110,11 +119,22 @@ class CPUWorker(Worker):
                     "to setup required pre-loaded libraries.",
                     name,
                 )
+                return False
+            return True
 
         if sys.platform.startswith("linux"):
             check_preloaded_libs("libtcmalloc")
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                check_preloaded_libs("libiomp")
+                iomp_loaded = check_preloaded_libs("libiomp")
+                if not iomp_loaded and self.vllm_config.speculative_config is not None:
+                    logger.warning(
+                        "Speculative decoding on CPU without Intel OpenMP in "
+                        "LD_PRELOAD will cause significant performance loss. "
+                        "Please follow the section `set LD_PRELOAD` in "
+                        "https://docs.vllm.ai/en/latest/getting_started/"
+                        "installation/cpu/ "
+                        "to setup libiomp5.",
+                    )
 
         def skip_set_num_threads(x: int):
             logger.warning(
@@ -138,9 +158,16 @@ class CPUWorker(Worker):
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
-        self.model_runner: CPUModelRunner = CPUModelRunner(
-            self.vllm_config, torch.device("cpu")
-        )
+        if self.use_v2_model_runner:
+            from vllm.v1.worker.cpu.model_runner import (
+                CPUModelRunner as CPUModelRunnerV2,
+            )
+
+            self.model_runner: CPUModelRunner = CPUModelRunnerV2(  # type: ignore
+                self.vllm_config, self.device
+            )
+        else:
+            self.model_runner = CPUModelRunner(self.vllm_config, torch.device("cpu"))
 
     def sleep(self, level: int = 1) -> None:
         logger.warning("sleep mode is not supported on CPU, ignore it.")
@@ -210,10 +237,13 @@ class CPUWorker(Worker):
         return kv_cache_size
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
+        # Note: the model has been compiled in determine_available_memory(),
+        # Only compile here for models without kv cache
+        if len(self.model_runner.kv_caches) == 0:
+            self.model_runner.warming_up_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
-        # Note: the model has been compiled in determine_available_memory()
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,

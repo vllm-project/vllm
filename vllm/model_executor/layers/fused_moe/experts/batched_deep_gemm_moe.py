@@ -316,16 +316,14 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
-    def supports_expert_map(self) -> bool:
-        return False
-
     def supports_packed_ue8m0_act_scales(self) -> bool:
         """
-        DeepGemm supports packed ue8m0 activation scales format in devices == sm100
+        DeepGemm supports packed ue8m0 activation scales on Blackwell-family
+        GPUs (SM100 datacenter and SM120 consumer).
         """
-        return (
-            is_deep_gemm_e8m0_used()
-            and current_platform.is_device_capability_family(100)
+        return is_deep_gemm_e8m0_used() and (
+            current_platform.is_device_capability_family(100)
+            or current_platform.is_device_capability_family(120)
         )
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
@@ -369,7 +367,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEExpertsModular):
             logger.warning_once(
                 "DPMetadata unavailable. Defaulting expected_m to "
                 f"{max_tokens_per_expert}.",
-                scope="local",
             )
             return max_tokens_per_expert
 

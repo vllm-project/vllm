@@ -9,6 +9,10 @@
 
 namespace vec_op {
 
+// FP8 tag types for tag dispatch (see cpu_attn_vec.hpp)
+struct fp8_e4m3_tag {};
+struct fp8_e5m2_tag {};
+
 // FIXME: FP16 is not fully supported in Torch-CPU
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)         \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__) \
@@ -85,6 +89,35 @@ struct BF16Vec8 : public Vec<BF16Vec8> {
   }
 };
 
+struct FP16Vec16 : public Vec<FP16Vec16> {
+  constexpr static int VEC_ELEM_NUM = 16;
+  ss16x8x2_t reg;
+
+  explicit FP16Vec16(const void* ptr) {
+    reg.val[0] = (__vector signed short)vec_xl(0, (signed short*)ptr);
+    reg.val[1] = (__vector signed short)vec_xl(16, (signed short*)ptr);
+  }
+
+  explicit FP16Vec16(bool, const void* ptr) : FP16Vec16(ptr) {}
+
+  explicit FP16Vec16(const FP32Vec16&);
+
+  void save(void* ptr) const {
+    vec_xst(reg.val[0], 0, (signed short*)ptr);
+    vec_xst(reg.val[1], 16, (signed short*)ptr);
+  }
+
+  void save(void* ptr, int elem_num) const {
+    int num = std::max(0, std::min(elem_num, VEC_ELEM_NUM));
+    if (num <= 8) {
+      vec_xst_len(reg.val[0], (signed short*)ptr, num * 2);
+    } else {
+      vec_xst(reg.val[0], 0, (signed short*)ptr);
+      vec_xst_len(reg.val[1], (signed short*)ptr + 8, (num - 8) * 2);
+    }
+  }
+};
+
 struct BF16Vec16 : public Vec<BF16Vec16> {
   constexpr static int VEC_ELEM_NUM = 16;
 
@@ -95,6 +128,8 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
     reg.val[0] = (__vector signed short)vec_xl(0, (signed short*)ptr);
     reg.val[1] = (__vector signed short)vec_xl(16, (signed short*)ptr);
   }
+
+  explicit BF16Vec16(bool, const void* ptr) : BF16Vec16(ptr) {}
 
   explicit BF16Vec16(const FP32Vec16&);
 
@@ -142,6 +177,9 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
       : reg({vec8_data.reg, vec8_data.reg, vec8_data.reg, vec8_data.reg}) {}
 
   void save(void* ptr) const { *reinterpret_cast<ss16x8x4_t*>(ptr) = reg; }
+
+  explicit BF16Vec32(const uint8_t*, fp8_e4m3_tag) : reg{} {}
+  explicit BF16Vec32(const uint8_t*, fp8_e5m2_tag) : reg{} {}
 };
 
 struct FP32Vec4 : public Vec<FP32Vec4> {
@@ -372,6 +410,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     reg.val[3] = vec_xl(48, ptr);
   }
 
+  explicit FP32Vec16(bool, const float* ptr) : FP32Vec16(ptr) {}
+
   explicit FP32Vec16(f32x4x4_t data) : reg(data) {}
 
   explicit FP32Vec16(const FP32Vec16& data) {
@@ -395,6 +435,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     reg.val[3] = data.reg.val[1];
   }
 
+  explicit FP32Vec16(const FP16Vec16& v);
   explicit FP32Vec16(const BF16Vec16& v) {
     reg.val[0] = (__vector float)vec_mergeh(zero, v.reg.val[0]);
     reg.val[1] = (__vector float)vec_mergel(zero, v.reg.val[0]);
@@ -403,6 +444,10 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   }
 
   explicit FP32Vec16(const BF16Vec8& v) : FP32Vec16(FP32Vec8(v)) {}
+
+  // FP8 stub: dead code on PowerPC (fp8 KV cache is x86-only), needed for
+  // load_b_pair_vec template to compile on all platforms.
+  explicit FP32Vec16(const BF16Vec32&, int) : reg{} {}
 
   explicit FP32Vec16(const INT32Vec16& v) {
     reg.val[0] = vec_ctf(v.reg.val[0], 0);
@@ -724,6 +769,40 @@ inline BF16Vec8::BF16Vec8(const FP32Vec8& v) {
 #endif
 }
 
+inline FP16Vec16::FP16Vec16(const FP32Vec16& v) {
+  alignas(16) float temp_fp32[16];
+  alignas(16) c10::Half temp_fp16[16];
+
+  vec_xst(v.reg.val[0], 0, temp_fp32);
+  vec_xst(v.reg.val[1], 16, temp_fp32);
+  vec_xst(v.reg.val[2], 32, temp_fp32);
+  vec_xst(v.reg.val[3], 48, temp_fp32);
+
+  for (int i = 0; i < 16; i++) {
+    temp_fp16[i] = c10::Half(temp_fp32[i]);
+  }
+
+  reg.val[0] = (__vector signed short)vec_xl(0, (signed short*)temp_fp16);
+  reg.val[1] = (__vector signed short)vec_xl(16, (signed short*)temp_fp16);
+}
+
+inline FP32Vec16::FP32Vec16(const FP16Vec16& v) {
+  alignas(16) c10::Half temp_fp16[16];
+  alignas(16) float temp_fp32[16];
+
+  vec_xst(v.reg.val[0], 0, (signed short*)temp_fp16);
+  vec_xst(v.reg.val[1], 16, (signed short*)temp_fp16);
+
+  for (int i = 0; i < 16; i++) {
+    temp_fp32[i] = float(temp_fp16[i]);
+  }
+
+  reg.val[0] = vec_xl(0, temp_fp32);
+  reg.val[1] = vec_xl(16, temp_fp32);
+  reg.val[2] = vec_xl(32, temp_fp32);
+  reg.val[3] = vec_xl(48, temp_fp32);
+}
+
 inline BF16Vec16::BF16Vec16(const FP32Vec16& v) {
 #ifdef _ARCH_PWR10
   __vector signed short ret[4];
@@ -783,6 +862,43 @@ inline void prefetch(const void* addr) {
   __asm__ __volatile__("dcbt 0, %0" : : "r"(addr) : "memory");
 }
 
-};  // namespace vec_op
+struct INT8Vec64 {
+  __vector signed char data[4];
+
+  INT8Vec64() = default;
+
+  explicit INT8Vec64(const int8_t* ptr) {
+    data[0] = vec_xl(0, ptr);
+    data[1] = vec_xl(16, ptr);
+    data[2] = vec_xl(32, ptr);
+    data[3] = vec_xl(48, ptr);
+  }
+
+  explicit INT8Vec64(bool, const int8_t* ptr) : INT8Vec64(ptr) {}
+
+  void save(int8_t* ptr) const {
+    vec_xst(data[0], 0, ptr);
+    vec_xst(data[1], 16, ptr);
+    vec_xst(data[2], 32, ptr);
+    vec_xst(data[3], 48, ptr);
+  }
+
+  void save(int8_t* ptr, int elem_num) const {
+    if (elem_num <= 0) return;
+
+    int full_vecs = elem_num / 16;
+    for (int i = 0; i < full_vecs && i < 4; i++) {
+      vec_xst(data[i], i * 16, ptr);
+    }
+
+    int remaining = elem_num % 16;
+    if (remaining > 0 && full_vecs < 4) {
+      vec_xst_len(data[full_vecs], ptr + full_vecs * 16, remaining);
+    }
+  }
+
+  void nt_save(int8_t* ptr) const { save(ptr); }
+};
+}  // namespace vec_op
 
 #endif
