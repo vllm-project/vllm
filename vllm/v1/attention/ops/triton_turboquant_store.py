@@ -343,6 +343,52 @@ def _tq_fused_store_mse(
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Fused cast + normalize (key) + cast (value) pre-op kernel
+# Replaces 3 PyTorch kernel launches (key.float, norm, key/norm) + 1
+# (value.float) with a single Triton kernel, reducing launch overhead
+# and intermediate-tensor memory bandwidth.
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@triton.jit
+def _fused_cast_normalize_kv(
+    Key_ptr,  # [NH, D] bfloat16/float16
+    Value_ptr,  # [NH, D] bfloat16/float16
+    X_hat_out,  # [NH, D] float32 — normalized key (k / ||k||)
+    Norms_out,  # [NH, 1] float32 — per-vector L2 norm
+    V_flat_out,  # [NH, D] float32 — value cast to fp32
+    D: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    """Fused: key bf16→fp32 cast + L2 norm + normalize + value bf16→fp32 cast.
+
+    One program per (token, head) pair. Loads K and V for the same
+    (token, head), computes the key norm and normalized key in registers,
+    and writes all three outputs.
+    """
+    pid = tl.program_id(0)
+    base = pid * D
+    d_offs = tl.arange(0, BLOCK_D)
+    d_mask = d_offs < D
+
+    # ── Key: load bf16, cast to fp32 ──────────────────────────────
+    k = tl.load(Key_ptr + base + d_offs, mask=d_mask, other=0.0).to(tl.float32)
+
+    # ── Compute L2 norm ───────────────────────────────────────────
+    k_sq = k * k
+    norm = tl.sqrt(tl.sum(k_sq, axis=0) + 1e-16)
+
+    # ── Normalize ─────────────────────────────────────────────────
+    x_hat = k / norm
+    tl.store(X_hat_out + base + d_offs, x_hat, mask=d_mask)
+    tl.store(Norms_out + pid, norm)
+
+    # ── Value: load bf16, cast to fp32, store ────────────────────
+    v = tl.load(Value_ptr + base + d_offs, mask=d_mask, other=0.0).to(tl.float32)
+    tl.store(V_flat_out + base + d_offs, v, mask=d_mask)
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # Launcher
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -409,16 +455,28 @@ def triton_turboquant_store(
         )
         return
 
-    # ── MSE PATH: external GEMM + fused bucketize/pack kernel ──
-    # Normalize + rotation GEMM externally (cuBLAS is faster than in-kernel)
-    k_flat = key.float().reshape(NH, D)
-    norms = k_flat.norm(dim=1, keepdim=True)
-    x_hat = k_flat / (norms + 1e-8)
+    # ── MSE PATH: fused pre-ops + external GEMM + fused bucketize/pack ──
+    # Step 1: Fused cast + norm + normalize (key) + cast (value) — 1 kernel
+    # .contiguous() ensures correct pointer arithmetic in Triton regardless
+    # of input tensor strides (critical for TP sharding / non-contiguous views).
+    x_hat = torch.empty(NH, D, dtype=torch.float32, device=key.device)
+    norms = torch.empty(NH, 1, dtype=torch.float32, device=key.device)
+    v_flat = torch.empty(NH, D, dtype=torch.float32, device=key.device)
+    grid_pre = (NH,)
+    _fused_cast_normalize_kv[grid_pre](
+        key.reshape(NH, D).contiguous(), value.reshape(NH, D).contiguous(),
+        x_hat, norms, v_flat,
+        D=D, BLOCK_D=BLOCK_D,
+        num_warps=4, num_stages=1,
+    )
+    # k_flat = key.float().reshape(NH, D)
+    # norms = k_flat.norm(dim=1, keepdim=True)
+    # x_hat = k_flat / (norms + 1e-8)
+    # v_flat = value.float().reshape(NH, D)
+
     y = x_hat @ PiT
 
-    v_flat = value.float().reshape(NH, D)
-
-    # Fused kernel: bucketize + MSE index pack + norm store + value pack
+    # Step 3: Fused kernel: bucketize + MSE index pack + norm store + value pack
     grid = (NH,)
     _tq_fused_store_mse[grid](
         y,
