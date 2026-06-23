@@ -293,20 +293,9 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             and not self.use_deepseek_fp8_block_scale
         ):
             # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
-            if self.moe_config.moe_parallel_config.enable_eplb:
-                # Account for weight scale rearrangement with EPLB
-                # TODO (varun): This is wasteful recomputation on every step.
-                # Hook this computation to EPLB rearrangement directly.
-
-                assert self.w1_scale is not None and self.w2_scale is not None
-                assert self.a1_scale is not None and self.a2_scale is not None
-                # w13_weight_scale * w13_input_scale
-                g1_alphas = (self.w1_scale * self.a1_scale).squeeze()
-                # w2_weight_scale * w2_input_scale
-                g2_alphas = (self.w2_scale * self.a2_scale).squeeze()
-            else:
-                # Use precomputed g1_alphas, g2_alphas
-                g1_alphas, g2_alphas = self.g1_alphas, self.g2_alphas
+            # g1_alphas / g2_alphas are kept fresh by Fp8MoEMethod
+            # .after_eplb_rearrangement after each EPLB expert reorder.
+            g1_alphas, g2_alphas = self.g1_alphas, self.g2_alphas
 
             quant_scales = [
                 g1_alphas,  # w13_weight_scale * w13_input_scale
