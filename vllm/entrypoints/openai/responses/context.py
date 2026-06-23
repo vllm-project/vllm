@@ -362,7 +362,7 @@ class ParsableContext(ConversationContext):
                 model_output_token_ids=completion.token_ids,
             )
 
-            self.num_reasoning_tokens = self.parser_instance.count_reasoning_tokens(
+            self.num_reasoning_tokens = self.response_parser.count_reasoning_tokens(
                 completion.token_ids
             )
             self.response_messages.extend(
