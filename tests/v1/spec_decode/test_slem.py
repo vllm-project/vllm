@@ -82,7 +82,9 @@ def sp_tokenizer():
     )
 
 
-class TestSlemDraftToTargetCandidates:
+class TestSlemMapDraftToTargetIds:
+    """Tests for string-level draft→target mapping."""
+
     def test_basic_roundtrip(self, bpe_tokenizer, sp_tokenizer):
         from vllm.v1.spec_decode.slem import SlemMapper
 
@@ -92,17 +94,37 @@ class TestSlemDraftToTargetCandidates:
             device=torch.device("cpu"),
         )
 
-        # "good" + " morn" + "ing" = "good morning"
+        # "good" + " morn" + "ing" = "good morning" → target token [1]
+        # With K=3, result is [1, eos, eos] (1 target token, padded)
         draft_ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
-        num_draft = torch.tensor([3], dtype=torch.long)
+        target_ids = mapper.map_draft_to_target_ids(draft_ids)
 
-        target_ids, num_tokens = mapper.draft_to_target_candidates(draft_ids, num_draft)
+        assert target_ids.shape == (1, 3)
+        assert target_ids[0, 0].item() == 1  # "good morning"
+        assert target_ids[0, 1].item() == mapper.target_eos_id  # padding
+        assert target_ids[0, 2].item() == mapper.target_eos_id  # padding
 
-        # "good morning" → ["good morning"] = [1]
-        assert num_tokens[0].item() == 1
-        assert target_ids[0, 0].item() == 1
+    def test_more_target_tokens_than_draft(self, bpe_tokenizer, sp_tokenizer):
+        """When target re-encoding produces more tokens, result is truncated."""
+        from vllm.v1.spec_decode.slem import SlemMapper
+
+        # Use sp as draft (coarse), bpe as target (fine)
+        mapper = SlemMapper(
+            target_tokenizer=bpe_tokenizer,
+            draft_tokenizer=sp_tokenizer,
+            device=torch.device("cpu"),
+        )
+
+        # "good morning" (1 draft token) → "good" + " morn" + "ing" (3 target tokens)
+        # With K=1, only first target token fits
+        draft_ids = torch.tensor([[1]], dtype=torch.long)
+        target_ids = mapper.map_draft_to_target_ids(draft_ids)
+
+        assert target_ids.shape == (1, 1)
+        assert target_ids[0, 0].item() == 1  # "good" (truncated)
 
     def test_fewer_target_tokens_than_draft(self, bpe_tokenizer, sp_tokenizer):
+        """When target re-encoding produces fewer tokens, result is padded."""
         from vllm.v1.spec_decode.slem import SlemMapper
 
         mapper = SlemMapper(
@@ -111,104 +133,16 @@ class TestSlemDraftToTargetCandidates:
             device=torch.device("cpu"),
         )
 
-        # 3 draft tokens → 1 target token
+        # 3 draft tokens → 1 target token, padded to width 3
         draft_ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
-        num_draft = torch.tensor([3], dtype=torch.long)
-        _, num_tokens = mapper.draft_to_target_candidates(draft_ids, num_draft)
-        assert num_tokens[0].item() == 1
+        target_ids = mapper.map_draft_to_target_ids(draft_ids)
 
+        assert target_ids[0, 0].item() == 1
+        assert target_ids[0, 1].item() == mapper.target_eos_id
+        assert target_ids[0, 2].item() == mapper.target_eos_id
 
-class TestSlemVerifyAndAccept:
-    def _make_mapper(self):
-        from vllm.v1.spec_decode.slem import SlemMapper
-
-        mapper = SlemMapper.__new__(SlemMapper)
-        mapper.target_eos_id = 0
-        mapper.device = torch.device("cpu")
-        return mapper
-
-    def test_all_match(self):
-        mapper = self._make_mapper()
-        candidates = torch.tensor([[10, 20, 30]], dtype=torch.long)
-        sampled = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
-        num_tokens = torch.tensor([3], dtype=torch.long)
-
-        accepted, lens = mapper.verify_and_accept(candidates, sampled, num_tokens)
-
-        assert lens[0].item() == 4  # 3 matched + 1 bonus
-        assert accepted[0, :4].tolist() == [10, 20, 30, 40]
-
-    def test_first_mismatch(self):
-        mapper = self._make_mapper()
-        candidates = torch.tensor([[10, 20, 30]], dtype=torch.long)
-        sampled = torch.tensor([[99, 20, 30, 40]], dtype=torch.long)
-        num_tokens = torch.tensor([3], dtype=torch.long)
-
-        accepted, lens = mapper.verify_and_accept(candidates, sampled, num_tokens)
-
-        assert lens[0].item() == 1  # only bonus
-        assert accepted[0, 0].item() == 99
-
-    def test_middle_mismatch(self):
-        mapper = self._make_mapper()
-        candidates = torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
-        sampled = torch.tensor([[10, 20, 99, 40, 50]], dtype=torch.long)
-        num_tokens = torch.tensor([4], dtype=torch.long)
-
-        accepted, lens = mapper.verify_and_accept(candidates, sampled, num_tokens)
-
-        assert lens[0].item() == 3  # 2 matched + bonus
-        assert accepted[0, :3].tolist() == [10, 20, 99]
-
-    def test_batch_mixed(self):
-        mapper = self._make_mapper()
-        candidates = torch.tensor(
-            [
-                [10, 20, 30],
-                [10, 20, 30],
-            ],
-            dtype=torch.long,
-        )
-        sampled = torch.tensor(
-            [
-                [10, 20, 30, 40],  # all match -> 4 accepted
-                [10, 99, 30, 40],  # mismatch at pos 1 -> 2 accepted
-            ],
-            dtype=torch.long,
-        )
-        num_tokens = torch.tensor([3, 3], dtype=torch.long)
-
-        accepted, lens = mapper.verify_and_accept(candidates, sampled, num_tokens)
-
-        assert lens[0].item() == 4
-        assert lens[1].item() == 2
-        assert accepted[1, :2].tolist() == [10, 99]
-
-    def test_empty_candidates(self):
-        mapper = self._make_mapper()
-        candidates = torch.zeros((1, 0), dtype=torch.long)
-        sampled = torch.tensor([[42]], dtype=torch.long)
-        num_tokens = torch.tensor([0], dtype=torch.long)
-
-        accepted, lens = mapper.verify_and_accept(candidates, sampled, num_tokens)
-
-        assert lens[0].item() == 1
-        assert accepted[0, 0].item() == 42
-
-    def test_single_token_match(self):
-        mapper = self._make_mapper()
-        candidates = torch.tensor([[10]], dtype=torch.long)
-        sampled = torch.tensor([[10, 55]], dtype=torch.long)
-        num_tokens = torch.tensor([1], dtype=torch.long)
-
-        accepted, lens = mapper.verify_and_accept(candidates, sampled, num_tokens)
-
-        assert lens[0].item() == 2
-        assert accepted[0, :2].tolist() == [10, 55]
-
-
-class TestSlemTargetToDraftInput:
-    def test_roundtrip_back_to_draft(self, bpe_tokenizer, sp_tokenizer):
+    def test_batch(self, bpe_tokenizer, sp_tokenizer):
+        """Batch of sequences mapped correctly."""
         from vllm.v1.spec_decode.slem import SlemMapper
 
         mapper = SlemMapper(
@@ -217,12 +151,87 @@ class TestSlemTargetToDraftInput:
             device=torch.device("cpu"),
         )
 
-        # Accepted: ["good morning"] = [1] in target vocab
-        accepted = torch.tensor([[1]], dtype=torch.long)
-        lens = torch.tensor([1], dtype=torch.long)
+        # Batch: ["good morning", "!"]
+        draft_ids = torch.tensor(
+            [
+                [1, 2, 3],  # "good" + " morn" + "ing" → "good morning" → [1]
+                [4, 0, 0],  # "!" + eos + eos → "!" → [2]
+            ],
+            dtype=torch.long,
+        )
+        target_ids = mapper.map_draft_to_target_ids(draft_ids)
 
-        draft_ids, num_ids = mapper.target_to_draft_input(accepted, lens)
+        assert target_ids.shape == (2, 3)
+        assert target_ids[0, 0].item() == 1  # "good morning"
+        assert target_ids[1, 0].item() == 2  # "!"
 
-        # "good morning" re-encoded with BPE -> ["good", " morn", "ing"] = [1, 2, 3]
-        assert draft_ids[0, :3].tolist() == [1, 2, 3]
-        assert num_ids[0].item() == 3
+    def test_all_eos_input(self, bpe_tokenizer, sp_tokenizer):
+        """All-EOS input produces all-EOS output."""
+        from vllm.v1.spec_decode.slem import SlemMapper
+
+        mapper = SlemMapper(
+            target_tokenizer=sp_tokenizer,
+            draft_tokenizer=bpe_tokenizer,
+            device=torch.device("cpu"),
+        )
+
+        draft_ids = torch.tensor([[0, 0, 0]], dtype=torch.long)
+        target_ids = mapper.map_draft_to_target_ids(draft_ids)
+
+        assert (target_ids == mapper.target_eos_id).all()
+
+    def test_text_preservation(self, bpe_tokenizer, sp_tokenizer):
+        """The mapped target tokens decode to a prefix of the draft text."""
+        from vllm.v1.spec_decode.slem import SlemMapper
+
+        mapper = SlemMapper(
+            target_tokenizer=sp_tokenizer,
+            draft_tokenizer=bpe_tokenizer,
+            device=torch.device("cpu"),
+        )
+
+        # "good morning!" = draft tokens [1, 2, 3, 4]
+        draft_ids = torch.tensor([[1, 2, 3, 4]], dtype=torch.long)
+        target_ids = mapper.map_draft_to_target_ids(draft_ids)
+
+        # Get non-EOS target tokens
+        non_eos_mask = target_ids[0] != mapper.target_eos_id
+        active_target_ids = target_ids[0][non_eos_mask].tolist()
+
+        draft_text = bpe_tokenizer.decode([1, 2, 3, 4])
+        target_text = sp_tokenizer.decode(active_target_ids)
+
+        # Target text must be a prefix of draft text (possibly truncated)
+        assert draft_text.startswith(target_text)
+
+
+class TestSlemMapTargetToDraftIds:
+    """Tests for target→draft 1:1 lookup (used for context feeding)."""
+
+    def test_1to1_mapping(self, bpe_tokenizer, sp_tokenizer):
+        from vllm.v1.spec_decode.slem import SlemMapper
+
+        mapper = SlemMapper(
+            target_tokenizer=sp_tokenizer,
+            draft_tokenizer=bpe_tokenizer,
+            device=torch.device("cpu"),
+        )
+
+        # "!" maps 1:1 between vocabs: sp[2] ↔ bpe[4]
+        target_ids = torch.tensor([2], dtype=torch.long)
+        draft_ids = mapper.map_target_to_draft_ids(target_ids)
+        assert draft_ids[0].item() == 4
+
+    def test_no_mapping_falls_back_to_eos(self, bpe_tokenizer, sp_tokenizer):
+        from vllm.v1.spec_decode.slem import SlemMapper
+
+        mapper = SlemMapper(
+            target_tokenizer=sp_tokenizer,
+            draft_tokenizer=bpe_tokenizer,
+            device=torch.device("cpu"),
+        )
+
+        # "good morning" (sp token 1) doesn't exist as single bpe token
+        target_ids = torch.tensor([1], dtype=torch.long)
+        draft_ids = mapper.map_target_to_draft_ids(target_ids)
+        assert draft_ids[0].item() == mapper.draft_eos_id

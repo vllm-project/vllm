@@ -13,7 +13,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.tokenizers.registry import get_tokenizer
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
-from vllm.v1.spec_decode.vocab_mapping import VocabMapping
 
 logger = init_logger(__name__)
 
