@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
+
 import torch
 import torch.nn as nn
 from transformers import DeepseekV2Config, DeepseekV3Config, PretrainedConfig
@@ -88,13 +90,17 @@ class UnlimitedOCRAttention(nn.Module):
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
         )
+        attn_cache_config = copy.copy(cache_config)
+        if attn_cache_config is not None:
+            attn_cache_config.sliding_window = None
+
         self.attn = RefSlidingWindowAttention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             sliding_window=config.sliding_window,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
+            cache_config=attn_cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )

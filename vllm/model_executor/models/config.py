@@ -108,7 +108,7 @@ class Gemma4Config(VerifyAndUpdateConfig):
 class UnlimitedOCRConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        """Use FA4 when available, otherwise Triton, for RefSlidingWindowAttention."""
+        """Use FA4 or Triton for mixed full-prefill and sliding decode."""
         from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -121,13 +121,14 @@ class UnlimitedOCRConfig(VerifyAndUpdateConfig):
                 attention_config.flash_attn_version = 4
                 logger.info(
                     "UnlimitedOCR uses RefSlidingWindowAttention. Using FA4 "
-                    "for mixed causal-prefill and sliding-window decode."
+                    "for full-prefill and sliding-window decode."
                 )
         elif attention_config.backend is None:
             attention_config.backend = AttentionBackendEnum.TRITON_ATTN
             logger.info(
                 "UnlimitedOCR uses RefSlidingWindowAttention. FA4 not "
-                "available, forcing TRITON_ATTN backend."
+                "available, forcing TRITON_ATTN backend for full-prefill "
+                "and sliding-window decode."
             )
 
 
