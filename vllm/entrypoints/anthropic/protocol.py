@@ -145,12 +145,18 @@ class AnthropicMessagesRequest(BaseModel):
         elif isinstance(existing, list):
             merged.extend(existing)
 
+        # NOTE(yxing): Wrap each hoisted system payload with leading/trailing
+        # newlines so it stays visually separable from the pre-existing `system`
+        # string (or from neighboring hoisted entries) once the downstream
+        # converter concatenates all text blocks without a delimiter.
         for content in extracted:
             if isinstance(content, str):
                 if content:
-                    merged.append({"type": "text", "text": content})
+                    merged.append({"type": "text", "text": "\n" + content + "\n"})
             elif isinstance(content, list):
+                merged.append({"type": "text", "text": "\n"})
                 merged.extend(content)
+                merged.append({"type": "text", "text": "\n"})
 
         data["messages"] = remaining
         data["system"] = merged
