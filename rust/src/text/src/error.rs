@@ -20,6 +20,8 @@ pub enum Error {
     Logprobs(#[from] LogprobsError),
     #[error(transparent)]
     OutOfVocab(#[from] OutOfVocabError),
+    #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
+    InvalidThinkingTokenBudget,
     #[error("text request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error(transparent)]
