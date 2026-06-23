@@ -1409,8 +1409,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch.num_scheduled_tokens,
                 input_batch.query_start_loc_np,
                 input_batch.prefill_len_np,
-                # +1 to consider the skew in eagle
-                input_batch.num_computed_prefill_tokens_np + 1,
+                input_batch.num_computed_prefill_tokens_np,
+                # The EAGLE/MTP drafter reads one position ahead of the target.
+                draft_lookahead=1,
             )
 
         # Postprocess results and update request states.
