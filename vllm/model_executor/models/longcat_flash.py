@@ -318,7 +318,7 @@ class LongcatMoe(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # Align to FusedMoE padded hidden size to avoid dim mismatch
-        padded_hidden = self.experts.hidden_size
+        padded_hidden = self.experts.moe_config.hidden_dim
         if hidden_dim < padded_hidden:
             hidden_states_padded = torch.nn.functional.pad(
                 hidden_states,
