@@ -124,19 +124,69 @@ ONBUILD RUN git clone ${VLLM_REPO} \
 FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 
 # -----------------------
-# Rust build stage
-# Builds the `vllm-rs` frontend in a dedicated stage so the wheel build stages
-# don't need the rust toolchain or protoc.
-FROM fetch_vllm AS rust-build
-ARG COMMON_WORKDIR
+# Rust build inputs
+#
+# REMOTE_VLLM=0: use only the local files that can affect Rust artifacts.
+# REMOTE_VLLM=1: fetch only those same files from the requested remote ref.
+FROM scratch AS rust_input_0
+COPY requirements/build/rust.txt /rust-input/vllm/requirements/build/rust.txt
+COPY rust /rust-input/vllm/rust
+COPY rust-toolchain.toml /rust-input/vllm/rust-toolchain.toml
+COPY tools/build_rust.py /rust-input/vllm/tools/build_rust.py
+COPY tools/install_protoc.sh /rust-input/vllm/tools/install_protoc.sh
+COPY build_rust.sh /rust-input/vllm/build_rust.sh
+
+FROM base AS rust_input_1
+ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
+ARG VLLM_BRANCH="main"
+RUN git clone --no-checkout --filter=blob:none ${VLLM_REPO} /rust-input/vllm \
+    && cd /rust-input/vllm \
+    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
+    && git sparse-checkout init --no-cone \
+    && git sparse-checkout set \
+        requirements/build/rust.txt \
+        rust \
+        rust-toolchain.toml \
+        tools/build_rust.py \
+        tools/install_protoc.sh \
+        build_rust.sh \
+    && git checkout FETCH_HEAD
+
+FROM rust_input_${REMOTE_VLLM} AS rust-input
+
+# -----------------------
+# Rust/protoc toolchain
+FROM base AS rust-toolchain
+
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+ENV PATH=${CARGO_HOME}/bin:${PATH}
 
 # protoc is used by tonic-build/prost-build.
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
         ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
 
-COPY tools/install_protoc.sh /tmp/install_protoc.sh
+COPY --from=rust-input /rust-input/vllm/tools/install_protoc.sh /tmp/install_protoc.sh
 RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
+
+COPY --from=rust-input /rust-input/vllm/rust-toolchain.toml /tmp/rust-toolchain.toml
+RUN TOOLCHAIN="$(grep '^channel' /tmp/rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')" \
+    && if ! command -v rustup >/dev/null 2>&1; then \
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none; \
+    fi \
+    && rustup toolchain install "${TOOLCHAIN}" \
+    && rustup default "${TOOLCHAIN}" \
+    && rustc --version \
+    && cargo --version
+
+# -----------------------
+# Rust build stage
+# Builds the `vllm-rs` frontend in a dedicated stage so the wheel build stages
+# don't need the rust toolchain or protoc.
+FROM rust-toolchain AS rust-build
+ARG COMMON_WORKDIR
 
 # Cap cargo parallelism to avoid exhausting the AMD CI host's open-file limit
 # (rustc spawns enough concurrent processes to hit RLIMIT_NOFILE otherwise).
@@ -144,9 +194,17 @@ ENV CARGO_BUILD_JOBS=4
 ENV CARGO_NET_RETRY=10
 ENV RUSTUP_MAX_RETRIES=10
 
+WORKDIR ${COMMON_WORKDIR}/vllm
+
+COPY --from=rust-input /rust-input/vllm/requirements/build/rust.txt requirements/build/rust.txt
+
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    cd ${COMMON_WORKDIR}/vllm \
-    && uv pip install --system -r requirements/build/rust.txt
+    uv pip install --system -r requirements/build/rust.txt
+
+COPY --from=rust-input /rust-input/vllm/rust rust
+COPY --from=rust-input /rust-input/vllm/rust-toolchain.toml rust-toolchain.toml
+COPY --from=rust-input /rust-input/vllm/tools/build_rust.py tools/build_rust.py
+COPY --from=rust-input /rust-input/vllm/build_rust.sh build_rust.sh
 
 # Build the release binary. Cargo's registry/git caches can be written by
 # concurrent BuildKit jobs on shared workers, so lock those cache mounts while
@@ -154,8 +212,7 @@ RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
 # can outlive source updates across BuildKit cache reuse.
 RUN --mount=type=cache,id=vllm-rocm-cargo-registry,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,id=vllm-rocm-cargo-git,target=/root/.cargo/git,sharing=locked \
-    cd ${COMMON_WORKDIR}/vllm \
-    && bash build_rust.sh \
+    bash build_rust.sh \
     && test -x vllm/vllm-rs
 
 # -----------------------
@@ -527,6 +584,17 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 # in the vLLM artifacts for the current commit.
 FROM mori_base AS ci_base
 ARG COMMON_WORKDIR
+
+ENV CARGO_HOME=/root/.cargo
+ENV RUSTUP_HOME=/root/.rustup
+ENV PATH=${CARGO_HOME}/bin:${PATH}
+
+# Bake the Rust/protoc toolchain into ci_base so Rust build/test steps do not
+# need to fetch it on each per-commit image build.
+COPY --from=rust-toolchain /root/.cargo /root/.cargo
+COPY --from=rust-toolchain /root/.rustup /root/.rustup
+COPY --from=rust-toolchain /usr/local/bin/protoc /usr/local/bin/protoc
+COPY --from=rust-toolchain /usr/local/include/google /usr/local/include/google
 
 # Update rdma-core to support latest rocshmem.
 ARG DEEPEP_NIC

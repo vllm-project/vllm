@@ -15,9 +15,9 @@ set -euo pipefail
 
 DEFAULT_REPO_SLUG="vllm-project/vllm"
 DEFAULT_CI_HCL_SOURCE="docker/ci-rocm.hcl"
-DEFAULT_CI_BASE_CONTENT_FILES="requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/Dockerfile.rocm_base tools/install_torchcodec_rocm.sh tests/vllm_test_utils"
+DEFAULT_CI_BASE_CONTENT_FILES="requirements/common.txt requirements/rocm.txt requirements/test/rocm.txt docker/Dockerfile.rocm_base tools/install_torchcodec_rocm.sh tools/install_protoc.sh rust-toolchain.toml tests/vllm_test_utils"
 DEFAULT_CI_BASE_DOCKERFILE="docker/Dockerfile.rocm"
-DEFAULT_CI_BASE_DOCKERFILE_STAGES="base build_rixl build_rocshmem build_deepep mori_base ci_base"
+DEFAULT_CI_BASE_DOCKERFILE_STAGES="base rust_input_0 rust-toolchain build_rixl build_rocshmem build_deepep mori_base ci_base"
 IMAGE_EXISTED_BEFORE_BUILD=0
 
 TARGET=""
@@ -1050,6 +1050,17 @@ uses_rocm_csrc_cache() {
     esac
 }
 
+uses_rocm_rust_cache() {
+    case "${TARGET}" in
+        rust-rocm-ci|test-rocm-ci|test-rocm-ci-with-wheel|test-rocm-ci-with-artifacts|export-wheel-rocm)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 compute_rocm_csrc_content_hash() {
     local bake_dir=""
     local dockerfile_rocm=""
@@ -1099,6 +1110,53 @@ compute_rocm_csrc_content_hash_if_needed() {
     echo "ROCm csrc content cache ref: ${ROCM_CSRC_CONTENT_CACHE_REF}"
 }
 
+compute_rocm_rust_content_hash() {
+    local bake_dir=""
+    local dockerfile_rocm=""
+    local -a content_paths=(
+        "requirements/build/rust.txt"
+        "rust"
+        "rust-toolchain.toml"
+        "tools/build_rust.py"
+        "tools/install_protoc.sh"
+        "build_rust.sh"
+    )
+    local -a content_args=()
+
+    bake_dir=$(dirname "${VLLM_BAKE_FILE}")
+    dockerfile_rocm="${bake_dir}/Dockerfile.rocm"
+    mapfile -t content_args < <(
+        get_content_arg_names "${dockerfile_rocm}" "base rust_input_1 rust-toolchain rust-build" "${ROCM_RUST_CONTENT_ARGS:-}"
+    )
+
+    {
+        printf 'rust-input-files-hash:%s\n' "$(compute_content_hash "${content_paths[@]}")"
+        printf 'dockerfile:%s\n' "${dockerfile_rocm}"
+        printf 'resolved-build-args:\n'
+        hash_dockerfile_arg_values "${dockerfile_rocm}" "${content_args[@]}"
+        printf 'dockerfile-stages:base rust_input_0 rust_input_1 rust-toolchain rust-build\n'
+        if [[ -f "${dockerfile_rocm}" ]]; then
+            hash_dockerfile_stages "${dockerfile_rocm}" "base rust_input_0 rust_input_1 rust-toolchain rust-build"
+        else
+            printf 'missing:%s\n' "${dockerfile_rocm}"
+        fi
+    } | sha256sum | cut -d' ' -f1
+}
+
+compute_rocm_rust_content_hash_if_needed() {
+    local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
+
+    if [[ "${ROCM_RUST_CONTENT_CACHE:-1}" == "0" ]] || ! uses_rocm_rust_cache; then
+        return 0
+    fi
+
+    ROCM_RUST_CONTENT_HASH=$(compute_rocm_rust_content_hash)
+    ROCM_RUST_CONTENT_CACHE_REF="${cache_repo}:rust-rocm-input-${ROCM_RUST_CONTENT_HASH}"
+    export ROCM_RUST_CONTENT_HASH
+    export ROCM_RUST_CONTENT_CACHE_REF
+    echo "ROCm Rust content cache ref: ${ROCM_RUST_CONTENT_CACHE_REF}"
+}
+
 write_hcl_string_list_entries() {
     local indent="$1"
     local value=""
@@ -1144,6 +1202,7 @@ write_rocm_build_arg_override() {
                 "${CI_BASE_DOCKERFILE_STAGES:-${DEFAULT_CI_BASE_DOCKERFILE_STAGES}}" \
                 "${CI_BASE_CONTENT_ARGS:-}"
             get_content_arg_names "${dockerfile_rocm}" "base csrc-build" "${ROCM_CSRC_CONTENT_ARGS:-}"
+            get_content_arg_names "${dockerfile_rocm}" "base rust_input_1 rust-toolchain rust-build" "${ROCM_RUST_CONTENT_ARGS:-}"
         } | awk 'NF && !seen[$0]++'
     )
 
@@ -1192,46 +1251,133 @@ validate_cache_export_mode() {
     esac
 }
 
+validate_content_cache_export_mode() {
+    local mode="$1"
+    local env_name="$2"
+
+    case "${mode}" in
+        missing|always|never)
+            ;;
+        *)
+            echo "Error: ${env_name} must be one of: missing, always, never"
+            exit 1
+            ;;
+    esac
+}
+
+should_export_content_cache_ref() {
+    local cache_ref="$1"
+    local cache_name="$2"
+    local mode="${ROCM_CONTENT_CACHE_EXPORT_MODE:-missing}"
+
+    case "${mode}" in
+        always)
+            echo "${cache_name} content cache export mode is always; exporting ${cache_ref}"
+            return 0
+            ;;
+        never)
+            echo "${cache_name} content cache export mode is never; not exporting ${cache_ref}"
+            return 1
+            ;;
+        missing|"")
+            if docker buildx imagetools inspect "${cache_ref}" >/dev/null 2>&1; then
+                echo "${cache_name} content cache exists; not re-exporting ${cache_ref}"
+                return 1
+            fi
+            echo "${cache_name} content cache missing; will export ${cache_ref}"
+            return 0
+            ;;
+        *)
+            echo "Error: ROCM_CONTENT_CACHE_EXPORT_MODE must be one of: missing, always, never"
+            exit 1
+            ;;
+    esac
+}
+
 write_rocm_cache_override() {
     local cache_repo="${DOCKERHUB_CACHE_REPO:-rocm/vllm-ci-cache}"
+    local content_cache_export_mode="${ROCM_CONTENT_CACHE_EXPORT_MODE:-missing}"
     local csrc_cache_to_mode="${ROCM_CSRC_CACHE_TO_MODE:-max}"
+    local rust_cache_to_mode="${ROCM_RUST_CACHE_TO_MODE:-max}"
     local rocm_cache_to_mode="${ROCM_FINAL_CACHE_TO_MODE:-min}"
-    local -a content_cache_from=()
+    local -a csrc_content_cache_from=()
+    local -a rust_content_cache_from=()
+    local -a combined_content_cache_from=()
     local -a csrc_cache_to=()
+    local -a rust_cache_to=()
     local -a rocm_cache_to=()
     local -a export_wheel_cache_to=()
+    local export_csrc_cache=1
+    local export_rust_cache=1
 
-    if ! uses_rocm_csrc_cache; then
+    if ! uses_rocm_csrc_cache && ! uses_rocm_rust_cache; then
         return 0
     fi
 
+    validate_content_cache_export_mode \
+        "${content_cache_export_mode}" \
+        "ROCM_CONTENT_CACHE_EXPORT_MODE"
     validate_cache_export_mode "${csrc_cache_to_mode}" "ROCM_CSRC_CACHE_TO_MODE"
+    validate_cache_export_mode "${rust_cache_to_mode}" "ROCM_RUST_CACHE_TO_MODE"
     validate_cache_export_mode "${rocm_cache_to_mode}" "ROCM_FINAL_CACHE_TO_MODE"
+    echo "ROCm content cache export mode: ${content_cache_export_mode}"
     echo "ROCm csrc cache export mode: ${csrc_cache_to_mode}"
+    echo "ROCm Rust cache export mode: ${rust_cache_to_mode}"
     echo "ROCm final image cache export mode: ${rocm_cache_to_mode}"
 
     if [[ -n "${ROCM_CSRC_CONTENT_CACHE_REF:-}" ]]; then
-        content_cache_from+=("type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF}")
-        csrc_cache_to+=(
-            "type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF},mode=${csrc_cache_to_mode},ignore-error=true"
-        )
+        csrc_content_cache_from+=("type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF}")
+        if should_export_content_cache_ref "${ROCM_CSRC_CONTENT_CACHE_REF}" "ROCm csrc"; then
+            csrc_cache_to+=(
+                "type=registry,ref=${ROCM_CSRC_CONTENT_CACHE_REF},mode=${csrc_cache_to_mode},ignore-error=true"
+            )
+        else
+            export_csrc_cache=0
+        fi
     fi
+
+    if [[ -n "${ROCM_RUST_CONTENT_CACHE_REF:-}" ]]; then
+        rust_content_cache_from+=("type=registry,ref=${ROCM_RUST_CONTENT_CACHE_REF}")
+        if should_export_content_cache_ref "${ROCM_RUST_CONTENT_CACHE_REF}" "ROCm Rust"; then
+            rust_cache_to+=(
+                "type=registry,ref=${ROCM_RUST_CONTENT_CACHE_REF},mode=${rust_cache_to_mode},ignore-error=true"
+            )
+        else
+            export_rust_cache=0
+        fi
+    fi
+
+    combined_content_cache_from=("${csrc_content_cache_from[@]}" "${rust_content_cache_from[@]}")
 
     # Docker Hub cache exports are best-effort. A cache-only target failure can
     # otherwise cancel the sibling image target before its manifest is pushed.
     if [[ -n "${BUILDKITE_COMMIT:-}" ]]; then
-        csrc_cache_to+=(
-            "type=registry,ref=${cache_repo}:csrc-rocm-${BUILDKITE_COMMIT},mode=${csrc_cache_to_mode},ignore-error=true"
-        )
+        if [[ ${export_csrc_cache} -eq 1 ]]; then
+            csrc_cache_to+=(
+                "type=registry,ref=${cache_repo}:csrc-rocm-${BUILDKITE_COMMIT},mode=${csrc_cache_to_mode},ignore-error=true"
+            )
+        fi
+        if [[ ${export_rust_cache} -eq 1 ]]; then
+            rust_cache_to+=(
+                "type=registry,ref=${cache_repo}:rust-rocm-${BUILDKITE_COMMIT},mode=${rust_cache_to_mode},ignore-error=true"
+            )
+        fi
         rocm_cache_to+=(
             "type=registry,ref=${cache_repo}:rocm-${BUILDKITE_COMMIT},mode=${rocm_cache_to_mode},ignore-error=true"
         )
     fi
 
     if [[ -n "${ROCM_CACHE_BRANCH_TAG:-}" ]]; then
-        csrc_cache_to+=(
-            "type=registry,ref=${cache_repo}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${csrc_cache_to_mode},ignore-error=true"
-        )
+        if [[ ${export_csrc_cache} -eq 1 ]]; then
+            csrc_cache_to+=(
+                "type=registry,ref=${cache_repo}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${csrc_cache_to_mode},ignore-error=true"
+            )
+        fi
+        if [[ ${export_rust_cache} -eq 1 ]]; then
+            rust_cache_to+=(
+                "type=registry,ref=${cache_repo}:rust-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${rust_cache_to_mode},ignore-error=true"
+            )
+        fi
         rocm_cache_to+=(
             "type=registry,ref=${cache_repo}:rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${rocm_cache_to_mode},ignore-error=true"
         )
@@ -1249,7 +1395,7 @@ target "csrc-rocm-ci" {
   cache-from = concat(
     get_cache_from_rocm_csrc(),
 EOF
-        write_hcl_string_list "    " "${content_cache_from[@]}"
+        write_hcl_string_list "    " "${csrc_content_cache_from[@]}"
         cat <<EOF
   )
 EOF
@@ -1257,11 +1403,23 @@ EOF
         cat <<EOF
 }
 
+target "rust-rocm-ci" {
+  cache-from = concat(
+    get_cache_from_rocm_rust(),
+EOF
+        write_hcl_string_list "    " "${rust_content_cache_from[@]}"
+        cat <<EOF
+  )
+EOF
+        write_hcl_string_list_attr "  " "cache-to" "${rust_cache_to[@]}"
+        cat <<EOF
+}
+
 target "test-rocm-ci" {
   cache-from = concat(
     get_cache_from_rocm(),
 EOF
-        write_hcl_string_list "    " "${content_cache_from[@]}"
+        write_hcl_string_list "    " "${combined_content_cache_from[@]}"
         cat <<EOF
   )
 EOF
@@ -1273,7 +1431,7 @@ target "export-wheel-rocm" {
   cache-from = concat(
     get_cache_from_rocm(),
 EOF
-        write_hcl_string_list "    " "${content_cache_from[@]}"
+        write_hcl_string_list "    " "${combined_content_cache_from[@]}"
         cat <<EOF
   )
 EOF
@@ -1734,6 +1892,7 @@ main() {
     write_rocm_build_arg_override
     compute_dependency_cache_keys
     compute_rocm_csrc_content_hash_if_needed
+    compute_rocm_rust_content_hash_if_needed
     write_rocm_cache_override
     resolve_ci_base_dependency_targets
     print_bake_config

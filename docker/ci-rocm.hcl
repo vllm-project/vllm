@@ -141,6 +141,10 @@ variable "ROCM_CSRC_CACHE_TO_MODE" {
   default = "max"
 }
 
+variable "ROCM_RUST_CACHE_TO_MODE" {
+  default = "max"
+}
+
 variable "ROCM_FINAL_CACHE_TO_MODE" {
   default = "min"
 }
@@ -164,6 +168,13 @@ function "get_cache_from_rocm" {
     VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
     ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
     ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
+    # Import the source-scoped Rust frontend cache so non-Rust changes do not
+    # force a fresh cargo release build.
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${BUILDKITE_COMMIT}" : "",
+    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${PARENT_COMMIT}" : "",
+    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
+    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
     # Branch-scoped full image cache - fallback when parent-commit cache is evicted
     ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
     ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rocm-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
@@ -201,6 +212,27 @@ function "get_cache_to_rocm_csrc" {
     # Export the branch-scoped native cache so later commits on the same branch
     # can reuse compiled ROCm objects even when the exact parent cache is absent.
     ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:csrc-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${ROCM_CSRC_CACHE_TO_MODE}" : "",
+  ])
+}
+
+function "get_cache_from_rocm_rust" {
+  params = []
+  result = compact([
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${BUILDKITE_COMMIT}" : "",
+    PARENT_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${PARENT_COMMIT}" : "",
+    VLLM_MERGE_BASE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${VLLM_MERGE_BASE_COMMIT}" : "",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-branch-${ROCM_CACHE_BRANCH_TAG}" : "",
+    ROCM_CACHE_UPSTREAM_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-branch-${ROCM_CACHE_UPSTREAM_BRANCH_TAG}" : "",
+  ])
+}
+
+function "get_cache_to_rocm_rust" {
+  params = []
+  result = compact([
+    # Export exact-commit and branch-scoped Rust caches. A content-addressed
+    # cache ref is appended by ci-bake-rocm.sh when that wrapper is used.
+    BUILDKITE_COMMIT != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-${BUILDKITE_COMMIT},mode=${ROCM_RUST_CACHE_TO_MODE}" : "",
+    ROCM_CACHE_BRANCH_TAG != "" ? "type=registry,ref=${DOCKERHUB_CACHE_REPO}:rust-rocm-branch-${ROCM_CACHE_BRANCH_TAG},mode=${ROCM_RUST_CACHE_TO_MODE}" : "",
   ])
 }
 
@@ -276,6 +308,17 @@ target "csrc-rocm-ci" {
   output     = ["type=cacheonly"]
 }
 
+# Cache-only target for the Rust frontend build stage. Final-image cache
+# exports use mode=min and do not reliably persist intermediate cargo layers,
+# so Rust gets its own source-scoped cache target.
+target "rust-rocm-ci" {
+  inherits   = ["_common-rocm", "_ci-rocm"]
+  target     = "rust-build"
+  cache-from = get_cache_from_rocm_rust()
+  cache-to   = get_cache_to_rocm_rust()
+  output     = ["type=cacheonly"]
+}
+
 # Keep wheel export on the same CI graph as the test image build so the
 # shared build_vllm/export_vllm stages resolve identically within one bake
 # invocation. Without this, export-wheel-rocm uses the plain local target
@@ -292,13 +335,13 @@ target "export-wheel-rocm" {
 # Artifact-only vLLM build. GPU test jobs consume this artifact on top of
 # ci_base, avoiding a per-commit multi-GB image push/pull.
 group "test-rocm-ci-with-artifacts" {
-  targets = ["csrc-rocm-ci", "export-wheel-rocm"]
+  targets = ["rust-rocm-ci", "csrc-rocm-ci", "export-wheel-rocm"]
 }
 
 # Full test image + wheel export. Kept for fallback/debugging when a pushed
 # per-commit image is useful.
 group "test-rocm-ci-with-wheel" {
-  targets = ["csrc-rocm-ci", "test-rocm-ci", "export-wheel-rocm"]
+  targets = ["rust-rocm-ci", "csrc-rocm-ci", "test-rocm-ci", "export-wheel-rocm"]
 }
 
 # Image tags for the ci_base build. ci-bake-rocm.sh rewrites CI_BASE_IMAGE_TAG
