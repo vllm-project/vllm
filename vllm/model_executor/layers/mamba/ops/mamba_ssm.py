@@ -21,6 +21,9 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
+if current_platform.is_xpu():
+    from vllm._xpu_ops import xpu_ops
+
 logger = init_logger(__name__)
 
 TRITON3 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.0.0"))
@@ -790,28 +793,52 @@ def selective_scan_fn(
     if C.dim() == 2 and query_start_loc is not None:
         C = C.unsqueeze(0)
 
-    ops.selective_scan_fwd(
-        u,
-        delta,
-        A,
-        B,
-        C,
-        D,
-        z,
-        delta_bias,
-        delta_softplus,
-        query_start_loc,
-        cache_indices,
-        has_initial_state,
-        ssm_states,
-        null_block_id,
-        block_size,
-        block_idx_first_scheduled_token,
-        block_idx_last_scheduled_token,
-        initial_state_idx,
-        cu_chunk_seqlen,
-        last_chunk_indices,
-    )
+    if current_platform.is_xpu():
+        xpu_ops.selective_scan_fwd(
+            u,
+            delta,
+            A,
+            B,
+            C,
+            D,
+            z,
+            delta_bias,
+            delta_softplus,
+            query_start_loc,
+            cache_indices,
+            has_initial_state,
+            ssm_states,
+            null_block_id,
+            block_size,
+            block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token,
+            initial_state_idx,
+            cu_chunk_seqlen,
+            last_chunk_indices,
+        )
+    else:
+        ops.selective_scan_fwd(
+            u,
+            delta,
+            A,
+            B,
+            C,
+            D,
+            z,
+            delta_bias,
+            delta_softplus,
+            query_start_loc,
+            cache_indices,
+            has_initial_state,
+            ssm_states,
+            null_block_id,
+            block_size,
+            block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token,
+            initial_state_idx,
+            cu_chunk_seqlen,
+            last_chunk_indices,
+        )
 
     if z is None:
         return delta  # output written inplace to delta

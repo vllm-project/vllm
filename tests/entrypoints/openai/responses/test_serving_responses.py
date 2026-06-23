@@ -386,8 +386,15 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
         reasoning_parser="qwen3",
     )
 
+    request = ResponsesRequest(input="hi", tools=[], stream=False)
+    response_parser = serving._make_response_parser(
+        request,
+        tokenizer,
+        serving._effective_chat_template_kwargs(request),
+    )
+
     # Build a SimpleContext with thinking tokens in the output.
-    context = SimpleContext()
+    context = SimpleContext(response_parser=response_parser)
     token_ids = [1, 10, 2, 20]  # <think> 10 </think> 20 -> reasoning token count = 1
     completion = CompletionOutput(
         index=0,
@@ -412,7 +419,6 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     async def dummy_result_generator():
         yield None
 
-    request = ResponsesRequest(input="hi", tools=[], stream=False)
     sampling_params = SamplingParams(max_tokens=16)
     metadata = RequestResponseMetadata(request_id="req")
 
@@ -636,9 +642,9 @@ class TestHarmonyPreambleStreaming:
         assert "response.output_text.done" not in type_names
 
 
-def _make_simple_context_with_output(text, token_ids):
+def _make_simple_context_with_output(text, token_ids, response_parser=None):
     """Create a SimpleContext with a RequestOutput containing the given text."""
-    ctx = SimpleContext()
+    ctx = SimpleContext(response_parser=response_parser)
     completion = CompletionOutput(
         index=0,
         text=text,
@@ -719,6 +725,7 @@ def _mock_parser_with_reasoning(serving, delta_sequence: list[DeltaMessage]):
     mock_parser_instance.parse_delta = mock_parse_delta
     mock_parser_instance.is_reasoning_end = MagicMock(return_value=False)
     serving.parser = MagicMock(return_value=mock_parser_instance)
+    return mock_parser_instance
 
 
 class TestStreamingReasoningToContentTransition:
@@ -745,12 +752,12 @@ class TestStreamingReasoningToContentTransition:
             DeltaMessage(reasoning=" end", content="hello"),  # mixed delta
             DeltaMessage(content=" world"),
         ]
-        _mock_parser_with_reasoning(serving, delta_sequence)
+        response_parser = _mock_parser_with_reasoning(serving, delta_sequence)
         # Create contexts for each streaming chunk
         contexts = [
-            _make_simple_context_with_output("chunk1", [10]),
-            _make_simple_context_with_output("chunk2", [20]),
-            _make_simple_context_with_output("chunk3", [30]),
+            _make_simple_context_with_output("chunk1", [10], response_parser),
+            _make_simple_context_with_output("chunk2", [20], response_parser),
+            _make_simple_context_with_output("chunk3", [30], response_parser),
         ]
 
         async def result_generator():
@@ -767,7 +774,7 @@ class TestStreamingReasoningToContentTransition:
             request=request,
             sampling_params=sampling_params,
             result_generator=result_generator(),
-            context=SimpleContext(),
+            context=SimpleContext(response_parser=response_parser),
             model_name="test-model",
             tokenizer=MagicMock(),
             request_metadata=metadata,
@@ -813,11 +820,11 @@ class TestStreamingReasoningToContentTransition:
             DeltaMessage(reasoning="thinking"),
             DeltaMessage(content="answer"),
         ]
-        _mock_parser_with_reasoning(serving, delta_sequence)
+        response_parser = _mock_parser_with_reasoning(serving, delta_sequence)
 
         contexts = [
-            _make_simple_context_with_output("chunk1", [10]),
-            _make_simple_context_with_output("chunk2", [20]),
+            _make_simple_context_with_output("chunk1", [10], response_parser),
+            _make_simple_context_with_output("chunk2", [20], response_parser),
         ]
 
         async def result_generator():
@@ -834,7 +841,7 @@ class TestStreamingReasoningToContentTransition:
             request=request,
             sampling_params=sampling_params,
             result_generator=result_generator(),
-            context=SimpleContext(),
+            context=SimpleContext(response_parser=response_parser),
             model_name="test-model",
             tokenizer=MagicMock(),
             request_metadata=metadata,
@@ -875,11 +882,11 @@ class TestStreamingReasoningToContentTransition:
             DeltaMessage(reasoning="step 1"),
             DeltaMessage(reasoning=" step 2"),
         ]
-        _mock_parser_with_reasoning(serving, delta_sequence)
+        response_parser = _mock_parser_with_reasoning(serving, delta_sequence)
 
         contexts = [
-            _make_simple_context_with_output("chunk1", [10]),
-            _make_simple_context_with_output("chunk2", [20]),
+            _make_simple_context_with_output("chunk1", [10], response_parser),
+            _make_simple_context_with_output("chunk2", [20], response_parser),
         ]
 
         async def result_generator():
@@ -896,7 +903,7 @@ class TestStreamingReasoningToContentTransition:
             request=request,
             sampling_params=sampling_params,
             result_generator=result_generator(),
-            context=SimpleContext(),
+            context=SimpleContext(response_parser=response_parser),
             model_name="test-model",
             tokenizer=MagicMock(),
             request_metadata=metadata,
@@ -936,10 +943,10 @@ class TestAutoToolStreaming:
     @staticmethod
     async def _collect_events(delta_sequence: list[DeltaMessage]):
         serving = _make_serving_instance_with_reasoning()
-        _mock_parser_with_reasoning(serving, delta_sequence)
+        response_parser = _mock_parser_with_reasoning(serving, delta_sequence)
 
         contexts = [
-            _make_simple_context_with_output("chunk", [i])
+            _make_simple_context_with_output("chunk", [i], response_parser)
             for i in range(len(delta_sequence))
         ]
 
@@ -974,7 +981,7 @@ class TestAutoToolStreaming:
             request=request,
             sampling_params=sampling_params,
             result_generator=result_generator(),
-            context=SimpleContext(),
+            context=SimpleContext(response_parser=response_parser),
             model_name="test-model",
             tokenizer=MagicMock(),
             request_metadata=metadata,
@@ -1124,3 +1131,66 @@ class TestAutoToolStreaming:
             if event.type == "response.function_call_arguments.delta"
         ]
         assert "".join(argument_deltas) == '{"location":"Berlin"}'
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.asyncio
+    async def test_compound_content_and_tool_name_args_same_delta(self, monkeypatch):
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+
+        tool_args = '{"location":"Berlin"}'
+
+        delta_sequence = [
+            DeltaMessage(
+                content="Let me check.",
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_weather",
+                        type="function",
+                        index=0,
+                        function=DeltaFunctionCall(name="get_weather"),
+                    ),
+                    DeltaToolCall(
+                        index=0,
+                        function=DeltaFunctionCall(arguments=tool_args),
+                    ),
+                ],
+            )
+        ]
+
+        events = await self._collect_events(delta_sequence)
+
+        text_deltas = [
+            event.delta
+            for event in events
+            if event.type == "response.output_text.delta"
+        ]
+        assert text_deltas == ["Let me check."]
+
+        argument_deltas = [
+            event.delta
+            for event in events
+            if event.type == "response.function_call_arguments.delta"
+        ]
+        assert argument_deltas == [tool_args]
+
+        types = [event.type for event in events]
+        assert types.index("response.output_text.delta") < types.index(
+            "response.function_call_arguments.delta"
+        )
+
+        argument_done = [
+            event
+            for event in events
+            if event.type == "response.function_call_arguments.done"
+        ]
+        assert [event.arguments for event in argument_done] == [tool_args]
+
+        function_done = [
+            event
+            for event in events
+            if event.type == "response.output_item.done"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert len(function_done) == 1
+        assert function_done[0].item.name == "get_weather"
+        assert function_done[0].item.arguments == tool_args

@@ -1,12 +1,12 @@
 use serde_json::{Map, Number, Value};
 use winnow::ascii::multispace0 as ws0;
-use winnow::combinator::{alt, delimited, opt, separated, seq, terminated};
+use winnow::combinator::{alt, delimited, eof, opt, separated, seq, terminated};
 use winnow::error::{ContextError, ErrMode, ModalResult};
 use winnow::prelude::*;
-use winnow::stream::Partial;
+use winnow::stream::{Partial, Stream};
 use winnow::token::{literal, take_till, take_until};
 
-use super::utils::{parse_buffered_event, safe_text_len};
+use super::utils::{incomplete, parse_buffered_event, partial_prefix_len, safe_text_len};
 use super::{Result, ToolCallDelta, ToolParser, ToolParserOutput};
 use crate::Tool;
 
@@ -19,12 +19,26 @@ type Gemma4Input<'i> = Partial<&'i str>;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Gemma4Event {
-    Text {
-        len: usize,
-    },
+    Text { len: usize },
+    ToolCallStart,
+    ToolCallHeader { name: String },
+    ToolCall { args: Map<String, Value> },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Gemma4ArgsScanState {
+    scanned_len: usize,
+    in_string: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum Gemma4Mode {
+    #[default]
+    Text,
+    Header,
     ToolCall {
         name: String,
-        args: Map<String, Value>,
+        args_scan: Gemma4ArgsScanState,
     },
 }
 
@@ -40,6 +54,7 @@ enum Gemma4Event {
 /// Arguments are emitted only after a full Gemma4 tool call is parsed.
 pub struct Gemma4ToolParser {
     buffer: String,
+    mode: Gemma4Mode,
     emitted_tool_count: usize,
 }
 
@@ -47,6 +62,7 @@ impl Gemma4ToolParser {
     fn new(_tools: &[Tool]) -> Self {
         Self {
             buffer: String::new(),
+            mode: Gemma4Mode::default(),
             emitted_tool_count: 0,
         }
     }
@@ -56,7 +72,20 @@ impl Gemma4ToolParser {
             Gemma4Event::Text { len: consumed_len } => {
                 output.normal_text.push_str(&self.buffer[..consumed_len]);
             }
-            Gemma4Event::ToolCall { name, args } => {
+            Gemma4Event::ToolCallStart => self.mode = Gemma4Mode::Header,
+            Gemma4Event::ToolCallHeader { name } => {
+                self.mode = Gemma4Mode::ToolCall {
+                    name,
+                    args_scan: Gemma4ArgsScanState::default(),
+                };
+            }
+            Gemma4Event::ToolCall { args } => {
+                let mode = std::mem::replace(&mut self.mode, Gemma4Mode::Text);
+                let Gemma4Mode::ToolCall { name, .. } = mode else {
+                    return Err(parsing_failed!(
+                        "Gemma4 arguments without an active tool call"
+                    ));
+                };
                 let arguments = serde_json::to_string(&args)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
@@ -72,8 +101,24 @@ impl Gemma4ToolParser {
     }
 
     fn reset(&mut self) -> String {
+        let raw = match std::mem::replace(&mut self.mode, Gemma4Mode::Text) {
+            Gemma4Mode::Text => std::mem::take(&mut self.buffer),
+            Gemma4Mode::Header => {
+                format!("{}{}", TOOL_CALL_START, std::mem::take(&mut self.buffer))
+            }
+            Gemma4Mode::ToolCall { name, .. } => {
+                format!(
+                    "{}{}{}{{{}",
+                    TOOL_CALL_START,
+                    CALL_PREFIX,
+                    name,
+                    std::mem::take(&mut self.buffer)
+                )
+            }
+        };
+        self.mode = Gemma4Mode::Text;
         self.emitted_tool_count = 0;
-        std::mem::take(&mut self.buffer)
+        raw
     }
 }
 
@@ -92,9 +137,11 @@ impl ToolParser for Gemma4ToolParser {
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
 
-        while let Some((event, consumed_len)) =
-            parse_buffered_event(&self.buffer, parse_next_gemma4_event)?
-        {
+        while let Some((event, consumed_len)) = {
+            parse_buffered_event(&self.buffer, |input| {
+                parse_next_gemma4_event(input, &mut self.mode)
+            })?
+        } {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
         }
@@ -105,11 +152,11 @@ impl ToolParser for Gemma4ToolParser {
     fn finish(&mut self) -> Result<ToolParserOutput> {
         let mut output = ToolParserOutput::default();
 
-        if !self.buffer.is_empty() {
-            if self.buffer.starts_with(TOOL_CALL_START) {
+        match &self.mode {
+            Gemma4Mode::Text => output.normal_text.push_str(&self.buffer),
+            Gemma4Mode::Header | Gemma4Mode::ToolCall { .. } => {
                 return Err(parsing_failed!("incomplete Gemma4 tool call"));
             }
-            output.normal_text.push_str(&self.buffer);
         }
 
         let _ = self.reset();
@@ -122,25 +169,50 @@ impl ToolParser for Gemma4ToolParser {
 }
 
 /// Parse one Gemma4 event from buffered streaming input.
-fn parse_next_gemma4_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
-    alt((tool_call_event, safe_text_event)).parse_next(input)
+fn parse_next_gemma4_event(
+    input: &mut Gemma4Input<'_>,
+    mode: &mut Gemma4Mode,
+) -> ModalResult<Gemma4Event> {
+    match mode {
+        Gemma4Mode::Text => parse_text_event(input),
+        Gemma4Mode::Header => tool_call_header_event(input),
+        Gemma4Mode::ToolCall { args_scan, .. } => tool_call_args_event(input, args_scan),
+    }
 }
 
-/// Parse a complete Gemma4 tool call.
-// TODO: incremental parsing arguments to reduce scanning from O(n^2) to O(n).
-fn tool_call_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
-    let (name, args) = seq!(
-        _: literal(TOOL_CALL_START),
+/// Parse a Gemma4 text-mode event.
+fn parse_text_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+    alt((tool_call_start_event, safe_text_event)).parse_next(input)
+}
+
+/// Parse a Gemma4 tool-call start marker.
+fn tool_call_start_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+    literal(TOOL_CALL_START).value(Gemma4Event::ToolCallStart).parse_next(input)
+}
+
+/// Parse a Gemma4 tool-call header.
+fn tool_call_header_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
+    let (name,) = seq!(
         _: literal(CALL_PREFIX),
         gemma4_tool_name,
         _: literal("{"),
-        gemma4_args,
-        _: literal("}"),
-        _: literal(TOOL_CALL_END),
     )
     .parse_next(input)?;
+    Ok(Gemma4Event::ToolCallHeader { name })
+}
 
-    Ok(Gemma4Event::ToolCall { name, args })
+/// Parse complete Gemma4 tool-call arguments.
+fn tool_call_args_event(
+    input: &mut Gemma4Input<'_>,
+    args_scan: &mut Gemma4ArgsScanState,
+) -> ModalResult<Gemma4Event> {
+    let raw_args = gemma4_raw_args_until_tool_call_end(input, args_scan)?;
+    let Some(args_input) = raw_args.strip_suffix('}') else {
+        return Err(ErrMode::Cut(ContextError::new()));
+    };
+    let args = parse_gemma4_args(args_input)?;
+
+    Ok(Gemma4Event::ToolCall { args })
 }
 
 /// Parse a Gemma4 tool name.
@@ -157,8 +229,75 @@ fn safe_text_event(input: &mut Gemma4Input<'_>) -> ModalResult<Gemma4Event> {
     safe_text_len(input, TOOL_CALL_START).map(|len| Gemma4Event::Text { len })
 }
 
+/// Parse raw Gemma4 arguments through the first end marker outside a Gemma string.
+fn gemma4_raw_args_until_tool_call_end<'i>(
+    input: &mut Gemma4Input<'i>,
+    state: &mut Gemma4ArgsScanState,
+) -> ModalResult<&'i str> {
+    let text = **input;
+    if state.scanned_len > text.len() {
+        return incomplete();
+    }
+
+    loop {
+        let rest = &text[state.scanned_len..];
+        if state.in_string {
+            let Some(string_delim) = rest.find(STRING_DELIM) else {
+                state.scanned_len = safe_scan_len(text, state.scanned_len, &[STRING_DELIM]);
+                return incomplete();
+            };
+
+            state.scanned_len += string_delim + STRING_DELIM.len();
+            state.in_string = false;
+            continue;
+        }
+
+        let next_string_delim = rest.find(STRING_DELIM);
+        let next_tool_call_end = rest.find(TOOL_CALL_END);
+        match (next_string_delim, next_tool_call_end) {
+            (Some(string_delim), Some(tool_call_end)) if tool_call_end < string_delim => {
+                let end = state.scanned_len + tool_call_end;
+                state.scanned_len = end + TOOL_CALL_END.len();
+                input.next_slice(state.scanned_len);
+                return Ok(&text[..end]);
+            }
+            (Some(string_delim), _) => {
+                state.scanned_len += string_delim + STRING_DELIM.len();
+                state.in_string = true;
+            }
+            (None, Some(tool_call_end)) => {
+                let end = state.scanned_len + tool_call_end;
+                state.scanned_len = end + TOOL_CALL_END.len();
+                input.next_slice(state.scanned_len);
+                return Ok(&text[..end]);
+            }
+            (None, None) => {
+                state.scanned_len =
+                    safe_scan_len(text, state.scanned_len, &[STRING_DELIM, TOOL_CALL_END]);
+                return incomplete();
+            }
+        }
+    }
+}
+
+/// Return the scan length while holding back a split marker prefix.
+fn safe_scan_len(text: &str, start: usize, markers: &[&str]) -> usize {
+    let max_partial = markers
+        .iter()
+        .map(|marker| partial_prefix_len(&text[start..], marker))
+        .max()
+        .unwrap_or(0);
+    text.len() - max_partial
+}
+
+/// Parse complete Gemma4 custom key-value arguments.
+fn parse_gemma4_args(args: &str) -> ModalResult<Map<String, Value>> {
+    let mut input = args;
+    terminated(gemma4_args, eof).parse_next(&mut input)
+}
+
 /// Parse Gemma4's custom key-value argument object content.
-fn gemma4_args(input: &mut Gemma4Input<'_>) -> ModalResult<Map<String, Value>> {
+fn gemma4_args(input: &mut &str) -> ModalResult<Map<String, Value>> {
     let pairs: Vec<(String, Value)> = delimited(
         ws0,
         terminated(
@@ -172,7 +311,7 @@ fn gemma4_args(input: &mut Gemma4Input<'_>) -> ModalResult<Map<String, Value>> {
 }
 
 /// Parse a Gemma4 key-value pair.
-fn gemma4_pair(input: &mut Gemma4Input<'_>) -> ModalResult<(String, Value)> {
+fn gemma4_pair(input: &mut &str) -> ModalResult<(String, Value)> {
     let (key, value) = seq!(
         _: ws0,
         gemma4_key,
@@ -186,7 +325,7 @@ fn gemma4_pair(input: &mut Gemma4Input<'_>) -> ModalResult<(String, Value)> {
 }
 
 /// Parse a Gemma4 bare key.
-fn gemma4_key(input: &mut Gemma4Input<'_>) -> ModalResult<String> {
+fn gemma4_key(input: &mut &str) -> ModalResult<String> {
     let key = take_till(1.., |char: char| char == ':').parse_next(input)?.trim();
     if key.is_empty() {
         return Err(ErrMode::Cut(ContextError::new()));
@@ -195,7 +334,7 @@ fn gemma4_key(input: &mut Gemma4Input<'_>) -> ModalResult<String> {
 }
 
 /// Parse a Gemma4 value.
-fn gemma4_value(input: &mut Gemma4Input<'_>) -> ModalResult<Value> {
+fn gemma4_value(input: &mut &str) -> ModalResult<Value> {
     alt((
         gemma4_string.map(|value: &str| Value::String(value.to_string())),
         gemma4_object.map(Value::Object),
@@ -206,7 +345,7 @@ fn gemma4_value(input: &mut Gemma4Input<'_>) -> ModalResult<Value> {
 }
 
 /// Parse a Gemma4 string delimited by `<|"|>`.
-fn gemma4_string<'i>(input: &mut Gemma4Input<'i>) -> ModalResult<&'i str> {
+fn gemma4_string<'i>(input: &mut &'i str) -> ModalResult<&'i str> {
     delimited(
         literal(STRING_DELIM),
         take_until(0.., STRING_DELIM),
@@ -216,17 +355,17 @@ fn gemma4_string<'i>(input: &mut Gemma4Input<'i>) -> ModalResult<&'i str> {
 }
 
 /// Parse a nested Gemma4 object.
-fn gemma4_object(input: &mut Gemma4Input<'_>) -> ModalResult<Map<String, Value>> {
+fn gemma4_object(input: &mut &str) -> ModalResult<Map<String, Value>> {
     delimited(literal("{"), gemma4_args, literal("}")).parse_next(input)
 }
 
 /// Parse a Gemma4 array value.
-fn gemma4_array_value(input: &mut Gemma4Input<'_>) -> ModalResult<Vec<Value>> {
+fn gemma4_array_value(input: &mut &str) -> ModalResult<Vec<Value>> {
     delimited(literal("["), gemma4_array_content, literal("]")).parse_next(input)
 }
 
 /// Parse Gemma4 array content.
-fn gemma4_array_content(input: &mut Gemma4Input<'_>) -> ModalResult<Vec<Value>> {
+fn gemma4_array_content(input: &mut &str) -> ModalResult<Vec<Value>> {
     delimited(
         ws0,
         terminated(
@@ -239,14 +378,14 @@ fn gemma4_array_content(input: &mut Gemma4Input<'_>) -> ModalResult<Vec<Value>> 
 }
 
 /// Parse a Gemma4 bare scalar.
-fn gemma4_bare_value(input: &mut Gemma4Input<'_>) -> ModalResult<Value> {
+fn gemma4_bare_value(input: &mut &str) -> ModalResult<Value> {
     take_till(1.., |char: char| matches!(char, ',' | '}' | ']'))
         .map(parse_gemma4_scalar)
         .parse_next(input)
 }
 
 /// Parse a Gemma4 comma separator.
-fn comma_separator(input: &mut Gemma4Input<'_>) -> ModalResult<()> {
+fn comma_separator(input: &mut &str) -> ModalResult<()> {
     delimited(ws0, literal(","), ws0).void().parse_next(input)
 }
 
@@ -284,29 +423,15 @@ mod tests {
     use winnow::combinator::{eof, terminated};
     use winnow::error::ErrMode;
     use winnow::prelude::*;
-    use winnow::stream::Partial;
 
     use super::{
-        Gemma4ToolParser, ToolCallDelta, ToolParser, ToolParserOutput, gemma4_args,
-        gemma4_array_content,
+        Gemma4ToolParser, ToolCallDelta, ToolParser, ToolParserOutput, gemma4_array_content,
+        parse_gemma4_args,
     };
     use crate::{Tool, ToolParserTestExt as _};
 
-    fn parse_gemma4_args(args: &str) -> super::Result<serde_json::Map<String, Value>> {
-        let mut input = Partial::new(args);
-        let _ = input.complete();
-        match terminated(gemma4_args, eof).parse_next(&mut input) {
-            Ok(value) => Ok(value),
-            Err(ErrMode::Incomplete(_)) => Err(parsing_failed!("incomplete Gemma4 arguments")),
-            Err(ErrMode::Backtrack(error) | ErrMode::Cut(error)) => {
-                Err(parsing_failed!("{}", error))
-            }
-        }
-    }
-
     fn parse_gemma4_array(array: &str) -> super::Result<Vec<Value>> {
-        let mut input = Partial::new(array);
-        let _ = input.complete();
+        let mut input = array;
         match terminated(gemma4_array_content, eof).parse_next(&mut input) {
             Ok(value) => Ok(value),
             Err(ErrMode::Incomplete(_)) => Err(parsing_failed!("incomplete Gemma4 array")),
@@ -561,6 +686,21 @@ mod tests {
     }
 
     #[test]
+    fn gemma4_streaming_handles_split_tool_call_end_marker() {
+        let output = collect_stream(&[
+            "<|tool_call>",
+            "call:get_weather{location:<|\"|>Paris<|\"|>}<tool",
+            "_call|>",
+        ]);
+
+        assert_eq!(first_call(&output).name.as_deref(), Some("get_weather"));
+        assert_eq!(
+            serde_json::from_str::<Value>(&first_call(&output).arguments).unwrap(),
+            json!({ "location": "Paris" })
+        );
+    }
+
+    #[test]
     fn gemma4_streaming_handles_end_marker_literal_inside_string() {
         let output = collect_stream(&[
             "<|tool_call>",
@@ -651,5 +791,36 @@ mod tests {
         let error = parser.finish().unwrap_err();
 
         assert!(error.to_report_string().contains("incomplete Gemma4 tool call"));
+    }
+
+    #[test]
+    fn gemma4_reset_preserves_internally_buffered_arguments() {
+        let mut parser = Gemma4ToolParser::new(&test_tools());
+        for chunk in [
+            "<|tool_call>",
+            "call:write_file{",
+            "content:<|\"|>hello ",
+            "world<|\"|>",
+        ] {
+            parser.parse_chunk(chunk).unwrap();
+        }
+
+        let raw = parser.reset();
+
+        assert_eq!(
+            raw,
+            "<|tool_call>call:write_file{content:<|\"|>hello world<|\"|>"
+        );
+    }
+
+    #[test]
+    fn gemma4_reset_preserves_completed_arguments_after_parse_error() {
+        let mut parser = Gemma4ToolParser::new(&test_tools());
+        let input = "<|tool_call>call:set{broken}<tool_call|>";
+
+        let _error = parser.parse_chunk(input).unwrap_err();
+        let raw = parser.reset();
+
+        assert_eq!(raw, input);
     }
 }

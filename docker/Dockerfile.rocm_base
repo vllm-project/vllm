@@ -1,7 +1,7 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.2-complete
-ARG TRITON_BRANCH="ba5c1517"
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.3-complete
+ARG TRITON_BRANCH="0f380657"
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
-ARG PYTORCH_BRANCH="8514f051" # release/2.10 as of 3/17
+ARG PYTORCH_BRANCH="d0c8b1f3" # release/2.11 as of 6/09
 ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
 ARG PYTORCH_VISION_BRANCH="v0.24.1"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
@@ -9,7 +9,7 @@ ARG PYTORCH_AUDIO_BRANCH="v2.9.0"
 ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.13"
+ARG AITER_BRANCH="v0.1.13.post1"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="v1.1.0"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
@@ -104,28 +104,6 @@ ENV SCCACHE_REGION=${USE_SCCACHE:+${SCCACHE_REGION_NAME}}
 ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
-# torch profiler hotfix for 7.2.2: rebuild CLR with https://github.com/ROCm/rocm-systems/pull/5062
-# will be removed once we move to ROCm 7.2.3
-RUN apt-get update && apt-get install -y rocm-llvm-dev
-RUN pip install CppHeaderParser
-RUN git clone --no-checkout --filter=blob:none https://github.com/ROCm/rocm-systems /tmp/rocm-systems \
-    && cd /tmp/rocm-systems \
-    && git sparse-checkout init --cone \
-    && git sparse-checkout set projects/hip projects/clr \
-    && git checkout 35e8c7bf8911862e5389509800e65fdf125412b3 \
-    && export CLR_DIR=/tmp/rocm-systems/projects/clr \
-    && export HIP_DIR=/tmp/rocm-systems/projects/hip \
-    && mkdir -p $CLR_DIR/build && cd $CLR_DIR/build \
-    && cmake \
-        -DHIP_COMMON_DIR=$HIP_DIR \
-        -DCMAKE_PREFIX_PATH="/opt/rocm/" \
-        -DCLR_BUILD_HIP=ON \
-        -DCLR_BUILD_OCL=OFF \
-        -DHIP_PLATFORM=amd \
-        .. \
-    && make -j$(nproc) \
-    && make install \
-    && rm -rf /tmp/rocm-systems
 
 ###
 ### Triton Build
@@ -136,12 +114,10 @@ ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
 # Cherry picking the following
 # https://github.com/triton-lang/triton/pull/8991
-# https://github.com/triton-lang/triton/pull/9541
 RUN cd triton \
     && git checkout ${TRITON_BRANCH} \
     && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
     && git cherry-pick 555d04f \
-    && git cherry-pick dd998b6 \
     && if [ ! -f setup.py ]; then cd python; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && mkdir -p /app/install && cp dist/*.whl /app/install
@@ -259,9 +235,8 @@ ARG AITER_REPO
 ARG USE_SCCACHE
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
     pip install /install/*.whl
-RUN git clone --recursive ${AITER_REPO}
+RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
 RUN cd aiter \
-    && git checkout ${AITER_BRANCH} \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
 RUN pip install pyyaml && cd aiter \

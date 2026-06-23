@@ -15,7 +15,7 @@ def get_model_args(
     spec_method: str,
     tp_size: int,
     model_max_len: int,
-    use_async: bool = False,
+    use_async: bool = True,
 ) -> dict:
     speculative_config = {
         "method": spec_method,
@@ -28,9 +28,8 @@ def get_model_args(
         "window_size": 128,
         "step_interval": 1024,
         "log_balancedness": False,
+        "use_async": use_async,
     }
-    if use_async:
-        eplb_config["use_async"] = True
     model_args = {
         "pretrained": model_name,
         "dtype": "auto",

@@ -1585,15 +1585,12 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
     e: int,
     topk: int,
     dtype: torch.dtype,
-    monkeypatch,
     workspace_init,
 ):
     """
     Test BF16 unquantized MoE with FlashInfer TRTLLM backend.
     """
     set_random_seed(7)
-
-    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
 
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEConfig,
@@ -1617,16 +1614,16 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         num_experts=e,
         experts_per_token=topk,
         hidden_dim=k,
-        intermediate_size_per_partition=n,
+        intermediate_size=n,
         num_local_experts=e,
         num_logical_experts=e,
         activation=MoEActivation.SILU,
         device="cuda",
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         in_dtype=dtype,
-        is_act_and_mul=True,
         routing_method=RoutingMethodType.Renormalize,
         max_num_tokens=next_power_of_2(m),
+        moe_backend="flashinfer_trtllm",
     )
 
     with set_current_vllm_config(vllm_config):
@@ -1656,7 +1653,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         layer.routing_method_type = RoutingMethodType.Renormalize
         layer.expert_map = None
         layer.apply_router_weight_on_input = False
-        layer.routed_scaling_factor = None
+        layer.routed_scaling_factor = 2.446
         layer.shared_experts = None
         layer._expert_routing_tables = lambda: None
 
@@ -1678,7 +1675,10 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         # Compute torch baseline
         w1_original = w1.clone()
         w2_original = w2.clone()
-        baseline_output = torch_moe(a, w1_original, w2_original, router_logits, topk)
+        baseline_output = (
+            torch_moe(a, w1_original, w2_original, router_logits, topk)
+            * layer.routed_scaling_factor
+        )
 
     close = torch.isclose(trtllm_output, baseline_output, atol=1e-1, rtol=0.85)
     assert close.float().mean() > 0.925
