@@ -93,18 +93,12 @@ ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
 FROM python-install AS torch-vision
 # Install torchvision
 ARG TORCH_VISION_VERSION=v0.26.0
-ARG PYTORCH_NIGHTLY
 WORKDIR /tmp
 RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/pytorch/vision.git && \
     cd vision && \
-    if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
-        git checkout main && \
-        uv pip install torch --pre --index-url https://download.pytorch.org/whl/nightly/cpu; \
-    else \
-        git checkout $TORCH_VISION_VERSION && \
-        uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu; \
-    fi && \
+    git checkout $TORCH_VISION_VERSION && \
+    uv pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu && \
     python setup.py bdist_wheel
 
 FROM python-install AS hf-xet-builder
@@ -216,7 +210,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # # Final build stage
 FROM python-install AS vllm-cpu
 ARG PYTHON_VERSION
-ARG PYTORCH_NIGHTLY
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
 # Set correct library path for torch and numactl
 ENV LD_LIBRARY_PATH="/opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/torch/lib:/usr/local/lib:/opt/rh/gcc-toolset-14/root/usr/lib64:$LD_LIBRARY_PATH"
@@ -256,36 +249,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
      NUMBA_WHL_FILE=$(ls /tmp/numba-wheels/*.whl) && \
      OPENCV_WHL_FILE=$(ls /tmp/opencv-wheels/*.whl) && \
      GUIDANCE_WHL_FILE=$(ls /tmp/guidance-wheels/*.whl) && \
-     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
-        echo "Installing torch nightly..." && \
-        uv pip install torch torchaudio --pre \
-        --index-url https://download.pytorch.org/whl/nightly/cpu && \
-        python3 use_existing_torch.py --prefix && \
-        uv pip install -v \
-            $ARROW_WHL_FILE \
-            $VISION_WHL_FILE \
-            $HF_XET_WHL_FILE \
-            $LLVM_WHL_FILE \
-            $NUMBA_WHL_FILE \
-            $OPENCV_WHL_FILE \
-            $GUIDANCE_WHL_FILE \
-            --index-strategy unsafe-best-match \
-            --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
-            -r requirements/build/cpu.txt \
-            -r requirements/cpu.txt; \
-     else \
-        uv pip install -v \
-            $ARROW_WHL_FILE \
-            $VISION_WHL_FILE \
-            $HF_XET_WHL_FILE \
-            $LLVM_WHL_FILE \
-            $NUMBA_WHL_FILE \
-            $OPENCV_WHL_FILE \
-            $GUIDANCE_WHL_FILE \
-            --index-strategy unsafe-best-match \
-            -r requirements/build/cpu.txt \
-            -r requirements/cpu.txt; \
-     fi
+     uv pip install -v \    
+        $ARROW_WHL_FILE \
+        $VISION_WHL_FILE \
+        $HF_XET_WHL_FILE \
+        $LLVM_WHL_FILE \
+        $NUMBA_WHL_FILE \
+        $OPENCV_WHL_FILE \
+        $GUIDANCE_WHL_FILE \
+        --index-strategy unsafe-best-match \
+        -r requirements/build/cpu.txt \
+        -r requirements/cpu.txt
 
 
 # Build and install vllm
