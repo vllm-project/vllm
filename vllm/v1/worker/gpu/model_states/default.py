@@ -64,7 +64,7 @@ class DefaultModelState(ModelState):
 
         # Pruner is used for multimodal embedding pruning (EVS).
         self.mm_pruner = maybe_create_mm_pruner(
-            self.model_config, model, self.rope_state
+            self.model_config, model, self.rope_state, encoder_cache
         )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
@@ -96,18 +96,11 @@ class DefaultModelState(ModelState):
             # Cache the encoder outputs by mm_hash
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
-        # Request return of per-request embed counts when pruning is enabled.
-        num_embeds_per_req: list[int] | None = [] if self.mm_pruner else None
-        mm_embeds, is_mm_embed = super().gather_mm_embeddings(
-            input_batch, num_embeds_per_req=num_embeds_per_req
-        )
+        mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
         if self.mm_pruner is not None and mm_embeds:
             # EVS: recompute mrope positions for pruned media.
-            assert num_embeds_per_req is not None
-            mm_embeds = self.mm_pruner.recompute(
-                mm_embeds, num_embeds_per_req, input_batch, req_states
-            )
-            # We must flush the staged positions for prepare_inputs() to pick up.
+            mm_embeds = self.mm_pruner.recompute(mm_embeds, input_batch, req_states)
+            # We must flush the staged rope updates for prepare_inputs() to pick up.
             self.apply_staged_writes()
 
         # Use unpadded input_ids to match is_mm_embed size (num_tokens).
@@ -119,13 +112,10 @@ class DefaultModelState(ModelState):
         return inputs_embeds[: input_batch.num_tokens_after_padding]
 
     def gather_mm_embeddings(
-        self,
-        input_batch: InputBatch,
-        draft_lookahead: int = 0,
-        num_embeds_per_req: list[int] | None = None,
+        self, input_batch: InputBatch, draft_lookahead: int = 0
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
         mm_embeds, is_mm_embed = super().gather_mm_embeddings(
-            input_batch, draft_lookahead, num_embeds_per_req
+            input_batch, draft_lookahead
         )
         if self.mm_pruner is not None:
             # EVS: strip the appended mrope-position channels.

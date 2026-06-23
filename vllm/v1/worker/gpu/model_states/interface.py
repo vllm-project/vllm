@@ -93,16 +93,9 @@ class ModelState(ABC):
         raise NotImplementedError
 
     def gather_mm_embeddings(
-        self,
-        input_batch: InputBatch,
-        draft_lookahead: int = 0,
-        num_embeds_per_req: list[int] | None = None,
+        self, input_batch: InputBatch, draft_lookahead: int = 0
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
-        """Gather cached multimodal embeddings for a speculator's draft forward.
-
-        If `num_embeds_per_req` is provided, the per-request embedding counts are
-        appended to it (see EncoderRunner.gather_mm_embeddings).
-        """
+        """Gather cached multimodal embeddings for a speculator's draft forward."""
         return self.encoder_runner.gather_mm_embeddings(
             input_batch.req_ids,
             input_batch.num_tokens,
@@ -111,7 +104,6 @@ class ModelState(ABC):
             input_batch.prefill_len_np,
             input_batch.num_computed_prefill_tokens_np,
             draft_lookahead=draft_lookahead,
-            num_embeds_per_req=num_embeds_per_req,
         )
 
     @abstractmethod

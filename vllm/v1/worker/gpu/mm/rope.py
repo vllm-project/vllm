@@ -104,7 +104,6 @@ class RopeState:
         self.prefill_positions.gpu[base : base + self.num_dims, :length].copy_(
             positions
         )
-
         if self.has_delta:
             self.prefill_delta.np[req_idx] = delta
 
