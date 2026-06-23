@@ -66,6 +66,7 @@ def _make_unit_args(**overrides) -> argparse.Namespace:
         "dp_supervisor_probe_interval_s": 5.0,
         "dp_supervisor_probe_timeout_s": 5.0,
         "dp_supervisor_probe_failure_threshold": 3,
+        "dp_supervisor_startup_timeout_s": 0.0,
         "data_parallel_size": 8,
         "data_parallel_size_local": 4,
         "data_parallel_start_rank": None,
@@ -101,6 +102,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         dp_supervisor_probe_interval_s=_PROBE_INTERVAL,
         dp_supervisor_probe_timeout_s=1.0,
         dp_supervisor_probe_failure_threshold=3,
+        dp_supervisor_startup_timeout_s=0.0,
         data_parallel_size=_N_CHILDREN,
         data_parallel_size_local=_N_CHILDREN,
         data_parallel_start_rank=0,
@@ -234,6 +236,60 @@ async def test_handles_probe_failure(
 
     await supervisor._monitor_children()
     assert supervisor._is_ready is False
+
+
+@pytest.mark.asyncio
+async def test_startup_timeout_shuts_down(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A child that stays alive but never becomes ready trips the startup
+    timeout, so the supervisor stops waiting instead of hanging on 503."""
+    supervisor = DPSupervisor(
+        _make_unit_args(
+            dp_supervisor_probe_interval_s=0.05,
+            dp_supervisor_startup_timeout_s=0.3,
+        )
+    )
+    supervisor.child_ports = [8000]
+    supervisor._processes = [
+        SimpleNamespace(name="APIServer_DPRank_4", exitcode=None, is_alive=lambda: True)
+    ]
+
+    async def fake_probe(*_args, **_kwargs) -> bool:
+        # Child is reachable but never reports ready (simulates a hang
+        # during initialization).
+        return False
+
+    monkeypatch.setattr(dp_sup, "_probe_endpoint", fake_probe)
+
+    await asyncio.wait_for(supervisor._monitor_children(), timeout=5.0)
+    assert supervisor._is_ready is False
+
+
+@pytest.mark.asyncio
+async def test_startup_timeout_disabled_keeps_waiting(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """With the startup timeout disabled (0.0), the supervisor keeps waiting
+    for a not-yet-ready child rather than shutting down."""
+    supervisor = DPSupervisor(
+        _make_unit_args(
+            dp_supervisor_probe_interval_s=0.05,
+            dp_supervisor_startup_timeout_s=0.0,
+        )
+    )
+    supervisor.child_ports = [8000]
+    supervisor._processes = [
+        SimpleNamespace(name="APIServer_DPRank_4", exitcode=None, is_alive=lambda: True)
+    ]
+
+    async def fake_probe(*_args, **_kwargs) -> bool:
+        return False
+
+    monkeypatch.setattr(dp_sup, "_probe_endpoint", fake_probe)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(supervisor._monitor_children(), timeout=0.5)
 
 
 @pytest.mark.asyncio
