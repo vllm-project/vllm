@@ -159,7 +159,7 @@ def test_nvfp4_emulation_support_check_rejects_bias_and_lora(
         num_experts=2,
         experts_per_token=1,
         hidden_dim=16,
-        intermediate_size_per_partition=16,
+        intermediate_size=16,
         num_local_experts=2,
         num_logical_experts=2,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
