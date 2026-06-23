@@ -526,6 +526,12 @@ class SamplingParams(
                 parameter="temperature",
                 value=self.temperature,
             )
+        if self.temperature > 2.0:
+            raise VLLMValidationError(
+                f"temperature must be in [0, 2], got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
+            )
         if not 0.0 < self.top_p <= 1.0:
             raise VLLMValidationError(
                 f"top_p must be in (0, 1], got {self.top_p}.",
@@ -720,7 +726,9 @@ class SamplingParams(
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
-        self._validate_structured_outputs(structured_outputs_config, tokenizer)
+        self._validate_structured_outputs(
+            model_config, structured_outputs_config, tokenizer
+        )
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
         max_logprobs = model_config.max_logprobs
@@ -853,11 +861,24 @@ class SamplingParams(
 
     def _validate_structured_outputs(
         self,
+        model_config: ModelConfig,
         structured_outputs_config: StructuredOutputsConfig | None,
         tokenizer: TokenizerLike | None,
     ) -> None:
         if structured_outputs_config is None or self.structured_outputs is None:
             return
+
+        if model_config.is_diffusion:
+            # Diffusion LLMs denoise a whole canvas of tokens in parallel
+            # rather than sampling left-to-right, which the grammar FSM
+            # requires. Without this check, requests fail mid-generation
+            # with an FSM rejection (HTTP 500). See issue #45436.
+            raise ValueError(
+                "Structured outputs are not yet supported for diffusion "
+                "language models. Remove the structured output constraint "
+                "(e.g. `response_format`, `structured_outputs`) from the "
+                "request."
+            )
 
         if tokenizer is None:
             raise ValueError(

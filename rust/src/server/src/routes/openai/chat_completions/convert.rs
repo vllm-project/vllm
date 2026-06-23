@@ -115,6 +115,7 @@ pub(super) fn prepare_chat_request(
             seed: request.seed,
             max_tokens: request.max_completion_tokens,
             min_tokens: request.min_tokens,
+            thinking_token_budget: request.thinking_token_budget,
             logprobs: request.logprobs.then_some(top_logprobs),
             prompt_logprobs,
             min_p: request.min_p,
@@ -142,6 +143,7 @@ pub(super) fn prepare_chat_request(
         },
         tools: convert_tools(request.tools)?,
         tool_choice: convert_tool_choice(request.tool_choice.as_ref())?,
+        parallel_tool_calls: request.parallel_tool_calls.unwrap_or(true),
         decode_options: vllm_text::output::TextDecodeOptions {
             skip_special_tokens: request.skip_special_tokens,
             include_stop_str_in_output: request.include_stop_str_in_output,
@@ -413,6 +415,33 @@ mod tests {
     }
 
     #[test]
+    fn prepare_chat_request_maps_parallel_tool_calls() {
+        let mut request = base_request();
+        request.parallel_tool_calls = Some(false);
+
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(!prepared.chat_request.parallel_tool_calls);
+    }
+
+    #[test]
+    fn prepare_chat_request_defaults_parallel_tool_calls_to_true() {
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert!(prepared.chat_request.parallel_tool_calls);
+    }
+
+    #[test]
     fn prepare_chat_request_maps_text_parts() {
         let mut request = base_request();
         request.messages = vec![ChatMessage::Assistant {
@@ -583,6 +612,31 @@ mod tests {
             ..VllmSamplingParams::default()
         };
         assert_eq!(prepared.chat_request.sampling_params, expected);
+    }
+
+    #[test]
+    fn prepare_chat_request_passes_through_thinking_token_budget() {
+        let prepare = |budget: Option<i64>| {
+            prepare_chat_request(
+                ChatCompletionRequest {
+                    thinking_token_budget: budget,
+                    ..base_request()
+                },
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("request is valid")
+            .chat_request
+            .sampling_params
+            .thinking_token_budget
+        };
+
+        // The convert layer forwards the raw value verbatim (including the `-1`
+        // "unlimited" sentinel); normalization/validation happens during
+        // lowering (see `vllm_text::lower`).
+        assert_eq!(prepare(Some(64)), Some(64));
+        assert_eq!(prepare(Some(-1)), Some(-1));
+        assert_eq!(prepare(None), None);
     }
 
     #[test]

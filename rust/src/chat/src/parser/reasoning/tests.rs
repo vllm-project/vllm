@@ -34,10 +34,12 @@ fn factory_contains_and_lists_registered_parsers() {
     assert!(factory.contains(names::DEEPSEEK_V4));
     assert!(factory.contains(names::SEED_OSS));
     assert!(factory.contains(names::STEP3P5));
+    assert!(factory.contains(names::MINIMAX_M3));
     assert!(factory.list().contains(&names::QWEN3.to_string()));
     assert!(factory.list().contains(&names::DEEPSEEK_V4.to_string()));
     assert!(factory.list().contains(&names::SEED_OSS.to_string()));
     assert!(factory.list().contains(&names::STEP3P5.to_string()));
+    assert!(factory.list().contains(&names::MINIMAX_M3.to_string()));
 }
 
 #[test]
@@ -85,6 +87,19 @@ fn factory_routes_seed_oss_models() {
     assert_eq!(
         factory.resolve_name_for_model("seedoss-7b"),
         Some(names::SEED_OSS)
+    );
+}
+
+#[test]
+fn factory_resolves_minimax_m3_before_generic_minimax() {
+    let factory = ReasoningParserFactory::new();
+    assert_eq!(
+        factory.resolve_name_for_model("MiniMaxAI/Minimax-M3-preview"),
+        Some(names::MINIMAX_M3)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("mm-m3"),
+        Some(names::MINIMAX_M3)
     );
 }
 

@@ -37,6 +37,7 @@ trait_set! {
 pub struct DefaultChatOutputProcessor {
     reasoning_parser: Option<Box<dyn ReasoningParser>>,
     tool_parser: Option<Box<dyn ToolParser>>,
+    parallel_tool_calls: bool,
 }
 
 impl DefaultChatOutputProcessor {
@@ -74,6 +75,7 @@ impl DefaultChatOutputProcessor {
         Ok(Self {
             reasoning_parser,
             tool_parser,
+            parallel_tool_calls: request.parallel_tool_calls,
         })
     }
 
@@ -86,6 +88,7 @@ impl DefaultChatOutputProcessor {
         Self {
             reasoning_parser: None,
             tool_parser: None,
+            parallel_tool_calls: true,
         }
     }
 
@@ -159,7 +162,7 @@ impl ChatOutputProcessor for DefaultChatOutputProcessor {
     fn process(self: Box<Self>, decoded: DynDecodedTextEventStream) -> Result<DynChatEventStream> {
         let reasoning = reasoning_event_stream(decoded, self.reasoning_parser);
         let tool = tool_event_stream(reasoning, self.tool_parser);
-        let structured = structured_chat_event_stream(tool);
+        let structured = structured_chat_event_stream(tool, self.parallel_tool_calls);
 
         Ok(structured.boxed())
     }
