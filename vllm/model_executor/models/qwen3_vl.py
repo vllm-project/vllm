@@ -1271,7 +1271,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             vision_end_token_id = hf_config.vision_end_token_id
             video_token_id = hf_config.video_token_id
 
-            for item in videos:
+            for item_idx, item in enumerate(videos):
                 video_array, metadata = item
 
                 # NOTE: @JJJYmmm new attr metadata.frames_indices indicates
@@ -1282,6 +1282,12 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 # NOTE: a copy of is created to update do_sample_frames,
                 # otherwise mm_hash for the object will be incorrect.
                 video_mm_kwargs = dict(**mm_kwargs)
+                sampled_fps = video_mm_kwargs.get("fps")
+                if is_list_of(sampled_fps, float):
+                    video_mm_kwargs["fps"] = sampled_fps[item_idx]
+                sampled_num_frames = video_mm_kwargs.get("num_frames")
+                if is_list_of(sampled_num_frames, int):
+                    video_mm_kwargs["num_frames"] = sampled_num_frames[item_idx]
                 if "do_sample_frames" not in video_mm_kwargs:
                     # qwen_vl_utils already has "do_sample_frames" in
                     # mm_kwargs, don't overwrite it.
@@ -1363,10 +1369,15 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         else:
             video_outputs = dict()
 
+        # fps/num_frames are video-only kwargs already consumed by the loop;
+        # exclude them so the text/image processor call below never gets a list.
+        non_video_mm_kwargs = {
+            k: v for k, v in mm_kwargs.items() if k not in ("fps", "num_frames")
+        }
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
-            mm_kwargs=mm_kwargs,
+            mm_kwargs=non_video_mm_kwargs,
             tok_kwargs=tok_kwargs,
         )
 

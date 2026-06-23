@@ -74,6 +74,20 @@ steps:
   commands:
     - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 55
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - csrc/attention/
+      - vllm/v1/attention
+      - vllm/model_executor/layers/attention
+      - tests/kernels/attention
+      - vllm/_aiter_ops.py
+      - vllm/envs.py
+      - vllm/platforms/rocm.py
 
 - label: Kernels Attention DiffKV Test (H100)
   key: kernels-attention-diffkv-test-h100
@@ -128,6 +142,22 @@ steps:
     - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 5
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 50
+      source_file_dependencies:
+      - csrc/quantization/cutlass_w8a8/moe/
+      - csrc/moe/
+      - tests/kernels/moe
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/distributed/device_communicators/
+      - vllm/envs.py
+      - vllm/config
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
+      depends_on:
+      - image-build-amd
 
 - label: Kernels Mamba Test
   key: kernels-mamba-test
