@@ -408,6 +408,7 @@ def test_int8_per_token_head_raw_cache_matches_round_reference():
         k_scale_cache,
         v_scale_cache,
         slot_mapping,
+        kv_quant_mode=INT8_CONFIG.kv_quant_mode,
     )
 
     ref_k_quant, ref_k_scales = _quantize_per_token_head_ref(key, INT8_CONFIG)

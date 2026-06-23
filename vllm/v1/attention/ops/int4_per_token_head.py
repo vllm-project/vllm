@@ -557,6 +557,7 @@ def _attn_packed(
             query_abs_pos,
             seq_offset,
             seq_idx,
+            seq_len,
             mm_prefix_range_ptr,
             SLIDING_WINDOW,
             USE_MM_PREFIX,
