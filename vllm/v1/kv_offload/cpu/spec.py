@@ -18,7 +18,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingWorker,
 )
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingMetrics
-from vllm.v1.kv_offload.cpu.gpu_worker import CpuOffloadingWorker
+from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 
 
@@ -101,7 +101,7 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._manager: OffloadingManager | None = None
 
         # worker-side
-        self._worker: CpuOffloadingWorker | None = None
+        self._worker: CPUOffloadingWorker | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
 
@@ -125,8 +125,8 @@ class CPUOffloadingSpec(OffloadingSpec):
             )
         return self._manager
 
-    def create_worker(self, kv_caches: CanonicalKVCaches) -> CpuOffloadingWorker:
-        return CpuOffloadingWorker(
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+        return CPUOffloadingWorker(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
             num_cpu_blocks=self.num_blocks,

@@ -466,7 +466,7 @@ class SingleDirectionOffloadingHandler:
             self._mmap_region = None
 
 
-class CpuOffloadingWorker(OffloadingWorker):
+class CPUOffloadingWorker(OffloadingWorker):
     """OffloadingWorker for CPU offloading.
 
     Composes two SingleDirectionOffloadingHandler instances (one for each

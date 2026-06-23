@@ -21,7 +21,7 @@ from vllm.v1.kv_offload.base import (
     TransferSpec,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
-from vllm.v1.kv_offload.cpu.gpu_worker import CpuOffloadingWorker
+from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 
 NUM_GPU_BLOCKS = [64]
@@ -107,7 +107,7 @@ def test_transfer(
             cpu_page_size=cpu_page_size,
         )
 
-    worker = CpuOffloadingWorker(
+    worker = CPUOffloadingWorker(
         kv_caches=kv_caches,
         block_size_factor=block_size_factor,
         num_cpu_blocks=num_cpu_blocks,
@@ -234,7 +234,7 @@ class FakeDirectionHandler:
     """Stand in for SingleDirectionOffloadingHandler.
 
     Records submitted transfers and fan out calls so we can assert how
-    CpuOffloadingWorker routes between its two internal handlers.
+    CPUOffloadingWorker routes between its two internal handlers.
     """
 
     def __init__(self):
@@ -260,14 +260,14 @@ class FakeDirectionHandler:
 
 
 def _make_worker() -> tuple[
-    CpuOffloadingWorker, FakeDirectionHandler, FakeDirectionHandler
+    CPUOffloadingWorker, FakeDirectionHandler, FakeDirectionHandler
 ]:
-    """Build a CpuOffloadingWorker with fake handlers.
+    """Build a CPUOffloadingWorker with fake handlers.
 
-    CpuOffloadingWorker.__init__ allocates GPU/CPU tensors, so we bypass it
+    CPUOffloadingWorker.__init__ allocates GPU/CPU tensors, so we bypass it
     and inject fakes to exercise the (CPU runnable) routing/aggregation logic.
     """
-    worker = object.__new__(CpuOffloadingWorker)
+    worker = object.__new__(CPUOffloadingWorker)
     store_handler = FakeDirectionHandler()
     load_handler = FakeDirectionHandler()
     worker._store_handler = store_handler  # type: ignore[assignment]
@@ -398,7 +398,7 @@ def test_transfer_multi_group(
         tensors=kv_cache_tensors, group_data_refs=kv_cache_groups_data_refs
     )
 
-    worker = CpuOffloadingWorker(
+    worker = CPUOffloadingWorker(
         kv_caches=canonical_kv_caches,
         block_size_factor=block_size_factor,
         num_cpu_blocks=num_cpu_blocks,

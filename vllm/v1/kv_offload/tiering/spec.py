@@ -44,7 +44,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadingMetricMetadata,
 )
-from vllm.v1.kv_offload.cpu.gpu_worker import CpuOffloadingWorker
+from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
@@ -187,7 +187,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return self._manager
 
     @override
-    def create_worker(self, kv_caches: CanonicalKVCaches) -> CpuOffloadingWorker:
+    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         rank = torch.accelerator.current_device_index()
         worker_mmap = SharedOffloadRegion(
             instance_id=self.vllm_config.instance_id,
@@ -196,7 +196,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             kv_bytes_per_block=self.kv_bytes_per_offloaded_block,
             cpu_page_size=self.cpu_page_size_per_worker,
         )
-        return CpuOffloadingWorker(
+        return CPUOffloadingWorker(
             kv_caches=kv_caches,
             block_size_factor=self.block_size_factor,
             num_cpu_blocks=self.num_blocks,
