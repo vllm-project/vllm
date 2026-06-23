@@ -69,7 +69,7 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
         super().__init__(vllm_config, engine_id, kv_cache_config)
         if self.is_bidirectional_kv_xfer_enabled:
             raise NotImplementedError(
-                g"Bidirectional KV transfer is not supported for NIXL push connector."
+                "Bidirectional KV transfer is not supported for NIXL push connector."
             )
 
         # D-side: registration data to pass to D workers via metadata on
