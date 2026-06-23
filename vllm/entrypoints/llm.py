@@ -829,6 +829,19 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         """
         self.llm_engine.sleep(level=level, mode=mode)
 
+    def release_kv_cache(self, mode: PauseMode = "abort") -> bool:
+        """
+        Release the engine's KV cache memory while keeping model weights resident.
+
+        The engine will stop processing requests until `wake_up(tags=["kv_cache"])`
+        is called.
+
+        Args:
+            mode: How to handle any existing requests, can be "abort", "wait",
+                or "keep".
+        """
+        return self.llm_engine.release_kv_cache(mode=mode)
+
     def wake_up(self, tags: list[str] | None = None):
         """
         Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]

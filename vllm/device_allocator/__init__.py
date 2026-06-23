@@ -18,12 +18,15 @@ class AllocationData:
     handle: HandleType
     tag: str
     cpu_backup_tensor: torch.Tensor | None = None
+    is_mapped: bool = True
 
 
 class MemAllocator(Protocol):
     def use_memory_pool(self, tag: str | None = None) -> AbstractContextManager: ...
 
     def sleep(self, offload_tags: tuple[str, ...] | str | None = None) -> None: ...
+
+    def release_tags(self, tags: tuple[str, ...] | str) -> None: ...
 
     def wake_up(self, tags: list[str] | None = None) -> None: ...
 

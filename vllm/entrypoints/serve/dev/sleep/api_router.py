@@ -29,6 +29,13 @@ async def sleep(raw_request: Request):
     return Response(status_code=200)
 
 
+@router.post("/release_kv_cache")
+async def release_kv_cache(raw_request: Request):
+    mode = raw_request.query_params.get("mode", "abort")
+    await engine_client(raw_request).release_kv_cache(mode)
+    return Response(status_code=200)
+
+
 @router.post("/wake_up")
 async def wake_up(raw_request: Request):
     tags = raw_request.query_params.getlist("tags")
