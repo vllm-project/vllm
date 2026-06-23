@@ -277,7 +277,6 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     k_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache: torch.Tensor,  # [num_blocks, block_size, num_kv_heads] float32
     slot_mapping: torch.Tensor,  # [num_tokens]
-    *,
     kv_quant_mode: KVQuantMode,
 ):
     """Quantize key/value per (token, head) and write to paged cache.
@@ -291,7 +290,7 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     range (QUANT_MAX, QUANT_MIN) derived from the cache tensor dtype.
     """
     if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
-        from vllm.v1.attention.ops.triton_quant_kv.int4_per_token_head import (
+        from vllm.v1.attention.ops.int4_per_token_head import (
             reshape_and_cache_int4,
         )
 

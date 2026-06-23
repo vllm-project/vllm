@@ -260,7 +260,7 @@ def kernel_unified_attention(
     # KV cache quantization mode handled inside this kernel via constexpr
     # branches: NONE (0), FP8_PER_TENSOR (1), INT8_PER_TOKEN_HEAD (2),
     # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4 (4) uses its own
-    # triton_quant_kv.int4_per_token_head kernel, not this one.
+    # int4_per_token_head kernel, not this one.
     KV_QUANT_MODE: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
@@ -447,8 +447,6 @@ def kernel_unified_attention(
                 HEAD_SIZE,
                 HEAD_SIZE_PADDED,
             )
-            K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
-            V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
         else:
             v_offset = (
                 physical_block_idx[:, None] * stride_v_cache_0
@@ -468,13 +466,14 @@ def kernel_unified_attention(
                 mask=dim_mask[:, None] & tile_mask[None, :],
                 other=0.0,
             )
-            K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
+            # V : (TILE_SIZE, HEAD_SIZE)
             V_load = tl.load(
                 value_cache_ptr + v_offset,
                 mask=dim_mask[None, :] & tile_mask[:, None],
                 other=0.0,
             )
-            V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
+        K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
+        V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
         # Per-(token, head) scales for INT8 / FP8 per-token-head modes.
         if USE_PER_TOKEN_HEAD_SCALES:
@@ -832,7 +831,7 @@ def unified_attention(
         assert use_causal and not use_per_seq_causal, (
             "INT4_PER_TOKEN_HEAD only supports causal attention"
         )
-        from vllm.v1.attention.ops.triton_quant_kv.int4_per_token_head import (
+        from vllm.v1.attention.ops.int4_per_token_head import (
             unified_attention_int4,
         )
 

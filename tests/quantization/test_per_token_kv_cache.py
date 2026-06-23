@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.ops.triton_quant_kv.int4_per_token_head import single_rht
+from vllm.v1.attention.ops.int4_per_token_head import single_rht
 from vllm.v1.kv_cache_interface import KVQuantMode, is_quantized_kv_cache
 
 DEVICE_TYPE = current_platform.device_type
