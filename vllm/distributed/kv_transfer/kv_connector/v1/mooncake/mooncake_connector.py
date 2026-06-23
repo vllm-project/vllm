@@ -113,7 +113,6 @@ def _expand_transfer_regions(
     block_lens: list[int],
     layer_names: list[str],
     layer_indices: list[int],
-    is_kv_layout_blocks_first: bool,
 ) -> list[TransferRegion]:
     """Expand registered KV tensors into the regions transferred by Mooncake."""
     assert (
@@ -128,26 +127,15 @@ def _expand_transfer_regions(
     for base_addr, block_len, layer_name, layer_index in zip(
         base_addrs, block_lens, layer_names, layer_indices
     ):
-        kv_block_len = block_len // 2 if is_kv_layout_blocks_first else block_len
         regions.append(
             TransferRegion(
                 layer_name=layer_name,
                 layer_index=layer_index,
                 base_addr=base_addr,
                 block_len=block_len,
-                kv_block_len=kv_block_len,
+                kv_block_len=block_len,
             )
         )
-        if is_kv_layout_blocks_first:
-            regions.append(
-                TransferRegion(
-                    layer_name=layer_name,
-                    layer_index=layer_index,
-                    base_addr=base_addr + kv_block_len,
-                    block_len=block_len,
-                    kv_block_len=kv_block_len,
-                )
-            )
     return regions
 
 
@@ -1856,7 +1844,6 @@ class MooncakeConnectorWorker:
             block_lens=block_lens,
             layer_names=layer_names,
             layer_indices=layer_indices,
-            is_kv_layout_blocks_first=self.transfer_topo.virtually_split_kv_in_blocks,
         )
 
     def _get_sender_transfer_plan(

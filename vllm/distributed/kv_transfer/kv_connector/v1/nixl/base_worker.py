@@ -1082,9 +1082,7 @@ class NixlBaseConnectorWorker:
                         f"backend={self.backend_name}, "
                         "all_backends="
                         f"{[backend.get_name() for backend in self.attn_backends]}, "
-                        f"kv_cache_layout={self.kv_cache_layout}, "
-                        "blocks_first="
-                        f"{self.transfer_topo.is_kv_layout_blocks_first}"
+                        f"kv_cache_layout={self.kv_cache_layout}"
                     )
 
                 # Need to make sure the device ID is non-negative for NIXL,
@@ -2245,8 +2243,7 @@ class NixlBaseConnectorWorker:
            |1st_split-2nd_split|         |1st_split-2nd_split |
         """
         assert self.transfer_topo is not None
-        virtually_split = self.transfer_topo.virtually_split_kv_in_blocks
-if self.transfer_topo.virtually_split_kv_in_blocks and mamba_view:
+        if self.transfer_topo.virtually_split_kv_in_blocks and mamba_view:
             block_len = self._mamba_ssm_size[not first_split]
         else:
             block_len = self.block_len_per_layer[layer_idx]

@@ -426,14 +426,16 @@ class TransferTopology:
                 head_size=1,
             )
             logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
-        # In the standardized layout K and V are packed into the content dim,
-        # so attention caches are 4D [num_blocks, num_kv_heads, block_size,
-        # 2*head_size] with num_blocks leading (blocks-first). We mock
-        # num_blocks to 1 for the dimension check below. Hybrid SSM models also
-        # assume a blocks-first layout.
-        self._is_kv_layout_blocks_first = self.is_mamba or (
-            len(kv_cache_shape) == 4 and kv_cache_shape[0] == 1
-        )
+            assert kv_cache_shape[0] == 1, (
+                "KV cache layout must be blocks-first; expected mocked "
+                f"num_blocks=1 in leading dim, got shape {kv_cache_shape}."
+            )
+            if not self.is_mla:
+                assert len(kv_cache_shape) == 4, (
+                    "Attention KV cache layout must be standardized as "
+                    "[num_blocks, num_kv_heads, block_size, content_size], "
+                    f"got shape {kv_cache_shape}."
+                )
 
         self._cross_layers_blocks = False
         if self.tensor_shape is not None:
@@ -491,10 +493,6 @@ class TransferTopology:
     # ============================================================
     # Layout properties
     # ============================================================
-
-    @property
-    def is_kv_layout_blocks_first(self) -> bool:
-        return self._is_kv_layout_blocks_first
 
     @property
     def cross_layers_blocks(self) -> bool:
