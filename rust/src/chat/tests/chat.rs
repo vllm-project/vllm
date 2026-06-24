@@ -277,6 +277,7 @@ impl ChatRenderer for FakeChatBackend {
 
         Ok(RenderedPrompt {
             prompt: Prompt::Text(prompt),
+            effective_template_kwargs: request.chat_options.template_kwargs.clone(),
         })
     }
 }
