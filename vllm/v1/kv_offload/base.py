@@ -14,6 +14,7 @@ import numpy as np
 import torch
 from typing_extensions import override
 
+from vllm.distributed.kv_events import MEDIUM_GPU
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
@@ -379,7 +380,7 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
     @staticmethod
     @override
     def medium() -> str:
-        return "GPU"
+        return MEDIUM_GPU
 
 
 @dataclass
