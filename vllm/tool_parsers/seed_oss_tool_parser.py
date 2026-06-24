@@ -528,7 +528,7 @@ class SeedOssToolParser(ToolParser):
                                     '"'
                                     + self.current_param_name
                                     + '": "'
-                                    + json.dumps(param_value)[1:-1]
+                                    + json.dumps(param_value, ensure_ascii=False)[1:-1]
                                     + '"'
                                 )
                             else:
@@ -536,7 +536,7 @@ class SeedOssToolParser(ToolParser):
                                     ', "'
                                     + self.current_param_name
                                     + '": "'
-                                    + json.dumps(param_value)[1:-1]
+                                    + json.dumps(param_value, ensure_ascii=False)[1:-1]
                                     + '"'
                                 )
 
@@ -571,11 +571,11 @@ class SeedOssToolParser(ToolParser):
                     # Calculate incremental JSON
                     full_value = self.current_param_value + value_chunk
                     prev_escaped = (
-                        json.dumps(self.current_param_value)[1:-1]
+                        json.dumps(self.current_param_value, ensure_ascii=False)[1:-1]
                         if self.current_param_value
                         else ""
                     )
-                    full_escaped = json.dumps(full_value)[1:-1]
+                    full_escaped = json.dumps(full_value, ensure_ascii=False)[1:-1]
                     delta_escaped = full_escaped[len(prev_escaped) :]
 
                     self.in_param = False
@@ -606,12 +606,16 @@ class SeedOssToolParser(ToolParser):
                     if value_chunk:
                         # Stream the escaped delta
                         prev_escaped = (
-                            json.dumps(self.current_param_value)[1:-1]
+                            json.dumps(self.current_param_value, ensure_ascii=False)[
+                                1:-1
+                            ]
                             if self.current_param_value
                             else ""
                         )
                         self.current_param_value += value_chunk
-                        full_escaped = json.dumps(self.current_param_value)[1:-1]
+                        full_escaped = json.dumps(
+                            self.current_param_value, ensure_ascii=False
+                        )[1:-1]
                         delta_escaped = full_escaped[len(prev_escaped) :]
 
                         if delta_escaped:

@@ -685,7 +685,7 @@ documentation for this option states:
 > use of possibly costly and or blocking operations and hence might
 > have a performance impact.
 
-The metrics were added by <https://github.com/vllm-project/vllm/pull/7089> and who up in an OpenTelemetry trace
+The metrics were added by <https://github.com/vllm-project/vllm/pull/7089> and show up in an OpenTelemetry trace
 as:
 
 ```text
