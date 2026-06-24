@@ -171,7 +171,7 @@ steps:
     gpu: 1+
   _raw_old_commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal/generation -m "not core_model" --ignore models/multimodal/generation/test_common.py
+  - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
   - pytest -v -s models/multimodal/test_mapping.py
   source_file_dependencies:
   - vllm/

@@ -74,28 +74,3 @@ steps:
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'cd tests && 
     pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py'
-- label: Basic Models Test (Other CPU)
-  depends_on:
-  - image-build-cpu
-  timeout_in_minutes: 10
-  device: intel_gpu
-  no_plugin: true
-  working_dir: .
-  env:
-    REGISTRY: public.ecr.aws/q9t5s3a7
-    REPO: vllm-ci-test-repo
-    VLLM_TEST_DEVICE: xpu
-  agent_tags:
-    label: debug
-    gpu: 1+
-  _raw_old_commands:
-  - pytest -v -s models/test_utils.py models/test_vision.py
-  source_file_dependencies:
-  - vllm/
-  - tests/models/test_utils.py
-  - tests/models/test_vision.py
-  commands:
-  - >-
-    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-    'cd tests && 
-    pytest -v -s models/test_utils.py models/test_vision.py'

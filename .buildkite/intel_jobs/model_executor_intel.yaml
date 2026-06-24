@@ -32,5 +32,5 @@ steps:
     'cd tests && 
     export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
     export PYTHONFAULTHANDLER=1 &&
-    pytest -v -s model_executor -m '(not slow_test)' --timeout=900 --timeout-method=thread &&
+    pytest -v -s model_executor -m "(not slow_test)" --timeout=900 --timeout-method=thread &&
     pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py --timeout=900 --timeout-method=thread'
