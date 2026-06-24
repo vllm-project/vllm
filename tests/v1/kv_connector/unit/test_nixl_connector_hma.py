@@ -586,6 +586,19 @@ def _make_mock_worker_for_desc_ids(
     worker._has_mamba = has_mamba
     worker._group_spec_types = group_spec_types
     worker.block_len_per_layer = block_len_per_layer or [100]
+    worker._conv_decomp = None
+    if has_mamba:
+        from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (  # noqa: E501
+            MambaConvSplitInfo,
+        )
+
+        # Mamba2/GDN layout: 3 conv sub-projections -> 4 NIXL regions per layer.
+        worker._conv_decomp = MambaConvSplitInfo(
+            conv_rows=3,
+            local_proj_dims=(1, 1, 1),
+            conv_dtype_size=2,
+            ssm_sizes=(0, 0),
+        )
     worker._compute_desc_ids = NixlConnectorWorker._compute_desc_ids.__get__(
         worker, NixlConnectorWorker
     )
